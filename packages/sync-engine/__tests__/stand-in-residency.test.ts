@@ -383,15 +383,44 @@ describe("a residency manager", () => {
       expect(lowered.deferredCandidates(10)).toEqual([]);
     });
 
-    it("wants a freed file again without forgetting that it was freed", async () => {
+    it("does not want a file the person let go, however the policy reads it", async () => {
+      // The gap this closes: `considerForAcquisition` used to ask the policy and
+      // nothing else, so a file the person deleted came straight back. Eviction
+      // looked safe only because "Free up space" removes nothing that is not
+      // above the ceiling, where the policy independently says `unwanted` — and a
+      // watched original on a node with `keepOriginals` set has no such guarantee.
       const { screen } = await family();
-      manager.noteDeparture(screen.objectStorageKey);
+      await manager.noteDeparture(blobCandidateForRecord(screen)!);
+      expect(manager.wasEvicted(screen.objectStorageKey)).toBe(true);
+      expect(await manager.considerForAcquisition(blobCandidateForRecord(screen)!)).toBe("unwanted");
+      expect(manager.deferredCandidates(10)).toEqual([]);
+      // Still remembered as a departure, which is what residency reports.
+      expect(manager.wasEvicted(screen.objectStorageKey)).toBe(true);
+    });
+
+    it("wants bytes a reconcile found missing, which is a fault rather than a decision", async () => {
+      // The other kind of departure. Nobody chose it — the object store lost the
+      // bytes — so re-acquiring the file is the repair the reconcile exists to
+      // start, and the row must stay eligible for the acquisition queue.
+      const { screen } = await family();
+      await local.delete(screen.objectStorageKey);
+      const report = await manager.reconcile();
+      expect(report.corrected).toBeGreaterThan(0);
       expect(manager.wasEvicted(screen.objectStorageKey)).toBe(true);
       expect(await manager.considerForAcquisition(blobCandidateForRecord(screen)!)).toBe("queued");
-      expect(manager.wasEvicted(screen.objectStorageKey)).toBe(true);
       manager.dropDeferred(screen.objectStorageKey);
       expect(manager.deferredCandidates(10)).toEqual([]);
       expect(manager.wasEvicted(screen.objectStorageKey)).toBe(true);
+    });
+
+    it("wants the key again once a read has brought the bytes back", async () => {
+      const { screen } = await family();
+      await manager.noteDeparture(blobCandidateForRecord(screen)!);
+      // What `ensureLocalBytes` does: fetch, then note the arrival.
+      await local.put(screen.objectStorageKey, Buffer.alloc(screen.sizeBytes, 7));
+      await manager.noteArrival(blobCandidateForRecord(screen)!);
+      expect(manager.wasEvicted(screen.objectStorageKey)).toBe(false);
+      expect(await manager.considerForAcquisition(blobCandidateForRecord(screen)!)).toBe("held");
     });
   });
 

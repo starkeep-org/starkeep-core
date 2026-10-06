@@ -766,6 +766,24 @@ export function checkMetadataValues(
 export const METADATA_DISCRIMINANT_COLUMN = "record_type";
 
 /**
+ * The tombstone column on every per-category metadata table.
+ *
+ * A metadata row used to be hard-deleted with its record while everything else
+ * about the record was soft-deleted, so a restore could never bring a
+ * photograph's dimensions or its ThumbHash back — and the platform cannot
+ * re-derive either, because deriving needs the bytes and an app's decoder. The
+ * one thing the hard delete bought was keeping a deleted record out of
+ * `GET /data/metadata/:category`, which reads the table directly and cannot see
+ * that the record is gone. This column buys the same thing without destroying
+ * anything: the route filters on it, and the reaper performs the one hard delete
+ * at the end of the retention window.
+ *
+ * Server-owned, like the discriminant. It is deliberately not declared in the
+ * app-facing schema, so no caller can project it or write a predicate over it.
+ */
+export const METADATA_DELETED_AT_COLUMN = "deleted_at";
+
+/**
  * Emits a `CREATE TABLE IF NOT EXISTS shared.record_<category>_metadata`
  * statement for DSQL. Single non-PL/pgSQL statement, no FK constraints — see
  * `dsql-schema-init.ts` for the DSQL surface caveats. Callers must skip the
@@ -798,6 +816,7 @@ export function pgMetadataDdl(c: CategoryDef): string {
   const cols = [
     `         record_id   text PRIMARY KEY`,
     `         ${METADATA_DISCRIMINANT_COLUMN} text NOT NULL`,
+    `         ${METADATA_DELETED_AT_COLUMN} text`,
     ...c.metadataColumns.map((col) => {
       const nullSuffix = col.nullable === false ? " NOT NULL" : "";
       return `         ${col.name} ${pgColumnType(col.type)}${nullSuffix}`;
@@ -815,6 +834,7 @@ export function sqliteMetadataDdl(c: CategoryDef): string {
   const cols = [
     `      record_id TEXT PRIMARY KEY`,
     `      ${METADATA_DISCRIMINANT_COLUMN} TEXT NOT NULL`,
+    `      ${METADATA_DELETED_AT_COLUMN} TEXT`,
     ...c.metadataColumns.map((col) => {
       const nullSuffix = col.nullable === false ? " NOT NULL" : "";
       return `      ${col.name} ${sqliteColumnType(col.type)}${nullSuffix}`;

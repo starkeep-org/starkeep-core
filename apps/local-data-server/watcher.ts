@@ -6,6 +6,28 @@
  *
  * File tracking state (path ↔ record ID mapping) is stored in a private `watch_files`
  * SQLite table managed here — it never touches the user data layer.
+ *
+ * ## A watched folder is a view of the library, not a vote over it
+ *
+ * Two directions of change meet here, and they do not mean the same thing.
+ *
+ * A file appearing on disk is a request to put it in the library. A file
+ * *leaving* the disk is not a request to delete it from the library: the folder
+ * is one node's view, and a tombstone would travel to the cloud and to every
+ * other node, so a backup machine would delete the only remaining copy of its
+ * own backup. So a removal **evicts** — the record stays live, this node's copy
+ * of the bytes goes, and residency reads `evicted`, which is exactly what "Free
+ * up space" produces for one file. The eviction runs only behind the same
+ * durability proof "Free up space" demands; without it nothing is removed and
+ * the path is reported as possibly lost.
+ *
+ * In the other direction, a record the person deleted must not come back. A
+ * record id is a pure function of parent, filename and content hash, so
+ * re-ingesting the same file writes the *tombstoned row's own id* and `put`
+ * upserts every column: one call is the whole resurrection, with no second
+ * write to catch. The guard therefore runs before any write, and the verdict is
+ * remembered against the path as `deleted-from-library` so the next scan does
+ * not ask again.
  */
 
 import type { RawDatabase } from "@starkeep/storage-adapter";
@@ -18,8 +40,14 @@ import { pipeline } from "node:stream/promises";
 import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
 import type { DatabaseAdapter } from "../../packages/storage-adapter/src/database/adapter.js";
 import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/object-storage/adapter.js";
-import { createStarkeepId, defaultTypeForExtension } from "@starkeep/protocol-primitives";
+import { createStarkeepId, defaultTypeForExtension, type StandInStandards } from "@starkeep/protocol-primitives";
 import { sqliteCompiler as qb } from "@starkeep/storage-sqlite";
+import {
+  blobCandidateForRecord,
+  proveCloudCopies,
+  type ReplicaProbe,
+  type ResidencyManager,
+} from "@starkeep/sync-engine";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -33,6 +61,31 @@ export interface WatchConfig {
   excludePatterns?: string[];
 }
 
+/**
+ * Where a watched path stands with respect to the library.
+ *
+ * Four readings, because a watched folder promises that everything inside it is
+ * in the library and three different things break that promise in three
+ * different ways:
+ *
+ * - `synced` — the file is on disk and the library holds it. The ordinary state.
+ * - `evicted` — the file left this disk and the cloud holds its bytes, proved.
+ *   The record is live; a read fetches the bytes back on demand. Nothing is
+ *   lost and nothing needs the person's attention.
+ * - `possibly-lost` — the file left this disk and no complete cloud copy was
+ *   confirmed, so the bytes may be gone for good. The only new way a person can
+ *   lose data, and the one state that deserves a report.
+ * - `deleted-from-library` — the file is on disk and the library ignores it on
+ *   purpose, because the person deleted the record. Re-ingesting would resurrect
+ *   the tombstone, so the watcher declines and offers the way back instead.
+ *
+ * The plan's three names collapsed `evicted` and `possibly-lost` into one
+ * "missing-on-disk". They are kept apart here because the watch status has to
+ * tell the person which of the two happened, and `evicted` is the word
+ * residency already uses for the same fact.
+ */
+export type WatchLibraryState = "synced" | "evicted" | "possibly-lost" | "deleted-from-library";
+
 export interface WatchStatus {
   id: string;
   directoryPath: string;
@@ -41,6 +94,14 @@ export interface WatchStatus {
   syncedFiles: number;
   lastScanAt: string | null;
   error?: string;
+  /**
+   * The two states that break a watched folder's promise, plus the benign one,
+   * named as paths rather than counted. A count tells the person something is
+   * wrong and a path tells them which file, and only one of those is actionable.
+   */
+  possiblyLost: string[];
+  excluded: string[];
+  evicted: string[];
 }
 
 export interface WatchFileInfo {
@@ -50,7 +111,13 @@ export interface WatchFileInfo {
   dataRecordId: string;
   mtime: number;
   status: "synced" | "pending" | "error";
+  libraryState: WatchLibraryState;
 }
+
+/** What `addBack` did, or why it could not. */
+export type AddBackOutcome =
+  | { readonly ok: true; readonly recordId: string }
+  | { readonly ok: false; readonly status: number; readonly error: string };
 
 export interface FileWatchManager {
   startWatch(config: WatchConfig): Promise<void>;
@@ -60,6 +127,16 @@ export interface FileWatchManager {
   getWatchFiles(watchId: string): WatchFileInfo[];
   getFileStatus(filePath: string): { watched: boolean; synced: boolean; watchId?: string; recordId?: string };
   getDirectoryStatus(dirPath: string): { watched: boolean; watchId?: string; directoryPath?: string };
+  /**
+   * Put an excluded path back in the library.
+   *
+   * Restores the tombstoned record rather than writing a fresh one. Because the
+   * id is content-addressed, re-ingesting the file would land on the tombstone's
+   * own id — but through `put`, which would revive the row with `version` reset
+   * to 1 and its labels and metadata still retracted. The restore planner lifts
+   * all three, so the item returns as itself.
+   */
+  addBack(filePath: string): Promise<AddBackOutcome>;
   shutdown(): Promise<void>;
 }
 
@@ -128,14 +205,30 @@ interface ActiveWatch {
 const MAX_CONCURRENCY = 4;
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 
-export function createFileWatchManager(opts: {
+export interface FileWatchManagerOptions {
   sdk: StarkeepSdk;
   db: RawDatabase;
   databaseAdapter: DatabaseAdapter;
   objectStorageAdapter: ObjectStorageAdapter;
   appId: string;
-}): FileWatchManager {
-  const { sdk, db, databaseAdapter, objectStorageAdapter, appId } = opts;
+  /**
+   * This node's residency, for the one thing a removal from disk has to do:
+   * record the departure, so the record reads `evicted` and no acquisition pass
+   * brings the bytes back on its own.
+   */
+  residency: ResidencyManager;
+  /**
+   * Where the cloud copy is proved, read per removal rather than held: the
+   * supervisor's probe comes and goes with the cloud connection, and a removal
+   * with no probe must prove nothing rather than prove it vacuously.
+   */
+  probes: () => readonly ReplicaProbe[];
+  /** The library's current stand-in standards, which the proof reads. */
+  standards: () => StandInStandards;
+}
+
+export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatchManager {
+  const { sdk, db, databaseAdapter, objectStorageAdapter, appId, residency } = opts;
   const watches = new Map<string, ActiveWatch>();
 
   // Create the private watch_files table if it doesn't exist.
@@ -152,25 +245,42 @@ export function createFileWatchManager(opts: {
       .addColumn("data_record_id", "text", (c) => c.notNull())
       .addColumn("mtime", "real", (c) => c.notNull())
       .addColumn("size_bytes", "integer", (c) => c.notNull())
+      // Where the path stands with the library. A `deleted-from-library` mark is
+      // the only thing in this table that cannot be re-derived from the disk, so
+      // it is the reason the table is loaded on startup rather than rebuilt.
+      .addColumn("library_state", "text", (c) => c.notNull().defaultTo("synced"))
       .compile().sql,
   );
 
   // -- Helpers --
 
+  /**
+   * A live record already holding this content, for dedup.
+   *
+   * `deletedAt isNull` belongs in the query rather than in a filter over the
+   * page: with `limit: 1` and the check applied afterwards, a tombstoned row
+   * occupying the single slot hid a live record with the same content hash, and
+   * which row that was depended on what the database happened to return.
+   */
   async function findExistingByHash(contentHash: string): Promise<string | null> {
     const result = await databaseAdapter.query({
       filters: [
         { field: "content_hash", operator: "eq", value: contentHash },
+        { field: "deletedAt", operator: "isNull" },
       ],
       limit: 1,
     });
-    const record = result.records.find((r) => !r.deletedAt);
-    return record ? record.id : null;
+    return result.records[0]?.id ?? null;
   }
 
   /**
    * Restore the watched file as this record's local object when its database
    * row survived but the local object store did not.
+   *
+   * Also the repair path for a file that was evicted and has come back: the
+   * arrival is noted so the resident set stops reading these bytes as departed,
+   * which is what `wasEvicted` would otherwise keep answering about a key whose
+   * bytes are here again.
    */
   async function ensureLocalObject(recordId: string, filePath: string): Promise<boolean> {
     const record = await sdk.data.get(createStarkeepId(recordId));
@@ -183,6 +293,8 @@ export function createFileWatchManager(opts: {
     } else {
       await objectStorageAdapter.put(record.objectStorageKey, await readFile(filePath), options);
     }
+    const candidate = blobCandidateForRecord(record);
+    if (candidate) await residency.noteArrival(candidate);
     console.log(`Restored watched object: ${filePath}`);
     return true;
   }
@@ -190,7 +302,14 @@ export function createFileWatchManager(opts: {
   function loadTrackingRecords(watchId: string): Map<string, WatchFileInfo> {
     const query = qb
       .selectFrom("watch_files")
-      .select(["file_path", "relative_path", "content_hash", "data_record_id", "mtime"])
+      .select([
+        "file_path",
+        "relative_path",
+        "content_hash",
+        "data_record_id",
+        "mtime",
+        "library_state",
+      ])
       .where("watch_id", "=", watchId)
       .compile();
     const rows = db.prepare(query.sql).all(...(query.parameters as string[])) as {
@@ -199,6 +318,7 @@ export function createFileWatchManager(opts: {
       content_hash: string;
       data_record_id: string;
       mtime: number;
+      library_state: string;
     }[];
 
     const map = new Map<string, WatchFileInfo>();
@@ -210,6 +330,7 @@ export function createFileWatchManager(opts: {
         dataRecordId: r.data_record_id,
         mtime: r.mtime,
         status: "synced",
+        libraryState: r.library_state as WatchLibraryState,
       });
     }
     return map;
@@ -223,6 +344,7 @@ export function createFileWatchManager(opts: {
     dataRecordId: string,
     mtime: number,
     sizeBytes: number,
+    libraryState: WatchLibraryState,
   ): void {
     const query = qb
       .insertInto("watch_files")
@@ -234,6 +356,7 @@ export function createFileWatchManager(opts: {
         data_record_id: dataRecordId,
         mtime,
         size_bytes: sizeBytes,
+        library_state: libraryState,
       })
       .onConflict((oc) =>
         oc.column("file_path").doUpdateSet((eb) => ({
@@ -243,8 +366,19 @@ export function createFileWatchManager(opts: {
           data_record_id: eb.ref("excluded.data_record_id"),
           mtime: eb.ref("excluded.mtime"),
           size_bytes: eb.ref("excluded.size_bytes"),
+          library_state: eb.ref("excluded.library_state"),
         })),
       )
+      .compile();
+    db.prepare(query.sql).run(...(query.parameters as (string | number)[]));
+  }
+
+  /** Move one path to a new library state, leaving everything else about it alone. */
+  function setLibraryState(filePath: string, libraryState: WatchLibraryState): void {
+    const query = qb
+      .updateTable("watch_files")
+      .set({ library_state: libraryState })
+      .where("file_path", "=", filePath)
       .compile();
     db.prepare(query.sql).run(...(query.parameters as (string | number)[]));
   }
@@ -257,6 +391,88 @@ export function createFileWatchManager(opts: {
   function deleteTrackingRecords(watchId: string): void {
     const query = qb.deleteFrom("watch_files").where("watch_id", "=", watchId).compile();
     db.prepare(query.sql).run(...(query.parameters as string[]));
+  }
+
+  /**
+   * The file left this disk. Let this node's copy of the bytes go, and leave the
+   * record alone.
+   *
+   * A tombstone here would travel: the cloud and every other node would apply
+   * it, so a backup machine whose folder was cleaned would delete the library's
+   * only remaining copy. An eviction is local by construction — the record stays
+   * live, residency reads `evicted`, and a read brings the bytes back through the
+   * Drive channel.
+   *
+   * The proof is the same one "Free up space" demands: complete, checksum-verified
+   * cloud copies of the file, of its original and of the original's canonical
+   * stand-in. Without it nothing is removed, because unlinking a symlink whose
+   * target is already gone would destroy the last reference to the content. That
+   * case is genuine data loss and is reported rather than stated as a state.
+   *
+   * Returns the state to record against the path.
+   */
+  async function evictFromDisk(
+    filePath: string,
+    recordId: string,
+  ): Promise<"evicted" | "possibly-lost"> {
+    const record = await databaseAdapter.get(createStarkeepId(recordId));
+    // No record, or one already deleted: there is nothing here to protect and
+    // nothing to prove. The key, if any, is the tombstone's and the reaper's.
+    if (!record || record.deletedAt) return "evicted";
+    if (!record.objectStorageKey) return "evicted";
+
+    const proof = await proveCloudCopies(
+      { databaseAdapter, standards: opts.standards() },
+      record,
+      opts.probes(),
+    );
+    if (!proof.ok) {
+      console.warn(
+        `[watch] ${filePath} left the disk and no cloud copy is confirmed (${proof.detail}); ` +
+          `the record stays staged and the path is reported as possibly lost`,
+      );
+      return "possibly-lost";
+    }
+
+    // The symlink, not its target: `delete` unlinks the entry inside the object
+    // store, and the watched file is already gone anyway. Removing the dangling
+    // link rather than leaving it is what lets a later on-demand fetch write a
+    // regular file, and it keeps `resolvePath` from naming a path that is not there.
+    await objectStorageAdapter.delete(record.objectStorageKey);
+    // The candidate, not the key: the watcher's bytes arrived by a symlink that
+    // never passed through a sync round, so the resident-set row has to be written
+    // before the departure can be recorded against it.
+    const candidate = blobCandidateForRecord(record);
+    if (candidate) await residency.noteDeparture(candidate);
+    console.log(`[watch] ${filePath} left the disk; its bytes stay in the cloud (evicted)`);
+    return "evicted";
+  }
+
+  /**
+   * Whether the library has deliberately deleted the record this path holds.
+   *
+   * Read through the adapter rather than the SDK, because `sdk.data.get` answers
+   * null for a tombstone and "no such record" and "deliberately deleted" are the
+   * two answers that have to be told apart here.
+   */
+  async function wasDeletedFromLibrary(recordId: string): Promise<boolean> {
+    if (!recordId) return false;
+    const record = await databaseAdapter.get(createStarkeepId(recordId));
+    return record !== null && record.deletedAt !== null;
+  }
+
+  /** Mark the path excluded, in memory and in the tracking table. */
+  function markExcluded(active: ActiveWatch, existing: WatchFileInfo): void {
+    active.files.set(existing.filePath, {
+      ...existing,
+      status: "synced",
+      libraryState: "deleted-from-library",
+    });
+    setLibraryState(existing.filePath, "deleted-from-library");
+    console.log(
+      `[watch] ${existing.filePath} is on disk and its record was deleted; ` +
+        `leaving it out of the library`,
+    );
   }
 
   async function ingestFile(active: ActiveWatch, filePath: string): Promise<void> {
@@ -273,11 +489,15 @@ export function createFileWatchManager(opts: {
       } catch (err) {
         if ((err as { code?: string }).code === "ENOENT") {
           const tracked = active.files.get(filePath);
-          if (tracked?.dataRecordId) {
-            await sdk.data.delete(createStarkeepId(tracked.dataRecordId));
-          }
-          deleteTrackingRecord(filePath);
-          active.files.delete(filePath);
+          if (!tracked) return;
+          // The row stays, marked absent from disk: it is what keeps the startup
+          // scan from re-ingesting the file if it comes back, and what lets the
+          // watch status say which of the two things happened.
+          const state = tracked.dataRecordId
+            ? await evictFromDisk(filePath, tracked.dataRecordId)
+            : "evicted";
+          active.files.set(filePath, { ...tracked, status: "synced", libraryState: state });
+          setLibraryState(filePath, state);
           return;
         }
         throw err;
@@ -291,8 +511,32 @@ export function createFileWatchManager(opts: {
 
       // Check if already tracked
       const existing = active.files.get(filePath);
+
+      // The resurrection guard, before anything that could write. A record id is
+      // a pure function of parent, filename and content hash, so re-ingesting
+      // this file would write the tombstoned row's *own* id — and `put` upserts
+      // every column, resetting `version` to 1 and overwriting `deleted_at`. One
+      // call is the whole resurrection, so there is no later write to correct.
+      //
+      // Asked only of a path the library already knows, and skipped once the
+      // verdict is recorded: new bytes at an excluded path are a new file and
+      // mint a new id, which is why the mark is cleared when the hash moves.
+      if (existing?.dataRecordId) {
+        if (existing.libraryState === "deleted-from-library") {
+          // An untouched file cannot have new bytes, so the mtime answers first
+          // and the hash is only paid for when the file actually moved.
+          if (existing.mtime === fileStat.mtimeMs) return;
+          if (existing.contentHash === (await hashFile(filePath))) return;
+          // Different bytes, so a different record. Fall through and ingest.
+        } else if (await wasDeletedFromLibrary(existing.dataRecordId)) {
+          markExcluded(active, existing);
+          return;
+        }
+      }
+
       if (
         existing?.status === "synced" &&
+        existing.libraryState === "synced" &&
         existing.mtime === fileStat.mtimeMs &&
         (await ensureLocalObject(existing.dataRecordId, filePath))
       ) {
@@ -300,7 +544,15 @@ export function createFileWatchManager(opts: {
       }
 
       // Mark pending immediately so duplicate FS events skip this file while it's in-flight
-      active.files.set(filePath, { filePath, relativePath, contentHash: "", dataRecordId: "", mtime: 0, status: "pending" });
+      active.files.set(filePath, {
+        filePath,
+        relativePath,
+        contentHash: "",
+        dataRecordId: "",
+        mtime: 0,
+        status: "pending",
+        libraryState: "synced",
+      });
 
       // Hash the file (streaming, no full buffer)
       const contentHash = await hashFile(filePath);
@@ -317,7 +569,12 @@ export function createFileWatchManager(opts: {
           deleteTrackingRecord(filePath);
           active.files.delete(filePath);
         } else {
-          active.files.set(filePath, { ...existing, mtime: fileStat.mtimeMs, status: "synced" });
+          active.files.set(filePath, {
+            ...existing,
+            mtime: fileStat.mtimeMs,
+            status: "synced",
+            libraryState: "synced",
+          });
           upsertTrackingRecord(
             active.config.id,
             filePath,
@@ -326,6 +583,7 @@ export function createFileWatchManager(opts: {
             existing.dataRecordId,
             fileStat.mtimeMs,
             fileStat.size,
+            "synced",
           );
           return;
         }
@@ -365,6 +623,7 @@ export function createFileWatchManager(opts: {
         dataRecordId,
         fileStat.mtimeMs,
         fileStat.size,
+        "synced",
       );
 
       active.files.set(filePath, {
@@ -374,6 +633,7 @@ export function createFileWatchManager(opts: {
         dataRecordId,
         mtime: fileStat.mtimeMs,
         status: "synced",
+        libraryState: "synced",
       });
     } catch (err) {
       console.error(`Failed to ingest ${filePath}:`, (err as Error).message);
@@ -384,6 +644,7 @@ export function createFileWatchManager(opts: {
         dataRecordId: "",
         mtime: 0,
         status: "error",
+        libraryState: "synced",
       });
     }
   }
@@ -437,6 +698,39 @@ export function createFileWatchManager(opts: {
     }
   }
 
+  /**
+   * One watch's status, including the paths in the three states a bare
+   * synced-of-total count cannot express.
+   */
+  function statusOf(active: ActiveWatch): WatchStatus {
+    const files = Array.from(active.files.values());
+    const pathsIn = (state: WatchLibraryState): string[] =>
+      files.filter((f) => f.libraryState === state).map((f) => f.filePath).sort();
+    return {
+      id: active.config.id,
+      directoryPath: active.config.directoryPath,
+      state: active.state,
+      totalFiles: files.length,
+      syncedFiles: files.filter((f) => f.status === "synced" && f.libraryState === "synced").length,
+      lastScanAt: active.lastScanAt,
+      error: active.error,
+      possiblyLost: pathsIn("possibly-lost"),
+      excluded: pathsIn("deleted-from-library"),
+      evicted: pathsIn("evicted"),
+    };
+  }
+
+  /** The watch a path belongs to, and what this watcher knows about it. */
+  function findTracked(
+    filePath: string,
+  ): { active: ActiveWatch; tracked: WatchFileInfo } | null {
+    for (const active of watches.values()) {
+      const tracked = active.files.get(filePath);
+      if (tracked) return { active, tracked };
+    }
+    return null;
+  }
+
   // -- Public API --
 
   return {
@@ -461,6 +755,24 @@ export function createFileWatchManager(opts: {
       const files = await scanDirectory(active);
       await processInBatches(active, files);
 
+      // The opposite comparison, which the scan alone never made: it enumerates
+      // the files that exist and says nothing about the rows for files that do
+      // not. A file removed while this process was stopped was invisible until
+      // now. The treatment is the same eviction an FS event gets, which is what
+      // makes this safe to run unattended — nothing here can propagate a delete.
+      if (active.state !== "error") {
+        const onDisk = new Set(files);
+        for (const tracked of [...active.files.values()]) {
+          if (onDisk.has(tracked.filePath)) continue;
+          if (tracked.libraryState !== "synced") continue;
+          const state = tracked.dataRecordId
+            ? await evictFromDisk(tracked.filePath, tracked.dataRecordId)
+            : "evicted";
+          active.files.set(tracked.filePath, { ...tracked, status: "synced", libraryState: state });
+          setLibraryState(tracked.filePath, state);
+        }
+      }
+
       active.lastScanAt = new Date().toISOString();
       if (active.state !== "error") {
         active.state = "watching";
@@ -483,32 +795,11 @@ export function createFileWatchManager(opts: {
 
     getStatus(watchId) {
       const active = watches.get(watchId);
-      if (!active) return null;
-      const files = Array.from(active.files.values());
-      return {
-        id: active.config.id,
-        directoryPath: active.config.directoryPath,
-        state: active.state,
-        totalFiles: files.length,
-        syncedFiles: files.filter(f => f.status === "synced").length,
-        lastScanAt: active.lastScanAt,
-        error: active.error,
-      };
+      return active ? statusOf(active) : null;
     },
 
     getAllStatuses() {
-      return Array.from(watches.values()).map((a) => {
-        const files = Array.from(a.files.values());
-        return {
-          id: a.config.id,
-          directoryPath: a.config.directoryPath,
-          state: a.state,
-          totalFiles: files.length,
-          syncedFiles: files.filter(f => f.status === "synced").length,
-          lastScanAt: a.lastScanAt,
-          error: a.error,
-        };
-      });
+      return Array.from(watches.values()).map(statusOf);
     },
 
     getWatchFiles(watchId) {
@@ -530,6 +821,39 @@ export function createFileWatchManager(opts: {
         }
       }
       return { watched: false, synced: false };
+    },
+
+    async addBack(filePath) {
+      const entry = findTracked(filePath);
+      if (!entry) {
+        return { ok: false, status: 404, error: `"${filePath}" is not a watched path` };
+      }
+      const { active, tracked } = entry;
+      if (tracked.libraryState !== "deleted-from-library") {
+        return {
+          ok: false,
+          status: 409,
+          error: `"${filePath}" is not excluded from the library`,
+        };
+      }
+      try {
+        // Restore rather than re-ingest. The id is content-addressed, so a fresh
+        // `putWithLocalFile` would land on the tombstoned row's own id through
+        // `put` — reviving the row with `version` reset to 1 and its labels and
+        // metadata still retracted. The restore planner lifts all three, so the
+        // item comes back as itself.
+        await sdk.data.restore(createStarkeepId(tracked.dataRecordId));
+      } catch (err) {
+        const status = (err as { statusCode?: number }).statusCode ?? 500;
+        return { ok: false, status, error: (err as Error).message };
+      }
+      // Clear the mark first, so the ingest below is allowed to re-link the file.
+      active.files.set(filePath, { ...tracked, libraryState: "synced" });
+      setLibraryState(filePath, "synced");
+      // The bytes: the record's object key may be gone — the reaper, or an
+      // eviction on this node — and the file on disk is what supplies them again.
+      await ingestFile(active, filePath);
+      return { ok: true, recordId: tracked.dataRecordId };
     },
 
     getDirectoryStatus(dirPath) {

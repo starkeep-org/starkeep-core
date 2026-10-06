@@ -54,6 +54,7 @@ export {
   type RowQueryResult,
   type WhereClause,
   LIKE_ESCAPE_CHAR,
+  type SoftDeletedScope,
 } from "./database/app-query-types.js";
 
 export {
@@ -127,6 +128,7 @@ export {
   loadMetadataForRecords,
   applyRecordMetadata,
   deleteRecordMetadata,
+  restoreRecordMetadata,
   type MetadataSubject,
 } from "./database/metadata-sync.js";
 
@@ -136,6 +138,7 @@ export {
   buildLabelRetraction,
   buildLabelValueReplacementTombstone,
   buildTombstoneLabelsForRecord,
+  buildRestoreLabelsForRecord,
   buildLabelsByRecordIds,
   buildGetLabel,
   buildQueryLabels,

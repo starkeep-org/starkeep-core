@@ -12,6 +12,7 @@ import {
   standInSlot,
   getCategory,
   typeCategory,
+  METADATA_DELETED_AT_COLUMN,
 } from "@starkeep/protocol-primitives";
 import { pgConvertersFor } from "./pg-timestamps.js";
 
@@ -128,7 +129,9 @@ export function columnsToMetadataRow(
   const converters = pgConvertersFor(getCategory(category)?.metadataColumns);
   const row: MetadataRow = { recordId };
   for (const [key, value] of Object.entries(columns)) {
-    if (key === "record_id") continue;
+    // `deleted_at` is the server's, like the discriminant: a caller reading a
+    // metadata row has no business seeing it, and nothing on the wire carries it.
+    if (key === "record_id" || key === METADATA_DELETED_AT_COLUMN) continue;
     const convert = converters?.get(key);
     row[key] = convert ? convert(value) : value;
   }

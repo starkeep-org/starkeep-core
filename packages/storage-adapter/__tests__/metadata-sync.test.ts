@@ -14,11 +14,15 @@ import {
   applyRecordMetadata,
   deleteRecordMetadata,
   loadMetadataForRecords,
+  restoreRecordMetadata,
 } from "../src/database/metadata-sync.js";
+import type { SoftDeletedScope } from "../src/database/app-query-types.js";
 
 const PHOTO: StarkeepId = createStarkeepId("01AAAAAAAAAAAAAAAAAAAAAAAA");
 const OTHER: StarkeepId = createStarkeepId("01BBBBBBBBBBBBBBBBBBBBBBBB");
 const photo = { id: PHOTO, type: "image/jpeg" };
+/** One deletion's clock reading, which is what a metadata tombstone carries. */
+const DELETED_AT = { wallTime: 1_700_000_000_000, counter: 0, nodeId: "node-a" };
 
 let db: MockDatabaseAdapter;
 
@@ -165,12 +169,52 @@ describe("applyRecordMetadata", () => {
 });
 
 describe("deleteRecordMetadata", () => {
-  it("drops the row, the way a local delete already cascades", async () => {
+  it("tombstones the row, the way a local delete already cascades", async () => {
     await db.putMetadata("image/jpeg", { recordId: PHOTO, width: 4032 });
-    await deleteRecordMetadata(db, photo);
-    expect(await db.getMetadata("image", PHOTO)).toBeNull();
+    await deleteRecordMetadata(db, photo, DELETED_AT);
+    // The columns survive, which is the whole point: dimensions and a ThumbHash
+    // are reported by an app over the bytes and the platform cannot re-derive
+    // either, so destroying them here made a restore permanently incomplete.
+    expect(await db.getMetadata("image", PHOTO)).toMatchObject({ recordId: PHOTO, width: 4032 });
+    expect(await rowsVisibleTo("exclude")).toEqual([]);
+    expect(await rowsVisibleTo("only")).toEqual([PHOTO]);
+  });
+
+  it("is lifted again by restoreRecordMetadata", async () => {
+    await db.putMetadata("image/jpeg", { recordId: PHOTO, width: 4032 });
+    await deleteRecordMetadata(db, photo, DELETED_AT);
+    await restoreRecordMetadata(db, photo);
+    expect(await rowsVisibleTo("exclude")).toEqual([PHOTO]);
+    expect(await rowsVisibleTo("only")).toEqual([]);
+  });
+
+  it("is lifted by a fresh metadata write, so an app re-reporting is enough", async () => {
+    await db.putMetadata("image/jpeg", { recordId: PHOTO, width: 4032 });
+    await deleteRecordMetadata(db, photo, DELETED_AT);
+    await db.putMetadata("image/jpeg", { recordId: PHOTO, thumb_hash: "TH" });
+    expect(await rowsVisibleTo("exclude")).toEqual([PHOTO]);
   });
 });
+
+/** The record ids a metadata query returns on one side of the tombstone. */
+async function rowsVisibleTo(softDeleted: SoftDeletedScope): Promise<string[]> {
+  const result = await db.queryShared(
+    { kind: "metadata", category: "image" },
+    {
+      mode: "rows",
+      table: "record_image_metadata",
+      select: ["record_id"],
+      where: [],
+      order: [],
+      limit: 10,
+      pageToken: null,
+      include: [],
+    },
+    { softDeleted },
+  );
+  if (result.mode !== "rows") throw new Error("expected rows");
+  return result.rows.map((r) => String(r["record_id"]));
+}
 
 describe("MockDatabaseAdapter.putMetadata", () => {
   it("upserts the supplied columns, matching both SQL adapters", async () => {

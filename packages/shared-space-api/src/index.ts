@@ -85,8 +85,11 @@ export {
 export {
   planRecordDelete,
   applyRecordDelete,
+  planRecordRestore,
+  applyRecordRestore,
   keepCanonicalOfArchivedOriginal,
   type DeletePlan,
+  type RestorePlan,
 } from "./stand-ins/delete.js";
 export {
   evaluateArchiving,

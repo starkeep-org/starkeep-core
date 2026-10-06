@@ -159,6 +159,10 @@ const RECORD_LABEL_ORDER_KEY: readonly string[] = ["value", "record_id"];
  * was not granted and read the shape of the answer off the row count, and a
  * caller that could project it would be reading an authorization decision back
  * out of a data row.
+ *
+ * `deleted_at` is absent for the same reason. It is the server's predicate, set
+ * by the record's delete cascade and read by the route, and a caller able to
+ * contradict it could read rows the library has deleted.
  */
 function metadataColumns(def: CategoryDef): readonly AppColumnInfo[] {
   return [
@@ -239,12 +243,17 @@ export function sharedQueryTableName(
 /**
  * Whether the target's table carries `deleted_at`.
  *
- * The metadata tables do not: a metadata row is derived state keyed by
- * `record_id`, deleted outright with its record rather than tombstoned, because
- * nothing syncs it independently of the record it rides on.
+ * All three now do. The metadata tables were the exception while a metadata row
+ * was hard-deleted with its record; they carry the column since the delete
+ * cascade became uniformly soft, which is what makes a restore able to bring a
+ * photograph's dimensions back.
+ *
+ * Kept as a function rather than inlined as `true` because it is the one place
+ * that answers "does this table have the column", and a table added later may
+ * not.
  */
-export function sharedQueryExcludesSoftDeleted(target: SharedQueryTarget): boolean {
-  return target.kind !== "metadata";
+export function sharedQueryExcludesSoftDeleted(_target: SharedQueryTarget): boolean {
+  return true;
 }
 
 /**

@@ -28,6 +28,8 @@ import {
   createSharedSpaceApi,
   planRecordDelete,
   applyRecordDelete,
+  planRecordRestore,
+  applyRecordRestore,
   ApiError,
 } from "@starkeep/shared-space-api";
 import type { SyncStateStore } from "@starkeep/sync-engine";
@@ -350,6 +352,21 @@ export async function createStarkeepSdk(
         for (const tombstone of await applyRecordDelete(databaseAdapter, plan, clock)) {
           logChange(tombstone);
         }
+      },
+
+      async restore(recordId) {
+        // Tombstones included, deliberately: this is the one read that exists to
+        // find a deleted record, so it goes to the adapter rather than through
+        // `get`, which answers null for one.
+        const existing = await databaseAdapter.get(recordId);
+        if (!existing) throw new ApiError("Record not found", 404);
+        const plan = await planRecordRestore(databaseAdapter, existing);
+        if (!plan.ok) {
+          throw new ApiError(String(plan.body.detail ?? plan.body.error), plan.status);
+        }
+        const restored = await applyRecordRestore(databaseAdapter, plan, clock);
+        for (const record of restored) logChange(record);
+        return restored;
       },
 
       async query(params) {

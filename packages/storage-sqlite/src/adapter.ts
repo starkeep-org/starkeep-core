@@ -16,6 +16,7 @@ import {
   sqliteMetadataTableName,
   typeCategory,
   METADATA_DISCRIMINANT_COLUMN,
+  METADATA_DELETED_AT_COLUMN,
 } from "@starkeep/protocol-primitives";
 import type {
   DatabaseAdapter,
@@ -46,6 +47,7 @@ import {
   type ParsedQueryResult,
   type SharedQueryTarget,
   type WhereClause,
+  type SoftDeletedScope,
   buildGetLabel,
   buildLabelNodeWatermarks,
   buildBucketDigest,
@@ -64,6 +66,7 @@ import {
   buildLabelsByRecordIds,
   buildQueryLabels,
   buildTombstoneLabelsForRecord,
+  buildRestoreLabelsForRecord,
   groupLabelsByRecordId,
   emptyLabelPage,
   LABEL_QUERY_TARGET,
@@ -397,13 +400,17 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
   async queryShared(
     target: SharedQueryTarget,
     query: ParsedQuery,
-    options: { readonly serverWhere?: readonly WhereClause[] } = {},
+    options: {
+      readonly serverWhere?: readonly WhereClause[];
+      readonly softDeleted?: SoftDeletedScope;
+    } = {},
   ): Promise<ParsedQueryResult> {
     const schema = sharedQuerySchema(target);
     const table = sharedQueryTableName(target, "sqlite");
     const build = {
       serverWhere: options.serverWhere,
       excludeSoftDeleted: sharedQueryExcludesSoftDeleted(target),
+      ...(options.softDeleted ? { softDeleted: options.softDeleted } : {}),
     };
     // Only the metadata tables declare one today (model3d's two flags), but
     // asking the schema rather than the target is what keeps a column added
@@ -521,6 +528,24 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
   async deleteMetadata(typeId: string, recordId: StarkeepId): Promise<void> {
     const table = sqliteMetadataTableName(typeId);
     const query = qb.deleteFrom(table).where("record_id", "=", recordId).compile();
+    this.runStmt(query.sql, ...query.parameters);
+  }
+
+  async tombstoneMetadata(typeId: string, recordId: StarkeepId, hlc: HLCTimestamp): Promise<void> {
+    this.setMetadataTombstone(typeId, recordId, serializeHLC(hlc));
+  }
+
+  async restoreMetadata(typeId: string, recordId: StarkeepId): Promise<void> {
+    this.setMetadataTombstone(typeId, recordId, null);
+  }
+
+  private setMetadataTombstone(typeId: string, recordId: StarkeepId, value: string | null): void {
+    const table = sqliteMetadataTableName(typeId);
+    const query = qb
+      .updateTable(table)
+      .set({ [METADATA_DELETED_AT_COLUMN]: value })
+      .where("record_id", "=", recordId)
+      .compile();
     this.runStmt(query.sql, ...query.parameters);
   }
 
@@ -705,6 +730,15 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     const query = buildTombstoneLabelsForRecord(qb, LABELS, recordId, hlc);
     this.runStmt(query.sql, ...query.parameters);
   }
+
+  async restoreLabelsForRecord(
+    recordId: StarkeepId,
+    deletedAt: HLCTimestamp,
+    hlc: HLCTimestamp,
+  ): Promise<void> {
+    const query = buildRestoreLabelsForRecord(qb, LABELS, recordId, deletedAt, hlc);
+    this.runStmt(query.sql, ...query.parameters);
+  }
 }
 
 /**
@@ -726,7 +760,9 @@ function columnsToMetadataRow(
   const booleans = booleanColumnNames(getCategory(category)?.metadataColumns);
   const row: MetadataRow = { recordId };
   for (const [key, value] of Object.entries(columns)) {
-    if (key === "record_id") continue;
+    // `deleted_at` is the server's, like the discriminant: a caller reading a
+    // metadata row has no business seeing it, and nothing on the wire carries it.
+    if (key === "record_id" || key === METADATA_DELETED_AT_COLUMN) continue;
     row[key] = booleans?.has(key) && typeof value === "number" ? value !== 0 : value;
   }
   return row;
@@ -755,11 +791,22 @@ function metadataValues(recordType: string, row: MetadataRow): Record<string, un
   const values: Record<string, unknown> = {
     record_id: row.recordId,
     [METADATA_DISCRIMINANT_COLUMN]: recordType,
+    // Writing metadata asserts the row is live. Without this an app re-reporting
+    // a restored record's dimensions would write into a row still carrying its
+    // tombstone, and the one read that filters on the stamp would keep answering
+    // nothing. Server-owned either way: a wire row carrying it is ignored below.
+    [METADATA_DELETED_AT_COLUMN]: null,
   };
   for (const [key, value] of Object.entries(row)) {
     // `recordId` is spelled `record_id` above, and the discriminant is the
     // server's to set — a wire row carrying one is ignored, not honoured.
-    if (key === "recordId" || key === METADATA_DISCRIMINANT_COLUMN) continue;
+    if (
+      key === "recordId" ||
+      key === METADATA_DISCRIMINANT_COLUMN ||
+      key === METADATA_DELETED_AT_COLUMN
+    ) {
+      continue;
+    }
     values[key] = value;
   }
   return values;

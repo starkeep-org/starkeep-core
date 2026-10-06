@@ -40,6 +40,7 @@ export {
   getCategory,
   isCategoryId,
   METADATA_DISCRIMINANT_COLUMN,
+  METADATA_DELETED_AT_COLUMN,
   checkMetadataValues,
   CAPTURED_AT_METADATA_COLUMN,
   metadataIndexDdls,

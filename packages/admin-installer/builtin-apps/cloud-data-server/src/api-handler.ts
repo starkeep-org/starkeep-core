@@ -1486,6 +1486,7 @@ async function runSharedQuery(db: DatabaseAdapter, build: () => SharedQueryPlan)
   }
   const result = await db.queryShared(plan.target, plan.query, {
     serverWhere: plan.serverWhere,
+    softDeleted: plan.softDeleted,
   });
   return ok(
     result.mode === "rows"
@@ -2310,6 +2311,9 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           ? { mode: "aggregate" as const, groups: [], truncated: false }
           : await db.queryShared({ kind: "records" }, plan.aggregate!, {
               serverWhere: plan.serverWhere,
+              // An aggregate carries no `filters`, so the tombstone reading
+              // reaches the compiler rather than the query plan.
+              softDeleted: plan.deleted,
             });
         return ok({
           groups: result.mode === "aggregate" ? result.groups : [],
@@ -3325,7 +3329,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const category = decodeURIComponent(metadataQueryMatch[1]!);
       if (!isCategoryId(category)) return clientErr(`"${category}" is not a category`, 400);
       return runSharedQuery(db, () =>
-        planMetadataQuery(category, grants, queryParamsFrom(query)),
+        planMetadataQuery(category, grants, query),
       );
     }
 
@@ -3340,7 +3344,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // nothing here. What restricts the answer is `record_type IN (…)`, which is
     // the same gate every other read of shared data carries.
     if (subPath === "/data/labels" && method === "GET") {
-      return runSharedQuery(db, () => planLabelQuery(grants, queryParamsFrom(query)));
+      return runSharedQuery(db, () => planLabelQuery(grants, query));
     }
 
     // POST /apps/{appId}/data/records/file-urls — batch signed URLs.

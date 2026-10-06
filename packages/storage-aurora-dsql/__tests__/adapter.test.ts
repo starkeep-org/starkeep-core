@@ -267,7 +267,10 @@ describe("metadata tables", () => {
     expect(call.text).toContain('"width" = "excluded"."width"');
     // `record_type` rides after `record_id`: it is the grant discriminant
     // every read of the row gates on, set from the type this call names.
-    expect(call.values).toEqual([record.id, "image/jpeg", 800, 600]);
+    // `deleted_at` follows it, always null: writing metadata asserts the row is
+    // live, so an app re-reporting a restored record's dimensions lifts the
+    // tombstone rather than writing into a row nobody can read.
+    expect(call.values).toEqual([record.id, "image/jpeg", null, 800, 600]);
   });
 
   it("still updates the discriminant when the row carries nothing else", async () => {
@@ -277,7 +280,7 @@ describe("metadata tables", () => {
     // now unreachable — which is right: an upsert that left the discriminant
     // alone would be an upsert that could leave a stale one behind.
     expect(client.calls[0].text).toContain('on conflict ("record_id") do update set');
-    expect(client.calls[0].values).toEqual([record.id, "image/jpeg"]);
+    expect(client.calls[0].values).toEqual([record.id, "image/jpeg", null]);
   });
 
   it("refuses a bare category, which would store an ungated discriminant", async () => {
@@ -308,5 +311,27 @@ describe("metadata tables", () => {
     expect(client.calls[0].text).toBe(
       'delete from "shared"."record_image_metadata" where "record_id" = $1',
     );
+  });
+
+  it("tombstoneMetadata stamps the column rather than removing the row", async () => {
+    const record = sampleRecord();
+    await adapter.tombstoneMetadata("image/jpeg", record.id, {
+      wallTime: 1_700_000_000_000,
+      counter: 0,
+      nodeId: "node-a",
+    });
+    expect(client.calls[0].text).toBe(
+      'update "shared"."record_image_metadata" set "deleted_at" = $1 where "record_id" = $2',
+    );
+    expect(client.calls[0].values[1]).toBe(record.id);
+  });
+
+  it("restoreMetadata clears the column again", async () => {
+    const record = sampleRecord();
+    await adapter.restoreMetadata("image/jpeg", record.id);
+    expect(client.calls[0].text).toBe(
+      'update "shared"."record_image_metadata" set "deleted_at" = $1 where "record_id" = $2',
+    );
+    expect(client.calls[0].values).toEqual([null, record.id]);
   });
 });

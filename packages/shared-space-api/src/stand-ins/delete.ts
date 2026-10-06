@@ -6,6 +6,13 @@
  * records (poster frames, skims). Nothing else would ever reach them — no
  * listing shows them — so leaving them would leak storage invisibly.
  *
+ * ## And the way back
+ *
+ * Nothing is destroyed at delete time any more, so a delete is reversible for as
+ * long as the retention window lasts. {@link planRecordRestore} and
+ * {@link applyRecordRestore} are the mirror image of the pair above, down to the
+ * cascade order, and they are what the Trash's restore action is made of.
+ *
  * The refusal: a canonical stand-in cannot be deleted on its own while its
  * original is live. The design's hard rule is narrower — the cloud must never
  * lose the canonical stand-in of an *archived* original — but a node cannot
@@ -14,7 +21,7 @@
  * servers keeps the two answers the same.
  */
 
-import type { DataRecord, HLCClock, StarkeepId } from "@starkeep/protocol-primitives";
+import { serializeHLC, type DataRecord, type HLCClock, type StarkeepId } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter } from "@starkeep/storage-adapter";
 
 /** Upper bound on one original's children; far above any real original. */
@@ -68,11 +75,106 @@ export async function applyRecordDelete(
   for (const record of [...plan.cascade, plan.record]) {
     const hlc = clock.now();
     await db.delete(record.id as StarkeepId, hlc);
-    await db.deleteMetadata(record.type, record.id as StarkeepId);
+    // Tombstoned, not destroyed. The metadata row used to be the one thing a
+    // delete hard-deleted, which made restore permanently incomplete: dimensions
+    // and a ThumbHash are reported by an app over the bytes, and the platform
+    // cannot re-derive either. The reaper performs the hard delete at the end of
+    // the retention window, with everything else.
+    await db.tombstoneMetadata(record.type, record.id as StarkeepId, hlc);
     await db.tombstoneLabelsForRecord(record.id as StarkeepId, hlc);
     deleted.push({ ...record, updatedAt: hlc, deletedAt: hlc, version: record.version + 1 });
   }
   return deleted;
+}
+
+export type RestorePlan =
+  | { readonly ok: true; readonly record: DataRecord; readonly cascade: readonly DataRecord[] }
+  | { readonly ok: false; readonly status: number; readonly body: Record<string, unknown> };
+
+/**
+ * Plan a restore: the tombstoned record, and the children its delete took.
+ *
+ * The mirror of {@link planRecordDelete}, over the other side of the tombstone.
+ * The cascade is selected by the deletion's own clock reading rather than by
+ * "every tombstoned child", so a stand-in that lost its slot months earlier, or a
+ * derived record an app deleted on its own, is not dragged back by a restore of
+ * the original.
+ *
+ * Refuses a record that is not deleted, which is not a no-op worth being quiet
+ * about: a Trash view offering restore on a live record is a view reading a stale
+ * page, and the person should be told rather than shown a success.
+ */
+export async function planRecordRestore(
+  db: DatabaseAdapter,
+  record: DataRecord,
+): Promise<RestorePlan> {
+  if (!record.deletedAt) {
+    return {
+      ok: false,
+      status: 409,
+      body: {
+        error: "NotDeleted",
+        detail: "this record is not deleted, so there is nothing to restore",
+      },
+    };
+  }
+  const deletedAt = serializeHLC(record.deletedAt);
+  const children = await db.query({
+    filters: [
+      { field: "parentId", operator: "eq", value: record.id },
+      { field: "deletedAt", operator: "isNotNull" },
+    ],
+    limit: MAX_CHILDREN,
+  });
+  const cascade = children.records.filter(
+    (child) => child.deletedAt !== null && serializeHLC(child.deletedAt) === deletedAt,
+  );
+  return { ok: true, record, cascade };
+}
+
+/**
+ * Lift the record's tombstone and its cascade's, each with metadata and labels.
+ *
+ * The mirror image of {@link applyRecordDelete}, with the order reversed: the
+ * original first and the children after, so no peer applying rows in clock order
+ * ever holds a live stand-in whose original is still tombstoned. The delete went
+ * children-first for the same reason read the other way round.
+ *
+ * Each row takes its own clock reading, so last-writer-wins carries the
+ * restoration everywhere the deletion reached. `version` advances, because a
+ * restore is a revision of the record rather than a return to a previous one —
+ * writing the old version back would let a peer's tombstone win the comparison
+ * and delete the record again.
+ *
+ * Bytes are not this function's business. A restore inside the retention window
+ * is pure row work, because the reaper has not touched them; past it, the bytes
+ * are gone and an app re-reports what it can.
+ */
+export async function applyRecordRestore(
+  db: DatabaseAdapter,
+  plan: Extract<RestorePlan, { ok: true }>,
+  clock: HLCClock,
+): Promise<DataRecord[]> {
+  const restored: DataRecord[] = [];
+  for (const record of [plan.record, ...plan.cascade]) {
+    const deletedAt = record.deletedAt;
+    if (!deletedAt) continue;
+    const hlc = clock.now();
+    const live: DataRecord = {
+      ...record,
+      deletedAt: null,
+      updatedAt: hlc,
+      version: record.version + 1,
+    };
+    // A full-row write rather than an "undelete": `put` recomputes the stand-in
+    // slot, which `delete` cleared, so a restored canonical stand-in takes its
+    // slot back instead of coming home without one.
+    await db.put(live);
+    await db.restoreMetadata(record.type, record.id as StarkeepId);
+    await db.restoreLabelsForRecord(record.id as StarkeepId, deletedAt, hlc);
+    restored.push(live);
+  }
+  return restored;
 }
 
 /** What the keep rule reads of a record in the incoming exchange. */

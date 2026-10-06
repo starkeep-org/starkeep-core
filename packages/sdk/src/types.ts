@@ -87,6 +87,21 @@ export interface DataOperations {
   // record's labels, children and history with it. See
   // `~/projects/starkeep/sync-duplicate-derivation-wedge-2026-08-29.md`.
   delete(recordId: StarkeepId): Promise<void>;
+  /**
+   * Lift a record's tombstone, and the tombstones its delete cascaded onto its
+   * stand-ins, its derived children, their labels and their metadata rows.
+   *
+   * The mirror of `delete`, and what a Trash's restore action is made of. Exact
+   * inside the retention window, because nothing was destroyed: the reaper has not
+   * touched the bytes and the hard deletes all wait for it. Past the window the
+   * row comes back without its metadata, which an app re-reports.
+   *
+   * Refuses a record that is not deleted — a 409 rather than a quiet success,
+   * because a view offering restore on a live record is reading a stale page.
+   *
+   * Returns the rows it restored, original first.
+   */
+  restore(recordId: StarkeepId): Promise<DataRecord[]>;
   query(params: { type?: string; filters?: import("@starkeep/storage-adapter").Filter[] }): Promise<DataRecord[]>;
 
   /**

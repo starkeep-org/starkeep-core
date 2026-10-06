@@ -127,6 +127,25 @@ async function metadataOf(
   return db.getMetadata("image", id);
 }
 
+/** The ids a metadata query sees on the live side of the tombstone. */
+async function liveMetadataIds(db: MockDatabaseAdapter): Promise<string[]> {
+  const result = await db.queryShared(
+    { kind: "metadata", category: "image" },
+    {
+      mode: "rows",
+      table: "record_image_metadata",
+      select: ["record_id"],
+      where: [],
+      order: [],
+      limit: 10,
+      pageToken: null,
+      include: [],
+    },
+  );
+  if (result.mode !== "rows") throw new Error("expected rows");
+  return result.rows.map((r) => String(r["record_id"]));
+}
+
 describe("metadata riding the record it belongs to", () => {
   it("ships metadata written before the record's first sync", async () => {
     const p = await makePair();
@@ -214,23 +233,40 @@ describe("metadata riding the record it belongs to", () => {
     expect((await metadataOf(p.cloud, record.id))!["width"]).toBe(4032);
   });
 
-  it("drops the metadata row when a tombstone applies", async () => {
+  it("tombstones the metadata row when a tombstone applies, and lifts it on restore", async () => {
     const p = await makePair();
     const record = await seedPhoto(p.local, p.localStorage, p.localClock);
     await p.local.putMetadata("image/jpeg", { recordId: record.id, width: 4032 });
     await p.engine.exchange();
     expect(await metadataOf(p.cloud, record.id)).not.toBeNull();
 
-    // A local delete cascades to the metadata row (`SdkDataOperations.delete`).
-    // A synced delete has to cascade the same way, or the dimensions of a
-    // deleted record outlive it on every peer but the one it was deleted on.
+    // A local delete cascades to the metadata row (`applyRecordDelete`). A synced
+    // delete has to cascade the same way, or the dimensions of a deleted record
+    // outlive it on every peer but the one it was deleted on. A tombstone rather
+    // than a drop since the cascade became uniformly soft: metadata is a
+    // passenger with no clock of its own, so a cascade that destroyed the row left
+    // no node holding a copy to re-spread and made restore permanently incomplete.
     const hlc = p.localClock.now();
     await p.local.delete(record.id, hlc);
-    await p.local.deleteMetadata("image", record.id);
+    await p.local.tombstoneMetadata("image", record.id, hlc);
     await p.engine.exchange();
 
     expect((await p.cloud.get(record.id))!.deletedAt).not.toBeNull();
-    expect(await metadataOf(p.cloud, record.id)).toBeNull();
+    expect(await liveMetadataIds(p.cloud)).toEqual([]);
+    // The columns are still there, which is what makes the restore below exact.
+    expect(await metadataOf(p.cloud, record.id)).toMatchObject({ width: 4032 });
+
+    // Restore, and the cloud lifts its own metadata tombstone from the record's
+    // arrival alone — the row ships no metadata passenger once the column is
+    // already agreed, so the cascade cannot depend on one.
+    const deleted = (await p.local.get(record.id))!;
+    const restoreAt = p.localClock.now();
+    await p.local.put({ ...deleted, deletedAt: null, updatedAt: restoreAt, version: deleted.version + 1 });
+    await p.local.restoreMetadata("image", record.id);
+    await p.engine.exchange();
+
+    expect((await p.cloud.get(record.id))!.deletedAt).toBeNull();
+    expect(await liveMetadataIds(p.cloud)).toEqual([record.id]);
   });
 
   it("converges on the union when two nodes write disjoint columns, in either order", async () => {

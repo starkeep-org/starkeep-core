@@ -137,6 +137,11 @@ export {
   type FreeUpSpaceRefusal,
 } from "./residency-manager.js";
 export {
+  proveCloudCopies,
+  type DurabilityProof,
+  type ProveCloudCopiesDeps,
+} from "./free-up-space.js";
+export {
   slotOccupant,
   tombstoneOf,
   admitIncomingStandIn,
