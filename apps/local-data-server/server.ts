@@ -1189,6 +1189,12 @@ async function main() {
       // no installable app may, which is also why the file they are stored in
       // sits in the Drive-only `starkeep` category.
       /^\/library\/stand-in-standards$/,
+      // The integrity check. An operator control over this machine's sync, and
+      // one the phone has had a button for since before the laptop had any entry
+      // point at all. The result is counts per channel — rows here, rows there,
+      // divergent buckets — and carries no record id, filename or content, which
+      // is what makes it safe on a surface with no app identity.
+      /^\/sync\/verify$/,
     ];
     const TOKEN_AUTHORIZED_PATTERNS = [
       /^\/data\/files\/upload\/[^/]+$/,
@@ -3902,6 +3908,57 @@ async function main() {
           timestamp: restored[restored.length - 1]!.updatedAt,
         });
         json(res, { restored: true, ids: restored.map((r) => r.id) });
+        return;
+      }
+
+      // POST /data/records/:id/re-upload — put bytes the cloud has lost back.
+      //
+      // Availability already reports `absent`, and reads and restores already answer
+      // 409, so a cloud-side loss is *visible* and always was. What was missing is a
+      // trigger: a sync round ships a record whose clock has moved, and a record
+      // whose bytes went missing in the cloud has not changed, so no round ever
+      // offered it again. A node still holding the file had no way to put it back.
+      //
+      // Manual per the triage, and idempotent: the transfer short-circuits when the
+      // cloud already holds the key, so a repair run twice costs one HEAD.
+      const reUploadMatch = path.match(/^\/data\/records\/([^/]+)\/re-upload$/);
+      if (reUploadMatch && req.method === "POST") {
+        const record = await sdk.data.get(createStarkeepId(decodeURIComponent(reUploadMatch[1]!)));
+        if (!record || !appCanRead(localDb, appId!, record.type)) {
+          res.writeHead(404);
+          json(res, { error: "Record not found" });
+          return;
+        }
+        if (!record.objectStorageKey) {
+          res.writeHead(409);
+          json(res, { error: "NoFile", detail: "this record has no file to upload" });
+          return;
+        }
+        if (!(await localAdapter.has(record.objectStorageKey))) {
+          res.writeHead(409);
+          json(res, {
+            error: "NotHere",
+            detail:
+              "this machine does not hold these bytes, so it has nothing to send; " +
+              "try the node that does",
+          });
+          return;
+        }
+        if (!supervisor) {
+          res.writeHead(409);
+          json(res, { error: "NoCloud", detail: "no cloud is configured on this machine" });
+          return;
+        }
+        const pushed = await supervisor.pushSharedBlob(record);
+        if (!pushed) {
+          res.writeHead(502);
+          json(res, {
+            error: "UploadFailed",
+            detail: "the upload did not complete; the log names the reason",
+          });
+          return;
+        }
+        json(res, { uploaded: true, objectStorageKey: record.objectStorageKey });
         return;
       }
 

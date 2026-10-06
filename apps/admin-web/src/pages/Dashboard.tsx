@@ -87,6 +87,7 @@ export function DashboardPage() {
   const [localOnline, setLocalOnline] = useState<boolean | null>(null);
   const [localCognitoConfig, setLocalCognitoConfig] = useState<CognitoConfig | null>(null);
   const [watches, setWatches] = useState<Watch[] | null>(null);
+  const [addingBack, setAddingBack] = useState<string | null>(null);
 
   // Remote
   const [cloudConfig, setCloudConfig] = useState<CloudConfig | null | undefined>(undefined);
@@ -406,6 +407,39 @@ export function DashboardPage() {
     } catch { /* server offline */ }
   }
 
+  /**
+   * Put an excluded path back in the library.
+   *
+   * The daemon restores the record rather than re-ingesting the file: the id names
+   * the content, so re-ingesting would land on the tombstone and revive it with its
+   * labels and metadata still retracted. The item comes back as itself.
+   */
+  async function handleAddBackWatchedFile(path: string) {
+    setWatchError(null);
+    setWatchSuccess(null);
+    setAddingBack(path);
+    try {
+      const base = await localDataServerUrl();
+      const resp = await fetch(`${base}/watches/add-back`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        setWatchError(data.error ?? "Could not add the file back.");
+        return;
+      }
+      setWatchSuccess(`Back in the library: ${path}`);
+      const wResp = await fetch(`${base}/watches`);
+      if (wResp.ok) setWatches((await wResp.json()).watches);
+    } catch {
+      setWatchError("Could not reach the data server.");
+    } finally {
+      setAddingBack(null);
+    }
+  }
+
   async function handleSignOut() {
     await fetch(`${await localDataServerUrl()}/auth/logout`, { method: "POST" }).catch(() => {});
     await clearCloudCredentials();
@@ -695,6 +729,8 @@ export function DashboardPage() {
         onPathChange={(v) => { setWatchPath(v); setWatchError(null); setWatchSuccess(null); }}
         onAdd={handleAddWatch}
         onRemove={handleRemoveWatch}
+        onAddBack={handleAddBackWatchedFile}
+        addingBack={addingBack}
         submitting={watchSubmitting}
         error={watchError}
         success={watchSuccess}

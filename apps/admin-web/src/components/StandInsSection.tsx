@@ -56,6 +56,32 @@ interface FreeUpSpaceReport {
   error?: string;
 }
 
+interface ReapReport {
+  keysConsidered: number;
+  reaped: Array<{ objectStorageKey: string; sizeBytes: number }>;
+  reclaimedBytes: number;
+  refused: Array<{ objectStorageKey: string; reason: string; detail: string }>;
+  /** Null when this machine cannot read the library's settings file. */
+  retentionDays: number | null;
+  archivedSkipped: number;
+  dryRun: boolean;
+  error?: string;
+}
+
+interface VerifyChannel {
+  appId: string;
+  result: {
+    supported: boolean;
+    localRows: number;
+    peerRows: number;
+    divergentBuckets: number;
+    missingLocally: number;
+    pendingUpload: number;
+    pendingDownload: number;
+  } | null;
+  error: string | null;
+}
+
 const CATEGORIES: readonly Category[] = ["image", "video"];
 
 const CATEGORY_LABELS: Record<Category, string> = {
@@ -273,6 +299,10 @@ export function StandInsSection() {
       </section>
 
       <FreeUpSpace />
+
+      <Reaper />
+
+      <VerifySync />
     </div>
   );
 }
@@ -401,7 +431,7 @@ function FreeUpSpace() {
   );
 
   return (
-    <section className="space-y-3">
+    <section className="space-y-3" aria-label="Free up space">
       <h3 className="text-sm font-medium">Free up space</h3>
       <p className="text-sm text-muted-foreground">
         Removes files from this machine, largest first, only after proving the cloud holds the
@@ -448,6 +478,176 @@ function FreeUpSpace() {
       {estimate && <ReportLine report={estimate} />}
       {result && <ReportLine report={result} />}
     </section>
+  );
+}
+
+/**
+ * The reaper: the bytes of items deleted longer ago than the library's window.
+ *
+ * The only pass that destroys something unrecoverable, so the estimate comes first
+ * and the removal runs only from one — the same shape as "Free up space", for the
+ * same reason. Manual while the reports are new; a schedule can follow once they
+ * read clean.
+ */
+function Reaper() {
+  const [estimate, setEstimate] = useState<ReapReport | null>(null);
+  const [result, setResult] = useState<ReapReport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = useCallback(async (dryRun: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/residency/reap", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dryRun }),
+      });
+      const body = (await res.json()) as ReapReport;
+      if (!res.ok) {
+        setError(body.error ?? `The data server answered ${res.status}`);
+        return;
+      }
+      if (dryRun) {
+        setEstimate(body);
+        setResult(null);
+      } else {
+        setResult(body);
+        setEstimate(null);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  return (
+    <section className="space-y-3" aria-label="Reclaim deleted files">
+      <h3 className="text-sm font-medium">Reclaim deleted files</h3>
+      <p className="text-sm text-muted-foreground">
+        Removes the files of items deleted longer ago than the library keeps them. Until then a
+        deleted item can be restored whole from Drive&apos;s Trash. Nothing else reclaims a deleted
+        file, so storage otherwise only grows.
+      </p>
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => void run(true)}>
+          Estimate
+        </Button>
+        <Button size="sm" disabled={!estimate || busy} onClick={() => void run(false)}>
+          Reclaim
+        </Button>
+      </div>
+      {error && <p className="text-sm text-destructive">{error}</p>}
+      {(estimate ?? result) && <ReapLine report={(estimate ?? result)!} />}
+    </section>
+  );
+}
+
+function ReapLine({ report }: { report: ReapReport }) {
+  if (report.retentionDays === null) {
+    return (
+      <p className="text-sm text-muted-foreground" role="status">
+        This machine cannot read the library&apos;s settings file yet, so it does not know how long
+        a deleted item is kept. Nothing will be reclaimed until it can.
+      </p>
+    );
+  }
+  const verb = report.dryRun ? "Would reclaim" : "Reclaimed";
+  return (
+    <p className="text-sm" role="status">
+      {verb} {formatBytes(report.reclaimedBytes)} from {report.reaped.length} file(s), of{" "}
+      {report.keysConsidered} deleted more than {report.retentionDays} days ago.
+      {report.refused.length > 0 && ` Kept ${report.refused.length}.`}
+      {report.archivedSkipped > 0 &&
+        ` ${report.archivedSkipped} sit in deep archive, which charges a minimum storage` +
+          ` period, so removing them now would cost as much as keeping them.`}
+    </p>
+  );
+}
+
+/**
+ * The integrity check, per sync channel.
+ *
+ * On request only. It is a grouped scan over each side's whole index plus a round
+ * trip, and it answers a question whose answer only changes when something has
+ * already gone wrong — but it is also the only thing that can see a row lost from
+ * the middle of an author's range, which the coverage watermark cannot. So a loss
+ * sits undetected until somebody presses this, and that is the trade.
+ */
+function VerifySync() {
+  const [channels, setChannels] = useState<VerifyChannel[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/sync/verify", { method: "POST" });
+      const body = (await res.json()) as { channels?: VerifyChannel[]; error?: string };
+      if (!res.ok) {
+        setError(body.error ?? `The data server answered ${res.status}`);
+        return;
+      }
+      setChannels(body.channels ?? []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  return (
+    <section className="space-y-3" aria-label="Check sync integrity">
+      <h3 className="text-sm font-medium">Check sync integrity</h3>
+      <p className="text-sm text-muted-foreground">
+        Compares what this machine holds against what the cloud holds, per app, and arms a repair
+        the next sync carries out. Run it when something looks missing.
+      </p>
+      <Button size="sm" variant="outline" disabled={busy} onClick={() => void run()}>
+        {busy ? "Checking…" : "Check now"}
+      </Button>
+      {error && <p className="text-sm text-destructive">{error}</p>}
+      {channels?.length === 0 && (
+        <p className="text-sm text-muted-foreground" role="status">
+          No sync channels are running on this machine.
+        </p>
+      )}
+      {channels && channels.length > 0 && (
+        <ul className="space-y-1 text-sm" role="status">
+          {channels.map((c) => (
+            <li key={c.appId}>
+              <span className="font-medium">{c.appId}</span> — <VerifyLine channel={c} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function VerifyLine({ channel }: { channel: VerifyChannel }) {
+  if (channel.error) return <span className="text-destructive">{channel.error}</span>;
+  const r = channel.result;
+  if (!r) return <span className="text-muted-foreground">no result</span>;
+  if (!r.supported) {
+    // A peer that cannot answer is not a peer that agrees, which is why this is
+    // said rather than reported as zero divergence.
+    return <span className="text-muted-foreground">the cloud did not answer the check</span>;
+  }
+  const notes: string[] = [];
+  if (r.divergentBuckets > 0) notes.push(`${r.divergentBuckets} the cloud is missing`);
+  if (r.missingLocally > 0) notes.push(`${r.missingLocally} missing here`);
+  if (r.pendingUpload > 0) notes.push(`${r.pendingUpload} still to upload`);
+  if (r.pendingDownload > 0) notes.push(`${r.pendingDownload} still to download`);
+  return (
+    <span className={r.divergentBuckets > 0 || r.missingLocally > 0 ? "text-destructive" : ""}>
+      <span className="tabular-nums">{r.localRows}</span> rows here,{" "}
+      <span className="tabular-nums">{r.peerRows}</span> in the cloud
+      {notes.length > 0 ? ` — ${notes.join(", ")}` : " — agreed"}
+    </span>
   );
 }
 

@@ -76,6 +76,8 @@ api.post("/exec/stream", (c) => execStream.POST(c.req.raw));
 api.get("/residency/stand-ins", () => standIns.GET());
 api.put("/residency/stand-ins", (c) => standIns.PUT(c.req.raw));
 api.post("/residency/free-up-space", (c) => standIns.POST_FREE_UP_SPACE(c.req.raw));
+api.post("/residency/reap", (c) => standIns.POST_REAP(c.req.raw));
+api.post("/sync/verify", () => standIns.POST_VERIFY());
 api.get("/library/stand-in-standards", () => standIns.GET_LIBRARY_STANDARDS());
 api.put("/library/stand-in-standards", (c) => standIns.PUT_LIBRARY_STANDARDS(c.req.raw));
 

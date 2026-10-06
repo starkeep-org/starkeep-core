@@ -44,6 +44,36 @@ export async function PUT(req: Request): Promise<Response> {
   });
 }
 
+/**
+ * The integrity check, on every channel.
+ *
+ * On request only, which is a decision rather than an omission: it is a grouped
+ * scan over each side's whole index plus a round trip, and it answers a question
+ * whose answer only changes when something has already gone wrong. The cost of
+ * that trade is that a row lost from the middle of an author's range — the one
+ * thing a coverage watermark cannot see — sits undetected until somebody presses
+ * this. The phone has had the button since before this machine had any entry point
+ * at all; this is the equivalent.
+ */
+export async function POST_VERIFY(): Promise<Response> {
+  return forward("/sync/verify", { method: "POST" });
+}
+
+/**
+ * The reaper: reclaim the bytes of items deleted longer ago than the library's
+ * retention window.
+ *
+ * The one pass that destroys something unrecoverable, so a dry run comes first —
+ * it proves and totals without removing, which is the estimate a person confirms.
+ */
+export async function POST_REAP(req: Request): Promise<Response> {
+  return forward("/residency/reap", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: await req.text(),
+  });
+}
+
 /** "Free up space", or its dry run. */
 export async function POST_FREE_UP_SPACE(req: Request): Promise<Response> {
   return forward("/residency/free-up-space", {

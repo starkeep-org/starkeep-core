@@ -229,6 +229,22 @@ export interface SyncSupervisor {
    * no file, or when the transfer failed.
    */
   fetchSharedBlob(record: AnyRecord): Promise<boolean>;
+
+  /**
+   * Put one shared record's bytes back in the cloud, through the Drive channel.
+   *
+   * The repair for bytes the cloud has lost. Availability already reports `absent`
+   * and reads and restores answer 409, so the loss is visible — and nothing
+   * re-pushed it, because a round ships a record whose clock has moved and this
+   * record's has not. A node still holding the file therefore had no way to put it
+   * back, which this is.
+   *
+   * Idempotent: the transfer short-circuits when the cloud already holds the key.
+   *
+   * Resolves false when the Drive engine is not running, when the record has no
+   * file, when this node does not hold the bytes, or when the upload failed.
+   */
+  pushSharedBlob(record: AnyRecord): Promise<boolean>;
 }
 
 /**
@@ -664,6 +680,21 @@ export function createSyncSupervisor(
         },
         candidate,
       );
+    },
+
+    async pushSharedBlob(record) {
+      const entry = engines.get(DRIVE_APP_ID);
+      const candidate = blobCandidateForRecord(record);
+      if (!entry || !candidate) return false;
+      // This node must actually hold the bytes. Without the check the transfer
+      // would read nothing and report a failure that reads as a network problem.
+      if (!(await localObjectStorage.has(candidate.objectStorageKey))) return false;
+      return entry.engine.pushBlob({
+        fileHash: record.contentHash || candidate.objectStorageKey,
+        objectStorageKey: candidate.objectStorageKey,
+        sizeBytes: record.sizeBytes,
+        ...(record.mimeType ? { mimeType: record.mimeType } : {}),
+      });
     },
 
     start() {

@@ -780,6 +780,24 @@ export interface SyncEngine {
   fetchBlob(manifest: FileSyncManifest, candidate?: BlobCandidate): Promise<boolean>;
 
   /**
+   * Push a blob this node holds to the cloud, on request.
+   *
+   * The repair action for bytes the cloud has lost. Availability already reports
+   * `absent` and reads and restores already answer 409, so the loss is *visible* —
+   * and nothing re-pushed it, because a round only ships a record whose clock has
+   * moved and this record's has not. So a node still holding the file had no way to
+   * put it back.
+   *
+   * Deliberately not subject to any policy, for the same reason as {@link fetchBlob}:
+   * the person asked. Idempotent, because `transferFile` short-circuits when the
+   * destination already holds the key, so a repair run twice costs one HEAD.
+   *
+   * Nothing records an arrival here — the bytes did not arrive, they left — so the
+   * resident set is untouched. It already knows this node holds them.
+   */
+  pushBlob(manifest: FileSyncManifest): Promise<boolean>;
+
+  /**
    * Pull a blob the acquisition queue says this node wants — speculatively, and
    * **subject to the policy**.
    *
