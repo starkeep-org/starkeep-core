@@ -21,7 +21,7 @@
  * servers keeps the two answers the same.
  */
 
-import { serializeHLC, type DataRecord, type HLCClock, type StarkeepId } from "@starkeep/protocol-primitives";
+import type { DataRecord, HLCClock, StarkeepId } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter } from "@starkeep/storage-adapter";
 
 /** Upper bound on one original's children; far above any real original. */
@@ -92,13 +92,17 @@ export type RestorePlan =
   | { readonly ok: false; readonly status: number; readonly body: Record<string, unknown> };
 
 /**
- * Plan a restore: the tombstoned record, and the children its delete took.
+ * Plan a restore: the tombstoned record, and the tombstoned children to bring back
+ * with it.
  *
- * The mirror of {@link planRecordDelete}, over the other side of the tombstone.
- * The cascade is selected by the deletion's own clock reading rather than by
- * "every tombstoned child", so a stand-in that lost its slot months earlier, or a
- * derived record an app deleted on its own, is not dragged back by a restore of
- * the original.
+ * The mirror of {@link planRecordDelete}, over the other side of the tombstone,
+ * with one asymmetry that is not a choice. The delete takes its own clock reading
+ * per row, deliberately, so the rows keep distinct positions in the per-node order
+ * the sync scan walks — which means there is no shared stamp a restore could select
+ * on. So the cascade is every tombstoned child, and the one kind that must not come
+ * back is refused by {@link applyRecordRestore} as it writes, where the question
+ * can be answered: two stand-ins that both lost their original are both tombstoned
+ * at plan time, so the slot looks free to either until the first one lands.
  *
  * Refuses a record that is not deleted, which is not a no-op worth being quiet
  * about: a Trash view offering restore on a live record is a view reading a stale
@@ -118,7 +122,6 @@ export async function planRecordRestore(
       },
     };
   }
-  const deletedAt = serializeHLC(record.deletedAt);
   const children = await db.query({
     filters: [
       { field: "parentId", operator: "eq", value: record.id },
@@ -126,10 +129,24 @@ export async function planRecordRestore(
     ],
     limit: MAX_CHILDREN,
   });
-  const cascade = children.records.filter(
-    (child) => child.deletedAt !== null && serializeHLC(child.deletedAt) === deletedAt,
-  );
-  return { ok: true, record, cascade };
+  return { ok: true, record, cascade: [...children.records] };
+}
+
+/** Whether a live sibling already holds the stand-in slot this child would take. */
+async function slotTaken(db: DatabaseAdapter, child: DataRecord): Promise<boolean> {
+  const occupant = await db.query({
+    filters: [
+      { field: "parentId", operator: "eq", value: child.parentId },
+      { field: "standInRole", operator: "eq", value: child.standInRole },
+      // A `smaller` slot is per fidelity; `canonical` is the one slot per original.
+      ...(child.standInRole === "smaller" && child.fidelity !== null
+        ? [{ field: "fidelity", operator: "eq" as const, value: child.fidelity }]
+        : []),
+      { field: "deletedAt", operator: "isNull" },
+    ],
+    limit: 1,
+  });
+  return occupant.records.length > 0;
 }
 
 /**
@@ -146,6 +163,13 @@ export async function planRecordRestore(
  * writing the old version back would let a peer's tombstone win the comparison
  * and delete the record again.
  *
+ * **A stand-in whose slot is already taken when its turn comes stays deleted.** A
+ * stand-in that lost its slot to another was tombstoned on purpose, and restoring
+ * both would put two in one slot, which the uniqueness index on either SQL backend
+ * refuses outright — so a restore that tried would fail rather than quietly do the
+ * wrong thing. The question can only be answered here: at plan time both losers and
+ * winners are tombstoned, so the slot looks free to either.
+ *
  * Bytes are not this function's business. A restore inside the retention window
  * is pure row work, because the reaper has not touched them; past it, the bytes
  * are gone and an app re-reports what it can.
@@ -159,6 +183,7 @@ export async function applyRecordRestore(
   for (const record of [plan.record, ...plan.cascade]) {
     const deletedAt = record.deletedAt;
     if (!deletedAt) continue;
+    if (record.standInRole !== null && (await slotTaken(db, record))) continue;
     const hlc = clock.now();
     const live: DataRecord = {
       ...record,

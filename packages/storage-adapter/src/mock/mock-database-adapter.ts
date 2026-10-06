@@ -192,17 +192,25 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
       for (const filter of query.filters) {
         records = records.filter((record) => {
           const parts = filter.field.split(".");
-          let value: unknown = record;
+          let raw: unknown = record;
           for (const part of parts) {
-            value = (value as Record<string, unknown>)?.[part];
+            raw = (raw as Record<string, unknown>)?.[part];
           }
+          // A clock reading is a column of serialized text on both SQL backends
+          // and an object here, so an ordering comparison against one has to go
+          // through the same spelling the databases order on — which is exact,
+          // because the format leads with a zero-padded hex wall time. Without
+          // this, `deletedAt lt <serialized>` compared an object to a string and
+          // matched nothing, so the mock answered a question the real adapters
+          // answer differently.
+          const value = isHlcTimestamp(raw) ? serializeHLC(raw) : raw;
           switch (filter.operator) {
             case "eq": return value === filter.value;
             case "neq": return value !== filter.value;
-            case "gt": return (value as number) > (filter.value as number);
-            case "gte": return (value as number) >= (filter.value as number);
-            case "lt": return (value as number) < (filter.value as number);
-            case "lte": return (value as number) <= (filter.value as number);
+            case "gt": return (value as never) > (filter.value as never);
+            case "gte": return (value as never) >= (filter.value as never);
+            case "lt": return (value as never) < (filter.value as never);
+            case "lte": return (value as never) <= (filter.value as never);
             case "in": return (filter.value as unknown[]).includes(value);
             case "like": return typeof value === "string" && value.includes(filter.value as string);
             // Soft deletion is expressed as `deletedAt isNull` by every caller
@@ -704,6 +712,12 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     return out;
   }
 
+  async deleteLabelsForRecord(recordId: StarkeepId): Promise<void> {
+    for (const [key, label] of [...this.labels.entries()]) {
+      if (label.recordId === recordId) this.labels.delete(key);
+    }
+  }
+
   async restoreLabelsForRecord(
     recordId: StarkeepId,
     deletedAt: HLCTimestamp,
@@ -888,4 +902,15 @@ function withoutTombstoneColumn(row: MetadataRow): MetadataRow {
   const copy = structuredClone(row);
   delete copy[METADATA_DELETED_AT_COLUMN];
   return copy;
+}
+
+/** Whether a value is a clock reading, for the comparison boundary in `query`. */
+function isHlcTimestamp(value: unknown): value is HLCTimestamp {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as HLCTimestamp).wallTime === "number" &&
+    typeof (value as HLCTimestamp).counter === "number" &&
+    typeof (value as HLCTimestamp).nodeId === "string"
+  );
 }

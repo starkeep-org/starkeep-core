@@ -36,6 +36,7 @@ import {
   DEFAULT_STAND_IN_STANDARDS,
   parseUserSettings,
   pickSettingsRecord,
+  retentionDaysFromSettings,
   SETTINGS_TYPE_ID,
   type DataRecord,
   type HLCClock,
@@ -65,6 +66,17 @@ export interface LibrarySettingsStatus {
 export interface LibrarySettings {
   /** The library's stand-in standards: the settings file's, or the defaults. */
   standards(): StandInStandards;
+  /**
+   * How long a deleted item stays recoverable, and how long its bytes stay —
+   * `null` when this host cannot tell.
+   *
+   * Null is not the default. A host that cannot read the winning settings file is
+   * in the dark about the library's value, and a reaper in the dark reaps nothing:
+   * reaping to a 30-day default under a library whose owner chose 365 would destroy
+   * bytes the person was promised. The stamp has no equivalent here — nothing can
+   * record "reaped under an unknown window" and be corrected later.
+   */
+  retentionDays(): number | null;
   /** Whether this host may stamp originals with {@link standards}. */
   knowsLibraryValue(): boolean;
   status(): LibrarySettingsStatus;
@@ -103,11 +115,15 @@ export function createLibrarySettings(options: LibrarySettingsOptions): LibraryS
   let loaded: { settings: UserSettings; standards: StandInStandards } | null = null;
   let problems: string[] = [];
 
+  // `winnerId !== null && loaded === null` is the one state that means "a settings
+  // file exists and this host cannot use it".
+  const knows = (): boolean => loaded !== null || winnerId === null || !cloudConfigured();
+
   return {
     standards: () => loaded?.standards ?? DEFAULT_STAND_IN_STANDARDS,
-    // `winnerId !== null && loaded === null` is the one state that means "a
-    // settings file exists and this host cannot use it".
-    knowsLibraryValue: () => loaded !== null || winnerId === null || !cloudConfigured(),
+    retentionDays: () =>
+      knows() ? retentionDaysFromSettings(loaded?.settings ?? {}) : null,
+    knowsLibraryValue: knows,
     status: () => ({
       set: winnerId !== null,
       recordId: winnerId,

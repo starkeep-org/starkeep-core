@@ -74,6 +74,7 @@ import { sha256HexToBase64, loadVariantCandidatesForPage } from "@starkeep/stora
 import type { RecordAvailability } from "@starkeep/protocol-primitives";
 import {
   createResidencyManager,
+  reapDeleted,
   residencyHooks,
   runAcquisition,
   scanForAcquirable,
@@ -91,6 +92,7 @@ import {
   standardsFor,
   stampFor,
   checkUserSettings,
+  DEFAULT_TRASH_RETENTION_DAYS,
   serializeUserSettings,
   settingsFromStandards,
   standardsFromSettings,
@@ -116,7 +118,9 @@ import {
 } from "../../packages/shared-space-api/src/stand-ins/write.js";
 import {
   applyRecordDelete,
+  applyRecordRestore,
   planRecordDelete,
+  planRecordRestore,
 } from "../../packages/shared-space-api/src/stand-ins/delete.js";
 import {
   BACKLOG_KINDS,
@@ -1174,7 +1178,12 @@ async function main() {
       // empty this node's copies — but only of files whose original, canonical
       // stand-in and own bytes are proved in the cloud, which leaves nothing
       // unrecoverable, and never of a file at or below the ceiling.
-      /^\/residency\/(stand-ins|free-up-space)$/,
+      // `reap` joins them on the same reasoning, with one difference worth stating:
+      // it is the one pass that destroys something unrecoverable. What bounds it is
+      // not the proof "Free up space" needs but the promise the library already
+      // made — nothing is reaped inside the retention window, and a node that
+      // cannot read that window reaps nothing at all.
+      /^\/residency\/(stand-ins|free-up-space|reap)$/,
       // The library's canonical thresholds. Loopback-gated like the admin
       // surface that installs apps: the person sets them from admin-web, and
       // no installable app may, which is also why the file they are stored in
@@ -1899,6 +1908,11 @@ async function main() {
             fidelity: r.fidelity,
             canonical_threshold: r.canonicalThreshold,
             self_canonical: r.selfCanonical,
+            // Null on a live record, which is every record this route answered
+            // before `?deleted=` existed. A Trash view reads it, and so does an
+            // app's delete feed: `deleted=only&updated_after=<hlc>` is the whole
+            // mechanism, over the path every other read already takes.
+            deleted_at: r.deletedAt ? new Date(r.deletedAt.wallTime).toISOString() : null,
             availability: availabilityByRecord.get(r.id) ?? { state: "instant" },
             path: r.objectStorageKey
               ? await localAdapter.resolvePath(r.objectStorageKey)
@@ -3295,6 +3309,31 @@ async function main() {
         return;
       }
 
+      // POST /residency/reap — reclaim the bytes of items deleted longer ago than
+      // the library's retention window.
+      //
+      // Body: { dryRun? }. Manual at first, so the first version is observable: a
+      // dry run says what would go, and the report names every refusal with its
+      // reason. A schedule can follow once the reports read clean.
+      //
+      // Each host reaps its own store from its own catalogue, which is sound
+      // because shared records sync everywhere. A host that reaps bytes another
+      // host later needs re-acquires them through the existing paths.
+      if (path === "/residency/reap" && req.method === "POST") {
+        const body = JSON.parse((await readBody(req)) || "{}") as { dryRun?: unknown };
+        const report = await reapDeleted(
+          { databaseAdapter, objectStorage: localAdapter },
+          {
+            // Null when this node cannot read the winning settings file, and a
+            // reaper in the dark reaps nothing.
+            retentionDays: librarySettings.retentionDays(),
+            dryRun: body.dryRun === true,
+          },
+        );
+        json(res, report);
+        return;
+      }
+
       if (path === "/data/label-keys" && req.method === "GET") {
         const filterApp = url.searchParams.get("app");
         let q = qb
@@ -3824,6 +3863,67 @@ async function main() {
           timestamp: deleted[deleted.length - 1]!.updatedAt,
         });
         json(res, { deleted: true, ids: deleted.map((r) => r.id) });
+        return;
+      }
+
+      // POST /data/records/:id/restore — take a delete back.
+      //
+      // The mirror of the DELETE above, through the same planner pair, so the
+      // cascade it lifts is the cascade the delete wrote: the record, its
+      // stand-ins, its derived children, their labels and their metadata rows.
+      // Exact inside the retention window, because nothing was destroyed — the
+      // reaper performs every hard delete and it has not run. Past the window the
+      // row comes back without its metadata, which an app re-reports.
+      const restoreMatch = path.match(/^\/data\/records\/([^/]+)\/restore$/);
+      if (restoreMatch && req.method === "POST") {
+        // Tombstones included, deliberately: this is the one read whose whole
+        // purpose is to find a deleted record.
+        const record = await databaseAdapter.get(createStarkeepId(decodeURIComponent(restoreMatch[1]!)));
+        if (!record || !appCanRead(localDb, appId!, record.type)) {
+          res.writeHead(404);
+          json(res, { error: "Record not found" });
+          return;
+        }
+        if (!appCanWrite(localDb, appId!, record.type)) {
+          res.writeHead(403);
+          json(res, { error: "Forbidden" });
+          return;
+        }
+        const plan = await planRecordRestore(databaseAdapter, record);
+        if (!plan.ok) {
+          res.writeHead(plan.status);
+          json(res, plan.body);
+          return;
+        }
+        const restored = await applyRecordRestore(databaseAdapter, plan, clock);
+        changeNotifier.emit({
+          eventType: "local-change-recorded",
+          recordIds: restored.map((r) => r.id),
+          timestamp: restored[restored.length - 1]!.updatedAt,
+        });
+        json(res, { restored: true, ids: restored.map((r) => r.id) });
+        return;
+      }
+
+      // GET /data/trash — the retention window, as the library's settings state it.
+      //
+      // A separate route from the records query because the window is not a
+      // property of any record: it is the promise the library makes about every
+      // deleted one, and it is what turns a `deleted_at` into a date a person can
+      // read. An app reads it for the same reason — the completeness guarantee on
+      // `deleted=only&updated_after=` is "at least once per *this* window", so an
+      // app that compiled in 30 would be asserting something the library may not
+      // hold to.
+      //
+      // `retention_days: null` means this node cannot read the winning settings
+      // file. A Trash view then shows no date, and the reaper reaps nothing.
+      if (path === "/data/trash" && req.method === "GET") {
+        const retentionDays = librarySettings.retentionDays();
+        json(res, {
+          retention_days: retentionDays,
+          default_retention_days: DEFAULT_TRASH_RETENTION_DAYS,
+          knows_library_value: librarySettings.knowsLibraryValue(),
+        });
         return;
       }
 

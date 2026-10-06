@@ -137,6 +137,14 @@ export {
   type FreeUpSpaceRefusal,
 } from "./residency-manager.js";
 export {
+  reapDeleted,
+  type ReapRequest,
+  type ReapReport,
+  type ReapedKey,
+  type ReapRefusal,
+  type ReaperDeps,
+} from "./reaper.js";
+export {
   proveCloudCopies,
   type DurabilityProof,
   type ProveCloudCopiesDeps,
