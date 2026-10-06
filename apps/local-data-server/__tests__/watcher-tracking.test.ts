@@ -42,7 +42,12 @@ import {
   type ResidencyManager,
 } from "@starkeep/sync-engine";
 import { createStarkeepSdk, type StarkeepSdk } from "@starkeep/sdk";
-import { planRecordDelete, applyRecordDelete } from "@starkeep/shared-space-api";
+import {
+  planRecordDelete,
+  applyRecordDelete,
+  planRecordRestore,
+  applyRecordRestore,
+} from "@starkeep/shared-space-api";
 import { createFileWatchManager, type FileWatchManager } from "../watcher.js";
 
 const WATCH_ID = "w1";
@@ -159,6 +164,17 @@ async function deleteRecord(n: Node, id: string): Promise<void> {
   const plan = await planRecordDelete(n.db, record);
   if (!plan.ok) throw new Error(String(plan.body.error));
   await applyRecordDelete(n.db, plan, n.clock);
+}
+
+/**
+ * Restore a record the way a peer's restore arrives: the row changes and nothing
+ * on this disk does.
+ */
+async function restoreRecord(n: Node, id: string): Promise<void> {
+  const record = (await n.db.get(id as StarkeepId))!;
+  const plan = await planRecordRestore(n.db, record);
+  if (!plan.ok) throw new Error(String(plan.body.error));
+  await applyRecordRestore(n.db, plan, n.clock);
 }
 
 function counts(mgr: FileWatchManager) {
@@ -491,6 +507,131 @@ describe("a record the person deleted", () => {
       ok: false,
       status: 404,
     });
+
+    await n.cleanup();
+  });
+});
+
+describe("a record deleted or restored somewhere else", () => {
+  it("marks the path excluded without a filesystem event or a restart", async () => {
+    // Another node's delete changes nothing on this disk, so the ingest guard —
+    // which runs on an FS event or a scan — never sees it. The watch status read
+    // `synced` for a record the library had deleted until the next restart.
+    const n = await node();
+    const path = join(n.dir, "deleted-elsewhere.txt");
+    await writeFile(path, "bytes-deleted-on-another-node");
+    const mgr = await n.restart();
+    const id = recordIdFor(mgr, path);
+
+    await deleteRecord(n, id);
+    // The stale reading the recheck exists to close.
+    expect(mgr.getStatus(WATCH_ID)!.excluded).toEqual([]);
+    expect(counts(mgr)).toEqual({ synced: 1, total: 1 });
+
+    await mgr.recheckRecords([id]);
+
+    expect(mgr.getStatus(WATCH_ID)!.excluded).toEqual([path]);
+    expect(counts(mgr)).toEqual({ synced: 0, total: 1 });
+    // Written down, not just held: the mark is the one thing in this table that
+    // cannot be re-derived from the disk.
+    const row = n.rawDb
+      .prepare("SELECT library_state FROM watch_files WHERE file_path = ?")
+      .get(path) as { library_state: string };
+    expect(row.library_state).toBe("deleted-from-library");
+
+    await n.cleanup();
+  });
+
+  it("puts the file back when the restore arrives from somewhere else", async () => {
+    // The direction that was stuck for good: the ingest guard returns early for an
+    // excluded path whose bytes have not changed, and `addBack` answered 409 because
+    // the record was already live. Identical bytes made touching the file useless
+    // too, so the only way out was to remove the watch and add it again.
+    const n = await node();
+    const path = join(n.dir, "restored-elsewhere.txt");
+    await writeFile(path, "bytes-coming-back-from-a-peer");
+    const mgr = await n.restart();
+    const id = recordIdFor(mgr, path);
+    const key = (await n.db.get(id as StarkeepId))!.objectStorageKey;
+
+    await deleteRecord(n, id);
+    await mgr.recheckRecords([id]);
+    expect(mgr.getStatus(WATCH_ID)!.excluded).toEqual([path]);
+
+    await restoreRecord(n, id);
+    // The link gone as well, so the assertion below proves the re-ingest ran
+    // rather than finding work already done.
+    await n.objects.delete(key);
+
+    await mgr.recheckRecords([id]);
+
+    expect(mgr.getStatus(WATCH_ID)!.excluded).toEqual([]);
+    expect(counts(mgr)).toEqual({ synced: 1, total: 1 });
+    expect(recordIdFor(mgr, path)).toBe(id);
+    expect(await n.objects.has(key)).toBe(true);
+
+    await n.cleanup();
+  });
+
+  it("leaves an evicted path alone, because its file is not on disk", async () => {
+    // `evicted` and `possibly-lost` are not statements about the library's opinion
+    // of the record, and there is no file to exclude or to re-link.
+    const n = await node();
+    const path = join(n.dir, "gone-then-deleted.txt");
+    await writeFile(path, "bytes-with-a-cloud-copy");
+    const first = await n.restart();
+    const id = recordIdFor(first, path);
+    await uploadToCloud(n, id);
+    await unlink(path);
+    const mgr = await n.restart();
+    expect(mgr.getStatus(WATCH_ID)!.evicted).toEqual([path]);
+
+    await deleteRecord(n, id);
+    await mgr.recheckRecords([id]);
+
+    expect(mgr.getStatus(WATCH_ID)!.evicted).toEqual([path]);
+    expect(mgr.getStatus(WATCH_ID)!.excluded).toEqual([]);
+
+    await n.cleanup();
+  });
+
+  it("ignores record ids this watcher does not track", async () => {
+    const n = await node();
+    await writeFile(join(n.dir, "untouched.txt"), "bytes");
+    const mgr = await n.restart();
+
+    await mgr.recheckRecords(["01ZZZZZZZZZZZZZZZZZZZZZZZZ"]);
+    await mgr.recheckRecords([]);
+
+    expect(counts(mgr)).toEqual({ synced: 1, total: 1 });
+
+    await n.cleanup();
+  });
+});
+
+describe("adding back a record that is already live", () => {
+  it("succeeds instead of refusing the restore it does not need", async () => {
+    // The manual way back has to work when no round announced the restore: a
+    // notification can be missed, and `planRecordRestore` refuses a live record.
+    const n = await node();
+    const path = join(n.dir, "restored-behind-our-back.txt");
+    await writeFile(path, "bytes-restored-elsewhere");
+    const mgr = await n.restart();
+    const id = recordIdFor(mgr, path);
+    const key = (await n.db.get(id as StarkeepId))!.objectStorageKey;
+
+    await deleteRecord(n, id);
+    await mgr.recheckRecords([id]);
+    expect(mgr.getStatus(WATCH_ID)!.excluded).toEqual([path]);
+
+    // The restore lands with no recheck behind it, which is the state the person's
+    // "add back" click meets.
+    await restoreRecord(n, id);
+    await n.objects.delete(key);
+
+    expect(await mgr.addBack(path)).toEqual({ ok: true, recordId: id });
+    expect(mgr.getStatus(WATCH_ID)!.excluded).toEqual([]);
+    expect(await n.objects.has(key)).toBe(true);
 
     await n.cleanup();
   });

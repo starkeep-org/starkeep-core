@@ -137,6 +137,17 @@ export interface FileWatchManager {
    * all three, so the item returns as itself.
    */
   addBack(filePath: string): Promise<AddBackOutcome>;
+  /**
+   * Re-read the library's verdict on these records, for the paths this watcher
+   * tracks.
+   *
+   * The guard inside the ingest path runs on a filesystem event or a scan, and a
+   * record deleted somewhere else changes nothing on this disk — so without this
+   * call the watcher would not learn until the next event or restart, and a path
+   * excluded by a deletion another node later undid would stay excluded for ever.
+   * Both directions are handled here.
+   */
+  recheckRecords(recordIds: readonly string[]): Promise<void>;
   shutdown(): Promise<void>;
 }
 
@@ -204,6 +215,8 @@ interface ActiveWatch {
 
 const MAX_CONCURRENCY = 4;
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+/** Record ids per reverse-lookup query, so one sync round cannot build an unbounded statement. */
+const RECHECK_CHUNK = 200;
 
 export interface FileWatchManagerOptions {
   sdk: StarkeepSdk;
@@ -249,6 +262,16 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
       // the only thing in this table that cannot be re-derived from the disk, so
       // it is the reason the table is loaded on startup rather than rebuilt.
       .addColumn("library_state", "text", (c) => c.notNull().defaultTo("synced"))
+      .compile().sql,
+  );
+  // The reverse lookup `recheckRecords` makes: a sync round names record ids and
+  // this table is keyed by path.
+  db.exec(
+    qb.schema
+      .createIndex("watch_files_data_record_id")
+      .ifNotExists()
+      .on("watch_files")
+      .column("data_record_id")
       .compile().sql,
   );
 
@@ -371,6 +394,23 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
       )
       .compile();
     db.prepare(query.sql).run(...(query.parameters as (string | number)[]));
+  }
+
+  /**
+   * The watched paths holding these records, read from the table rather than
+   * from the in-memory maps: the table is indexed by record id and a scan of
+   * every tracked file would cost the whole library per sync round.
+   */
+  function trackedPathsForRecords(recordIds: readonly string[]): string[] {
+    const query = qb
+      .selectFrom("watch_files")
+      .select(["file_path"])
+      .where("data_record_id", "in", [...recordIds])
+      .compile();
+    const rows = db.prepare(query.sql).all(...(query.parameters as string[])) as {
+      file_path: string;
+    }[];
+    return rows.map((r) => r.file_path);
   }
 
   /** Move one path to a new library state, leaving everything else about it alone. */
@@ -731,6 +771,75 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
     return null;
   }
 
+  /**
+   * Re-read the library's verdict on these records. See the interface.
+   *
+   * Two directions, and the restore direction is the one that cannot wait for a
+   * filesystem event: the ingest guard returns early for an excluded path whose
+   * bytes have not changed, so a record another node restored would leave the
+   * path excluded for ever. Identical bytes mean touching the file does not help
+   * either, because the hash is what the guard compares.
+   *
+   * `evicted` and `possibly-lost` paths are left alone. Neither is a statement
+   * about the library's opinion of the record, and the file is not on disk to
+   * re-link or to exclude.
+   *
+   * The work runs on each watch's own queue, so it serializes behind an in-flight
+   * ingest of the same path rather than racing it.
+   */
+  async function recheckRecords(recordIds: readonly string[]): Promise<void> {
+    if (recordIds.length === 0) return;
+    const byWatch = new Map<ActiveWatch, WatchFileInfo[]>();
+    for (let i = 0; i < recordIds.length; i += RECHECK_CHUNK) {
+      const chunk = recordIds.slice(i, i + RECHECK_CHUNK);
+      const paths = trackedPathsForRecords(chunk);
+      for (const filePath of paths) {
+        const entry = findTracked(filePath);
+        if (!entry) continue;
+        const { active, tracked } = entry;
+        if (tracked.libraryState !== "synced" && tracked.libraryState !== "deleted-from-library") {
+          continue;
+        }
+        const list = byWatch.get(active);
+        if (list) list.push(tracked);
+        else byWatch.set(active, [tracked]);
+      }
+    }
+    if (byWatch.size === 0) return;
+
+    const queued: Promise<void>[] = [];
+    for (const [active, tracked] of byWatch) {
+      active.queue = active.queue.then(async () => {
+        for (const file of tracked) {
+          // Re-read rather than trust the snapshot: the queue may have run an
+          // ingest of this very path while this call waited its turn.
+          const current = active.files.get(file.filePath);
+          if (!current) continue;
+          const deleted = await wasDeletedFromLibrary(current.dataRecordId);
+          if (deleted && current.libraryState === "synced") {
+            markExcluded(active, current);
+          } else if (!deleted && current.libraryState === "deleted-from-library") {
+            // The mark first, or the ingest below declines to re-link the file.
+            // The same two steps `addBack` runs once its own restore returns.
+            active.files.set(current.filePath, { ...current, libraryState: "synced" });
+            setLibraryState(current.filePath, "synced");
+            console.log(
+              `[watch] ${current.filePath} is in the library again; putting it back`,
+            );
+            await ingestFile(active, current.filePath);
+          }
+        }
+      });
+      // The chain is left resolved, exactly as the FS-event path leaves it: a
+      // `then` on a rejected queue would silently drop every later recheck.
+      active.queue = active.queue.catch((err: Error) =>
+        console.warn(`[watch] rechecking the library's verdict failed: ${err.message}`),
+      );
+      queued.push(active.queue);
+    }
+    await Promise.allSettled(queued);
+  }
+
   // -- Public API --
 
   return {
@@ -793,6 +902,8 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
       deleteTrackingRecords(watchId);
     },
 
+    recheckRecords,
+
     getStatus(watchId) {
       const active = watches.get(watchId);
       return active ? statusOf(active) : null;
@@ -842,7 +953,19 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
         // `put` — reviving the row with `version` reset to 1 and its labels and
         // metadata still retracted. The restore planner lifts all three, so the
         // item comes back as itself.
-        await sdk.data.restore(createStarkeepId(tracked.dataRecordId));
+        //
+        // Asked of the row first, because the record may already be live: another
+        // node's restore reaches this one over sync, and `planRecordRestore`
+        // refuses a live record with a 409. `recheckRecords` normally clears the
+        // mark before anyone gets here, and this is what keeps the way back open
+        // when no round announced it.
+        const row = await databaseAdapter.get(createStarkeepId(tracked.dataRecordId));
+        if (row === null || row.deletedAt !== null) {
+          // A missing row still asks, so a caller naming a record this node does
+          // not hold gets the restore path's own answer rather than a silent
+          // re-ingest under a fresh id.
+          await sdk.data.restore(createStarkeepId(tracked.dataRecordId));
+        }
       } catch (err) {
         const status = (err as { statusCode?: number }).statusCode ?? 500;
         return { ok: false, status, error: (err as Error).message };
