@@ -11,6 +11,7 @@ import {
   deserializeHLC,
   isKnownType,
   METADATA_DISCRIMINANT_COLUMN,
+  METADATA_DELETED_AT_COLUMN,
 } from "@starkeep/protocol-primitives";
 import type {
   DatabaseAdapter,
@@ -41,6 +42,7 @@ import {
   type ParsedQueryResult,
   type SharedQueryTarget,
   type WhereClause,
+  type SoftDeletedScope,
   buildGetLabel,
   buildLabelNodeWatermarks,
   buildLabelRetraction,
@@ -59,6 +61,7 @@ import {
   type DigestBucket,
   type SincePage,
   buildTombstoneLabelsForRecord,
+  buildRestoreLabelsForRecord,
   groupLabelsByRecordId,
   nextCursorFrom,
   emptyLabelPage,
@@ -363,13 +366,17 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   async queryShared(
     target: SharedQueryTarget,
     query: ParsedQuery,
-    options: { readonly serverWhere?: readonly WhereClause[] } = {},
+    options: {
+      readonly serverWhere?: readonly WhereClause[];
+      readonly softDeleted?: SoftDeletedScope;
+    } = {},
   ): Promise<ParsedQueryResult> {
     const schema = sharedQuerySchema(target);
     const table = sharedQueryTableName(target, "pg");
     const build = {
       serverWhere: options.serverWhere,
       excludeSoftDeleted: sharedQueryExcludesSoftDeleted(target),
+      ...(options.softDeleted ? { softDeleted: options.softDeleted } : {}),
     };
     const converters = pgConvertersFor(schema.columns);
 
@@ -508,6 +515,31 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
         compiler.deleteFrom(table).where("record_id", "=", recordId).compile(),
       );
     });
+  }
+
+  async tombstoneMetadata(typeId: string, recordId: StarkeepId, hlc: HLCTimestamp): Promise<void> {
+    await withOccRetry("tombstoneMetadata", () =>
+      this.setMetadataTombstone(typeId, recordId, serializeHLC(hlc)),
+    );
+  }
+
+  async restoreMetadata(typeId: string, recordId: StarkeepId): Promise<void> {
+    await withOccRetry("restoreMetadata", () => this.setMetadataTombstone(typeId, recordId, null));
+  }
+
+  private async setMetadataTombstone(
+    typeId: string,
+    recordId: StarkeepId,
+    value: string | null,
+  ): Promise<void> {
+    const table = pgMetadataTableName(typeId);
+    await this.run(
+      compiler
+        .updateTable(table)
+        .set({ [METADATA_DELETED_AT_COLUMN]: value })
+        .where("record_id", "=", recordId)
+        .compile(),
+    );
   }
 
   // ---- Cross-app record labels -------------------------------------------
@@ -746,6 +778,16 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       await this.run(buildTombstoneLabelsForRecord(compiler, LABELS, recordId, hlc));
     });
   }
+
+  async restoreLabelsForRecord(
+    recordId: StarkeepId,
+    deletedAt: HLCTimestamp,
+    hlc: HLCTimestamp,
+  ): Promise<void> {
+    await withOccRetry("restoreLabelsForRecord", async () => {
+      await this.run(buildRestoreLabelsForRecord(compiler, LABELS, recordId, deletedAt, hlc));
+    });
+  }
 }
 
 /**
@@ -771,11 +813,19 @@ function metadataValues(recordType: string, row: MetadataRow): Record<string, un
   const values: Record<string, unknown> = {
     record_id: row.recordId,
     [METADATA_DISCRIMINANT_COLUMN]: recordType,
+    // Writing metadata asserts the row is live — see the SQLite adapter's note.
+    [METADATA_DELETED_AT_COLUMN]: null,
   };
   for (const [key, value] of Object.entries(row)) {
     // `recordId` is spelled `record_id` above, and the discriminant is the
     // server's to set — a wire row carrying one is ignored, not honoured.
-    if (key === "recordId" || key === METADATA_DISCRIMINANT_COLUMN) continue;
+    if (
+      key === "recordId" ||
+      key === METADATA_DISCRIMINANT_COLUMN ||
+      key === METADATA_DELETED_AT_COLUMN
+    ) {
+      continue;
+    }
     values[key] = value;
   }
   return values;

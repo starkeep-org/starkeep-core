@@ -799,7 +799,9 @@ describe("metadata routes", () => {
     // out of storage rather than from the body's `typeId` — it is the grant
     // discriminant every read of this row gates on, so a caller-supplied value
     // would let the caller decide who may read it.
-    expect(writes[0]!.values).toEqual(["r1", "image/jpeg", 100, 50]);
+    // `deleted_at` follows it, always null: writing metadata asserts the row is
+    // live, so an app re-reporting after a restore lifts the tombstone.
+    expect(writes[0]!.values).toEqual(["r1", "image/jpeg", null, 100, 50]);
   });
 
   it("takes record_type from the record, not from the caller's typeId", async () => {
@@ -827,6 +829,7 @@ describe("metadata routes", () => {
     expect(db.calls(/insert into "shared"\."record_image_metadata"/)[0]!.values).toEqual([
       "r2",
       "image/png",
+      null,
       100,
     ]);
   });
@@ -2819,9 +2822,11 @@ describe("the shared-plane query routes", () => {
     expect(issued.values).toContain("image/png");
     expect(issued.values).not.toContain("video/mp4");
     expect(issued.text).toContain('"record_type" in');
-    // The metadata tables carry no `deleted_at`, so the predicate every other
-    // table gets must not be emitted here.
-    expect(issued.text).not.toContain('"deleted_at" is null');
+    // The metadata tables carry `deleted_at` too now, and this route is the one
+    // read that cannot see whether its record is gone — so the predicate is the
+    // only thing keeping a deleted record's dimensions out of the answer. It used
+    // to be a hard delete standing in for exactly this.
+    expect(issued.text).toContain('"deleted_at" is null');
   });
 
   it("403s a category the caller holds no type in, without querying", async () => {

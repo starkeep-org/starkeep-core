@@ -35,6 +35,7 @@ import type {
   Predicate,
   RowQuery,
   RowQueryResult,
+  SoftDeletedScope,
   WhereClause,
 } from "./app-query-types.js";
 import { encodePageToken, pageTokenFrom } from "./app-page-token.js";
@@ -247,6 +248,17 @@ export interface BuildOptions {
    * be able to guess wrong on a table it had never seen.
    */
   readonly excludeSoftDeleted?: boolean;
+  /**
+   * Which side of the tombstone the caller wants, for a table that has the
+   * column.
+   *
+   * `exclude` is the default and the only reading any caller had before: live
+   * rows. `only` is what a Trash view and a delete feed ask for, and `include`
+   * is what a caller needs in order to tell "no such row" from "deliberately
+   * deleted". Ignored when `excludeSoftDeleted` is false, because there is then
+   * no column to filter on.
+   */
+  readonly softDeleted?: SoftDeletedScope;
 }
 
 /** The soft-delete predicate, applied unless the table has no such column. */
@@ -254,6 +266,11 @@ function applySoftDelete(qb: Qb, options: BuildOptions): Qb {
   // The server owns this predicate. A caller cannot name the column at all, so
   // this cannot be contradicted.
   if (options.excludeSoftDeleted === false) return qb;
+  const scope = options.softDeleted ?? "exclude";
+  if (scope === "include") return qb;
+  if (scope === "only") {
+    return qb.where(sql<boolean>`${sql.ref("deleted_at")} is not null` as never) as Qb;
+  }
   return qb.where(sql<boolean>`${sql.ref("deleted_at")} is null` as never) as Qb;
 }
 

@@ -167,10 +167,14 @@ describe("shared records across the wire", () => {
     }
   });
 
-  it("a watcher tombstone on A removes the record from B", async () => {
+  it("a watched file deleted on A evicts there and never reaches B", async () => {
+    // The data-loss path this replaces: the watcher used to map a disk removal onto
+    // a platform tombstone, which propagated to the cloud and to every other node.
+    // A backup machine whose watched folder was cleaned deleted the library's only
+    // remaining copy of its own backup.
     const watchDir = await mkdtemp(join(tmpdir(), "starkeep-wire-watch-"));
     try {
-      await writeFile(join(watchDir, "doomed.txt"), "doomed-bytes");
+      await writeFile(join(watchDir, "kept.txt"), "kept-bytes");
       const watchRes = await fetch(`${serverA.url}/watches`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -180,18 +184,32 @@ describe("shared records across the wire", () => {
 
       await converge();
       const onB = await listRecords(driveB);
-      const doomed = onB.find((r) => r.original_filename === "doomed.txt");
-      expect(doomed).toBeDefined();
+      const kept = onB.find((r) => r.original_filename === "kept.txt");
+      expect(kept).toBeDefined();
 
-      // Delete on disk → watcher tombstones on A → tombstone propagates.
-      await unlink(join(watchDir, "doomed.txt"));
+      // The removal reaches A's watcher, which reports it rather than deleting.
+      // This harness's cloud answers `stat` with no stored checksum, so the
+      // durability proof cannot confirm anything and the path lands in
+      // `possiblyLost` — the conservative branch. The proven branch, where the
+      // bytes are let go and the record reads `evicted`, is covered in
+      // `watcher-tracking.test.ts`, where the probe can confirm a checksum.
+      await unlink(join(watchDir, "kept.txt"));
       await eventually(async () => {
-        const onA = await listRecords(driveA);
-        expect(onA.map((r) => r.id)).not.toContain(doomed!.id);
+        const res = await fetch(`${serverA.url}/watches`);
+        const { watches } = (await res.json()) as {
+          watches: Array<{ directoryPath: string; possiblyLost: string[] }>;
+        };
+        const watch = watches.find((w) => w.directoryPath === watchDir)!;
+        expect(watch.possiblyLost).toContain(join(watchDir, "kept.txt"));
       });
       await converge();
-      const afterB = await listRecords(driveB);
-      expect(afterB.map((r) => r.id)).not.toContain(doomed!.id);
+
+      // The point of the test, either branch: no tombstone left A, so the record
+      // is live on A and still live on B.
+      expect((await listRecords(driveA)).map((r) => r.id)).toContain(kept!.id);
+      expect((await listRecords(driveB)).map((r) => r.id)).toContain(kept!.id);
+      // B never held the removal, so B can still read the bytes.
+      expect(await fetchBytes(driveB, kept!.id)).toBe("kept-bytes");
     } finally {
       await rm(watchDir, { recursive: true, force: true });
     }

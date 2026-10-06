@@ -310,3 +310,14 @@ export class QueryParseError extends Error {
     this.name = "QueryParseError";
   }
 }
+
+/**
+ * Which side of the tombstone a query over a table carrying `deleted_at` reads.
+ *
+ * `exclude` is the default and the only reading any caller had before a Trash
+ * view existed. `only` is what a Trash view and a delete feed ask for; `include`
+ * is what a caller needs in order to tell "no such row" from "deliberately
+ * deleted". The server owns the choice — no caller can name the column — so a
+ * reading cannot be contradicted by a predicate.
+ */
+export type SoftDeletedScope = "exclude" | "only" | "include";

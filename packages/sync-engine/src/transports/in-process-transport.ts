@@ -8,6 +8,7 @@ import { admitIncomingStandIn } from "../stand-in-slots.js";
 import {
   applyRecordMetadata,
   deleteRecordMetadata,
+  restoreRecordMetadata,
   loadMetadataForRecords,
   mergeDigestBuckets,
   scopeDigestBuckets,
@@ -224,6 +225,13 @@ export function createInProcessSyncTransport(
           const current = await databaseAdapter.get(snapshot.id);
           const rowAlreadyApplied =
             current !== null && compareHLC(current.updatedAt, snapshot.updatedAt) >= 0;
+          // What this side holds for the record once the LWW comparison and the
+          // keep rule have had their say: the row written below, or the row this
+          // side already had when the incoming one lost. The metadata cascade
+          // reads *this* rather than the incoming snapshot, because the two can
+          // disagree — a refused tombstone leaves the record live, and cascading
+          // on the snapshot would take its metadata anyway.
+          let held: DataRecord = current ?? snapshot;
           if (!rowAlreadyApplied) {
             clock.receive(snapshot.updatedAt);
             let row: DataRecord = snapshot;
@@ -250,15 +258,22 @@ export function createInProcessSyncTransport(
             }
             await databaseAdapter.put(row);
             appliedRecords.push(row);
+            held = row;
           }
           // **Outside** the LWW guard: an equal or older record row can still
           // carry columns this side lacks, and the record's clock does not move
           // when metadata is written, so a stale-looking row says nothing about
           // its metadata. A tombstone cascades instead, matching what a local
-          // delete already does.
-          if (snapshot.deletedAt) {
-            await deleteRecordMetadata(databaseAdapter, snapshot);
-          } else if (incomingMetadata) {
+          // delete already does — tombstoning the row rather than dropping it,
+          // which is what lets a restore bring it back.
+          if (held.deletedAt) {
+            await deleteRecordMetadata(databaseAdapter, held, held.deletedAt);
+          } else if (current?.deletedAt) {
+            // A restore arriving: the mirror cascade, run whether or not a
+            // metadata passenger came with the row. See the requester's copy.
+            await restoreRecordMetadata(databaseAdapter, held);
+          }
+          if (!held.deletedAt && incomingMetadata) {
             // `detectOwedBack: false` — a responder never answers "I hold
             // columns you did not name" by moving the record's clock. Doing so
             // would re-author the row, and this side's coverage report is

@@ -58,6 +58,23 @@ export interface ResidentEntry {
   readonly heldEver: boolean;
   /** Whether the acquisition pass should fetch these bytes. */
   readonly wanted: boolean;
+  /**
+   * Whether the departure was deliberate — the person let these bytes go.
+   *
+   * Two things make a row not resident and they do not mean the same thing. The
+   * person running "Free up space", or deleting a watched file from its folder,
+   * is a *decision*: the acquisition pass must not fetch the file back, and a
+   * read is the only thing that brings it here again. {@link reconcile} finding
+   * bytes the index believed and storage does not have is a *discovery*: nobody
+   * chose it, and re-acquiring the file is the repair the reconcile exists to
+   * start.
+   *
+   * Collapsing the two would cost one of the two behaviours. Honouring every
+   * departure as a decision would make a node that lost bytes to a wiped object
+   * store never fetch them again; honouring none would re-download the file the
+   * person just deleted on any node that keeps originals.
+   */
+  readonly released: boolean;
 }
 
 /** What {@link ResidentSetIndex.reconcile} found when it walked storage. */
@@ -76,10 +93,14 @@ export interface ReconcileReport {
 
 /**
  * What a caller supplies about a blob. The lifecycle flags are set by the
- * index itself — `add` means resident and held, `defer` means wanted — so a
- * caller cannot state them inconsistently with the call it is making.
+ * index itself — `add` means resident and held, `defer` means wanted, `release`
+ * means let go — so a caller cannot state them inconsistently with the call it is
+ * making.
  */
-export type ResidentArrival = Omit<ResidentEntry, "resident" | "heldEver" | "wanted">;
+export type ResidentArrival = Omit<
+  ResidentEntry,
+  "resident" | "heldEver" | "wanted" | "released"
+>;
 
 export interface ResidentSetIndex {
   /** Record that bytes are here. Idempotent on `objectStorageKey`. */
@@ -99,8 +120,24 @@ export interface ResidentSetIndex {
   dropDeferred(objectStorageKey: string): void;
   /** Forget a blob entirely. Use this only when the *record* is gone. */
   remove(objectStorageKey: string): void;
-  /** Note that this node no longer holds these bytes, keeping the row. */
+  /**
+   * Note that this node no longer holds these bytes, keeping the row.
+   *
+   * A discovery rather than a decision — what {@link reconcile} writes. The row
+   * stops being wanted now, and the next catalogue scan may want it again, which
+   * is how a node that lost bytes repairs itself. For a departure the person
+   * chose, call {@link release}.
+   */
   markDeparted(objectStorageKey: string): void;
+  /**
+   * Note that this node let these bytes go on purpose.
+   *
+   * "Free up space", and a watched file deleted from its folder. Beyond
+   * {@link markDeparted}, this stops the acquisition pass wanting the key at all,
+   * however the policy reads: a read through `ensureLocalBytes` is what brings
+   * the file back, and that arrival clears the mark. See {@link ResidentEntry.released}.
+   */
+  release(objectStorageKey: string): void;
   /** Whether this node held these bytes and let them go. */
   wasEvicted(objectStorageKey: string): boolean;
   /** Reconcile the index against what storage actually holds. */
@@ -121,11 +158,14 @@ const qb = new Kysely<DB>({
 });
 
 /**
- * Named apart from the budgeted `resident_blobs` table this replaced, so a
- * development database that still holds that table's shape keeps working. The
- * old table is left behind; drop the database to remove it.
+ * Named apart from the `resident_files` table this replaced, which in turn was
+ * named apart from the budgeted `resident_blobs` before it — for the same reason
+ * both times. The index is a cache of a fact the filesystem also knows, so a new
+ * column is cheaper to take as a new table than to migrate: an empty index is
+ * repopulated by the next `reconcile`, whose `unknownKeys` the catalogue scan
+ * adopts. The older tables are left behind; drop the database to remove them.
  */
-const TABLE = "resident_files";
+const TABLE = "resident_keys";
 
 interface Row {
   record_id: string;
@@ -136,6 +176,7 @@ interface Row {
   resident: number;
   held_ever: number;
   wanted: number;
+  released: number;
 }
 
 export function createSqliteResidentSetIndex(options: {
@@ -155,6 +196,7 @@ export function createSqliteResidentSetIndex(options: {
       .addColumn("resident", "integer", (c) => c.notNull())
       .addColumn("held_ever", "integer", (c) => c.notNull())
       .addColumn("wanted", "integer", (c) => c.notNull())
+      .addColumn("released", "integer", (c) => c.notNull().defaultTo(0))
       .compile().sql,
   );
   // The acquisition queue: wanted, not here, oldest first.
@@ -179,6 +221,7 @@ export function createSqliteResidentSetIndex(options: {
         resident: sql.lit(1),
         held_ever: sql.lit(1),
         wanted: sql.lit(0),
+        released: sql.lit(0),
       })
       .onConflict((oc) =>
         oc.column("object_storage_key").doUpdateSet((eb) => ({
@@ -188,6 +231,9 @@ export function createSqliteResidentSetIndex(options: {
           resident: sql.lit(1),
           held_ever: sql.lit(1),
           wanted: sql.lit(0),
+          // The bytes are here again, so the release is spent. A read is what
+          // brings back a file the person let go, and this is that arrival.
+          released: sql.lit(0),
         })),
       )
       .compile().sql,
@@ -205,6 +251,7 @@ export function createSqliteResidentSetIndex(options: {
         resident: sql.lit(0),
         held_ever: sql.lit(0),
         wanted: sql.lit(1),
+        released: sql.lit(0),
       })
       .onConflict((oc) =>
         oc
@@ -249,6 +296,13 @@ export function createSqliteResidentSetIndex(options: {
       .where("object_storage_key", "=", sql.raw("?"))
       .compile().sql,
   );
+  const releaseStmt = db.prepare(
+    qb
+      .updateTable(TABLE)
+      .set({ resident: sql.lit(0), wanted: sql.lit(0), released: sql.lit(1) })
+      .where("object_storage_key", "=", sql.raw("?"))
+      .compile().sql,
+  );
   const getStmt = db.prepare(
     qb.selectFrom(TABLE).selectAll().where("object_storage_key", "=", sql.raw("?")).compile().sql,
   );
@@ -278,6 +332,7 @@ export function createSqliteResidentSetIndex(options: {
       resident: row.resident === 1,
       heldEver: row.held_ever === 1,
       wanted: row.wanted === 1,
+      released: row.released === 1,
     };
   }
 
@@ -304,6 +359,9 @@ export function createSqliteResidentSetIndex(options: {
     },
     markDeparted(objectStorageKey) {
       markDepartedStmt.run(objectStorageKey);
+    },
+    release(objectStorageKey) {
+      releaseStmt.run(objectStorageKey);
     },
     wasEvicted(objectStorageKey) {
       const row = getStmt.get(objectStorageKey) as Row | undefined;

@@ -12,6 +12,7 @@ import {
   standInSlot,
   typeCategory,
   METADATA_DISCRIMINANT_COLUMN,
+  METADATA_DELETED_AT_COLUMN,
 } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter } from "../database/adapter.js";
 import {
@@ -38,6 +39,7 @@ import type {
   ParsedQuery,
   ParsedQueryResult,
   WhereClause,
+  SoftDeletedScope,
 } from "../database/app-query-types.js";
 import type {
   Query,
@@ -377,18 +379,24 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
   async queryShared(
     target: SharedQueryTarget,
     query: ParsedQuery,
-    options: { readonly serverWhere?: readonly WhereClause[] } = {},
+    options: {
+      readonly serverWhere?: readonly WhereClause[];
+      readonly softDeleted?: SoftDeletedScope;
+    } = {},
   ): Promise<ParsedQueryResult> {
     // Asked for its side effect: an unknown category, or `other`, has no
     // metadata table and must fail here rather than answer an empty page.
     sharedQuerySchema(target);
     const rows = this.sharedRows(target);
     // The compiler applies the soft-delete predicate; nothing parses it, so it
-    // is applied here for the two tables that carry the column.
-    const live = sharedQueryExcludesSoftDeleted(target)
-      ? rows.filter((row) => row["deleted_at"] === null || row["deleted_at"] === undefined)
-      : rows;
-    return runInMemoryQuery(live, query, options);
+    // is applied here for every table that carries the column.
+    const scope = options.softDeleted ?? "exclude";
+    const tombstoned = (row: Record<string, unknown>): boolean =>
+      row["deleted_at"] !== null && row["deleted_at"] !== undefined;
+    const selected = !sharedQueryExcludesSoftDeleted(target) || scope === "include"
+      ? rows
+      : rows.filter((row) => (scope === "only" ? tombstoned(row) : !tombstoned(row)));
+    return runInMemoryQuery(selected, query, { serverWhere: options.serverWhere });
   }
 
   /** A column-shaped view of one shared table. */
@@ -455,10 +463,13 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     // Server-set, never merged from the caller's row — see
     // METADATA_DISCRIMINANT_COLUMN.
     delete incoming[METADATA_DISCRIMINANT_COLUMN];
+    delete incoming[METADATA_DELETED_AT_COLUMN];
     table.set(row.recordId, {
       ...(existing ?? {}),
       ...incoming,
       [METADATA_DISCRIMINANT_COLUMN]: recordType,
+      // Writing metadata asserts the row is live, as both SQL adapters do.
+      [METADATA_DELETED_AT_COLUMN]: null,
       recordId: row.recordId,
     });
   }
@@ -482,7 +493,7 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
 
   async getMetadata(typeId: string, recordId: StarkeepId): Promise<MetadataRow | null> {
     const row = this.metadataTable(typeId).get(recordId);
-    return row ? structuredClone(row) : null;
+    return row ? withoutTombstoneColumn(row) : null;
   }
 
   async getMetadataByIds(
@@ -493,13 +504,32 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     const result = new Map<StarkeepId, MetadataRow>();
     for (const id of recordIds) {
       const row = table.get(id);
-      if (row) result.set(id, structuredClone(row));
+      if (row) result.set(id, withoutTombstoneColumn(row));
     }
     return result;
   }
 
   async deleteMetadata(typeId: string, recordId: StarkeepId): Promise<void> {
     this.metadataTable(typeId).delete(recordId);
+  }
+
+  async tombstoneMetadata(typeId: string, recordId: StarkeepId, hlc: HLCTimestamp): Promise<void> {
+    this.setMetadataTombstone(typeId, recordId, serializeHLC(hlc));
+  }
+
+  async restoreMetadata(typeId: string, recordId: StarkeepId): Promise<void> {
+    this.setMetadataTombstone(typeId, recordId, null);
+  }
+
+  private setMetadataTombstone(
+    typeId: string,
+    recordId: StarkeepId,
+    value: string | null,
+  ): void {
+    const table = this.metadataTable(typeId);
+    const row = table.get(recordId);
+    if (!row) return;
+    table.set(recordId, { ...row, [METADATA_DELETED_AT_COLUMN]: value });
   }
 
   // ---- Cross-app record labels -------------------------------------------
@@ -674,6 +704,23 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     return out;
   }
 
+  async restoreLabelsForRecord(
+    recordId: StarkeepId,
+    deletedAt: HLCTimestamp,
+    hlc: HLCTimestamp,
+  ): Promise<void> {
+    const stamp = serializeHLC(deletedAt);
+    for (const label of this.labels.values()) {
+      if (label.recordId !== recordId) continue;
+      // Exactly the rows the delete took: a label withdrawn before it carries a
+      // different reading and stays withdrawn.
+      if (!label.deletedAt || serializeHLC(label.deletedAt) !== stamp) continue;
+      label.deletedAt = null;
+      label.updatedAt = hlc;
+      label.nodeId = hlc.nodeId;
+    }
+  }
+
   async tombstoneLabelsForRecord(recordId: StarkeepId, hlc: HLCTimestamp): Promise<void> {
     for (const label of this.labels.values()) {
       if (label.recordId !== recordId || label.deletedAt) continue;
@@ -828,4 +875,17 @@ function recordToRow(record: DataRecord): Record<string, unknown> {
     self_canonical: record.selfCanonical,
     stand_in_slot: standInSlot(record),
   };
+}
+
+/**
+ * A metadata row as a caller sees it: without the server-owned tombstone column.
+ *
+ * Both SQL adapters drop it on the way out of `getMetadata`, so the mock does
+ * too — a mock that handed it back would let a test pass on an assertion no real
+ * backend supports.
+ */
+function withoutTombstoneColumn(row: MetadataRow): MetadataRow {
+  const copy = structuredClone(row);
+  delete copy[METADATA_DELETED_AT_COLUMN];
+  return copy;
 }

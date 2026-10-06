@@ -107,6 +107,7 @@ import {
   applyRepairFloors,
   bucketsPeerIsMissing,
   deleteRecordMetadata,
+  restoreRecordMetadata,
   digestIsScoped,
   foldDigestScopes,
   loadMetadataForRecords,
@@ -864,13 +865,23 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
               // written, so a stale-looking row is no evidence about its
               // metadata.
               //
-              // A tombstone cascades instead: `SdkDataOperations.delete` drops
-              // the metadata row, and a synced delete has to do the same or the
+              // A tombstone cascades instead: `applyRecordDelete` tombstones the
+              // metadata row, and a synced delete has to do the same or the
               // record's dimensions outlive it on every peer but the one it was
-              // deleted on.
+              // deleted on. Tombstoned rather than dropped since the delete became
+              // uniformly soft, which is what lets a restore bring the row back.
               if (snapshot.deletedAt) {
-                await deleteRecordMetadata(localDatabaseAdapter, snapshot);
-              } else if (incomingMetadata) {
+                await deleteRecordMetadata(localDatabaseAdapter, snapshot, snapshot.deletedAt);
+              } else if (current?.deletedAt) {
+                // A restore arriving. The cascade mirrors the delete's, and it has
+                // to run whether or not a metadata passenger came with the row: a
+                // row whose columns are all null ships nothing, and a tombstoned
+                // metadata row nobody lifted is a restored photograph with no
+                // dimensions. Asked only of a record this node held as deleted, so
+                // the ordinary round pays nothing for it.
+                await restoreRecordMetadata(localDatabaseAdapter, snapshot);
+              }
+              if (!snapshot.deletedAt && incomingMetadata) {
                 const owedBack = await applyRecordMetadata(
                   localDatabaseAdapter,
                   snapshot,

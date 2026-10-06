@@ -39,7 +39,9 @@ import {
 } from "@starkeep/storage-adapter";
 import { ApiError } from "../errors.js";
 import { parseQuery } from "./parse.js";
-import type { ParsedQuery, QueryParams, WhereClause } from "./types.js";
+import type { ParsedQuery, WhereClause } from "./types.js";
+import { queryParamsFrom, rawParam, type ParamSource } from "./params.js";
+import type { SoftDeletedScope } from "@starkeep/storage-adapter";
 
 /** A parsed query and the server-owned predicate that goes with it. */
 export interface SharedQueryPlan {
@@ -47,6 +49,29 @@ export interface SharedQueryPlan {
   readonly query: ParsedQuery;
   /** Empty only under `allAccess`, where there is nothing to restrict. */
   readonly serverWhere: readonly WhereClause[];
+  /**
+   * Which side of the tombstone to read, from `?deleted=`. `exclude` by default.
+   *
+   * This is the gate the metadata hard delete used to stand in for. A metadata
+   * row is now tombstoned with its record rather than destroyed, and this route
+   * reads the table directly with no view of any record, so the predicate here is
+   * the only thing keeping a deleted record's dimensions out of the answer. A
+   * Trash view passes `only` to show what it is about to lose.
+   */
+  readonly softDeleted: SoftDeletedScope;
+}
+
+/**
+ * Read `?deleted=`, naming the three readings rather than accepting anything.
+ *
+ * A misspelling is a 400 rather than a silent `exclude`, for the reason the
+ * records route gives: a view that asked for tombstones and got live rows looks
+ * like it is working.
+ */
+function softDeletedScope(raw: string | undefined): SoftDeletedScope {
+  if (raw === undefined) return "exclude";
+  if (raw === "exclude" || raw === "only" || raw === "include") return raw;
+  throw new ApiError(`deleted must be "exclude", "only" or "include" (got "${raw}")`, 400);
 }
 
 /**
@@ -65,14 +90,14 @@ export interface SharedQueryPlan {
 export function planMetadataQuery(
   category: Category,
   grants: AccessGrants,
-  params: QueryParams,
+  source: ParamSource,
 ): SharedQueryPlan {
   if (!hasMetadataTable(category)) {
     // Drive-only, ungrantable, and it has no metadata table to query.
     throw new ApiError(`Category "${category}" has no metadata table`, 400);
   }
   const target: SharedQueryTarget = { kind: "metadata", category };
-  return plan(target, grants, params, readableTypesIn(grants, category));
+  return plan(target, grants, source, readableTypesIn(grants, category));
 }
 
 /**
@@ -87,14 +112,17 @@ export function planMetadataQuery(
  * is what `record_type IN (…)` decides. Restricting a caller to its own labels
  * would break the one thing the table exists for.
  */
-export function planLabelQuery(grants: AccessGrants, params: QueryParams): SharedQueryPlan {
-  return plan({ kind: "labels" }, grants, params, [...grants.readableTypes].sort());
+export function planLabelQuery(grants: AccessGrants, source: ParamSource): SharedQueryPlan {
+  return plan({ kind: "labels" }, grants, source, [...grants.readableTypes].sort());
 }
+
+/** The parameters these two routes own rather than the grammar. */
+const SHARED_READ_SERVER_PARAMS: readonly string[] = ["deleted"];
 
 function plan(
   target: SharedQueryTarget,
   grants: AccessGrants,
-  params: QueryParams,
+  source: ParamSource,
   readable: readonly string[],
 ): SharedQueryPlan {
   if (!grants.allAccess && readable.length === 0) {
@@ -104,10 +132,17 @@ function plan(
   // The projection is narrowed to the declared columns before it leaves here,
   // so `record_type` — present on every row, and the thing the predicate below
   // is built on — is not returned by a caller's bare `SELECT *`.
-  const query = withDeclaredProjection(parseQuery(schema, params), schema);
+  // `deleted` is the route's parameter, not the grammar's: the parser is given
+  // the caller's own `where`, `order` and the rest, and would refuse a column the
+  // schema does not declare — which `deleted_at` deliberately is not.
+  const query = withDeclaredProjection(
+    parseQuery(schema, queryParamsFrom(source, SHARED_READ_SERVER_PARAMS)),
+    schema,
+  );
   return {
     target,
     query,
+    softDeleted: softDeletedScope(rawParam(source, "deleted")),
     serverWhere: grants.allAccess
       ? []
       : [

@@ -4,7 +4,7 @@
  * Drive identity on the shared-records plane. (Plan §3 "Watcher".)
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtemp, mkdir, rm, writeFile, appendFile, unlink, truncate } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, appendFile, unlink, utimes, truncate } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
@@ -22,6 +22,12 @@ interface WatchStatus {
   totalFiles: number;
   syncedFiles: number;
   lastScanAt: string | null;
+  /** Left the disk with no cloud copy confirmed — the one new way to lose data. */
+  possiblyLost: string[];
+  /** On disk, and left out of the library because the person deleted the record. */
+  excluded: string[];
+  /** Left the disk, bytes proved in the cloud; a read brings them back. */
+  evicted: string[];
 }
 
 async function getWatches(s: LocalDataServer): Promise<WatchStatus[]> {
@@ -178,13 +184,92 @@ describe("live filesystem events", () => {
     expect(await (await fetch(url)).text()).toBe("jpeg-bytes-a-modified");
   });
 
-  it("a file deleted on disk tombstones its record", async () => {
+  it("a file deleted on disk leaves the record alone, and says so", async () => {
+    // A watched folder is one node's *view* of the library, so a removal from it
+    // is not a vote to delete the item everywhere. The old behaviour tombstoned
+    // the record, which propagated to the cloud and to every other node: a backup
+    // machine whose folder was cleaned deleted the library's only remaining copy.
     const tracked = await fileStatus(server, join(watchDir, "c.png"));
     expect(tracked.recordId).toBeTruthy();
     await unlink(join(watchDir, "c.png"));
+
+    // No cloud is configured here, so no cloud copy can be proved — which is the
+    // reported case rather than a state: nothing is removed from disk, because
+    // unlinking a link whose target is gone would destroy the last reference to
+    // the content.
     await eventually(async () => {
-      const records = await listRecords(drive);
-      expect(records.map((r) => r.id)).not.toContain(tracked.recordId);
+      const [watch] = await getWatches(server);
+      expect(watch!.possiblyLost).toContain(join(watchDir, "c.png"));
+    });
+    const records = await listRecords(drive);
+    expect(records.map((r) => r.id)).toContain(tracked.recordId);
+    // The bytes are genuinely gone — the file was the only copy — which is what
+    // "possibly lost" names and why it is reported rather than stated as a state.
+    // The remedy is the person's: restore the file, or delete the record.
+    expect((await drive.fetch(`/data/records/${tracked.recordId}/file-url`)).status).toBe(404);
+  });
+
+  it("deleting the record does not bring the file back, and the path says why", async () => {
+    // Resurrection, which defeated every other deletion behaviour. A record id is
+    // a pure function of parent, filename and content hash, so re-ingesting the
+    // same file writes the tombstoned row's *own* id — and `put` upserts every
+    // column, so one call was the whole resurrection with no second write to catch.
+    await writeFile(join(watchDir, "deleted-on-purpose.txt"), "bytes-to-delete");
+    await eventually(async () => {
+      const tracked = await fileStatus(server, join(watchDir, "deleted-on-purpose.txt"));
+      expect(tracked.recordId).toBeTruthy();
+    });
+    const tracked = await fileStatus(server, join(watchDir, "deleted-on-purpose.txt"));
+
+    const del = await drive.fetch(`/data/records/${tracked.recordId}`, { method: "DELETE" });
+    expect(del.status).toBe(200);
+
+    // Touch the file so the watcher looks at it again, as a re-save would.
+    const later = new Date(Date.now() + 30_000);
+    await utimes(join(watchDir, "deleted-on-purpose.txt"), later, later);
+    await eventually(async () => {
+      const [watch] = await getWatches(server);
+      expect(watch!.excluded).toContain(join(watchDir, "deleted-on-purpose.txt"));
+    });
+    const records = await listRecords(drive);
+    expect(records.map((r) => r.id)).not.toContain(tracked.recordId);
+  });
+
+  it("the excluded path can be added back, as itself", async () => {
+    const path = join(watchDir, "deleted-on-purpose.txt");
+    const before = await fileStatus(server, path);
+    const res = await fetch(`${server.url}/watches/add-back`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    expect(res.status).toBe(200);
+    // The same id, not a copy: the id names the content, so re-ingesting lands on
+    // the tombstoned row — which is why the action restores rather than re-puts.
+    expect(((await res.json()) as { recordId: string }).recordId).toBe(before.recordId);
+
+    const records = await listRecords(drive);
+    expect(records.map((r) => r.id)).toContain(before.recordId);
+    const [watch] = await getWatches(server);
+    expect(watch!.excluded).not.toContain(path);
+  });
+
+  it("a file removed while the watcher was stopped is reconciled on the next start", async () => {
+    // The startup scan enumerated the files that exist and never compared against
+    // the tracking table, so a removal while the server was down was invisible.
+    await writeFile(join(watchDir, "gone-while-down.txt"), "bytes-going-away");
+    await eventually(async () => {
+      expect((await fileStatus(server, join(watchDir, "gone-while-down.txt"))).recordId).toBeTruthy();
+    });
+
+    await server.stopKeepData();
+    await unlink(join(watchDir, "gone-while-down.txt"));
+    server = await startLocalDataServer({ starkeepDir: server.starkeepDir });
+    drive = await builtinAppCreds(server, "starkeep-drive");
+
+    await eventually(async () => {
+      const [watch] = await getWatches(server);
+      expect(watch!.possiblyLost).toContain(join(watchDir, "gone-while-down.txt"));
     });
   });
 

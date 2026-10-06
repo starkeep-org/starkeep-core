@@ -8,11 +8,19 @@
  *     `shared.records` schema. These replaced a hand-written parameter set —
  *     `type`, `ids`, `parentId`, `cursor` and an unreachable `sort` — which was
  *     the third read grammar on the shared plane and the last one left.
- *   - **Access path** — `label`, `labelValue`, `notLabel` and `updated_after` —
- *     stays explicit. A reverse-index lookup is a join, `notLabel` is an
- *     anti-join no filter grammar expresses, and `updated_after` compares
- *     against a serialized HLC, which the parser refuses in `where` on purpose.
+ *   - **Access path** — `label`, `labelValue`, `notLabel`, `updated_after` and
+ *     `deleted` — stays explicit. A reverse-index lookup is a join, `notLabel` is
+ *     an anti-join no filter grammar expresses, `updated_after` compares against
+ *     a serialized HLC, which the parser refuses in `where` on purpose, and
+ *     `deleted` chooses which side of the tombstone the query reads at all.
  *     Each one is the server's predicate rather than the caller's.
+ *
+ * `deleted` is what makes a Trash view and an app's delete feed possible, and
+ * both are the same query: `deleted=only&updated_after=<hlc>` returns every
+ * record tombstoned since an app last looked, over the path every other read
+ * already takes. The answer is complete as long as the app reconciles at least
+ * once per the library's configured retention window, because the reaper trims
+ * nothing inside it.
  *   - **Post-page hydration** — `include`, `labelApps` and `variant` — runs
  *     over the page after it is cut and filters nothing.
  *
@@ -42,6 +50,7 @@ import {
   type LabelFindPlan,
   type Query,
   type RowQuery,
+  type SoftDeletedScope,
   type SortField,
   type WhereClause,
 } from "@starkeep/storage-adapter";
@@ -110,6 +119,16 @@ export interface RecordQueryPlan {
   readonly includeStandIns: boolean;
   /** `include=stand-in-urls`: a URL on every size summary entry readable now. */
   readonly includeStandInUrls: boolean;
+  /**
+   * `?deleted=`: which side of the tombstone to read. `exclude` by default, so
+   * no caller that never sent it sees a change.
+   *
+   * Rows mode carries it as a `filters` entry on the plan's `query`; aggregate
+   * mode has no `filters`, so the route passes this to `queryShared` and the
+   * compiler applies the predicate. Both readings come from here, which is why
+   * the field is on the plan rather than derived twice.
+   */
+  readonly deleted: SoftDeletedScope;
 }
 
 /**
@@ -142,6 +161,7 @@ const RECORD_PARAMS: readonly string[] = [
   "labelValue",
   "notLabel",
   "updated_after",
+  "deleted",
   // Hydration.
   "labelApps",
   "variant",
@@ -173,6 +193,22 @@ const SORT_FIELD_OF: Record<string, string> = {
   node_id: "node_id",
   captured_at: "capturedAt",
 };
+
+/**
+ * Read `?deleted=`, naming the three readings rather than accepting anything.
+ *
+ * A misspelling must be a 400 rather than a silent `exclude`: a Trash view that
+ * sent `deleted=onlyy` and got the live library back would look like an empty
+ * Trash, which is the one wrong answer nobody checks.
+ */
+function softDeletedScope(raw: string | undefined): SoftDeletedScope {
+  if (raw === undefined) return "exclude";
+  if (raw === "exclude" || raw === "only" || raw === "include") return raw;
+  throw new ApiError(
+    `deleted must be "exclude", "only" or "include" (got "${raw}")`,
+    400,
+  );
+}
 
 /** Read a `<appId>/<key>` label reference, or reject it by name. */
 function labelRef(parameter: string, raw: string): { appId: string; key: string } {
@@ -266,6 +302,7 @@ export function planRecordQuery(
     throw new ApiError("labelValue requires label", 400);
   }
   const notLabelParam = get("notLabel");
+  const deleted = softDeletedScope(get("deleted"));
 
   if (parsed.mode === "aggregate") {
     // The two access paths the aggregate compiler does not build: a reverse
@@ -295,11 +332,18 @@ export function planRecordQuery(
       variant: null,
       includeStandIns,
       includeStandInUrls: false,
+      deleted,
     };
   }
 
   const rows = parsed as RowQuery;
-  const filters: Filter[] = [{ field: "deletedAt", operator: "isNull" }];
+  // The one unconditional filter this route ever had. Three readings now, with
+  // `exclude` the default so every caller that has never sent `deleted` keeps
+  // the answer it always got.
+  const filters: Filter[] =
+    deleted === "include"
+      ? []
+      : [{ field: "deletedAt", operator: deleted === "only" ? "isNotNull" : "isNull" }];
   const updatedAfter = hlcLowerBound(get("updated_after"));
   if (updatedAfter) filters.push(updatedAfter);
 
@@ -342,6 +386,7 @@ export function planRecordQuery(
     variant: variantRequest(get("variant")),
     includeStandIns,
     includeStandInUrls,
+    deleted,
   };
 }
 

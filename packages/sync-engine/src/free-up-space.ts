@@ -55,7 +55,7 @@ export interface FreeUpSpaceDeps {
    */
   readonly noteRemoved: (candidate: BlobCandidate) => Promise<void>;
   /** Bytes the store answers for without holding them. See `ResidencyManagerOptions.borrowsBytes`. */
-  readonly borrowsBytes?: (objectStorageKey: string) => boolean;
+  readonly borrowsBytes?: (objectStorageKey: string) => boolean | Promise<boolean>;
 }
 
 interface Candidate {
@@ -91,7 +91,7 @@ export async function freeUpSpaceOn(
       kind: candidate.kind,
     };
 
-    const proof = await proveCloudCopies(deps, candidate, request.probes);
+    const proof = await proveCloudCopies(deps, candidate.record, request.probes);
     if (!proof.ok) {
       refused.push({ ...item, reason: proof.reason, detail: proof.detail });
       continue;
@@ -153,7 +153,7 @@ async function eligible(deps: FreeUpSpaceDeps, scope: FreeUpSpaceRequest["scope"
         if (deps.ceilingOf(candidate) !== "above") continue;
         // Borrowed bytes cost this node nothing, and deleting the key would
         // drop the alias rather than free space.
-        if (deps.borrowsBytes?.(record.objectStorageKey)) continue;
+        if (await deps.borrowsBytes?.(record.objectStorageKey)) continue;
         if (!(await deps.localObjectStorage.has(record.objectStorageKey))) continue;
         out.push({ record, candidate, kind: record.standInRole ? "stand-in" : "original" });
       }
@@ -163,31 +163,90 @@ async function eligible(deps: FreeUpSpaceDeps, scope: FreeUpSpaceRequest["scope"
   return out.sort((a, b) => b.record.sizeBytes - a.record.sizeBytes);
 }
 
-type Proof =
+export type DurabilityProof =
   | { readonly ok: true }
   | { readonly ok: false; readonly reason: FreeUpSpaceRefusal["reason"]; readonly detail: string };
+
+/** What the durability proof reads. The watcher holds these two and no more. */
+export interface ProveCloudCopiesDeps {
+  readonly databaseAdapter: DatabaseAdapter;
+  readonly standards: StandInStandards;
+}
 
 /**
  * Prove complete cloud copies of the file, its original and the original's
  * canonical stand-in. Each record is proved once however many roles it plays.
+ *
+ * Exported because the watcher's local-`unlink` path has to answer the same
+ * question before it lets a file go: a watched file the person deleted from
+ * disk is "Free up space, for this one file", and the two paths must not be
+ * able to disagree about when that is safe.
+ *
+ * **The stand-in clauses apply only to a file a stand-in can replace.** "Free up
+ * space" enumerates only types with stand-in standards, so every candidate it
+ * brings here is an original or a stand-in in such a category. The watcher sees
+ * every type a folder holds, and a text file or a PDF has no original and no
+ * canonical stand-in to prove — demanding them would make a watched document
+ * impossible to prove and therefore permanently "possibly lost", which is the
+ * opposite of the truth about a file the cloud holds a verified copy of.
  */
-async function proveCloudCopies(
-  deps: FreeUpSpaceDeps,
-  candidate: Candidate,
+export async function proveCloudCopies(
+  deps: ProveCloudCopiesDeps,
+  record: DataRecord,
   probes: FreeUpSpaceRequest["probes"],
-): Promise<Proof> {
+): Promise<DurabilityProof> {
+  const toProve = new Map<string, DataRecord>([[record.id, record]]);
+
+  const inStandInCategory =
+    record.standInRole !== null || record.parentId !== null || isStandInOriginal(record);
+  if (inStandInCategory) {
+    const outcome = await addStandInClauses(deps, record, toProve);
+    if (outcome) return outcome;
+  }
+
+  for (const r of toProve.values()) {
+    const verdict = await assessDurability(
+      {
+        objectStorageKey: r.objectStorageKey,
+        contentHash: hexHash(r.contentHash),
+        sizeBytes: r.sizeBytes,
+      },
+      probes,
+    );
+    if (!verdict.durable) {
+      return {
+        ok: false,
+        reason: "not-durable",
+        detail: `no complete cloud copy of ${r.id} is confirmed`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * Add the original and the original's canonical stand-in to what must be proved.
+ *
+ * Returns a refusal when either is missing, because a file whose original is gone
+ * or whose original has nothing to show in its place must not be removed however
+ * durable its own bytes are.
+ */
+async function addStandInClauses(
+  deps: ProveCloudCopiesDeps,
+  record: DataRecord,
+  toProve: Map<string, DataRecord>,
+): Promise<DurabilityProof | null> {
   const { databaseAdapter, standards } = deps;
   const original =
-    candidate.kind === "original"
-      ? candidate.record
-      : candidate.record.parentId
-        ? await databaseAdapter.get(candidate.record.parentId)
+    record.standInRole === null && record.parentId === null
+      ? record
+      : record.parentId
+        ? await databaseAdapter.get(record.parentId)
         : null;
   if (!original || original.deletedAt || !isStandInOriginal(original)) {
     return { ok: false, reason: "record-missing", detail: "the original this file belongs to is gone" };
   }
 
-  const toProve = new Map<string, DataRecord>([[candidate.record.id, candidate.record]]);
   toProve.set(original.id, original);
   if (originalStatus(original, standards) !== "self-canonical") {
     const canonical = (
@@ -209,25 +268,7 @@ async function proveCloudCopies(
     }
     toProve.set(canonical.id, canonical);
   }
-
-  for (const record of toProve.values()) {
-    const verdict = await assessDurability(
-      {
-        objectStorageKey: record.objectStorageKey,
-        contentHash: hexHash(record.contentHash),
-        sizeBytes: record.sizeBytes,
-      },
-      probes,
-    );
-    if (!verdict.durable) {
-      return {
-        ok: false,
-        reason: "not-durable",
-        detail: `no complete cloud copy of ${record.id} is confirmed`,
-      };
-    }
-  }
-  return { ok: true };
+  return null;
 }
 
 /** Content hashes are stored bare on some write paths and `sha256:`-prefixed on others. */

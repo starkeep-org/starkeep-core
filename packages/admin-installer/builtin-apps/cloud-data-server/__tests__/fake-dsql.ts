@@ -127,8 +127,10 @@ export function fakeDsqlWithGrants(
     // assert on the cascade read `db.calls(...)`, which logs every statement
     // regardless of which route answered it.
     .on(/update "shared"\."record_labels" set "deleted_at"/, [])
-    // A record delete drops the record's metadata row, in whichever category
-    // table holds it. No rows either way.
+    // A record delete tombstones the record's metadata row, and a restore lifts
+    // the stamp again, in whichever category table holds it. No rows either way.
+    .on(/update "shared"\."record_\w+_metadata" set "deleted_at"/, [])
+    // The reaper's hard delete, at the end of the retention window.
     .on(/delete from "shared"\."record_\w+_metadata"/, [])
     // Every listing of originals in a stand-in category asks for the page's
     // stand-ins, to build each item's size summary. None by default; a test

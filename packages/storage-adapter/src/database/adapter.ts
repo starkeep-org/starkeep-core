@@ -20,7 +20,12 @@ import type {
 } from "./types.js";
 import type { DigestBucket } from "./digest-queries.js";
 import type { SincePage } from "./since-queries.js";
-import type { ParsedQuery, ParsedQueryResult, WhereClause } from "./app-query-types.js";
+import type {
+  ParsedQuery,
+  ParsedQueryResult,
+  SoftDeletedScope,
+  WhereClause,
+} from "./app-query-types.js";
 import type { SharedQueryTarget } from "./shared-query-schemas.js";
 
 export interface DatabaseAdapter {
@@ -87,11 +92,18 @@ export interface DatabaseAdapter {
    * omitted `serverWhere` means unrestricted access, which is what the
    * User-Data-Owner has and what every other caller must not be given by
    * accident.
+   *
+   * `softDeleted` is the server's too, and defaults to `exclude`. A Trash view
+   * passes `only` and a caller telling "absent" from "deleted" passes `include`;
+   * no caller can name the column, so neither reading can be contradicted.
    */
   queryShared(
     target: SharedQueryTarget,
     query: ParsedQuery,
-    options?: { readonly serverWhere?: readonly WhereClause[] },
+    options?: {
+      readonly serverWhere?: readonly WhereClause[];
+      readonly softDeleted?: SoftDeletedScope;
+    },
   ): Promise<ParsedQueryResult>;
 
   /**
@@ -163,8 +175,38 @@ export interface DatabaseAdapter {
     recordIds: StarkeepId[],
   ): Promise<Map<StarkeepId, MetadataRow>>;
 
-  /** Delete the per-type metadata row for `recordId` (no-op if absent). */
+  /**
+   * Delete the per-type metadata row for `recordId` (no-op if absent).
+   *
+   * The hard delete, which only the reaper performs now: a record's delete
+   * cascade tombstones the row instead, so a restore inside the retention window
+   * brings the dimensions and the ThumbHash back with it.
+   */
   deleteMetadata(typeId: string, recordId: StarkeepId): Promise<void>;
+
+  /**
+   * Stamp `deleted_at` on the per-type metadata row for `recordId` (no-op if
+   * absent).
+   *
+   * The soft counterpart of {@link deleteMetadata}, and what every delete path
+   * calls. The row keeps its columns, and `GET /data/metadata/:category` — the
+   * one read that cannot see whether its record is gone — filters on the stamp.
+   *
+   * The clock reading is the deletion's own, so a tombstoned metadata row carries
+   * the same moment as the record tombstone it belongs to. Nothing syncs the row
+   * independently of its record, so the stamp is a local fact rather than a
+   * position in any order.
+   */
+  tombstoneMetadata(typeId: string, recordId: StarkeepId, hlc: HLCTimestamp): Promise<void>;
+
+  /**
+   * Clear `deleted_at` on the per-type metadata row for `recordId` (no-op if
+   * absent).
+   *
+   * What restore calls. A row the reaper already removed cannot be brought back
+   * here — an app re-reports it — which is the cost the retention window bounds.
+   */
+  restoreMetadata(typeId: string, recordId: StarkeepId): Promise<void>;
 
   // ---- Cross-app record labels -------------------------------------------
   //
@@ -244,6 +286,23 @@ export interface DatabaseAdapter {
    * because the record is going away.
    */
   tombstoneLabelsForRecord(recordId: StarkeepId, hlc: HLCTimestamp): Promise<void>;
+
+  /**
+   * Lift the label tombstones one record-delete wrote, and no others.
+   *
+   * The mirror of {@link tombstoneLabelsForRecord}, for restore. `deletedAt` is
+   * the record's own deletion reading, which is also the reading that cascade
+   * stamped on every label it touched — so the rows restored are exactly the rows
+   * the delete took, and a label an app withdrew before the delete stays
+   * withdrawn.
+   *
+   * A platform operation for the same reason, and with the same restriction.
+   */
+  restoreLabelsForRecord(
+    recordId: StarkeepId,
+    deletedAt: HLCTimestamp,
+    hlc: HLCTimestamp,
+  ): Promise<void>;
 
   // ---- Label sync ---------------------------------------------------------
   //

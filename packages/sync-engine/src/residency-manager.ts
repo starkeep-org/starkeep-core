@@ -90,10 +90,14 @@ export interface ResidencyManagerOptions {
   /**
    * Whether `localObjectStorage` answers for these bytes without holding them —
    * a phone's camera-roll alias, whose bytes belong to the device's media
-   * store. Removing such a key frees nothing and loses the alias, so "Free up
-   * space" skips it. Absent: every key the store has is held here.
+   * store, or a symlink into a watched folder on a laptop. Removing such a key
+   * frees nothing and loses the alias, so "Free up space" skips it. Absent:
+   * every key the store has is held here.
+   *
+   * Answers asynchronously because a laptop's answer is an `lstat`. The phone's
+   * synchronous alias-table lookup still satisfies the wider type.
    */
-  readonly borrowsBytes?: (objectStorageKey: string) => boolean;
+  readonly borrowsBytes?: (objectStorageKey: string) => boolean | Promise<boolean>;
 }
 
 /** What "Free up space" is asked to reclaim. */
@@ -141,8 +145,20 @@ export interface ResidencyManager {
   decide(candidate: BlobCandidate): Promise<ResidencyVerdict>;
   /** Record that a blob landed. Called after a successful transfer. */
   noteArrival(candidate: BlobCandidate): Promise<void>;
-  /** Record that this node's bytes for a key are gone. */
-  noteDeparture(objectStorageKey: string): void;
+  /**
+   * Record that this node let its bytes for a key go, deliberately.
+   *
+   * Residency then reads `evicted`, and no acquisition pass fetches the key back
+   * on its own — a read does, which is the behaviour `evicted` documents.
+   *
+   * Takes the candidate rather than the key because the row may not exist yet:
+   * bytes that arrived by a route which never passed through a round — a local
+   * import, a derived stand-in, a watcher's symlink — have no index row, and
+   * noting a departure against nothing would leave residency reading `staged`
+   * for a file this node deliberately let go. Both removal paths, "Free up space"
+   * and the watcher's local `unlink`, come through here.
+   */
+  noteDeparture(candidate: BlobCandidate): Promise<void>;
   /**
    * The catalogue scan's per-record step: adopt bytes already here, queue
    * bytes this node wants and lacks, and skip the rest.
@@ -182,6 +198,9 @@ export interface ResidencyManager {
 
 
 export function createResidencyManager(options: ResidencyManagerOptions): ResidencyManager {
+  // eslint-disable-next-line prefer-const -- assigned to the object literal below,
+  // so "Free up space" and the watcher share one departure path rather than two.
+  let manager: ResidencyManager;
   const {
     localDb,
     databaseAdapter,
@@ -258,7 +277,7 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
     });
   }
 
-  return {
+  manager = {
     index,
     decide,
     ceilingOf,
@@ -271,13 +290,26 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
       index.add(arrivalOf(candidate));
     },
 
-    noteDeparture(objectStorageKey) {
-      index.markDeparted(objectStorageKey);
+    async noteDeparture(candidate) {
+      if (index.get(candidate.objectStorageKey) === null) index.add(arrivalOf(candidate));
+      index.release(candidate.objectStorageKey);
     },
 
     async considerForAcquisition(candidate) {
       const existing = index.get(candidate.objectStorageKey);
       if (existing?.resident) return "held";
+      // A key this node let go **on purpose** stays gone until someone reads it.
+      // The policy cannot answer this: "Free up space" removes only files above
+      // the ceiling, where the policy says `unwanted` anyway, but the watcher
+      // evicts a file the person deleted from a watched folder, and that file may
+      // sit within the ceiling — a node with `keepOriginals` set would re-download
+      // it. A read still brings it back through `ensureLocalBytes`, which is what
+      // `evicted` means.
+      //
+      // A departure `reconcile` *discovered* is deliberately not this: bytes that
+      // went missing from the object store are a fault to repair, and the
+      // acquisition pass is the repair. See `ResidentEntry.released`.
+      if (existing?.released) return "unwanted";
       // Bytes that arrived by a route that never passed through a round — a
       // local import, a derived stand-in, a watcher — are adopted here, once,
       // so the next scan answers from the index rather than from storage.
@@ -322,15 +354,13 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
           ceilingOf,
           standards: currentStandards(),
           ...(options.borrowsBytes ? { borrowsBytes: options.borrowsBytes } : {}),
-          noteRemoved: async (candidate) => {
-            if (index.get(candidate.objectStorageKey) === null) index.add(arrivalOf(candidate));
-            index.markDeparted(candidate.objectStorageKey);
-          },
+          noteRemoved: (candidate) => manager.noteDeparture(candidate),
         },
         request,
       );
     },
   };
+  return manager;
 }
 
 /**

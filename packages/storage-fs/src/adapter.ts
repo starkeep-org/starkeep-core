@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, unlink, readdir, stat, symlink, readlink, access, rename } from "node:fs/promises";
+import { mkdir, readFile, writeFile, unlink, readdir, stat, lstat, symlink, readlink, access, rename } from "node:fs/promises";
 import { createReadStream, createWriteStream } from "node:fs";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -60,9 +60,43 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
     await mkdir(dirname(linkPath), { recursive: true });
     try {
       await symlink(targetPath, linkPath);
+      return;
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      // Symlink already exists — content-addressed key guarantees same content, skip.
+    }
+    // Something is already at the key. A content-addressed key guarantees the
+    // same *content*, so a readable entry is the right one and nothing is to be
+    // done. It guarantees nothing about a *link's target*: two watched paths
+    // holding identical bytes share one key and one link, so deleting the first
+    // path leaves the second path's record pointing at a link that dangles. The
+    // caller that asked for a link to a file it can see is the one chance to
+    // repair that, and swallowing EEXIST here is what used to make the repair
+    // impossible — `ensureLocalObject` reported success over a dangling link.
+    try {
+      await access(linkPath);
+      return;
+    } catch {
+      // Dangling, or otherwise unreadable. Replace it.
+    }
+    await unlink(linkPath).catch(() => {});
+    await symlink(targetPath, linkPath);
+  }
+
+  /**
+   * Whether the key is a symlink into a folder outside the object store — bytes
+   * this store answers for without holding.
+   *
+   * The watcher links a watched file into the store rather than copying it, so
+   * the bytes belong to the person's folder and removing the key frees nothing.
+   * This is the laptop's answer to `ResidencyManagerOptions.borrowsBytes`, and
+   * it is what keeps "Free up space" from spending a removal on zero bytes and
+   * losing the link.
+   */
+  async isAlias(key: string): Promise<boolean> {
+    try {
+      return (await lstat(this.keyToPath(key))).isSymbolicLink();
+    } catch {
+      return false;
     }
   }
 

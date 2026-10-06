@@ -230,6 +230,38 @@ export function buildTombstoneLabelsForRecord(
     .compile();
 }
 
+/**
+ * Lift the label tombstones one record-delete wrote, and no others.
+ *
+ * The mirror of {@link buildTombstoneLabelsForRecord}, and the reason restore can
+ * be exact rather than approximate: that function stamps every *live* label with
+ * the deletion's own clock reading, so the rows it touched are precisely the rows
+ * carrying that reading. A restore that cleared every tombstone on the record
+ * would also un-retract labels an app had deliberately withdrawn before the
+ * delete, which is an app's assertion coming back from the dead.
+ *
+ * `updated_at` and `node_id` move to the restore's own reading, so the lifting
+ * carries over sync by last-writer-wins the way the retraction did.
+ */
+export function buildRestoreLabelsForRecord(
+  k: Kysely<LabelDb>,
+  dialect: LabelDialect,
+  recordId: StarkeepId,
+  deletedAt: HLCTimestamp,
+  hlc: HLCTimestamp,
+): CompiledQuery {
+  return k
+    .updateTable(dialect.table)
+    .set({
+      deleted_at: null,
+      updated_at: serializeHLC(hlc),
+      node_id: hlc.nodeId,
+    })
+    .where("record_id", "=", recordId)
+    .where("deleted_at", "=", serializeHLC(deletedAt))
+    .compile();
+}
+
 /** Forward path: live labels on a page of records, one PK-prefix seek. */
 export function buildLabelsByRecordIds(
   k: Kysely<LabelDb>,

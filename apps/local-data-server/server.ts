@@ -683,6 +683,7 @@ async function runSharedQuery(
   }
   const result = await adapter.queryShared(plan.target, plan.query, {
     serverWhere: plan.serverWhere,
+    softDeleted: plan.softDeleted,
   });
   json(res, result.mode === "rows"
     ? { rows: result.rows, truncated: result.truncated, page_token: result.pageToken }
@@ -857,6 +858,12 @@ async function main() {
         ceilings,
         keepOriginals: starkeepConfig.keepOriginals === true,
         standards: () => librarySettings.standards(),
+        // A watched file is symlinked into the object store rather than copied,
+        // so its bytes belong to the person's folder. Removing the key frees
+        // nothing and loses the link, which is a removal that costs something
+        // and reclaims nothing. The phone answers the same question from its
+        // camera-roll alias table.
+        borrowsBytes: (key) => localAdapter.isAlias(key),
       });
 
   const namespaceStore = new SqliteAppSyncableNamespaceStore(localDb);
@@ -1083,6 +1090,17 @@ async function main() {
     databaseAdapter,
     objectStorageAdapter: localAdapter,
     appId: watcherAppId,
+    // A file leaving a watched folder is an eviction, not a delete, and both
+    // halves of that need the node's residency: the durability proof reads the
+    // same probe "Free up space" reads, and the departure is recorded in the same
+    // index. Read through accessors because the probe comes and goes with the
+    // cloud connection and the standards come from the library's settings file.
+    residency: residencyManager,
+    probes: () => {
+      const probe = supervisor?.cloudReplicaProbe() ?? null;
+      return probe ? [probe] : [];
+    },
+    standards: () => librarySettings.standards(),
   });
 
   // Restore persisted watches from local config file
@@ -1661,6 +1679,9 @@ async function main() {
             ? { mode: "aggregate" as const, groups: [], truncated: false }
             : await databaseAdapter.queryShared({ kind: "records" }, plan.aggregate!, {
                 serverWhere: plan.serverWhere,
+                // An aggregate carries no `filters`, so the tombstone reading
+                // reaches the compiler rather than the query plan.
+                softDeleted: plan.deleted,
               });
           json(res, {
             groups: result.mode === "aggregate" ? result.groups : [],
@@ -3684,7 +3705,7 @@ async function main() {
           return;
         }
         await runSharedQuery(res, databaseAdapter, () =>
-          planMetadataQuery(category, appGrants(localDb, appId!), queryParamsFrom(url.searchParams)),
+          planMetadataQuery(category, appGrants(localDb, appId!), url.searchParams),
         );
         return;
       }
@@ -3700,7 +3721,7 @@ async function main() {
       // is the same gate every other read of shared data carries.
       if (path === "/data/labels" && req.method === "GET") {
         await runSharedQuery(res, databaseAdapter, () =>
-          planLabelQuery(appGrants(localDb, appId!), queryParamsFrom(url.searchParams)),
+          planLabelQuery(appGrants(localDb, appId!), url.searchParams),
         );
         return;
       }
@@ -3883,6 +3904,31 @@ async function main() {
           return;
         }
         json(res, watchManager.getFileStatus(filePath));
+        return;
+      }
+
+      // POST /watches/add-back — put an excluded watched path back in the library.
+      //
+      // Body: { path }. A path the watch status reports as `excluded` is a file on
+      // disk the library ignores on purpose, because the person deleted its record.
+      // This restores the record rather than re-ingesting the file: the id is
+      // content-addressed, so a fresh write would land on the tombstoned row and
+      // revive it through `put` with `version` reset to 1 and its labels and
+      // metadata still retracted. The item comes back as itself instead.
+      if (path === "/watches/add-back" && req.method === "POST") {
+        const body = JSON.parse((await readBody(req)) || "{}") as { path?: unknown };
+        if (typeof body.path !== "string" || body.path.length === 0) {
+          res.writeHead(400);
+          json(res, { error: "path is required" });
+          return;
+        }
+        const outcome = await watchManager.addBack(body.path);
+        if (!outcome.ok) {
+          res.writeHead(outcome.status);
+          json(res, { error: outcome.error });
+          return;
+        }
+        json(res, { recordId: outcome.recordId });
         return;
       }
 

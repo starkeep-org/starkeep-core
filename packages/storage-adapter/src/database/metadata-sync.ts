@@ -31,6 +31,7 @@
 import {
   getCategory,
   typeCategory,
+  type HLCTimestamp,
   type MetadataRow,
   type StarkeepId,
   hasMetadataTable,
@@ -167,19 +168,44 @@ export async function applyRecordMetadata(
 }
 
 /**
- * Drop a record's metadata row, the way a local delete already does.
+ * Tombstone a record's metadata row, the way a local delete already does.
  *
  * The sync apply path used to leave the row behind on an inbound tombstone
  * while `SdkDataOperations.delete` cascaded, so a deleted record's dimensions
  * outlived it on every peer but the one it was deleted on.
+ *
+ * A tombstone rather than a drop, matching `applyRecordDelete`. Metadata is a
+ * sync passenger with no clock of its own, so this cascade is the only thing that
+ * reaches the row on a peer — and a cascade that destroyed it left no node holding
+ * a copy to re-spread, which made a restore permanently incomplete library-wide.
+ * The clock reading is the record tombstone's own, which is what lets a restore
+ * lift exactly what one delete took.
  */
 export async function deleteRecordMetadata(
-  db: Pick<DatabaseAdapter, "deleteMetadata">,
+  db: Pick<DatabaseAdapter, "tombstoneMetadata">,
+  record: MetadataSubject,
+  deletedAt: HLCTimestamp,
+): Promise<void> {
+  const category = typeCategory(record.type);
+  if (!hasMetadataTable(category)) return;
+  await db.tombstoneMetadata(category, record.id, deletedAt);
+}
+
+/**
+ * Lift a record's metadata tombstone, the way a local restore does.
+ *
+ * The inbound half of restore: a peer applying a record whose tombstone has been
+ * lifted applies the same cascade, so the row comes back wherever the deletion
+ * reached. A row the reaper already removed cannot come back this way, which is
+ * the cost the retention window bounds.
+ */
+export async function restoreRecordMetadata(
+  db: Pick<DatabaseAdapter, "restoreMetadata">,
   record: MetadataSubject,
 ): Promise<void> {
   const category = typeCategory(record.type);
   if (!hasMetadataTable(category)) return;
-  await db.deleteMetadata(category, record.id);
+  await db.restoreMetadata(category, record.id);
 }
 
 /**
