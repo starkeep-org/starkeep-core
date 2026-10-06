@@ -15,7 +15,7 @@
  * records). The engine's S5 concurrent suite owns LWW semantics.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtemp, rm, writeFile, unlink } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, unlink, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -98,6 +98,26 @@ async function converge(maxRounds = 30): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error(`did not converge within ${maxRounds} rounds`);
+}
+
+/** One watch's status, read over the server's own HTTP surface. */
+async function watchOn(
+  server: LocalDataServer,
+  directoryPath: string,
+): Promise<{ excluded: string[]; possiblyLost: string[]; evicted: string[] }> {
+  const res = await fetch(`${server.url}/watches`);
+  expect(res.status).toBe(200);
+  const { watches } = (await res.json()) as {
+    watches: Array<{
+      directoryPath: string;
+      excluded: string[];
+      possiblyLost: string[];
+      evicted: string[];
+    }>;
+  };
+  const watch = watches.find((w) => w.directoryPath === directoryPath);
+  if (!watch) throw new Error(`no watch for ${directoryPath}`);
+  return watch;
 }
 
 async function fetchBytes(app: InstalledApp, recordId: string): Promise<string> {
@@ -210,6 +230,56 @@ describe("shared records across the wire", () => {
       expect((await listRecords(driveB)).map((r) => r.id)).toContain(kept!.id);
       // B never held the removal, so B can still read the bytes.
       expect(await fetchBytes(driveB, kept!.id)).toBe("kept-bytes");
+    } finally {
+      await rm(watchDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a watched file's record deleted on B is excluded on A, and comes back when B restores it", { timeout: 30_000 }, async () => {
+    // The watcher's resurrection guard runs on a filesystem event or a scan, and a
+    // delete on B changes nothing on A's disk — so without the recheck the round
+    // drives, A's watch status read `synced` for a record the library had deleted,
+    // and an excluded path whose record B later restored stayed excluded for ever.
+    const watchDir = await mkdtemp(join(tmpdir(), "starkeep-wire-remote-delete-"));
+    const filePath = join(watchDir, "deleted-on-b.txt");
+    try {
+      await writeFile(filePath, "bytes-deleted-from-another-node");
+      const watchRes = await fetch(`${serverA.url}/watches`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ directoryPath: watchDir }),
+      });
+      expect(watchRes.status).toBe(200);
+
+      await converge();
+      const onB = await listRecords(driveB);
+      const arrived = onB.find((r) => r.original_filename === "deleted-on-b.txt");
+      expect(arrived).toBeDefined();
+
+      const deleteRes = await driveB.fetch(`/data/records/${arrived!.id}`, { method: "DELETE" });
+      expect(deleteRes.status).toBe(200);
+      await converge();
+
+      await eventually(async () => {
+        const watch = await watchOn(serverA, watchDir);
+        expect(watch.excluded).toContain(filePath);
+      });
+      // The file itself is untouched. Excluding a path is the library's opinion
+      // about the record, and never a removal from the person's folder.
+      expect(await readFile(filePath, "utf8")).toBe("bytes-deleted-from-another-node");
+
+      const restoreRes = await driveB.fetch(`/data/records/${arrived!.id}/restore`, {
+        method: "POST",
+      });
+      expect(restoreRes.status).toBe(200);
+      await converge();
+
+      await eventually(async () => {
+        const watch = await watchOn(serverA, watchDir);
+        expect(watch.excluded).toEqual([]);
+      });
+      // Live on both sides again, and readable on A from the file that never left.
+      expect(await fetchBytes(driveA, arrived!.id)).toBe("bytes-deleted-from-another-node");
     } finally {
       await rm(watchDir, { recursive: true, force: true });
     }

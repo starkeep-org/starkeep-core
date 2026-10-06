@@ -1107,6 +1107,24 @@ async function main() {
     standards: () => librarySettings.standards(),
   });
 
+  // A record's deletion or restoration reaches the watcher through here.
+  //
+  // Nothing on this disk changes when another node deletes a watched file's
+  // record, so the ingest guard — which runs on a filesystem event or a scan —
+  // would not see it until the next event or restart. A round names exactly the
+  // records it applied, which is the precise signal; local writes are included
+  // because a delete through this node's own API is just as invisible to the
+  // folder. `remote-update-available` is not, because it names no applied rows.
+  sdk.changeNotifier.subscribe((event) => {
+    if (event.eventType === "remote-update-available") return;
+    if (event.recordIds.length === 0) return;
+    void watchManager
+      .recheckRecords(event.recordIds)
+      .catch((err: Error) =>
+        console.warn(`[watch] rechecking ${event.recordIds.length} records failed:`, err.message),
+      );
+  });
+
   // Restore persisted watches from local config file
   const persistedWatches = await loadWatchConfigs();
   for (const config of persistedWatches) {
