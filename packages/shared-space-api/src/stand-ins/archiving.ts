@@ -87,20 +87,33 @@ export async function evaluateArchiving(
   });
 
   const original = await db.get(originalId);
-  if (!original || original.deletedAt) return keep(["the original does not exist"]);
+  if (!original) return keep(["the original does not exist"]);
   if (!isStandInOriginal(original)) return keep(["the record is not an original in a stand-in category"]);
   if (!original.objectStorageKey) return keep(["the original has no file"]);
   const key = original.objectStorageKey;
 
+  // A deleted original is not an archiving candidate, and the question still has
+  // an answer: *may the tag come off*. It may, once no live record shares the
+  // object. So the key is kept rather than nulled and `archivable` reports true,
+  // which is what `applyArchiveEvaluation` reads before it clears a tag — and
+  // nulling the key is what used to make the delete case report `unchanged` and
+  // write nothing. A live record sharing the bytes keeps the tag, because the tag
+  // is a fact about the object rather than about any one record.
+  if (original.deletedAt) {
+    const live = await liveRecordsOn(db, key);
+    return {
+      originalId,
+      decision: "keep",
+      reasons: ["the original is deleted"],
+      objectStorageKey: key,
+      archivable: live.length === 0,
+      heldBy: [],
+    };
+  }
+
   // Every live record on this object has to agree — see the module note.
-  const sharing = await db.query({
-    filters: [
-      { field: "objectStorageKey", operator: "eq", value: key },
-      { field: "deletedAt", operator: "isNull" },
-    ],
-    limit: MAX_RECORDS_PER_OBJECT,
-  });
-  const records = sharing.records.length > 0 ? sharing.records : [original];
+  const sharing = await liveRecordsOn(db, key);
+  const records = sharing.length > 0 ? sharing : [original];
   const labelsById = await db.getLabelsByRecordIds(records.map((r) => r.id));
 
   const reasons: string[] = [];
@@ -118,6 +131,18 @@ export async function evaluateArchiving(
   const extra = { objectStorageKey: key, archivable, heldBy: [...heldBy].sort() };
   if (reasons.length > 0) return keep(reasons, extra);
   return { originalId, decision: "archive", reasons: [], ...extra };
+}
+
+/** The live records sharing one object. Capped — see {@link MAX_RECORDS_PER_OBJECT}. */
+async function liveRecordsOn(db: DatabaseAdapter, key: string): Promise<DataRecord[]> {
+  const page = await db.query({
+    filters: [
+      { field: "objectStorageKey", operator: "eq", value: key },
+      { field: "deletedAt", operator: "isNull" },
+    ],
+    limit: MAX_RECORDS_PER_OBJECT,
+  });
+  return [...page.records];
 }
 
 async function recordVerdict(
@@ -219,8 +244,20 @@ export interface ArchiveTrigger {
  * - An original arriving, or its fidelity arriving, may complete condition 1.
  * - A `do-not-archive` label arriving breaks condition 2; its retraction may
  *   complete it.
+ * - **An original being deleted** removes every condition at once, and the tag
+ *   has to come off.
  *
  * Smaller stand-ins and derived records touch no condition.
+ *
+ * The delete case is the one that was missing, and it is not the same shape as
+ * the others. The archive decision is not an operation on a record at all: the
+ * platform's whole act is writing two object tags, and the transition is
+ * performed later by a bucket lifecycle rule whose clock runs on object age with
+ * no view of any record. Delete a record after its object is tagged and before
+ * the hold period expires, and the tag outlived the record, the rule fired on
+ * schedule, and the bytes landed in Deep Archive owing a 180-day minimum with
+ * nothing referencing them. Delete time is the only moment the platform still
+ * holds the decision.
  */
 export function archiveTriggersFor(
   records: readonly DataRecord[],
@@ -233,8 +270,11 @@ export function archiveTriggersFor(
   for (const record of records) {
     if (record.standInRole === "canonical" && record.parentId) {
       add(record.parentId, Boolean(record.deletedAt));
-    } else if (!record.deletedAt && isStandInOriginal(record)) {
-      add(record.id, false);
+    } else if (isStandInOriginal(record)) {
+      // A tombstoned original emits a trigger with `mayUntag`, which is what
+      // takes the tag off an object nothing references any more. Before this it
+      // emitted no trigger at all, so the tag outlived the record.
+      add(record.id, Boolean(record.deletedAt));
     }
   }
   for (const label of labels) {

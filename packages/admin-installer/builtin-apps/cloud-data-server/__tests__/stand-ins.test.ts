@@ -130,6 +130,8 @@ const HASH = "c".repeat(64);
 const RECORDS_INSERT = /insert into "shared"\."records"/;
 const GET_BY_ID = /from "shared"\."records" where "id" = \$1/;
 const LIVE_STAND_IN = /from "shared"\."records" where "parent_id" = \$1 and "stand_in_role" = \$2/;
+/** A serialized deletion reading, for a row that has to read as tombstoned. */
+const TOMBSTONE_HLC = serializeHLC({ wallTime: Date.UTC(2026, 9, 1), counter: 0, nodeId: "cloud" });
 
 function parentRow(over: Record<string, unknown> = {}) {
   return recordRow({
@@ -549,6 +551,50 @@ describe("the platform's archiving decision", () => {
     );
     expect(res.statusCode, res.body).toBe(200);
     expect(tagsWritten()).toEqual([{ key: PARENT_KEY, tags: {} }]);
+  });
+
+  it("clears the tags when the original is deleted", async () => {
+    // The transition is performed by a bucket lifecycle rule whose clock runs on
+    // object age with no view of any record, so a tag left behind after a delete
+    // fires on schedule and lands bytes nothing references in Deep Archive, owing a
+    // 180-day minimum. Delete time is the only moment the platform still holds the
+    // decision — and only the cloud holds the tags.
+    let deleted = false;
+    const db = fakeDsqlWithGrants(GRANTS)
+      .on(CHILDREN_OF, [])
+      .on(GET_BY_ID, () => [parentRow(deleted ? { deleted_at: TOMBSTONE_HLC } : {})])
+      // After the delete, nothing live shares the object.
+      .on(SHARING, () => (deleted ? [] : [parentRow()]))
+      .on(LABELS_BY_IDS, [])
+      .on(/update "shared"\."records" set "deleted_at"/, () => {
+        deleted = true;
+        return [];
+      });
+    setDbFactory(db);
+    s3Mock.on(PutObjectTaggingCommand).resolves({});
+    const res = await handler(request("delt", "DELETE", `/data/records/${PARENT_ID}`), context);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(tagsWritten()).toEqual([{ key: PARENT_KEY, tags: {} }]);
+  });
+
+  it("leaves the tags alone when a live record still shares the object", async () => {
+    // Object keys name bytes, so two records holding one file under two names share
+    // an object. The tag is a fact about the object, not about either record.
+    let deleted = false;
+    const db = fakeDsqlWithGrants(GRANTS)
+      .on(CHILDREN_OF, [])
+      .on(GET_BY_ID, () => [parentRow(deleted ? { deleted_at: TOMBSTONE_HLC } : {})])
+      .on(SHARING, [parentRow({ id: "01SIBLINGSIBLINGSIBLINGSB" })])
+      .on(LABELS_BY_IDS, [])
+      .on(/update "shared"\."records" set "deleted_at"/, () => {
+        deleted = true;
+        return [];
+      });
+    setDbFactory(db);
+    s3Mock.on(PutObjectTaggingCommand).resolves({});
+    const res = await handler(request("delt2", "DELETE", `/data/records/${PARENT_ID}`), context);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(tagsWritten()).toEqual([]);
   });
 });
 

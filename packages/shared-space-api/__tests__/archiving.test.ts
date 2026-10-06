@@ -221,6 +221,73 @@ describe("applyArchiveEvaluation", () => {
     });
     expect(action).toBe("unchanged");
   });
+
+  describe("a deleted original", () => {
+    // The archive decision is not an operation on a record. The platform's whole
+    // act is two object tags, and the transition is performed later by a bucket
+    // lifecycle rule whose clock runs on object age with no view of any record. A
+    // tag left behind after a delete fires on schedule and lands bytes nothing
+    // references in Deep Archive, owing a 180-day minimum. Delete time is the only
+    // moment the platform still holds the decision.
+
+    it("clears the tags on the last record to leave the object", async () => {
+      const original = await put({ fidelity: 6000 });
+      await canonicalFor(original);
+      await storage.setTags(original.objectStorageKey, { ...ARCHIVE_TAGS });
+
+      await db.delete(original.id, clock.now());
+      const [trigger] = archiveTriggersFor([(await db.get(original.id))!], []);
+      expect(trigger).toEqual({ originalId: original.id, mayUntag: true });
+
+      const e = await evaluate(original.id);
+      // The key is kept rather than nulled, which is what used to make this case
+      // report `unchanged` and write nothing.
+      expect(e).toMatchObject({
+        decision: "keep",
+        objectStorageKey: original.objectStorageKey,
+        archivable: true,
+      });
+      expect(await applyArchiveEvaluation(storage, e, { mayUntag: true, ...notArchived })).toBe(
+        "untagged",
+      );
+      expect(storage.tagsOf(original.objectStorageKey)).toEqual({});
+    });
+
+    it("leaves the tags alone while a live record still shares the object", async () => {
+      // Object keys name bytes, so two records holding one file under two names
+      // share an object. The tag is a fact about the object, not about either record.
+      const original = await put({ fidelity: 6000 });
+      await canonicalFor(original);
+      const sibling = await put({
+        fidelity: 6000,
+        objectStorageKey: original.objectStorageKey,
+        originalFilename: "same-bytes-other-name.jpg",
+      });
+      expect(sibling.objectStorageKey).toBe(original.objectStorageKey);
+      await storage.setTags(original.objectStorageKey, { ...ARCHIVE_TAGS });
+
+      await db.delete(original.id, clock.now());
+      const e = await evaluate(original.id);
+      expect(e).toMatchObject({ decision: "keep", archivable: false });
+      expect(await applyArchiveEvaluation(storage, e, { mayUntag: true, ...notArchived })).toBe(
+        "unchanged",
+      );
+      expect(storage.tagsOf(original.objectStorageKey)).toEqual(ARCHIVE_TAGS);
+    });
+
+    it("leaves an object the lifecycle rule has already moved where it is", async () => {
+      // The platform never thaws on its own; a restore is the person's decision.
+      const original = await put({ fidelity: 6000 });
+      await storage.setTags(original.objectStorageKey, { ...ARCHIVE_TAGS });
+      await db.delete(original.id, clock.now());
+      const action = await applyArchiveEvaluation(storage, await evaluate(original.id), {
+        mayUntag: true,
+        isArchived: async () => true,
+      });
+      expect(action).toBe("unchanged");
+      expect(storage.tagsOf(original.objectStorageKey)).toEqual(ARCHIVE_TAGS);
+    });
+  });
 });
 
 describe("archiveTriggersFor", () => {
@@ -248,6 +315,14 @@ describe("archiveTriggersFor", () => {
     expect(
       archiveTriggersFor([], [{ recordId: original.id, key: "do-not-archive", deletedAt: clock.now() }]),
     ).toEqual([{ originalId: original.id, mayUntag: false }]);
+  });
+
+  it("emits a trigger for a tombstoned original, which is what takes the tag off", async () => {
+    // It emitted none at all before, so a tag outlived the record it belonged to.
+    const original = await put({ fidelity: 6000 });
+    expect(archiveTriggersFor([{ ...original, deletedAt: clock.now() }], [])).toEqual([
+      { originalId: original.id, mayUntag: true },
+    ]);
   });
 
   it("ignores smaller stand-ins, derived records and other labels", async () => {
