@@ -64,6 +64,13 @@ async function deleteDaysAgo(record: DataRecord, daysAgo: number): Promise<void>
 const reap = (retentionDays: number | null, dryRun = false) =>
   reapDeleted({ databaseAdapter: db, objectStorage: storage }, { retentionDays, dryRun, nowMs: NOW });
 
+/** A reap on a host whose store only links to the given keys. */
+const reapBorrowing = (borrowed: readonly string[], retentionDays = 30) =>
+  reapDeleted(
+    { databaseAdapter: db, objectStorage: storage, borrowsBytes: (key) => borrowed.includes(key) },
+    { retentionDays, nowMs: NOW },
+  );
+
 describe("the retention window", () => {
   it("reaps bytes deleted before the window and leaves the rest", async () => {
     const old = await put({ size: 1000 });
@@ -245,6 +252,49 @@ describe("bytes this host does not hold", () => {
     expect(report.reaped).toEqual([]);
     expect(report.reclaimedBytes).toBe(0);
     expect(report.refused.map((r) => r.reason)).toEqual(["absent"]);
+  });
+});
+
+describe("bytes this host only links to", () => {
+  it("are refused rather than unlinked and counted as reclaimed", async () => {
+    // A watched file is symlinked into the object store, so its bytes belong to the
+    // person's folder. Reaping the key would free nothing and report the file's
+    // whole size as reclaimed, which is the one number in this report a person
+    // would act on.
+    const record = await put({ size: 9000 });
+    await deleteDaysAgo(record, 60);
+
+    const report = await reapBorrowing([record.objectStorageKey]);
+    expect(report.reaped).toEqual([]);
+    expect(report.reclaimedBytes).toBe(0);
+    expect(report.refused.map((r) => r.reason)).toEqual(["borrowed"]);
+    expect(await storage.has(record.objectStorageKey)).toBe(true);
+  });
+
+  it("keep the rows a restore needs, because the bytes are still readable here", async () => {
+    // The byte deletion carries the metadata and label rows, and a hard-deleted
+    // metadata row is gone for good. On a host that still holds the bytes the
+    // restore is worth something, so nothing about the record is destroyed.
+    const record = await put();
+    await db.putMetadata("image/jpeg", { recordId: record.id, width: 4032, height: 3024 });
+    await deleteDaysAgo(record, 60);
+
+    await reapBorrowing([record.objectStorageKey]);
+
+    expect(await db.getMetadata("image", record.id)).not.toBeNull();
+  });
+
+  it("does not excuse a held key sharing the pass", async () => {
+    const borrowed = await put({ size: 9000 });
+    const held = await put({ size: 1000 });
+    await deleteDaysAgo(borrowed, 60);
+    await deleteDaysAgo(held, 60);
+
+    const report = await reapBorrowing([borrowed.objectStorageKey]);
+    expect(report.reaped.map((r) => r.objectStorageKey)).toEqual([held.objectStorageKey]);
+    expect(report.reclaimedBytes).toBe(1000);
+    expect(await storage.has(borrowed.objectStorageKey)).toBe(true);
+    expect(await storage.has(held.objectStorageKey)).toBe(false);
   });
 });
 

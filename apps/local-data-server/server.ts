@@ -3328,7 +3328,14 @@ async function main() {
       if (path === "/residency/reap" && req.method === "POST") {
         const body = JSON.parse((await readBody(req)) || "{}") as { dryRun?: unknown };
         const report = await reapDeleted(
-          { databaseAdapter, objectStorage: localAdapter },
+          {
+            databaseAdapter,
+            objectStorage: localAdapter,
+            // A watched file is symlinked into the object store, so its bytes
+            // belong to the person's folder. Reaping such a key would drop the
+            // link, free nothing, and report the file's size as reclaimed.
+            borrowsBytes: (key) => localAdapter.isAlias(key),
+          },
           {
             // Null when this node cannot read the winning settings file, and a
             // reaper in the dark reaps nothing.
