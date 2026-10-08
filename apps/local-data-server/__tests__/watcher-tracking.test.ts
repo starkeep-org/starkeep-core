@@ -373,29 +373,45 @@ describe("a file leaving a watched folder", () => {
   });
 });
 
-describe("one of two identical files leaving a watched folder", () => {
-  // Identical files share one content-addressed key either way: under one record
-  // when the second arrives after the first, and under two when one scan ingests
-  // them in parallel. One path's departure says nothing about the bytes while the
-  // other remains.
+describe("identical files under two names", () => {
+  // Two records sharing one content-addressed key, as through every registration
+  // route. Matching on content alone used to make them one record or two depending
+  // on whether one scan happened to ingest them in parallel.
   it.each([
-    ["sharing one record", true],
-    ["as two records on one key", false],
-  ])("keeps the bytes the other file still supplies, %s", async (_name, oneAfterTheOther) => {
+    ["in one scan", false],
+    ["one after the other", true],
+  ])("are two records on one key, %s", async (_name, oneAfterTheOther) => {
     const n = await node();
     const a = join(n.dir, "a.jpg");
     const copy = join(n.dir, "copy-of-a.jpg");
     await writeFile(a, "identical-bytes");
     if (oneAfterTheOther) await n.restart();
     await writeFile(copy, "identical-bytes");
+    const mgr = await n.restart();
+
+    const [first, second] = [recordIdFor(mgr, a), recordIdFor(mgr, copy)];
+    expect(first).not.toBe(second);
+    const [recA, recCopy] = [(await n.db.get(first as StarkeepId))!, (await n.db.get(second as StarkeepId))!];
+    expect(recA.originalFilename).toBe("a.jpg");
+    expect(recCopy.originalFilename).toBe("copy-of-a.jpg");
+    expect(recCopy.objectStorageKey).toBe(recA.objectStorageKey);
+
+    await n.cleanup();
+  });
+
+  it("keeps the bytes when one leaves and the other still supplies them", async () => {
+    // One path's departure says nothing about a key the other path still holds.
+    const n = await node();
+    const a = join(n.dir, "a.jpg");
+    const copy = join(n.dir, "copy-of-a.jpg");
+    await writeFile(a, "identical-bytes");
+    await writeFile(copy, "identical-bytes");
     const first = await n.restart();
     const ids = [recordIdFor(first, a), recordIdFor(first, copy)];
-    expect(new Set(ids).size).toBe(oneAfterTheOther ? 1 : 2);
     // Proved cloud copies, so the only thing standing between the key and an
     // eviction is the surviving path.
-    for (const id of new Set(ids)) await uploadToCloud(n, id);
+    for (const id of ids) await uploadToCloud(n, id);
     const key = (await n.db.get(ids[0] as StarkeepId))!.objectStorageKey;
-    expect((await n.db.get(ids[1] as StarkeepId))!.objectStorageKey).toBe(key);
 
     // Remove whichever path the link names, so the link would dangle if nothing
     // pointed it at the survivor.
@@ -409,6 +425,75 @@ describe("one of two identical files leaving a watched folder", () => {
     expect(n.residency.wasEvicted(key)).toBe(false);
     expect(after.getStatus(WATCH_ID)!.evicted).toEqual([linked]);
     expect(counts(after)).toEqual({ synced: 1, total: 2 });
+
+    await n.cleanup();
+  });
+});
+
+describe("a file the library already holds", () => {
+  it("attaches to the record another app registered under the same name and bytes", async () => {
+    // The id is the platform's `(parent, filename, content)` rule, so this file is
+    // the record Photos registered. Attaching must not rewrite the row: a fresh
+    // `put` over it would reset its version and replace its type and origin app.
+    const n = await node();
+    const bytes = new TextEncoder().encode("a-photo-from-photos");
+    const registered = await n.sdk.data.putWithFile(
+      { type: "image/jpeg", originAppId: "photos", originalFilename: "IMG_1.jpg" },
+      bytes,
+      "image/jpeg",
+    );
+    const before = (await n.db.get(registered.id as StarkeepId))!;
+
+    const path = join(n.dir, "IMG_1.jpg");
+    await writeFile(path, bytes);
+    const mgr = await n.restart();
+
+    expect(recordIdFor(mgr, path)).toBe(registered.id);
+    expect(await n.db.get(registered.id as StarkeepId)).toEqual(before);
+    expect(counts(mgr)).toEqual({ synced: 1, total: 1 });
+
+    await n.cleanup();
+  });
+
+  it("is a second record when it carries another name", async () => {
+    const n = await node();
+    const bytes = new TextEncoder().encode("a-photo-from-photos");
+    const registered = await n.sdk.data.putWithFile(
+      { type: "image/jpeg", originAppId: "photos", originalFilename: "IMG_1.jpg" },
+      bytes,
+      "image/jpeg",
+    );
+
+    const path = join(n.dir, "renamed.jpg");
+    await writeFile(path, bytes);
+    const mgr = await n.restart();
+
+    expect(recordIdFor(mgr, path)).not.toBe(registered.id);
+    expect((await n.db.get(registered.id as StarkeepId))!.originAppId).toBe("photos");
+
+    await n.cleanup();
+  });
+
+  it("does not bring back a deleted record at a path it never tracked", async () => {
+    // The resurrection guard covered tracked paths only. A deleted file copied back
+    // into the folder mints the tombstone's own id, so it is left out instead, with
+    // the same way back a tracked path gets.
+    const n = await node();
+    const bytes = new TextEncoder().encode("deleted-in-photos");
+    const registered = await n.sdk.data.putWithFile(
+      { type: "image/jpeg", originAppId: "photos", originalFilename: "IMG_2.jpg" },
+      bytes,
+      "image/jpeg",
+    );
+    await deleteRecord(n, registered.id);
+
+    const path = join(n.dir, "IMG_2.jpg");
+    await writeFile(path, bytes);
+    const mgr = await n.restart();
+
+    expect((await n.db.get(registered.id as StarkeepId))!.deletedAt).not.toBeNull();
+    expect(mgr.getStatus(WATCH_ID)!.excluded).toEqual([path]);
+    expect(recordIdFor(mgr, path)).toBe(registered.id);
 
     await n.cleanup();
   });

@@ -40,7 +40,13 @@ import { pipeline } from "node:stream/promises";
 import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
 import type { DatabaseAdapter } from "../../packages/storage-adapter/src/database/adapter.js";
 import type { ObjectStorageAdapter } from "../../packages/storage-adapter/src/object-storage/adapter.js";
-import { createStarkeepId, defaultTypeForExtension, type StandInStandards } from "@starkeep/protocol-primitives";
+import {
+  contentAddressedId,
+  createStarkeepId,
+  defaultTypeForExtension,
+  type DataRecord,
+  type StandInStandards,
+} from "@starkeep/protocol-primitives";
 import { sqliteCompiler as qb } from "@starkeep/storage-sqlite";
 import {
   blobCandidateForRecord,
@@ -278,22 +284,22 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
   // -- Helpers --
 
   /**
-   * A live record already holding this content, for dedup.
+   * The record this file *is*, if the library already holds it: the id the SDK
+   * would mint for it, read tombstones included.
    *
-   * `deletedAt isNull` belongs in the query rather than in a filter over the
-   * page: with `limit: 1` and the check applied afterwards, a tombstoned row
-   * occupying the single slot hid a live record with the same content hash, and
-   * which row that was depended on what the database happened to return.
+   * The rule is the platform's, `(parent_id, original_filename, content_hash)`,
+   * and not a match on content alone. Two copies of one file under two names are
+   * two records sharing one object, as they are through every registration
+   * route; a content-only match made them one record or two depending on whether
+   * one scan happened to ingest them in parallel. A file with the same name and
+   * bytes as a record another app registered is that record.
+   *
+   * Read rather than written blind, because `put` upserts every column: a fresh
+   * row over an existing id would reset its `version` and replace its type and
+   * origin app, and over a tombstone it would be a resurrection.
    */
-  async function findExistingByHash(contentHash: string): Promise<string | null> {
-    const result = await databaseAdapter.query({
-      filters: [
-        { field: "content_hash", operator: "eq", value: contentHash },
-        { field: "deletedAt", operator: "isNull" },
-      ],
-      limit: 1,
-    });
-    return result.records[0]?.id ?? null;
+  async function recordForFile(filename: string, contentHash: string): Promise<DataRecord | null> {
+    return databaseAdapter.get(contentAddressedId(null, filename, contentHash));
   }
 
   /**
@@ -416,9 +422,9 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
   /**
    * Another watched path that still supplies the departed path's bytes: same
    * content hash, tracked as on disk, and still there with the mtime it was
-   * ingested at. Identical files share one content-addressed key — under one
-   * record when they arrive one after the other, under two when one scan ingests
-   * them in parallel — so one of them leaving the disk says nothing about the
+   * ingested at. Identical files share one content-addressed key — as two
+   * records under two names, or as one record when a recursive watch holds one
+   * name in two folders — so one of them leaving the disk says nothing about the
    * bytes while the other remains.
    *
    * The mtime is the cheap evidence the ingest path already trusts; a path whose
@@ -682,14 +688,40 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
         }
       }
 
-      // Dedup: check if another record already has this content
-      let dataRecordId = await findExistingByHash(contentHash);
-
-      if (dataRecordId && !(await ensureLocalObject(dataRecordId, filePath))) {
-        dataRecordId = null;
+      const known = await recordForFile(filename, contentHash);
+      if (known?.deletedAt) {
+        // The library deleted this file, and arriving at a path the watcher has
+        // not tracked does not change that. Left out, with the way back offered,
+        // exactly as for a tracked path. See the resurrection guard above.
+        upsertTrackingRecord(
+          active.config.id,
+          filePath,
+          relativePath,
+          contentHash,
+          known.id,
+          fileStat.mtimeMs,
+          fileStat.size,
+          "deleted-from-library",
+        );
+        markExcluded(active, {
+          filePath,
+          relativePath,
+          contentHash,
+          dataRecordId: known.id,
+          mtime: fileStat.mtimeMs,
+          status: "synced",
+          libraryState: "deleted-from-library",
+        });
+        return;
       }
 
-      if (!dataRecordId) {
+      let dataRecordId: string;
+      if (known) {
+        // Already in the library, from another path or another app. The path
+        // attaches to it, and the bytes are linked if this node lacks them.
+        await ensureLocalObject(known.id, filePath);
+        dataRecordId = known.id;
+      } else {
         // The watcher has only a filename, so it picks a default Starkeep type
         // from the extension via the advisory map. MIME is left null — there is
         // no over-the-network Content-Type on a local-disk ingest.
