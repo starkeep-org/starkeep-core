@@ -304,16 +304,6 @@ export interface DatabaseAdapter {
     hlc: HLCTimestamp,
   ): Promise<void>;
 
-  /**
-   * Remove every label row on a record outright — the reaper's hard delete.
-   *
-   * The one path that destroys a label rather than retracting it, and only at the
-   * end of the retention window, when the record's bytes go and nothing will
-   * restore it. The record row itself is never reaped: `verify()` counts record
-   * tombstones, so a missing one reads as a hole and gets re-shipped from a peer.
-   */
-  deleteLabelsForRecord(recordId: StarkeepId): Promise<void>;
-
   // ---- Label sync ---------------------------------------------------------
   //
   // Labels ride the Drive channel alongside records. These four mirror the

@@ -138,7 +138,6 @@ export {
   buildLabelRetraction,
   buildLabelValueReplacementTombstone,
   buildTombstoneLabelsForRecord,
-  buildDeleteLabelsForRecord,
   buildRestoreLabelsForRecord,
   buildLabelsByRecordIds,
   buildGetLabel,

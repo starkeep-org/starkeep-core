@@ -62,7 +62,6 @@ import {
   type SincePage,
   buildTombstoneLabelsForRecord,
   buildRestoreLabelsForRecord,
-  buildDeleteLabelsForRecord,
   groupLabelsByRecordId,
   nextCursorFrom,
   emptyLabelPage,
@@ -787,12 +786,6 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   ): Promise<void> {
     await withOccRetry("restoreLabelsForRecord", async () => {
       await this.run(buildRestoreLabelsForRecord(compiler, LABELS, recordId, deletedAt, hlc));
-    });
-  }
-
-  async deleteLabelsForRecord(recordId: StarkeepId): Promise<void> {
-    await withOccRetry("deleteLabelsForRecord", async () => {
-      await this.run(buildDeleteLabelsForRecord(compiler, LABELS, recordId));
     });
   }
 }

@@ -184,7 +184,7 @@ describe("the refcount over the object key", () => {
 });
 
 describe("the rows that ride on a reaped record", () => {
-  it("hard-deletes the metadata row and the label rows, and no record row", async () => {
+  it("hard-deletes the metadata row, and neither the label rows nor the record row", async () => {
     const record = await put();
     await db.putMetadata("image/jpeg", { recordId: record.id, width: 4032, height: 3024 });
     await db.upsertLabels([
@@ -200,11 +200,14 @@ describe("the rows that ride on a reaped record", () => {
     await deleteDaysAgo(record, 60);
     // Still there, which is what makes a restore inside the window complete.
     expect(await db.getMetadata("image", record.id)).not.toBeNull();
+    const labelWatermarks = await db.getLabelNodeWatermarks();
 
     await reap(30);
 
     expect(await db.getMetadata("image", record.id)).toBeNull();
-    expect(await db.getLabel(record.id as StarkeepId, "photos", "favourite", "")).toBeNull();
+    // Label sync derives each author's watermark from the rows held, so destroying a
+    // label tombstone would lower it and have a peer re-ship the row next round.
+    expect(await db.getLabelNodeWatermarks()).toEqual(labelWatermarks);
     expect(await db.get(record.id as StarkeepId)).not.toBeNull();
   });
 
@@ -290,7 +293,7 @@ describe("bytes this host only links to", () => {
   });
 
   it("keep the rows a restore needs, because the bytes are still readable here", async () => {
-    // The byte deletion carries the metadata and label rows, and a hard-deleted
+    // The byte deletion carries the metadata rows, and a hard-deleted
     // metadata row is gone for good. On a host that still holds the bytes the
     // restore is worth something, so nothing about the record is destroyed.
     const record = await put();

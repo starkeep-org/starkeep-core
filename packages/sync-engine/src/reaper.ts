@@ -5,16 +5,22 @@
  * where it was, on every node and in the cloud, for ever — so storage only grew,
  * and "I deleted that" meant "I stopped seeing it".
  *
- * ## Bytes, and never a record row
+ * ## Bytes, and never a synced row
  *
- * The reaper deletes bytes and the rows that ride on a record — its per-category
- * metadata row, and the label tombstones belonging to it. **It never deletes a
- * record row.** `verify()` counts tombstone rows deliberately, so hard-deleting a
- * tombstone reads as a hole and gets the tombstone re-shipped from a peer; and the
- * coverage watermark's contract states the required order plainly, that a
+ * The reaper deletes bytes and the one row that rides on a record without a clock
+ * of its own: its per-category metadata row. **It never deletes a record row or a
+ * label row.** `verify()` counts tombstone rows deliberately, so hard-deleting a
+ * record tombstone reads as a hole and gets the tombstone re-shipped from a peer;
+ * and the coverage watermark's contract states the required order plainly, that a
  * compaction floor must be persisted and raised *before* anything below it is
- * deleted. Row compaction is separate, later work with a protocol obligation
- * attached. Byte reclamation has none.
+ * deleted.
+ *
+ * A label tombstone carries the same obligation by a different route. Label sync
+ * derives each author's watermark from the label rows this host holds
+ * (`buildLabelNodeWatermarks`), so destroying an author's newest rows lowers its
+ * watermark, and the next round asks a peer for the very tombstones the reaper
+ * just destroyed. Row compaction, for both tables, is separate, later work with a
+ * protocol obligation attached. Byte reclamation has none.
  *
  * ## Why this is safe against content-addressed dedup
  *
@@ -50,8 +56,8 @@
  * folder on a laptop, a camera-roll alias on a phone. Reaping such a key unlinks
  * the alias and frees nothing, which is why "Free up space" refuses one too.
  *
- * The refusal covers the key whole, including the metadata and label rows the
- * byte deletion carries. Those rows are what a restore brings back, and they are
+ * The refusal covers the key whole, including the metadata rows the byte
+ * deletion carries. Those rows are what a restore brings back, and they are
  * recoverable only while they exist — a hard-deleted metadata row makes a
  * restored photograph dimensionless for ever. On a host whose bytes are still
  * readable the restore is still worth something, so nothing about the record is
@@ -255,13 +261,12 @@ export async function reapDeleted(deps: ReaperDeps, request: ReapRequest): Promi
     const sizeBytes = records[0]?.sizeBytes ?? 0;
     if (!dryRun) {
       await deps.objectStorage.delete(key);
-      // The rows that ride on the record, and never the record row itself. See the
-      // module note on the coverage watermark.
+      // The metadata rows that ride on the records, and never a synced row. See
+      // the module note on the coverage watermark.
       for (const record of all) {
         if (hasMetadataTable(typeCategory(record.type))) {
           await deps.databaseAdapter.deleteMetadata(record.type, record.id as StarkeepId);
         }
-        await deps.databaseAdapter.deleteLabelsForRecord(record.id as StarkeepId);
       }
     }
     reaped.push({ objectStorageKey: key, sizeBytes, recordIds: all.map((r) => r.id) });
