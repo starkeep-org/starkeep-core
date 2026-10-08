@@ -712,12 +712,6 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     return out;
   }
 
-  async deleteLabelsForRecord(recordId: StarkeepId): Promise<void> {
-    for (const [key, label] of [...this.labels.entries()]) {
-      if (label.recordId === recordId) this.labels.delete(key);
-    }
-  }
-
   async restoreLabelsForRecord(
     recordId: StarkeepId,
     deletedAt: HLCTimestamp,
