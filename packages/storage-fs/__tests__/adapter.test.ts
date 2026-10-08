@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FsObjectStorageAdapter } from "../src/adapter.js";
@@ -190,6 +190,36 @@ describe("FsObjectStorageAdapter", () => {
       const target = await adapter.resolvePath("real");
       await adapter.putSymlink("linked", target!);
       expect((await adapter.stat("linked"))?.sizeBytes).toBe(10);
+    });
+  });
+
+  describe("putSymlink", () => {
+    it("replaces a dangling link with one to the file it was asked for", async () => {
+      const gone = join(tempDir, "gone.jpg");
+      const here = join(tempDir, "here.jpg");
+      await writeFile(gone, "bytes");
+      await writeFile(here, "bytes");
+      await adapter.putSymlink("shared", gone);
+      await unlink(gone);
+
+      await adapter.putSymlink("shared", here);
+      expect((await adapter.get("shared"))!.data.toString()).toBe("bytes");
+    });
+
+    // Two watched files with identical bytes share one key, and the watcher ingests
+    // in parallel, so both can find the link dangling and both repair it.
+    it("survives two concurrent repairs of the same dangling link", async () => {
+      for (let i = 0; i < 20; i++) {
+        const gone = join(tempDir, `gone-${i}.jpg`);
+        const a = join(tempDir, `a-${i}.jpg`);
+        const b = join(tempDir, `b-${i}.jpg`);
+        await Promise.all([gone, a, b].map((p) => writeFile(p, "bytes")));
+        await adapter.putSymlink(`shared-${i}`, gone);
+        await unlink(gone);
+
+        await Promise.all([adapter.putSymlink(`shared-${i}`, a), adapter.putSymlink(`shared-${i}`, b)]);
+        expect((await adapter.get(`shared-${i}`))!.data.toString()).toBe("bytes");
+      }
     });
   });
 
