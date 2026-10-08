@@ -119,6 +119,7 @@ import {
 import {
   applyRecordDelete,
   applyRecordRestore,
+  RESTORE_SLOT_TAKEN,
   planRecordDelete,
   planRecordRestore,
 } from "../../packages/shared-space-api/src/stand-ins/delete.js";
@@ -3950,6 +3951,12 @@ async function main() {
           return;
         }
         const restored = await applyRecordRestore(databaseAdapter, plan, clock);
+        if (restored.length === 0) {
+          // A sibling took the record's stand-in slot after the plan.
+          res.writeHead(409);
+          json(res, RESTORE_SLOT_TAKEN);
+          return;
+        }
         changeNotifier.emit({
           eventType: "local-change-recorded",
           recordIds: restored.map((r) => r.id),

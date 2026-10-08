@@ -392,3 +392,21 @@ describe("POST /data/records/:id/fidelity", () => {
     expect((await report(blindApp, id, 300)).status).toBe(403);
   });
 });
+
+describe("restoring a stand-in", () => {
+  it("answers 409 when another stand-in has taken its slot since the delete", async () => {
+    const parent = await original({ fidelity: 6000 });
+    const first = await standIn(parent, "smaller", 640);
+    const firstId = first.body.record!.id;
+    expect((await app.fetch(`/data/records/${firstId}`, { method: "DELETE" })).status).toBe(200);
+    const second = await standIn(parent, "smaller", 640, { bytes: "a newer encoder" });
+    expect(second.status).toBe(200);
+
+    const res = await app.fetch(`/data/records/${firstId}/restore`, { method: "POST" });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: "SlotTaken" });
+    // The refusal writes nothing: the first stays deleted, and the second keeps the slot.
+    expect((await app.fetch(`/data/records/${firstId}`)).status).toBe(404);
+    expect(await getRecord(second.body.record!.id)).toMatchObject({ stand_in_role: "smaller" });
+  });
+});

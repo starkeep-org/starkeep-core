@@ -87,6 +87,7 @@ export {
   applyRecordDelete,
   planRecordRestore,
   applyRecordRestore,
+  RESTORE_SLOT_TAKEN,
   keepCanonicalOfArchivedOriginal,
   type DeletePlan,
   type RestorePlan,

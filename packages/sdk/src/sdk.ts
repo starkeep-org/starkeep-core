@@ -30,6 +30,7 @@ import {
   applyRecordDelete,
   planRecordRestore,
   applyRecordRestore,
+  RESTORE_SLOT_TAKEN,
   ApiError,
 } from "@starkeep/shared-space-api";
 import type { SyncStateStore } from "@starkeep/sync-engine";
@@ -365,6 +366,10 @@ export async function createStarkeepSdk(
           throw new ApiError(String(plan.body.detail ?? plan.body.error), plan.status);
         }
         const restored = await applyRecordRestore(databaseAdapter, plan, clock);
+        if (restored.length === 0) {
+          // A sibling took the record's stand-in slot after the plan.
+          throw new ApiError(String(RESTORE_SLOT_TAKEN["detail"]), 409);
+        }
         for (const record of restored) logChange(record);
         return restored;
       },
