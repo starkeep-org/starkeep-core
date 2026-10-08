@@ -91,6 +91,7 @@ import {
   reapDeleted,
   sanitizeExchangeRequest,
   InvalidExchangeRequest,
+  type RetentionWindow,
 } from "@starkeep/sync-engine";
 import {
   DsqlAppSyncableNamespaceStore,
@@ -2172,27 +2173,40 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     const grants: AccessGrants = await loadAccessGrants(grantClient, appId);
     const clock: HLCClock = await makeCloudClock(grantClient);
 
-    // The library's settings, read from the database just before this request
-    // stamps an original. This warm Lambda's cache is one of several, and a
-    // settings file another instance applied reaches this one only through
-    // the database. A stamp is permanent, so a stamp from a stale value stays
-    // wrong. Every other use judges originals the cloud has already stamped,
-    // or names advisory resolutions, which no stamp records. One indexed query; the file itself is fetched through
-    // Drive's storage only when the winning file changed. Only the Drive
-    // channel tombstones a losing settings file, since only Drive may write
-    // one. A failure keeps the last value rather than failing the request.
-    const readLibrarySettings = async (): Promise<void> => {
-      try {
-        await cloudLibrarySettings.refresh({
+    // The library's settings, read from the database by the request that needs
+    // them. This warm Lambda's cache is one of several, and a settings file
+    // another instance applied reaches this one only through the database, so a
+    // request that reads the cache alone reads whatever earlier traffic left
+    // there.
+    //
+    // Two kinds of request need the value. A request that stamps an original
+    // needs it because a stamp is permanent, so a stamp from a stale value stays
+    // wrong; it reads for the refresh and ignores the window. The reap route
+    // needs the window itself, which no stamp records and nothing corrects
+    // afterwards. Every other use judges originals the cloud has already
+    // stamped, or names advisory resolutions, which no stamp records either.
+    //
+    // Memoized, so a request that does both reads once: one indexed query, and
+    // the file itself fetched through Drive's storage only when the winning file
+    // changed. Only the Drive channel tombstones a losing settings file, since
+    // only Drive may write one.
+    let librarySettingsRead: Promise<RetentionWindow> | null = null;
+    const readLibrarySettings = (): Promise<RetentionWindow> =>
+      (librarySettingsRead ??= cloudLibrarySettings
+        .acquireRetentionWindow({
           db,
           clock,
           storage: { get: async (key) => (await platformStorage()).get(key) },
           tombstoneLosers: appId === DRIVE_APP_ID,
-        });
-      } catch (err) {
-        console.warn("[settings] reading the library's settings failed:", err);
-      }
-    };
+        })
+        .then((window) => {
+          // A stamping path keeps the last value and carries on, so the reason
+          // is logged here rather than left to the one caller that acts on it.
+          if (!window.known) {
+            console.warn("[settings] the library's settings are unreadable:", window.problems.join("; "));
+          }
+          return window;
+        }));
 
     const query = event.queryStringParameters ?? {};
 
@@ -3558,16 +3572,23 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     if (method === "POST" && subPath === "/data/reap") {
       if (!grants.allAccess) return clientErr("Forbidden", 403);
       const body = event.body ? (JSON.parse(event.body) as { dryRun?: unknown }) : {};
+      // Acquired here rather than read off the cache. This request may be the
+      // first on a cold execution environment, and a reap under a defaulted or
+      // stale window destroys bytes the person was promised — a loss nothing
+      // records and nothing corrects later.
+      const window = await readLibrarySettings();
       const report = await reapDeleted(
         { databaseAdapter: db, objectStorage: storage },
         {
           // Null when the cloud cannot read the winning settings file, and a reaper
           // in the dark reaps nothing.
-          retentionDays: cloudLibrarySettings.retentionDays(),
+          retentionDays: window.known ? window.days : null,
           dryRun: body.dryRun === true,
         },
       );
-      return ok(report);
+      // The refusal is as reportable as any other, so it travels with the report
+      // rather than only in the log.
+      return ok(window.known ? report : { ...report, retentionProblems: window.problems });
     }
 
     // GET /apps/{appId}/data/records/:id/content-url?size=<n|canonical>
@@ -4022,6 +4043,9 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           onApplied: async ({ records, labels }) => {
             if (records.some(isSettingsRecord)) {
               await cloudLibrarySettings.refresh({ db, clock, storage, tombstoneLosers: true });
+              // This request's memoized read now predates the file that just
+              // arrived, so drop it rather than let a later read reuse it.
+              librarySettingsRead = null;
             }
             const stamped = await stampUnstampedOriginals(db, records, cloudLibrarySettings.standards(), clock);
             await runArchiveTriggers(db, async () => storage, archiveTriggersFor([...records, ...stamped], labels));

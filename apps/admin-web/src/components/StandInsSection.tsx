@@ -63,6 +63,8 @@ interface ReapReport {
   refused: Array<{ objectStorageKey: string; reason: string; detail: string }>;
   /** Null when this machine cannot read the library's settings file. */
   retentionDays: number | null;
+  /** Why the window could not be read, when it could not. */
+  retentionProblems?: string[];
   archivedSkipped: number;
   dryRun: boolean;
   error?: string;
@@ -551,6 +553,9 @@ function ReapLine({ report }: { report: ReapReport }) {
       <p className="text-sm text-muted-foreground" role="status">
         This machine cannot read the library&apos;s settings file yet, so it does not know how long
         a deleted item is kept. Nothing will be reclaimed until it can.
+        {report.retentionProblems && report.retentionProblems.length > 0 && (
+          <> The read reported: {report.retentionProblems.join("; ")}.</>
+        )}
       </p>
     );
   }

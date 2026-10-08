@@ -102,6 +102,67 @@ describe("createLibrarySettings", () => {
     expect(settings.status().problems.join()).toMatch(/not valid JSON/);
   });
 
+  it("acquires the retention window through the IO it is handed", async () => {
+    // The window has no stamp behind it, so the operation that consumes it
+    // reads the settings itself rather than trusting whatever warmed the cache.
+    // A source built with no adapters is the cloud's case: one module-level
+    // instance, request-scoped adapters.
+    await writeSettings({ trash: { retentionDays: 365 } }, "a");
+    const settings = createLibrarySettings({ cloudConfigured: () => false });
+    expect(await settings.acquireRetentionWindow({ db, storage, clock })).toEqual({
+      known: true,
+      days: 365,
+    });
+  });
+
+  it("answers with the default window when no settings file exists", async () => {
+    // The person has not set a value, so the platform's default is the library's
+    // value. Refusing to reap an untouched library would mean its Trash grew for
+    // ever, and its Trash view could state no date.
+    expect(await source(true).acquireRetentionWindow({ db, storage, clock })).toEqual({
+      known: true,
+      days: 30,
+    });
+  });
+
+  it("refuses the window when the winning file cannot be read, cloud or not", async () => {
+    // `cloudConfigured: () => false` says the defaults are this host's value for
+    // *stamping*. It says nothing about having read the library's settings, and
+    // the reaper needs the second claim — so the window is unknown here even
+    // though `knowsLibraryValue` is true.
+    await writeSettings({ trash: { retentionDays: 365 } }, "a", false);
+    const alone = createLibrarySettings({ cloudConfigured: () => false });
+    const window = await alone.acquireRetentionWindow({ db, storage, clock });
+    expect(window.known).toBe(false);
+    expect(window.known === false && window.problems.join()).toMatch(/not reached this machine/);
+    expect(alone.knowsLibraryValue()).toBe(true);
+
+    await writeSettings(new TextEncoder().encode("{broken"), "b");
+    const broken = await alone.acquireRetentionWindow({ db, storage, clock });
+    expect(broken.known === false && broken.problems.join()).toMatch(/not valid JSON/);
+  });
+
+  it("refuses the window when the read itself fails", async () => {
+    // The stamping paths keep the last value through a failed read, because an
+    // unstamped original waits for the cloud. Nothing corrects a reap, so a
+    // failure here is a refusal rather than the previous answer.
+    await writeSettings({ trash: { retentionDays: 365 } }, "a");
+    const settings = source(true);
+    expect(await settings.acquireRetentionWindow({ db, storage, clock })).toEqual({
+      known: true,
+      days: 365,
+    });
+    const failing = {
+      ...db,
+      query: async () => {
+        throw new Error("connection reset");
+      },
+    } as unknown as MockDatabaseAdapter;
+    const window = await settings.acquireRetentionWindow({ db: failing, storage, clock });
+    expect(window.known).toBe(false);
+    expect(window.known === false && window.problems.join()).toMatch(/connection reset/);
+  });
+
   it("reads the file again only when the winner changes", async () => {
     await writeSettings({ standIns: { image: { canonicalThreshold: 6000 } } }, "a");
     let reads = 0;
