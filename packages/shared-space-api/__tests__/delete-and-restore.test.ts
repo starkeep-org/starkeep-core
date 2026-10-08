@@ -147,6 +147,24 @@ describe("planRecordRestore", () => {
     expect(plan).toMatchObject({ ok: false, status: 409 });
   });
 
+  it("refuses a stand-in whose slot a live sibling already holds", async () => {
+    // The record is the first row a restore writes, so the plan's answer for it is
+    // the write's answer. Refusing here gives the caller a verdict rather than an
+    // empty result.
+    const original = await put({ fidelity: 6000 });
+    const first = await put({
+      type: "image/avif",
+      parentId: original.id,
+      standInRole: "smaller",
+      fidelity: 640,
+    });
+    await del(first);
+    await put({ type: "image/webp", parentId: original.id, standInRole: "smaller", fidelity: 640 });
+
+    const plan = await planRecordRestore(db, (await db.get(first.id as StarkeepId))!);
+    expect(plan).toMatchObject({ ok: false, status: 409, body: { error: "SlotTaken" } });
+  });
+
   it("takes every tombstoned child, since the delete leaves no shared stamp", async () => {
     // The delete takes its own clock reading per row, so the rows keep distinct
     // positions in the per-node order the sync scan walks — which means there is no

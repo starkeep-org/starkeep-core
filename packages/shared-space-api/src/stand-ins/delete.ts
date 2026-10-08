@@ -107,6 +107,10 @@ export type RestorePlan =
  * Refuses a record that is not deleted, which is not a no-op worth being quiet
  * about: a Trash view offering restore on a live record is a view reading a stale
  * page, and the person should be told rather than shown a success.
+ *
+ * Refuses a stand-in whose slot a live sibling already holds, for the same
+ * reason. The cascade's losers are answered as the restore writes, but the record
+ * itself is written first, so for it the plan-time answer is the write-time one.
  */
 export async function planRecordRestore(
   db: DatabaseAdapter,
@@ -122,6 +126,9 @@ export async function planRecordRestore(
       },
     };
   }
+  if (record.standInRole !== null && (await slotTaken(db, record))) {
+    return { ok: false, status: 409, body: RESTORE_SLOT_TAKEN };
+  }
   const children = await db.query({
     filters: [
       { field: "parentId", operator: "eq", value: record.id },
@@ -131,6 +138,16 @@ export async function planRecordRestore(
   });
   return { ok: true, record, cascade: [...children.records] };
 }
+
+/**
+ * The refusal for a stand-in whose slot a live sibling holds. Shared by the
+ * planner and by the callers of {@link applyRecordRestore}, which can still meet
+ * it when a sibling lands between the plan and the write.
+ */
+export const RESTORE_SLOT_TAKEN: Readonly<Record<string, unknown>> = {
+  error: "SlotTaken",
+  detail: "another stand-in already holds this record's slot, so it stays deleted",
+};
 
 /** Whether a live sibling already holds the stand-in slot this child would take. */
 async function slotTaken(db: DatabaseAdapter, child: DataRecord): Promise<boolean> {
@@ -170,6 +187,9 @@ async function slotTaken(db: DatabaseAdapter, child: DataRecord): Promise<boolea
  * wrong thing. The question can only be answered here: at plan time both losers and
  * winners are tombstoned, so the slot looks free to either.
  *
+ * Answers an empty array when the record itself lost its slot between the plan
+ * and the write; a caller reports that as {@link RESTORE_SLOT_TAKEN}.
+ *
  * Bytes are not this function's business. A restore inside the retention window
  * is pure row work, because the reaper has not touched them; past it, the bytes
  * are gone and an app re-reports what it can.
@@ -183,7 +203,12 @@ export async function applyRecordRestore(
   for (const record of [plan.record, ...plan.cascade]) {
     const deletedAt = record.deletedAt;
     if (!deletedAt) continue;
-    if (record.standInRole !== null && (await slotTaken(db, record))) continue;
+    if (record.standInRole !== null && (await slotTaken(db, record))) {
+      // The record itself lost its slot after the plan: nothing comes back, since
+      // its cascade belongs to a record that stays deleted.
+      if (record === plan.record) return [];
+      continue;
+    }
     const hlc = clock.now();
     const live: DataRecord = {
       ...record,
