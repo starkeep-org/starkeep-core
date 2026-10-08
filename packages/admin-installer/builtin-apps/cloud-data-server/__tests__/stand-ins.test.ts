@@ -12,8 +12,18 @@ import { generateKeyPairSync } from "node:crypto";
 import { mockClient } from "aws-sdk-client-mock";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
-import { S3Client, HeadObjectCommand, PutObjectTaggingCommand } from "@aws-sdk/client-s3";
-import { SETTINGS_TYPE_ID, serializeHLC } from "@starkeep/protocol-primitives";
+import {
+  S3Client,
+  GetObjectCommand,
+  HeadObjectCommand,
+  PutObjectTaggingCommand,
+} from "@aws-sdk/client-s3";
+import {
+  SETTINGS_TYPE_ID,
+  serializeHLC,
+  serializeUserSettings,
+  type UserSettings,
+} from "@starkeep/protocol-primitives";
 import { signRequest } from "@starkeep/app-client";
 import type { APIGatewayEvent, LambdaContext } from "../src/handler-utils.js";
 import {
@@ -128,6 +138,8 @@ const GRANTS = [
 const PARENT_ID = "01PARENT000000000000000000";
 const HASH = "c".repeat(64);
 const RECORDS_INSERT = /insert into "shared"\."records"/;
+/** The library-settings lookup: the live record of the settings type. */
+const SETTINGS_QUERY = /from "shared"\."records" where "type" = \$1 and "deleted_at" is null/;
 const GET_BY_ID = /from "shared"\."records" where "id" = \$1/;
 const LIVE_STAND_IN = /from "shared"\."records" where "parent_id" = \$1 and "stand_in_role" = \$2/;
 /** A serialized deletion reading, for a row that has to read as tombstoned. */
@@ -744,5 +756,102 @@ describe("reading the library's settings", () => {
     const res = await handler(request("rs3", "GET", "/data/records"), context);
     expect(res.statusCode, res.body).toBe(200);
     expect(settingsReads(db)).toHaveLength(0);
+  });
+});
+
+/**
+ * The reap route acquires the retention window itself.
+ *
+ * Every other settings-derived value reaches its durable consumer through a
+ * stamp, written on a path that reads the settings first. The window has no
+ * stamp: nothing records "reaped under a guess" and nothing corrects it later.
+ * So the route reads the settings on the request that reaps, rather than
+ * applying whatever an earlier request left in this execution environment's
+ * cache — which on a cold one is the 30-day default.
+ *
+ * See `~/projects/starkeep/design-settings-read-at-point-of-use-2026-10-07.md`.
+ */
+describe("POST /data/reap — the window it applies", () => {
+  const TOMBSTONE_SCAN = /"deleted_at" is not null/;
+
+  function reap(settingsRecordId: string | null): FakeDsql {
+    const db = fakeDsqlWithGrants(GRANTS)
+      .on(
+        SETTINGS_QUERY,
+        settingsRecordId === null
+          ? []
+          : [
+              recordRow({
+                id: settingsRecordId,
+                type: SETTINGS_TYPE_ID,
+                origin_app_id: "starkeep-drive",
+                object_storage_key: `shared/starkeep/aa/${"a".repeat(64)}`,
+              }),
+            ],
+      )
+      // Nothing is past any cutoff, so the report's window is the whole of what
+      // this pass decided.
+      .on(TOMBSTONE_SCAN, [])
+      .otherwise(/from "shared"\."records"/, []);
+    setDbFactory(db);
+    return db;
+  }
+
+  /** The settings file as Drive's storage serves it. */
+  function settingsFile(settings: UserSettings | null) {
+    s3Mock.on(GetObjectCommand).resolves(
+      (settings === null
+        ? {}
+        : { Body: { transformToByteArray: async () => serializeUserSettings(settings) } }) as never,
+    );
+  }
+
+  function reapRequest(): APIGatewayEvent {
+    const appId = "starkeep-drive";
+    const path = "/data/reap";
+    const body = JSON.stringify({ dryRun: true });
+    return {
+      rawPath: `/apps/${appId}${path}`,
+      requestContext: { http: { method: "POST" } },
+      headers: {
+        ...signRequest({ appId, hmacSecret: `secret-${appId}`, method: "POST", path, body }),
+        "X-Starkeep-User-Token": userToken,
+      },
+      body,
+    };
+  }
+
+  async function report(db: FakeDsql): Promise<Record<string, unknown>> {
+    const res = await handler(reapRequest(), context);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(db.log.filter((q) => q.values.includes(SETTINGS_TYPE_ID))).toHaveLength(1);
+    return JSON.parse(res.body) as Record<string, unknown>;
+  }
+
+  it("applies the window the owner chose, on an environment that has stamped nothing", async () => {
+    // The bug this pins: the route used to read a cache no reap-path code fills,
+    // so a cold environment reaped to 30 days under a library whose owner chose
+    // a year, destroying bytes still inside the window the Trash promised.
+    settingsFile({ trash: { retentionDays: 365 } });
+    const db = reap("01SETTINGSREAP00000000000A");
+    expect(await report(db)).toMatchObject({ retentionDays: 365, reaped: [] });
+  });
+
+  it("reaps nothing when the winning settings file cannot be read", async () => {
+    // A file exists and this host cannot use it, so the library's value is
+    // unknown — and the cloud's `cloudConfigured: () => false`, which says the
+    // defaults are its value for stamping, no longer answers for the window.
+    settingsFile(null);
+    const db = reap("01SETTINGSREAP00000000000B");
+    const body = await report(db);
+    expect(body).toMatchObject({ retentionDays: null, reaped: [], reclaimedBytes: 0 });
+    expect((body["retentionProblems"] as string[]).join()).toMatch(/not reached this machine/);
+    // Nothing was enumerated, because the pass refused before looking.
+    expect(db.calls(TOMBSTONE_SCAN)).toHaveLength(0);
+  });
+
+  it("applies the platform default when the person has set no value", async () => {
+    const db = reap(null);
+    expect(await report(db)).toMatchObject({ retentionDays: 30 });
   });
 });

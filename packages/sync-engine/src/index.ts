@@ -161,4 +161,5 @@ export {
   type LibrarySettingsIo,
   type LibrarySettingsOptions,
   type LibrarySettingsStatus,
+  type RetentionWindow,
 } from "./library-settings.js";

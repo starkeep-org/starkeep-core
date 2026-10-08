@@ -129,7 +129,10 @@ import {
   type BacklogKind,
 } from "../../packages/shared-space-api/src/stand-ins/backlog.js";
 import { isStandInSlotConflict, loadStandInSummariesForPage } from "@starkeep/storage-adapter";
-import { createLibrarySettings } from "../../packages/sync-engine/src/library-settings.js";
+import {
+  createLibrarySettings,
+  type RetentionWindow,
+} from "../../packages/sync-engine/src/library-settings.js";
 import {
   renderStandInSummary,
   resolveContentRead,
@@ -841,6 +844,23 @@ async function main() {
       });
     }
   }
+
+  /**
+   * The retention window, read for the operation about to use it.
+   *
+   * The window reaches a reap or a Trash date with no stamp in between, so the
+   * read belongs to the operation rather than to whatever last refreshed the
+   * cache — one indexed query, and the file itself only when the winning record
+   * changed. Losers are left alone here because the paths above are the ones
+   * that tombstone them and announce the tombstones to sync.
+   */
+  const retentionWindow = (): Promise<RetentionWindow> =>
+    librarySettings.acquireRetentionWindow({
+      db: databaseAdapter,
+      storage: localAdapter,
+      clock,
+      tombstoneLosers: false,
+    });
 
   // Direct sqlite handle for app-identity / grant lookups. The records-layer
   // adapter operates on the same DB; we use raw access for the shared_*
@@ -3345,6 +3365,7 @@ async function main() {
       // host later needs re-acquires them through the existing paths.
       if (path === "/residency/reap" && req.method === "POST") {
         const body = JSON.parse((await readBody(req)) || "{}") as { dryRun?: unknown };
+        const window = await retentionWindow();
         const report = await reapDeleted(
           {
             databaseAdapter,
@@ -3357,11 +3378,13 @@ async function main() {
           {
             // Null when this node cannot read the winning settings file, and a
             // reaper in the dark reaps nothing.
-            retentionDays: librarySettings.retentionDays(),
+            retentionDays: window.known ? window.days : null,
             dryRun: body.dryRun === true,
           },
         );
-        json(res, report);
+        // The refusal is as reportable as any other, so it travels with the
+        // report rather than only in the log.
+        json(res, window.known ? report : { ...report, retentionProblems: window.problems });
         return;
       }
 
@@ -4000,11 +4023,15 @@ async function main() {
       // `retention_days: null` means this node cannot read the winning settings
       // file. A Trash view then shows no date, and the reaper reaps nothing.
       if (path === "/data/trash" && req.method === "GET") {
-        const retentionDays = librarySettings.retentionDays();
+        // Read here rather than taken from the cache, for the reason the reap
+        // route reads it here: the window reaches the date a person sees with no
+        // stamp in between, and `knows_library_value` reports what this read
+        // found rather than whether this node may stamp an original.
+        const window = await retentionWindow();
         json(res, {
-          retention_days: retentionDays,
+          retention_days: window.known ? window.days : null,
           default_retention_days: DEFAULT_TRASH_RETENTION_DAYS,
-          knows_library_value: librarySettings.knowsLibraryValue(),
+          knows_library_value: window.known,
         });
         return;
       }

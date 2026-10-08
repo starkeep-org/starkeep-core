@@ -322,7 +322,15 @@ describe("the stand-in section", () => {
         stubFetch({
           "GET /api/residency/stand-ins": () => ({ body: STAND_INS }),
           "POST /api/residency/reap": () => ({
-            body: reapReport({ retentionDays: null, reaped: [], reclaimedBytes: 0, refused: [] }),
+            body: reapReport({
+              retentionDays: null,
+              reaped: [],
+              reclaimedBytes: 0,
+              refused: [],
+              // The read says which of its ways of failing happened, so the
+              // operator sees whether to wait for bytes or to fix a file.
+              retentionProblems: ["the settings file's bytes have not reached this machine yet"],
+            }),
           }),
         }),
       );
@@ -330,9 +338,9 @@ describe("the stand-in section", () => {
       render(<StandInsSection />);
       const reap = await panel("Reclaim deleted files");
       await user.click(reap.getByRole("button", { name: "Estimate" }));
-      expect((await reap.findByRole("status")).textContent).toMatch(
-        /cannot read the library's settings file/,
-      );
+      const status = (await reap.findByRole("status")).textContent;
+      expect(status).toMatch(/cannot read the library's settings file/);
+      expect(status).toMatch(/bytes have not reached this machine/);
     });
 
     it("names the deep-archive exception, so its standing cost stays visible", async () => {
