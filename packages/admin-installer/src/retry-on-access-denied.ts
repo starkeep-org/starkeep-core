@@ -30,6 +30,13 @@
  *                  so it belongs on the same retry budget. Retrying the same
  *                  creds is correct — re-assuming only mints an equally-fresh
  *                  key; we wait for S3 to recognize the one we have.
+ *
+ * The loop also retries transient socket errors (`isTransientConnectionError`).
+ * A propagation wait can run four minutes, and a local network blip in that
+ * window says nothing about the policy. Observed: a Tier-3 uninstall's
+ * ListBucket probe died on `read EADDRNOTAVAIL` at 158s, after 18 AccessDenied
+ * attempts and with ~250s of its budget left. Every caller wraps an
+ * idempotent call, so replaying it after a socket error is safe.
  */
 
 interface RetryOpts {
@@ -73,6 +80,7 @@ export function isTransientConnectionError(err: unknown): boolean {
     "ENETUNREACH",
     "ENOTFOUND",
     "EAI_AGAIN",
+    "EADDRNOTAVAIL",
   ];
   if (transientCodes.includes(code)) return true;
   if (message.includes("connection terminated")) return true;
@@ -115,7 +123,7 @@ export function isRetryableDsqlConflict(err: unknown): boolean {
  */
 async function retryWhile<T>(
   label: string,
-  kind: string,
+  kind: (err: unknown) => string,
   shouldRetry: (err: unknown) => boolean,
   fn: () => Promise<T>,
   opts: RetryOpts,
@@ -146,7 +154,7 @@ async function retryWhile<T>(
         throw err;
       }
       console.log(
-        `[diag] ${label}: attempt ${attempt} ${kind} at ${elapsed}s, retrying in ${(delay / 1000).toFixed(1)}s`,
+        `[diag] ${label}: attempt ${attempt} ${kind(err)} at ${elapsed}s, retrying in ${(delay / 1000).toFixed(1)}s`,
       );
       await new Promise((r) => setTimeout(r, delay));
       delay = Math.min(delay * 2, maxDelayMs);
@@ -160,7 +168,13 @@ export async function retryOnAccessDenied<T>(
   fn: () => Promise<T>,
   opts: RetryOpts = {},
 ): Promise<T> {
-  return retryWhile(label, "AccessDenied", isAccessDeniedError, fn, opts);
+  return retryWhile(
+    label,
+    (err) => (isAccessDeniedError(err) ? "AccessDenied" : "transient-connection-error"),
+    (err) => isAccessDeniedError(err) || isTransientConnectionError(err),
+    fn,
+    opts,
+  );
 }
 
 /**
@@ -178,7 +192,7 @@ export async function retryOnTransientDbError<T>(
 ): Promise<T> {
   return retryWhile(
     label,
-    "transient-db-error",
+    () => "transient-db-error",
     (err) => isTransientConnectionError(err) || isRetryableDsqlConflict(err),
     fn,
     {

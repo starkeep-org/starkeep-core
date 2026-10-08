@@ -75,6 +75,25 @@ describe("putAppKeepFile", () => {
     });
   });
 
+  it("keeps waiting through a socket error that lands inside the propagation window", async () => {
+    // Observed on a Tier-3 uninstall: AccessDenied while the temp policy
+    // propagated, then a local `read EADDRNOTAVAIL`, which ended the wait.
+    const socketErr = Object.assign(new Error("read EADDRNOTAVAIL"), {
+      code: "EADDRNOTAVAIL",
+    });
+    const denied = Object.assign(new Error("Access Denied"), { name: "AccessDenied" });
+    send
+      .mockRejectedValueOnce(denied)
+      .mockRejectedValueOnce(socketErr)
+      .mockRejectedValueOnce(denied)
+      .mockResolvedValueOnce({});
+
+    await expect(
+      putAppKeepFile("starkeep", "photos", "starkeep-files-x", "us-east-1", appCreds),
+    ).resolves.toBeUndefined();
+    expect(send).toHaveBeenCalledTimes(4);
+  });
+
   it("does not retry a genuine non-transient error", async () => {
     const err = new Error("The specified bucket does not exist");
     err.name = "NoSuchBucket";
