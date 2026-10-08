@@ -20,7 +20,7 @@
 import { describe, it, expect } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
-import { mkdtemp, writeFile, utimes, rm, unlink, lstat } from "node:fs/promises";
+import { mkdtemp, writeFile, utimes, rm, unlink, lstat, readlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -368,6 +368,47 @@ describe("a file leaving a watched folder", () => {
     expect((await n.objects.get(key))!.data.toString()).toBe("bytes-that-return");
     expect(back.getStatus(WATCH_ID)!.possiblyLost).toEqual([]);
     expect(counts(back)).toEqual({ synced: 1, total: 1 });
+
+    await n.cleanup();
+  });
+});
+
+describe("one of two identical files leaving a watched folder", () => {
+  // Identical files share one content-addressed key either way: under one record
+  // when the second arrives after the first, and under two when one scan ingests
+  // them in parallel. One path's departure says nothing about the bytes while the
+  // other remains.
+  it.each([
+    ["sharing one record", true],
+    ["as two records on one key", false],
+  ])("keeps the bytes the other file still supplies, %s", async (_name, oneAfterTheOther) => {
+    const n = await node();
+    const a = join(n.dir, "a.jpg");
+    const copy = join(n.dir, "copy-of-a.jpg");
+    await writeFile(a, "identical-bytes");
+    if (oneAfterTheOther) await n.restart();
+    await writeFile(copy, "identical-bytes");
+    const first = await n.restart();
+    const ids = [recordIdFor(first, a), recordIdFor(first, copy)];
+    expect(new Set(ids).size).toBe(oneAfterTheOther ? 1 : 2);
+    // Proved cloud copies, so the only thing standing between the key and an
+    // eviction is the surviving path.
+    for (const id of new Set(ids)) await uploadToCloud(n, id);
+    const key = (await n.db.get(ids[0] as StarkeepId))!.objectStorageKey;
+    expect((await n.db.get(ids[1] as StarkeepId))!.objectStorageKey).toBe(key);
+
+    // Remove whichever path the link names, so the link would dangle if nothing
+    // pointed it at the survivor.
+    const linked = await readlink(entryPath(n, key));
+    const survivor = linked === a ? copy : a;
+    await unlink(linked);
+    const after = await n.restart();
+
+    expect(await readlink(entryPath(n, key))).toBe(survivor);
+    expect((await n.objects.get(key))!.data.toString()).toBe("identical-bytes");
+    expect(n.residency.wasEvicted(key)).toBe(false);
+    expect(after.getStatus(WATCH_ID)!.evicted).toEqual([linked]);
+    expect(counts(after)).toEqual({ synced: 1, total: 2 });
 
     await n.cleanup();
   });
