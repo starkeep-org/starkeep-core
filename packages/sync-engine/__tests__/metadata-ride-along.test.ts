@@ -269,6 +269,64 @@ describe("metadata riding the record it belongs to", () => {
     expect(await liveMetadataIds(p.cloud)).toEqual([record.id]);
   });
 
+  /**
+   * An engine whose requests reach the cloud without their records, so the
+   * cloud answers from what it held before this round. Models a responder that
+   * has not yet seen this node's newer row — the case in which the reply carries
+   * a row the requester's LWW comparison rejects.
+   */
+  function engineWithUnseenRequests(p: Pair): SyncEngine {
+    const unseen: SyncTransport = {
+      exchange: ({ records: _drop, ...request }) => p.transport.exchange(request),
+    };
+    return createSyncEngine({
+      localDatabaseAdapter: p.local,
+      localObjectStorage: p.localStorage,
+      remoteObjectStorage: p.cloudStorage,
+      transport: unseen,
+      clock: p.localClock,
+      syncState: createMemorySyncStateStore(),
+    });
+  }
+
+  it("leaves a live record's metadata alone when a losing tombstone arrives", async () => {
+    const p = await makePair();
+    const record = await seedPhoto(p.cloud, p.cloudStorage, p.cloudClock);
+    await p.local.put(record);
+    await p.local.putMetadata("image/jpeg", { recordId: record.id, width: 4032 });
+
+    // The cloud deletes; this node writes the record afterwards, so its live row
+    // wins LWW against the tombstone the cloud is about to offer.
+    const deletedAt = p.cloudClock.now();
+    await p.cloud.delete(record.id, deletedAt);
+    await p.cloud.tombstoneMetadata("image", record.id, deletedAt);
+    await p.local.put({ ...record, updatedAt: p.localClock.now(), version: record.version + 1 });
+
+    await engineWithUnseenRequests(p).exchange();
+
+    expect((await p.local.get(record.id))!.deletedAt).toBeNull();
+    expect(await liveMetadataIds(p.local)).toEqual([record.id]);
+  });
+
+  it("keeps a deleted record's metadata tombstoned when a losing live row arrives", async () => {
+    const p = await makePair();
+    const record = await seedPhoto(p.cloud, p.cloudStorage, p.cloudClock);
+    await p.cloud.putMetadata("image/jpeg", { recordId: record.id, width: 4032 });
+    await p.local.put(record);
+    await p.local.putMetadata("image/jpeg", { recordId: record.id, width: 4032 });
+
+    // This node deletes; the cloud is behind and still offers its older live row,
+    // with a metadata passenger riding on it.
+    const deletedAt = p.localClock.now();
+    await p.local.delete(record.id, deletedAt);
+    await p.local.tombstoneMetadata("image", record.id, deletedAt);
+
+    await engineWithUnseenRequests(p).exchange();
+
+    expect((await p.local.get(record.id))!.deletedAt).not.toBeNull();
+    expect(await liveMetadataIds(p.local)).toEqual([]);
+  });
+
   it("converges on the union when two nodes write disjoint columns, in either order", async () => {
     for (const cloudFirst of [false, true]) {
       const p = await makePair();

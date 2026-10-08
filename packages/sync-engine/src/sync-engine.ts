@@ -826,6 +826,12 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
             const rowAlreadyApplied =
               current !== null &&
               compareHLC(current.updatedAt, snapshot.updatedAt) >= 0;
+            // What this node holds for the record once the LWW comparison has
+            // had its say. The metadata cascade reads *this* rather than the
+            // incoming snapshot, because the two disagree whenever the snapshot
+            // lost: a losing tombstone leaves the record live, and a losing live
+            // row leaves it deleted. See the responder's copy.
+            const held = rowAlreadyApplied ? current! : snapshot;
 
             // Everything that writes this record is inside one guard, and a
             // failure inside it takes the record out of the round rather than
@@ -870,8 +876,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
               // record's dimensions outlive it on every peer but the one it was
               // deleted on. Tombstoned rather than dropped since the delete became
               // uniformly soft, which is what lets a restore bring the row back.
-              if (snapshot.deletedAt) {
-                await deleteRecordMetadata(localDatabaseAdapter, snapshot, snapshot.deletedAt);
+              if (held.deletedAt) {
+                await deleteRecordMetadata(localDatabaseAdapter, held, held.deletedAt);
               } else if (current?.deletedAt) {
                 // A restore arriving. The cascade mirrors the delete's, and it has
                 // to run whether or not a metadata passenger came with the row: a
@@ -879,9 +885,9 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
                 // metadata row nobody lifted is a restored photograph with no
                 // dimensions. Asked only of a record this node held as deleted, so
                 // the ordinary round pays nothing for it.
-                await restoreRecordMetadata(localDatabaseAdapter, snapshot);
+                await restoreRecordMetadata(localDatabaseAdapter, held);
               }
-              if (!snapshot.deletedAt && incomingMetadata) {
+              if (!held.deletedAt && incomingMetadata) {
                 const owedBack = await applyRecordMetadata(
                   localDatabaseAdapter,
                   snapshot,
@@ -902,9 +908,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
                 // and the reply to it names the union, against which the same
                 // test is false on both sides. See `applyRecordMetadata`.
                 if (owedBack) {
-                  const merged = rowAlreadyApplied ? current! : snapshot;
                   await localDatabaseAdapter.put({
-                    ...merged,
+                    ...held,
                     updatedAt: clock.now(),
                   });
                 }
