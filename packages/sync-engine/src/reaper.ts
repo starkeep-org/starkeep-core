@@ -83,9 +83,6 @@ import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-ad
 /** Records read per page while enumerating tombstones. */
 const ENUMERATION_PAGE = 500;
 
-/** Upper bound on records sharing one object; the same cap archiving uses. */
-const MAX_RECORDS_PER_OBJECT = 100;
-
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 export interface ReapRequest {
@@ -320,11 +317,24 @@ async function tombstonesPastCutoff(
   return byKey;
 }
 
-/** Every record on one object, tombstones included. */
+/**
+ * Every record on one object, tombstones included.
+ *
+ * Paged to the end rather than capped: the caller proves that *every* record on
+ * the key is past the window, and a record a cap left out is one whose promise
+ * goes unchecked.
+ */
 async function recordsOn(deps: ReaperDeps, key: string): Promise<DataRecord[]> {
-  const page = await deps.databaseAdapter.query({
-    filters: [{ field: "objectStorageKey", operator: "eq", value: key }],
-    limit: MAX_RECORDS_PER_OBJECT,
-  });
-  return [...page.records];
+  const all: DataRecord[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await deps.databaseAdapter.query({
+      filters: [{ field: "objectStorageKey", operator: "eq", value: key }],
+      limit: ENUMERATION_PAGE,
+      ...(cursor ? { cursor } : {}),
+    });
+    all.push(...page.records);
+    cursor = page.hasMore && page.nextCursor ? page.nextCursor : undefined;
+  } while (cursor);
+  return all;
 }

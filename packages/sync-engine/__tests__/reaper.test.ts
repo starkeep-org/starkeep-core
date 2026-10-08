@@ -163,6 +163,24 @@ describe("the refcount over the object key", () => {
     expect(report.refused.map((r) => r.reason)).toEqual(["within-window"]);
     expect(await storage.has(key)).toBe(true);
   });
+
+  it("finds the newest tombstone on a key shared by more records than one page holds", async () => {
+    // The same image under hundreds of filenames is the case the key-wide refcount
+    // exists for, so the check reads every record on the key rather than a page.
+    const key = "shared/image/ee/widely-duplicated";
+    for (let i = 0; i < 600; i++) {
+      await deleteDaysAgo(await put({ key, filename: `copy-${i}.jpg` }), 60);
+    }
+    const recent = await put({ key, filename: "copy-recent.jpg" });
+    await db.putMetadata("image/jpeg", { recordId: recent.id, width: 4032 });
+    await deleteDaysAgo(recent, 2);
+
+    const report = await reap(30);
+    expect(report.reaped).toEqual([]);
+    expect(report.refused.map((r) => r.reason)).toEqual(["within-window"]);
+    expect(await storage.has(key)).toBe(true);
+    expect(await db.getMetadata("image", recent.id)).not.toBeNull();
+  });
 });
 
 describe("the rows that ride on a reaped record", () => {
