@@ -413,6 +413,45 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
     return rows.map((r) => r.file_path);
   }
 
+  /**
+   * Another watched path that still supplies the departed path's bytes: same
+   * content hash, tracked as on disk, and still there with the mtime it was
+   * ingested at. Identical files share one content-addressed key — under one
+   * record when they arrive one after the other, under two when one scan ingests
+   * them in parallel — so one of them leaving the disk says nothing about the
+   * bytes while the other remains.
+   *
+   * The mtime is the cheap evidence the ingest path already trusts; a path whose
+   * file moved is left to its own event rather than hashed here.
+   */
+  async function survivingPathFor(
+    departed: string,
+  ): Promise<{ filePath: string; recordId: string } | null> {
+    const query = qb
+      .selectFrom("watch_files")
+      .select(["file_path", "data_record_id", "mtime"])
+      .where(
+        "content_hash",
+        "=",
+        qb.selectFrom("watch_files").select("content_hash").where("file_path", "=", departed),
+      )
+      .where("file_path", "!=", departed)
+      .where("library_state", "=", "synced")
+      .compile();
+    const rows = db.prepare(query.sql).all(...(query.parameters as string[])) as {
+      file_path: string;
+      data_record_id: string;
+      mtime: number;
+    }[];
+    for (const row of rows) {
+      const onDisk = await stat(row.file_path).catch(() => null);
+      if (onDisk?.isFile() && onDisk.mtimeMs === row.mtime) {
+        return { filePath: row.file_path, recordId: row.data_record_id };
+      }
+    }
+    return null;
+  }
+
   /** Move one path to a new library state, leaving everything else about it alone. */
   function setLibraryState(filePath: string, libraryState: WatchLibraryState): void {
     const query = qb
@@ -449,6 +488,9 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
    * target is already gone would destroy the last reference to the content. That
    * case is genuine data loss and is reported rather than stated as a state.
    *
+   * Nothing is removed either while another watched path supplies the same bytes,
+   * which is the case content addressing creates for two identical files.
+   *
    * Returns the state to record against the path.
    */
   async function evictFromDisk(
@@ -460,6 +502,17 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
     // nothing to prove. The key, if any, is the tombstone's and the reaper's.
     if (!record || record.deletedAt) return "evicted";
     if (!record.objectStorageKey) return "evicted";
+
+    // Another path still holds the same bytes, so nothing leaves this node. The
+    // link may name the departed path, so it is pointed at the survivor rather
+    // than left to dangle until the survivor's next event.
+    const survivor = await survivingPathFor(filePath);
+    if (survivor && (await ensureLocalObject(survivor.recordId, survivor.filePath))) {
+      console.log(
+        `[watch] ${filePath} left the disk; ${survivor.filePath} holds the same bytes, so they stay here`,
+      );
+      return "evicted";
+    }
 
     const proof = await proveCloudCopies(
       { databaseAdapter, standards: opts.standards() },
