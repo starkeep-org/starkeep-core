@@ -79,7 +79,15 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
       // Dangling, or otherwise unreadable. Replace it.
     }
     await unlink(linkPath).catch(() => {});
-    await symlink(targetPath, linkPath);
+    try {
+      await symlink(targetPath, linkPath);
+    } catch (err: unknown) {
+      // A concurrent repair of the same key got there between the unlink and this
+      // link — two watched files with identical bytes ingest in parallel. Its link
+      // is as good as ours once it resolves, for the reason above.
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      await access(linkPath);
+    }
   }
 
   /**
