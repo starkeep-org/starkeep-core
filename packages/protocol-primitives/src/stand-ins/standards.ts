@@ -210,6 +210,71 @@ export const DEFAULT_SYNC_DOWN_CEILINGS: Readonly<Record<NodeKind, SyncDownCeili
 };
 
 /**
+ * A node's ceilings as the person set them. A category left out keeps the
+ * node's default. The desktop stores this in `config.json` and the phone in its
+ * device settings, in the same shape, so the two read and check it one way.
+ */
+export type ConfiguredCeilings = Partial<Record<StandInCategory, number | null>>;
+
+function isCeiling(value: unknown): value is number | null {
+  return value === null || (typeof value === "number" && Number.isInteger(value) && value > 0);
+}
+
+/** Problems with a configured ceilings value, as sentences. Empty when the value is usable. */
+export function syncDownCeilingProblems(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return ["ceilings must be an object keyed by stand-in category"];
+  }
+  const problems: string[] = [];
+  for (const [category, ceiling] of Object.entries(value)) {
+    if (!(STAND_IN_CATEGORIES as readonly string[]).includes(category)) {
+      problems.push(`${category} is not a stand-in category (${STAND_IN_CATEGORIES.join(", ")})`);
+    } else if (!isCeiling(ceiling)) {
+      problems.push(`${category}: a ceiling is a positive whole fidelity, or null for none`);
+    }
+  }
+  return problems;
+}
+
+/**
+ * A node's ceilings: its defaults, with the person's per-category values on
+ * top. A malformed value keeps the default rather than being trusted, and
+ * `onIgnored` hears about it. Only a hand-edited store can carry one, because
+ * every writer checks with {@link syncDownCeilingProblems} first.
+ */
+export function resolveSyncDownCeilings(
+  configured: unknown,
+  defaults: SyncDownCeilings,
+  onIgnored?: (category: StandInCategory, value: unknown) => void,
+): SyncDownCeilings {
+  const out: Record<StandInCategory, number | null> = { ...defaults };
+  if (configured === null || typeof configured !== "object") return out;
+  const values = configured as Record<string, unknown>;
+  for (const category of STAND_IN_CATEGORIES) {
+    const value = values[category];
+    if (value === undefined) continue;
+    if (isCeiling(value)) out[category] = value;
+    else onIgnored?.(category, value);
+  }
+  return out;
+}
+
+/**
+ * The ceilings a person can pick for one category, besides none: each standard
+ * size and the library's canonical threshold, in ascending order. A current
+ * value outside that set stays on the list, so a picker can show it.
+ */
+export function ceilingChoices(
+  standards: Pick<CategoryStandards, "standardSizes" | "canonicalThreshold">,
+  current: number | null = null,
+): number[] {
+  const sizes = new Set([...standards.standardSizes, standards.canonicalThreshold]);
+  if (current !== null) sizes.add(current);
+  return [...sizes].sort((a, b) => a - b);
+}
+
+/**
  * The canonical thresholds the person may choose, per category: wide enough
  * for any real screen or archive, narrow enough that a typo cannot make every
  * original self-canonical or every stand-in huge. Provisional.
