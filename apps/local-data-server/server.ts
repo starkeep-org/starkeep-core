@@ -87,6 +87,8 @@ import {
   labelValueSetKey,
   DEFAULT_STAND_IN_STANDARDS,
   DEFAULT_SYNC_DOWN_CEILINGS,
+  resolveSyncDownCeilings,
+  syncDownCeilingProblems,
   STAND_IN_CATEGORIES,
   STAND_IN_MIME_TYPES,
   standardsFor,
@@ -410,17 +412,15 @@ function isDuplicateFileError(err: unknown): boolean {
  * hand-edited config file can carry it.
  */
 function resolveCeilings(config: Pick<StarkeepConfig, "standInCeilings">): SyncDownCeilings {
-  const out: Record<StandInCategory, number | null> = { ...DEFAULT_SYNC_DOWN_CEILINGS.desktop };
-  for (const category of STAND_IN_CATEGORIES) {
-    const configured = config.standInCeilings?.[category];
-    if (configured === undefined) continue;
-    if (configured === null || (Number.isInteger(configured) && configured > 0)) {
-      out[category] = configured;
-    } else {
-      console.warn(`[residency] ignoring standInCeilings.${category} = ${String(configured)}; keeping ${out[category]}`);
-    }
-  }
-  return out;
+  return resolveSyncDownCeilings(
+    config.standInCeilings,
+    DEFAULT_SYNC_DOWN_CEILINGS.desktop,
+    (category, value) => {
+      console.warn(
+        `[residency] ignoring standInCeilings.${category} = ${String(value)}; keeping ${DEFAULT_SYNC_DOWN_CEILINGS.desktop[category]}`,
+      );
+    },
+  );
 }
 
 /**
@@ -460,20 +460,14 @@ function originalBytesByCategory(db: RawDatabase): Record<StandInCategory, { cou
 }
 
 function ceilingProblems(body: {
-  ceilings?: Record<string, unknown>;
+  ceilings?: unknown;
   keepOriginals?: unknown;
 }): string[] {
   const problems: string[] = [];
   if (body.keepOriginals !== undefined && typeof body.keepOriginals !== "boolean") {
     problems.push("keepOriginals must be true or false");
   }
-  for (const [category, value] of Object.entries(body.ceilings ?? {})) {
-    if (!(STAND_IN_CATEGORIES as readonly string[]).includes(category)) {
-      problems.push(`${category} is not a stand-in category (${STAND_IN_CATEGORIES.join(", ")})`);
-    } else if (value !== null && !(typeof value === "number" && Number.isInteger(value) && value > 0)) {
-      problems.push(`${category}: a ceiling is a positive whole fidelity, or null for none`);
-    }
-  }
+  problems.push(...syncDownCeilingProblems(body.ceilings));
   return problems;
 }
 
