@@ -4,8 +4,11 @@
  * browses data through proper access control, not by reading the DB directly.
  */
 
-// First import: load repo-root .env / .env.local so STARKEEP_DIR (and any other
-// vars) are populated before anything below reads them.
+// First import: stamp every console line with the time, so the log says when
+// as well as what. See log-timestamps.ts.
+import "./log-timestamps.js";
+// Then load repo-root .env / .env.local so STARKEEP_DIR (and any other vars)
+// are populated before anything below reads them.
 import type { RawDatabase } from "@starkeep/storage-adapter";
 import "@starkeep/app-client/load-env";
 import { createServer } from "node:http";
