@@ -63,6 +63,7 @@ api.get("/exec/deploy-outputs", () => execDeployOutputs.GET());
 
 // Cloud operations against the operator's own AWS credentials.
 api.post("/costs", (c) => costs.POST(c.req.raw));
+api.get("/devices", () => devices.GET());
 api.post("/devices", (c) => devices.POST(c.req.raw));
 api.delete("/devices", (c) => devices.DELETE(c.req.raw));
 

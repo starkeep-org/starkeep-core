@@ -53,7 +53,7 @@ export function cloudFrontSigningParameterName(stackPrefix: string): string {
  * rather than needing a new IAM path and a bootstrap change; and teardown's
  * `app-creds/*` sweep removes paired devices along with everything else.
  *
- * The value is `{ publicKeySpki, userId, pairedAt, label }` and is **not
+ * The value is `{ publicKeySpki, userId, appIds, pairedAt, label }` and is **not
  * secret** — it is the public half. It is still stored as a SecureString,
  * because one convention under this prefix is cheaper to reason about than two.
  */
@@ -75,6 +75,12 @@ export interface DeviceRegistration {
    * costs one field.
    */
   readonly userId: string | null;
+  /**
+   * The apps the device may act as. The broker refuses any other app id, and
+   * refuses a record without this field, so a device key is a key to the
+   * apps it was paired for and no others.
+   */
+  readonly appIds: readonly string[];
   /** Human-readable, so the operator can tell two phones apart when revoking. */
   readonly label: string | null;
   readonly pairedAt: string;

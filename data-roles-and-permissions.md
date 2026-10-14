@@ -145,6 +145,19 @@ The same single-hop assume serves **app-specific** runtime operations, but those
 
 Shared-record **sync** does **not** re-assume per-app roles. It flows through the single always-on **Starkeep Drive (User-Data-Owner)** channel: the local-data-server runs one Drive sync engine that ships all shared records, and the cloud-data-server serves that channel under `app-starkeep-drive-role`. Shared writes are therefore **type-confined locally by the originating app's grants before ship** (the local `appCanWrite` check, layer 1) and **bounded in the cloud by Drive's IAM grant** on `shared/*` (layer 2); origin attribution is preserved immutably in `origin_app_id`. There is no per-record role re-assumption and no "origin app uninstalled → rejected" path: a record's origin app need not be cloud-installed for its shared data to sync (that is the whole point of routing shared sync through Drive). Per-app channels carry only that app's *app-specific* rows and matter only when the app is cloud-installed.
 
+### The phone's credential
+
+A phone cannot hold an app's HMAC secret. The secret is symmetric and extractable from a distributed APK, and revoking it would break every other client of the app. Each phone therefore signs with its own Ed25519 key, and the broker verifies the signature against a public key under `/<prefix>/app-creds/_device-<id>`. A device signature stands in for the end-user token, because pairing binds the key to a named user.
+
+- **Pairing is the phone's install step.** Admin-web's browser code generates the keypair. Admin-web registers the public key through Manager, the same admin-app → Manager hop an app install uses, and shows the private key once as a QR code for the phone to scan. The cloud's request path only verifies the key and never mints one.
+- **A device acts only as the apps it was paired for.** The parameter records `appIds`, and pairing sets it to `starkeep-drive`. The broker refuses any other app id, and refuses a parameter without `appIds`.
+- **A device reaches only the routes the phone calls.** The broker allows `GET /health`, `POST /sync/exchange`, `POST /files/presign`, `GET /files/<key>/presign`, `GET /files/<key>/stat` and `HEAD /files/<key>` for a device, and refuses every other route. A device holds Drive's authority, so this allowlist keeps a stolen phone from deleting records through the record routes.
+- **A device never writes the platform's own files.** The broker refuses an exchange that carries a `starkeep/*` record and a presigned upload to a `shared/starkeep/` key. The library's settings file holds the paired-device list, so this rule keeps a stolen phone from removing itself from the list. The phone's own settings refresh leaves losing settings files for other nodes to tombstone.
+- **The paired-device list lives in the library's settings file.** The list syncs to every machine, so any machine's admin-web can revoke a phone. The SSM parameter stays the authority. Pairing writes the list entry before the key, and revoking deletes the key before the entry, so a partial failure can leave a harmless entry but never an unlisted key.
+- **Revoking deletes the parameter.** The broker caches device keys for up to five minutes, so a revoked phone stops syncing within that window. No other device or app notices.
+
+While the QR code is on screen, the code is a bearer credential: anyone who photographs it can sync as Drive until the operator revokes the device. Admin-web shows the code only after an explicit click and hides it on "Done". `plan-mobile-qr-pairing-2026-10-13.md` at the workspace root records the design.
+
 ---
 
 ## The local data server

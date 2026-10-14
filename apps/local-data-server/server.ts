@@ -101,7 +101,11 @@ import {
   SETTINGS_TYPE_ID,
   USER_SETTINGS_FILE_NAME,
   USER_SETTINGS_MIME_TYPE,
+  withPairedDevice,
+  withoutPairedDevice,
+  type PairedDevice,
   type StandInCategory,
+  type UserSettings,
   type StandInSize,
   type SyncDownCeilings,
   hasMetadataTable,
@@ -924,6 +928,68 @@ async function main() {
     clock,
   });
 
+  type SettingsWrite =
+    | { readonly ok: true; readonly settings: UserSettings; readonly recordId: string }
+    | { readonly ok: false; readonly status: number; readonly error: string; readonly problems: readonly string[] };
+
+  /** Settings writes, one at a time, so two changes cannot both start from the same file. */
+  let settingsWrites: Promise<unknown> = Promise.resolve();
+
+  /**
+   * Write the library's settings file as a change to the current one.
+   *
+   * Every settings write goes through here, for two reasons.
+   *
+   * - **A change keeps what it does not touch.** The file holds unrelated
+   *   settings — stand-in standards, the trash window, the paired-device list —
+   *   and a new file replaces the old one whole. A writer that serialized only
+   *   its own field would erase the rest.
+   * - **A host in the dark writes nothing.** When a settings file exists and
+   *   its bytes have not reached this machine, the current value is unknown.
+   *   The newest file wins everywhere, so a change built on the defaults would
+   *   overwrite the person's settings on every node. Refused with 409 instead.
+   */
+  function writeLibrarySettings(change: (current: UserSettings) => UserSettings): Promise<SettingsWrite> {
+    const run = async (): Promise<SettingsWrite> => {
+      await refreshLibrarySettings();
+      const status = librarySettings.status();
+      if (status.set && status.settings === null) {
+        return {
+          ok: false,
+          status: 409,
+          error:
+            "This machine cannot read the library's settings file yet, so a change made here would overwrite settings it cannot see. Let it sync, then try again.",
+          problems: status.problems,
+        };
+      }
+      const base = status.settings ?? {};
+      const next = change(base);
+      // Nothing changed, so nothing is written. A write here would create a
+      // settings file where none existed, and an absent file is what tells
+      // every host that the person has set nothing.
+      if (next === base) return { ok: true, settings: base, recordId: status.recordId ?? "" };
+      const checked = checkUserSettings(next);
+      if (!checked.ok) {
+        return { ok: false, status: 422, error: "the settings are not valid", problems: checked.problems };
+      }
+      const record = await sdk.data.putWithFile(
+        {
+          type: SETTINGS_TYPE_ID,
+          originAppId: DRIVE_APP_ID,
+          originalFilename: USER_SETTINGS_FILE_NAME,
+        },
+        serializeUserSettings(next),
+        USER_SETTINGS_MIME_TYPE,
+      );
+      // The new file is the newest, so this tombstones the one it replaces.
+      await refreshLibrarySettings();
+      return { ok: true, settings: next, recordId: record.id };
+    };
+    const result = settingsWrites.then(run, run);
+    settingsWrites = result.catch(() => undefined);
+    return result;
+  }
+
   const sseClients = new Set<import("node:http").ServerResponse>();
   setInterval(() => {
     for (const client of sseClients) client.write(": ping\n\n");
@@ -1228,6 +1294,12 @@ async function main() {
       // no installable app may, which is also why the file they are stored in
       // sits in the Drive-only `starkeep` category.
       /^\/library\/stand-in-standards$/,
+      // The paired-device list, on the same reasoning: admin-web writes it while
+      // pairing, and it lives in the same Drive-only file. It holds device ids
+      // and labels and no keys. A loopback caller that edits it can hide a
+      // device from the list but cannot create or keep a key, since keys live
+      // in SSM and only Manager writes them.
+      /^\/library\/paired-devices(\/[^/]+)?$/,
       // The integrity check. An operator control over this machine's sync, and
       // one the phone has had a button for since before the laptop had any entry
       // point at all. The result is counts per channel — rows here, rows there,
@@ -3295,26 +3367,80 @@ async function main() {
           json(res, { error: "the settings are not valid", problems: requested.problems });
           return;
         }
-        const merged = standardsFromSettings(requested.settings, librarySettings.standards());
-        const checked = checkUserSettings(settingsFromStandards(merged));
-        if (!checked.ok) {
-          res.writeHead(422);
-          json(res, { error: "the settings are not valid", problems: checked.problems });
+        // Only the standards change. The trash window and the paired-device
+        // list ride along untouched.
+        const written = await writeLibrarySettings((current) => ({
+          ...current,
+          ...settingsFromStandards(
+            standardsFromSettings(requested.settings, standardsFromSettings(current)),
+          ),
+        }));
+        if (!written.ok) {
+          res.writeHead(written.status);
+          json(res, { error: written.error, problems: written.problems });
           return;
         }
-        const bytes = serializeUserSettings(settingsFromStandards(merged));
-        const record = await sdk.data.putWithFile(
-          {
-            type: SETTINGS_TYPE_ID,
-            originAppId: DRIVE_APP_ID,
-            originalFilename: USER_SETTINGS_FILE_NAME,
-          },
-          bytes,
-          USER_SETTINGS_MIME_TYPE,
-        );
-        // The new file is the newest, so this tombstones the one it replaces.
+        json(res, { ok: true, recordId: written.recordId, current: settingsFromStandards(librarySettings.standards()) });
+        return;
+      }
+
+      // The paired-device list: which phones admin-web has paired, kept in the
+      // library's settings file so it reaches every machine. Admin-web writes
+      // the entry before the device's key, and removes it after the key, so the
+      // list never misses a device that can sync. The list holds no keys.
+      //
+      // GET answers `devices: null` while this machine cannot read the winning
+      // settings file, which is different from an empty list.
+      if (path === "/library/paired-devices" && req.method === "GET") {
         await refreshLibrarySettings();
-        json(res, { ok: true, recordId: record.id, current: settingsFromStandards(librarySettings.standards()) });
+        const status = librarySettings.status();
+        const readable = !(status.set && status.settings === null);
+        json(res, {
+          devices: readable ? (status.settings?.pairedDevices ?? []) : null,
+          problems: status.problems,
+        });
+        return;
+      }
+
+      // POST /library/paired-devices — add or replace one entry.
+      // Body: { deviceId, label, appIds, pairedAt }.
+      if (path === "/library/paired-devices" && req.method === "POST") {
+        let body: Partial<PairedDevice>;
+        try {
+          body = JSON.parse((await readBody(req)) || "{}") as Partial<PairedDevice>;
+        } catch {
+          res.writeHead(400);
+          json(res, { error: "Body is not valid JSON" });
+          return;
+        }
+        const device = {
+          deviceId: body.deviceId,
+          label: body.label ?? null,
+          appIds: body.appIds,
+          pairedAt: body.pairedAt,
+        } as PairedDevice;
+        const written = await writeLibrarySettings((current) => withPairedDevice(current, device));
+        if (!written.ok) {
+          res.writeHead(written.status);
+          json(res, { error: written.error, problems: written.problems });
+          return;
+        }
+        json(res, { ok: true, devices: written.settings.pairedDevices ?? [] });
+        return;
+      }
+
+      // DELETE /library/paired-devices/{deviceId} — remove one entry. Removing
+      // an id the list does not hold writes nothing and succeeds.
+      const pairedDeviceMatch = path.match(/^\/library\/paired-devices\/([^/]+)$/);
+      if (pairedDeviceMatch && req.method === "DELETE") {
+        const deviceId = decodeURIComponent(pairedDeviceMatch[1]!);
+        const written = await writeLibrarySettings((current) => withoutPairedDevice(current, deviceId));
+        if (!written.ok) {
+          res.writeHead(written.status);
+          json(res, { error: written.error, problems: written.problems });
+          return;
+        }
+        json(res, { ok: true, devices: written.settings.pairedDevices ?? [] });
         return;
       }
 

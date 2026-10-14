@@ -69,6 +69,7 @@ import {
   parseLabelRef,
   STAND_IN_MIME_TYPES,
   isSettingsRecord,
+  SETTINGS_TYPE_ID,
   stampFor,
   hasMetadataTable,
 } from "@starkeep/protocol-primitives";
@@ -260,7 +261,79 @@ interface CachedDeviceKey {
   publicKeySpki: string;
   /** The Cognito user this device was paired for. Recorded, not yet enforced. */
   userId: string | null;
+  /**
+   * The apps this device may act as, as admin-web recorded them at pairing.
+   * Empty for a record written before pairing recorded them, which therefore
+   * acts as nothing: the device re-pairs.
+   */
+  appIds: readonly string[];
   fetchedAt: number;
+}
+
+/**
+ * The category the platform's own files live in — today only the library's
+ * settings file. A paired device may not write it. See {@link deviceMayCall}.
+ */
+const PLATFORM_CATEGORY = typeCategory(SETTINGS_TYPE_ID);
+
+/**
+ * Whether a paired device may call this route at all.
+ *
+ * A device acts as Starkeep Drive, and Drive may do anything to shared data,
+ * including deleting records and rewriting the library's settings file. A
+ * phone needs a small part of that: it exchanges records and moves bytes. So a
+ * device reaches exactly the routes the phone's sync transport and object
+ * storage adapter call, and nothing else. A stolen phone can then sync, which
+ * its key already allowed, but cannot delete records through the record routes
+ * or edit the paired-device list to hide itself from revocation.
+ *
+ * Writes that these routes allow are checked separately for the platform
+ * category: see {@link deviceWriteRefusal}.
+ */
+export function deviceMayCall(method: string, subPath: string): boolean {
+  if (method === "GET" && subPath === "/health") return true;
+  if (method === "POST" && subPath === "/sync/exchange") return true;
+  if (method === "POST" && subPath === "/files/presign") return true;
+  if (method === "GET" && /^\/files\/.+\/(presign|stat)$/.test(subPath)) return true;
+  if (method === "HEAD" && /^\/files\/.+$/.test(subPath)) return true;
+  return false;
+}
+
+/**
+ * Why a device's write to one of its permitted routes is refused, or null.
+ *
+ * The routes in {@link deviceMayCall} still let Drive write anything, and two of
+ * them carry writes: an exchange carries records, and a presign authorizes an
+ * upload. A phone never writes the platform category — it reads the settings
+ * file and leaves losing copies for the cloud to tombstone — so a device that
+ * tries is refused whole. The paired-device list lives in that file, and a
+ * stolen phone must not be able to remove itself from it.
+ *
+ * Checked in the gate, from the raw body, so every rule about devices sits in
+ * one place. A body that does not parse is left to the route, which refuses it.
+ */
+export function deviceWriteRefusal(method: string, subPath: string, body: Buffer): string | null {
+  if (method !== "POST") return null;
+  if (subPath !== "/sync/exchange" && subPath !== "/files/presign") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.toString("utf8") || "{}");
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const refusal = "A paired device may not write the platform's own files";
+  if (subPath === "/sync/exchange") {
+    const records = (parsed as { records?: unknown }).records;
+    if (!Array.isArray(records)) return null;
+    const touchesPlatform = records.some((r: unknown) => {
+      const type = typeof r === "object" && r !== null ? (r as { type?: unknown }).type : undefined;
+      return typeof type === "string" && typeCategory(type) === PLATFORM_CATEGORY;
+    });
+    return touchesPlatform ? refusal : null;
+  }
+  const key = (parsed as { key?: unknown }).key;
+  return typeof key === "string" && key.startsWith(`shared/${PLATFORM_CATEGORY}/`) ? refusal : null;
 }
 
 const deviceKeyCache = new Map<string, CachedDeviceKey>();
@@ -291,11 +364,14 @@ async function loadDevicePublicKey(deviceId: string): Promise<CachedDeviceKey | 
     );
     const raw = result.Parameter?.Value;
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as { publicKeySpki?: string; userId?: string };
+    const parsed = JSON.parse(raw) as { publicKeySpki?: string; userId?: string; appIds?: unknown };
     if (!parsed.publicKeySpki) return null;
     const entry: CachedDeviceKey = {
       publicKeySpki: parsed.publicKeySpki,
       userId: parsed.userId ?? null,
+      appIds: Array.isArray(parsed.appIds)
+        ? parsed.appIds.filter((a): a is string => typeof a === "string")
+        : [],
       fetchedAt: Date.now(),
     };
     deviceKeyCache.set(deviceId, entry);
@@ -2065,6 +2141,19 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (!(await loadAppHmacSecret(appId))) {
         return clientErr(`Unknown app: ${appId}`, 401);
       }
+      // Admin-web records which apps a device may act as. A phone acts as
+      // Starkeep Drive and nothing else, so its key is no key to Photos or Memo.
+      if (!device.appIds.includes(appId)) {
+        return clientErr(
+          `This device may act only as ${device.appIds.join(", ") || "no app"}, not ${appId}. Pair it again from admin-web.`,
+          403,
+        );
+      }
+      if (!deviceMayCall(method, subPath)) {
+        return clientErr(`A paired device may not call ${method} ${subPath}`, 403);
+      }
+      const writeRefusal = deviceWriteRefusal(method, subPath, bodyBytes);
+      if (writeRefusal) return clientErr(writeRefusal, 403);
       // No end-user token is required on this branch, and that is not an
       // oversight or a carve-out. A registered device key IS an end-user
       // credential: admin-web writes it against a named Cognito userId at
