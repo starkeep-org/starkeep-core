@@ -29,6 +29,7 @@ import {
   FILE_RECORDS_TABLE,
   FILE_RECORDS_COLUMNS,
   FILE_RECORDS_TABLE_INFO,
+  BYTE_COVERAGE_TABLE,
   appSyncableTableInfo,
   syncableIndexName,
 } from "@starkeep/shared-space-api";
@@ -418,6 +419,27 @@ export async function runAppInstallDdl(
           )
           .execute(db);
       }
+
+      // Framework-owned table for the cloud's own bytes watermark on this
+      // app's sync channel: per author, how far every file the cloud wants is
+      // in S3. The sync responder reports it so a phone knows which uploads it
+      // still owes, and stores it so each exchange checks only newer files.
+      //
+      // In the app's own schema, under the app's own role, for every app —
+      // the Drive channel is installed as an app and carries the shared files,
+      // and a files-enabled app's channel carries its private ones. Keeping it
+      // here rather than in `shared` is what stops one app's role from moving
+      // another channel's value. Never registered as a syncable table: it is
+      // one node's statement about its own storage, not data that travels.
+      await db.schema
+        .createTable(`${schemaName}.${BYTE_COVERAGE_TABLE}`)
+        .ifNotExists()
+        .addColumn("node_id", "text", (col) => col.primaryKey())
+        .addColumn("hlc", "text", (col) => col.notNull())
+        .execute();
+      await sql
+        .raw(`GRANT SELECT, INSERT, UPDATE ON ${schemaName}."${BYTE_COVERAGE_TABLE}" TO ${pgRole}`)
+        .execute(db);
 
       // Upsert namespace registry row so the pull path knows which tables exist.
       if (appSyncableTables.length > 0 || appSyncableFilesEnabled) {

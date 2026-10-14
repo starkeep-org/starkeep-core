@@ -227,7 +227,7 @@ describe("version-vector exchange", () => {
     expect(cloudCopy!.deletedAt).not.toBeNull();
   });
 
-  it("blob upload failure keeps peerWatermarks behind the unsent record (auto-retry)", async () => {
+  it("a file missing locally holds the peer's bytes watermark, not its rows watermark, and uploads once it exists", async () => {
     let time = 1000;
     const localClock = createHLCClock({
       nodeId: "local",
@@ -293,24 +293,28 @@ describe("version-vector exchange", () => {
 
     await engine.exchange();
 
-    // Strict contiguous-prefix shipping: r0 ships (blob present), r1 fails
-    // (no blob), r2 is NOT shipped this round even though its blob is
-    // present — otherwise we'd create a gap on cloud that misleads other
-    // clients into advancing past r2 and never receiving r1.
-    expect(await cloudDb.get(records[0]!.id)).not.toBeNull();
-    expect(await cloudDb.get(records[1]!.id)).toBeNull();
-    expect(await cloudDb.get(records[2]!.id)).toBeNull();
+    // Every row ships; the files this node holds upload, r2's included.
+    for (const record of records) expect(await cloudDb.get(record.id)).not.toBeNull();
+    expect(await cloudStorage.has(records[0]!.objectStorageKey)).toBe(true);
+    expect(await cloudStorage.has(records[1]!.objectStorageKey)).toBe(false);
+    expect(await cloudStorage.has(records[2]!.objectStorageKey)).toBe(true);
 
-    const pwm = await syncState.getPeerWatermarks();
-    expect(pwm["local"]).toEqual(records[0]!.updatedAt);
+    // The cloud reports its bytes watermark on the next exchange: through r0,
+    // stopping at r1's missing file, while its rows watermark covers r2.
+    await engine.exchange();
+    expect((await syncState.getPeerWatermarks())["local"]).toEqual(records[2]!.updatedAt);
+    expect((await syncState.getPeerByteWatermarks())?.["local"]).toEqual(records[0]!.updatedAt);
 
-    // Repair r1's blob locally and re-run. Now r1 ships, then r2 ships.
+    // The file turns up locally. The next round uploads it, because the
+    // cloud's bytes watermark still says it is owed.
     await localStorage.put(records[1]!.objectStorageKey, new Uint8Array([2]), {
       contentType: "image/jpeg",
     });
+    const repaired = await engine.exchange();
+    expect(repaired.uploaded).toBe(1);
+    expect(await cloudStorage.has(records[1]!.objectStorageKey)).toBe(true);
     await engine.exchange();
-    expect(await cloudDb.get(records[1]!.id)).not.toBeNull();
-    expect(await cloudDb.get(records[2]!.id)).not.toBeNull();
+    expect((await syncState.getPeerByteWatermarks())?.["local"]).toEqual(records[2]!.updatedAt);
   });
 
   it("first-round exchange with empty peer watermarks ships all records (cloud-reinstall recovery)", async () => {
@@ -459,7 +463,7 @@ describe("version-vector exchange", () => {
     expect(serializeHLC(pwm["local"]!)).toBe(serializeHLC(hlc));
   });
 
-  it("blocks later same-nodeId SR records when an earlier AR row's blob upload fails (cross-stream contiguous prefix)", async () => {
+  it("holds the bytes watermark at an AR row whose file is missing, across streams, while every row ships", async () => {
     let time = 1000;
     const localClock = createHLCClock({
       nodeId: "local",
@@ -487,9 +491,11 @@ describe("version-vector exchange", () => {
     ]);
 
     // HLC order on nodeId="local":
-    //   t1 — SR record (blob present)        → must ship
-    //   t2 — AR row    (blob MISSING locally) → blocked
-    //   t3 — SR record (blob present)        → must NOT ship (cross-stream prefix)
+    //   t1 — SR record (blob present)
+    //   t2 — AR row    (blob MISSING locally)
+    //   t3 — SR record (blob present)
+    // Every row ships. The cloud's bytes watermark must stop at t1 across
+    // both streams, or the AR file's upload would be forgotten.
     const srEarly = createDataRecord(
       {
         type: "@test/photo",
@@ -558,40 +564,35 @@ describe("version-vector exchange", () => {
     });
 
     await engine.exchange();
+    await engine.exchange();
 
-    // SR early ships (blob present, comes first in HLC order).
+    // Every row ships, the AR row included.
     expect(await cloudDb.get(srEarly.id)).not.toBeNull();
-    // AR row in middle is blocked (its blob can't be pushed).
     const cloudArPage = await cloudApp.applier.scanSince(
       "test-app",
       FILE_RECORDS_TABLE,
       {},
       1000,
     );
-    expect(cloudArPage.rows).toHaveLength(0);
-    // SR late MUST NOT ship even though its blob is fine — otherwise the
-    // peerWatermark would leapfrog the AR row and lose it forever.
-    expect(await cloudDb.get(srLate.id)).toBeNull();
+    expect(cloudArPage.rows).toHaveLength(1);
+    expect(await cloudDb.get(srLate.id)).not.toBeNull();
+    expect(await cloudStorage.has(srLate.objectStorageKey)).toBe(true);
+    expect(await cloudStorage.has(arKey)).toBe(false);
 
-    // peerWatermark sits at srEarly.updatedAt, behind the AR row.
-    const pwm = await syncState.getPeerWatermarks();
-    expect(serializeHLC(pwm["local"]!)).toBe(serializeHLC(srEarly.updatedAt));
+    // The bytes watermark sits at srEarly, behind the AR row, across streams.
+    const bytes = await syncState.getPeerByteWatermarks();
+    expect(serializeHLC(bytes!["local"]!)).toBe(serializeHLC(srEarly.updatedAt));
 
-    // Repair: put the missing AR blob locally and re-run. AR ships, then SR late.
+    // Repair: put the missing AR blob locally. The next round uploads it and
+    // the one after reports the bytes watermark past srLate.
     await localStorage.put(arKey, new Uint8Array([2]), {
       contentType: "image/jpeg",
     });
     await engine.exchange();
-
-    const afterPage = await cloudApp.applier.scanSince(
-      "test-app",
-      FILE_RECORDS_TABLE,
-      {},
-      1000,
-    );
-    expect(afterPage.rows).toHaveLength(1);
+    await engine.exchange();
     expect(await cloudStorage.has(arKey)).toBe(true);
-    expect(await cloudDb.get(srLate.id)).not.toBeNull();
+    const after = await syncState.getPeerByteWatermarks();
+    expect(serializeHLC(after!["local"]!)).toBe(serializeHLC(srLate.updatedAt));
   });
 
   it("AR/AW pagination: backlog exceeds a single scanSince page — cursor advances across pages so no rows strand", async () => {

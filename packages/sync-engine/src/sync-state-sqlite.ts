@@ -25,6 +25,8 @@ const WATERMARKS = "watermarks";
 const REPAIR_FLOORS = "repair_floors";
 const INBOUND_FLOORS = "inbound_floors";
 const PEER_WATERMARKS = "peer_watermarks";
+const BYTE_WATERMARKS = "byte_watermarks";
+const PEER_BYTE_WATERMARKS = "peer_byte_watermarks";
 const HLC_CLOCK = "hlc_clock";
 
 export interface SqliteSyncStateStoreOptions {
@@ -105,6 +107,18 @@ export function createSqliteSyncStateStore(
     },
     async setInboundFloors(floors: Watermarks): Promise<void> {
       setJson(INBOUND_FLOORS, floors);
+    },
+    async getByteWatermarks(): Promise<Watermarks | null> {
+      return getJson<Watermarks>(BYTE_WATERMARKS);
+    },
+    async setByteWatermarks(watermarks: Watermarks): Promise<void> {
+      setJson(BYTE_WATERMARKS, watermarks);
+    },
+    async getPeerByteWatermarks(): Promise<Watermarks | null> {
+      return getJson<Watermarks>(PEER_BYTE_WATERMARKS);
+    },
+    async setPeerByteWatermarks(watermarks: Watermarks): Promise<void> {
+      setJson(PEER_BYTE_WATERMARKS, watermarks);
     },
     async getHlcClockState(): Promise<
       { wallTime: number; counter: number } | null

@@ -157,7 +157,16 @@ export interface World {
     side: "local" | "cloud",
     id?: StarkeepId,
   ): Promise<RecordResidency>;
-  watermarks(): Promise<{ own: Watermarks; peer: Watermarks }>;
+  /**
+   * The rows watermarks (`own`, `peer`) and the bytes watermarks beside them.
+   * A bytes watermark is null until first written.
+   */
+  watermarks(): Promise<{
+    own: Watermarks;
+    peer: Watermarks;
+    ownBytes: Watermarks | null;
+    peerBytes: Watermarks | null;
+  }>;
 }
 
 /** Spec with all defaults resolved. */

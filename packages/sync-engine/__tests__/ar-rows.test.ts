@@ -156,18 +156,21 @@ describe("AR — app-record rows", () => {
 
   // ---- S3 blob failure (AR variants) ----
 
-  it("S3-011: AR lb + persistent upload-fails / 2r — record never ships (app namespace)", async () => {
+  it("S3-011: AR lb + persistent upload-fails / 2r — row ships, file stays owed (app namespace)", async () => {
     const w = await setupCase({
       dt: "AR",
       presence: "local-only",
       blob: "lb",
     });
-    await w.exchange({
+    const results = await w.exchange({
       rounds: 2,
       inject: { kind: "blob-upload-fails", recov: "persistent" },
     });
-    expect(await w.recordExists("cloud")).toBe(false);
+    expect(await w.recordExists("cloud")).toBe(true);
     expect(await w.blobExists("cloud")).toBe(false);
+    const { peerBytes } = await w.watermarks();
+    expect(peerBytes?.[w.local.nodeId]).toBeUndefined();
+    expect(results.every((r) => r.blocked)).toBe(true);
   });
 
   it("S3-012: AR cb + transient download-fails / 2r — round 2 pulls blob", async () => {

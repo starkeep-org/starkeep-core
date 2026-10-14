@@ -1,17 +1,18 @@
 /**
  * Round sizing: the byte budget, the item cap, and concurrent blob transfer.
  *
- * The round is the unit of lost work — a dropped response costs one round's
- * re-scan and re-upload — so on a channel carrying files the thing worth
- * bounding is bytes, not row count. Six photos is ~18 MB; six labels is
- * nothing. These tests pin the three consequences of that choice:
+ * Rows travel ahead of their files, so rows are bounded by the item cap alone
+ * and the byte budget bounds file transfers. Each transfer pass spends two
+ * allotments of it: a head allotment in timestamp order, which moves the bytes
+ * watermark, and an opportunistic one, smallest first, which lets small files
+ * past a large one. These tests pin the consequences:
  *
- *   1. Bytes bound a blob round, and blob-less rows spend none of the budget.
- *   2. An item larger than the whole budget still ships, alone — otherwise a
- *      single large video stalls its channel permanently.
+ *   1. Bytes bound a round's files, and rows spend none of the budget.
+ *   2. A file larger than the whole budget still goes, alone at the head —
+ *      otherwise a single large video stalls its author's files permanently —
+ *      and smaller files still go beside it.
  *   3. Transferring concurrently does not weaken the contiguous-prefix rule:
- *      what ships is still decided per author in HLC order, stopping at that
- *      author's first failure.
+ *      a bytes watermark still stops at an author's first missing file.
  */
 
 import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
@@ -132,18 +133,22 @@ async function seedAuthored(
 }
 
 describe("round budget", () => {
-  it("bounds a blob round by bytes, not by item count", async () => {
+  it("bounds a round's files by bytes, and its rows by items alone", async () => {
     const { local, cloud } = await twoSides();
     for (let i = 0; i < 10; i += 1) await seedBlobRecord(local, 3 * MB);
 
-    // 10 MB of budget against 3 MB items: three fit, the fourth does not.
+    // 10 MB of budget against 3 MB files: three fit the head allotment and
+    // three more the opportunistic one. Every row ships regardless.
     const result = await engineFor(local, cloud, createMemorySyncStateStore(), {
       maxBytes: 10 * MB,
       maxItems: 1000,
     }).exchange();
 
-    expect(result.shipped).toBe(3);
-    expect(result.outboundHasMore).toBe(true);
+    expect(result.shipped).toBe(10);
+    expect(result.outboundHasMore).toBe(false);
+    expect(result.uploaded).toBe(6);
+    expect(result.uploadedBytes).toBe(18 * MB);
+    expect(result.bytesHasMore).toBe(true);
   });
 
   it("does not charge blob-less rows against the byte budget", async () => {
@@ -161,30 +166,37 @@ describe("round budget", () => {
     expect(result.outboundHasMore).toBe(false);
   });
 
-  it("still ships a single item larger than the whole budget", async () => {
+  it("still sends a single file larger than the whole budget", async () => {
     const { local, cloud } = await twoSides();
     await seedBlobRecord(local, 400 * MB);
 
-    // Refusing it would stall the channel forever rather than making one
-    // round big, so the first item is always taken.
+    // Refusing it would stall the author's files forever rather than making
+    // one round big, so the first head file is always taken.
     const result = await engineFor(local, cloud, createMemorySyncStateStore(), {
       maxBytes: 10 * MB,
     }).exchange();
 
     expect(result.shipped).toBe(1);
+    expect(result.uploaded).toBe(1);
   });
 
-  it("an oversized item does not drag the rest of the round along with it", async () => {
+  it("sends small files beside an oversized one rather than behind it", async () => {
     const { local, cloud } = await twoSides();
-    await seedBlobRecord(local, 400 * MB);
-    for (let i = 0; i < 5; i += 1) await seedBlobRecord(local, 1 * MB);
+    const big = await seedBlobRecord(local, 400 * MB);
+    const small: StarkeepId[] = [];
+    for (let i = 0; i < 5; i += 1) small.push(await seedBlobRecord(local, 1 * MB));
 
     const result = await engineFor(local, cloud, createMemorySyncStateStore(), {
       maxBytes: 10 * MB,
     }).exchange();
 
-    expect(result.shipped).toBe(1);
-    expect(result.outboundHasMore).toBe(true);
+    // Every row ships. The big file is the head; the head allotment stops
+    // after it, and the five small files go in the opportunistic allotment.
+    expect(result.shipped).toBe(6);
+    expect(result.uploaded).toBe(6);
+    for (const id of [big, ...small]) {
+      expect(await cloud.storage.has((await local.db.get(id))!.objectStorageKey)).toBe(true);
+    }
   });
 
   it("the item cap still binds when bytes do not", async () => {
@@ -207,26 +219,26 @@ describe("round budget", () => {
 
     const syncState = createMemorySyncStateStore();
     const engine = engineFor(local, cloud, syncState, { maxBytes: 10 * MB });
-    for (let round = 0; round < 10; round += 1) {
-      const result = await engine.exchange();
-      if (!result.outboundHasMore) break;
-    }
+    const result = await engine.sync({ maxRounds: 20 });
 
+    expect(result.complete).toBe(true);
     for (const id of ids) {
       expect(await cloud.db.get(id), id).not.toBeNull();
+      expect(await cloud.storage.has((await local.db.get(id))!.objectStorageKey), id).toBe(true);
     }
+    // The peer's bytes watermark reached the last row: nothing is owed.
+    const last = (await local.db.get(ids[11]!))!;
+    expect((await syncState.getPeerByteWatermarks())?.["L"]).toEqual(last.updatedAt);
   });
 
-  it("concurrent transfer still truncates an author at its first failure", async () => {
+  it("concurrent transfer still stops the peer's bytes watermark at an author's first failure", async () => {
     const { local, cloud } = await twoSides();
     const ids: StarkeepId[] = [];
     for (let i = 0; i < 5; i += 1) ids.push(await seedBlobRecord(local, 1 * MB));
 
-    // Fail the third blob. Later blobs may well have uploaded already —
-    // transfers overlap — but the *shipping* decision is made afterwards in
-    // HLC order, so nothing past the failure may reach the peer. Otherwise the
-    // peer's coverage watermark would leapfrog the failed record and it would
-    // never be offered again.
+    // Fail the third file. Later files upload anyway — transfers overlap, and
+    // the bytes are content-addressed — but the peer's bytes watermark must
+    // not pass the failure, or that upload would never be owed again.
     const failing = (await local.db.get(ids[2]!))!.objectStorageKey;
     const realPutStream = cloud.storage.putStream.bind(cloud.storage);
     cloud.storage.putStream = async (key: string, ...rest: unknown[]) => {
@@ -234,17 +246,22 @@ describe("round budget", () => {
       return (realPutStream as (...a: unknown[]) => Promise<void>)(key, ...rest);
     };
 
-    const result = await engineFor(local, cloud, createMemorySyncStateStore(), {
+    const syncState = createMemorySyncStateStore();
+    const engine = engineFor(local, cloud, syncState, {
       maxBytes: 100 * MB,
       transferConcurrency: 4,
-    }).exchange();
+    });
+    const result = await engine.exchange();
 
-    expect(result.shipped).toBe(2);
-    expect(await cloud.db.get(ids[0]!)).not.toBeNull();
-    expect(await cloud.db.get(ids[1]!)).not.toBeNull();
-    expect(await cloud.db.get(ids[2]!)).toBeNull();
-    expect(await cloud.db.get(ids[3]!)).toBeNull();
-    expect(await cloud.db.get(ids[4]!)).toBeNull();
+    expect(result.shipped).toBe(5);
+    expect(result.uploaded).toBe(4);
+    expect(result.blocked).toBe(true);
+    for (const id of ids) expect(await cloud.db.get(id)).not.toBeNull();
+    expect(await cloud.storage.has(failing)).toBe(false);
+
+    await engine.exchange();
+    const second = (await local.db.get(ids[1]!))!;
+    expect((await syncState.getPeerByteWatermarks())?.["L"]).toEqual(second.updatedAt);
   });
 
   /**
@@ -283,7 +300,7 @@ describe("round budget", () => {
       maxItems: count,
       transferConcurrency: limit,
     }).exchange();
-    return { peak, shipped: result.shipped };
+    return { peak, shipped: result.uploaded };
   }
 
   it("never has more transfers in flight than transferConcurrency allows", async () => {
@@ -668,8 +685,8 @@ describe("records sharing one object key", () => {
   });
 
   it("still fails every record naming a key whose transfer failed", async () => {
-    // The flip side of sharing an outcome: one failure has to reach all of them,
-    // or a record ships with bytes that never arrived.
+    // The flip side of sharing an outcome: one failure has to reach all of
+    // them, or the peer's bytes watermark passes a file that never arrived.
     const { local, cloud } = await twoSides();
     const key = "apps/photos/syncable/identical-bytes.bin";
     const first = await seedSharingKey(local, key);
@@ -678,10 +695,14 @@ describe("records sharing one object key", () => {
       throw new Error("[test] permanent upload failure");
     };
 
-    const result = await engineFor(local, cloud, createMemorySyncStateStore()).sync();
+    const syncState = createMemorySyncStateStore();
+    const result = await engineFor(local, cloud, syncState).sync();
 
-    expect(await cloud.db.get(first)).toBeNull();
-    expect(await cloud.db.get(second)).toBeNull();
+    // Both rows ship; neither one's file is counted as held.
+    expect(await cloud.db.get(first)).not.toBeNull();
+    expect(await cloud.db.get(second)).not.toBeNull();
+    expect(await cloud.storage.has(key)).toBe(false);
+    expect((await syncState.getPeerByteWatermarks())?.["L"]).toBeUndefined();
     expect(result.complete).toBe(false);
   });
 
@@ -727,13 +748,11 @@ describe("records sharing one object key", () => {
 
 describe("the responder's half of the byte budget", () => {
   /**
-   * The budget the *caller* sets on what it will be handed back.
-   *
-   * Without it the cap is one-directional: a handset that limits itself to
-   * 10 MB outbound could still be handed a hundred blob-carrying records
-   * inbound and be expected to pull every one. The requester's own budget is
-   * covered above; this is the responder honouring what it was asked for,
-   * which is the side a phone depends on and the side nothing tested.
+   * Rows travel ahead of their files, so the responder charges no row for its
+   * file. The caller budgets its downloads itself, in its download pass. A
+   * responder that charged rows would put back exactly the wait this design
+   * removes: a desktop pulling a phone's round would get eight rows instead of
+   * a thousand because the eight named originals.
    */
   function responderFor(cloud: Side) {
     return createInProcessSyncTransport({
@@ -744,39 +763,9 @@ describe("the responder's half of the byte budget", () => {
     });
   }
 
-  it("ships back no more bytes than the caller allowed", async () => {
+  it("ships rows without charging their files against the caller's budget", async () => {
     const { cloud } = await twoSides();
     for (let i = 0; i < 6; i += 1) await seedBlobRecord(cloud, 3 * MB);
-
-    const response = await responderFor(cloud).exchange({
-      watermarks: {},
-      limit: 1000,
-      maxBytes: 10 * MB,
-    });
-
-    expect(response.records.length).toBeGreaterThan(0);
-    const bytes = response.records.reduce((sum, r) => sum + r.sizeBytes, 0);
-    expect(bytes).toBeLessThanOrEqual(10 * MB);
-    expect(response.hasMore).toBe(true);
-  });
-
-  it("falls back to its own maximum for a caller that names none", async () => {
-    // An older peer that omits the field gets the responder's default rather
-    // than an unbounded pull.
-    const { cloud } = await twoSides();
-    for (let i = 0; i < 6; i += 1) await seedBlobRecord(cloud, 10 * MB);
-
-    const response = await responderFor(cloud).exchange({ watermarks: {}, limit: 1000 });
-
-    const bytes = response.records.reduce((sum, r) => sum + r.sizeBytes, 0);
-    expect(bytes).toBeLessThanOrEqual(25 * MB);
-  });
-
-  it("still ships one record larger than the whole budget", async () => {
-    // Otherwise a single large video stalls the channel permanently: it never
-    // fits, so it never ships, so nothing behind it ever moves either.
-    const { cloud } = await twoSides();
-    await seedBlobRecord(cloud, 50 * MB);
 
     const response = await responderFor(cloud).exchange({
       watermarks: {},
@@ -784,21 +773,32 @@ describe("the responder's half of the byte budget", () => {
       maxBytes: 1 * MB,
     });
 
-    expect(response.records).toHaveLength(1);
+    expect(response.records).toHaveLength(6);
+    expect(response.hasMore).toBe(false);
   });
 
-  it("does not charge blob-less rows against it", async () => {
+  it("still bounds rows by the caller's item cap", async () => {
     const { cloud } = await twoSides();
     for (let i = 0; i < 6; i += 1) await seedBlobless(cloud);
 
     const response = await responderFor(cloud).exchange({
       watermarks: {},
-      limit: 1000,
+      limit: 4,
       maxBytes: 1,
     });
 
-    expect(response.records).toHaveLength(6);
-    expect(response.hasMore).toBe(false);
+    expect(response.records).toHaveLength(4);
+    expect(response.hasMore).toBe(true);
+  });
+
+  it("reports its bytes watermark with every response", async () => {
+    const { cloud } = await twoSides();
+    const id = await seedBlobRecord(cloud, 1 * MB);
+
+    const response = await responderFor(cloud).exchange({ watermarks: {}, limit: 1000 });
+
+    // The file is in the responder's storage, so the watermark covers its row.
+    expect(response.responderByteWatermarks?.["C"]).toEqual((await cloud.db.get(id))!.updatedAt);
   });
 });
 
@@ -807,8 +807,8 @@ describe("sync() termination", () => {
     const { local, cloud } = await twoSides();
     for (let i = 0; i < 5; i += 1) await seedBlobRecord(local, 3 * MB);
 
-    // The earliest record's blob never uploads, so the contiguous-prefix rule
-    // holds the whole author back and every round is byte-identical.
+    // The earliest record's file never uploads. Rows all ship, the other
+    // files all go, and then every round is byte-identical.
     const oldest = (await local.db.query({})).records.sort((a, b) =>
       a.updatedAt.wallTime - b.updatedAt.wallTime,
     )[0]!;
@@ -823,8 +823,13 @@ describe("sync() termination", () => {
       maxItems: 100,
     }).sync({ maxRounds: 500 });
 
-    expect(result.rounds).toBeLessThan(5);
-    expect(result.shipped).toBe(0);
+    expect(result.rounds).toBeLessThan(12);
+    expect(result.shipped).toBe(5);
+    // The stuck file does not keep the files behind it from going.
+    for (const record of (await local.db.query({})).records) {
+      if (record.id === oldest.id) continue;
+      expect(await cloud.storage.has(record.objectStorageKey)).toBe(true);
+    }
     // Not "complete" — work remains — and `stalled` says which of the two it
     // is, so a caller can tell "finished" from "wedged".
     expect(result.complete).toBe(false);
@@ -832,12 +837,11 @@ describe("sync() termination", () => {
   });
 
   it("does not report complete when the only record's upload keeps failing", async () => {
-    // The case the scan signals cannot see. One record, a budget it fits
-    // inside, and a transfer that never succeeds: both scans drain, so
-    // `hasMore` and `outboundHasMore` are false and the loop used to take the
-    // "both directions drained" exit — returning complete, not stalled, for a
-    // record that is not in the cloud. That is the value `/sync/now` returns
-    // and the one the phone's Sync button reads.
+    // The case the scan signals cannot see. Both row scans drain, so
+    // `hasMore` and `outboundHasMore` are false, and the row reached the peer
+    // — but its file did not. Reporting complete here is a "backup finished"
+    // for a file that is not in the cloud; that is the value `/sync/now`
+    // returns and the one the phone's Sync button reads.
     const { local, cloud } = await twoSides();
     const id = await seedBlobRecord(local, 1 * MB);
     const record = (await local.db.get(id))!;
@@ -849,11 +853,11 @@ describe("sync() termination", () => {
       maxBytes: 100 * MB,
     }).sync();
 
-    expect(result.shipped).toBe(0);
-    expect(await cloud.db.get(id)).toBeNull();
+    expect(result.shipped).toBe(1);
+    expect(await cloud.db.get(id)).not.toBeNull();
+    expect(await cloud.storage.has(record.objectStorageKey)).toBe(false);
     expect(result.complete).toBe(false);
     expect(result.stalled).toBe(true);
-    expect(record.objectStorageKey).not.toBe("");
   });
 
   it("does not report complete when an inbound blob keeps failing", async () => {
@@ -955,16 +959,17 @@ describe("repair floor retirement", () => {
     const engine = engineFor(local, cloud, syncState, { maxBytes: 100 * MB });
     await engine.sync();
 
-    // A hole in the middle: MAX(updated_at) is unchanged, so the coverage
-    // report is unchanged and only a count comparison can see it.
+    // A hole in the middle, row and file: MAX(updated_at) is unchanged, so
+    // neither watermark the cloud reports moves, and only a count comparison
+    // can see it.
     await loseFromMiddle(cloud, ids[2]!);
     await engine.verify();
     expect(Object.keys(await syncState.getRepairFloors())).toHaveLength(1);
 
-    // Now the re-ship cannot complete. `outboundHasMore` describes the *scan*,
-    // which fit the budget perfectly — so it stays false while the shipment is
-    // silently truncated at the failed blob. Retiring on that reads "repair
-    // done" and discards the only thing still asking for the row.
+    // The row re-ships, but the file's upload fails. The cloud's bytes
+    // watermark sits above the hole, so the floor is the only thing that
+    // keeps the upload pass offering that file: retiring it now would read
+    // "repair done" and abandon the file.
     const lost = ids[2]!;
     const lostKey = (await local.db.get(lost))!.objectStorageKey;
     const realPutStream = cloud.storage.putStream.bind(cloud.storage);
@@ -974,16 +979,38 @@ describe("repair floor retirement", () => {
     };
     await engine.sync();
 
-    expect(await cloud.db.get(lost)).toBeNull();
+    expect(await cloud.db.get(lost)).not.toBeNull();
+    expect(await cloud.storage.has(lostKey)).toBe(false);
     expect(
       Object.keys(await syncState.getRepairFloors()),
-      "the floor is the only thing still asking for this row",
+      "the floor is the only thing still asking for this file",
     ).toHaveLength(1);
 
     // And when the transfer recovers, the still-armed floor completes the job.
     cloud.storage.putStream = realPutStream as typeof cloud.storage.putStream;
     await engine.sync();
-    expect(await cloud.db.get(lost)).not.toBeNull();
+    expect(await cloud.storage.has(lostKey)).toBe(true);
+    expect(await syncState.getRepairFloors()).toEqual({});
+  });
+
+  it("re-sends a file the peer lost along with its row", { timeout: 30_000 }, async () => {
+    // The cloud's bytes watermark sits above a hole exactly as its rows
+    // watermark does. Without the floor lowering where the upload pass starts,
+    // the repair would put the row back and leave its file missing for good.
+    const { local, cloud } = await twoSides();
+    const ids: StarkeepId[] = [];
+    for (let i = 0; i < 4; i += 1) ids.push(await seedBlobRecord(local, 1 * MB));
+    const syncState = createMemorySyncStateStore();
+    const engine = engineFor(local, cloud, syncState, { maxBytes: 100 * MB });
+    await engine.sync();
+
+    const lostKey = (await local.db.get(ids[1]!))!.objectStorageKey;
+    await loseFromMiddle(cloud, ids[1]!);
+    await engine.verify();
+    await engine.sync();
+
+    expect(await cloud.db.get(ids[1]!)).not.toBeNull();
+    expect(await cloud.storage.has(lostKey)).toBe(true);
     expect(await syncState.getRepairFloors()).toEqual({});
   });
 
@@ -1016,7 +1043,7 @@ describe("repair floor retirement", () => {
     expect(result.shipped).toBeLessThanOrEqual(8);
   });
 
-  it("retires only the authors whose shipment was not truncated", { timeout: 30_000 }, async () => {
+  it("retires only the authors whose repaired files all uploaded", { timeout: 30_000 }, async () => {
     // Retirement is per author because failure is. One device's failed upload
     // must not discard a repair armed for another's.
     const { local, cloud } = await twoSides();

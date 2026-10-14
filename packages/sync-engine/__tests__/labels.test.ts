@@ -1,6 +1,6 @@
 import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
 import { describe, it, expect } from "vitest";
-import { createDataRecord, generateId, type StarkeepId } from "@starkeep/protocol-primitives";
+import { compareHLC, createDataRecord, generateId, type StarkeepId } from "@starkeep/protocol-primitives";
 import { createSyncEngine } from "../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../src/transports/in-process-transport.js";
 import { buildSide } from "./sync-test-harness/side.js";
@@ -47,9 +47,9 @@ describe("label sync", () => {
   }
 
   /**
-   * A record with a real blob key whose bytes are *missing* locally, so
-   * `transferFile` fails and the engine halts that node for the round. The
-   * seedRecord above has an empty key, which the engine treats as blobless.
+   * A record with a real blob key whose bytes are *missing* locally, so this
+   * node cannot upload the file. The seedRecord above has an empty key, which
+   * the engine treats as blobless.
    */
   async function seedRecordWithMissingBlob(side: Side): Promise<StarkeepId> {
     const id = generateId() as StarkeepId;
@@ -424,48 +424,48 @@ describe("label sync", () => {
     expect((await cloud.db.getLabelsByRecordIds([recordId])).get(recordId)).toHaveLength(1);
   });
 
-  it("blocks a later same-node LABEL when an earlier record's blob transfer fails", async () => {
-    // The contiguous-prefix rule has to hold ACROSS the two streams, not
-    // within each. HLC order on node L:
-    //   t1 — record, blob present  → ships
-    //   t2 — record, blob MISSING  → blocked
-    //   t3 — label on the t1 record → must NOT ship
-    // If the label shipped, the peer watermark would leapfrog the blocked
-    // record and it would never be re-sent. Nothing here corrupts data — LWW
-    // is idempotent — which is exactly why it needs an explicit test.
+  it("ships a later same-node label past a record whose file is missing, and keeps the file owed", async () => {
+    // HLC order on node L:
+    //   t1 — record, file present
+    //   t2 — record, file MISSING locally
+    //   t3 — label on the t1 record
+    // Rows travel ahead of files, so all three ship. The debt for t2's file
+    // lives in the cloud's bytes watermark, which must stop before t2 —
+    // across the label stream as well as the record stream.
     const { local, cloud } = await twoSides();
 
     const early = await seedRecord(local);
-    const blocked = await seedRecordWithMissingBlob(local);
+    const missing = await seedRecordWithMissingBlob(local);
     await seedLabel(local, early, "alpha", "faces-detected");
 
     const syncState = createMemorySyncStateStore();
-    await driveEngine(local, cloud, { syncState }).exchange();
+    const engine = driveEngine(local, cloud, { syncState });
+    await engine.exchange();
+    await engine.exchange();
 
     expect(await cloud.db.get(early)).not.toBeNull();
-    expect(await cloud.db.get(blocked)).toBeNull();
-    // The label sorts after the blocked record on the same node, so it waits.
-    expect(await cloud.db.getLabel(early, "alpha", "faces-detected", "")).toBeNull();
-
-    const peer = await syncState.getPeerWatermarks();
-    expect(peer["L"]).toEqual((await local.db.get(early))!.updatedAt);
-
-    // Repair the blob and re-run: the record ships, and the label follows.
-    await local.storage.put(
-      (await local.db.get(blocked))!.objectStorageKey,
-      new Uint8Array([1]),
-      { contentType: "image/jpeg" },
-    );
-    await driveEngine(local, cloud, { syncState }).exchange();
-
-    expect(await cloud.db.get(blocked)).not.toBeNull();
+    expect(await cloud.db.get(missing)).not.toBeNull();
     expect(await cloud.db.getLabel(early, "alpha", "faces-detected", "")).not.toBeNull();
+
+    const missingRow = (await local.db.get(missing))!;
+    const peerBytes = (await syncState.getPeerByteWatermarks())!;
+    expect(
+      peerBytes["L"] === undefined || compareHLC(peerBytes["L"], missingRow.updatedAt) < 0,
+    ).toBe(true);
+
+    // The file turns up; the next rounds upload it and the watermark passes.
+    await local.storage.put(missingRow.objectStorageKey, new Uint8Array([1]), {
+      contentType: "image/jpeg",
+    });
+    await engine.exchange();
+    await engine.exchange();
+    expect(await cloud.storage.has(missingRow.objectStorageKey)).toBe(true);
+    const after = (await syncState.getPeerByteWatermarks())!;
+    expect(compareHLC(after["L"]!, missingRow.updatedAt)).toBeGreaterThanOrEqual(0);
   });
 
-  it("ships a label that precedes the failure, and holds only what follows it", async () => {
-    // The mirror of the case above: a label earlier in the same node's HLC
-    // order than the failure is part of the contiguous prefix and must ship,
-    // or a single bad blob would stall label delivery indefinitely.
+  it("ships labels on both sides of a missing file in one round", async () => {
+    // A single bad file used to stall every label behind it on the same node.
     const { local, cloud } = await twoSides();
 
     const early = await seedRecord(local);
@@ -476,7 +476,7 @@ describe("label sync", () => {
     await driveEngine(local, cloud).exchange();
 
     expect(await cloud.db.getLabel(early, "alpha", "before", "")).not.toBeNull();
-    expect(await cloud.db.getLabel(early, "alpha", "after", "")).toBeNull();
+    expect(await cloud.db.getLabel(early, "alpha", "after", "")).not.toBeNull();
   });
 
   it("the responder skips inbound labels from a node halted by a failed app row", async () => {

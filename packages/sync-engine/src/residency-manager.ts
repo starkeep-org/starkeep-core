@@ -50,10 +50,8 @@ import {
   type ResidentSetIndex,
 } from "./resident-set.js";
 
-/** Label namespace for platform-level record constraints. */
-export const STARKEEP_LABEL_APP_ID = "starkeep";
-/** Record label forbidding these bytes from reaching cloud storage. */
-export const NO_CLOUD_LABEL_KEY = "no-cloud";
+export { NO_CLOUD_LABEL_KEY, STARKEEP_LABEL_APP_ID } from "./file-rows.js";
+import { NO_CLOUD_LABEL_KEY, STARKEEP_LABEL_APP_ID } from "./file-rows.js";
 
 /** The resident-set group of a file no stand-in can replace. */
 export const KEPT_GROUP = "kept";

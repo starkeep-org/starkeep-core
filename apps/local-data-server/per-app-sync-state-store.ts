@@ -19,6 +19,8 @@ export function createPerAppSyncStateStore(
   const peerWatermarksKey = `${appId}:peer_watermarks`;
   const repairFloorsKey = `${appId}:repair_floors`;
   const inboundFloorsKey = `${appId}:inbound_floors`;
+  const byteWatermarksKey = `${appId}:byte_watermarks`;
+  const peerByteWatermarksKey = `${appId}:peer_byte_watermarks`;
 
   // sql.raw("?") leaves positional placeholders in the compiled SQL so the
   // statements can be prepared once here and bound per call below.
@@ -76,6 +78,18 @@ export function createPerAppSyncStateStore(
     },
     async setInboundFloors(floors: Watermarks): Promise<void> {
       setJson(inboundFloorsKey, floors);
+    },
+    async getByteWatermarks(): Promise<Watermarks | null> {
+      return getJson<Watermarks>(byteWatermarksKey);
+    },
+    async setByteWatermarks(watermarks: Watermarks): Promise<void> {
+      setJson(byteWatermarksKey, watermarks);
+    },
+    async getPeerByteWatermarks(): Promise<Watermarks | null> {
+      return getJson<Watermarks>(peerByteWatermarksKey);
+    },
+    async setPeerByteWatermarks(watermarks: Watermarks): Promise<void> {
+      setJson(peerByteWatermarksKey, watermarks);
     },
     // HLC clock state is shared across apps — pass through unmodified.
     getHlcClockState() {

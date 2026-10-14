@@ -44,6 +44,7 @@ export {
 export { quoteIdent, validateTableName, RESERVED_COLUMN_NAMES } from "./app-syncable/validation.js";
 export {
   FILE_RECORDS_TABLE,
+  BYTE_COVERAGE_TABLE,
   FILE_RECORDS_TABLE_INFO,
   FILE_RECORDS_COLUMNS,
   RESERVED_TABLE_NAMES,

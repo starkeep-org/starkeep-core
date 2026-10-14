@@ -6,6 +6,8 @@ export type {
   SyncTransport,
   FileSyncManifest,
   FileSyncEngine,
+  TransferOutcome,
+  ByteCoverageStore,
   ChangeEventType,
   ChangeEvent,
   ChangeListener,
@@ -93,7 +95,10 @@ export {
   type RecordResidency,
   type RecordResidencyState,
 } from "./residency.js";
-export { createInProcessSyncTransport } from "./transports/in-process-transport.js";
+export {
+  createInProcessSyncTransport,
+  createMemoryByteCoverageStore,
+} from "./transports/in-process-transport.js";
 export {
   createHttpSyncTransport,
   type HttpSyncTransportOptions,
@@ -163,3 +168,8 @@ export {
   type LibrarySettingsStatus,
   type RetentionWindow,
 } from "./library-settings.js";
+export {
+  advanceBytesWatermark,
+  clampToRows,
+} from "./file-rows.js";
+export { planByteWindow, type ByteWindowPlan, type ByteWindowItem } from "./byte-window.js";

@@ -262,6 +262,39 @@ describe("install DDL for the photos manifest", () => {
   });
 });
 
+describe("the cloud's bytes-watermark table", () => {
+  // The sync responder stores, per author, how far every file it wants is in
+  // S3. Each channel keeps its own, in its own schema under its own role, so
+  // no app's role can move another channel's value.
+  it("is created in the app's own schema and granted to the app's role only", async () => {
+    await installPhotos();
+    const s = stmts();
+    expect(
+      s.some((t) => t.startsWith("create table if not exists") && t.includes('"app_photos"."_starkeep_byte_coverage"')),
+    ).toBe(true);
+    expect(s).toContain('GRANT SELECT, INSERT, UPDATE ON app_photos."_starkeep_byte_coverage" TO starkeep_app_photos');
+    // Never to PUBLIC, and never in `shared`.
+    expect(s.some((t) => t.includes("_starkeep_byte_coverage") && t.includes("PUBLIC"))).toBe(false);
+    expect(s.some((t) => t.includes('"shared"."_starkeep_byte_coverage"'))).toBe(false);
+  });
+
+  it("is never registered as a syncable table", async () => {
+    await installPhotos();
+    const ns = stmts().find((t) => t.includes('insert into "shared"."app_syncable_namespaces"'))!;
+    const registered = state.queries.find((q) => q.text === ns)!;
+    expect(JSON.stringify(registered.params)).not.toContain("_starkeep_byte_coverage");
+  });
+
+  it("is created for Drive, whose channel carries the shared files", async () => {
+    await runAppInstallDdl(opts, "starkeep-drive", [], true, [], false);
+    const s = stmts();
+    expect(s.some((t) => t.includes('"app_starkeep_drive"."_starkeep_byte_coverage"'))).toBe(true);
+    expect(s).toContain(
+      'GRANT SELECT, INSERT, UPDATE ON app_starkeep_drive."_starkeep_byte_coverage" TO starkeep_app_starkeep_drive',
+    );
+  });
+});
+
 describe("install DDL for Drive (fileAccessAll)", () => {
   it("writes zero access_grants rows but grants every category metadata table", async () => {
     await runAppInstallDdl(opts, "starkeep-drive", [], true, [], false);

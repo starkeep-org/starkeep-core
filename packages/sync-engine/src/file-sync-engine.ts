@@ -1,6 +1,6 @@
 import { FileUriTransferRefused } from "@starkeep/storage-adapter";
 import type { ObjectStorageAdapter, PutStreamOptions } from "@starkeep/storage-adapter";
-import type { FileSyncEngine, FileSyncManifest } from "./types.js";
+import type { FileSyncEngine, FileSyncManifest, TransferOutcome } from "./types.js";
 
 const HEX_SHA256 = /^[a-f0-9]{64}$/;
 
@@ -40,7 +40,7 @@ export function createFileSyncEngine(): FileSyncEngine {
    */
   interface InFlight {
     readonly destination: ObjectStorageAdapter;
-    readonly promise: Promise<boolean>;
+    readonly promise: Promise<TransferOutcome>;
   }
   const inFlight = new Map<string, InFlight>();
 
@@ -48,7 +48,7 @@ export function createFileSyncEngine(): FileSyncEngine {
     manifest: FileSyncManifest,
     source: ObjectStorageAdapter,
     destination: ObjectStorageAdapter,
-  ): Promise<boolean> {
+  ): Promise<TransferOutcome> {
     const key = manifest.objectStorageKey;
     const running = inFlight.get(key);
     if (!running) return start(manifest, source, destination);
@@ -73,8 +73,8 @@ export function createFileSyncEngine(): FileSyncEngine {
     // Handing that `false` to someone who asked to fetch a photo reports a
     // failure for a transfer that was never attempted, and the placeholder stays
     // on screen. So the other direction runs on its own.
-    return running.promise.then((ok) =>
-      ok ? true : transfer(manifest, source, destination),
+    return running.promise.then((outcome) =>
+      outcome === "failed" ? transfer(manifest, source, destination) : "present",
     );
   }
 
@@ -82,7 +82,7 @@ export function createFileSyncEngine(): FileSyncEngine {
     manifest: FileSyncManifest,
     source: ObjectStorageAdapter,
     destination: ObjectStorageAdapter,
-  ): Promise<boolean> {
+  ): Promise<TransferOutcome> {
     const key = manifest.objectStorageKey;
     const entry: InFlight = {
       destination,
@@ -101,12 +101,12 @@ export function createFileSyncEngine(): FileSyncEngine {
     manifest: FileSyncManifest,
     source: ObjectStorageAdapter,
     destination: ObjectStorageAdapter,
-  ): Promise<boolean> {
+  ): Promise<TransferOutcome> {
     const key = manifest.objectStorageKey;
     // Destination already has it — no-op success. Lets callers fire-and-
     // forget transferFile without needing to HEAD first.
     if (await destination.has(key)) {
-      return true;
+      return "present";
     }
     const expectedSha256Hex = expectedHashFor(manifest);
     const options: PutStreamOptions = {
@@ -133,7 +133,7 @@ export function createFileSyncEngine(): FileSyncEngine {
     if (fileUri !== null && destination.putFromFileUri) {
       try {
         await destination.putFromFileUri(key, fileUri, options);
-        return true;
+        return "transferred";
       } catch (err) {
         // A refusal is contractually raised before anything was sent, so
         // retrying costs nothing but the presign round trip. Any other error
@@ -148,7 +148,7 @@ export function createFileSyncEngine(): FileSyncEngine {
     // it wasn't slow, it was impossible. Nothing here materializes the body.
     const body = await source.getStream(key);
     if (!body) {
-      return false;
+      return "failed";
     }
     try {
       await destination.putStream(key, body, options);
@@ -161,7 +161,15 @@ export function createFileSyncEngine(): FileSyncEngine {
       await body.cancel().catch(() => {});
       throw err;
     }
-    return true;
+    return "transferred";
+  }
+
+  async function transferBoolean(
+    manifest: FileSyncManifest,
+    source: ObjectStorageAdapter,
+    destination: ObjectStorageAdapter,
+  ): Promise<boolean> {
+    return (await transfer(manifest, source, destination)) !== "failed";
   }
 
   return {
@@ -169,7 +177,9 @@ export function createFileSyncEngine(): FileSyncEngine {
       return inFlight.has(key);
     },
 
-    transferFile: transfer,
+    transferFile: transferBoolean,
+
+    transferFileOutcome: transfer,
 
     // Same mechanics as transferFile; a distinct entry point because the two
     // have different *authority*. transferFile runs inside a sync round and is
@@ -177,6 +187,6 @@ export function createFileSyncEngine(): FileSyncEngine {
     // direct request and is not. Keeping them separate means a call site
     // cannot accidentally acquire the ability to ignore policy — it has to
     // name the intent.
-    fetchBlobOnDemand: transfer,
+    fetchBlobOnDemand: transferBoolean,
   };
 }

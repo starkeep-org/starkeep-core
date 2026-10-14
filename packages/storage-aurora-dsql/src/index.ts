@@ -17,3 +17,9 @@ export {
   toCanonicalTimestamp,
   fromPgRows,
 } from "./pg-timestamps.js";
+export {
+  BYTE_COVERAGE_TABLE,
+  appSchemaName,
+  createDsqlByteCoverageStore,
+  type DsqlByteCoverageStore,
+} from "./byte-coverage.js";

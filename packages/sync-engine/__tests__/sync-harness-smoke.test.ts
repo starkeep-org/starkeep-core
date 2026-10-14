@@ -46,7 +46,7 @@ describe("sync test harness — smoke", () => {
     expect(cloudCopy?.contentHash).toBe(localAfterUpdate!.contentHash);
   });
 
-  it("S3-001: SR / local-only + persistent blob-upload-fails / 2r → record never ships, watermark stays empty", async () => {
+  it("S3-001: SR / local-only + persistent blob-upload-fails / 2r → row ships, peer's bytes watermark stays empty", async () => {
     const w = await setupCase({
       dt: "SR",
       presence: "local-only",
@@ -58,11 +58,12 @@ describe("sync test harness — smoke", () => {
       inject: { kind: "blob-upload-fails", recov: "persistent" },
     });
 
-    expect(await w.recordExists("cloud")).toBe(false);
+    expect(await w.recordExists("cloud")).toBe(true);
     expect(await w.blobExists("cloud")).toBe(false);
 
-    const { peer } = await w.watermarks();
-    expect(peer[w.local.nodeId]).toBeUndefined();
+    const { peer, peerBytes } = await w.watermarks();
+    expect(peer[w.local.nodeId]).toBeDefined();
+    expect(peerBytes?.[w.local.nodeId]).toBeUndefined();
   });
 
   it("S3-002: SR / local-only + transient blob-upload-fails / 2r → round 2 succeeds, record converges", async () => {

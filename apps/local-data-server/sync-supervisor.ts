@@ -7,6 +7,7 @@ import {
   createSyncEngine,
 } from "../../packages/sync-engine/src/index.js";
 import type {
+  ExchangeResult,
   SyncEngine,
   SyncStateStore,
   AppSyncableNamespace,
@@ -543,6 +544,33 @@ export function createSyncSupervisor(
     return entry.runner.run(body);
   }
 
+  /**
+   * A per-round logger for one engine's `sync()`.
+   *
+   * One line per round that moved anything, so the log answers "when did this
+   * node pull that row, and how long did its bytes take". An idle poll is left
+   * out: it is a line every thirty seconds per engine, and the absence of a line
+   * already says nothing arrived.
+   */
+  function roundLogger(entry: EngineEntry): (result: ExchangeResult, round: number) => void {
+    let roundStartedAt = Date.now();
+    return (result, round) => {
+      const elapsedMs = Date.now() - roundStartedAt;
+      roundStartedAt = Date.now();
+      const moved =
+        result.applied + result.shipped + result.elided + result.landed + result.uploaded;
+      if (moved === 0 && !result.blocked) return;
+      console.log(
+        `[sync] app=${entry.appId} round=${round} elapsedMs=${elapsedMs} ` +
+          `applied=${result.applied} landed=${result.landed} landedBytes=${result.landedBytes} ` +
+          `elided=${result.elided} shipped=${result.shipped} uploaded=${result.uploaded} ` +
+          `uploadedBytes=${result.uploadedBytes} blocked=${result.blocked} ` +
+          `hasMore=${result.hasMore} outboundHasMore=${result.outboundHasMore} ` +
+          `bytesHasMore=${result.bytesHasMore}`,
+      );
+    };
+  }
+
   async function driveDrain(entry: EngineEntry): Promise<void> {
     try {
       // sync(), not one exchange(): a round is bounded by the byte budget, so a
@@ -550,7 +578,7 @@ export function createSyncSupervisor(
       // large first sync take hours of wall clock doing nothing in between.
       // The loop stops as soon as both directions are drained, which in steady
       // state is after the first (pull-only) round.
-      await entry.engine.sync({ signal: signalFor(entry) });
+      await entry.engine.sync({ signal: signalFor(entry), onRound: roundLogger(entry) });
       entry.lastExchangeAt = new Date().toISOString();
       entry.lastError = null;
       entry.backoffMs = exchangeIntervalMs;
@@ -759,7 +787,7 @@ export function createSyncSupervisor(
         Array.from(engines.values()).map(async (entry) => {
           await withEngine(entry, async () => {
             try {
-              await entry.engine.sync({ signal: signalFor(entry) });
+              await entry.engine.sync({ signal: signalFor(entry), onRound: roundLogger(entry) });
               entry.lastExchangeAt = new Date().toISOString();
               entry.lastError = null;
               entry.backoffMs = exchangeIntervalMs;
@@ -788,6 +816,7 @@ export function createSyncSupervisor(
             entry.engine.sync({
               maxRounds: SYNC_NOW_MAX_ROUNDS,
               signal: signalFor(entry),
+              onRound: roundLogger(entry),
             }),
           );
           applied += r.applied;
