@@ -35,6 +35,7 @@ import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
 import {
   AuroraDsqlDatabaseAdapter,
+  createDsqlByteCoverageStore,
   applyPgTypeParsers,
   postgresCompiler,
 } from "@starkeep/storage-aurora-dsql";
@@ -4124,6 +4125,16 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           syncSharedRecords: true,
           keepLiveOnTombstone: (current, _incoming, exchange) =>
             keepCanonicalOfArchivedOriginal(db, current, exchange),
+          // The cloud's own bytes watermark for the Drive channel, in Drive's
+          // schema under Drive's role. A `no-cloud` file is one the cloud will
+          // never hold — the upload route refuses it — so the walk counts it
+          // as held rather than stopping there forever.
+          byteCoverage: db.byteCoverageStore(DRIVE_APP_ID),
+          declinesBlob: (key) => keyIsCloudExcluded(db, key),
+          // The cloud stamps originals from the settings file, and a stamp is
+          // permanent, so a settings row waits for its bytes; see
+          // `requiresFileToApply`.
+          requiresFileToApply: isSettingsRecord,
           // The Drive channel is where most stand-ins, originals and labels
           // reach the cloud, and its storage is already Drive's. A settings
           // file that arrived is read first, then every original a node
@@ -4163,9 +4174,39 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           },
           objectStorage: storage,
           syncSharedRecords: false,
+          // In this app's schema, under this app's role, over the same
+          // connection the applier uses.
+          byteCoverage: createDsqlByteCoverageStore(source.client, appId),
         });
       }
+      const exchangeStartedAt = Date.now();
       const response = await transport.exchange(body);
+      // One structured line per exchange. Without it the cloud leg of a sync
+      // was invisible: S3 `LastModified` dates a blob, but nothing dated a row's
+      // arrival, and nothing said which node sent it. CloudWatch stamps the time.
+      console.log(
+        JSON.stringify({
+          event: "sync-exchange",
+          appId,
+          caller: deviceId ? { device: deviceId } : { app: appId },
+          in: {
+            records: body.records?.length ?? 0,
+            labels: body.labels?.length ?? 0,
+            appRows: body.appSyncableRows?.length ?? 0,
+          },
+          out: {
+            records: response.records.length,
+            labels: response.labels?.length ?? 0,
+            appRows: response.appSyncableRows?.length ?? 0,
+          },
+          maxBytes: body.maxBytes ?? null,
+          hasMore: response.hasMore,
+          // False means requesters stop pushing; see `walkByteCoverage`.
+          bytesReported: response.responderByteWatermarks !== undefined,
+          haltedAuthors: response.haltedAuthors ?? [],
+          durationMs: Date.now() - exchangeStartedAt,
+        }),
+      );
       return ok(response);
     }
 

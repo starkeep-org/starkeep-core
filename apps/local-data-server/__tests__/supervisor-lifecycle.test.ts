@@ -111,6 +111,18 @@ function memorySyncState(): SyncStateStore {
     async setInboundFloors(w) {
       maps["inbound"] = w;
     },
+    async getByteWatermarks() {
+      return maps["bytes"] ?? null;
+    },
+    async setByteWatermarks(w) {
+      maps["bytes"] = w;
+    },
+    async getPeerByteWatermarks() {
+      return maps["peerBytes"] ?? null;
+    },
+    async setPeerByteWatermarks(w) {
+      maps["peerBytes"] = w;
+    },
     async getHlcClockState() {
       return null;
     },

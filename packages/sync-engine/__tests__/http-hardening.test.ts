@@ -481,6 +481,36 @@ describe("the response the transport is willing to believe", () => {
     });
   });
 
+  describe("the bytes watermark", () => {
+    // Written to disk and the start of every later upload scan, exactly like
+    // the rows watermark, so it is held to the same rules.
+    it("carries a well-formed bytes watermark through, normalized", async () => {
+      const response = await respondingWith({
+        ...good,
+        responderByteWatermarks: { L: { wallTime: 5, counter: 0, nodeId: "L" } },
+      }).exchange({ watermarks: {} });
+      expect(response.responderByteWatermarks).toEqual({
+        L: { wallTime: 5, counter: 0, nodeId: "L" },
+      });
+    });
+
+    it("reads an absent one as a peer too old to track files", async () => {
+      const response = await respondingWith(good).exchange({ watermarks: {} });
+      expect(response.responderByteWatermarks).toBeUndefined();
+    });
+
+    it("refuses one that is not a map of HLCs", async () => {
+      await expect(
+        respondingWith({ ...good, responderByteWatermarks: { L: "not-an-hlc" } }).exchange({
+          watermarks: {},
+        }),
+      ).rejects.toThrow(/responderByteWatermarks/);
+      await expect(
+        respondingWith({ ...good, responderByteWatermarks: [] }).exchange({ watermarks: {} }),
+      ).rejects.toThrow(/responderByteWatermarks/);
+    });
+  });
+
   it("refuses a records array holding something that is not a record", async () => {
     // Without this the round failed with a bare `TypeError` out of
     // `groupInboundByNodeId`, reading `.updatedAt` off a string — deep enough

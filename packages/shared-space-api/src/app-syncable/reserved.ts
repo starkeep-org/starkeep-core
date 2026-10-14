@@ -10,8 +10,16 @@ import { appSyncableTableInfo, type DeclaredColumn } from "./columns.js";
  */
 export const FILE_RECORDS_TABLE = "_starkeep_sync_records";
 
+/**
+ * Name of the framework-owned table holding the cloud's own bytes watermark
+ * for the channel, created in every app's namespace on the cloud. Unlike
+ * {@link FILE_RECORDS_TABLE} it never syncs: it is one node's statement about
+ * its own storage. See `@starkeep/storage-aurora-dsql`, `byte-coverage.ts`.
+ */
+export const BYTE_COVERAGE_TABLE = "_starkeep_byte_coverage";
+
 /** Tables apps may not declare via the manifest or write to directly. */
-export const RESERVED_TABLE_NAMES = new Set<string>([FILE_RECORDS_TABLE]);
+export const RESERVED_TABLE_NAMES = new Set<string>([FILE_RECORDS_TABLE, BYTE_COVERAGE_TABLE]);
 
 /**
  * One column of the reserved table.

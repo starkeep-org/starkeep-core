@@ -1372,6 +1372,111 @@ describe("sync exchange channel split", () => {
   });
 });
 
+describe("the cloud's bytes watermark on /sync/exchange", () => {
+  // The cloud reports, per author, how far every file it wants is in S3, so a
+  // phone knows which uploads it still owes. It keeps the value in the
+  // channel's own schema, under the channel's own role.
+  const COVERAGE_LOAD = /from "app_starkeep_drive"\."_starkeep_byte_coverage"/;
+  const COVERAGE_SAVE = /insert into "app_starkeep_drive"\."_starkeep_byte_coverage"/;
+  const testHlc = { wallTime: Date.UTC(2026, 0, 1), counter: 0, nodeId: "test" };
+
+  function exchange(appId = "starkeep-drive") {
+    return handler(
+      signedEvent({ appId, method: "POST", subPath: "/sync/exchange", body: { watermarks: {}, limit: 0 } }),
+      context,
+    );
+  }
+
+  /** One record from author `test` whose file is at `shared/image/aa/aaa…`. */
+  function storeWithOneRecord() {
+    return fakeDsqlWithGrants()
+      .on(RECORDS_SELECT, [recordRow({ id: "rec-1", type: "image/jpeg" })])
+      .on(RECORDS_NODE_WATERMARKS, [{ node_id: "test", max_updated_at: TEST_HLC_FOR_LABELS }]);
+  }
+
+  it("walks forward from the value in Drive's schema and stores how far it got", async () => {
+    const db = storeWithOneRecord().on(COVERAGE_LOAD, []).on(COVERAGE_SAVE, []);
+    setDbFactory(db);
+    s3Mock.on(HeadObjectCommand).resolves({});
+
+    const res = await exchange();
+
+    expect(res.statusCode).toBe(200);
+    expect(bodyOf(res)["responderByteWatermarks"]).toEqual({ test: testHlc });
+    const saved = db.calls(COVERAGE_SAVE);
+    expect(saved).toHaveLength(1);
+    expect(saved[0]!.values).toEqual(expect.arrayContaining(["test", TEST_HLC_FOR_LABELS]));
+  });
+
+  it("stops at a file S3 does not have, and stores nothing new", async () => {
+    const db = storeWithOneRecord()
+      .on(COVERAGE_LOAD, [])
+      .on(COVERAGE_SAVE, [])
+      // The no-cloud check on the missing file: a record with no labels.
+      .on(/from "shared"\."record_labels" where "record_id" in/, []);
+    setDbFactory(db);
+    s3Mock.on(HeadObjectCommand).rejects(Object.assign(new Error("NotFound"), { name: "NotFound" }));
+
+    const res = await exchange();
+
+    expect(bodyOf(res)["responderByteWatermarks"]).toEqual({});
+    expect(db.calls(COVERAGE_SAVE)).toHaveLength(0);
+  });
+
+  it("counts a file marked starkeep/no-cloud as held, since it refuses those bytes", async () => {
+    const db = storeWithOneRecord()
+      .on(COVERAGE_LOAD, [])
+      .on(COVERAGE_SAVE, [])
+      .on(/from "shared"\."record_labels" where "record_id" in/, [
+        {
+          record_id: "rec-1",
+          app_id: "starkeep",
+          key: "no-cloud",
+          value: "",
+          record_type: "image/jpeg",
+          created_at: TEST_HLC_FOR_LABELS,
+          updated_at: TEST_HLC_FOR_LABELS,
+          node_id: "test",
+          deleted_at: null,
+        },
+      ]);
+    setDbFactory(db);
+    s3Mock.on(HeadObjectCommand).rejects(Object.assign(new Error("NotFound"), { name: "NotFound" }));
+
+    const res = await exchange();
+
+    expect(bodyOf(res)["responderByteWatermarks"]).toEqual({ test: testHlc });
+  });
+
+  it("omits the field, and still answers, when the channel's table is missing", async () => {
+    // An app installed before the table existed. Requesters stop pushing
+    // rather than ship rows whose uploads nothing would remember.
+    const db = storeWithOneRecord().on(COVERAGE_LOAD, () => {
+      throw Object.assign(new Error('relation "app_starkeep_drive._starkeep_byte_coverage" does not exist'), {
+        code: "42P01",
+      });
+    });
+    setDbFactory(db);
+
+    const res = await exchange();
+
+    expect(res.statusCode).toBe(200);
+    expect(bodyOf(res)).not.toHaveProperty("responderByteWatermarks");
+  });
+
+  it("needs no table on a per-app channel that carries no files", async () => {
+    const db = fakeDsqlWithGrants().on(/from "shared"\."app_syncable_namespaces"/, []);
+    setDbFactory(db);
+
+    const res = await exchange("chsplit1");
+
+    expect(res.statusCode).toBe(200);
+    const body = bodyOf(res);
+    expect(body["responderByteWatermarks"]).toEqual(body["responderWatermarks"]);
+    expect(db.calls(/_starkeep_byte_coverage/)).toHaveLength(0);
+  });
+});
+
 describe("sync exchange request validation", () => {
   const DIGEST = /group by "node_id", substr/;
   const hlc = { wallTime: Date.UTC(2026, 0, 2), counter: 0, nodeId: "peer" };

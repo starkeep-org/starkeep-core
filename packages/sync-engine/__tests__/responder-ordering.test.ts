@@ -1,25 +1,17 @@
 /**
- * The responder's shared-record apply order, and the throw that makes it safe.
+ * The responder's shared-record apply order.
  *
- * Round 3's R11.1: step 2 of `in-process-transport.ts` iterates the *wire
- * order* and does not sort, while step 1 sorts app rows per author before
- * applying them. The asymmetry is deliberate and it is load-bearing on a single
- * fact — **a shared-record `put()` that throws aborts the whole exchange** — so
- * no response is produced, no coverage watermark is reported over a
- * partially-applied author, and the requester simply re-ships next round.
+ * Step 2 of `in-process-transport.ts` applies shared records per author in HLC
+ * order, as step 1 does app rows. It used to iterate the wire order, which was
+ * safe only because a shared-record `put()` that throws aborts the whole
+ * exchange: no response, so no coverage report over a partially-applied author.
+ * A record that needs its file before it applies (`requiresFileToApply`) halts
+ * its author *without* throwing, and a halt is only safe over a contiguous
+ * prefix, so the sort is now required rather than optional.
  *
- * That argument is written down at the call site. What was missing was a test
- * that fails when someone relaxes the throw, which is exactly the change the
- * comment warns against: catch the apply error and fold the author into
- * `haltedNodes` the way app rows are, and the missing sort stops being harmless
- * and becomes silent loss under a watermark claiming coverage.
- *
- * So these cases pin the pair. Out-of-order delivery converges (LWW does not
- * care what order snapshots arrive in); a failed apply *aborts*; and — the case
- * that shows why the abort is the only thing holding the invariant up — after
- * the failed apply the responder's own coverage watermark already sits above
- * the row it dropped. The response that is never sent is the one that would
- * have lied.
+ * These cases pin the pair: out-of-order delivery converges (LWW does not care
+ * what order snapshots arrive in); a failed apply still aborts; and a failure
+ * now leaves nothing above it applied.
  */
 
 import { describe, it, expect } from "vitest";
@@ -162,16 +154,13 @@ describe("a shared-record apply that fails", () => {
     ).rejects.toThrow(/injected put failure/);
   });
 
-  it("leaves a coverage watermark that would overstate what landed", async () => {
-    // The reason the abort is not merely tidy. The later row applied before the
-    // earlier one failed, so the responder's own `getNodeWatermarks` — a
-    // MAX(updated_at) per author — now sits *above* a row it does not hold.
-    // Any response built from it claims coverage of the dropped row, and the
-    // requester's authoritative replace would stop re-shipping it forever.
-    //
-    // Nothing rescues that except never sending the response, which is what the
-    // throw does. Catch it and fold the author into `haltedNodes` — the obvious
-    // symmetry with step 1 — and this map is what would go on the wire.
+  it("applies an author's records in HLC order whatever the wire order, so a failure leaves nothing above it", async () => {
+    // The responder used to apply in wire order, so here the later row landed
+    // before the earlier one failed, and its MAX(updated_at) sat above a row
+    // it did not hold. Only the throw kept that map off the wire. Records now
+    // apply per author in HLC order — a record that needs its file halts its
+    // author without throwing, which is only safe over a contiguous prefix —
+    // so the earlier row fails first and nothing above it lands.
     const { local, cloud } = await twoSides();
     const early = authoredRecord(local, "L", 10);
     const late = authoredRecord(local, "L", 20);
@@ -182,8 +171,8 @@ describe("a shared-record apply that fails", () => {
     ).rejects.toThrow();
 
     expect(await cloud.db.get(early.id), "the earlier row never landed").toBeNull();
-    const watermarks = await cloud.db.getNodeWatermarks();
-    expect(compareHLC(watermarks["L"]!, early.updatedAt)).toBeGreaterThan(0);
+    expect(await cloud.db.get(late.id), "nor did anything above it").toBeNull();
+    expect((await cloud.db.getNodeWatermarks())["L"]).toBeUndefined();
   });
 
   it("costs nothing but a round, since the retry re-ships and LWW absorbs it", async () => {

@@ -2,7 +2,9 @@
 
 Cross-cutting sync engine for Starkeep: a single `exchange()` round performs a per-`nodeId` HLC version-vector exchange between a local node and a peer (the cloud data server in production; an in-process peer in tests), transferring shared records and app-specific rows together with their blobs.
 
-The package is data-kind-aware: shared data (always file-backed, no owning app) and app-specific data (owned by exactly one app, optionally file-backed) flow as two first-class streams on each side. Conflict resolution is pure HLC last-write-wins. Partial failures don't corrupt state: a blob failure halts watermark advance for the affected `nodeId` only, so the next round retries naturally.
+The package is data-kind-aware: shared data (always file-backed, no owning app) and app-specific data (owned by exactly one app, optionally file-backed) flow as two first-class streams on each side. Conflict resolution is pure HLC last-write-wins.
+
+Rows travel ahead of their files. Each receiver keeps two watermarks per author: a rows watermark and a bytes watermark, which says every file it wants up to that point is in its storage. A responder reports both, so a requester uploads the files the responder says it lacks, and downloads the files it lacks itself. A failed transfer holds only the affected author's bytes watermark, so rows keep flowing and the next round retries the file.
 
 See `starkeep-core/meta-docs/docs/functional-doc-data-sync-2026-06-08.md` for the full functional description.
 
@@ -65,14 +67,15 @@ const unsubscribe = syncEngine.changeNotifier.subscribe((event) => {
 | `createHttpSyncHandler(options)` | Request handler for the responder side; handles `POST /sync/exchange` and `/files/:key` (`HEAD`/`GET`/`PUT`/`DELETE`). |
 | `createChangeNotifier()` | Standalone synchronous in-memory pub/sub over `ChangeEvent`s. |
 | `createFileSyncEngine()` | Wraps an `ObjectStorageAdapter` with `transferFile` (in-flight dedupe + destination short-circuit). |
-| `createSqliteSyncStateStore(db)` | Built-in `SyncStateStore` over `node:sqlite`; persists watermarks, peer watermarks, and HLC clock state. |
+| `createSqliteSyncStateStore(db)` | Built-in `SyncStateStore` over `node:sqlite`; persists rows and bytes watermarks, the peer's of both, repair floors, and HLC clock state. |
+| `createMemoryByteCoverageStore()` | In-memory `ByteCoverageStore`, the in-process responder's default home for its own bytes watermark. A responder that builds a transport per request passes a durable one. |
 
 ### `SyncEngine`
 
 | Member | Description |
 |---|---|
-| `exchange()` | Run one version-vector exchange round. Returns `ExchangeResult` with `{ applied, shipped, hasMore }`. |
-| `changeNotifier` | The engine's `ChangeNotifier`. Emits `local-data-synced` after each round; callers emit `remote-update-available` and `local-change-recorded`. |
+| `exchange()` | Run one version-vector exchange round. Returns `ExchangeResult` with row counts, file counts in each direction, and `hasMore` / `outboundHasMore` / `bytesHasMore`. |
+| `changeNotifier` | The engine's `ChangeNotifier`. Emits `local-data-synced` once a round's rows are applied, then again, at most once a second, as files land; callers emit `remote-update-available` and `local-change-recorded`. |
 
 ### Watermark helpers
 
@@ -97,8 +100,9 @@ const unsubscribe = syncEngine.changeNotifier.subscribe((event) => {
 |---|---|
 | `SyncEngineOptions` | Local DB adapter, local object storage, transport, clock, optional `syncState`, `appSyncableSource`, `syncSharedRecords` (default `true`), `maxBytes` (default 25 MB), `maxItems` (default 1000), `transferConcurrency` (default 4). |
 | `SyncTransport` | `{ exchange(request) }`. |
-| `SyncExchangeRequest` / `SyncExchangeResponse` | Wire shape: `watermarks`, `records?` (shared), `appSyncableRows?` (app-specific), `limit?` / `hasMore`. |
-| `ExchangeResult` | `{ applied, shipped, hasMore }`. |
+| `SyncExchangeRequest` / `SyncExchangeResponse` | Wire shape: `watermarks`, `records?` (shared), `appSyncableRows?` (app-specific), `limit?` / `hasMore`, and the responder's `responderWatermarks` and `responderByteWatermarks`. |
+| `ExchangeResult` | Row counts (`applied`, `shipped`), file counts (`landed`, `uploaded`, and bytes of each), `elided`, `blocked`, `progressed`, and the three `…HasMore` signals. |
+| `ByteCoverageStore` | Where a responder keeps its own bytes watermark between exchanges. |
 | `Watermarks` | Per-`nodeId` HLC map. |
 | `AppSyncableNamespace` / `AppSyncableNamespaceStore` | App table descriptors. |
 | `AppSyncableApplier` / `ScanCapableApplier` | Apply incoming rows; scan local rows by HLC. |
@@ -106,7 +110,7 @@ const unsubscribe = syncEngine.changeNotifier.subscribe((event) => {
 | `FileRecordRow` | Row shape for the reserved file-backed app table `_starkeep_sync_records`. |
 | `FileSyncEngine` / `FileSyncManifest` / `FileEntry` | Blob transfer surface. |
 | `ChangeEvent` / `ChangeEventType` / `ChangeListener` / `ChangeNotifier` | Pub/sub types. Event types: `"remote-update-available"`, `"local-data-synced"`, `"local-change-recorded"`. |
-| `SyncStateStore` | Watermark + HLC clock persistence interface. |
+| `SyncStateStore` | Watermark (rows and bytes, own and peer) + repair floors + HLC clock persistence interface. |
 
 ### Errors
 

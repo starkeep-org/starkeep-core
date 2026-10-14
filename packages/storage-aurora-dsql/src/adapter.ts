@@ -5,6 +5,7 @@ import type {
   RecordLabel,
   StarkeepId,
 } from "@starkeep/protocol-primitives";
+import { createDsqlByteCoverageStore, type DsqlByteCoverageStore } from "./byte-coverage.js";
 import {
   pgMetadataTableName,
   serializeHLC,
@@ -158,6 +159,14 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       throw new StorageError("Database not initialized. Call init() first.");
     }
     return this.client;
+  }
+
+  /**
+   * The sync channel's own bytes watermark, over this adapter's connection.
+   * See `byte-coverage.ts`.
+   */
+  byteCoverageStore(appId: string): DsqlByteCoverageStore {
+    return createDsqlByteCoverageStore(this.getClient(), appId);
   }
 
   // Executes a kysely-compiled query through the raw client.

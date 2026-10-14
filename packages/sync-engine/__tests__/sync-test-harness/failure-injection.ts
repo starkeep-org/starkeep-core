@@ -292,7 +292,15 @@ export function losingResponseTransport(
   return {
     async exchange(request: SyncExchangeRequest): Promise<SyncExchangeResponse> {
       const response = await base.exchange(request);
-      if (remaining > 0) {
+      // Only a response to a request that carried rows. Losing the reply to a
+      // request that applied nothing — the engine's first-push question about
+      // the peer's bytes watermark — is not the failure this simulates.
+      const carried =
+        (request.records?.length ?? 0) +
+          (request.labels?.length ?? 0) +
+          (request.appSyncableRows?.length ?? 0) >
+        0;
+      if (carried && remaining > 0) {
         remaining -= 1;
         throw new Error("[harness] response lost in transit after the peer applied it");
       }

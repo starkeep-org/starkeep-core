@@ -192,9 +192,8 @@ describe("contiguous prefix across streams", () => {
     // failing blob is enough — blocked every author sorted after it forever.
     const { local, cloud } = await twoSides();
     // `aaa` owes more than the whole item budget and its first blob will never
-    // upload, so it can never drain. Under a budget spent in author order that
-    // is the end of `bbb`, permanently — the scan stops inside `aaa` every
-    // round and never reaches it.
+    // upload, so its files can never drain. Under a budget spent in author
+    // order that would be the end of `bbb`, permanently.
     const stuck = await seedRecord(local, 1 * MB, { nodeId: "aaa", wallTime: 10 });
     await seedRecord(local, 1 * MB, { nodeId: "aaa", wallTime: 11 });
     await seedRecord(local, 1 * MB, { nodeId: "aaa", wallTime: 12 });
@@ -213,11 +212,15 @@ describe("contiguous prefix across streams", () => {
     });
     for (let i = 0; i < 5; i += 1) await engine.sync({ maxRounds: 5 });
 
-    // `aaa` is genuinely blocked — the contiguous-prefix rule holds its whole
-    // range behind the failed blob, which is correct.
-    expect(await cloud.db.get(stuck)).toBeNull();
-    // `bbb` shares no author with it and must be unaffected.
+    // Rows no longer wait for files, so `aaa`'s row reaches the cloud; its
+    // file is what is stuck.
+    expect(await cloud.db.get(stuck)).not.toBeNull();
+    expect(await cloud.storage.has(failingKey)).toBe(false);
+    // `bbb` shares no author with it, so neither its row nor its file waits:
+    // the head allotment takes files round-robin across authors.
     expect(await cloud.db.get(healthy), "bbb must not be starved by aaa").not.toBeNull();
+    const healthyKey = (await local.db.get(healthy))!.objectStorageKey;
+    expect(await cloud.storage.has(healthyKey), "bbb's file must not wait for aaa's").toBe(true);
   });
 
   /**

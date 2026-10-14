@@ -13,6 +13,8 @@ export function createMemorySyncStateStore(): SyncStateStore {
   let peerWatermarks: Watermarks = {};
   let repairFloors: Watermarks = {};
   let inboundFloors: Watermarks = {};
+  let byteWatermarks: Watermarks | null = null;
+  let peerByteWatermarks: Watermarks | null = null;
   return {
     async getWatermarks() {
       return watermarks;
@@ -37,6 +39,18 @@ export function createMemorySyncStateStore(): SyncStateStore {
     },
     async setInboundFloors(f) {
       inboundFloors = f;
+    },
+    async getByteWatermarks() {
+      return byteWatermarks;
+    },
+    async setByteWatermarks(w) {
+      byteWatermarks = w;
+    },
+    async getPeerByteWatermarks() {
+      return peerByteWatermarks;
+    },
+    async setPeerByteWatermarks(w) {
+      peerByteWatermarks = w;
     },
     async getHlcClockState() {
       return null;

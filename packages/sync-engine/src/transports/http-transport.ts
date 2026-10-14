@@ -133,6 +133,21 @@ function sanitizeExchangeResponse(body: unknown): SyncExchangeResponse {
     fail,
   });
 
+  // Sanitized like the rows watermark and for the same reason: it is written to
+  // disk and bounds every later upload scan. Absent is allowed and means a peer
+  // too old to track files; the engine then stops pushing.
+  const rawByteWatermarks = raw["responderByteWatermarks"];
+  let responderByteWatermarks: SyncExchangeResponse["responderByteWatermarks"];
+  if (rawByteWatermarks !== undefined && rawByteWatermarks !== null) {
+    if (typeof rawByteWatermarks !== "object" || Array.isArray(rawByteWatermarks)) {
+      throw fail('field "responderByteWatermarks" is not an object');
+    }
+    responderByteWatermarks = sanitizeWatermarkMap(rawByteWatermarks, {
+      field: "responderByteWatermarks",
+      fail,
+    });
+  }
+
   for (const field of ["records", "labels", "appSyncableRows", "digest"] as const) {
     const value = raw[field];
     if (value === undefined || value === null) continue;
@@ -191,6 +206,7 @@ function sanitizeExchangeResponse(body: unknown): SyncExchangeResponse {
   return {
     ...(raw as unknown as SyncExchangeResponse),
     responderWatermarks,
+    responderByteWatermarks,
     records: (raw["records"] as SyncExchangeResponse["records"]) ?? [],
     labels: (raw["labels"] as SyncExchangeResponse["labels"]) ?? [],
     appSyncableRows:

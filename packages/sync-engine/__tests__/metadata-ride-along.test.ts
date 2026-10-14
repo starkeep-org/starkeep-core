@@ -196,6 +196,9 @@ describe("metadata riding the record it belongs to", () => {
       width: 4032,
       height: 3024,
     });
+    // A later local write to the record, so the cloud's coverage — which the
+    // first push reads before shipping — does not already cover it.
+    await p.local.put({ ...record, updatedAt: p.localClock.now() });
 
     await p.engine.exchange();
 
@@ -213,6 +216,7 @@ describe("metadata riding the record it belongs to", () => {
     // A wrong value on the receiver, which is what overwrite exists for: a
     // corrected extraction has to be able to travel.
     await p.cloud.putMetadata("image/jpeg", { recordId: record.id, width: 1 });
+    await p.local.put({ ...record, updatedAt: p.localClock.now() });
 
     await p.engine.exchange();
 

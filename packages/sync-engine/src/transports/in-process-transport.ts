@@ -18,6 +18,7 @@ import {
   type ObjectStorageAdapter,
 } from "@starkeep/storage-adapter";
 import type {
+  ByteCoverageStore,
   SyncTransport,
   SyncExchangeRequest,
   SyncExchangeResponse,
@@ -31,6 +32,15 @@ import type {
 import { SHARED_DIGEST_SCOPE } from "../types.js";
 import { advanceWatermark } from "../watermarks.js";
 import {
+  advanceBytesWatermark,
+  carriesFiles,
+  clampToRows,
+  FILE_RECORDS_TABLE,
+  scanFileRows,
+  type FileRow,
+  type FileRowSources,
+} from "../file-rows.js";
+import {
   computeCeilings,
   cutRound,
   type RoundItem,
@@ -41,31 +51,12 @@ import {
   DEFAULT_RESPONDER_MAX_BYTES,
 } from "../exchange-request.js";
 
-/** Mirror of `FILE_RECORDS_TABLE`; only that table's rows carry blobs. */
-const FILE_RECORDS_TABLE = "_starkeep_sync_records";
 
 /** One row eligible to ship back, tagged with which stream it came from. */
 type OutboundRow =
   | { kind: "record"; record: SyncRecordItem }
   | { kind: "label"; label: RecordLabel }
   | { kind: "appRow"; entry: AppSyncableRowEntry };
-
-/**
- * Blob bytes an app-syncable row will make the caller download, or 0.
- *
- * Charging the byte budget for rows that carry no blob would throttle a channel
- * of captions as if it were a channel of photos; not charging for the ones that
- * do would hand a handset an unbounded download.
- */
-function appRowBytes(entry: AppSyncableRowEntry): number {
-  if (entry.table !== FILE_RECORDS_TABLE || entry.op === "delete") return 0;
-  const row = entry.row;
-  if (!row) return 0;
-  const key = row["object_storage_key"];
-  if (typeof key !== "string" || key.length === 0) return 0;
-  const size = row["size_bytes"];
-  return typeof size === "number" ? size : Number(size) || 0;
-}
 
 export interface InProcessTransportOptions {
   readonly databaseAdapter: DatabaseAdapter;
@@ -121,6 +112,35 @@ export interface InProcessTransportOptions {
     readonly records: readonly DataRecord[];
     readonly labels: readonly RecordLabel[];
   }) => Promise<void>;
+  /**
+   * Where this side keeps its own bytes watermark between exchanges. See
+   * `SyncExchangeResponse.responderByteWatermarks`.
+   *
+   * Defaults to memory held by this transport instance, which suits tests and
+   * any responder that lives as long as its transport. A responder that builds
+   * a transport per request — the cloud — must pass a durable store, or every
+   * exchange walks each author's files from the beginning.
+   */
+  readonly byteCoverage?: ByteCoverageStore;
+  /**
+   * True when this side declines the file under an object key, so the walk
+   * counts it as held. The cloud declines `starkeep/no-cloud` files, which it
+   * also refuses to accept.
+   */
+  readonly declinesBlob?: (objectStorageKey: string) => Promise<boolean>;
+  /**
+   * True for a record this side must not apply until its file is in this
+   * side's storage. Such a record halts its author for the round instead,
+   * exactly as a failed apply does, and the requester re-ships it after its
+   * upload pass has sent the file.
+   *
+   * Rows travel ahead of their files, which is right for nearly everything: a
+   * photo's row is useful at once. A record whose *meaning* is in its file is
+   * different. The cloud stamps originals from the library's settings file,
+   * and a stamp is permanent, so applying the settings row before its bytes
+   * would have the cloud stamp from the defaults for as long as the bytes took.
+   */
+  readonly requiresFileToApply?: (record: DataRecord) => boolean;
 }
 
 /**
@@ -144,7 +164,110 @@ export function createInProcessSyncTransport(
     syncSharedRecords = true,
     keepLiveOnTombstone,
     onApplied,
+    declinesBlob,
+    requiresFileToApply,
   } = options;
+  const byteCoverage = options.byteCoverage ?? createMemoryByteCoverageStore();
+
+  // This channel's file-bearing rows on this side: shared records on the Drive
+  // channel, each app's reserved file table on a per-app channel.
+  const scanCapableApplier = appSyncableSource?.applier as ScanCapableApplier | undefined;
+  const fileRowSources: FileRowSources = {
+    records: syncSharedRecords ? databaseAdapter : null,
+    fileTables:
+      appSyncableSource && typeof scanCapableApplier?.scanSince === "function"
+        ? appSyncableSource.namespaces
+            .list()
+            .filter((ns) => ns.tables.some((t) => t.name === FILE_RECORDS_TABLE))
+            .map((ns) => ({
+              appId: ns.appId,
+              scanSince: (watermarks: Watermarks, limit: number) =>
+                scanCapableApplier.scanSince(ns.appId, FILE_RECORDS_TABLE, watermarks, limit),
+            }))
+        : [],
+  };
+
+  /**
+   * Advance this side's bytes watermark over the files now in its storage.
+   *
+   * Starts from the stored value, lowered to the rows watermark wherever rows
+   * were lost, and checks files above it in timestamp order per author,
+   * stopping at each author's first missing file. The checks are spread
+   * across authors and capped per exchange, so a first walk over an existing
+   * library takes several exchanges rather than one long one.
+   *
+   * Undefined when the stored value will not load. The response then carries
+   * no bytes watermark, and a requester stops pushing rather than ship rows
+   * whose uploads nothing would remember.
+   */
+  async function walkByteCoverage(rowsWatermarks: Watermarks): Promise<Watermarks | undefined> {
+    // A channel with no file-bearing table owes no file for any row.
+    if (!carriesFiles(fileRowSources)) return { ...rowsWatermarks };
+    let stored: Watermarks;
+    try {
+      stored = await byteCoverage.load();
+    } catch (err) {
+      console.warn(`[sync] could not load this side's bytes watermark: ${(err as Error).message}`);
+      return undefined;
+    }
+    const from = clampToRows(stored, rowsWatermarks);
+    const scan = await scanFileRows(fileRowSources, from, BYTE_WALK_MAX_ROWS);
+    if (!scan.readable) return from;
+
+    const byAuthor = new Map<string, { row: FileRow; satisfied: boolean }[]>();
+    for (const row of scan.rows) {
+      const run = byAuthor.get(row.hlc.nodeId) ?? [];
+      run.push({ row, satisfied: !row.manifest });
+      byAuthor.set(row.hlc.nodeId, run);
+    }
+    const share = Math.max(
+      BYTE_WALK_CONCURRENCY,
+      Math.floor(BYTE_WALK_MAX_CHECKS / Math.max(1, byAuthor.size)),
+    );
+    for (const run of byAuthor.values()) {
+      run.sort((a, b) => compareHLC(a.row.hlc, b.row.hlc));
+      const toCheck = run.filter((entry) => entry.row.manifest !== null).slice(0, share);
+      let stopped = false;
+      for (let start = 0; start < toCheck.length && !stopped; start += BYTE_WALK_CONCURRENCY) {
+        const batch = toCheck.slice(start, start + BYTE_WALK_CONCURRENCY);
+        const held = await Promise.all(
+          batch.map(async (entry) => {
+            const key = entry.row.manifest!.objectStorageKey;
+            try {
+              if (await options.objectStorage.has(key)) return true;
+              return declinesBlob ? await declinesBlob(key) : false;
+            } catch (err) {
+              console.warn(`[sync] could not check ${key} for the bytes watermark: ${(err as Error).message}`);
+              return false;
+            }
+          }),
+        );
+        for (const [i, entry] of batch.entries()) {
+          if (!held[i]) {
+            stopped = true;
+            break;
+          }
+          entry.satisfied = true;
+        }
+      }
+    }
+
+    const next = advanceBytesWatermark(
+      from,
+      [...byAuthor.values()].flat().map((entry) => ({ hlc: entry.row.hlc, satisfied: entry.satisfied })),
+      scan.ceilings,
+    );
+    if (!sameWatermarkMaps(next, stored)) {
+      try {
+        await byteCoverage.save(next);
+      } catch (err) {
+        // The report below is still true; only the next exchange's starting
+        // point is lost, and that exchange walks again from the stored value.
+        console.warn(`[sync] could not save this side's bytes watermark: ${(err as Error).message}`);
+      }
+    }
+    return next;
+  }
 
   return {
     async exchange(request: SyncExchangeRequest): Promise<SyncExchangeResponse> {
@@ -193,32 +316,44 @@ export function createInProcessSyncTransport(
       //    nodes halted in step 1 are skipped to preserve the contiguous
       //    prefix (they re-ship next round).
       //
-      //    ## This iterates the wire order and does not sort. That is load-bearing.
+      //    ## Per node, in HLC order, because a record can now halt its node.
       //
-      //    Step 1 sorts app rows per node by HLC before applying, because their
-      //    failures are silent and the contiguous prefix has to be maintained by
-      //    hand. Steps 2 and 2b deliberately do not, and the reason they are
-      //    allowed not to is narrow: **a shared-record `put()` that throws
-      //    aborts the whole exchange.** No response is produced, so no coverage
-      //    watermark is ever reported over a partially-applied author, so
-      //    holdings cannot end up as a non-contiguous prefix — the requester
-      //    simply re-ships everything next round and LWW makes it idempotent.
+      //    A shared-record `put()` that throws still aborts the whole exchange,
+      //    and that alone never needed an order: no response, no coverage
+      //    report over a partial author. But a record that needs its file to
+      //    apply (`requiresFileToApply`) halts its node without throwing, and a
+      //    halt is only safe over a contiguous prefix — a later record applied
+      //    ahead of the halted one would lift the node's coverage over it, and
+      //    the requester would never re-ship it. So records are sorted per node
+      //    and each node stops at its first halt.
       //
-      //    The moment shared-record apply becomes non-fatal — caught and folded
-      //    into `haltedNodes` the way app rows already are — the missing sort
-      //    stops being harmless and becomes silent loss under a watermark that
-      //    claims coverage: a later row applies, an earlier one does not, and
-      //    the union-of-MAX below reports the author as fully covered. Anyone
-      //    relaxing the throw has to sort here in the same commit.
-      //
-      //    (Records are also applied entirely before labels rather than merged
-      //    per author in HLC order, unlike the requester's inbound loop. Same
-      //    argument, same dependency: safe only while the halt rule is a throw.)
+      //    (Records are still applied entirely before labels rather than merged
+      //    per author in HLC order, unlike the requester's inbound loop. A
+      //    halted node's labels are all skipped below, the ones under the halt
+      //    included, which only costs their re-ship.)
       const appliedRecords: DataRecord[] = [];
       const appliedLabels: RecordLabel[] = [];
       if (syncSharedRecords) {
-        for (const item of request.records ?? []) {
+        const inboundRecords = [...(request.records ?? [])].sort((a, b) => {
+          if (a.updatedAt.nodeId !== b.updatedAt.nodeId) {
+            return a.updatedAt.nodeId < b.updatedAt.nodeId ? -1 : 1;
+          }
+          return compareHLC(a.updatedAt, b.updatedAt);
+        });
+        for (const item of inboundRecords) {
           if (haltedNodes.has(item.updatedAt.nodeId)) continue;
+          if (
+            requiresFileToApply?.(item) &&
+            !item.deletedAt &&
+            item.objectStorageKey &&
+            !(await options.objectStorage.has(item.objectStorageKey))
+          ) {
+            console.warn(
+              `[sync] record ${item.id} needs its file before it applies; halting node ${item.updatedAt.nodeId} this round`,
+            );
+            haltedNodes.add(item.updatedAt.nodeId);
+            continue;
+          }
           // The metadata passenger comes off before the row is written; see
           // `SyncRecordItem`.
           const { metadata: incomingMetadata, ...snapshot } = item;
@@ -370,7 +505,9 @@ export function createInProcessSyncTransport(
           candidates.push({
             value: { kind: "record", record },
             hlc: record.updatedAt,
-            bytes: record.objectStorageKey && !record.deletedAt ? record.sizeBytes : 0,
+            // Rows travel ahead of their files, so a row costs the caller no
+            // byte budget here: the caller's download pass budgets the files.
+            bytes: 0,
           });
         }
 
@@ -403,7 +540,7 @@ export function createInProcessSyncTransport(
                   candidates.push({
                     value: { kind: "appRow", entry },
                     hlc: entry.timestamp,
-                    bytes: appRowBytes(entry),
+                    bytes: 0,
                   });
                 }
               } catch (err) {
@@ -531,6 +668,13 @@ export function createInProcessSyncTransport(
         }
       }
 
+      // 5b. The bytes watermark, over the same post-apply state. Never above
+      //     the rows watermark just computed. Computed even when that map is
+      //     incomplete: clamping to a lower bound only understates which files
+      //     this side holds, which costs a requester a redundant upload and
+      //     never a lost one.
+      const responderByteWatermarks = await walkByteCoverage(responderWatermarks);
+
       // The integrity check, only when asked: a GROUP BY over the whole index
       // is cheap but not per-round cheap, and it answers a question that only
       // changes when something has gone wrong.
@@ -606,6 +750,9 @@ export function createInProcessSyncTransport(
         labels,
         appSyncableRows,
         responderWatermarks,
+        // Omitted when this side cannot say which files it holds, which tells
+        // the requester to stop pushing. See `walkByteCoverage`.
+        ...(responderByteWatermarks ? { responderByteWatermarks } : {}),
         hasMore,
         // Omitted when the report is whole, so the common response stays the
         // shape it was and an older requester is unaffected. A single boolean is
@@ -633,4 +780,39 @@ export function createInProcessSyncTransport(
       };
     },
   };
+}
+
+/**
+ * Most rows one walk reads above the stored bytes watermark. Bounds the scan;
+ * the check cap below bounds the requests.
+ */
+const BYTE_WALK_MAX_ROWS = 1000;
+
+/** Most storage checks one exchange's walk issues, across every author. */
+const BYTE_WALK_MAX_CHECKS = 256;
+
+/** Storage checks in flight at once during a walk. */
+const BYTE_WALK_CONCURRENCY = 16;
+
+/** A bytes-watermark store held in memory. See `byteCoverage`. */
+export function createMemoryByteCoverageStore(initial: Watermarks = {}): ByteCoverageStore {
+  let current: Watermarks = { ...initial };
+  return {
+    async load() {
+      return { ...current };
+    },
+    async save(watermarks) {
+      current = { ...watermarks };
+    },
+  };
+}
+
+function sameWatermarkMaps(a: Watermarks, b: Watermarks): boolean {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const key of keys) {
+    const left = a[key];
+    const right = b[key];
+    if (!left || !right || compareHLC(left, right) !== 0) return false;
+  }
+  return true;
 }

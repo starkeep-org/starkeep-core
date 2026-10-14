@@ -183,8 +183,10 @@ describe("fetching a blob", () => {
 
     await f.engine.exchange();
     expect(f.landed).toHaveLength(0);
-    // And the watermark stayed put, so this is a retry rather than a decline.
-    expect(await f.syncState.getWatermarks()).toEqual({});
+    // The row is held, so the rows watermark passes it. The bytes watermark
+    // stays put, so this is a retry rather than a decline.
+    expect(Object.keys(await f.syncState.getWatermarks())).toEqual(["cloud"]);
+    expect(await f.syncState.getByteWatermarks()).toEqual({});
   });
 });
 
@@ -291,8 +293,8 @@ describe("the way back from a decline", () => {
     await f.engine.exchange();
 
     // The row itself is an LWW no-op — we already had it, which is why
-    // `applied` stays at zero — but the *decision* is taken again, and this
-    // time it wants the bytes.
+    // `applied` stays at zero — but the repair lowers the bytes watermark too,
+    // so the *decision* is taken again, and this time it wants the bytes.
     expect(f.decisions.length).toBeGreaterThan(1);
     expect(await f.localStorage.has(f.cloudRecordKey)).toBe(true);
     expect(f.landed.map((c) => c.objectStorageKey)).toEqual([f.cloudRecordKey]);
@@ -303,15 +305,15 @@ describe("a failed fetch is not a decline", () => {
   // These two states are indistinguishable from the blob's absence alone, and
   // conflating them is exactly the bug residency exists to fix: one must retry
   // forever, the other must never retry.
-  it("holds the watermark on failure and advances it on decline", async () => {
+  it("holds the bytes watermark on failure and advances it on decline", async () => {
     const failing = await setup(() => fetch);
     await failing.cloudStorage.delete(failing.cloudRecordKey);
     await failing.engine.exchange();
-    expect(await failing.syncState.getWatermarks()).toEqual({});
+    expect(await failing.syncState.getByteWatermarks()).toEqual({});
 
     const declining = await setup(() => elide);
     await declining.engine.exchange();
-    expect(Object.keys(await declining.syncState.getWatermarks())).toEqual(["cloud"]);
+    expect(Object.keys((await declining.syncState.getByteWatermarks())!)).toEqual(["cloud"]);
   });
 });
 

@@ -299,15 +299,10 @@ export interface SyncExchangeRequest {
   /** Max items the responder should ship in this round. */
   readonly limit?: number;
   /**
-   * Byte budget for what the responder ships back, mirroring the requester's
-   * own round budget. Rows with no blob spend none of it.
-   *
-   * Without this the cap is asymmetric: a node that limits itself to 10 MB
-   * outbound could still be handed a hundred blob-carrying records inbound and
-   * be expected to pull every one of them.
-   *
-   * Optional so an older peer that omits it still works — the responder then
-   * falls back to its own default rather than shipping unbounded bytes.
+   * The requester's byte budget. Rows travel ahead of their files, so a
+   * responder charges no row against it: the requester's download pass budgets
+   * the files itself. Kept on the wire so the cloud's per-exchange log line
+   * records what the requester asked for.
    */
   readonly maxBytes?: number;
   /**
@@ -392,6 +387,27 @@ export interface SyncExchangeResponse {
    * node can currently serve. Never a timestamp.
    */
   readonly responderWatermarks: Watermarks;
+  /**
+   * The responder's **bytes watermark** per nodeId, after applying this
+   * request: every file the responder wants, from rows by that author up to
+   * here, is in the responder's storage. A file the responder declines
+   * (`starkeep/no-cloud` on the cloud) counts as held, and so does a row with
+   * no file. Never above {@link responderWatermarks}.
+   *
+   * The requester uses it twice. Pushing, it uploads the files of its own rows
+   * above this point, because the responder says it lacks them. Pulling, it
+   * expects a download at or below this point to succeed, and treats a failure
+   * above it as "not uploaded yet" rather than as a fault.
+   *
+   * Rows travel ahead of their files because of this field. Before it existed
+   * the only way a sender could remember an owed upload was to hold the row
+   * back until the upload succeeded, since the coverage map above says nothing
+   * about files and the sender's scan starts above it.
+   *
+   * Absent from a responder too old to track files. A requester then refuses to
+   * push: see {@link SyncStateStore.getPeerByteWatermarks}.
+   */
+  readonly responderByteWatermarks?: Watermarks;
   /**
    * Whether {@link responderWatermarks} is the responder's whole coverage, or a
    * lower bound because some scope of it would not read.
@@ -492,12 +508,37 @@ export interface SyncTransport {
   exchange(request: SyncExchangeRequest): Promise<SyncExchangeResponse>;
 }
 
+/**
+ * Where a responder keeps its own bytes watermark between exchanges — see
+ * {@link SyncExchangeResponse.responderWatermarks}' sibling,
+ * {@link SyncExchangeResponse.responderByteWatermarks}.
+ *
+ * Stored rather than recomputed because recomputing means checking every file
+ * an author ever wrote, on every exchange. Stored on the **responder** because
+ * whether a file is in a node's storage is that node's fact, not the sender's
+ * belief about it. One store per channel.
+ *
+ * `load` throwing means the responder cannot say which files it holds. The
+ * responder then omits its bytes watermark, and requesters stop pushing rather
+ * than send rows whose uploads nothing would remember.
+ */
+export interface ByteCoverageStore {
+  load(): Promise<Watermarks>;
+  save(watermarks: Watermarks): Promise<void>;
+}
+
 export interface FileSyncManifest {
   readonly fileHash: string;
   readonly objectStorageKey: string;
   readonly sizeBytes: number;
   readonly mimeType?: string;
 }
+
+/**
+ * What one file transfer did: sent the bytes, found them already at the
+ * destination, or failed. The source lacking the file is a failure.
+ */
+export type TransferOutcome = "transferred" | "present" | "failed";
 
 export interface FileSyncEngine {
   /** True if a transferFile for this key is currently running in this process. */
@@ -516,6 +557,19 @@ export interface FileSyncEngine {
     source: ObjectStorageAdapter,
     destination: ObjectStorageAdapter,
   ): Promise<boolean>;
+  /**
+   * {@link transferFile}, telling a transfer that sent bytes apart from one
+   * that found them already at the destination.
+   *
+   * A sync round needs the difference to judge progress. Re-offering a file the
+   * peer already holds succeeds every round, and counting that as progress
+   * would keep a round loop running while nothing moves.
+   */
+  transferFileOutcome(
+    manifest: FileSyncManifest,
+    source: ObjectStorageAdapter,
+    destination: ObjectStorageAdapter,
+  ): Promise<TransferOutcome>;
   /**
    * Fetch a blob this node previously declined.
    *
@@ -609,13 +663,66 @@ export interface SyncStateStore {
   getInboundFloors(): Promise<Watermarks>;
   setInboundFloors(floors: Watermarks): Promise<void>;
 
+  /**
+   * This node's **bytes watermark**: per author, every file this node wants,
+   * from rows by that author up to here, is in this node's storage. A file the
+   * node declines counts as done, and so does a row with no file.
+   *
+   * The sibling of {@link getWatermarks}, which now covers rows only. The two
+   * used to be one number, advanced past a row only once its file had landed,
+   * so a row waited for every earlier file from its author. Split, a row lands
+   * and shows at once and the file follows.
+   *
+   * `null` until the first write. The engine then starts from
+   * {@link getWatermarks}, which is a valid bytes watermark: before the split,
+   * that map advanced only past files that had landed or been declined.
+   */
+  getByteWatermarks(): Promise<Watermarks | null>;
+  setByteWatermarks(watermarks: Watermarks): Promise<void>;
+
+  /**
+   * The peer's bytes watermark, as reported in
+   * {@link SyncExchangeResponse.responderByteWatermarks} on the previous
+   * exchange. Replaced wholesale each round, like {@link getPeerWatermarks}.
+   *
+   * `null` until a peer has reported one. A pushing round treats `null` as "the
+   * peer may not track files at all" and asks before shipping: rows sent ahead
+   * of their files to a peer that cannot say which files it lacks would leave
+   * those uploads owed with nothing anywhere remembering them.
+   */
+  getPeerByteWatermarks(): Promise<Watermarks | null>;
+  setPeerByteWatermarks(watermarks: Watermarks): Promise<void>;
+
   getHlcClockState(): Promise<{ wallTime: number; counter: number } | null>;
   setHlcClockState(state: { wallTime: number; counter: number }): Promise<void>;
 }
 
 export interface ExchangeResult {
   readonly applied: number;
+  /**
+   * Files this round's download pass fetched, and their bytes. A file found
+   * already here does not count, nor does a declined one, which counts under
+   * {@link elided}, nor a failed one.
+   */
+  readonly landed: number;
+  readonly landedBytes: number;
+  /**
+   * Files this round's upload pass sent, and their bytes. Counted per object,
+   * so two items sharing identical bytes count once, and a file found already
+   * at the peer does not count.
+   */
+  readonly uploaded: number;
+  readonly uploadedBytes: number;
   readonly shipped: number;
+  /**
+   * File work remains that another round can do: a transfer pass left files
+   * for the byte budget, or an upload sent bytes and the peer's bytes
+   * watermark is therefore stale until the next exchange.
+   *
+   * A file that only another node holds does not count. Nothing this node can
+   * do moves it, so counting it would keep `sync()` looping on nothing.
+   */
+  readonly bytesHasMore: boolean;
   /**
    * The **responder** had more to send us than fit in this round.
    *
@@ -704,18 +811,21 @@ export interface ExchangeResult {
 export interface SyncEngine {
   /**
    * One version-vector exchange round with the peer:
-   *   1. Read own + last-reported peer watermarks
-   *   2. For each outbound record (peer hasn't seen): push its blob if any,
-   *      then ship metadata. Blob push failure excludes that record from the
-   *      round; the peer's reported watermarks stay behind it for an
-   *      automatic retry.
-   *   3. For each inbound record: apply metadata, then pull its blob if any.
-   *      Blob pull failure leaves own watermark behind it; next round the
-   *      responder still ships it.
-   *   4. Persist watermarks: own advances past fully-landed inbound items;
-   *      peer is **replaced** with `response.responderWatermarks` — the
-   *      peer's own coverage report, not local optimism — so peer-side loss
-   *      (wipe, redeploy, failed apply) is detected and re-shipped.
+   *   1. Read own + last-reported peer watermarks, rows and bytes. Before the
+   *      first push to a peer, ask it (with a row-less exchange) whether it
+   *      reports a bytes watermark; push nothing to a peer that does not.
+   *   2. Ship every row the peer has not seen, ahead of its file.
+   *   3. Apply every inbound row and announce the new ones. The rows watermark
+   *      advances past every row that applied.
+   *   4. Download pass: fetch the files this node wants and lacks, from its
+   *      own rows above its bytes watermark, announcing them as they land.
+   *      A failed download holds only the bytes watermark.
+   *   5. Upload pass: send the files of this node's rows that the peer's
+   *      bytes watermark says it lacks.
+   *   6. Persist watermarks: own rows and bytes advance over what landed; the
+   *      peer's are **replaced** with its own reports — not local optimism —
+   *      so peer-side loss (wipe, redeploy, failed apply) is detected and
+   *      re-shipped.
    */
   exchange(options?: ExchangeOptions): Promise<ExchangeResult>;
 

@@ -264,10 +264,17 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
     return (await side(role).storage.has(key)) ? "resident" : "staged";
   }
 
-  async function watermarks(): Promise<{ own: Watermarks; peer: Watermarks }> {
+  async function watermarks(): Promise<{
+    own: Watermarks;
+    peer: Watermarks;
+    ownBytes: Watermarks | null;
+    peerBytes: Watermarks | null;
+  }> {
     return {
       own: await syncState.getWatermarks(),
       peer: await syncState.getPeerWatermarks(),
+      ownBytes: await syncState.getByteWatermarks(),
+      peerBytes: await syncState.getPeerByteWatermarks(),
     };
   }
 

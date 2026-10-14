@@ -9,11 +9,6 @@ import {
 } from "@starkeep/protocol-primitives";
 import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
 
-// Mirror of `FILE_RECORDS_TABLE` from `@starkeep/shared-space-api`. The sync
-// engine cannot import that package (cycle), but it needs the table name to
-// recognize which app-syncable rows carry blobs. Keep these in sync.
-const FILE_RECORDS_TABLE = "_starkeep_sync_records";
-
 /**
  * Default round budget, sized for a laptop on a home connection.
  *
@@ -96,6 +91,7 @@ import type {
   SyncOptions,
   SyncRecordItem,
   SyncResult,
+  TransferOutcome,
   VerifyResult,
   Watermarks,
 } from "./types.js";
@@ -127,6 +123,20 @@ import {
   type StreamTruncation,
 } from "./round-cut.js";
 import type { BlobCandidate, ResidencyVerdict } from "./residency-policy.js";
+import { planByteWindow } from "./byte-window.js";
+import {
+  advanceBytesWatermark,
+  blobCandidateForRecord,
+  cloudExcludedRecords,
+  FILE_RECORDS_TABLE,
+  manifestForAppRow,
+  manifestForRecord,
+  scanFileRows,
+  type FileRow,
+  type FileRowSources,
+} from "./file-rows.js";
+
+export { blobCandidateForRecord };
 
 /**
  * What the outbound backlog check found.
@@ -171,19 +181,19 @@ const NOT_VERIFIED: VerifyResult = {
 /**
  * Sync engine: drives one version-vector exchange round per tick.
  *
- * Blob transfer is gated on the same watermark that drives metadata transfer.
- * A record's blob is pushed before its metadata ships; a record's blob is
- * pulled before its receipt is acknowledged. If either fails, the watermark
- * doesn't advance past it, and the next round naturally retries.
+ * Rows and files move on two watermarks. Rows ship as soon as a round runs,
+ * and the rows watermark advances past every row that applied. Files follow
+ * against a **bytes watermark**: this node's own for downloads, and the peer's
+ * reported one for uploads. A file that fails holds only the bytes watermark,
+ * so its row still shows and later rows still arrive. See `file-rows.ts`.
  *
  * Shared records (SR) and app-record rows in the reserved `_starkeep_sync_records`
  * table (AR) are interleaved per nodeId in HLC order so the contiguous-prefix
- * watermark rule covers both streams: a blob failure on an AR row blocks any
- * later SR record on the same nodeId from shipping in the same round (and vice
- * versa). Without that, the per-nodeId watermark could leapfrog a failed item.
+ * rule covers both streams, for rows and for files alike. Without that, a
+ * per-nodeId watermark could leapfrog a failed item.
  *
  * There is no scan-everything reconciliation pass. There is no `sync_status`.
- * Steady state issues zero storage HEAD requests: the watermark delta tells
+ * Steady state issues zero storage HEAD requests: the watermark deltas tell
  * us exactly which records (and therefore which blobs) need attention.
  */
 export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
@@ -374,6 +384,378 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     return { owed: false, readable };
   }
 
+  // Without a state store, the two bytes watermarks live as long as the engine.
+  // Tests and one-off engines run that way; every real node has a store.
+  let memoryByteWatermarks: Watermarks | null = null;
+  let memoryPeerByteWatermarks: Watermarks | null = null;
+
+  async function loadByteWatermarks(): Promise<Watermarks | null> {
+    return syncState ? syncState.getByteWatermarks() : memoryByteWatermarks;
+  }
+
+  async function saveByteWatermarks(watermarks: Watermarks): Promise<void> {
+    if (syncState) await syncState.setByteWatermarks(watermarks);
+    else memoryByteWatermarks = watermarks;
+  }
+
+  async function loadPeerByteWatermarks(): Promise<Watermarks | null> {
+    return syncState ? syncState.getPeerByteWatermarks() : memoryPeerByteWatermarks;
+  }
+
+  async function savePeerByteWatermarks(watermarks: Watermarks): Promise<void> {
+    if (syncState) await syncState.setPeerByteWatermarks(watermarks);
+    else memoryPeerByteWatermarks = watermarks;
+  }
+
+  /** This channel's file-bearing rows, on this node. */
+  const localFileRows: FileRowSources = {
+    records: syncSharedRecords ? localDatabaseAdapter : null,
+    fileTables: appSyncableSource
+      ? appSyncableSource.namespaces
+          .list()
+          .filter((ns) => ns.tables.some((t) => t.name === FILE_RECORDS_TABLE))
+          .map((ns) => ({
+            appId: ns.appId,
+            scanSince: (watermarks: Watermarks, limit: number) =>
+              appSyncableSource.applier.scanSince(ns.appId, FILE_RECORDS_TABLE, watermarks, limit),
+          }))
+      : [],
+  };
+
+  /**
+   * Keys an upload found at the peer, or sent there, during the current
+   * `sync()`.
+   *
+   * A file above a stuck one stays above the peer's bytes watermark, so every
+   * round would offer it again, and the smallest-first pick would offer the
+   * same already-uploaded files every round and never reach the rest. Skipping
+   * them for the rest of the sync fixes both. Cleared when a sync starts, so
+   * the next sync asks the peer again and a file the peer has since lost is
+   * owed again: the peer's watermark, not this set, decides what is owed.
+   */
+  const peerHolds = new Set<string>();
+  /**
+   * Keys a "not yet" download found missing at the peer, with when. Skipped
+   * for {@link PEER_LACKS_RETRY_MS}, for the mirror of the reason above:
+   * retrying the same missing files every round would crowd out the ones that
+   * have arrived. Cleared when a sync starts.
+   */
+  const peerLacks = new Map<string, number>();
+
+  function rememberBounded<T>(store: Set<T> | Map<T, number>, key: T, at?: number): void {
+    if (store.size >= TRANSFER_MEMORY_LIMIT) store.clear();
+    if (store instanceof Set) store.add(key);
+    else store.set(key, at ?? Date.now());
+  }
+
+  async function localHas(key: string): Promise<boolean> {
+    try {
+      return await localObjectStorage.has(key);
+    } catch (err) {
+      console.warn(`[sync] could not check local storage for ${key}: ${(err as Error).message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Download the files this node wants and lacks, and advance its bytes
+   * watermark over what it now holds.
+   *
+   * Works from this node's own rows, not from the round's response. A file is
+   * owed from the moment its row lands until it arrives or is declined, and
+   * the bytes watermark is the only record of that: the rows watermark has
+   * already moved past the row, so the peer will not send it again.
+   *
+   * `peerBytes` decides how loud a failure is. At or below it, the peer has
+   * said it holds the file, and a failed download is a fault. Above it, the
+   * file is usually still on its way up from the node that wrote it.
+   */
+  async function downloadOwedFiles(
+    peerBytes: Watermarks | null,
+    initial: Watermarks,
+  ): Promise<FilePassResult> {
+    const stored = await loadByteWatermarks();
+    // An inbound repair re-receives rows in a range this node may have lost,
+    // and their files are owed again as much as the rows are: a bytes
+    // watermark above the repair would never look at them. So the walk starts
+    // no higher than the repair's floor. Files still here are found present at
+    // once, and declined files are decided again under the current policy.
+    const from = lowerBytesToFloors(stored ?? initial, await loadInboundFloors());
+    const scan = await scanFileRows(localFileRows, from, maxItems);
+    if (!scan.readable) return { ...EMPTY_FILE_PASS, failed: true };
+
+    interface Classified {
+      readonly row: FileRow;
+      satisfied: boolean;
+      elided: boolean;
+      readonly available: boolean;
+      verdict: ResidencyVerdict | null;
+    }
+    const classified: Classified[] = [];
+    const owed: Classified[] = [];
+    let failed = false;
+    for (const row of scan.rows) {
+      const entry: Classified = { row, satisfied: false, elided: false, available: false, verdict: null };
+      if (!row.manifest || (await localHas(row.manifest.objectStorageKey))) {
+        classified.push({ ...entry, satisfied: true });
+        continue;
+      }
+      if (residency && row.candidate) {
+        // Caught: `decide` is a host callback doing real I/O, and a throw here
+        // must cost one file a round, not the round.
+        try {
+          entry.verdict = await residency.decide(row.candidate);
+        } catch (err) {
+          console.warn(
+            `[sync] residency decide failed for ${row.itemId} (${row.manifest.objectStorageKey}): ${(err as Error).message}`,
+          );
+          failed = true;
+          classified.push(entry);
+          continue;
+        }
+        if (entry.verdict.decision === "elide") {
+          classified.push({ ...entry, satisfied: true, elided: true });
+          continue;
+        }
+      }
+      const peer = peerBytes?.[row.hlc.nodeId];
+      const available = peerBytes === null || (peer !== undefined && compareHLC(row.hlc, peer) <= 0);
+      const owedEntry: Classified = { ...entry, available };
+      classified.push(owedEntry);
+      owed.push(owedEntry);
+    }
+
+    const now = Date.now();
+    const plan = planByteWindow(
+      owed.map((c) => ({ value: c, hlc: c.row.hlc, bytes: c.row.manifest!.sizeBytes })),
+      {
+        headBytes: maxBytes,
+        opportunisticBytes: maxBytes,
+        opportunisticMaxFiles: OPPORTUNISTIC_MAX_FILES,
+        // Files the peer has said it holds come before files it may not, and
+        // a file found missing a moment ago waits its turn.
+        opportunisticOrder: (c) => (c.available ? 0 : 1),
+        skip: (c) => {
+          const at = peerLacks.get(c.row.manifest!.objectStorageKey);
+          return !c.available && at !== undefined && now - at < PEER_LACKS_RETRY_MS;
+        },
+      },
+    );
+
+    let transferred = 0;
+    let transferredBytes = 0;
+    let landedSinceEvent: StarkeepId[] = [];
+    let lastLandedEventAt = Date.now();
+    const announceLanded = (): void => {
+      if (landedSinceEvent.length === 0) return;
+      changeNotifier.emit({
+        eventType: "local-data-synced",
+        recordIds: landedSinceEvent,
+        timestamp: clock.now(),
+      });
+      landedSinceEvent = [];
+      lastLandedEventAt = Date.now();
+    };
+
+    // One transfer per key: content-addressed keys can be shared by two rows.
+    const byKey = groupByKey([...plan.head, ...plan.opportunistic], (c) => c.row.manifest!.objectStorageKey);
+    await forEachConcurrent([...byKey.values()], transferConcurrency, async (sharing) => {
+      const first = sharing[0]!;
+      const manifest = first.row.manifest!;
+      const quiet = sharing.every((c) => !c.available);
+      const outcome = await transferOutcomeSafe(
+        manifest,
+        remoteObjectStorage,
+        localObjectStorage,
+        fileSyncEngine,
+        "download",
+        first.row.itemId,
+        quiet,
+      );
+      if (outcome === "failed") {
+        if (quiet) rememberBounded(peerLacks, manifest.objectStorageKey);
+        else failed = true;
+        return;
+      }
+      peerLacks.delete(manifest.objectStorageKey);
+      if (outcome === "transferred") {
+        transferred += 1;
+        transferredBytes += manifest.sizeBytes;
+      }
+      for (const c of sharing) {
+        // Recorded only once the bytes are here, so the node's record of what
+        // it holds describes the disk. A failure reports the file unsatisfied
+        // even though the bytes arrived: the next pass finds them present and
+        // the record is written then.
+        if (residency?.onLanded && c.row.candidate && c.verdict) {
+          try {
+            await residency.onLanded(c.row.candidate, c.verdict);
+          } catch (err) {
+            console.warn(
+              `[sync] residency accounting failed for ${c.row.itemId} (${manifest.objectStorageKey}): ${(err as Error).message}`,
+            );
+            failed = true;
+            continue;
+          }
+        }
+        c.satisfied = true;
+        if (c.row.recordId !== null) landedSinceEvent.push(c.row.recordId);
+      }
+      if (Date.now() - lastLandedEventAt >= LANDED_EVENT_INTERVAL_MS) announceLanded();
+    });
+    announceLanded();
+
+    const next = advanceBytesWatermark(
+      from,
+      classified.map((c) => ({ hlc: c.row.hlc, satisfied: c.satisfied })),
+      scan.ceilings,
+    );
+    const moved = !sameWatermarks(stored ?? initial, next);
+    if (stored === null || moved) await saveByteWatermarks(next);
+
+    // Declined files count once, in the round the watermark passes them. A
+    // declined file above a stuck one is decided again every round until then,
+    // and counting each decision would read as progress that is not happening.
+    const elided = classified.filter((c) => {
+      const passed = next[c.row.hlc.nodeId];
+      return c.elided && passed !== undefined && compareHLC(c.row.hlc, passed) <= 0;
+    }).length;
+
+    const taken = new Set<Classified>([...plan.head, ...plan.opportunistic]);
+    const availableLeftOver = owed.some((c) => c.available && !taken.has(c));
+    return {
+      transferred,
+      transferredBytes,
+      elided,
+      failed,
+      moved,
+      hasMore: availableLeftOver || (scan.ceilings.size > 0 && moved),
+    };
+  }
+
+  /**
+   * Upload the files of this node's rows that the peer says it lacks.
+   *
+   * Works from the peer's bytes watermark, which is the peer's own statement of
+   * what it holds. Nothing on this node records an upload as done: an upload
+   * the peer lost is owed again as soon as the peer's watermark says so.
+   *
+   * Takes only files this node holds. A file whose bytes live on another node
+   * is that node's to send. Takes no file marked `starkeep/no-cloud`: the peer
+   * is always the cloud, and the cloud refuses those bytes and counts them as
+   * held.
+   */
+  async function uploadOwedFiles(peerBytes: Watermarks): Promise<FilePassResult> {
+    // An outbound repair re-ships rows the peer lost, and the peer may have
+    // lost their files with them. Its bytes watermark sits above the hole by
+    // construction, exactly as its rows watermark does, so the upload pass
+    // starts no higher than the repair floor and offers those files again. A
+    // file the peer still holds costs one HEAD.
+    const from = lowerBytesToFloors(peerBytes, await loadRepairFloors());
+    const scan = await scanFileRows(localFileRows, from, maxItems);
+    if (!scan.readable) return { ...EMPTY_FILE_PASS, failed: true };
+
+    const owed: FileRow[] = [];
+    for (const row of scan.rows) {
+      if (!row.manifest) continue;
+      if (!(await localHas(row.manifest.objectStorageKey))) continue;
+      owed.push(row);
+    }
+    let excluded: ReadonlySet<StarkeepId>;
+    try {
+      excluded = await cloudExcludedRecords(
+        localDatabaseAdapter,
+        owed.flatMap((row) => (row.recordId === null ? [] : [row.recordId])),
+      );
+    } catch (err) {
+      // An unread label might be the one that forbids the upload. Sending
+      // nothing this round is the side that cannot leak.
+      console.warn(`[sync] could not read no-cloud labels; uploading nothing this round: ${(err as Error).message}`);
+      return { ...EMPTY_FILE_PASS, failed: true };
+    }
+    const sendable = owed.filter((row) => row.recordId === null || !excluded.has(row.recordId));
+
+    const plan = planByteWindow(
+      sendable.map((row) => ({ value: row, hlc: row.hlc, bytes: row.manifest!.sizeBytes })),
+      {
+        headBytes: maxBytes,
+        opportunisticBytes: maxBytes,
+        opportunisticMaxFiles: OPPORTUNISTIC_MAX_FILES,
+        skip: (row) => peerHolds.has(row.manifest!.objectStorageKey),
+      },
+    );
+
+    let transferred = 0;
+    let transferredBytes = 0;
+    let failed = false;
+    const failedAuthors = new Set<string>();
+    // Authors with files this pass did not get to: left for budget, or past
+    // where the scan stopped. A repair floor must not retire over them.
+    const taken = new Set<FileRow>([...plan.head, ...plan.opportunistic]);
+    const pendingAuthors = new Set<string>(scan.ceilings.keys());
+    for (const row of sendable) {
+      if (!taken.has(row) && !peerHolds.has(row.manifest!.objectStorageKey)) {
+        pendingAuthors.add(row.hlc.nodeId);
+      }
+    }
+    const byKey = groupByKey([...plan.head, ...plan.opportunistic], (row) => row.manifest!.objectStorageKey);
+    await forEachConcurrent([...byKey.values()], transferConcurrency, async (sharing) => {
+      const first = sharing[0]!;
+      const manifest = first.manifest!;
+      const outcome = await transferOutcomeSafe(
+        manifest,
+        localObjectStorage,
+        remoteObjectStorage,
+        fileSyncEngine,
+        "upload",
+        first.itemId,
+        false,
+      );
+      if (outcome === "failed") {
+        failed = true;
+        for (const row of sharing) failedAuthors.add(row.hlc.nodeId);
+        return;
+      }
+      rememberBounded(peerHolds, manifest.objectStorageKey);
+      if (outcome === "transferred") {
+        transferred += 1;
+        transferredBytes += manifest.sizeBytes;
+      }
+    });
+
+    // How far, per author, every file from `from` up is accounted for: sent,
+    // found at the peer, not this node's to send, or not allowed there. A
+    // repair floor advances over this, so a repair wider than one window
+    // still moves forward.
+    const owedSet = new Set(owed);
+    const accountedFor = advanceBytesWatermark(
+      from,
+      scan.rows.map((row) => ({
+        hlc: row.hlc,
+        satisfied:
+          !row.manifest ||
+          !owedSet.has(row) ||
+          (row.recordId !== null && excluded.has(row.recordId)) ||
+          peerHolds.has(row.manifest.objectStorageKey),
+      })),
+      scan.ceilings,
+    );
+
+    return {
+      transferred,
+      transferredBytes,
+      elided: 0,
+      failed,
+      failedAuthors,
+      pendingAuthors,
+      accountedFor,
+      moved: false,
+      // A sent file moves the peer's bytes watermark only when the peer next
+      // reports it, so one more exchange is needed to learn what is still owed.
+      hasMore: transferred > 0 || plan.leftOver > 0,
+    };
+  }
+
   async function exchange(options?: ExchangeOptions): Promise<ExchangeResult> {
       // A pull-only round ships nothing and scans nothing outbound. It exists
       // so a sync session can **pull before it pushes**: `peerWatermarks` is a
@@ -386,7 +768,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // us — it does the entire inbound half of the sync. The reason it has
       // nothing to push is simply that we have not yet learned what the peer
       // needs.
-      const push = options?.push ?? true;
+      let push = options?.push ?? true;
       const ownWatermarks = await loadOwnWatermarks();
       // What we *advertise* is what the responder scans above, so an inbound
       // repair is expressed by advertising less than we hold. Same trick as the
@@ -401,7 +783,38 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // Repair, when one is outstanding, is expressed by lowering the bound the
       // scan already takes — not by a second scan and not by a branch. The
       // scans below cannot tell a repair from an ordinary round.
-      const priorPeerWatermarks = await loadPeerWatermarks();
+      let priorPeerWatermarks = await loadPeerWatermarks();
+      let priorPeerByteWatermarks = await loadPeerByteWatermarks();
+
+      // Rows go ahead of their files only to a peer that reports which files it
+      // holds. A peer that cannot would accept rows whose uploads nothing then
+      // remembers: this node's scan starts above the peer's rows watermark, and
+      // the upload pass works from a bytes watermark the peer never sends. So
+      // the first push to a peer asks first, with an exchange that carries and
+      // returns no rows (`limit: 0`; see `verify()` for why that ships nothing).
+      // The answer is stored, so the question is asked once per peer.
+      let pushWithheld = false;
+      if (push && priorPeerByteWatermarks === null) {
+        const probe = await transport.exchange({ watermarks: advertisedWatermarks, limit: 0 });
+        if (probe.responderByteWatermarks) {
+          priorPeerByteWatermarks = probe.responderByteWatermarks;
+          await savePeerByteWatermarks(probe.responderByteWatermarks);
+          // The probe's coverage is fresher than the cache, by the reasoning
+          // behind the pull-first round.
+          priorPeerWatermarks =
+            probe.coverageComplete === false
+              ? mergeWatermarksUpward(priorPeerWatermarks, probe.responderWatermarks)
+              : probe.responderWatermarks;
+          if (syncState) await syncState.setPeerWatermarks(priorPeerWatermarks);
+        } else {
+          console.warn(
+            "[sync] peer does not report a bytes watermark; pushing nothing until it does. Deploy the current cloud data server.",
+          );
+          push = false;
+          pushWithheld = true;
+        }
+      }
+
       const peerWatermarks = applyRepairFloors(
         priorPeerWatermarks,
         await loadRepairFloors(),
@@ -455,10 +868,11 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
             candidates.push({
               value: { kind: "record", record: rec },
               hlc: rec.updatedAt,
-              // A tombstone or a record with no blob transfers no bytes, so it
-              // must not be charged for them — otherwise a delete-heavy round
-              // budgets as if it were re-uploading the library.
-              bytes: manifestForRecord(rec) ? rec.sizeBytes : 0,
+              // Rows travel ahead of their files, so a row costs no byte
+              // budget: its upload is the upload pass's business, budgeted
+              // there. Charging rows for their files is what made a row wait
+              // behind every earlier file from its author.
+              bytes: 0,
             });
           }
 
@@ -506,7 +920,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
                 candidates.push({
                   value: { kind: "appRow", entry },
                   hlc: entry.timestamp,
-                  bytes: appRowBlobBytes(entry),
+                  bytes: 0,
                 });
               }
             } catch (err) {
@@ -547,72 +961,10 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       const outboundLabels: RecordLabel[] = [];
       const outboundAppRows: AppSyncableRowEntry[] = [];
 
-      // Upload this round's blobs with bounded concurrency, then decide what
-      // ships.
-      //
-      // Concurrency is the reason a small round is affordable: a single-stream
-      // 3 MB upload does not come close to saturating a fast link, so a
-      // strictly sequential round leaves the node idle for most of it
-      // regardless of how the budget is set.
-      //
-      // It does **not** relax the contiguous-prefix rule. Transfers overlap,
-      // but the decision about what ships is made afterwards, per author, in
-      // HLC order, stopping at that author's first failure. Uploading a later
-      // item concurrently with one that fails is harmless — the bytes are
-      // content-addressed and the item simply doesn't ship this round, so the
-      // next round finds them already there.
-      // Grouped by object key, not by item, because a key can belong to more
-      // than one item. Record blobs are content-addressed
-      // (`shared/<category>/<shard>/<sha256>`), so two records with identical
-      // bytes name the same object — a photo saved twice, two renditions that
-      // compress alike. Dispatching those as separate transfers means the
-      // second one meets the first still in flight, and `transferFile` answers
-      // `false` for a key it is already moving. The engine cannot tell that
-      // apart from a failed upload, so it truncated the author's shipment on a
-      // transfer that was in fact succeeding.
-      //
-      // One transfer per key, and every item naming it takes the same outcome.
-      // Cheaper as well as correct: identical bytes were being sent twice.
-      const uploadOutcomes = new Map<OutboundItem, boolean>();
-      const itemsByKey = new Map<string, OutboundItem[]>();
-      for (const items of outboundByNode.values()) {
-        for (const item of items) {
-          const manifest = outboundManifest(item);
-          if (!manifest) continue;
-          pushToBucket(itemsByKey, manifest.objectStorageKey, item);
-        }
-      }
-      await forEachConcurrent(
-        [...itemsByKey.values()],
-        transferConcurrency,
-        async (sharing) => {
-          const representative = sharing[0]!;
-          const ok = await transferBlobSafe(
-            outboundManifest(representative)!,
-            localObjectStorage,
-            remoteObjectStorage,
-            fileSyncEngine,
-            "upload",
-            outboundItemId(representative),
-          );
-          for (const item of sharing) uploadOutcomes.set(item, ok);
-        },
-      );
-
-      // Authors whose shipment this round was cut short by a failed transfer,
-      // as opposed to by the budget. The two are not interchangeable: the
-      // budget leaves a tidy prefix behind and the peer's watermark records
-      // exactly where to resume, while a failed transfer leaves rows unshipped
-      // that a repair floor may be the only thing still asking for. Retiring a
-      // floor on such a round is how a repair reports success and does nothing.
-      const truncatedByFailure = new Set<string>();
       // Highest position actually shipped per author this round — what the
-      // repeat-shipment backstop compares against the peer's coverage. Recorded
-      // from what *shipped*, not from what the scan selected, so a shipment cut
-      // short by a failed transfer is not credited with the part that never left.
+      // repeat-shipment backstop compares against the peer's coverage.
       const shippedHighWater: Record<string, HLCTimestamp> = {};
-      // Authors this node has stopped pushing this round. Distinct from
-      // `truncatedByFailure`: nothing failed, we are declining to try again.
+      // Authors this node has stopped pushing this round.
       const suppressedThisRound = new Set<string>();
       for (const [nodeId, items] of outboundByNode) {
         if (refusedAuthors.has(nodeId)) {
@@ -623,13 +975,11 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           suppressedThisRound.add(nodeId);
           continue;
         }
+        // Every row ships. A row no longer waits for its file: the file is
+        // owed to the peer until the peer's bytes watermark passes it, and the
+        // upload pass after the exchange works from that watermark. See
+        // `SyncExchangeResponse.responderByteWatermarks`.
         for (const item of items) {
-          // `false` only for an item that had a blob and failed it; an item
-          // with no blob was never entered into the map at all.
-          if (uploadOutcomes.get(item) === false) {
-            truncatedByFailure.add(nodeId);
-            break;
-          }
           if (item.kind === "record") {
             outboundRecords.push(item.record);
           } else if (item.kind === "label") {
@@ -702,12 +1052,12 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       }
 
       // ---------------------------------------------------------------------
-      // Inbound: apply records (and pull their blobs) per nodeId in HLC order,
-      // interleaving SR snapshots and AR/AW rows. Own watermark advances only
-      // past items that fully landed locally. peerWatermarks needs no
-      // per-item bookkeeping here: the responder reports its coverage in
-      // `responderWatermarks` (computed after applying our outbound), which
-      // replaces the whole map below.
+      // Inbound: apply rows per nodeId in HLC order, interleaving SR snapshots
+      // and AR/AW rows. The rows watermark advances past every row that
+      // applied; files follow in the download pass, which keeps its own
+      // watermark. peerWatermarks needs no per-item bookkeeping here: the
+      // responder reports its coverage in `responderWatermarks` (computed
+      // after applying our outbound), which replaces the whole map below.
       // ---------------------------------------------------------------------
       // A per-app channel (syncSharedRecords=false) must never apply shared
       // records. The responder shouldn't ship them, but guard inbound too so
@@ -735,87 +1085,28 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       const ownSafeAdvance = new Map<string, HLCTimestamp>();
       let elidedCount = 0;
 
-      /**
-       * Pull a blob unless this node has decided it doesn't want it.
-       *
-       * The three outcomes are deliberately distinct and only two of them
-       * existed before:
-       *   - "landed"  — bytes are here (or there were none to fetch).
-       *   - "elided"  — bytes deliberately declined. **Advances the watermark**,
-       *                 because the record is not owed. This is the whole point
-       *                 of the residency work: without it, declining a blob is
-       *                 indistinguishable from failing to fetch one, so the
-       *                 watermark holds and the peer re-ships forever.
-       *   - "failed"  — wanted and didn't arrive. Watermark holds; retry next
-       *                 round, exactly as before.
-       */
-      async function pullBlob(
-        manifest: FileSyncManifest | null,
-        candidate: BlobCandidate | null,
-        itemId: string,
-      ): Promise<"landed" | "elided" | "failed"> {
-        if (!manifest) return "landed";
-        let verdict: ResidencyVerdict | null = null;
-        if (residency && candidate) {
-          // Both residency hooks are caught, because both are *host callbacks
-          // doing real I/O* — `decide` runs a label query on the cloud node,
-          // `onLanded` writes a row — and they were the one fallible operation
-          // in this file with no catch. Every comparable one is folded into the
-          // contiguous-prefix rule instead: `scanSince`, `bucketDigest`, the
-          // blob transfer, the app-row apply. A throw here propagated out of
-          // `exchange()` and out of `sync()`, which on a handset means a
-          // transient SQLite error takes down the whole round rather than
-          // holding one author's watermark for one tick.
-          try {
-            verdict = await residency.decide(candidate);
-          } catch (err) {
-            console.warn(
-              `[sync] residency decide failed for ${itemId} (${manifest.objectStorageKey}): ${(err as Error).message}`,
-            );
-            return "failed";
-          }
-          if (verdict.decision === "elide") {
-            elidedCount += 1;
-            return "elided";
-          }
-        }
-        const ok = await transferBlobSafe(
-          manifest,
-          remoteObjectStorage,
-          localObjectStorage,
-          fileSyncEngine,
-          "download",
-          itemId,
-        );
-        if (!ok) return "failed";
-        // Recorded only once the bytes are here, so the node's record of what
-        // it holds describes the disk.
-        //
-        // A failure here reports `failed` even though the bytes did arrive, and
-        // that is the right way round: the watermark holds, the next round finds
-        // the blob already present (`transferFile` short-circuits on
-        // `destination.has`), and the record is retried.
-        if (residency?.onLanded && candidate && verdict) {
-          try {
-            await residency.onLanded(candidate, verdict);
-          } catch (err) {
-            console.warn(
-              `[sync] residency accounting failed for ${itemId} (${manifest.objectStorageKey}): ${(err as Error).message}`,
-            );
-            return "failed";
-          }
-        }
-        return "landed";
-      }
-
-      // Authors whose inbound run broke — a blob that would not download, a row
-      // that would not apply. The mirror of `truncatedByFailure`, and it gates
-      // inbound-floor retirement for the same reason: the floor is the only
-      // thing still asking the peer for the rows underneath the hole.
+      // Authors whose inbound run broke on a row that would not apply. It
+      // gates inbound-floor retirement: the floor is the only thing still
+      // asking the peer for the rows underneath the hole.
       const inboundBrokeFor = new Set<string>();
+
+      // Rows first, every one of them, then files in their own pass.
+      //
+      // A row used to wait for its file, and for every earlier file from its
+      // author: a round carrying a 40 MB video kept every row behind it out of
+      // the database for the length of the download. A grid needs only the row
+      // to paint a placeholder, so rows apply and are announced at once. The
+      // rows watermark advances past every row that applied, stopping at the
+      // first that did not, and files are owed against the separate bytes
+      // watermark until they land. `brokenAt` holds that first failed row.
+      const brokenAt = new Map<string, number>();
+      const markBroken = (nodeId: string, index: number): void => {
+        const prior = brokenAt.get(nodeId);
+        if (prior === undefined || index < prior) brokenAt.set(nodeId, index);
+      };
+
       for (const [nodeId, items] of inboundByNode) {
-        let contiguous = true;
-        for (const item of items) {
+        for (const [index, item] of items.entries()) {
           if (item.kind === "record") {
             // The passenger comes off before the row goes to `put`. Splitting
             // here rather than letting the adapter ignore an unknown field
@@ -918,37 +1209,15 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
               console.warn(
                 `[sync] record ${snapshot.id} from ${nodeId} would not apply: ${(err as Error).message}`,
               );
-              contiguous = false;
-              inboundBrokeFor.add(nodeId);
+              markBroken(nodeId, index);
               continue;
             }
 
-            // Always attempt blob pull when the record needs one. The
-            // "row already applied" branch covers the case where a prior
-            // round landed the row but failed the blob pull (Staged
-            // residency) — without this, the watermark would advance past
-            // the failed blob in round 2 and the record would be stuck.
-            const manifest = manifestForRecord(snapshot);
-            const outcome = await pullBlob(
-              manifest,
-              blobCandidateForRecord(snapshot),
-              snapshot.id,
-            );
-            if (outcome === "failed") {
-              // Row applied (or already was), but blob fetch failed.
-              // Don't advance own watermark past this item — next round the
-              // responder still ships it (because our advertised watermarks
-              // haven't moved past it) and we'll retry the blob.
-              contiguous = false;
-              inboundBrokeFor.add(nodeId);
-              continue;
-            }
-
-            // Only fire the change notifier when the row was newly applied
-            // this round. A blob-retry on an already-applied row isn't a
-            // user-visible "data change."
+            // Only announce a row newly applied this round. A file arriving
+            // later for a row the node already held announces itself when it
+            // lands.
             if (!rowAlreadyApplied) appliedIds.push(snapshot.id);
-            if (contiguous) ownSafeAdvance.set(nodeId, snapshot.updatedAt);
+
           } else if (item.kind === "label") {
             const incoming = item.label;
             // HLC LWW on the label's own row, which is the whole reason
@@ -980,15 +1249,13 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
               appliedIds.push(incoming.recordId);
             }
             // No blob to pull, so a label can never fail the way a record
-            // with a missing blob can; the prefix stays contiguous.
-            if (contiguous) ownSafeAdvance.set(nodeId, incoming.updatedAt);
+            // with a missing blob can.
           } else {
             const entry = item.entry;
             if (!appSyncableSource) {
               // No applier configured — skip without advancing own watermark
               // (we have no way to durably accept this row).
-              contiguous = false;
-              inboundBrokeFor.add(nodeId);
+              markBroken(nodeId, index);
               continue;
             }
             clock.receive(entry.timestamp);
@@ -998,26 +1265,49 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
               console.warn(
                 `[sync] appSyncableRow apply failed (app=${entry.appId} table=${entry.table}): ${(err as Error).message}`,
               );
-              contiguous = false;
-              inboundBrokeFor.add(nodeId);
+              markBroken(nodeId, index);
               continue;
             }
 
-            const manifest = manifestForAppRow(entry);
-            const outcome = await pullBlob(
-              manifest,
-              candidateForAppRow(entry),
-              `${entry.appId}.${entry.table}`,
-            );
-            if (outcome === "failed") {
-              contiguous = false;
-              inboundBrokeFor.add(nodeId);
-              continue;
-            }
-
-            if (contiguous) ownSafeAdvance.set(nodeId, entry.timestamp);
           }
         }
+      }
+
+      // Every row is in. Say so now, before the first download, so a reader
+      // paints the round's placeholders while its bytes are still moving.
+      if (appliedIds.length > 0) {
+        changeNotifier.emit({
+          eventType: "local-data-synced",
+          recordIds: [...appliedIds],
+          timestamp: clock.now(),
+        });
+      }
+
+      // The peer's bytes watermark as of this response. Absent from a peer too
+      // old to track files, which keeps the previous value; `null` means no
+      // report has ever arrived, and every download is then expected to work.
+      const peerByteWatermarks = response.responderByteWatermarks ?? priorPeerByteWatermarks;
+
+      // Files after rows, downloads before uploads. Each pass spends its own
+      // byte budget, so a phone fetching stand-ins still uploads this round.
+      const download = await downloadOwedFiles(peerByteWatermarks, ownWatermarks);
+      const upload =
+        push && peerByteWatermarks !== null
+          ? await uploadOwedFiles(peerByteWatermarks)
+          : EMPTY_FILE_PASS;
+      if (response.responderByteWatermarks) {
+        await savePeerByteWatermarks(response.responderByteWatermarks);
+      } else if (push && (outboundRecords.length > 0 || outboundAppRows.length > 0)) {
+        console.warn(
+          "[sync] peer stopped reporting a bytes watermark after rows were shipped; their uploads continue from its last report",
+        );
+      }
+      elidedCount += download.elided;
+
+      for (const [nodeId, items] of inboundByNode) {
+        const stop = brokenAt.get(nodeId) ?? items.length;
+        if (brokenAt.has(nodeId)) inboundBrokeFor.add(nodeId);
+        if (stop > 0) ownSafeAdvance.set(nodeId, inboundItemHlc(items[stop - 1]!));
       }
 
       // ---------------------------------------------------------------------
@@ -1044,8 +1334,21 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         outboundRecords.filter((r) => !haltedByPeer.has(r.updatedAt.nodeId)).length +
         outboundLabels.filter((l) => !haltedByPeer.has(l.updatedAt.nodeId)).length +
         outboundAppRows.filter((e) => !haltedByPeer.has(e.timestamp.nodeId)).length;
+      // File work counts when bytes moved or a bytes watermark did. A file
+      // offered again and found already there moves nothing, and counting it
+      // would keep a round loop running over files nobody can advance.
+      const peerBytesMoved =
+        response.responderByteWatermarks !== undefined &&
+        (priorPeerByteWatermarks === null ||
+          !sameWatermarks(priorPeerByteWatermarks, response.responderByteWatermarks));
       let progressed =
-        appliedIds.length > 0 || acceptedOutbound > 0 || elidedCount > 0;
+        appliedIds.length > 0 ||
+        acceptedOutbound > 0 ||
+        elidedCount > 0 ||
+        download.transferred > 0 ||
+        download.moved ||
+        upload.transferred > 0 ||
+        peerBytesMoved;
 
       if (syncState) {
         const nextOwnWatermarks: Watermarks = { ...ownWatermarks };
@@ -1081,18 +1384,17 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         await syncState.setPeerWatermarks(nextPeerWatermarks);
 
         // Retire repair floors, per author, once a **pushing** round has
-        // drained the outbound side *and that author's shipment was not cut
-        // short by a failed transfer*.
+        // drained the outbound side *and the peer kept that author's rows*.
         //
         // Not on the peer's coverage watermark: the floor sits *below* that
         // watermark by construction — that is the whole point, since the hole
         // is under it — so a watermark comparison reads as "already covered"
         // from the very first round and retires the floor before it has
         // re-shipped anything. Nor on a pull-only round, which ships nothing
-        // and so proves nothing. And not on an author whose upload failed
-        // mid-batch: `outboundHasMore` describes the *scan*, so it stays false
-        // while the shipment was silently truncated, and clearing the floor
-        // there discards the only record that the hole still needs filling.
+        // and so proves nothing. And not on an author with a file that failed
+        // to upload: rows ship ahead of their files, but a repaired range's
+        // files are offered again only while the floor lowers where the upload
+        // pass starts, so retiring early would abandon them.
         //
         // Nor on an author the *peer* dropped. A repair round whose rows shipped
         // fine and were then discarded on arrival is the same event as a failed
@@ -1119,18 +1421,41 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           const floors = await loadRepairFloors();
           const next: Watermarks = {};
           for (const [nodeId, floor] of Object.entries(floors)) {
-            // Truncated or halted: the hole may still be below what shipped, so
-            // neither advance nor retire. Same reasoning as the retirement gate.
-            if (truncatedByFailure.has(nodeId) || haltedByPeer.has(nodeId)) {
+            // Halted: the hole may still be below what shipped. Neither
+            // advance nor retire.
+            if (haltedByPeer.has(nodeId)) {
               next[nodeId] = floor;
               continue;
             }
-            // Drained, and nothing was left behind: the repair is done.
-            if (!outboundHasMore) continue;
+            // The floor also lowers where the upload pass starts, so it has to
+            // stay until the repaired range's files are accounted for too.
+            const filesDone =
+              !upload.failedAuthors?.has(nodeId) && !upload.pendingAuthors?.has(nodeId);
+            // How far each half of the repair has got. `null` means that half
+            // is done and holds the floor nowhere.
             const shipped = shippedHighWater[nodeId];
-            next[nodeId] = shipped !== undefined && compareHLC(shipped, floor) > 0
-              ? shipped
-              : floor;
+            const rowsTo = !outboundHasMore
+              ? null
+              : shipped !== undefined && compareHLC(shipped, floor) > 0
+                ? shipped
+                : floor;
+            const files = upload.accountedFor?.[nodeId];
+            const filesTo = filesDone
+              ? null
+              : files !== undefined && compareHLC(files, floor) > 0
+                ? files
+                : floor;
+            // Drained, and nothing was left behind: the repair is done.
+            if (rowsTo === null && filesTo === null) continue;
+            // No further than the slower half: a floor past an unsent row or an
+            // unsent file would stop the scan offering it.
+            const advanced =
+              rowsTo === null
+                ? filesTo!
+                : filesTo === null || compareHLC(rowsTo, filesTo) <= 0
+                  ? rowsTo
+                  : filesTo;
+            next[nodeId] = advanced;
           }
           if (!sameWatermarks(floors, next)) {
             progressed = true;
@@ -1166,16 +1491,13 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         }
       }
 
-      if (appliedIds.length > 0) {
-        changeNotifier.emit({
-          eventType: "local-data-synced",
-          recordIds: appliedIds,
-          timestamp: clock.now(),
-        });
-      }
-
       return {
         applied: appliedIds.length,
+        landed: download.transferred,
+        landedBytes: download.transferredBytes,
+        uploaded: upload.transferred,
+        uploadedBytes: upload.transferredBytes,
+        bytesHasMore: download.hasMore || upload.hasMore,
         // All three streams, including labels. Counting two of the three made
         // `shipped` unusable as a progress signal on a label-heavy round — the
         // caller sees a frozen counter while the round is doing real work — and
@@ -1186,9 +1508,11 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         outboundHasMore,
         elided: elidedCount,
         progressed,
-        // Something this round *selected* could not be moved — a blob that
-        // would not transfer, a row that would not apply — so an author's run
-        // stopped short in one direction or the other.
+        // Something this round *selected* could not be moved — a row that
+        // would not apply, a file that would not transfer although the other
+        // end had it or this node held it — so work is stuck in one direction
+        // or the other. A file still on its way up from another node is not a
+        // failure and does not count.
         //
         // Kept separate from `outboundHasMore`, which describes only the scan
         // and is therefore false in exactly this case: the scan fit the budget,
@@ -1208,7 +1532,9 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         // over that is the same silent success the other three terms exist to
         // prevent.
         blocked:
-          truncatedByFailure.size > 0 ||
+          pushWithheld ||
+          download.failed ||
+          upload.failed ||
           inboundBrokeFor.size > 0 ||
           haltedByPeer.size > 0 ||
           suppressedThisRound.size > 0,
@@ -1363,6 +1689,11 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // caller that had already gone away.
       if (options?.signal?.aborted) return totals;
 
+      // Each sync asks the peer afresh which files it holds and lacks. The two
+      // memories only stop one sync from offering the same file every round.
+      peerHolds.clear();
+      peerLacks.clear();
+
       // Highest position shipped per author across this whole sync, for the
       // repeat-shipment backstop below. Accumulated across rounds rather than
       // judged per round: within one sync the rounds walk *forward* through an
@@ -1418,7 +1749,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         options?.onRound?.(result, totals.rounds);
 
         // Drained means drained in every sense: nothing left to scan on either
-        // side, *and* nothing this round selected was left behind.
+        // side, no file work another round could do, *and* nothing this round
+        // selected was left behind.
         //
         // `blocked` is the third term and it is not redundant. `hasMore` and
         // `outboundHasMore` describe scans; a round whose scan fit the budget
@@ -1428,7 +1760,12 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         // cloud and never will be. That is the value `/sync/now` hands back and
         // the one the phone's "Sync now" button reads, so it is the difference
         // between a silent success and "something could not transfer".
-        if (!result.hasMore && !result.outboundHasMore && !result.blocked) {
+        if (
+          !result.hasMore &&
+          !result.outboundHasMore &&
+          !result.bytesHasMore &&
+          !result.blocked
+        ) {
           totals.complete = true;
           break;
         }
@@ -1727,6 +2064,28 @@ type InboundItem =
   | { kind: "label"; label: RecordLabel }
   | { kind: "appRow"; entry: AppSyncableRowEntry };
 
+/** A blob the row pass queued for the blob pass, and where its item sits. */
+interface PendingInboundBlob {
+  readonly manifest: FileSyncManifest;
+  readonly candidate: BlobCandidate | null;
+  /** What a failure log names the item by. */
+  readonly itemId: string;
+  /** The record to announce when the bytes land; null for an app row. */
+  readonly recordId: StarkeepId | null;
+  readonly nodeId: string;
+  /** The item's position in its author's HLC-ordered run. */
+  readonly index: number;
+}
+
+/**
+ * The shortest gap between two "these blobs landed" events in one round.
+ *
+ * A second, because the reader on the other end re-fetches its listing on each
+ * event: often enough that a tile fills in about when its bytes arrive, rarely
+ * enough that a round of stand-ins does not turn into a re-fetch per file.
+ */
+const LANDED_EVENT_INTERVAL_MS = 1_000;
+
 function outboundItemHlc(item: OutboundItem): HLCTimestamp {
   if (item.kind === "record") return item.record.updatedAt;
   if (item.kind === "label") return item.label.updatedAt;
@@ -1824,38 +2183,11 @@ async function forEachConcurrent<T>(
   await Promise.all(runners);
 }
 
-/** Blob bytes an app-syncable row will transfer, or 0 when it carries none. */
-function appRowBlobBytes(entry: AppSyncableRowEntry): number {
-  const manifest = manifestForAppRow(entry);
-  return manifest ? manifest.sizeBytes : 0;
-}
-
 function outboundManifest(item: OutboundItem): FileSyncManifest | null {
   if (item.kind === "record") return manifestForRecord(item.record);
   // A label is a row, never a blob — it has nothing to transfer.
   if (item.kind === "label") return null;
   return manifestForAppRow(item.entry);
-}
-
-/**
- * Normalize a shared record into the shape the residency decision reads.
- */
-export function blobCandidateForRecord(record: AnyRecord): BlobCandidate | null {
-  if (!record.objectStorageKey) return null;
-  return {
-    recordId: record.id,
-    objectStorageKey: record.objectStorageKey,
-    sizeBytes: record.sizeBytes,
-    type: record.type,
-    parentId: record.parentId,
-    appId: null,
-    // Columns, so the ceiling decision needs no second read — see
-    // `ceilingPlacement` in protocol-primitives.
-    standInRole: record.standInRole ?? null,
-    fidelity: record.fidelity ?? null,
-    canonicalThreshold: record.canonicalThreshold ?? null,
-    selfCanonical: record.selfCanonical ?? false,
-  };
 }
 
 /**
@@ -1911,62 +2243,6 @@ function starkeepTypeForMimeType(mimeType: string | undefined): string | null {
   return top !== undefined && isCategoryId(top) ? mimeType : null;
 }
 
-/** Same, for a row in the reserved `_starkeep_sync_records` table. */
-function candidateForAppRow(entry: AppSyncableRowEntry): BlobCandidate | null {
-  if (entry.table !== FILE_RECORDS_TABLE || entry.op === "delete") return null;
-  const row = entry.row;
-  if (!row) return null;
-  const key = row["object_storage_key"];
-  if (typeof key !== "string" || key.length === 0) return null;
-  const sizeBytes = row["size_bytes"];
-  const id = row["id"];
-  return {
-    recordId: typeof id === "string" ? id : key,
-    objectStorageKey: key,
-    sizeBytes: typeof sizeBytes === "number" ? sizeBytes : Number(sizeBytes) || 0,
-    type: null,
-    parentId: null,
-    appId: entry.appId,
-  };
-}
-
-function manifestForRecord(record: AnyRecord): FileSyncManifest | null {
-  if (!record.objectStorageKey || record.deletedAt) return null;
-  return {
-    fileHash: record.contentHash || record.objectStorageKey,
-    objectStorageKey: record.objectStorageKey,
-    sizeBytes: record.sizeBytes,
-    mimeType: record.mimeType ?? undefined,
-  };
-}
-
-/**
- * Derive a blob manifest from an app-syncable row entry. Only the reserved
- * `_starkeep_sync_records` table carries blobs at the protocol level; plain
- * app-row tables (AW) never do. Tombstones return null — blob retention on
- * delete is a GC concern, not a sync concern.
- */
-function manifestForAppRow(entry: AppSyncableRowEntry): FileSyncManifest | null {
-  if (entry.table !== FILE_RECORDS_TABLE) return null;
-  if (entry.op === "delete") return null;
-  const row = entry.row;
-  if (!row) return null;
-  const key = row["object_storage_key"];
-  if (typeof key !== "string" || key.length === 0) return null;
-  const contentHash = row["content_hash"];
-  const mimeType = row["mime_type"];
-  const sizeBytes = row["size_bytes"];
-  return {
-    fileHash:
-      typeof contentHash === "string" && contentHash.length > 0
-        ? contentHash
-        : key,
-    objectStorageKey: key,
-    sizeBytes: typeof sizeBytes === "number" ? sizeBytes : Number(sizeBytes) || 0,
-    mimeType: typeof mimeType === "string" ? mimeType : undefined,
-  };
-}
-
 /**
  * Run a blob transfer through the file-sync engine, swallowing exceptions as a
  * false return so the caller can apply the contiguous-prefix rule uniformly.
@@ -1992,4 +2268,97 @@ async function transferBlobSafe(
     );
     return false;
   }
+}
+
+/** What one transfer pass did. */
+interface FilePassResult {
+  /** Files whose bytes actually moved, and their size. */
+  readonly transferred: number;
+  readonly transferredBytes: number;
+  /** Declined files the bytes watermark passed this round. */
+  readonly elided: number;
+  /** A file that should have moved did not, or a step would not run. */
+  readonly failed: boolean;
+  /** Authors with a file that failed to upload. Uploads only. */
+  readonly failedAuthors?: ReadonlySet<string>;
+  /** Authors with files this upload pass did not reach. Uploads only. */
+  readonly pendingAuthors?: ReadonlySet<string>;
+  /** Per author, how far every file is accounted for. Uploads only. */
+  readonly accountedFor?: Watermarks;
+  /** This node's bytes watermark advanced. */
+  readonly moved: boolean;
+  /** Work remains that another round can do. */
+  readonly hasMore: boolean;
+}
+
+const EMPTY_FILE_PASS: FilePassResult = {
+  transferred: 0,
+  transferredBytes: 0,
+  elided: 0,
+  failed: false,
+  moved: false,
+  hasMore: false,
+};
+
+/**
+ * Most files the opportunistic allotment takes per round, in each direction.
+ *
+ * Bounds the round's requests rather than its bytes: the allotment exists for
+ * thumbnails, which are small enough that a byte budget alone would let one
+ * round issue hundreds of transfers.
+ */
+const OPPORTUNISTIC_MAX_FILES = 64;
+
+/** How long a file found missing at the peer waits before it is tried again. */
+const PEER_LACKS_RETRY_MS = 30_000;
+
+/** Cap on either transfer memory, which is cleared outright when reached. */
+const TRANSFER_MEMORY_LIMIT = 10_000;
+
+function groupByKey<T>(items: readonly T[], keyOf: (item: T) => string): Map<string, T[]> {
+  const out = new Map<string, T[]>();
+  for (const item of items) pushToBucket(out, keyOf(item), item);
+  return out;
+}
+
+/**
+ * {@link transferBlobSafe}, keeping the difference between bytes that moved and
+ * bytes already there. `quiet` drops the warning for a failure the caller
+ * expects, such as a download of a file the peer has not reported holding.
+ */
+async function transferOutcomeSafe(
+  manifest: FileSyncManifest,
+  source: ObjectStorageAdapter,
+  destination: ObjectStorageAdapter,
+  fileSyncEngine: FileSyncEngine,
+  direction: "upload" | "download",
+  itemId: string,
+  quiet: boolean,
+): Promise<TransferOutcome> {
+  try {
+    return await fileSyncEngine.transferFileOutcome(manifest, source, destination);
+  } catch (err) {
+    if (!quiet) {
+      console.warn(
+        `[sync] blob ${direction} failed for ${itemId} (${manifest.objectStorageKey}): ${(err as Error).message}`,
+      );
+    }
+    return "failed";
+  }
+}
+
+/**
+ * A bytes watermark lowered to each author's repair floor, where it is higher.
+ *
+ * Unlike `applyRepairFloors`, an author with no entry stays without one: no
+ * entry already means "from the beginning", and taking the floor outright
+ * would claim the files below it.
+ */
+function lowerBytesToFloors(bytes: Watermarks, floors: Watermarks): Watermarks {
+  const out: Watermarks = { ...bytes };
+  for (const [author, floor] of Object.entries(floors)) {
+    const current = out[author];
+    if (current !== undefined && compareHLC(floor, current) < 0) out[author] = floor;
+  }
+  return out;
 }

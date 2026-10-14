@@ -201,8 +201,10 @@ describe("a residency hook that throws", () => {
     });
 
     const result = await engine.exchange();
-    // The round survives, and reports the item as not landed.
-    expect(result.applied).toBe(0);
+    // The round survives, and reports the item as not landed. The row itself
+    // is in: rows apply before any blob is decided.
+    expect(result.applied).toBe(1);
+    expect(result.landed).toBe(0);
     expect(result.blocked).toBe(true);
   });
 
@@ -301,20 +303,17 @@ describe("an unreadable shared-record stream", () => {
     await seedRecord(local);
     await seedRecord(local);
 
-    // Two failures: the backlog check burns one and the round's own scan burns
-    // the other, so the first `sync()` gets nothing across. The second is the
-    // next tick, and the point of the case — a transient failure must cost a
-    // round, not the records.
+    // Two failures: the backlog check burns one and the first pushing round's
+    // scan burns the other, so that round ships no rows. The point of the case
+    // is that a transient failure costs a round, not the records: a later
+    // round of the same sync, or the next tick, gets them across.
     const engine = driveChannel(local, cloud, createMemorySyncStateStore(), {
       localDb: failingMethod(local.db, "querySince", { failFor: 2 }),
     });
 
     const first = await engine.sync();
-    expect(first.complete).toBe(false);
-    expect(first.shipped).toBe(0);
-
-    const second = await engine.sync();
-    expect(second.complete).toBe(true);
+    const result = first.complete ? first : await engine.sync();
+    expect(result.complete).toBe(true);
     expect((await cloud.db.query({})).records).toHaveLength(2);
   });
 
@@ -484,6 +483,9 @@ describe("the repeat-shipment backstop", () => {
           labels: [],
           appSyncableRows: [],
           responderWatermarks: {},
+          // It tracks files, so the requester pushes to it; it just never
+          // keeps anything.
+          responderByteWatermarks: {},
           hasMore: false,
         };
       },

@@ -262,6 +262,9 @@ export async function startFakeCloud(): Promise<FakeCloud> {
             clock,
             objectStorage,
             syncSharedRecords: true,
+            // As the real cloud's Drive channel: a settings row waits for its
+            // bytes, because the stamps it drives are permanent.
+            requiresFileToApply: isSettingsRecord,
             // The real cloud's Drive channel: read an arriving settings file,
             // then stamp what a node recorded without knowing the library's
             // value, so the reply carries the stamp back. One process holds
