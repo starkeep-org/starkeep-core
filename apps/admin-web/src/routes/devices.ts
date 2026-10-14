@@ -1,31 +1,35 @@
 /**
- * Pairing and revoking devices.
+ * Pairing, listing and revoking phones.
  *
- * ## Why the operator does this rather than the device
+ * ## Why pairing happens here
  *
- * Registration is the one step that cannot be authenticated by the thing being
- * registered. The alternative was for a handset to enrol itself with its
- * Cognito token, which would have meant teaching the data plane to verify user
- * JWTs — and the data plane identifies *apps*, not end users, by deliberate
- * design (see the route comments in `cloud-data-server-program.ts`). Reversing
- * that is a real decision and it belongs to the multi-user work (todo #52), not
- * to getting a phone syncing.
+ * Pairing is a phone's install step. An elevated person approves a device once,
+ * the approval mints the device's credential, and the device then syncs with
+ * nothing more to do. Installing a cloud or local app has the same shape: the
+ * privileged console mints a credential, and the request path only ever
+ * verifies one. Nothing in the cloud's request path can write a credential, and
+ * pairing keeps it that way.
  *
- * So pairing happens here, in the privileged console, using credentials the
- * operator already holds. It is also the stronger bar: pairing requires the
- * admin console rather than a password.
+ * The browser generates the device's keypair (`lib/device-pairing.ts`) and
+ * sends only the public half here. The private half goes from the browser into
+ * a QR code that the phone scans, and never reaches this server.
  *
- * ## What is stored
+ * ## What is stored, and where
  *
- * The device's **public** key, under `/${stackPrefix}/app-creds/_device-<id>`.
- * Nothing secret leaves the handset. Revoking is deleting that one parameter,
- * and it disturbs no other client of any app — which is the whole reason a
- * device gets its own asymmetric key rather than a copy of an app's shared
- * HMAC secret.
+ * - **The key.** The device's public key, under
+ *   `/${stackPrefix}/app-creds/_device-<id>`, with the apps it may act as. This
+ *   is the authority: the broker accepts the device's signatures while the
+ *   parameter exists. Revoking deletes it.
+ * - **The list.** An entry in the library's settings file (`pairedDevices`),
+ *   written through the local data server. The file syncs to every machine, so
+ *   a phone paired here can be revoked from any machine. The entry holds the
+ *   id, label, app ids and pairing time, and no key.
  *
- * `userId` is recorded even though nothing reads it yet. See the note on
- * `DeviceRegistration` — it is what saves already-paired devices a migration
- * when shared data is finally partitioned per user.
+ * Pairing writes the entry before the key, and revoking deletes the key before
+ * the entry. Either way a failure part-way leaves an entry without a key, which
+ * is harmless, and never a key without an entry, which would be a phone that
+ * syncs and that nobody can find to revoke. For the same reason pairing refuses
+ * when the local data server is down.
  *
  * ## Why the operator's own session does not make the SSM call
  *
@@ -38,32 +42,52 @@
  * does before minting a per-app HMAC secret or the CloudFront signing key; the
  * trust policy and the `sts:AssumeRole` grant for it already exist from
  * bootstrap, so no IAM change is involved.
+ *
+ * See `~/projects/starkeep/plan-mobile-qr-pairing-2026-10-13.md`.
  */
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
 // The `/app-creds` subpath, not the package root. The root barrel pulls in the
-// whole installer — Pulumi, the orchestrator, the local registry — and a Next
-// route importing it fails to build on a module several layers away that has
-// nothing to do with pairing. Same shape of failure as a UI component reaching
-// through a barrel for a type and dragging `sharp` into the browser bundle.
+// whole installer — Pulumi, the orchestrator, the local registry — and a route
+// importing it fails to build on a module several layers away that has nothing
+// to do with pairing.
 import {
   putDeviceKeyParameter,
   deleteDeviceKeyParameter,
 } from "@starkeep/admin-installer/app-creds";
 import type { AwsCredentials } from "@starkeep/admin-installer/app-creds";
-// Likewise a subpath: `session` imports nothing but the STS client, so it can
-// be pulled into a Next route without dragging the installer along behind it.
+// Likewise a subpath: `session` imports nothing but the STS client.
 import { roleChain } from "@starkeep/admin-installer/session";
 import type { STSCredentials } from "../lib/cognito-auth";
 
 const CONFIG_PATH = join(starkeepDir(), "config.json");
 
+/**
+ * The apps a paired phone may act as. Set here rather than taken from the
+ * request, because it decides what the device's key opens. A phone syncs
+ * through Starkeep Drive and nothing else.
+ */
+export const PHONE_APP_IDS: readonly string[] = ["starkeep-drive"];
+
 interface StarkeepConfig {
   stackPrefix?: string;
   accountId?: string;
   managerRoleArn?: string;
+  publicBaseUrl?: string;
+  apiGatewayUrl?: string;
+}
+
+function localDataServer(): string {
+  return process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://127.0.0.1:9820";
+}
+
+function readConfig(): StarkeepConfig {
+  if (!existsSync(CONFIG_PATH)) {
+    throw new Error("~/.starkeep/config.json not found — complete the cloud setup first");
+  }
+  return JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as StarkeepConfig;
 }
 
 /**
@@ -85,20 +109,15 @@ function toAwsCreds(c: STSCredentials): AwsCredentials {
  * Manager credentials for this one call, from the operator's session.
  *
  * The role ARN is read from `~/.starkeep/config.json` rather than taken from
- * the request body: admin-web runs on the operator's own machine, but a role
- * ARN is the one input here that decides *which* identity does a privileged
- * write, and it is already on disk — there is no reason for it to make a round
- * trip through the browser. Same fallback as the uninstall CLI for configs
- * written before `managerRoleArn` was recorded.
+ * the request body: a role ARN is the one input here that decides *which*
+ * identity does a privileged write, and it is already on disk. Same fallback as
+ * the uninstall CLI for configs written before `managerRoleArn` was recorded.
  */
 async function managerCredentials(
+  config: StarkeepConfig,
   operatorCreds: STSCredentials,
   region: string,
 ): Promise<AwsCredentials> {
-  if (!existsSync(CONFIG_PATH)) {
-    throw new Error("~/.starkeep/config.json not found — complete the cloud setup first");
-  }
-  const config = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as StarkeepConfig;
   const managerRoleArn =
     config.managerRoleArn ??
     (config.accountId && config.stackPrefix
@@ -123,11 +142,14 @@ async function managerCredentials(
   });
 }
 
-/** Must match the handler's `isValidDeviceId` — this name becomes a path. */
+/** Must match the broker's `isValidDeviceId` — this name becomes a path. */
 const DEVICE_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
 /** 32-byte Ed25519 key in a 44-byte SPKI wrapper, base64 — always 60 chars. */
 const SPKI_RE = /^[A-Za-z0-9+/]{59}=$/;
+
+/** Must match `MAX_DEVICE_LABEL_LENGTH` in the settings file's rules. */
+const MAX_LABEL_LENGTH = 100;
 
 interface PairBody {
   credentials: STSCredentials;
@@ -139,9 +161,54 @@ interface PairBody {
   label?: string | null;
 }
 
-export async function POST(req: Request) {
+type ListCall =
+  | { ok: true; body: { devices?: unknown; problems?: unknown } }
+  | { ok: false; status: number; error: string };
+
+/** Call the local data server's paired-device list, reporting a daemon that is down as such. */
+async function callList(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<ListCall> {
+  let res: Response;
+  try {
+    res = await fetch(`${localDataServer()}${path}`, {
+      method,
+      cache: "no-store",
+      ...(body !== undefined
+        ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+        : {}),
+    });
+  } catch {
+    return {
+      ok: false,
+      status: 503,
+      error:
+        "The local data server is not running. Start it from the dashboard: the paired-device list lives in the library's settings file, which it writes.",
+    };
+  }
+  const parsed = (await res.json().catch(() => ({}))) as { error?: string; devices?: unknown; problems?: unknown };
+  if (!res.ok) {
+    return { ok: false, status: res.status, error: parsed.error ?? `local data server answered ${res.status}` };
+  }
+  return { ok: true, body: parsed };
+}
+
+/** The paired-device list, as the library's settings file holds it. */
+export async function GET(): Promise<Response> {
+  const result = await callList("GET", "/library/paired-devices");
+  if (!result.ok) return Response.json({ error: result.error }, { status: result.status });
+  return Response.json(result.body);
+}
+
+/**
+ * Pair a phone: list it, then publish its public key.
+ *
+ * Answers the cloud base URL the QR code carries, read from this machine's
+ * config rather than from the browser, so the phone syncs with the deployment
+ * this console administers.
+ */
+export async function POST(req: Request): Promise<Response> {
   const body = (await req.json()) as PairBody;
   const { credentials, stackPrefix, region, deviceId, publicKeySpki } = body;
+  const label = typeof body.label === "string" && body.label.trim() !== "" ? body.label.trim() : null;
 
   if (!deviceId || !DEVICE_ID_RE.test(deviceId)) {
     return Response.json(
@@ -159,6 +226,36 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
+  if (label !== null && label.length > MAX_LABEL_LENGTH) {
+    return Response.json({ error: `label must be at most ${MAX_LABEL_LENGTH} characters` }, { status: 400 });
+  }
+
+  let config: StarkeepConfig;
+  let awsCreds: AwsCredentials;
+  try {
+    config = readConfig();
+    awsCreds = await managerCredentials(config, credentials, region);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[api/devices] pair failed", message);
+    return Response.json({ error: message }, { status: 500 });
+  }
+  const baseUrl = config.publicBaseUrl ?? config.apiGatewayUrl;
+  if (!baseUrl) {
+    return Response.json(
+      { error: "~/.starkeep/config.json has no cloud URL — deploy the cloud data server first" },
+      { status: 400 },
+    );
+  }
+
+  const pairedAt = new Date().toISOString();
+  const listed = await callList("POST", "/library/paired-devices", {
+    deviceId,
+    label,
+    appIds: PHONE_APP_IDS,
+    pairedAt,
+  });
+  if (!listed.ok) return Response.json({ error: listed.error }, { status: listed.status });
 
   try {
     const name = await putDeviceKeyParameter({
@@ -167,21 +264,45 @@ export async function POST(req: Request) {
       registration: {
         publicKeySpki,
         userId: body.userId ?? null,
-        label: body.label ?? null,
-        pairedAt: new Date().toISOString(),
+        appIds: PHONE_APP_IDS,
+        label,
+        pairedAt,
       },
       region,
-      awsCreds: await managerCredentials(credentials, region),
+      awsCreds,
     });
-    return Response.json({ paired: { deviceId, parameterName: name } });
+    return Response.json({
+      paired: { deviceId, parameterName: name },
+      baseUrl,
+      devices: listed.body.devices ?? [],
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[api/devices] pair failed", message);
-    return Response.json({ error: message }, { status: 500 });
+    // The entry is there and the key is not. Take the entry back so the list
+    // does not show a phone that was never paired. If that fails too, the
+    // entry is harmless and revoking it removes it.
+    const rolledBack = await callList("DELETE", `/library/paired-devices/${encodeURIComponent(deviceId)}`);
+    return Response.json(
+      {
+        error: rolledBack.ok
+          ? message
+          : `${message} (the list still shows ${deviceId}; revoke it to remove the entry)`,
+      },
+      { status: 500 },
+    );
   }
 }
 
-export async function DELETE(req: Request) {
+/**
+ * Revoke a phone: delete its key, then its list entry.
+ *
+ * A key that is already gone counts as deleted, so revoking an entry left
+ * behind by a reinstall that kept data cleans up the list. A list update that
+ * fails after the key is deleted still answers 200, because the device can no
+ * longer sync; `listError` says the entry remains.
+ */
+export async function DELETE(req: Request): Promise<Response> {
   const body = (await req.json()) as PairBody;
   const { credentials, stackPrefix, region, deviceId } = body;
 
@@ -191,17 +312,22 @@ export async function DELETE(req: Request) {
 
   try {
     // Revoke needs the same hop: `ssm:DeleteParameter` on `app-creds/*` is
-    // Manager's too, so this path was denied for the same reason pairing was.
+    // Manager's too.
     await deleteDeviceKeyParameter({
       stackPrefix,
       deviceId,
       region,
-      awsCreds: await managerCredentials(credentials, region),
+      awsCreds: await managerCredentials(readConfig(), credentials, region),
     });
-    return Response.json({ revoked: deviceId });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[api/devices] revoke failed", message);
     return Response.json({ error: message }, { status: 500 });
   }
+
+  const unlisted = await callList("DELETE", `/library/paired-devices/${encodeURIComponent(deviceId)}`);
+  if (!unlisted.ok) {
+    return Response.json({ revoked: deviceId, listError: unlisted.error });
+  }
+  return Response.json({ revoked: deviceId, devices: unlisted.body.devices ?? [] });
 }

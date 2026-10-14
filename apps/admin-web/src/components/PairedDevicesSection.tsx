@@ -1,36 +1,32 @@
 /**
- * Pairing a handset so it may sync.
+ * Pairing a phone so it may sync, and revoking one.
  *
  * ## Why this lives in the admin console
  *
- * Registration is the one step a device cannot authenticate for itself: an
- * unpaired phone has no credential to present. The alternative was to let it
- * enrol with its Cognito token, which would mean teaching the data plane to
- * verify end-user JWTs — and that plane identifies *apps*, not users, by
- * deliberate design. Reversing it belongs to the multi-user work, not to
- * getting a phone syncing.
+ * Pairing is a phone's install step. Installing a cloud or local app happens
+ * here, where the operator approves the app and the console mints its
+ * credential, and a phone works the same way: the operator approves it once and
+ * it then syncs with nothing more to do. Nothing in the cloud's request path
+ * mints a credential, and pairing keeps it that way.
  *
- * So the operator does it here, with credentials they already hold. It is also
- * the stronger bar: pairing requires this console rather than a password.
+ * ## How the credential reaches the phone
  *
- * ## The values are typed in, for now
+ * This page makes the phone's keypair (`lib/device-pairing.ts`), registers the
+ * public half through the server route, and shows the private half once as a
+ * QR code for the phone to scan. The private half never reaches admin-web's
+ * server. While the code is on screen it is a bearer credential — anyone who
+ * photographs it can sync as Starkeep Drive until the device is revoked — so it
+ * appears only after "Pair a phone" and disappears on "Done".
  *
- * The phone shows its device id and public key; they get copied across by hand.
- * That is clumsy and it is temporary — a QR flow was investigated and deferred
- * (`photos-mobile/mobile-sync-design.md` §4.4), because the direction that is
- * actually pleasant, admin-shows/phone-scans, needs a new unauthenticated cloud
- * route and a bearer token. Worth doing deliberately, not as a detail of
- * getting sync working.
+ * ## The list
  *
- * ## Nothing secret is handled here
- *
- * The public half of a device key is not a credential. What makes this
- * privileged is *writing* it — that is what tells the cloud whose signatures to
- * trust, and it is why this uses the operator's AWS session rather than
- * anything the phone could present.
+ * The list of paired phones lives in the library's settings file, which syncs
+ * to every machine, so a phone paired from any machine can be revoked from
+ * this one. A lost phone is the case it exists for.
  */
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import QRCode from "qrcode";
 import { ChevronDownIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -52,99 +48,153 @@ import {
   getIdentityPoolCredentials,
   type STSCredentials,
 } from "@/lib/cognito-auth";
+import { generateDeviceKeys, pairingPayload } from "@/lib/device-pairing";
 
-/** Must match the handler's `isValidDeviceId` — this becomes a parameter name. */
-const DEVICE_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
-/** A 32-byte Ed25519 key in its 44-byte SPKI wrapper is always 60 base64 chars. */
-const SPKI_RE = /^[A-Za-z0-9+/]{59}=$/;
+/** Must match the settings file's `MAX_DEVICE_LABEL_LENGTH`. */
+const MAX_LABEL_LENGTH = 100;
+
+export interface PairedDevice {
+  readonly deviceId: string;
+  readonly label: string | null;
+  readonly appIds: readonly string[];
+  readonly pairedAt: string;
+}
+
+type ListState =
+  | { kind: "loading" }
+  | { kind: "ready"; devices: readonly PairedDevice[] }
+  /** The settings file exists but its bytes have not reached this machine. */
+  | { kind: "unreadable"; problems: readonly string[] }
+  | { kind: "error"; message: string };
 
 type Status =
   | { kind: "idle" }
   | { kind: "working" }
-  | { kind: "paired"; deviceId: string }
-  | { kind: "revoked"; deviceId: string }
+  | { kind: "showing-code"; deviceId: string; label: string | null; qrDataUrl: string }
+  | { kind: "revoked"; deviceId: string; listError: string | null }
   | { kind: "error"; message: string };
 
+/**
+ * A fresh STS session for one call.
+ *
+ * Minted per action rather than held, matching `CloudAppsSection`: the
+ * credentials expire, and a stale one surfaces as an opaque AWS error at the
+ * moment the operator is trying to do something.
+ */
+async function credentialsNow(): Promise<{
+  credentials: STSCredentials;
+  stackPrefix: string;
+  region: string;
+}> {
+  const cfg = await readCloudConfig();
+  if (!cfg) throw new Error("Cloud is not configured. Complete the cloud setup first.");
+  const session = await readCognitoSession();
+  if (!session?.refreshToken) throw new Error("Not signed in. Sign in from the dashboard first.");
+
+  const tokens = await refreshTokens(cfg.cognitoConfig, session.refreshToken);
+  const credentials = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
+  await writeCloudCredentials(credentials);
+  await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
+
+  return { credentials, stackPrefix: cfg.stackPrefix, region: cfg.region };
+}
+
+/** The name a person reads for a device. */
+export function deviceName(device: Pick<PairedDevice, "label">): string {
+  return device.label ?? "Unnamed device";
+}
+
 export function PairedDevicesSection() {
-  const [deviceId, setDeviceId] = useState("");
-  const [publicKey, setPublicKey] = useState("");
   const [label, setLabel] = useState("");
   const [status, setStatus] = useState<Status>({ kind: "idle" });
+  const [list, setList] = useState<ListState>({ kind: "loading" });
+  /** The device whose "Revoke" was pressed once and now asks to be confirmed. */
+  const [confirming, setConfirming] = useState<string | null>(null);
 
-  /**
-   * A fresh STS session for this one call.
-   *
-   * Minted per action rather than held, matching `CloudAppsSection`: the
-   * credentials expire, and a stale one surfaces as an opaque AWS error at the
-   * moment the operator is trying to do something.
-   */
-  async function credentialsNow(): Promise<{
-    credentials: STSCredentials;
-    stackPrefix: string;
-    region: string;
-  }> {
-    const cfg = await readCloudConfig();
-    if (!cfg) throw new Error("Cloud is not configured. Complete the cloud setup first.");
-    const session = await readCognitoSession();
-    if (!session?.refreshToken) throw new Error("Not signed in. Sign in from the dashboard first.");
+  const loadList = useCallback(async () => {
+    try {
+      const res = await fetch("/api/devices", { cache: "no-store" });
+      const body = (await res.json()) as {
+        devices?: PairedDevice[] | null;
+        problems?: string[];
+        error?: string;
+      };
+      if (!res.ok) throw new Error(body.error ?? `Request failed (${res.status})`);
+      if (body.devices === null || body.devices === undefined) {
+        setList({ kind: "unreadable", problems: body.problems ?? [] });
+      } else {
+        setList({ kind: "ready", devices: body.devices });
+      }
+    } catch (err) {
+      setList({ kind: "error", message: err instanceof Error ? err.message : String(err) });
+    }
+  }, []);
 
-    const tokens = await refreshTokens(cfg.cognitoConfig, session.refreshToken);
-    const credentials = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
-    await writeCloudCredentials(credentials);
-    await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
+  useEffect(() => {
+    void loadList();
+  }, [loadList]);
 
-    return { credentials, stackPrefix: cfg.stackPrefix, region: cfg.region };
-  }
-
-  async function submit(method: "POST" | "DELETE") {
-    const id = deviceId.trim();
-    const key = publicKey.trim();
-
-    // Validated here as well as in the route, because a mistyped key is the
-    // likeliest failure of a copy-across flow and the operator is standing
-    // right here. The same check in the Lambda would surface as a device that
-    // silently cannot sync, visible only in CloudWatch.
-    if (!DEVICE_ID_RE.test(id)) {
-      setStatus({ kind: "error", message: "Device id must be 1-128 chars of A-Z a-z 0-9 _ -" });
+  async function pair() {
+    const name = label.trim() || null;
+    if (name !== null && name.length > MAX_LABEL_LENGTH) {
+      setStatus({ kind: "error", message: `A label can be at most ${MAX_LABEL_LENGTH} characters.` });
       return;
     }
-    if (method === "POST" && !SPKI_RE.test(key)) {
-      setStatus({
-        kind: "error",
-        message: "Public key should be 60 base64 characters ending in '='. Check it copied whole.",
-      });
-      return;
-    }
-
     setStatus({ kind: "working" });
     try {
+      const keys = await generateDeviceKeys();
       const { credentials, stackPrefix, region } = await credentialsNow();
       const res = await fetch("/api/devices", {
-        method,
+        method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           credentials,
           stackPrefix,
           region,
-          deviceId: id,
-          publicKeySpki: key,
-          label: label.trim() || null,
+          deviceId: keys.deviceId,
+          // The public half only. The private half goes into the QR code below
+          // and nowhere else.
+          publicKeySpki: keys.publicKeySpki,
+          label: name,
           // Recorded although nothing reads it yet — it is what saves already
           // paired devices a migration when shared data is partitioned per
           // user. The email is the closest stable handle this console has.
           userId: (await readCognitoSession())?.userEmail ?? null,
         }),
       });
-      const body = (await res.json()) as { error?: string };
-      if (!res.ok) throw new Error(body.error ?? `Request failed (${res.status})`);
+      const body = (await res.json()) as { error?: string; baseUrl?: string };
+      if (!res.ok || !body.baseUrl) throw new Error(body.error ?? `Request failed (${res.status})`);
 
-      setStatus(
-        method === "POST" ? { kind: "paired", deviceId: id } : { kind: "revoked", deviceId: id },
+      const qrDataUrl = await QRCode.toDataURL(
+        pairingPayload({ keys, baseUrl: body.baseUrl, label: name }),
+        { errorCorrectionLevel: "M", margin: 2, width: 288 },
       );
-      if (method === "POST") setPublicKey("");
+      setStatus({ kind: "showing-code", deviceId: keys.deviceId, label: name, qrDataUrl });
+      setLabel("");
+      void loadList();
+    } catch (err) {
+      setStatus({ kind: "error", message: err instanceof Error ? err.message : String(err) });
+      void loadList();
+    }
+  }
+
+  async function revoke(device: PairedDevice) {
+    setConfirming(null);
+    setStatus({ kind: "working" });
+    try {
+      const { credentials, stackPrefix, region } = await credentialsNow();
+      const res = await fetch("/api/devices", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ credentials, stackPrefix, region, deviceId: device.deviceId }),
+      });
+      const body = (await res.json()) as { error?: string; listError?: string };
+      if (!res.ok) throw new Error(body.error ?? `Request failed (${res.status})`);
+      setStatus({ kind: "revoked", deviceId: deviceName(device), listError: body.listError ?? null });
     } catch (err) {
       setStatus({ kind: "error", message: err instanceof Error ? err.message : String(err) });
     }
+    void loadList();
   }
 
   const busy = status.kind === "working";
@@ -152,79 +202,139 @@ export function PairedDevicesSection() {
   return (
     <Collapsible className="rounded-lg border p-4">
       <CollapsibleTrigger className="group flex w-full items-center gap-2 text-left">
-        <h3 className="font-medium">Pair with mobile app</h3>
+        <h3 className="font-medium">Paired phones</h3>
         <Badge variant="outline" className="text-xs">Experimental</Badge>
         <ChevronDownIcon className="ml-auto size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
       </CollapsibleTrigger>
 
       <CollapsibleContent className="space-y-4 pt-4">
-      <p className="text-muted-foreground text-sm">
-        A phone signs its sync requests with a key only it holds. Pairing publishes the public
-        half so the cloud will accept them — open Starkeep on the handset and copy the two values
-        from its Sync section.
-      </p>
+        <p className="text-muted-foreground text-sm">
+          Pairing gives a phone its own key, which lets it back up to your cloud through Starkeep
+          Drive and nothing else. Name the phone, then scan the code with Starkeep on the phone
+          under Connect this device.
+        </p>
 
-      <div className="space-y-2">
-        <Input
-          placeholder="Device id (shown on the phone)"
-          value={deviceId}
-          onChange={(e) => setDeviceId(e.target.value)}
-          disabled={busy}
+        {status.kind === "showing-code" ? (
+          <div className="flex flex-col items-start gap-3">
+            <img
+              src={status.qrDataUrl}
+              alt={`Pairing code for ${deviceName(status)}`}
+              width={288}
+              height={288}
+              className="rounded-md border bg-white"
+            />
+            <p className="text-sm">
+              Scan this with the phone now. Anyone who photographs this code can sync as this
+              phone until you revoke it, so close it once the phone says it is connected.
+            </p>
+            <Button onClick={() => setStatus({ kind: "idle" })}>Done</Button>
+          </div>
+        ) : (
+          <div className="flex gap-2">
+            <Input
+              placeholder="Name this phone, e.g. 'Pixel 8'"
+              value={label}
+              maxLength={MAX_LABEL_LENGTH}
+              onChange={(e) => setLabel(e.target.value)}
+              disabled={busy}
+            />
+            <Button onClick={() => void pair()} disabled={busy}>
+              {busy ? "Working…" : "Pair a phone"}
+            </Button>
+          </div>
+        )}
+
+        {status.kind === "revoked" ? (
+          <Alert>
+            <AlertTitle>Revoked {status.deviceId}</AlertTitle>
+            <AlertDescription>
+              {status.listError
+                ? `The phone can no longer sync, but the list could not be updated: ${status.listError}`
+                : "The phone stops being able to sync within five minutes. No other device or app is affected."}
+            </AlertDescription>
+          </Alert>
+        ) : null}
+
+        {status.kind === "error" ? (
+          <Alert variant="destructive">
+            <AlertTitle>Could not complete</AlertTitle>
+            <AlertDescription>{status.message}</AlertDescription>
+          </Alert>
+        ) : null}
+
+        <DeviceList
+          list={list}
+          busy={busy}
+          confirming={confirming}
+          onAskRevoke={setConfirming}
+          onRevoke={(device) => void revoke(device)}
         />
-        <Input
-          placeholder="Public key (60 characters, ends in =)"
-          value={publicKey}
-          onChange={(e) => setPublicKey(e.target.value)}
-          disabled={busy}
-          className="font-mono text-xs"
-        />
-        <Input
-          placeholder="Label — optional, e.g. 'Pixel 5'"
-          value={label}
-          onChange={(e) => setLabel(e.target.value)}
-          disabled={busy}
-        />
-      </div>
-
-      <div className="flex gap-2">
-        <Button onClick={() => void submit("POST")} disabled={busy}>
-          {busy ? "Working…" : "Pair device"}
-        </Button>
-        {/* Revoking needs only the id — the key is irrelevant to a delete, and
-            requiring it would mean an operator with a lost phone has to go and
-            find a value they can no longer read off it. */}
-        <Button variant="outline" onClick={() => void submit("DELETE")} disabled={busy}>
-          Revoke
-        </Button>
-      </div>
-
-      {status.kind === "paired" ? (
-        <Alert>
-          <AlertTitle>Paired {status.deviceId}</AlertTitle>
-          <AlertDescription>
-            The cloud will accept this device within five minutes — the verifier caches keys for
-            that long. Tap Sync now on the phone.
-          </AlertDescription>
-        </Alert>
-      ) : null}
-
-      {status.kind === "revoked" ? (
-        <Alert>
-          <AlertTitle>Revoked {status.deviceId}</AlertTitle>
-          <AlertDescription>
-            Its signatures stop being accepted within five minutes. No other device or app is
-            affected.
-          </AlertDescription>
-        </Alert>
-      ) : null}
-
-      {status.kind === "error" ? (
-        <Alert variant="destructive">
-          <AlertTitle>Could not complete</AlertTitle>
-          <AlertDescription>{status.message}</AlertDescription>
-        </Alert>
-      ) : null}
       </CollapsibleContent>
     </Collapsible>
+  );
+}
+
+function DeviceList({
+  list,
+  busy,
+  confirming,
+  onAskRevoke,
+  onRevoke,
+}: {
+  list: ListState;
+  busy: boolean;
+  confirming: string | null;
+  onAskRevoke: (deviceId: string | null) => void;
+  onRevoke: (device: PairedDevice) => void;
+}) {
+  if (list.kind === "loading") {
+    return <p className="text-muted-foreground text-sm">Loading paired phones…</p>;
+  }
+  if (list.kind === "error") {
+    return (
+      <Alert variant="destructive">
+        <AlertTitle>Could not load paired phones</AlertTitle>
+        <AlertDescription>{list.message}</AlertDescription>
+      </Alert>
+    );
+  }
+  if (list.kind === "unreadable") {
+    return (
+      <p className="text-muted-foreground text-sm">
+        This machine has not received the library&apos;s settings file yet, so it cannot show or
+        change the list. Let it sync, then try again.
+      </p>
+    );
+  }
+  if (list.devices.length === 0) {
+    return <p className="text-muted-foreground text-sm">No phones are paired.</p>;
+  }
+  return (
+    <ul className="divide-y rounded-md border" aria-label="Paired phones">
+      {list.devices.map((device) => (
+        <li key={device.deviceId} className="flex items-center gap-3 p-3">
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium">{deviceName(device)}</p>
+            <p className="truncate font-mono text-xs text-muted-foreground">
+              {device.deviceId} · paired {new Date(device.pairedAt).toLocaleDateString()}
+            </p>
+          </div>
+          {confirming === device.deviceId ? (
+            <>
+              <Button variant="destructive" size="sm" onClick={() => onRevoke(device)} disabled={busy}>
+                Confirm revoke
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => onAskRevoke(null)} disabled={busy}>
+                Cancel
+              </Button>
+            </>
+          ) : (
+            <Button variant="outline" size="sm" onClick={() => onAskRevoke(device.deviceId)} disabled={busy}>
+              Revoke
+            </Button>
+          )}
+        </li>
+      ))}
+    </ul>
   );
 }

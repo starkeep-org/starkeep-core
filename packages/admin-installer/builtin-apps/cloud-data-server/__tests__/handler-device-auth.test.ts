@@ -30,6 +30,8 @@ const context: LambdaContext = {
 };
 
 let handler: (typeof import("../src/api-handler.js"))["handler"];
+let deviceMayCall: (typeof import("../src/api-handler.js"))["deviceMayCall"];
+let deviceWriteRefusal: (typeof import("../src/api-handler.js"))["deviceWriteRefusal"];
 
 beforeAll(async () => {
   process.env.STACK_PREFIX = "teststack";
@@ -41,7 +43,7 @@ beforeAll(async () => {
   // device id, except where reuse is the point.
   process.env.HMAC_CACHE_TTL_MS = "0";
   vi.spyOn(console, "error").mockImplementation(() => {});
-  ({ handler } = await import("../src/api-handler.js"));
+  ({ handler, deviceMayCall, deviceWriteRefusal } = await import("../src/api-handler.js"));
 });
 
 beforeEach(() => {
@@ -99,19 +101,59 @@ function makeDevice() {
   };
 }
 
-/** Register a device and an app, the way admin-web and the installer would. */
-function scriptRegistered(deviceId: string, publicKeySpki: string, appId: string, userId?: string) {
+/**
+ * Register a device and an app, the way admin-web and the installer would.
+ * The device may act as `appId` unless `appIds` says otherwise; `null` writes a
+ * record with no `appIds` at all, as pairing did before it recorded them.
+ */
+function scriptRegistered(
+  deviceId: string,
+  publicKeySpki: string,
+  appId: string,
+  userId?: string,
+  appIds: readonly string[] | null = [appId],
+) {
   ssmMock
     .on(GetParameterCommand, {
       Name: `/teststack/app-creds/_device-${deviceId}`,
       WithDecryption: true,
     })
     .resolves({
-      Parameter: { Value: JSON.stringify({ publicKeySpki, ...(userId ? { userId } : {}) }) },
+      Parameter: {
+        Value: JSON.stringify({
+          publicKeySpki,
+          ...(userId ? { userId } : {}),
+          ...(appIds ? { appIds } : {}),
+        }),
+      },
     });
   ssmMock
     .on(GetParameterCommand, { Name: `/teststack/app-creds/${appId}`, WithDecryption: true })
     .resolves({ Parameter: { Value: JSON.stringify({ hmacSecret: "the-app-secret" }) } });
+}
+
+/** Register an installed app with no device, for a device that names it. */
+function scriptApp(appId: string) {
+  ssmMock
+    .on(GetParameterCommand, { Name: `/teststack/app-creds/${appId}`, WithDecryption: true })
+    .resolves({ Parameter: { Value: JSON.stringify({ hmacSecret: "the-app-secret" }) } });
+}
+
+/** Send one signed device request and return the response. */
+async function deviceCall(
+  device: ReturnType<typeof makeDevice>,
+  deviceId: string,
+  appId: string,
+  method: string,
+  path: string,
+  body?: string,
+) {
+  const headers = device.sign(appId, method, path, body);
+  headers["X-Starkeep-Device-Id"] = deviceId;
+  return handler(
+    makeEvent({ method, path: `/apps/${appId}${path}`, headers, ...(body !== undefined ? { body } : {}) }),
+    context,
+  );
 }
 
 function makeEvent(args: {
@@ -387,5 +429,168 @@ describe("the HMAC path is untouched", () => {
     );
     // 500, not 401: the HMAC gate still passes and hands off to the DB.
     expect(res.statusCode).toBe(500);
+  });
+});
+
+describe("a device acts only as the apps it was paired for", () => {
+  it("403s an installed app the device was not paired for", async () => {
+    // Before pairing recorded app ids, a device key was a key to every
+    // installed app. A phone needs Starkeep Drive and nothing else.
+    const device = makeDevice();
+    scriptRegistered("dev-drive-only", device.publicKeySpki, "starkeep-drive");
+    scriptApp("photos");
+
+    const res = await deviceCall(device, "dev-drive-only", "photos", "GET", "/health");
+    expect(res.statusCode).toBe(403);
+    expect(errorOf(res)).toMatch(/may act only as starkeep-drive, not photos/);
+  });
+
+  it("403s every app for a record written before pairing recorded app ids", async () => {
+    const device = makeDevice();
+    scriptRegistered("dev-no-appids", device.publicKeySpki, "starkeep-drive", undefined, null);
+
+    const res = await deviceCall(device, "dev-no-appids", "starkeep-drive", "GET", "/health");
+    expect(res.statusCode).toBe(403);
+    expect(errorOf(res)).toMatch(/may act only as no app/);
+  });
+
+  it("ignores app ids that are not strings", async () => {
+    const device = makeDevice();
+    ssmMock
+      .on(GetParameterCommand, { Name: "/teststack/app-creds/_device-dev-junk-appids", WithDecryption: true })
+      .resolves({
+        Parameter: {
+          Value: JSON.stringify({ publicKeySpki: device.publicKeySpki, appIds: [7, "starkeep-drive"] }),
+        },
+      });
+    scriptApp("starkeep-drive");
+
+    const res = await deviceCall(device, "dev-junk-appids", "starkeep-drive", "GET", "/health");
+    expect(res.statusCode).toBe(500);
+  });
+});
+
+describe("a device reaches only the routes the phone calls", () => {
+  const KEY = "shared/image/ab/abcdef0123456789";
+
+  it.each([
+    ["GET", "/health", undefined],
+    ["POST", "/sync/exchange", JSON.stringify({ watermarks: {}, records: [] })],
+    ["POST", "/files/presign", JSON.stringify({ key: KEY })],
+    ["GET", `/files/${KEY}/presign`, undefined],
+    ["GET", `/files/${KEY}/stat`, undefined],
+    ["HEAD", `/files/${KEY}`, undefined],
+  ])("lets %s %s through the gate", async (method, path, body) => {
+    const device = makeDevice();
+    const id = `dev-allow-${method}-${path.length}`;
+    scriptRegistered(id, device.publicKeySpki, "starkeep-drive");
+    const res = await deviceCall(device, id, "starkeep-drive", method, path, body);
+    // Past the gate, into pg connect against a host that does not resolve.
+    expect(res.statusCode).toBe(500);
+  });
+
+  it.each([
+    ["GET", "/data/records", undefined],
+    ["POST", "/data/records", JSON.stringify({ type: "image/jpeg" })],
+    ["DELETE", "/data/records/rec-1", undefined],
+    ["POST", "/data/records/rec-1/restore", "{}"],
+    ["DELETE", `/files/${KEY}`, undefined],
+    ["POST", "/data/labels", "{}"],
+    ["POST", "/data/reap", "{}"],
+    ["GET", "/app-data/db/captions", undefined],
+  ])("403s %s %s", async (method, path, body) => {
+    const device = makeDevice();
+    const id = `dev-deny-${method}-${path.length}`;
+    scriptRegistered(id, device.publicKeySpki, "starkeep-drive");
+    const res = await deviceCall(device, id, "starkeep-drive", method, path, body);
+    expect(res.statusCode).toBe(403);
+    expect(errorOf(res)).toBe(`A paired device may not call ${method} ${path}`);
+  });
+
+  it("checks the route only after the signature, so an impostor learns nothing about it", async () => {
+    const registered = makeDevice();
+    const impostor = makeDevice();
+    scriptRegistered("dev-route-impostor", registered.publicKeySpki, "starkeep-drive");
+    const res = await deviceCall(impostor, "dev-route-impostor", "starkeep-drive", "DELETE", "/data/records/x");
+    expect(res.statusCode).toBe(401);
+  });
+});
+
+describe("a device may not write the platform's own files", () => {
+  const settingsRecord = {
+    id: "settings-1",
+    type: "starkeep/settings",
+    createdAt: "0000000000001-0000-node",
+    updatedAt: "0000000000001-0000-node",
+  };
+
+  it("403s an exchange that carries a settings record", async () => {
+    const device = makeDevice();
+    scriptRegistered("dev-push-settings", device.publicKeySpki, "starkeep-drive");
+    const body = JSON.stringify({ watermarks: {}, records: [settingsRecord] });
+    const res = await deviceCall(device, "dev-push-settings", "starkeep-drive", "POST", "/sync/exchange", body);
+    expect(res.statusCode).toBe(403);
+    expect(errorOf(res)).toBe("A paired device may not write the platform's own files");
+  });
+
+  it("403s an exchange that carries a tombstone of a settings record", async () => {
+    // Tombstoning the winning file reverts every setting to the defaults and
+    // empties the paired-device list, which is exactly how a stolen phone
+    // would hide itself.
+    const device = makeDevice();
+    scriptRegistered("dev-tomb-settings", device.publicKeySpki, "starkeep-drive");
+    const body = JSON.stringify({
+      watermarks: {},
+      records: [{ id: "img-1", type: "image/jpeg" }, { ...settingsRecord, deletedAt: settingsRecord.updatedAt }],
+    });
+    const res = await deviceCall(device, "dev-tomb-settings", "starkeep-drive", "POST", "/sync/exchange", body);
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("lets an exchange of ordinary records through", async () => {
+    const device = makeDevice();
+    scriptRegistered("dev-push-photo", device.publicKeySpki, "starkeep-drive");
+    const body = JSON.stringify({ watermarks: {}, records: [{ id: "img-1", type: "image/jpeg" }] });
+    const res = await deviceCall(device, "dev-push-photo", "starkeep-drive", "POST", "/sync/exchange", body);
+    expect(res.statusCode).toBe(500);
+  });
+
+  it("403s a presigned upload into the platform category", async () => {
+    const device = makeDevice();
+    scriptRegistered("dev-presign-settings", device.publicKeySpki, "starkeep-drive");
+    const body = JSON.stringify({ key: "shared/starkeep/ab/abcdef0123456789" });
+    const res = await deviceCall(device, "dev-presign-settings", "starkeep-drive", "POST", "/files/presign", body);
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("leaves a body that does not parse to the route, which refuses it", () => {
+    expect(deviceWriteRefusal("POST", "/sync/exchange", Buffer.from("{not json"))).toBeNull();
+  });
+});
+
+describe("deviceMayCall", () => {
+  it("does not match a path that merely starts like an allowed one", () => {
+    expect(deviceMayCall("POST", "/sync/exchange/extra")).toBe(false);
+    expect(deviceMayCall("GET", "/healthz")).toBe(false);
+    expect(deviceMayCall("GET", "/files/presign")).toBe(false);
+    expect(deviceMayCall("PUT", "/files/shared/image/ab/cd")).toBe(false);
+    expect(deviceMayCall("GET", "/files/shared/image/ab/cd")).toBe(false);
+  });
+});
+
+describe("deviceWriteRefusal", () => {
+  it("reads nothing on routes that carry no write", () => {
+    expect(deviceWriteRefusal("GET", "/health", Buffer.from("[]"))).toBeNull();
+    expect(deviceWriteRefusal("HEAD", "/files/shared/starkeep/ab/cd", Buffer.alloc(0))).toBeNull();
+  });
+
+  it("refuses by category, not by the one settings type", () => {
+    const body = Buffer.from(JSON.stringify({ records: [{ type: "starkeep/some-future-file" }] }));
+    expect(deviceWriteRefusal("POST", "/sync/exchange", body)).not.toBeNull();
+  });
+
+  it("ignores records with no type, such as app-syncable rows", () => {
+    const body = Buffer.from(JSON.stringify({ records: [{ id: "x" }, null, 3] }));
+    expect(deviceWriteRefusal("POST", "/sync/exchange", body)).toBeNull();
   });
 });
