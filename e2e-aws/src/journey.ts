@@ -23,13 +23,14 @@
  */
 
 import { describe, it, expect, afterAll, afterEach, beforeAll } from "vitest";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { chromium, watchPageProblems, signInWithBrowser } from "./browser.js";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
 import {
@@ -43,7 +44,9 @@ import {
 import { signedFetch, USER_TOKEN_HEADER, type AppCredentials } from "@starkeep/app-client";
 import { cloudDataServerBundleSha256Base64, createDsqlRegistry } from "@starkeep/admin-installer";
 import { LambdaClient, GetFunctionConfigurationCommand } from "@aws-sdk/client-lambda";
-import { S3Client, GetObjectTaggingCommand } from "@aws-sdk/client-s3";
+import { S3Client, GetObjectTaggingCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
+import { compareHLC, deserializeHLC, type HLCTimestamp } from "@starkeep/protocol-primitives";
+import { appSyncableTableName, sqliteCompiler } from "@starkeep/storage-sqlite";
 import { AWS_TESTS_ENABLED, STACK_PREFIX, REGION, TEARDOWN } from "./env.js";
 import { ensureBootstrapStack, type BootstrapOutputs } from "./bootstrap-stack.js";
 import { ensureAdminUser } from "./admin-user.js";
@@ -78,6 +81,15 @@ export interface CloudJourneyOptions {
  */
 export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions = {}): void {
   const paths = runPaths(STACK_PREFIX, options.runStateDir);
+
+  // Read at registration, because it decides which steps exist. A missing
+  // manifest reads as "no files" here and fails the run in `beforeAll`.
+  const manifestPath = join(app.appDir, "starkeep.manifest.json");
+  const appDeclaresFiles =
+    existsSync(manifestPath) &&
+    (JSON.parse(readFileSync(manifestPath, "utf-8")) as {
+      infraRequirements?: { appSpecificSyncable?: { files?: boolean } };
+    }).infraRequirements?.appSpecificSyncable?.files === true;
 
   // Shared journey state, filled in step order.
   let outputs: BootstrapOutputs;
@@ -319,6 +331,99 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
   async function syncDesktop(): Promise<void> {
     const res = await drive.fetch("/sync/now", { method: "POST" });
     expect(res.status).toBe(200);
+  }
+
+  /**
+   * The two maps the real cloud reports for one channel: its rows coverage and
+   * its bytes watermark, from a row-less exchange signed as the channel's app.
+   *
+   * The exchange ships nothing, so the only thing it changes on the cloud is
+   * how far the cloud's walk over its own files has got. A requester's
+   * row-less first exchange relies on the same behaviour.
+   */
+  async function cloudCoverage(
+    channel: LdsApp,
+  ): Promise<{ rows: Record<string, HLCTimestamp>; bytes?: Record<string, HLCTimestamp> }> {
+    const res = await cloudApp(channel).fetch("/sync/exchange", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ watermarks: {}, limit: 1 }),
+    });
+    const text = await res.text();
+    expect(res.status, text).toBe(200);
+    const body = JSON.parse(text) as {
+      responderWatermarks: Record<string, HLCTimestamp>;
+      responderByteWatermarks?: Record<string, HLCTimestamp>;
+    };
+    return { rows: body.responderWatermarks, bytes: body.responderByteWatermarks };
+  }
+
+  /**
+   * A row's version in the local data server's own database.
+   *
+   * Read from disk because no route reports a row's full HLC: the record
+   * routes render `updated_at` as an ISO date, which drops the counter and the
+   * author. The daemon keeps the database in WAL mode, so a read-only
+   * connection beside it is safe.
+   */
+  function localVersionOf(table: string, id: string): HLCTimestamp {
+    const db = new DatabaseSync(join(paths.dataDir, "data.db"), { readOnly: true });
+    try {
+      const query = sqliteCompiler.selectFrom(table).select("updated_at").where("id", "=", id).compile();
+      const row = db.prepare(query.sql).get(...(query.parameters as string[])) as
+        | { updated_at?: string }
+        | undefined;
+      expect(row?.updated_at, `${table} holds no row ${id}`).toBeTruthy();
+      return deserializeHLC(row!.updated_at!);
+    } finally {
+      db.close();
+    }
+  }
+
+  /**
+   * Whether S3 holds `key`, asked with the operator's credentials.
+   *
+   * A listing rather than a HEAD: the bucket keeps `apps/*` private to each
+   * app, so the operator's HEAD on an app-private file is refused with 403
+   * whether the object exists or not. The listing is allowed and answers the
+   * same question.
+   */
+  async function inS3(key: string): Promise<boolean> {
+    const s3 = new S3Client({ region: REGION });
+    const out = await s3.send(
+      new ListObjectsV2Command({ Bucket: config.s3Bucket!, Prefix: key, MaxKeys: 1 }),
+    );
+    return (out.Contents ?? []).some((object) => object.Key === key);
+  }
+
+  /**
+   * Assert where the cloud's bytes watermark stands against one row on one
+   * channel. `"below"`: the cloud holds the row and says the row's file is
+   * still owed. `"past"`: the cloud says the file is in S3.
+   */
+  async function expectBytesWatermark(
+    channel: LdsApp,
+    version: HLCTimestamp,
+    where: "below" | "past",
+  ): Promise<void> {
+    const { rows, bytes } = await cloudCoverage(channel);
+    const author = version.nodeId;
+    expect(
+      bytes,
+      `the cloud reports no bytes watermark on ${channel.appId}'s channel, so requesters stop pushing to it`,
+    ).toBeDefined();
+    const rowsAt = rows[author];
+    expect(
+      rowsAt !== undefined && compareHLC(rowsAt, version) >= 0,
+      `the cloud's rows coverage for ${author} on ${channel.appId} (${JSON.stringify(rowsAt)}) does not cover the row`,
+    ).toBe(true);
+    const bytesAt = bytes![author];
+    const past = bytesAt !== undefined && compareHLC(bytesAt, version) >= 0;
+    expect(
+      past,
+      `the cloud's bytes watermark for ${author} on ${channel.appId} is ${JSON.stringify(bytesAt)}, ` +
+        `expected ${where} ${JSON.stringify(version)}`,
+    ).toBe(where === "past");
   }
 
   function runTeardownScript(script: string): void {
@@ -814,6 +919,130 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         };
         expect(perApp.find((e) => e.appId === "starkeep-drive")?.lastError).toBeNull();
       });
+
+      it("a row reaches the cloud ahead of its file, and the cloud's bytes watermark waits for the file", async () => {
+        // A record whose bytes this node has lost, so its upload fails every
+        // round until the bytes come back. Under bytes-first the row waited
+        // here for its file. Now the row ships at once, and the cloud's bytes
+        // watermark is what remembers the owed upload. The real parts under
+        // test are the `_starkeep_byte_coverage` table in Drive's schema under
+        // Drive's role, and the cloud's walk, which checks each file with an
+        // S3 HEAD.
+        //
+        // Registration refuses a record whose bytes are not stored, so the
+        // record is written whole and its bytes removed from disk afterwards.
+        // Sync is paused across that window: a write nudges a round within
+        // 50 ms, and a round that uploaded the file first would test nothing.
+        const bytes = randomBytes(64_000);
+        const pause = await drive.fetch("/sync/pause", { method: "POST" });
+        expect(pause.status, await pause.clone().text()).toBe(200);
+        let id: string;
+        let key: string;
+        try {
+          const written = await writeRecord(appUnderTest, {
+            type: "image/jpeg",
+            contentType: "image/jpeg",
+            bytes,
+          });
+          expectCreated(written, "the record whose bytes go missing");
+          const record = written.body.record as { id: string; object_storage_key: string; path: string | null };
+          id = record.id;
+          key = record.object_storage_key;
+          expect(record.path, JSON.stringify(record)).toBeTruthy();
+          unlinkSync(record.path!);
+        } finally {
+          const resume = await drive.fetch("/sync/resume", { method: "POST" });
+          expect(resume.status, await resume.clone().text()).toBe(200);
+        }
+        const version = localVersionOf("shared_records", id);
+
+        const cloudDrive = cloudApp(drive);
+        await eventually(
+          async () => {
+            await syncDesktop();
+            const res = await cloudDrive.fetch(`/data/records/${id}`);
+            if (res.status !== 200) throw new Error(`row ${id} has not reached the cloud (${res.status})`);
+          },
+          { timeoutMs: 60_000, intervalMs: 2_000 },
+        );
+        expect(await inS3(key), `${key} reached S3 although this node never held it`).toBe(false);
+        await expectBytesWatermark(drive, version, "below");
+
+        // The bytes appear on the desktop. The next rounds upload the file
+        // without re-shipping the row, and the cloud's walk moves past it.
+        const upload = await appUnderTest.fetch("/data/files?type=image/jpeg", {
+          method: "POST",
+          headers: { "Content-Type": "image/jpeg" },
+          body: bytes,
+        });
+        expect(upload.status, await upload.clone().text()).toBe(200);
+        await eventually(
+          async () => {
+            await syncDesktop();
+            if (!(await inS3(key))) throw new Error(`${key} has not reached S3`);
+            await expectBytesWatermark(drive, version, "past");
+          },
+          { timeoutMs: 120_000, intervalMs: 3_000 },
+        );
+      });
+
+      // The same property on the app's own channel, which carries the app's
+      // private files in its reserved `_starkeep_sync_records` table. The
+      // cloud keeps that channel's bytes watermark in the app's own schema,
+      // under the app's own role, through a different handler path than Drive's.
+      // An app whose manifest declares no private files has no such channel.
+      (appDeclaresFiles ? it : it.skip)(
+        `${app.appId}'s own channel: an app-private file's row reaches the cloud ahead of the file`,
+        async () => {
+          const bytes = randomBytes(48_000);
+          const contentHash = createHash("sha256").update(bytes).digest("hex");
+          const subKey = `tier3-ahead-${contentHash.slice(0, 12)}.bin`;
+          const register = await appUnderTest.fetch(
+            `/app-data/files/${encodeURIComponent(subKey)}/record`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ contentHash, mimeType: "application/octet-stream", sizeBytes: bytes.length }),
+            },
+          );
+          const registered = (await register.json()) as { key?: string };
+          expect(register.status, JSON.stringify(registered)).toBe(200);
+          const key = registered.key!;
+          // The reserved table's row id is the file's object key.
+          const version = localVersionOf(appSyncableTableName(app.appId, "_starkeep_sync_records"), key);
+
+          await eventually(
+            async () => {
+              await syncDesktop();
+              await expectBytesWatermark(appUnderTest, version, "below");
+            },
+            { timeoutMs: 60_000, intervalMs: 2_000 },
+          );
+          expect(await inS3(key), `${key} reached S3 although this node never held it`).toBe(false);
+
+          const presign = await appUnderTest.fetch("/app-data/files/presign", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ subKey, contentType: "application/octet-stream" }),
+          });
+          expect(presign.status, await presign.clone().text()).toBe(200);
+          const { url } = (await presign.json()) as { url: string };
+          const put = await fetch(url, {
+            method: "PUT",
+            headers: { "Content-Type": "application/octet-stream" },
+            body: bytes,
+          });
+          expect(put.status, await put.clone().text()).toBeLessThan(300);
+          await eventually(
+            async () => {
+              await syncDesktop();
+              if (!(await inS3(key))) throw new Error(`${key} has not reached S3`);
+              await expectBytesWatermark(appUnderTest, version, "past");
+            },
+            { timeoutMs: 120_000, intervalMs: 3_000 },
+          );
+        },
+      );
 
       it(`${app.appId} cloud static handler serves`, async () => {
         // The app root, spelled the way the platform can actually register it.

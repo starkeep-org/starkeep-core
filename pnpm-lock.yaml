@@ -381,6 +381,12 @@ importers:
       '@starkeep/e2e':
         specifier: workspace:*
         version: link:../e2e
+      '@starkeep/protocol-primitives':
+        specifier: workspace:*
+        version: link:../packages/protocol-primitives
+      '@starkeep/storage-sqlite':
+        specifier: workspace:*
+        version: link:../packages/storage-sqlite
       '@starkeep/testkit':
         specifier: workspace:*
         version: link:../packages/testkit
