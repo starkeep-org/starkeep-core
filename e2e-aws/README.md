@@ -64,6 +64,16 @@ registry database, which must not land in a checkout you do not own.
    the thing the step tests.
 10. Drift a local creds file, re-run the Drive cloud install, and assert sync
     still validates — the todo-39 regression.
+    - **Rows ahead of bytes, Drive channel.** A record loses its local bytes
+      before sync. Its row must reach the cloud anyway, S3 must lack the file,
+      and the cloud's bytes watermark must stop below the row. Once the bytes
+      return, the file must reach S3 and the watermark must pass the row. This
+      is the only coverage of `_starkeep_byte_coverage` on real DSQL and of
+      the cloud's walk against real S3.
+    - **Rows ahead of bytes, the app's own channel.** The same property for an
+      app-private file in `_starkeep_sync_records`, through the per-app
+      handler and the app's own role. Skipped for an app whose manifest
+      declares no private files.
 11. Static handler; 12. the app root's trailing-slash spelling is gated (a
     platform limit, pinned so a change is deliberate).
 13. The cloud-served `/api/local-data` proxy (list + a write verb).

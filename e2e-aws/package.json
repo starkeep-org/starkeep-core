@@ -21,6 +21,8 @@
     "@starkeep/app-client": "workspace:*",
     "@starkeep/aws-bootstrap": "workspace:*",
     "@starkeep/e2e": "workspace:*",
+    "@starkeep/protocol-primitives": "workspace:*",
+    "@starkeep/storage-sqlite": "workspace:*",
     "@starkeep/testkit": "workspace:*",
     "pg": "^8.0.0"
   },
