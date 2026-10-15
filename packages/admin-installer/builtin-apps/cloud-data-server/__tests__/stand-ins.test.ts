@@ -505,6 +505,52 @@ describe("the platform's archiving decision", () => {
     ]);
   });
 
+  it("tags the original when the cloud's walk finds the canonical's bytes after its row", async () => {
+    // Rows reach the cloud ahead of their files, so the decision taken when
+    // the canonical's row applied found no bytes and tagged nothing. The bytes
+    // then arrive through a presigned PUT this handler never sees. The next
+    // exchange's walk over the cloud's files is where the cloud learns of
+    // them, and it re-decides there. Found by the tier-3 journey.
+    const recordStamp = serializeHLC({ wallTime: Date.UTC(2026, 0, 1), counter: 0, nodeId: "test" });
+    const db = fakeDsqlWithGrants(GRANTS)
+      .on(GET_BY_ID, (q) => (q.values.includes(CANONICAL_ID) ? [canonicalRow()] : [parentRow()]))
+      .on(LIVE_STAND_IN, [canonicalRow()])
+      .on(SHARING, [parentRow()])
+      .on(LABELS_BY_IDS, [])
+      .on(/"app_starkeep_drive"\."_starkeep_byte_coverage"/, [])
+      .on(/select "node_id", max\("updated_at"\).*from "shared"\."records" group by "node_id"/, [
+        { node_id: "test", max_updated_at: recordStamp },
+      ])
+      // The walk's scan above the stored bytes watermark, which is empty.
+      .on(/select \* from "shared"\."records"/, [canonicalRow()]);
+    setDbFactory(db);
+    s3Mock.on(PutObjectTaggingCommand).resolves({});
+    const bodyStr = JSON.stringify({ watermarks: {}, limit: 0 });
+    const appId = "starkeep-drive";
+    const headers = signRequest({
+      appId,
+      hmacSecret: `secret-${appId}`,
+      method: "POST",
+      path: "/sync/exchange",
+      body: bodyStr,
+    });
+
+    const res = await handler(
+      {
+        rawPath: `/apps/${appId}/sync/exchange`,
+        requestContext: { http: { method: "POST" } },
+        headers: { ...headers, "X-Starkeep-User-Token": userToken },
+        body: bodyStr,
+      },
+      context,
+    );
+
+    expect(res.statusCode, res.body).toBe(200);
+    expect(tagsWritten()).toEqual([
+      { key: PARENT_KEY, tags: { "starkeep:intent": "archive", "starkeep:ladder": "complete" } },
+    ]);
+  });
+
   it("tags nothing for a smaller stand-in", async () => {
     setDbFactory(
       fakeDsqlWithGrants(GRANTS)
