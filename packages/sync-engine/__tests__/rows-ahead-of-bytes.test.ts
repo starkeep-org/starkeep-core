@@ -90,7 +90,14 @@ async function hlcOf(side: Side, id: StarkeepId): Promise<HLCTimestamp> {
   return (await side.db.get(id))!.updatedAt;
 }
 
-function responder(cloud: Side, extra: { byteCoverage?: ByteCoverageStore; declinesBlob?: (key: string) => Promise<boolean> } = {}) {
+function responder(
+  cloud: Side,
+  extra: {
+    byteCoverage?: ByteCoverageStore;
+    declinesBlob?: (key: string) => Promise<boolean>;
+    onFilesHeld?: (recordIds: readonly StarkeepId[]) => Promise<void>;
+  } = {},
+) {
   return createInProcessSyncTransport({
     databaseAdapter: cloud.db,
     clock: cloud.clock,
@@ -349,6 +356,44 @@ describe("pushing rows ahead of files", () => {
     expect(second.shipped).toBe(0);
     expect(second.uploaded).toBe(1);
     expect(await cloud!.storage.has(key)).toBe(true);
+  });
+
+  it("reports the records whose files the walk has just passed, each once", async () => {
+    // The responder never sees an upload, only its own walk finding the file
+    // later. The cloud re-decides archiving from this report, because the
+    // decision it took when the row applied found no bytes.
+    const [cloud, phone] = await sides("C", "P");
+    const first = await seedFile(phone!, 10);
+    const second = await seedFile(phone!, 10);
+    const firstKey = await keyOf(phone!, first);
+    let failing = true;
+    const realPut = cloud!.storage.putStream.bind(cloud!.storage);
+    cloud!.storage.putStream = async (k: string, ...rest: unknown[]) => {
+      if (failing && k === firstKey) throw new Error("[test] link down");
+      return (realPut as (...a: unknown[]) => Promise<void>)(k, ...rest);
+    };
+    const held: StarkeepId[] = [];
+    const node = engine(
+      phone!,
+      cloud!,
+      responder(cloud!, {
+        onFilesHeld: async (ids) => {
+          held.push(...ids);
+        },
+      }),
+    );
+
+    await node.exchange();
+    await node.exchange();
+    // The second file is in the cloud, but the watermark stops at the first.
+    expect(await cloud!.storage.has(await keyOf(phone!, second))).toBe(true);
+    expect(held).toEqual([]);
+
+    failing = false;
+    await node.exchange(); // uploads the first file
+    await node.exchange(); // the walk finds both
+    await node.exchange(); // and reports neither again
+    expect([...held].sort()).toEqual([first, second].sort());
   });
 });
 

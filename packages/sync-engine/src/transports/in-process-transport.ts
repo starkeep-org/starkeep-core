@@ -3,6 +3,7 @@ import {
   type DataRecord,
   type HLCClock,
   type RecordLabel,
+  type StarkeepId,
 } from "@starkeep/protocol-primitives";
 import { admitIncomingStandIn } from "../stand-in-slots.js";
 import {
@@ -141,6 +142,20 @@ export interface InProcessTransportOptions {
    * would have the cloud stamp from the defaults for as long as the bytes took.
    */
   readonly requiresFileToApply?: (record: DataRecord) => boolean;
+  /**
+   * Called with the shared records whose files this side's bytes watermark has
+   * just moved past, after the walk saves the new value. A declined file
+   * counts, as it does for the watermark.
+   *
+   * The walk is where a responder first learns that a file has arrived. A
+   * requester uploads through presigned URLs the responder never sees, and
+   * rows now land ahead of their files, so a decision taken when the row
+   * applied may have found no bytes. The cloud re-decides archiving here.
+   *
+   * A file waiting behind an earlier missing file is reported only once the
+   * watermark reaches it. A throw is logged and never fails the exchange.
+   */
+  readonly onFilesHeld?: (recordIds: readonly StarkeepId[]) => Promise<void>;
 }
 
 /**
@@ -166,6 +181,7 @@ export function createInProcessSyncTransport(
     onApplied,
     declinesBlob,
     requiresFileToApply,
+    onFilesHeld,
   } = options;
   const byteCoverage = options.byteCoverage ?? createMemoryByteCoverageStore();
 
@@ -264,6 +280,25 @@ export function createInProcessSyncTransport(
         // The report below is still true; only the next exchange's starting
         // point is lost, and that exchange walks again from the stored value.
         console.warn(`[sync] could not save this side's bytes watermark: ${(err as Error).message}`);
+      }
+    }
+    if (onFilesHeld) {
+      const passed = scan.rows.filter((row) => {
+        if (row.manifest === null || row.recordId === null) return false;
+        const after = next[row.hlc.nodeId];
+        const before = from[row.hlc.nodeId];
+        return (
+          after !== undefined &&
+          compareHLC(row.hlc, after) <= 0 &&
+          (before === undefined || compareHLC(row.hlc, before) > 0)
+        );
+      });
+      if (passed.length > 0) {
+        try {
+          await onFilesHeld([...new Set(passed.map((row) => row.recordId!))]);
+        } catch (err) {
+          console.warn(`[sync] the files-held hook failed for ${passed.length} record(s): ${(err as Error).message}`);
+        }
       }
     }
     return next;

@@ -4135,6 +4135,18 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           // permanent, so a settings row waits for its bytes; see
           // `requiresFileToApply`.
           requiresFileToApply: isSettingsRecord,
+          // A canonical stand-in's row lands before its bytes, so the archive
+          // decision `onApplied` takes for it finds no bytes and declines.
+          // Bytes reach S3 through presigned PUTs this handler never sees, and
+          // the walk is where the cloud first learns they are there, so the
+          // decision is taken again then. The same holds for an original whose
+          // own bytes were still uploading.
+          onFilesHeld: async (recordIds) => {
+            const records = (await Promise.all(recordIds.map((id) => db.get(id)))).filter(
+              (record): record is DataRecord => record !== null,
+            );
+            await runArchiveTriggers(db, async () => storage, archiveTriggersFor(records, []));
+          },
           // The Drive channel is where most stand-ins, originals and labels
           // reach the cloud, and its storage is already Drive's. A settings
           // file that arrived is read first, then every original a node
