@@ -243,8 +243,8 @@ async function auditAppGrants(client: pg.Client): Promise<void> {
         `  table. No install produces that: every metadata apply fails with 42501 and\n` +
         `  takes the whole sync exchange down with it, so shared-record sync is off for\n` +
         `  that app entirely. Re-run its install DDL — step 6 of\n` +
-        `  docs/schema-change-runbook.md. Clearing one ledger row is the unsafe move;\n` +
-        `  clear the whole ledger or call runAppInstallDdl directly.`,
+        `  docs/schema-change-runbook.md: redeploy the app, or run\n` +
+        `  scripts/rerun-app-install-ddl.ts.`,
     );
   }
 }
@@ -348,11 +348,10 @@ async function main(): Promise<void> {
       // every Drive sync exchange 500ing on `42501 permission denied`.
       //
       // The authoritative repair after any recreate is re-running **every**
-      // installed app's install DDL. Nothing here can do that: the ledger marks
-      // `run_dsql_ddl` done and only the infra steps carry `alwaysRun`, so no
-      // reinstall of the cloud data server will ever reissue these — however
-      // many times it runs. The audit below is what makes the gap visible
-      // instead of silent.
+      // installed app's install DDL. Nothing here can do that: a redeploy of
+      // each app does it, since `run_dsql_ddl` carries `alwaysRun`, and Drive's
+      // runs as the second pass of a cloud data server redeploy. The audit
+      // below is what makes the gap visible until then.
       const restored: string[] = [];
       for (const t of recreated) {
         const was = before.find((b) => b.name === t.name);

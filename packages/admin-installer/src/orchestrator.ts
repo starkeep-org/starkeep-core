@@ -264,32 +264,59 @@ async function installAppInner(
     });
   }
 
-  await runStep(registry, appId, "install", "attach_temp_install_ddl_policy", done, () =>
-    attachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
+  // alwaysRun on attach, DDL and detach: a redeploy applies the manifest's
+  // schema, so a table, index, grant or label key added since the first install
+  // reaches an installed app (the bytes-watermark table did not, 2026-10-15).
+  // Every statement runAppInstallDdl issues is idempotent. The DDL needs the
+  // temp policy, which the detach below removes at the end of every run, so the
+  // three re-run together; re-running the DDL alone retries AccessDenied
+  // indefinitely (plan-app-upgrade-path-2026-09-10.md).
+  await runStep(
+    registry,
+    appId,
+    "install",
+    "attach_temp_install_ddl_policy",
+    done,
+    () => attachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
+    { alwaysRun: true },
   );
 
-  await runStep(registry, appId, "install", "run_dsql_ddl", done, async () => {
-    const ddlCreds = await roleChain([config.managerRoleArn, config.installDdlRoleArn]);
-    const dsqlOpts: DsqlDdlOptions = {
-      hostname: config.dsqlHostname,
-      region: config.region,
-      stackPrefix: config.stackPrefix,
-      accountId: config.accountId,
-      credentials: ddlCreds,
-    };
-    await runAppInstallDdl(
-      dsqlOpts,
-      appId,
-      ir.fileAccess,
-      ir.fileAccessAll,
-      ir.appSpecificSyncable.tables,
-      ir.appSpecificSyncable.files,
-      ir.labelKeys,
-    );
-  });
+  await runStep(
+    registry,
+    appId,
+    "install",
+    "run_dsql_ddl",
+    done,
+    async () => {
+      const ddlCreds = await roleChain([config.managerRoleArn, config.installDdlRoleArn]);
+      const dsqlOpts: DsqlDdlOptions = {
+        hostname: config.dsqlHostname,
+        region: config.region,
+        stackPrefix: config.stackPrefix,
+        accountId: config.accountId,
+        credentials: ddlCreds,
+      };
+      await runAppInstallDdl(
+        dsqlOpts,
+        appId,
+        ir.fileAccess,
+        ir.fileAccessAll,
+        ir.appSpecificSyncable.tables,
+        ir.appSpecificSyncable.files,
+        ir.labelKeys,
+      );
+    },
+    { alwaysRun: true },
+  );
 
-  await runStep(registry, appId, "install", "detach_temp_install_ddl_policy", done, () =>
-    detachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
+  await runStep(
+    registry,
+    appId,
+    "install",
+    "detach_temp_install_ddl_policy",
+    done,
+    () => detachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
+    { alwaysRun: true },
   );
 
   // App creds: derived fresh (not persisted) — always re-assume on resume.

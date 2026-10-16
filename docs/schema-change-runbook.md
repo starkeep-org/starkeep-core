@@ -55,16 +55,13 @@ and `shared.app_registry` are untouched.
 
 ### 6. Re-run the cloud install DDL
 
-**"Redeploy" does not do this.** Only the infra steps carry `alwaysRun`, so
-`run_dsql_ddl` is skipped whenever the ledger records it done.
+Redeploy the app. `run_dsql_ddl` and its temp-policy attach and detach carry
+`alwaysRun` (since 2026-10-15), so every install re-runs the DDL. Drive has no
+redeploy of its own: a cloud data server redeploy installs Drive as its second
+pass.
 
-Either clear the app's **entire** install ledger, or call `runAppInstallDdl`
-directly with the app's manifest.
-
-> Never clear a single ledger row. `run_dsql_ddl` depends on
-> `attach_temp_install_ddl_policy`, which has no `alwaysRun`, so clearing the
-> DDL row alone runs it with no `DbConnectAdmin` grant — an AccessDenied retry
-> loop with no way out.
+To re-run one app's DDL without a redeploy, run
+`packages/admin-installer/scripts/rerun-app-install-ddl.ts`.
 
 Verify: schema exists, column types are the new ones, and the
 `app_syncable_namespaces` row carries `columns`.
@@ -108,9 +105,9 @@ Verify both:
   app's install DDL after recreating a shared table**, not just the app whose
   schema you were changing.
 
-  Skipping this fails silently and late. The ledger marks `run_dsql_ddl` done
-  and only the infra steps carry `alwaysRun`, so no later reinstall repairs it.
-  The app keeps syncing until the first row carrying metadata arrives, then
+  Skipping this fails silently and late. Before 2026-10-15 the ledger skipped
+  `run_dsql_ddl` on every reinstall, so nothing repaired it; a redeploy of each
+  app now does. The app keeps syncing until the first row carrying metadata arrives, then
   every exchange 500s on `42501 permission denied` — and because
   `applyRecordMetadata` throws inside the exchange, that app's shared-record
   sync stops entirely, not just its metadata.
