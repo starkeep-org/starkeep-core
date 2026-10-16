@@ -1,21 +1,13 @@
 /**
  * Re-run one installed app's DSQL install DDL, to reissue grants a shared-table
- * recreate revoked.
+ * recreate revoked or create a table added since the app was installed.
  *
- * This is step 6 of `docs/schema-change-runbook.md`, as a command. **A redeploy
- * does not do it.** `run_dsql_ddl` carries no `alwaysRun` (`orchestrator.ts:271`),
- * so `runStep` skips it the moment the ledger records it done — however many
- * times the cloud data server is reinstalled. Verified on this cluster: the
- * 2026-09-10 reinstall left Drive's `run_dsql_ddl` timestamp at 2026-08-31 and
- * touched only `put_app_creds_parameter`, its one `alwaysRun` step.
- *
- * It calls `runAppInstallDdl` directly rather than clearing the ledger, which
- * is the other permitted route. Clearing is coarser — it re-runs role creation,
- * the S3 keep file and registration too — and clearing a *single* row is the
- * unsafe move the runbook warns against, because `run_dsql_ddl` depends on
- * `attach_temp_install_ddl_policy`, which has no `alwaysRun` either. A direct
- * call touches no ledger row at all, which is why an app repaired this way
- * keeps its original install timestamp.
+ * This is step 6 of `docs/schema-change-runbook.md`, as a command. Since
+ * 2026-10-15 a redeploy does it too: `run_dsql_ddl` and its temp-policy attach
+ * and detach carry `alwaysRun` in `orchestrator.ts`. This script remains the
+ * route that re-runs the DDL alone, without a bundle upload or a compute stack
+ * update. A direct call touches no ledger row at all, which is why an app
+ * repaired this way keeps its original install timestamp.
  *
  * Every statement `runAppInstallDdl` issues is idempotent — `IF NOT EXISTS`,
  * probe-then-act, `ON CONFLICT` — so running it against a healthy app is a

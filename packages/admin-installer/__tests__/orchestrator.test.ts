@@ -93,8 +93,11 @@ import {
   createAppRole,
   attachTempInstallInfraPolicy,
   detachTempInstallInfraPolicy,
+  attachTempInstallDdlPolicy,
+  detachTempInstallDdlPolicy,
 } from "../src/iam";
 import { putAppCredsParameter } from "../src/app-creds";
+import { runAppInstallDdl } from "../src/dsql-ddl";
 import { putAppKeepFile, uploadAppBundle } from "../src/s3";
 import { installComputeStack } from "../src/compute-stack";
 import { validateManifest, type AppManifest } from "@starkeep/admin-manifest";
@@ -345,6 +348,44 @@ describe("install", () => {
     expect(
       ledger.filter((e) => e.step === "install_compute_stack" && e.status === "done"),
     ).toHaveLength(2);
+  });
+
+  // Regression: a redeploy must apply the manifest's schema. The first install
+  // records run_dsql_ddl "done", and without alwaysRun no redeploy ever created
+  // a table added later — the bytes-watermark table never reached Drive's
+  // schema on 2026-10-15. Compute-less, like Drive, whose redeploy is the
+  // second pass of a cloud data server redeploy.
+  it("re-runs the DSQL DDL, with its temp policy, on a redeploy of a fully-installed app", async () => {
+    const manifest: AppManifest = {
+      ...photosManifest,
+      infraRequirements: {
+        ...photosManifest.infraRequirements,
+        compute: { enabled: false, handlers: [] },
+      },
+    };
+    const drive = () =>
+      installApp({ appId: "photos", manifest, version: "0.1.0", config, registryCredentials });
+
+    await drive();
+    await drive();
+
+    expect(vi.mocked(runAppInstallDdl)).toHaveBeenCalledTimes(2);
+    // The detach at the end of every run removes the grant the DDL needs, so
+    // the attach must run again too, and the detach with it.
+    expect(vi.mocked(attachTempInstallDdlPolicy)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(detachTempInstallDdlPolicy)).toHaveBeenCalledTimes(2);
+    const order = ledger
+      .filter((e) => e.status === "done" && e.step.includes("ddl"))
+      .map((e) => e.step);
+    expect(order).toEqual([
+      "attach_temp_install_ddl_policy",
+      "run_dsql_ddl",
+      "detach_temp_install_ddl_policy",
+      "attach_temp_install_ddl_policy",
+      "run_dsql_ddl",
+      "detach_temp_install_ddl_policy",
+    ]);
+    expect(vi.mocked(createAppRole)).toHaveBeenCalledTimes(1);
   });
 
   it("rejects reserved app ids before recording any step, unless explicitly allowed", async () => {
