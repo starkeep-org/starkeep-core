@@ -20,9 +20,9 @@
  *
  * ## The list
  *
- * The list of paired phones lives in the library's settings file, which syncs
- * to every machine, so a phone paired from any machine can be revoked from
- * this one. A lost phone is the case it exists for.
+ * The list is the device records themselves, read from SSM through Manager, so
+ * a phone paired from any machine can be revoked from this one. A lost phone is
+ * the case it exists for.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -50,12 +50,14 @@ import {
 } from "@/lib/cognito-auth";
 import { generateDeviceKeys, pairingPayload } from "@/lib/device-pairing";
 
-/** Must match the settings file's `MAX_DEVICE_LABEL_LENGTH`. */
+/** Must match the route's `MAX_LABEL_LENGTH`. */
 const MAX_LABEL_LENGTH = 100;
 
 export interface PairedDevice {
   readonly deviceId: string;
   readonly label: string | null;
+  readonly kind: "phone" | "desktop";
+  readonly userId: string | null;
   readonly appIds: readonly string[];
   readonly pairedAt: string;
 }
@@ -63,15 +65,13 @@ export interface PairedDevice {
 type ListState =
   | { kind: "loading" }
   | { kind: "ready"; devices: readonly PairedDevice[] }
-  /** The settings file exists but its bytes have not reached this machine. */
-  | { kind: "unreadable"; problems: readonly string[] }
   | { kind: "error"; message: string };
 
 type Status =
   | { kind: "idle" }
   | { kind: "working" }
   | { kind: "showing-code"; deviceId: string; label: string | null; qrDataUrl: string }
-  | { kind: "revoked"; deviceId: string; listError: string | null }
+  | { kind: "revoked"; deviceId: string }
   | { kind: "error"; message: string };
 
 /**
@@ -85,6 +85,8 @@ async function credentialsNow(): Promise<{
   credentials: STSCredentials;
   stackPrefix: string;
   region: string;
+  /** The signed-in operator's Cognito `sub`. */
+  userSub: string;
 }> {
   const cfg = await readCloudConfig();
   if (!cfg) throw new Error("Cloud is not configured. Complete the cloud setup first.");
@@ -96,7 +98,16 @@ async function credentialsNow(): Promise<{
   await writeCloudCredentials(credentials);
   await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
 
-  return { credentials, stackPrefix: cfg.stackPrefix, region: cfg.region };
+  return { credentials, stackPrefix: cfg.stackPrefix, region: cfg.region, userSub: subOf(tokens.idToken) };
+}
+
+/** The `sub` claim of an ID token. The token came straight from Cognito, so it is read, not verified. */
+function subOf(idToken: string): string {
+  const payload = idToken.split(".")[1] ?? "";
+  const json = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
+  const sub = (JSON.parse(json) as { sub?: unknown }).sub;
+  if (typeof sub !== "string" || sub === "") throw new Error("The sign-in token names no user.");
+  return sub;
 }
 
 /** The name a person reads for a device. */
@@ -113,18 +124,15 @@ export function PairedDevicesSection() {
 
   const loadList = useCallback(async () => {
     try {
-      const res = await fetch("/api/devices", { cache: "no-store" });
-      const body = (await res.json()) as {
-        devices?: PairedDevice[] | null;
-        problems?: string[];
-        error?: string;
-      };
-      if (!res.ok) throw new Error(body.error ?? `Request failed (${res.status})`);
-      if (body.devices === null || body.devices === undefined) {
-        setList({ kind: "unreadable", problems: body.problems ?? [] });
-      } else {
-        setList({ kind: "ready", devices: body.devices });
-      }
+      const { credentials, stackPrefix, region } = await credentialsNow();
+      const res = await fetch("/api/devices/list", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ credentials, stackPrefix, region }),
+      });
+      const body = (await res.json()) as { devices?: PairedDevice[]; error?: string };
+      if (!res.ok || !body.devices) throw new Error(body.error ?? `Request failed (${res.status})`);
+      setList({ kind: "ready", devices: body.devices });
     } catch (err) {
       setList({ kind: "error", message: err instanceof Error ? err.message : String(err) });
     }
@@ -143,7 +151,7 @@ export function PairedDevicesSection() {
     setStatus({ kind: "working" });
     try {
       const keys = await generateDeviceKeys();
-      const { credentials, stackPrefix, region } = await credentialsNow();
+      const { credentials, stackPrefix, region, userSub } = await credentialsNow();
       const res = await fetch("/api/devices", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -156,10 +164,9 @@ export function PairedDevicesSection() {
           // and nowhere else.
           publicKeySpki: keys.publicKeySpki,
           label: name,
-          // Recorded although nothing reads it yet — it is what saves already
-          // paired devices a migration when shared data is partitioned per
-          // user. The email is the closest stable handle this console has.
-          userId: (await readCognitoSession())?.userEmail ?? null,
+          // The signed-in operator. The broker binds the device's data to
+          // this user.
+          userId: userSub,
         }),
       });
       const body = (await res.json()) as { error?: string; baseUrl?: string };
@@ -188,9 +195,9 @@ export function PairedDevicesSection() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ credentials, stackPrefix, region, deviceId: device.deviceId }),
       });
-      const body = (await res.json()) as { error?: string; listError?: string };
+      const body = (await res.json()) as { error?: string };
       if (!res.ok) throw new Error(body.error ?? `Request failed (${res.status})`);
-      setStatus({ kind: "revoked", deviceId: deviceName(device), listError: body.listError ?? null });
+      setStatus({ kind: "revoked", deviceId: deviceName(device) });
     } catch (err) {
       setStatus({ kind: "error", message: err instanceof Error ? err.message : String(err) });
     }
@@ -248,9 +255,8 @@ export function PairedDevicesSection() {
           <Alert>
             <AlertTitle>Revoked {status.deviceId}</AlertTitle>
             <AlertDescription>
-              {status.listError
-                ? `The phone can no longer sync, but the list could not be updated: ${status.listError}`
-                : "The phone stops being able to sync within five minutes. No other device or app is affected."}
+              The phone stops being able to sync within five minutes. No other device or app is
+              affected.
             </AlertDescription>
           </Alert>
         ) : null}
@@ -296,14 +302,6 @@ function DeviceList({
         <AlertTitle>Could not load paired phones</AlertTitle>
         <AlertDescription>{list.message}</AlertDescription>
       </Alert>
-    );
-  }
-  if (list.kind === "unreadable") {
-    return (
-      <p className="text-muted-foreground text-sm">
-        This machine has not received the library&apos;s settings file yet, so it cannot show or
-        change the list. Let it sync, then try again.
-      </p>
     );
   }
   if (list.devices.length === 0) {

@@ -114,10 +114,7 @@ function scriptRegistered(
   appIds: readonly string[] | null = [appId],
 ) {
   ssmMock
-    .on(GetParameterCommand, {
-      Name: `/teststack/app-creds/_device-${deviceId}`,
-      WithDecryption: true,
-    })
+    .on(GetParameterCommand, { Name: `/teststack/platform/devices/${deviceId}` })
     .resolves({
       Parameter: {
         Value: JSON.stringify({
@@ -253,10 +250,7 @@ describe("a device that should be refused", () => {
     // HMAC path, which is the credential it must not have.
     const device = makeDevice();
     ssmMock
-      .on(GetParameterCommand, {
-        Name: "/teststack/app-creds/_device-dev-revoked",
-        WithDecryption: true,
-      })
+      .on(GetParameterCommand, { Name: "/teststack/platform/devices/dev-revoked" })
       .rejects(new ParameterNotFound({ message: "gone", $metadata: {} }));
     ssmMock
       .on(GetParameterCommand, { Name: "/teststack/app-creds/starkeep-drive", WithDecryption: true })
@@ -357,10 +351,7 @@ describe("a device that should be refused", () => {
   it("401s an app the device names but that is not installed", async () => {
     const device = makeDevice();
     ssmMock
-      .on(GetParameterCommand, {
-        Name: "/teststack/app-creds/_device-dev-ghostapp",
-        WithDecryption: true,
-      })
+      .on(GetParameterCommand, { Name: "/teststack/platform/devices/dev-ghostapp" })
       .resolves({ Parameter: { Value: JSON.stringify({ publicKeySpki: device.publicKeySpki }) } });
     ssmMock
       .on(GetParameterCommand, { Name: "/teststack/app-creds/ghost", WithDecryption: true })
@@ -457,7 +448,7 @@ describe("a device acts only as the apps it was paired for", () => {
   it("ignores app ids that are not strings", async () => {
     const device = makeDevice();
     ssmMock
-      .on(GetParameterCommand, { Name: "/teststack/app-creds/_device-dev-junk-appids", WithDecryption: true })
+      .on(GetParameterCommand, { Name: "/teststack/platform/devices/dev-junk-appids" })
       .resolves({
         Parameter: {
           Value: JSON.stringify({ publicKeySpki: device.publicKeySpki, appIds: [7, "starkeep-drive"] }),
@@ -534,9 +525,7 @@ describe("a device may not write the platform's own files", () => {
   });
 
   it("403s an exchange that carries a tombstone of a settings record", async () => {
-    // Tombstoning the winning file reverts every setting to the defaults and
-    // empties the paired-device list, which is exactly how a stolen phone
-    // would hide itself.
+    // Tombstoning the winning file reverts every setting to the defaults.
     const device = makeDevice();
     scriptRegistered("dev-tomb-settings", device.publicKeySpki, "starkeep-drive");
     const body = JSON.stringify({

@@ -239,29 +239,24 @@ function getSsmClient(): SSMClient {
 // and the cloud-data-server's own credentials deliberately have no access to
 // shared data. A device registry in `shared.*` would be unreadable by the code
 // that has to read it. The app secrets already had this problem and already
-// solved it, so devices take the identical path and inherit the cache, the
-// failure modes and the revocation story — revoking is deleting one parameter.
+// solved it, so devices take the same path and inherit the cache, the failure
+// modes and the revocation story — revoking is deleting one parameter.
 //
-// **Why under `app-creds/` rather than a `device-keys/` prefix of its own.**
-// `/${stackPrefix}/app-creds/*` is the *only* SSM path this Lambda's role can
-// read, and widening it would mean editing the runtime policy *and* the
-// foundational permissions boundary — a bootstrap CloudFormation change, for a
-// parameter that is not secret. `_cloudfront-signing` already established the
-// convention of reserved names under this prefix, and it is collision-free by
-// construction: `CLOUD_APP_ID_RE` requires an app id to start `[a-z0-9]`, so no
-// app can ever claim a name beginning with an underscore.
+// The records live under `/${stackPrefix}/platform/devices/`, beside the
+// deployment's settings and apart from the app secrets, so Manager can list
+// them for admin-web without any read on `app-creds/*`.
 //
 // Registration is not self-service: admin-web writes the parameter, having
 // authenticated the operator and chosen which Cognito user the device belongs
-// to. `userId` is recorded from day one even though nothing reads it yet —
-// see todo #52. Capturing it now is what saves every device a migration when
-// shared data is finally partitioned per user.
+// to.
 
 interface CachedDeviceKey {
   /** Base64 SPKI, exactly as registered. */
   publicKeySpki: string;
   /** The Cognito user this device was paired for. Recorded, not yet enforced. */
   userId: string | null;
+  /** A phone or a desktop. A record without the field is a phone. */
+  kind: "phone" | "desktop";
   /**
    * The apps this device may act as, as admin-web recorded them at pairing.
    * Empty for a record written before pairing recorded them, which therefore
@@ -286,7 +281,7 @@ const PLATFORM_CATEGORY = typeCategory(SETTINGS_TYPE_ID);
  * device reaches exactly the routes the phone's sync transport and object
  * storage adapter call, and nothing else. A stolen phone can then sync, which
  * its key already allowed, but cannot delete records through the record routes
- * or edit the paired-device list to hide itself from revocation.
+ * or rewrite the library's settings file.
  *
  * Writes that these routes allow are checked separately for the platform
  * category: see {@link deviceWriteRefusal}.
@@ -307,8 +302,7 @@ export function deviceMayCall(method: string, subPath: string): boolean {
  * them carry writes: an exchange carries records, and a presign authorizes an
  * upload. A phone never writes the platform category — it reads the settings
  * file and leaves losing copies for the cloud to tombstone — so a device that
- * tries is refused whole. The paired-device list lives in that file, and a
- * stolen phone must not be able to remove itself from it.
+ * tries is refused whole.
  *
  * Checked in the gate, from the raw body, so every rule about devices sits in
  * one place. A body that does not parse is left to the route, which refuses it.
@@ -358,18 +352,21 @@ async function loadDevicePublicKey(deviceId: string): Promise<CachedDeviceKey | 
   if (!stackPrefix) throw new Error("STACK_PREFIX env var is required");
   try {
     const result = await getSsmClient().send(
-      new GetParameterCommand({
-        Name: `/${stackPrefix}/app-creds/_device-${deviceId}`,
-        WithDecryption: true,
-      }),
+      new GetParameterCommand({ Name: `/${stackPrefix}/platform/devices/${deviceId}` }),
     );
     const raw = result.Parameter?.Value;
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as { publicKeySpki?: string; userId?: string; appIds?: unknown };
+    const parsed = JSON.parse(raw) as {
+      publicKeySpki?: string;
+      userId?: string;
+      kind?: unknown;
+      appIds?: unknown;
+    };
     if (!parsed.publicKeySpki) return null;
     const entry: CachedDeviceKey = {
       publicKeySpki: parsed.publicKeySpki,
       userId: parsed.userId ?? null,
+      kind: parsed.kind === "desktop" ? "desktop" : "phone",
       appIds: Array.isArray(parsed.appIds)
         ? parsed.appIds.filter((a): a is string => typeof a === "string")
         : [],

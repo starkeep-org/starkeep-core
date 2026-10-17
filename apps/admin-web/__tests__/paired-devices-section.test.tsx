@@ -5,7 +5,8 @@
  *
  * Pins what the section promises: the private half of the key reaches the QR
  * code and never the server, the code disappears on "Done", the list comes from
- * the library's settings file, and revoking asks twice.
+ * the device records through the list route, the signed-in operator's `sub`
+ * becomes the device's user, and revoking asks twice.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
@@ -33,8 +34,11 @@ vi.mock("@/lib/cloud-config", () => ({
   writeCognitoSession: async () => undefined,
 }));
 
+/** An unsigned ID token naming the operator; the section reads `sub` from it. */
+const ID_TOKEN = `h.${btoa(JSON.stringify({ sub: "sub-operator" }))}.s`;
+
 vi.mock("@/lib/cognito-auth", () => ({
-  refreshTokens: async () => ({ idToken: "id", refreshToken: "rt2" }),
+  refreshTokens: async () => ({ idToken: ID_TOKEN, refreshToken: "rt2" }),
   getIdentityPoolCredentials: async () => ({
     accessKeyId: "AKIA",
     secretAccessKey: "s",
@@ -46,6 +50,7 @@ vi.mock("@/lib/cognito-auth", () => ({
 const { PairedDevicesSection } = await import("../src/components/PairedDevicesSection");
 
 interface Call {
+  url: string;
   method: string;
   body: Record<string, unknown> | null;
 }
@@ -53,6 +58,8 @@ interface Call {
 const PIXEL = {
   deviceId: "dev_pixel",
   label: "Pixel 8",
+  kind: "phone",
+  userId: "sub-operator",
   appIds: ["starkeep-drive"],
   pairedAt: "2026-10-01T12:00:00.000Z",
 };
@@ -68,23 +75,25 @@ beforeEach(() => {
   respond = () => undefined;
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (_url: string, init?: RequestInit) => {
+    vi.fn(async (url: string, init?: RequestInit) => {
       const call: Call = {
+        url,
         method: init?.method ?? "GET",
         body: init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : null,
       };
       calls.push(call);
       const override = respond(call);
       if (override) return Response.json(override.body, { status: override.status });
+      if (url === "/api/devices/list") return Response.json({ devices });
       if (call.method === "POST") {
         devices = [...devices, { ...PIXEL, deviceId: String(call.body!.deviceId), label: (call.body!.label as string) ?? null }];
-        return Response.json({ paired: {}, baseUrl: "https://d123.cloudfront.net", devices });
+        return Response.json({ paired: {}, baseUrl: "https://d123.cloudfront.net" });
       }
       if (call.method === "DELETE") {
         devices = devices.filter((d) => d.deviceId !== call.body!.deviceId);
-        return Response.json({ revoked: call.body!.deviceId, devices });
+        return Response.json({ revoked: call.body!.deviceId });
       }
-      return Response.json({ devices, problems: [] });
+      return Response.json({ error: `unexpected ${url}` }, { status: 404 });
     }),
   );
 });
@@ -115,18 +124,19 @@ describe("the list", () => {
     expect(await screen.findByText("No phones are paired.")).toBeTruthy();
   });
 
-  it("says the machine cannot read the list yet, rather than showing it empty", async () => {
-    respond = (call) =>
-      call.method === "GET" ? { status: 200, body: { devices: null, problems: ["not here yet"] } } : undefined;
+  it("reads the list with the operator's session", async () => {
     await open();
-    expect(await screen.findByText(/has not received the library's settings file yet/)).toBeTruthy();
+    await screen.findByRole("list", { name: "Paired phones" });
+    const listCall = calls.find((c) => c.url === "/api/devices/list")!;
+    expect(listCall.body).toMatchObject({ stackPrefix: "sktest", region: "us-east-2" });
+    expect((listCall.body!.credentials as { accessKeyId: string }).accessKeyId).toBe("AKIA");
   });
 
-  it("names the problem when the daemon is down", async () => {
+  it("names the problem when the records cannot be read", async () => {
     respond = (call) =>
-      call.method === "GET" ? { status: 503, body: { error: "The local data server is not running." } } : undefined;
+      call.url === "/api/devices/list" ? { status: 500, body: { error: "AccessDeniedException" } } : undefined;
     await open();
-    expect(await screen.findByText("The local data server is not running.")).toBeTruthy();
+    expect(await screen.findByText("AccessDeniedException")).toBeTruthy();
   });
 });
 
@@ -139,14 +149,14 @@ describe("pairing", () => {
     const code = await screen.findByRole("img", { name: "Pairing code for Tablet" });
     expect(code.getAttribute("src")).toMatch(/^data:image\/png;base64,/);
 
-    const post = calls.find((c) => c.method === "POST")!;
+    const post = calls.find((c) => c.url === "/api/devices" && c.method === "POST")!;
     const [keys] = generated;
     expect(post.body).toMatchObject({
       deviceId: keys!.deviceId,
       publicKeySpki: keys!.publicKeySpki,
       label: "Tablet",
       stackPrefix: "sktest",
-      userId: "me@example.com",
+      userId: "sub-operator",
     });
     // The seed appears nowhere in what reaches the server.
     expect(JSON.stringify(post.body)).not.toContain(keys!.privateKeySeed);
@@ -164,15 +174,17 @@ describe("pairing", () => {
     const user = await open();
     await user.click(screen.getByRole("button", { name: "Pair a phone" }));
     await screen.findByRole("img", { name: "Pairing code for Unnamed device" });
-    expect(calls.find((c) => c.method === "POST")!.body!.label).toBeNull();
+    expect(calls.find((c) => c.url === "/api/devices" && c.method === "POST")!.body!.label).toBeNull();
   });
 
   it("shows the route's error and no code when pairing fails", async () => {
     respond = (call) =>
-      call.method === "POST" ? { status: 503, body: { error: "The local data server is not running." } } : undefined;
+      call.url === "/api/devices" && call.method === "POST"
+        ? { status: 500, body: { error: "AccessDeniedException" } }
+        : undefined;
     const user = await open();
     await user.click(screen.getByRole("button", { name: "Pair a phone" }));
-    expect(await screen.findByText("The local data server is not running.")).toBeTruthy();
+    expect(await screen.findByText("AccessDeniedException")).toBeTruthy();
     expect(screen.queryByRole("img", { name: /Pairing code/ })).toBeNull();
   });
 });
@@ -197,17 +209,5 @@ describe("revoking", () => {
     await user.click(within(list).getByRole("button", { name: "Cancel" }));
     expect(within(list).getByRole("button", { name: "Revoke" })).toBeTruthy();
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
-  });
-
-  it("says the phone is revoked even when the list could not be updated", async () => {
-    respond = (call) =>
-      call.method === "DELETE"
-        ? { status: 200, body: { revoked: "dev_pixel", listError: "The local data server is not running." } }
-        : undefined;
-    const user = await open();
-    const list = await screen.findByRole("list", { name: "Paired phones" });
-    await user.click(within(list).getByRole("button", { name: "Revoke" }));
-    await user.click(within(list).getByRole("button", { name: "Confirm revoke" }));
-    expect(await screen.findByText(/can no longer sync, but the list could not be updated/)).toBeTruthy();
   });
 });

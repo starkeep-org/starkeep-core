@@ -75,21 +75,6 @@ export interface UserSettings {
    * constant compiled into one.
    */
   readonly trash?: { readonly retentionDays?: number };
-  /**
-   * The phones an operator has paired from admin-web.
-   *
-   * The index the operator revokes from, kept here so that it reaches every
-   * machine and outlives any one of them: a list that lived beside admin-web
-   * would vanish with that folder, and a lost phone missing from the list is a
-   * phone nobody can find to revoke. The list is not the authority. A device
-   * syncs because its public key is in SSM, and it stops when that key is
-   * deleted; an entry whose key is gone is harmless.
-   *
-   * Only admin-web writes this, through the local data server. The cloud refuses
-   * a `starkeep/*` write from a device, so a stolen phone cannot remove itself.
-   * See `~/projects/starkeep/plan-mobile-qr-pairing-2026-10-13.md`.
-   */
-  readonly pairedDevices?: readonly PairedDevice[];
   readonly standIns?: {
     readonly image?: { readonly canonicalThreshold?: number };
     readonly video?: {
@@ -101,40 +86,6 @@ export interface UserSettings {
       };
     };
   };
-}
-
-/** One phone in {@link UserSettings.pairedDevices}. Ids and names only, never a key. */
-export interface PairedDevice {
-  /** The id the device signs with, and the name of its key in SSM. */
-  readonly deviceId: string;
-  /** What the operator called it when pairing, or null. */
-  readonly label: string | null;
-  /** The apps the device may act as. */
-  readonly appIds: readonly string[];
-  /** When it was paired, as an ISO-8601 timestamp. */
-  readonly pairedAt: string;
-}
-
-/**
- * The shape a device id must have. It becomes part of an SSM parameter name, so
- * the cloud checks the same rule before it builds one (`isValidDeviceId`).
- */
-export const DEVICE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
-
-/** The longest label a paired device may carry. */
-export const MAX_DEVICE_LABEL_LENGTH = 100;
-
-/** A settings value with one device added, replacing any entry with its id. */
-export function withPairedDevice(settings: UserSettings, device: PairedDevice): UserSettings {
-  const others = (settings.pairedDevices ?? []).filter((d) => d.deviceId !== device.deviceId);
-  return { ...settings, pairedDevices: [...others, device] };
-}
-
-/** A settings value with one device removed. Removing an absent id changes nothing. */
-export function withoutPairedDevice(settings: UserSettings, deviceId: string): UserSettings {
-  const remaining = (settings.pairedDevices ?? []).filter((d) => d.deviceId !== deviceId);
-  if (remaining.length === (settings.pairedDevices ?? []).length) return settings;
-  return { ...settings, pairedDevices: remaining };
 }
 
 /** How long a deleted item stays recoverable under a settings file. */
@@ -216,7 +167,6 @@ export function checkUserSettings(value: unknown): UserSettingsCheck {
       problems.push("trash.retentionDays must be a positive whole number of days");
     }
   }
-  problems.push(...pairedDeviceProblems(value["pairedDevices"]));
   const standIns = value["standIns"];
   if (standIns !== undefined && !isObject(standIns)) problems.push("standIns must be an object");
   const categories = isObject(standIns) ? standIns : {};
@@ -297,45 +247,6 @@ export function pickSettingsRecord(records: readonly DataRecord[]): {
     .filter((r) => !r.deletedAt && isSettingsRecord(r))
     .sort((a, b) => compareHLC(b.createdAt, a.createdAt) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
   return { winner: live[0] ?? null, losers: live.slice(1) };
-}
-
-function pairedDeviceProblems(devices: unknown): string[] {
-  if (devices === undefined) return [];
-  if (!Array.isArray(devices)) return ["pairedDevices must be a list"];
-  const problems: string[] = [];
-  const seen = new Set<string>();
-  devices.forEach((device: unknown, i) => {
-    const at = `pairedDevices[${i}]`;
-    if (!isObject(device)) {
-      problems.push(`${at} must be an object`);
-      return;
-    }
-    const id = device["deviceId"];
-    if (typeof id !== "string" || !DEVICE_ID_PATTERN.test(id)) {
-      problems.push(`${at}.deviceId must be 1-128 characters of A-Z, a-z, 0-9, _ and -`);
-    } else if (seen.has(id)) {
-      problems.push(`${at}.deviceId ${id} appears more than once`);
-    } else {
-      seen.add(id);
-    }
-    const label = device["label"];
-    if (label !== null && (typeof label !== "string" || label.length > MAX_DEVICE_LABEL_LENGTH)) {
-      problems.push(`${at}.label must be null or a string of at most ${MAX_DEVICE_LABEL_LENGTH} characters`);
-    }
-    const appIds = device["appIds"];
-    if (
-      !Array.isArray(appIds) ||
-      appIds.length === 0 ||
-      !appIds.every((a: unknown) => typeof a === "string" && a.length > 0)
-    ) {
-      problems.push(`${at}.appIds must be a non-empty list of app ids`);
-    }
-    const pairedAt = device["pairedAt"];
-    if (typeof pairedAt !== "string" || Number.isNaN(Date.parse(pairedAt))) {
-      problems.push(`${at}.pairedAt must be an ISO-8601 timestamp`);
-    }
-  });
-  return problems;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

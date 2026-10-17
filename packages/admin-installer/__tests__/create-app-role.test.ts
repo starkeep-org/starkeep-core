@@ -117,8 +117,12 @@ describe("inline policies", () => {
     expect(sids).toEqual([
       "BrokerAssumeAppRoles",
       "BrokerReadAppCreds",
+      "BrokerReadPlatformParameters",
       "BrokerReadAppCredsKmsDecrypt",
     ]);
+    expect(broker.Statement[2].Resource).toBe(
+      "arn:aws:ssm:*:111122223333:parameter/starkeep/platform/*",
+    );
     expect(broker.Statement[0].Resource).toBe(
       "arn:aws:iam::111122223333:role/starkeep-app-*",
     );

@@ -47,7 +47,7 @@ vi.mock("../src/routes/cloud-data-server-install", () =>
 );
 vi.mock("../src/routes/config", () => spy("config", ["GET", "PATCH"]));
 vi.mock("../src/routes/costs", () => spy("costs", ["POST"]));
-vi.mock("../src/routes/devices", () => spy("devices", ["GET", "POST", "DELETE"]));
+vi.mock("../src/routes/devices", () => spy("devices", ["LIST", "POST", "DELETE"]));
 vi.mock("../src/routes/drive-install", () => spy("drive-install", ["POST"]));
 vi.mock("../src/routes/exec-daemon", () => spy("exec-daemon", ["POST"]));
 vi.mock("../src/routes/exec-daemon-status", () => spy("exec-daemon-status", ["GET"]));
@@ -90,7 +90,7 @@ const ROUTES: Array<[string, string, string, string]> = [
   ["GET", "/api/config", "config", "GET"],
   ["PATCH", "/api/config", "config", "PATCH"],
   ["POST", "/api/costs", "costs", "POST"],
-  ["GET", "/api/devices", "devices", "GET"],
+  ["POST", "/api/devices/list", "devices", "LIST"],
   ["POST", "/api/devices", "devices", "POST"],
   ["DELETE", "/api/devices", "devices", "DELETE"],
   ["POST", "/api/drive/install", "drive-install", "POST"],
