@@ -138,18 +138,29 @@ describe("manager policy (the install/uninstall allow-list)", () => {
 describe("per-app permissions boundary (the per-app runtime ceiling)", () => {
   const statements = appPermissionsBoundaryStatements(PREFIX);
 
-  it("confines per-object S3 to the app's own principal-tagged prefix", () => {
-    const own = byId(statements, "AppS3OwnPrefix");
+  it("confines a user's session to that user's part of the app's own prefix", () => {
+    const own = byId(statements, "AppS3OwnUserPrefix");
     expect(own.Resource).toBe(
-      `arn:aws:s3:::${PREFIX}-files-*/apps/\${aws:PrincipalTag/starkeep:appId}/*`,
+      `arn:aws:s3:::${PREFIX}-files-*/apps/\${aws:PrincipalTag/starkeep:appId}/\${aws:PrincipalTag/starkeep:userId}/*`,
     );
+    expect(own.Condition).toBeUndefined();
   });
 
-  it("scopes ListBucket by s3:prefix to own + shared prefixes (no cross-app listing)", () => {
+  it("gives the whole own prefix only to a session that names no user", () => {
+    const whole = byId(statements, "AppS3OwnPrefixNoUser");
+    expect(whole.Resource).toBe(`arn:aws:s3:::${PREFIX}-files-*/apps/\${aws:PrincipalTag/starkeep:appId}/*`);
+    expect(whole.Condition).toEqual({ Null: { "aws:PrincipalTag/starkeep:userId": "true" } });
+  });
+
+  it("caps shared data at the session's own user", () => {
+    expect(byId(statements, "AppS3SharedData").Resource).toBe(`arn:aws:s3:::${PREFIX}-files-*/shared/\${aws:PrincipalTag/starkeep:userId}/*`);
+  });
+
+  it("scopes ListBucket by s3:prefix to the user's own and shared prefixes (no cross-app or cross-user listing)", () => {
     const list = byId(statements, "AppS3ListOwnAndShared");
     expect(list.Condition!.StringLike["s3:prefix"]).toEqual([
-      `apps/\${aws:PrincipalTag/starkeep:appId}/*`,
-      "shared/*",
+      `apps/\${aws:PrincipalTag/starkeep:appId}/\${aws:PrincipalTag/starkeep:userId}/*`,
+      `shared/\${aws:PrincipalTag/starkeep:userId}/*`,
     ]);
   });
 
@@ -173,9 +184,9 @@ describe("per-app permissions boundary (the per-app runtime ceiling)", () => {
 describe("user-data-owner boundary (Drive's layer-2 hard floor)", () => {
   const statements = userDataOwnerPermissionsBoundaryStatements(PREFIX);
 
-  it("caps shared-data custody at the shared/* prefix", () => {
+  it("caps shared-data custody at the session's own user's shared prefix", () => {
     const shared = byId(statements, "UserDataOwnerS3SharedData");
-    expect(shared.Resource).toBe(`arn:aws:s3:::${PREFIX}-files-*/shared/*`);
+    expect(shared.Resource).toBe(`arn:aws:s3:::${PREFIX}-files-*/shared/\${aws:PrincipalTag/starkeep:userId}/*`);
     expect(shared.Action).toEqual([
       "s3:GetObject",
       "s3:PutObject",
@@ -242,7 +253,8 @@ describe("foundational boundary (cloud-data-server only)", () => {
 
   it("may assume per-app roles (broker power) — unique among boundaries", () => {
     const assume = byId(statements, "FoundationalBrokerAssumeAppRoles");
-    expect(assume.Action).toBe("sts:AssumeRole");
+    // TagSession: the broker names the user each session acts for.
+    expect(assume.Action).toEqual(["sts:AssumeRole", "sts:TagSession"]);
     expect(cfnString(assume.Resource as CfnValue)).toContain(`role/${PREFIX}-app-`);
   });
 

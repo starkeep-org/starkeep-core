@@ -304,6 +304,28 @@ type Inspected = {
   fingerprint: string;
 };
 
+/** An account a device may sync for: enabled, with a data library. */
+interface DataAccount {
+  readonly username: string;
+  readonly email: string | null;
+}
+
+/** The accounts with a data library, for the approval's account picker. */
+async function loadDataAccounts(): Promise<DataAccount[]> {
+  const session = await operatorSession();
+  const res = await fetch("/api/users/list", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ credentials: session.credentials, stackPrefix: session.stackPrefix, region: session.region }),
+  });
+  const body = (await res.json()) as {
+    users?: Array<DataAccount & { enabled: boolean; data: boolean }>;
+    error?: string;
+  };
+  if (!res.ok || !body.users) throw new Error(body.error ?? `Request failed (${res.status})`);
+  return body.users.filter((u) => u.enabled && u.data).map(({ username, email }) => ({ username, email }));
+}
+
 /**
  * Approve a device from the pairing code it shows.
  *
@@ -311,7 +333,9 @@ type Inspected = {
  * nothing secret passes through here. What can go wrong is approving the wrong
  * device: anyone can make a code. So the page shows the device's fingerprint
  * and asks the admin to confirm it with the device's owner before approving.
- * The device then finds out by itself, within seconds, and starts syncing.
+ * The admin also chooses whose library the device syncs: any account with a
+ * data library, the signed-in admin's own by default. The device then finds
+ * out by itself, within seconds, and starts syncing.
  */
 function ApproveDevice({ onApproved }: { onApproved: () => void }) {
   const [code, setCode] = useState("");
@@ -319,10 +343,29 @@ function ApproveDevice({ onApproved }: { onApproved: () => void }) {
   const [cloudAddress, setCloudAddress] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const [accounts, setAccounts] = useState<DataAccount[] | null>(null);
+  const [owner, setOwner] = useState<string>("");
 
   useEffect(() => {
     void readCloudConfig().then((cfg) => setCloudAddress(cfg?.publicBaseUrl ?? cfg?.apiGatewayUrl ?? null));
   }, []);
+
+  // Loaded once a code checks out, so a console with no device to approve
+  // makes no Cognito calls.
+  useEffect(() => {
+    if (!inspected || accounts !== null) return;
+    void (async () => {
+      try {
+        const [list, session] = await Promise.all([loadDataAccounts(), operatorSession()]);
+        setAccounts(list);
+        setOwner((current) =>
+          current || (list.some((a) => a.username === session.userSub) ? session.userSub : (list[0]?.username ?? "")),
+        );
+      } catch (err) {
+        setMessage({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+      }
+    })();
+  }, [inspected, accounts]);
 
   async function inspect() {
     setBusy(true);
@@ -348,13 +391,12 @@ function ApproveDevice({ onApproved }: { onApproved: () => void }) {
     setBusy(true);
     setMessage(null);
     try {
-      const { credentials, stackPrefix, region, userSub } = await operatorSession();
+      const { credentials, stackPrefix, region } = await operatorSession();
       const res = await fetch("/api/devices/approve", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        // Until accounts other than the admin's can hold data, an approved
-        // device syncs for the signed-in admin.
-        body: JSON.stringify({ code, credentials, stackPrefix, region, userId: userSub }),
+        // The device syncs for the account chosen below.
+        body: JSON.stringify({ code, credentials, stackPrefix, region, userId: owner }),
       });
       const body = (await res.json()) as { error?: string };
       if (!res.ok) throw new Error(body.error ?? `Request failed (${res.status})`);
@@ -399,11 +441,33 @@ function ApproveDevice({ onApproved }: { onApproved: () => void }) {
             <span className="font-medium">{inspected.request.label ?? "Unnamed device"}</span>, fingerprint{" "}
             <span className="font-mono">{inspected.fingerprint}</span>.
           </p>
+          <label className="flex items-center gap-2 text-sm">
+            Syncs the library of
+            <select
+              aria-label="Account this device syncs for"
+              className="rounded border bg-transparent px-2 py-1 text-sm"
+              value={owner}
+              onChange={(e) => setOwner(e.target.value)}
+              disabled={busy || accounts === null}
+            >
+              {accounts === null ? (
+                <option value="">Loading accounts…</option>
+              ) : accounts.length === 0 ? (
+                <option value="">No account has a data library</option>
+              ) : (
+                accounts.map((a) => (
+                  <option key={a.username} value={a.username}>
+                    {a.email ?? a.username}
+                  </option>
+                ))
+              )}
+            </select>
+          </label>
           <p className="text-sm">
             Ask the device&apos;s owner to read the fingerprint their screen shows. Approve only if it
-            matches: anyone can make a pairing code, and an approved device syncs as you.
+            matches: anyone can make a pairing code, and an approved device syncs as the account you chose.
           </p>
-          <Button onClick={() => void approve()} disabled={busy}>
+          <Button onClick={() => void approve()} disabled={busy || owner === ""}>
             {busy ? "Working…" : "The fingerprint matches — approve"}
           </Button>
         </div>

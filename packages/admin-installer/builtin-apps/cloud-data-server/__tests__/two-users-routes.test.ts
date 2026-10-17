@@ -206,6 +206,26 @@ describe("two users through the broker", () => {
     expect((await call(A, "GET", `/data/records/${id}`)).status).toBe(200);
   });
 
+  it("tags each app session with the user it acts for, one session per user", async () => {
+    // Users no earlier case has used, so the warm credential cache holds no
+    // session for them.
+    tokens["user-c"] = await mintTestUserToken({ sub: "user-c" });
+    tokens["user-d"] = await mintTestUserToken({ sub: "user-d" });
+    await call("user-c", "GET", "/data/records");
+    await call("user-d", "GET", "/data/records");
+    await call("user-c", "GET", "/data/records");
+    const tags = stsMock
+      .commandCalls(AssumeRoleCommand)
+      .map((c) => c.args[0].input)
+      .filter((input) => input.RoleArn!.endsWith(`-app-${DRIVE}-role`))
+      .map((input) => input.Tags);
+    // C's second request reuses C's session.
+    expect(tags).toEqual([
+      [{ Key: "starkeep:userId", Value: "user-c" }],
+      [{ Key: "starkeep:userId", Value: "user-d" }],
+    ]);
+  });
+
   it("the same photo is one record per user, each under its own key", async () => {
     const id = await aWritesAPhoto();
     const res = await call(B, "POST", "/data/records", {

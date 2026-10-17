@@ -20,18 +20,33 @@ import type { IamStatement } from "../iam-utils.js";
  */
 export function appPermissionsBoundaryStatements(stackPrefix: string): IamStatement[] {
   return [
+    // Two kinds of session reach a per-app role. The broker's carries the
+    // `starkeep:userId` session tag of the user a request acts for, and
+    // reaches that user's objects only. Manager's install and uninstall
+    // sessions carry no user, and reach the app's own prefix as a whole: the
+    // `.keep` marker, and every user's files when the app is uninstalled.
+    // Neither reaches another user's objects or the shared prefix untagged.
     {
-      // Per-object verbs scoped to apps/<appId>/* on any files bucket.
-      Sid: "AppS3OwnPrefix",
+      // Per-object verbs on one user's part of apps/<appId>/.
+      Sid: "AppS3OwnUserPrefix",
+      Effect: "Allow",
+      Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      Resource: `arn:aws:s3:::${stackPrefix}-files-*/apps/\${aws:PrincipalTag/starkeep:appId}/\${aws:PrincipalTag/starkeep:userId}/*`,
+    },
+    {
+      // The whole of apps/<appId>/, for a session that names no user.
+      Sid: "AppS3OwnPrefixNoUser",
       Effect: "Allow",
       Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
       Resource: `arn:aws:s3:::${stackPrefix}-files-*/apps/\${aws:PrincipalTag/starkeep:appId}/*`,
+      Condition: { Null: { "aws:PrincipalTag/starkeep:userId": "true" } },
     },
     {
       // ListBucket is a bucket-level action — AWS evaluates it against the
       // bucket ARN, not the object key. We add an s3:prefix Condition so a
-      // per-app role cannot enumerate other apps' keys (G9g). Two prefixes
-      // are permitted: the app's own prefix and the shared root.
+      // per-app role cannot enumerate other apps' keys (G9g), nor another
+      // user's. A user's session lists its own part of the app's prefix and
+      // of the shared root.
       Sid: "AppS3ListOwnAndShared",
       Effect: "Allow",
       Action: "s3:ListBucket",
@@ -39,16 +54,28 @@ export function appPermissionsBoundaryStatements(stackPrefix: string): IamStatem
       Condition: {
         StringLike: {
           "s3:prefix": [
-            `apps/\${aws:PrincipalTag/starkeep:appId}/*`,
-            "shared/*",
+            `apps/\${aws:PrincipalTag/starkeep:appId}/\${aws:PrincipalTag/starkeep:userId}/*`,
+            `shared/\${aws:PrincipalTag/starkeep:userId}/*`,
           ],
         },
       },
     },
     {
-      // Shared-data root. Per-typeId narrowing lives in buildRuntimePolicy's
-      // AppS3SharedData Sid; the boundary just permits the shared/* root so
-      // the runtime grants are reachable through the ceiling (G2).
+      // Uninstall enumerates the app's whole prefix to delete it.
+      Sid: "AppS3ListOwnPrefixNoUser",
+      Effect: "Allow",
+      Action: "s3:ListBucket",
+      Resource: `arn:aws:s3:::${stackPrefix}-files-*`,
+      Condition: {
+        StringLike: { "s3:prefix": [`apps/\${aws:PrincipalTag/starkeep:appId}/*`] },
+        Null: { "aws:PrincipalTag/starkeep:userId": "true" },
+      },
+    },
+    {
+      // One user's shared data. Per-category narrowing lives in
+      // buildRuntimePolicy's AppS3SharedData Sid; the boundary permits the
+      // session's own user's shared root so the runtime grants are reachable
+      // through the ceiling (G2). A session that names no user reaches none.
       Sid: "AppS3SharedData",
       Effect: "Allow",
       Action: [
@@ -63,7 +90,7 @@ export function appPermissionsBoundaryStatements(stackPrefix: string): IamStatem
         "s3:PutObjectTagging",
         "s3:RestoreObject",
       ],
-      Resource: `arn:aws:s3:::${stackPrefix}-files-*/shared/*`,
+      Resource: `arn:aws:s3:::${stackPrefix}-files-*/shared/\${aws:PrincipalTag/starkeep:userId}/*`,
     },
     {
       Sid: "AppDsqlConnect",

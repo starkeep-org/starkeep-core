@@ -291,12 +291,11 @@ describe("the end-user gate", () => {
   });
 
   it.each([
-    ["a member", ["starkeep-users"]],
     ["an admin without a data library", ["starkeep-admins"]],
     ["a user in no group", []],
   ])("refuses %s with 403, before any role assumption", async (_who, groups) => {
-    // Until data separates by user, only an admin with a data library may
-    // reach data: every library is still one library.
+    // Data is per user, and the data group is what gives an account a
+    // library; being an admin gives none.
     const appId = `app-groups-${groups.length}-${groups.join("-") || "none"}`;
     scriptSecret(appId, `secret-${appId}`);
     scriptAssumeRole();

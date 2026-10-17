@@ -34,6 +34,7 @@
 // whole installer — Pulumi, the orchestrator, the local registry — and a route
 // importing it fails to build on a module several layers away that has nothing
 // to do with pairing.
+import { devicePairingRefusal } from "./users";
 import {
   putDeviceKeyParameter,
   deleteDeviceKeyParameter,
@@ -169,6 +170,15 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
+  try {
+    const refusal = await devicePairingRefusal({ credentials, region }, body.userId);
+    if (refusal) return Response.json({ error: refusal }, { status: 400 });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[api/devices] pair failed", message);
+    return Response.json({ error: message }, { status: 500 });
+  }
+
   const pairedAt = new Date().toISOString();
   try {
     const name = await putDeviceKeyParameter({
@@ -232,6 +242,10 @@ export async function APPROVE(req: Request): Promise<Response> {
   }
   const { deviceId, publicKeySpki, label, kind } = parsed.request;
   try {
+    // The device syncs for the account the admin chose, which must have a
+    // data library.
+    const refusal = await devicePairingRefusal({ credentials, region }, body.userId);
+    if (refusal) return Response.json({ error: refusal }, { status: 400 });
     const config = readConfig();
     const awsCreds = await managerCredentials(config, credentials, region);
     await putDeviceKeyParameter({
