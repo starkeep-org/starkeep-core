@@ -178,7 +178,9 @@ describe("install DDL for the photos manifest", () => {
     expect(createTable).toBeDefined();
     expect(createTable).toContain('"updated_at" text not null');
     expect(createTable).toContain('"deleted_at" text');
-    expect(createTable).toContain('primary key ("record_id")');
+    // The owner leads: each user's rows are a library of their own.
+    expect(createTable).toContain('"user_id" text not null');
+    expect(createTable).toContain('primary key ("user_id", "record_id")');
     expect(s.some((t) => t.includes('CREATE INDEX ASYNC IF NOT EXISTS "idx_app_photos_image_enriched_updated_at"'))).toBe(true);
     expect(s.some((t) => t.includes('GRANT SELECT, INSERT, UPDATE, DELETE ON app_photos."image_enriched"'))).toBe(true);
   });
@@ -209,7 +211,7 @@ describe("install DDL for the photos manifest", () => {
     const created = s.find((t) => t.includes('"idx_app_memo_card_state_deck_id_due"'));
     expect(created).toBeDefined();
     expect(created).toContain("CREATE INDEX ASYNC IF NOT EXISTS");
-    expect(created).toContain('ON app_memo."card_state"("deck_id", "due")');
+    expect(created).toContain('ON app_memo."card_state"("user_id", "deck_id", "due")');
     expect(created).not.toContain("USING");
     expect(created).not.toContain("UNIQUE");
   });

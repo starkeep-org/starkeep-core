@@ -99,6 +99,7 @@ beforeEach(async () => {
   adapter = new AuroraDsqlDatabaseAdapter(
     { hostname: "fake.dsql", region: "us-east-1" },
     factoryOf(client),
+    "user-a",
   );
   await adapter.init();
 });

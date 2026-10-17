@@ -54,7 +54,7 @@ let applier: DsqlAppSyncableApplier;
 
 beforeEach(() => {
   client = new FakeClient();
-  applier = new DsqlAppSyncableApplier(client, namespaceStore);
+  applier = new DsqlAppSyncableApplier(client, namespaceStore, "user-a");
 });
 
 function insertEntry(): AppSyncableRowEntry {

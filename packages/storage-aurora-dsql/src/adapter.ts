@@ -89,7 +89,8 @@ import {
   buildPostgresCountQuery,
   buildPostgresQuery,
   buildPostgresTypeCountsQuery,
-  compiler,
+  ownerScopedCompiler,
+  type PostgresCompiler,
 } from "./query-builder.js";
 import { withOccRetry, isRetryableDsqlConflict } from "./occ-retry.js";
 import { fromPgRows, pgConvertersFor, withAggregateOutputs } from "./pg-timestamps.js";
@@ -119,17 +120,29 @@ const LABELS: LabelDialect = {
 };
 
 
+/**
+ * One user's library in DSQL.
+ *
+ * Every statement compiles through a compiler scoped to `ownerId`, so every
+ * read, write and delete touches only that user's rows. There is no unscoped
+ * adapter: the cloud holds many users' data, and code that wants to see all of
+ * it has no business going through the data plane. See `owner-scope.ts`.
+ */
 export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   private client: DatabaseClient | null = null;
   private readonly options: AuroraDsqlDatabaseAdapterOptions;
   private readonly clientFactory: DatabaseClientFactory;
+  private readonly qb: PostgresCompiler;
 
   constructor(
     options: AuroraDsqlDatabaseAdapterOptions,
     clientFactory: DatabaseClientFactory,
+    /** The user whose rows this adapter reads and writes. */
+    readonly ownerId: string,
   ) {
     this.options = options;
     this.clientFactory = clientFactory;
+    this.qb = ownerScopedCompiler(ownerId);
   }
 
   async init(): Promise<void> {
@@ -146,7 +159,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   async healthCheck(): Promise<boolean> {
     if (!this.client) return false;
     try {
-      const ping = sql`SELECT 1`.compile(compiler);
+      const ping = sql`SELECT 1`.compile(this.qb);
       await this.client.query(ping.sql, [...ping.parameters]);
       return true;
     } catch {
@@ -166,7 +179,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
    * See `byte-coverage.ts`.
    */
   byteCoverageStore(appId: string): DsqlByteCoverageStore {
-    return createDsqlByteCoverageStore(this.getClient(), appId);
+    return createDsqlByteCoverageStore(this.getClient(), appId, this.ownerId);
   }
 
   // Executes a kysely-compiled query through the raw client.
@@ -185,7 +198,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     const row = recordToRow(record);
     const updateColumns = Object.keys(row).filter((column) => column !== "id");
     await this.run(
-      compiler
+      this.qb
         .insertInto("shared.records")
         .values({ ...row })
         .onConflict((oc) =>
@@ -205,7 +218,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
 
   private async getRaw(id: StarkeepId): Promise<DataRecord | null> {
     const result = await this.run(
-      compiler.selectFrom("shared.records").selectAll().where("id", "=", id).compile(),
+      this.qb.selectFrom("shared.records").selectAll().where("id", "=", id).compile(),
     );
     if (result.rows.length === 0) return null;
     return rowToRecord(result.rows[0] as unknown as PostgresRow);
@@ -218,7 +231,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   private async deleteRaw(id: StarkeepId, hlc: HLCTimestamp): Promise<void> {
     const ts = serializeHLC(hlc);
     await this.run(
-      compiler
+      this.qb
         .updateTable("shared.records")
         // A tombstone frees its stand-in slot, the same rule `standInSlot`
       // applies on a full-row write.
@@ -238,7 +251,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       // nodeId suffix, so lexicographic MAX equals HLC MAX. The
       // (node_id, updated_at) index makes this an index-only scan.
       const result = await this.run(
-        compiler
+        this.qb
           .selectFrom("shared.records")
           .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])
           .groupBy("node_id")
@@ -264,7 +277,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
         limit,
         async (scan, remaining) => {
           const result = await this.run(
-            buildScanSinceForNode(compiler, "shared.records", scan, remaining),
+            buildScanSinceForNode(this.qb, "shared.records", scan, remaining),
           );
           return result.rows as unknown as PostgresRow[];
         },
@@ -285,7 +298,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
         limit,
         async (scan, remaining) => {
           const result = await this.run(
-            buildScanSinceForNode(compiler, LABELS.table, scan, remaining),
+            buildScanSinceForNode(this.qb, LABELS.table, scan, remaining),
           );
           return result.rows as unknown as LabelRow[];
         },
@@ -303,7 +316,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       // digest over half of it would report agreement while a label was lost.
       const out: DigestBucket[] = [];
       for (const table of ["shared.records", LABELS.table]) {
-        const result = await this.run(buildBucketDigest(compiler, table, prefixLength));
+        const result = await this.run(buildBucketDigest(this.qb, table, prefixLength));
         out.push(...toDigestBuckets(result.rows as Record<string, unknown>[]));
       }
       return mergeDigestBuckets(out);
@@ -315,7 +328,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   private async queryRaw(query: Query): Promise<QueryResult> {
-    const { text, values } = buildPostgresQuery(query);
+    const { text, values } = buildPostgresQuery(query, this.qb);
     const result = await this.getClient().query(text, values);
     const rows = result.rows as unknown as (PostgresRow & Record<string, unknown>)[];
 
@@ -333,7 +346,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
 
   async countRecords(query: Query): Promise<number> {
     return withOccRetry("countRecords", async () => {
-      const { text, values } = buildPostgresCountQuery(query);
+      const { text, values } = buildPostgresCountQuery(query, this.qb);
       const result = await this.getClient().query(text, values);
       const total = (result.rows[0] as { total?: string | number } | undefined)?.total;
       // `count(*)` comes back as a bigint, which `pg` hands over as a string
@@ -345,7 +358,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
 
   async countRecordsByType(query: Query): Promise<RecordTypeCount[]> {
     return withOccRetry("countRecordsByType", async () => {
-      const { text, values } = buildPostgresTypeCountsQuery(query);
+      const { text, values } = buildPostgresTypeCountsQuery(query, this.qb);
       const result = await this.getClient().query(text, values);
       return (
         result.rows as Array<{
@@ -391,7 +404,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
 
     if (query.mode === "aggregate") {
       const compiled = buildAppAggregateQuery(
-        compiler,
+        this.qb,
         table,
         query,
         POSTGRES_APP_QUERY_DIALECT,
@@ -403,7 +416,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
         fromPgRows(result.rows, withAggregateOutputs(converters, query.aggregates)),
       );
     }
-    const compiled = buildAppRowQuery(compiler, table, query, build);
+    const compiled = buildAppRowQuery(this.qb, table, query, build);
     const { rows } = await this.run(compiled);
     // Converted before the page is collected rather than after, so the page
     // token is cut from the same representation the rows carry.
@@ -470,7 +483,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     const values = metadataValues(recordType, row);
     const updateColumns = Object.keys(values).filter((c) => c !== "record_id");
     await this.run(
-      compiler
+      this.qb
         .insertInto(table)
         .values(values)
         .onConflict((oc) =>
@@ -490,7 +503,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     return withOccRetry("getMetadata", async () => {
       const table = pgMetadataTableName(typeId);
       const result = await this.run(
-        compiler.selectFrom(table).selectAll().where("record_id", "=", recordId).compile(),
+        this.qb.selectFrom(table).selectAll().where("record_id", "=", recordId).compile(),
       );
       if (result.rows.length === 0) return null;
       return columnsToMetadataRow(recordId, typeId, result.rows[0] as Record<string, unknown>);
@@ -506,7 +519,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       const result = new Map<StarkeepId, MetadataRow>();
       const table = pgMetadataTableName(typeId);
       const dbResult = await this.run(
-        compiler.selectFrom(table).selectAll().where("record_id", "in", recordIds).compile(),
+        this.qb.selectFrom(table).selectAll().where("record_id", "in", recordIds).compile(),
       );
       for (const raw of dbResult.rows) {
         const row = raw as Record<string, unknown>;
@@ -521,7 +534,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     await withOccRetry("deleteMetadata", async () => {
       const table = pgMetadataTableName(typeId);
       await this.run(
-        compiler.deleteFrom(table).where("record_id", "=", recordId).compile(),
+        this.qb.deleteFrom(table).where("record_id", "=", recordId).compile(),
       );
     });
   }
@@ -543,7 +556,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   ): Promise<void> {
     const table = pgMetadataTableName(typeId);
     await this.run(
-      compiler
+      this.qb
         .updateTable(table)
         .set({ [METADATA_DELETED_AT_COLUMN]: value })
         .where("record_id", "=", recordId)
@@ -566,7 +579,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     // secondary-index entries do not count against it (measured), so the two
     // indexes on this table don't shrink the usable batch.
     await withOccRetry("upsertLabels", async () => {
-      await this.run(buildLabelUpsert(compiler, LABELS, labels));
+      await this.run(buildLabelUpsert(this.qb, LABELS, labels));
     });
   }
 
@@ -574,7 +587,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     if (retractions.length === 0) return;
     await withOccRetry("retractLabels", async () => {
       for (const r of retractions) {
-        await this.run(buildLabelRetraction(compiler, LABELS, r));
+        await this.run(buildLabelRetraction(this.qb, LABELS, r));
       }
     });
   }
@@ -593,11 +606,11 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       await this.getClient().query("BEGIN");
       try {
         for (const r of replacements) {
-          await this.run(buildLabelValueReplacementTombstone(compiler, LABELS, r));
+          await this.run(buildLabelValueReplacementTombstone(this.qb, LABELS, r));
           if (r.values.length > 0) {
             await this.run(
               buildLabelUpsert(
-                compiler,
+                this.qb,
                 LABELS,
                 r.values.map((value) => ({
                   recordId: r.recordId,
@@ -624,7 +637,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   ): Promise<Map<StarkeepId, RecordLabel[]>> {
     if (recordIds.length === 0) return new Map();
     return withOccRetry("getLabelsByRecordIds", async () => {
-      const result = await this.run(buildLabelsByRecordIds(compiler, LABELS, recordIds));
+      const result = await this.run(buildLabelsByRecordIds(this.qb, LABELS, recordIds));
       return groupLabelsByRecordId(result.rows as unknown as LabelRow[]);
     });
   }
@@ -656,7 +669,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
 
   async putLabel(label: RecordLabel): Promise<void> {
     await withOccRetry("putLabel", async () => {
-      await this.run(buildLabelSnapshotUpsert(compiler, LABELS, label));
+      await this.run(buildLabelSnapshotUpsert(this.qb, LABELS, label));
     });
   }
 
@@ -668,7 +681,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   ): Promise<RecordLabel | null> {
     return withOccRetry("getLabel", async () => {
       const result = await this.run(
-        buildGetLabel(compiler, LABELS, recordId, appId, key, value),
+        buildGetLabel(this.qb, LABELS, recordId, appId, key, value),
       );
       const row = result.rows[0] as unknown as LabelRow | undefined;
       return row ? rowToLabel(row) : null;
@@ -681,7 +694,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     hasMore: boolean;
   }> {
     return withOccRetry("queryLabels", async () => {
-      const result = await this.run(buildQueryLabels(compiler, LABELS, query));
+      const result = await this.run(buildQueryLabels(this.qb, LABELS, query));
       return paginateLabelScan(result.rows as unknown as LabelRow[], query.limit);
     });
   }
@@ -691,7 +704,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   async getAvailability(objectStorageKeys: string[]): Promise<Map<string, StoredAvailability>> {
     const out = new Map<string, StoredAvailability>();
     if (objectStorageKeys.length === 0) return out;
-    const compiled = compiler
+    const compiled = this.qb
       .selectFrom(AVAILABILITY_TABLE)
       .selectAll()
       .where("object_storage_key", "in", objectStorageKeys)
@@ -718,7 +731,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
 
   async putAvailability(row: StoredAvailability): Promise<void> {
     await withOccRetry("putAvailability", async () => {
-      const compiled = compiler
+      const compiled = this.qb
         .insertInto(AVAILABILITY_TABLE)
         .values({
           object_storage_key: row.objectStorageKey,
@@ -747,7 +760,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   async countRestoringObjects(): Promise<{ objectCount: number; bytes: number }> {
     // Joined to records for the byte total: availability is keyed by object,
     // and only the record row knows how big the object is.
-    const compiled = compiler
+    const compiled = this.qb
       .selectFrom(AVAILABILITY_TABLE)
       .innerJoin(
         "shared.records",
@@ -773,7 +786,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   private async getLabelNodeWatermarksRaw(): Promise<Record<string, HLCTimestamp>> {
-    const result = await this.run(buildLabelNodeWatermarks(compiler, LABELS));
+    const result = await this.run(buildLabelNodeWatermarks(this.qb, LABELS));
     const out: Record<string, HLCTimestamp> = {};
     for (const raw of result.rows) {
       const row = raw as Record<string, unknown>;
@@ -784,7 +797,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
 
   async tombstoneLabelsForRecord(recordId: StarkeepId, hlc: HLCTimestamp): Promise<void> {
     await withOccRetry("tombstoneLabelsForRecord", async () => {
-      await this.run(buildTombstoneLabelsForRecord(compiler, LABELS, recordId, hlc));
+      await this.run(buildTombstoneLabelsForRecord(this.qb, LABELS, recordId, hlc));
     });
   }
 
@@ -794,7 +807,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     hlc: HLCTimestamp,
   ): Promise<void> {
     await withOccRetry("restoreLabelsForRecord", async () => {
-      await this.run(buildRestoreLabelsForRecord(compiler, LABELS, recordId, deletedAt, hlc));
+      await this.run(buildRestoreLabelsForRecord(this.qb, LABELS, recordId, deletedAt, hlc));
     });
   }
 }

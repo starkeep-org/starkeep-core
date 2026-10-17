@@ -7,8 +7,10 @@
  * thing a later reader "tidies". Nothing else in CI would notice —
  * `initializeSharedSchema` only ever runs against a real DSQL endpoint.
  *
- *   (app_id, key, deleted_at, value, record_id) INCLUDE (record_type)
+ *   (user_id, app_id, key, deleted_at, value, record_id) INCLUDE (record_type)
  *
+ *   - `user_id` first, because every query is one user's: the broker's
+ *     user-scoped compiler pins it by equality on every statement.
  *   - `deleted_at` third, BEFORE value, is what makes the live rows a
  *     contiguous range. DSQL has no partial indexes, so `WHERE deleted_at IS
  *     NULL` cannot be baked in; measured, this scans 20 index entries behind
@@ -85,7 +87,7 @@ function find(statements: string[], needle: string): string | undefined {
 }
 
 describe("shared.record_labels", () => {
-  it("creates the table with the (record_id, app_id, key, value) primary key", async () => {
+  it("creates the table with the (user_id, record_id, app_id, key, value) primary key", async () => {
     const create = find(await init(), 'create table if not exists "shared"."record_labels"');
     expect(create).toBeTruthy();
     // app_id in the primary key is what keeps two different apps from ever
@@ -93,7 +95,7 @@ describe("shared.record_labels", () => {
     // shared.records instead. `value` is what makes a key set-valued: without
     // it, faces=Alice and faces=Bob cannot both exist and the value stops being
     // searchable at all.
-    expect(create).toMatch(/primary key \("record_id", "app_id", "key", "value"\)/);
+    expect(create).toMatch(/primary key \("user_id", "record_id", "app_id", "key", "value"\)/);
     // No FK on record_id: DSQL has none, and orphans are tolerated.
     expect(create).not.toMatch(/references/i);
   });
@@ -115,7 +117,7 @@ describe("shared.record_labels", () => {
     const idx = find(await init(), "idx_record_labels_reverse");
     expect(idx).toBeTruthy();
     expect(idx).toContain(
-      "ON shared.record_labels (app_id, key, deleted_at, value, record_id) INCLUDE (record_type)",
+      "ON shared.record_labels (user_id, app_id, key, deleted_at, value, record_id) INCLUDE (record_type)",
     );
     // ASYNC because DSQL rejects synchronous secondary indexes.
     expect(idx).toContain("CREATE INDEX ASYNC");
@@ -126,7 +128,7 @@ describe("shared.record_labels", () => {
 
   it("builds the sync watermark index", async () => {
     const idx = find(await init(), "idx_record_labels_node_watermark");
-    expect(idx).toContain("ON shared.record_labels (node_id, updated_at)");
+    expect(idx).toContain("ON shared.record_labels (user_id, node_id, updated_at)");
   });
 
   it("guards every async index with IF NOT EXISTS rather than pre-checking", async () => {
@@ -236,13 +238,43 @@ describe("shared.records stand-in columns", () => {
     }
   });
 
-  it("keys the slot index on (parent_id, stand_in_slot) with NULLs distinct", async () => {
+  it("keys the slot index on (user_id, parent_id, stand_in_slot) with NULLs distinct", async () => {
     const idx = find(await init(), "uq_records_stand_in_slot")!;
     expect(idx).toContain("CREATE UNIQUE INDEX ASYNC IF NOT EXISTS");
-    expect(idx).toContain("ON shared.records (parent_id, stand_in_slot)");
+    // Per user: two users' stand-ins of one original never collide.
+    expect(idx).toContain("ON shared.records (user_id, parent_id, stand_in_slot)");
     // NULLS NOT DISTINCT would make every ordinary record under one parent
     // collide, because their slot is null.
     expect(idx).not.toMatch(/NULLS NOT DISTINCT/i);
+  });
+});
+
+describe("every owned table leads with its owner", () => {
+  // The broker's user-scoped compiler fills and filters `user_id` on these
+  // tables and puts it first in every conflict target; see storage-aurora-dsql's
+  // `owner-scope.ts`. A table or index without it either fails every insert or
+  // lets one user's row collide with another's.
+  const OWNED = ["shared.records", "shared.record_labels", "shared.object_availability"];
+
+  it.each(OWNED)("%s has the owner column and leads its primary key with it", async (table) => {
+    const create = (await init()).find((s) => s.startsWith(`create table if not exists "${table.replace(".", '"."')}"`));
+    expect(create, table).toBeDefined();
+    expect(create).toMatch(/"user_id" text not null/);
+    expect(create).toMatch(/primary key \("user_id", /);
+  });
+
+  it("leads every metadata table's primary key with the owner", async () => {
+    const creates = (await init()).filter((s) => /CREATE TABLE IF NOT EXISTS shared\.record_\w+_metadata/.test(s));
+    expect(creates.length).toBeGreaterThan(0);
+    for (const create of creates) expect(create).toContain("PRIMARY KEY (user_id, record_id)");
+  });
+
+  it("leads every index on an owned table with the owner", async () => {
+    const indexes = (await init()).filter(
+      (s) => /CREATE (UNIQUE )?INDEX/.test(s) && /ON shared\.(records|record_labels|object_availability|record_\w+_metadata)\b/.test(s),
+    );
+    expect(indexes.length).toBeGreaterThan(0);
+    for (const index of indexes) expect(index, index).toMatch(/\((user_id|"user_id"),/);
   });
 });
 

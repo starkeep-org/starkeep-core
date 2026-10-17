@@ -1,3 +1,4 @@
+import { OWNER_COLUMN } from "./owner-scope.js";
 import type {
   Category,
   DataRecord,
@@ -131,7 +132,8 @@ export function columnsToMetadataRow(
   for (const [key, value] of Object.entries(columns)) {
     // `deleted_at` is the server's, like the discriminant: a caller reading a
     // metadata row has no business seeing it, and nothing on the wire carries it.
-    if (key === "record_id" || key === METADATA_DELETED_AT_COLUMN) continue;
+    // The owner column scopes the row in the cloud and is nobody's metadata.
+    if (key === "record_id" || key === METADATA_DELETED_AT_COLUMN || key === OWNER_COLUMN) continue;
     const convert = converters?.get(key);
     row[key] = convert ? convert(value) : value;
   }
