@@ -180,6 +180,14 @@ export function foundationalPermissionsBoundaryStatements(
       ],
     },
     {
+      // The broker's device branch reads the groups of the user a device
+      // record names. The role's broker-power policy grants the same.
+      Sid: "FoundationalListUserGroups",
+      Effect: "Allow",
+      Action: "cognito-idp:AdminListGroupsForUser",
+      Resource: "arn:aws:cognito-idp:*:*:userpool/*",
+    },
+    {
       // SecureString decrypt for the two SSM SecureStrings this role reads
       // (both parameters in FoundationalReadSsmParameters — the Pulumi state
       // passphrase and the per-app HMAC creds). Both decrypt via the SSM

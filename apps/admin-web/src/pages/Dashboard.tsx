@@ -39,6 +39,7 @@ import { LocalAppsSection } from "../components/LocalAppsSection";
 import { CloudAppsSection } from "../components/CloudAppsSection";
 import { PairedDevicesSection } from "../components/PairedDevicesSection";
 import { ThisMachineSection } from "../components/ThisMachineSection";
+import { UsersSection } from "../components/UsersSection";
 import { LocalFoldersModal, type Watch } from "../components/LocalFoldersModal";
 import { CommandOutputModal } from "../components/CommandOutputModal";
 import { targetsOf, type LocalAppEntry } from "../lib/app-types";
@@ -593,6 +594,8 @@ export function DashboardPage() {
               <ThisMachineSection canConnect={cognitoSession !== null} />
 
               <PairedDevicesSection />
+
+              {cognitoSession && <UsersSection />}
 
               {/* The cloud Data Server card's View Costs button targets this. */}
               <div id="costs" className="flex flex-col gap-2 scroll-mt-4">

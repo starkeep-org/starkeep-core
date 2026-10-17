@@ -244,6 +244,15 @@ export async function createAppRole(input: CreateAppRoleInput): Promise<string> 
               Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/platform/*`,
             },
             {
+              // The device branch looks up the groups of the user a device
+              // record names, so a member removed from the data group stops
+              // syncing. Read-only.
+              Sid: "BrokerListUserGroups",
+              Effect: "Allow",
+              Action: "cognito-idp:AdminListGroupsForUser",
+              Resource: `arn:aws:cognito-idp:*:${accountId}:userpool/*`,
+            },
+            {
               // SecureString — decrypt via the SSM service key.
               Sid: "BrokerReadAppCredsKmsDecrypt",
               Effect: "Allow",

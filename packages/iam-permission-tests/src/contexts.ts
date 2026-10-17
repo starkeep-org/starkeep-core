@@ -120,6 +120,13 @@ function brokerPowerPolicy(stackPrefix: string, accountId: string): PolicyDoc {
           Action: "ssm:GetParameter",
           Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/platform/*`,
         },
+        {
+          // Matches iam.ts `BrokerListUserGroups`.
+          Sid: "BrokerListUserGroups",
+          Effect: "Allow",
+          Action: "cognito-idp:AdminListGroupsForUser",
+          Resource: `arn:aws:cognito-idp:*:${accountId}:userpool/*`,
+        },
       ],
     },
   };
@@ -472,6 +479,11 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           action: "ssm:GetParameter",
           resource: `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/platform/devices/dev-01ABC`,
           why: "The device branch reads a paired device's record to verify its signature.",
+        },
+        {
+          action: "cognito-idp:AdminListGroupsForUser",
+          resource: `arn:aws:cognito-idp:${region}:${accountId}:userpool/${region}_TESTPOOL`,
+          why: "The device branch reads the groups of the user a device record names; a member outside the data group is refused.",
         },
         {
           action: "logs:CreateLogStream",

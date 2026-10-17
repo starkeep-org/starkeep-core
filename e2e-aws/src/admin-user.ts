@@ -7,10 +7,15 @@
  * AdminSetUserPassword(Permanent) so sign-in never hits the
  * NEW_PASSWORD_REQUIRED challenge. The password is generated per stack and
  * kept in the run-state dir.
+ *
+ * The account joins both groups, as the operator's own does: `starkeep-admins`
+ * so the identity pool hands it credentials, and `starkeep-users` so the cloud
+ * data server lets it reach data.
  */
 
 import {
   CognitoIdentityProviderClient,
+  AdminAddUserToGroupCommand,
   AdminCreateUserCommand,
   AdminGetUserCommand,
   AdminSetUserPasswordCommand,
@@ -36,6 +41,7 @@ export async function ensureAdminUser(
 
   const saved = readAdminCredentials(paths);
   const exists = await userExists(client, userPoolId, TEST_ADMIN_EMAIL);
+  if (exists) await joinBothGroups(client, userPoolId);
 
   // Reusable only when the saved password was minted against *this* pool. The
   // email matching is not enough: a teardown destroys the pool and the next
@@ -71,6 +77,7 @@ export async function ensureAdminUser(
         MessageAction: "SUPPRESS",
       }),
     );
+    await joinBothGroups(client, userPoolId);
   }
 
   // The saved password is missing, or belongs to a pool that is gone. Both
@@ -105,5 +112,14 @@ async function userExists(
   } catch (err) {
     if ((err as { name?: string }).name === "UserNotFoundException") return false;
     throw err;
+  }
+}
+
+/** Add the test admin to both groups. Adding a member again is a no-op. */
+async function joinBothGroups(client: CognitoIdentityProviderClient, userPoolId: string): Promise<void> {
+  for (const group of ["starkeep-admins", "starkeep-users"]) {
+    await client.send(
+      new AdminAddUserToGroupCommand({ UserPoolId: userPoolId, Username: TEST_ADMIN_EMAIL, GroupName: group }),
+    );
   }
 }

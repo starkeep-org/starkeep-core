@@ -30,6 +30,11 @@ import {
 } from "node:crypto";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 import { SSMClient, GetParameterCommand, ParameterNotFound } from "@aws-sdk/client-ssm";
+import {
+  AdminListGroupsForUserCommand,
+  CognitoIdentityProviderClient,
+  UserNotFoundException,
+} from "@aws-sdk/client-cognito-identity-provider";
 import { getSignedUrl as getCloudFrontSignedUrl } from "@aws-sdk/cloudfront-signer";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
@@ -349,6 +354,83 @@ export function deviceWriteRefusal(method: string, subPath: string, body: Buffer
 }
 
 const deviceKeyCache = new Map<string, CachedDeviceKey>();
+
+// ---------------------------------------------------------------------------
+// Account groups
+// ---------------------------------------------------------------------------
+//
+// Two Cognito groups define an account. `starkeep-admins` administers the
+// deployment; `starkeep-users` has a data library that syncs. The identity
+// pool hands AWS credentials to admins only. This file checks the data group,
+// on both branches: the HMAC branch reads it from the ID token, and the device
+// branch looks up the user its record names.
+
+export const ADMINS_GROUP = "starkeep-admins";
+export const DATA_GROUP = "starkeep-users";
+
+/**
+ * Whether a user may reach data.
+ *
+ * Until data separates by user (step 4.11 of
+ * plan-multi-user-roles-2026-10-16.md), only an admin with a data library may.
+ * Every library is still one library, so a member who reached data would read
+ * the admin's. Step 4.11 drops the admin half.
+ */
+export function groupsMayUseData(groups: readonly string[]): boolean {
+  return groups.includes(DATA_GROUP) && groups.includes(ADMINS_GROUP);
+}
+
+interface CachedGroups {
+  groups: readonly string[];
+  fetchedAt: number;
+}
+
+const userGroupsCache = new Map<string, CachedGroups>();
+
+let cognitoClientSingleton: CognitoIdentityProviderClient | null = null;
+function getCognitoClient(): CognitoIdentityProviderClient {
+  cognitoClientSingleton ??= new CognitoIdentityProviderClient({
+    region: process.env.AWS_REGION ?? "us-east-1",
+  });
+  return cognitoClientSingleton;
+}
+
+/**
+ * The groups of the user a device record names, cached for the same five
+ * minutes as the record itself. Removing a user from a group therefore stops
+ * that user's devices within the window, as revoking a device does. A user the
+ * pool no longer holds has no groups.
+ */
+async function loadUserGroups(userId: string): Promise<readonly string[]> {
+  const cached = userGroupsCache.get(userId);
+  if (cached && Date.now() - cached.fetchedAt < HMAC_CACHE_TTL_MS) return cached.groups;
+  const poolCfg = userPoolConfig();
+  if (!poolCfg) throw new Error("no user pool configured — cannot look up a device's user");
+  const groups: string[] = [];
+  try {
+    let nextToken: string | undefined;
+    do {
+      const page = await getCognitoClient().send(
+        new AdminListGroupsForUserCommand({
+          UserPoolId: poolCfg.userPoolId,
+          Username: userId,
+          NextToken: nextToken,
+        }),
+      );
+      for (const group of page.Groups ?? []) if (group.GroupName) groups.push(group.GroupName);
+      nextToken = page.NextToken;
+    } while (nextToken);
+  } catch (err) {
+    if (!(err instanceof UserNotFoundException)) throw err;
+  }
+  userGroupsCache.set(userId, { groups, fetchedAt: Date.now() });
+  return groups;
+}
+
+/** Test seam: forget cached group lookups. */
+export function _resetUserGroupsCache(): void {
+  userGroupsCache.clear();
+}
 
 /**
  * Device ids are used to build an SSM parameter name, so they are constrained
@@ -2224,6 +2306,14 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       }
       const writeRefusal = deviceWriteRefusal(method, subPath, bodyBytes);
       if (writeRefusal) return clientErr(writeRefusal, 403);
+      // The device syncs for the user its record names, so that user must be
+      // allowed data — the same check the HMAC branch makes on the token.
+      if (!device.userId) {
+        return clientErr("This device's record names no user. Pair it again from admin-web.", 403);
+      }
+      if (!groupsMayUseData(await loadUserGroups(device.userId))) {
+        return clientErr("The account this device syncs for has no data library on this cloud", 403);
+      }
       callingDevice = { ...device, deviceId };
       // No end-user token is required on this branch, and that is not an
       // oversight or a carve-out. A registered device key IS an end-user
@@ -2295,6 +2385,9 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         const claims = await verifyUserToken(userToken, poolCfg);
         if (!claims) {
           return clientErr("Invalid or expired end-user token", 401);
+        }
+        if (!groupsMayUseData(claims.groups)) {
+          return clientErr("This account has no data library on this cloud", 403);
         }
       }
     }

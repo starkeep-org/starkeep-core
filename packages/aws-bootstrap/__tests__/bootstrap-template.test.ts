@@ -135,11 +135,35 @@ describe("trust policies (who can assume which role)", () => {
     },
   );
 
-  it("the federated identity pool maps authenticated users to AdminAppRole", () => {
+  it("the federated identity pool maps only starkeep-admins to AdminAppRole, and denies everyone else", () => {
     const props = resources.IdentityPoolRoleAttachment.Properties as unknown as {
-      Roles: Record<string, unknown>;
+      Roles?: unknown;
+      RoleMappings: Record<string, {
+        Type: string;
+        AmbiguousRoleResolution: string;
+        RulesConfiguration: { Rules: Array<Record<string, unknown>> };
+      }>;
     };
-    expect(props.Roles).toEqual({ authenticated: { "Fn::GetAtt": "AdminAppRole.Arn" } });
+    // No default role: a user who matches no rule gets no credentials.
+    expect(props.Roles).toBeUndefined();
+    const mapping = props.RoleMappings["userpool"]!;
+    expect(mapping.Type).toBe("Rules");
+    expect(mapping.AmbiguousRoleResolution).toBe("Deny");
+    expect(mapping.RulesConfiguration.Rules).toEqual([
+      {
+        Claim: "cognito:groups",
+        MatchType: "Contains",
+        Value: "starkeep-admins",
+        RoleARN: { "Fn::GetAtt": "AdminAppRole.Arn" },
+      },
+    ]);
+  });
+
+  it("defines the two account groups in the user pool", () => {
+    const groups = resourcesOfType("AWS::Cognito::UserPoolGroup").map(
+      (name) => (resources[name]!.Properties as { GroupName: string }).GroupName,
+    );
+    expect(groups.sort()).toEqual(["starkeep-admins", "starkeep-users"]);
   });
 });
 

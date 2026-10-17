@@ -18,11 +18,20 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mockClient } from "aws-sdk-client-mock";
 import { SSMClient, GetParameterCommand, ParameterNotFound } from "@aws-sdk/client-ssm";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
+import {
+  AdminListGroupsForUserCommand,
+  CognitoIdentityProviderClient,
+  UserNotFoundException,
+} from "@aws-sdk/client-cognito-identity-provider";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import type { APIGatewayEvent, LambdaContext } from "../src/handler-utils.js";
 
 const ssmMock = mockClient(SSMClient);
 const stsMock = mockClient(STSClient);
+const cognitoMock = mockClient(CognitoIdentityProviderClient);
+
+/** The groups the pool reports per user; an admin with data unless a test says otherwise. */
+const userGroups = new Map<string, string[]>();
 
 const ACCOUNT_ID = "123456789012";
 const context: LambdaContext = {
@@ -38,6 +47,8 @@ beforeAll(async () => {
   process.env.AURORA_ENDPOINT = "invalid.test.localdomain";
   process.env.S3_BUCKET = "fake-bucket";
   process.env.AWS_REGION = "us-east-1";
+  process.env.STARKEEP_USER_POOL_ID = "us-east-1_TESTPOOL";
+  process.env.STARKEEP_USER_POOL_CLIENT_ID = "test-client-id";
   // The module caches SSM lookups for 5 minutes by default, which would make
   // every test after the first see a stale device. Each test uses a distinct
   // device id, except where reuse is the point.
@@ -49,6 +60,15 @@ beforeAll(async () => {
 beforeEach(() => {
   ssmMock.reset();
   stsMock.reset();
+  cognitoMock.reset();
+  userGroups.clear();
+  cognitoMock.on(AdminListGroupsForUserCommand).callsFake(async (input: { Username?: string }) => {
+    const groups = userGroups.get(input.Username!);
+    if (groups === undefined && input.Username === "gone") {
+      throw new UserNotFoundException({ message: "gone", $metadata: {} });
+    }
+    return { Groups: (groups ?? ["starkeep-admins", "starkeep-users"]).map((GroupName) => ({ GroupName })) };
+  });
   stsMock.on(AssumeRoleCommand).resolves({
     Credentials: {
       AccessKeyId: "AKIAFAKE",
@@ -120,7 +140,7 @@ function scriptRegistered(
       Parameter: {
         Value: JSON.stringify({
           publicKeySpki,
-          ...(userId ? { userId } : {}),
+          userId: userId ?? "test-user",
           ...(appIds ? { appIds } : {}),
           ...extra,
         }),
@@ -453,7 +473,7 @@ describe("a device acts only as the apps it was paired for", () => {
       .on(GetParameterCommand, { Name: "/teststack/platform/devices/dev-junk-appids" })
       .resolves({
         Parameter: {
-          Value: JSON.stringify({ publicKeySpki: device.publicKeySpki, appIds: [7, "starkeep-drive"] }),
+          Value: JSON.stringify({ publicKeySpki: device.publicKeySpki, userId: "test-user", appIds: [7, "starkeep-drive"] }),
         },
       });
     scriptApp("starkeep-drive");
@@ -652,5 +672,39 @@ describe("GET /device/self", () => {
     scriptRegistered("dev-self-photos", device.publicKeySpki, "photos", "sub-1", ["photos"]);
     const res = await deviceCall(device, "dev-self-photos", "photos", "GET", "/device/self");
     expect(res.statusCode).toBe(404);
+  });
+});
+
+describe("the user a device syncs for", () => {
+  it("must be an admin with a data library until data separates by user", async () => {
+    const device = makeDevice();
+    scriptRegistered("dev-member", device.publicKeySpki, "starkeep-drive", "member-1");
+    userGroups.set("member-1", ["starkeep-users"]);
+    const res = await deviceCall(device, "dev-member", "starkeep-drive", "POST", "/sync/exchange", "{}");
+    expect(res.statusCode).toBe(403);
+    expect(errorOf(res)).toMatch(/no data library/);
+  });
+
+  it("is refused once removed from the data group, including an admin", async () => {
+    const device = makeDevice();
+    scriptRegistered("dev-admin-nodata", device.publicKeySpki, "starkeep-drive", "admin-2");
+    userGroups.set("admin-2", ["starkeep-admins"]);
+    const res = await deviceCall(device, "dev-admin-nodata", "starkeep-drive", "GET", "/health");
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("is refused when the pool no longer holds the user", async () => {
+    const device = makeDevice();
+    scriptRegistered("dev-gone", device.publicKeySpki, "starkeep-drive", "gone");
+    const res = await deviceCall(device, "dev-gone", "starkeep-drive", "GET", "/health");
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("is looked up by the record's user id", async () => {
+    const device = makeDevice();
+    scriptRegistered("dev-lookup", device.publicKeySpki, "starkeep-drive", "sub-42");
+    await deviceCall(device, "dev-lookup", "starkeep-drive", "GET", "/health");
+    const [call] = cognitoMock.commandCalls(AdminListGroupsForUserCommand);
+    expect(call!.args[0].input).toMatchObject({ UserPoolId: "us-east-1_TESTPOOL", Username: "sub-42" });
   });
 });

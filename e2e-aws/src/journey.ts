@@ -50,7 +50,7 @@ import { appSyncableTableName, sqliteCompiler } from "@starkeep/storage-sqlite";
 import { AWS_TESTS_ENABLED, STACK_PREFIX, REGION, TEARDOWN } from "./env.js";
 import { ensureBootstrapStack, type BootstrapOutputs } from "./bootstrap-stack.js";
 import { ensureAdminUser } from "./admin-user.js";
-import { signInAdmin, runInstallCli, type AdminSession } from "./installers.js";
+import { connectThisMachine, signInAdmin, runInstallCli, type AdminSession } from "./installers.js";
 import {
   runPaths,
   readConfig,
@@ -601,10 +601,10 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
       it("boots a local data server against the real cloud", async () => {
         // Boot with the Cognito pool config but NO pre-seeded auth.json. The real
         // wizard never injects a token at boot; it signs the user in afterwards
-        // through the LDS /auth/tokens handoff (next step). Booting unauthenticated
-        // means the sync supervisor stays parked (startOrKickSupervisor gates on a
-        // live id token) until that handoff lands — so the later `shipped > 0`
-        // assertion genuinely depends on the handoff having started sync.
+        // through the LDS /auth/tokens handoff (next step). Sync itself waits for
+        // the cloud to accept this machine's device key, which the
+        // "connects this machine" step below arranges — so the later
+        // `shipped > 0` assertion depends on that approval.
         // Share the run-state dir as the LDS's STARKEEP_DIR, so config.json (written
         // by the cloud-data-server install) and data.db (the LDS's registry) live in
         // one dir — the single-root model the install CLIs also use, mirroring
@@ -620,7 +620,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // resetLocalNodeState clears it; this is the guard that keeps it true.
         expect(
           existsSync(join(paths.dataDir, "auth.json")),
-          "boot must be unauthenticated — the /auth/tokens handoff is what starts sync",
+          "boot must be unauthenticated — the /auth/tokens handoff is exercised next",
         ).toBe(false);
 
         lds = await startLocalDataServer({
@@ -633,11 +633,10 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
       it("signs in through the LDS /auth/tokens handoff (real Cognito→STS exchange)", async () => {
         // The user-visible step 4 of cloud setup: the wizard POSTs the freshly
         // minted Cognito tokens to the daemon, which then performs the in-process
-        // Identity-Pool (STS) exchange, persists cloud credentials, starts the
-        // credential-refresh timer, and starts the sync supervisor. We drive that
-        // real path here rather than pre-seeding auth.json, so the handoff —
-        // Cognito sign-in → /auth/tokens → STS exchange → supervisor startup — has
-        // end-to-end coverage against real AWS.
+        // Identity-Pool (STS) exchange, persists cloud credentials and starts the
+        // credential-refresh timer. Sync no longer depends on it (step 2.8 of
+        // plan-multi-user-roles-2026-10-16.md decides whether it stays); the
+        // handoff keeps its end-to-end coverage until then.
         const res = await fetch(`${lds!.url}/auth/tokens`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -671,6 +670,15 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         await runInstallCli("cli-install-drive", [], paths, session);
         const res = await cloudApp(drive).fetch("/health");
         expect(res.status).toBe(200);
+      });
+
+      it("connects this machine, which is what starts sync", async () => {
+        // The local data server signs every cloud call with its own device key
+        // and starts no channel until the cloud accepts that key. "Connect this
+        // machine" registers it for the signed-in admin through Manager. After
+        // Drive's cloud install, because `device/self` is a Drive route.
+        const approval = await connectThisMachine(lds!.url, config, session);
+        expect(approval.state).toBe("approved");
       });
 
       it(`installs ${app.appId} in the cloud (bundle, Lambda, routes)`, async () => {
