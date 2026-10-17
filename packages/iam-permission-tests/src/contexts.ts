@@ -113,6 +113,13 @@ function brokerPowerPolicy(stackPrefix: string, accountId: string): PolicyDoc {
           // any future role-name suffix variants are covered too.
           Resource: `arn:aws:iam::${accountId}:role/${stackPrefix}-app-*`,
         },
+        {
+          // Matches iam.ts `BrokerReadPlatformParameters`.
+          Sid: "BrokerReadPlatformParameters",
+          Effect: "Allow",
+          Action: "ssm:GetParameter",
+          Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/platform/*`,
+        },
       ],
     },
   };
@@ -462,6 +469,11 @@ const CONTEXTS: Record<string, ContextBuilder> = {
             "AND the foundational boundary must grant sts:AssumeRole on the per-app role pattern.",
         },
         {
+          action: "ssm:GetParameter",
+          resource: `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/platform/devices/dev-01ABC`,
+          why: "The device branch reads a paired device's record to verify its signature.",
+        },
+        {
           action: "logs:CreateLogStream",
           resource: cdsLambdaLogGroup,
           why: "Lambda runtime appends a log stream per invocation under the CDS log group.",
@@ -729,10 +741,9 @@ const CONTEXTS: Record<string, ContextBuilder> = {
       const installInfraRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-infra-role`;
       const appBoundaryArn = `arn:aws:iam::${accountId}:policy/${stackPrefix}-app-permissions-boundary`;
       const appCredsArn = `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/app-creds/${id}`;
-      // A paired handset's public key. The reserved `_device-` prefix keeps it
-      // out of the real-appId keyspace while still sitting under `app-creds/*`
-      // — which is exactly why it needs no IAM of its own.
-      const deviceKeyArn = `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/app-creds/_device-dev-01ABC`;
+      // A paired device's record, under the platform's own non-secret prefix.
+      const deviceKeyArn = `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/platform/devices/dev-01ABC`;
+      const deviceListArn = `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/platform/devices`;
       const ssmViaService = `ssm.${region}.amazonaws.com`;
       return [
         // ---- Mint / heal the per-app role (createAppRole). --------------
@@ -847,9 +858,9 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           why: "admin-web device pairing writes the handset's public key; the CDS Lambda reads it to decide whose signatures to trust.",
         },
         {
-          action: "ssm:AddTagsToResource",
-          resource: deviceKeyArn,
-          why: "putDeviceKeyParameter creates with Tags before falling back to an Overwrite re-put, same shape as the HMAC secret.",
+          action: "ssm:GetParametersByPath",
+          resource: deviceListArn,
+          why: "admin-web lists paired devices from their records, which are the authority the broker reads.",
         },
         {
           action: "ssm:DeleteParameter",
@@ -860,7 +871,7 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           action: "kms:Encrypt",
           resource: "*",
           contextVariables: { "kms:ViaService": ssmViaService },
-          why: "Every write above is Type=SecureString, which encrypts through KMS via SSM.",
+          why: "The app-secret writes above are Type=SecureString, which encrypts through KMS via SSM.",
         },
 
         // ---- Role-chain into the three downstream roles. ---------------

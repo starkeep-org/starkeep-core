@@ -15,10 +15,7 @@ import {
   standardsFromSettings,
   typeCategory,
   USER_SETTINGS_FILE_NAME,
-  withoutPairedDevice,
-  withPairedDevice,
   type DataRecord,
-  type PairedDevice,
 } from "../src/index.js";
 
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
@@ -107,70 +104,5 @@ describe("pickSettingsRecord", () => {
 
   it("picks nothing from no live settings record", () => {
     expect(pickSettingsRecord([])).toEqual({ winner: null, losers: [] });
-  });
-});
-
-describe("paired devices in the settings file", () => {
-  const phone: PairedDevice = {
-    deviceId: "dev_abc-123",
-    label: "Pixel 8",
-    appIds: ["starkeep-drive"],
-    pairedAt: "2026-10-13T12:00:00.000Z",
-  };
-
-  it("reads a list of paired devices, and keeps the standards at their defaults", () => {
-    const parsed = parseUserSettings(bytes({ pairedDevices: [phone, { ...phone, deviceId: "two", label: null }] }));
-    expect(parsed.ok).toBe(true);
-    if (!parsed.ok) return;
-    expect(parsed.settings.pairedDevices).toEqual([phone, { ...phone, deviceId: "two", label: null }]);
-    expect(parsed.standards).toEqual(STD);
-  });
-
-  it("round-trips through the file's bytes", () => {
-    const parsed = parseUserSettings(serializeUserSettings({ pairedDevices: [phone] }));
-    expect(parsed.ok && parsed.settings.pairedDevices).toEqual([phone]);
-  });
-
-  it.each([
-    ["not a list", { pairedDevices: {} }, "pairedDevices must be a list"],
-    ["an entry that is not an object", { pairedDevices: ["x"] }, "pairedDevices[0] must be an object"],
-    ["a device id that could walk an SSM path", { pairedDevices: [{ ...phone, deviceId: "../app-creds/photos" }] }, "pairedDevices[0].deviceId"],
-    ["an empty device id", { pairedDevices: [{ ...phone, deviceId: "" }] }, "pairedDevices[0].deviceId"],
-    ["a duplicate device id", { pairedDevices: [phone, phone] }, "appears more than once"],
-    ["a label that is not a string", { pairedDevices: [{ ...phone, label: 7 }] }, "pairedDevices[0].label"],
-    ["a label that is too long", { pairedDevices: [{ ...phone, label: "x".repeat(101) }] }, "pairedDevices[0].label"],
-    ["no app ids", { pairedDevices: [{ ...phone, appIds: [] }] }, "pairedDevices[0].appIds"],
-    ["an app id that is not a string", { pairedDevices: [{ ...phone, appIds: [3] }] }, "pairedDevices[0].appIds"],
-    ["a pairing time that is not a date", { pairedDevices: [{ ...phone, pairedAt: "yesterday" }] }, "pairedDevices[0].pairedAt"],
-  ])("refuses %s", (_name, value, problem) => {
-    const parsed = parseUserSettings(bytes(value));
-    expect(parsed.ok).toBe(false);
-    if (parsed.ok) return;
-    expect(parsed.problems.join("\n")).toContain(problem);
-  });
-
-  it("accepts a label at the length limit", () => {
-    expect(parseUserSettings(bytes({ pairedDevices: [{ ...phone, label: "x".repeat(100) }] })).ok).toBe(true);
-  });
-
-  it("adds a device, and replaces an entry with the same id rather than duplicating it", () => {
-    const once = withPairedDevice({}, phone);
-    expect(once.pairedDevices).toEqual([phone]);
-    const relabelled = withPairedDevice(once, { ...phone, label: "Old phone" });
-    expect(relabelled.pairedDevices).toEqual([{ ...phone, label: "Old phone" }]);
-  });
-
-  it("keeps every other setting when the list changes", () => {
-    const settings = { trash: { retentionDays: 90 }, standIns: { image: { canonicalThreshold: 6000 } } };
-    const added = withPairedDevice(settings, phone);
-    expect(added.trash).toEqual(settings.trash);
-    expect(added.standIns).toEqual(settings.standIns);
-    expect(withoutPairedDevice(added, phone.deviceId)).toEqual({ ...settings, pairedDevices: [] });
-  });
-
-  it("removes only the named device, and leaves the value unchanged for an absent id", () => {
-    const two = withPairedDevice(withPairedDevice({}, phone), { ...phone, deviceId: "two" });
-    expect(withoutPairedDevice(two, "two").pairedDevices).toEqual([phone]);
-    expect(withoutPairedDevice(two, "absent")).toBe(two);
   });
 });

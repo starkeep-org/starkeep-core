@@ -235,6 +235,15 @@ export async function createAppRole(input: CreateAppRoleInput): Promise<string> 
               Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/app-creds/*`,
             },
             {
+              // The platform's own non-secret parameters: paired-device
+              // records, read to verify a device's signature, and the
+              // deployment's settings. Read only; Manager writes both.
+              Sid: "BrokerReadPlatformParameters",
+              Effect: "Allow",
+              Action: "ssm:GetParameter",
+              Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/platform/*`,
+            },
+            {
               // SecureString — decrypt via the SSM service key.
               Sid: "BrokerReadAppCredsKmsDecrypt",
               Effect: "Allow",

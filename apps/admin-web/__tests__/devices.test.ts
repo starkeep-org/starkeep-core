@@ -1,5 +1,6 @@
 /**
- * GET, POST and DELETE /api/devices — listing, pairing and revoking a phone.
+ * POST /api/devices/list, POST and DELETE /api/devices — listing, pairing and
+ * revoking a phone.
  *
  * Pairing is a phone's install step, so it happens here, in the privileged
  * console. These properties carry it:
@@ -7,37 +8,50 @@
  *   - The inputs are validated *here*, because a key that fails to parse in the
  *     Lambda is a device that silently cannot sync, diagnosable only from
  *     CloudWatch.
- *   - The privileged write runs as Manager, assumed from the operator's own
- *     session, with the role ARN off disk, never out of the request body.
- *   - The route, not the browser, decides which apps the device may act as.
- *   - The list entry goes into the library's settings file *before* the key,
- *     and comes out *after* it, so the list never misses a device that can
- *     sync. A real local data server holds the list in these tests.
+ *   - Every SSM call runs as Manager, assumed from the operator's own session,
+ *     with the role ARN off disk, never out of the request body.
+ *   - The route, not the browser, decides the device's kind and the apps it
+ *     may act as.
+ *   - The list is the device records, so the list and what the broker accepts
+ *     cannot disagree. A map stands in for SSM in these tests.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { getFreePort, startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
 import { jsonRequest, makeDataDir } from "./helpers";
+
+interface Device {
+  deviceId: string;
+  userId: string | null;
+  kind: string;
+  label: string | null;
+  appIds: string[];
+  pairedAt: string;
+  publicKeySpki?: string;
+}
+
+/** The device records, as SSM would hold them. */
+const records = new Map<string, Omit<Device, "deviceId">>();
 
 const putDeviceKeyParameter = vi.fn();
 const deleteDeviceKeyParameter = vi.fn();
+const listDeviceRecords = vi.fn();
 const roleChain = vi.fn();
 
 vi.mock("@starkeep/admin-installer/app-creds", () => ({
   putDeviceKeyParameter: (...args: unknown[]) => putDeviceKeyParameter(...args),
   deleteDeviceKeyParameter: (...args: unknown[]) => deleteDeviceKeyParameter(...args),
+  listDeviceRecords: (...args: unknown[]) => listDeviceRecords(...args),
 }));
 vi.mock("@starkeep/admin-installer/session", () => ({
   roleChain: (...args: unknown[]) => roleChain(...args),
 }));
 
-let GET: () => Promise<Response>;
+let LIST: (req: Request) => Promise<Response>;
 let POST: (req: Request) => Promise<Response>;
 let DELETE: (req: Request) => Promise<Response>;
 let dataDir: string;
 let configPath: string;
-let lds: LocalDataServer;
 
 /** 32-byte Ed25519 key in a 44-byte SPKI wrapper, base64 — always 60 chars. */
 const SPKI = "M".repeat(59) + "=";
@@ -57,13 +71,6 @@ const CONFIG = {
   apiGatewayUrl: "https://abc.execute-api.us-east-2.amazonaws.com",
 };
 
-interface Device {
-  deviceId: string;
-  label: string | null;
-  appIds: string[];
-  pairedAt: string;
-}
-
 function pairBody(over: Record<string, unknown> = {}) {
   return {
     credentials: CREDENTIALS,
@@ -75,42 +82,35 @@ function pairBody(over: Record<string, unknown> = {}) {
   };
 }
 
-/** The list as the local data server holds it, read around the route. */
-async function listed(): Promise<Device[]> {
-  const res = await fetch(`${lds.url}/library/paired-devices`);
-  return ((await res.json()) as { devices: Device[] }).devices;
-}
+const listBody = { credentials: CREDENTIALS, stackPrefix: "sktest", region: "us-east-2" };
 
-/** Run `fn` with the route pointed at a port where nothing listens. */
-async function withDaemonDown<T>(fn: () => Promise<T>): Promise<T> {
-  const saved = process.env.STARKEEP_LOCAL_DATA_SERVER_URL;
-  process.env.STARKEEP_LOCAL_DATA_SERVER_URL = `http://127.0.0.1:${await getFreePort()}`;
-  try {
-    return await fn();
-  } finally {
-    process.env.STARKEEP_LOCAL_DATA_SERVER_URL = saved;
-  }
+/** The records as stored, by id. */
+function stored(): Device[] {
+  return [...records.entries()].map(([deviceId, r]) => ({ deviceId, ...r }));
 }
 
 beforeAll(async () => {
-  lds = await startLocalDataServer();
   dataDir = makeDataDir("adminweb-devices-");
   configPath = join(dataDir, "config.json");
   process.env.STARKEEP_DIR = dataDir;
-  process.env.STARKEEP_LOCAL_DATA_SERVER_URL = lds.url;
   const route = await import("../src/routes/devices");
-  GET = route.GET;
+  LIST = route.LIST;
   POST = route.POST;
   DELETE = route.DELETE;
 }, 60_000);
 
-afterAll(async () => {
-  await lds?.stop();
-});
-
-beforeEach(async () => {
-  putDeviceKeyParameter.mockReset().mockResolvedValue("/sktest/app-creds/_device-pixel-9");
-  deleteDeviceKeyParameter.mockReset().mockResolvedValue(undefined);
+beforeEach(() => {
+  records.clear();
+  putDeviceKeyParameter.mockReset().mockImplementation(
+    async (opts: { deviceId: string; registration: Omit<Device, "deviceId"> }) => {
+      records.set(opts.deviceId, opts.registration);
+      return `/sktest/platform/devices/${opts.deviceId}`;
+    },
+  );
+  deleteDeviceKeyParameter.mockReset().mockImplementation(async (opts: { deviceId: string }) => {
+    records.delete(opts.deviceId);
+  });
+  listDeviceRecords.mockReset().mockImplementation(async () => stored());
   roleChain.mockReset().mockResolvedValue({
     accessKeyId: "ASIA-MANAGER",
     secretAccessKey: "s",
@@ -119,14 +119,11 @@ beforeEach(async () => {
   });
   rmSync(configPath, { force: true });
   writeFileSync(configPath, JSON.stringify(CONFIG));
-  // Empty the list between tests, through the daemon, so each starts clean.
-  for (const device of await listed()) {
-    await fetch(`${lds.url}/library/paired-devices/${device.deviceId}`, { method: "DELETE" });
-  }
 });
 
 const pair = (body: unknown) => POST(jsonRequest("/api/devices", body));
 const revoke = (body: unknown) => DELETE(jsonRequest("/api/devices", body, "DELETE"));
+const list = (body: unknown = listBody) => LIST(jsonRequest("/api/devices/list", body));
 
 describe("validating what becomes a parameter name", () => {
   it.each([
@@ -139,7 +136,7 @@ describe("validating what becomes a parameter name", () => {
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toContain("deviceId");
     expect(putDeviceKeyParameter).not.toHaveBeenCalled();
-    expect(await listed()).toEqual([]);
+    expect(stored()).toEqual([]);
   });
 
   it("accepts the characters a device id is allowed to carry", async () => {
@@ -161,7 +158,7 @@ describe("validating the key and the label", () => {
     expect(putDeviceKeyParameter).not.toHaveBeenCalled();
   });
 
-  it("refuses a label longer than the settings file allows", async () => {
+  it("refuses a label longer than 100 characters", async () => {
     const res = await pair(pairBody({ label: "x".repeat(101) }));
     expect(res.status).toBe(400);
     expect(putDeviceKeyParameter).not.toHaveBeenCalled();
@@ -169,69 +166,45 @@ describe("validating the key and the label", () => {
 
   it("trims the label, and records a blank one as null", async () => {
     await pair(pairBody({ label: "  Pixel 9  " }));
-    expect((await listed())[0]!.label).toBe("Pixel 9");
+    expect(stored()[0]!.label).toBe("Pixel 9");
     await pair(pairBody({ deviceId: "blank", label: "   " }));
-    expect((await listed()).find((d) => d.deviceId === "blank")!.label).toBeNull();
+    expect(stored().find((d) => d.deviceId === "blank")!.label).toBeNull();
   });
 });
 
 describe("pairing", () => {
-  it("lists the device and stores its key, and answers the cloud URL for the QR code", async () => {
+  it("stores the device's record, and answers the cloud URL for the QR code", async () => {
     const res = await pair(pairBody({ userId: "u-1", label: "Aaron's phone" }));
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { paired: unknown; baseUrl: string; devices: Device[] };
-    expect(body.paired).toEqual({ deviceId: "pixel-9", parameterName: "/sktest/app-creds/_device-pixel-9" });
+    const body = (await res.json()) as { paired: unknown; baseUrl: string };
+    expect(body.paired).toEqual({ deviceId: "pixel-9", parameterName: "/sktest/platform/devices/pixel-9" });
     expect(body.baseUrl).toBe("https://d123.cloudfront.net");
-    expect(body.devices.map((d) => d.deviceId)).toEqual(["pixel-9"]);
 
     const [args] = putDeviceKeyParameter.mock.calls[0] as [Record<string, never>];
     expect(args).toMatchObject({ stackPrefix: "sktest", deviceId: "pixel-9", region: "us-east-2" });
-    const registration = (args as unknown as { registration: Record<string, unknown> }).registration;
-    expect(registration).toMatchObject({
-      publicKeySpki: SPKI,
-      userId: "u-1",
-      label: "Aaron's phone",
-      appIds: ["starkeep-drive"],
-    });
-
-    const [entry] = await listed();
-    expect(entry).toMatchObject({ deviceId: "pixel-9", label: "Aaron's phone", appIds: ["starkeep-drive"] });
-    // One pairing, one timestamp: the list and the key agree on when.
-    expect(entry!.pairedAt).toBe(registration.pairedAt);
+    expect(stored()).toEqual([
+      {
+        deviceId: "pixel-9",
+        publicKeySpki: SPKI,
+        userId: "u-1",
+        kind: "phone",
+        label: "Aaron's phone",
+        appIds: ["starkeep-drive"],
+        pairedAt: expect.any(String),
+      },
+    ]);
   });
 
-  it("decides the device's apps itself, whatever the request says", async () => {
-    await pair(pairBody({ appIds: ["photos", "memo"] }));
-    const [args] = putDeviceKeyParameter.mock.calls[0] as [{ registration: { appIds: string[] } }];
-    expect(args.registration.appIds).toEqual(["starkeep-drive"]);
-    expect((await listed())[0]!.appIds).toEqual(["starkeep-drive"]);
+  it("decides the device's kind and apps itself, whatever the request says", async () => {
+    await pair(pairBody({ appIds: ["photos", "memo"], kind: "desktop" }));
+    expect(stored()[0]).toMatchObject({ kind: "phone", appIds: ["starkeep-drive"] });
   });
 
-  it("lists the device before it writes the key", async () => {
-    // A key without an entry is a phone that syncs and that nobody can find to
-    // revoke. So the entry must already be there when the key is written.
-    let listedAtKeyWrite: Device[] = [];
-    putDeviceKeyParameter.mockImplementation(async () => {
-      listedAtKeyWrite = await listed();
-      return "/sktest/app-creds/_device-pixel-9";
-    });
-    await pair(pairBody());
-    expect(listedAtKeyWrite.map((d) => d.deviceId)).toEqual(["pixel-9"]);
-  });
-
-  it("takes the entry back when the key write fails", async () => {
+  it("answers 500 naming the reason when the record write fails", async () => {
     putDeviceKeyParameter.mockRejectedValue(new Error("AccessDeniedException"));
     const res = await pair(pairBody());
     expect(res.status).toBe(500);
     expect(((await res.json()) as { error: string }).error).toBe("AccessDeniedException");
-    expect(await listed()).toEqual([]);
-  });
-
-  it("refuses, writing nothing, when the local data server is down", async () => {
-    const res = await withDaemonDown(() => pair(pairBody()));
-    expect(res.status).toBe(503);
-    expect(((await res.json()) as { error: string }).error).toMatch(/local data server is not running/);
-    expect(putDeviceKeyParameter).not.toHaveBeenCalled();
   });
 
   it("falls back to the gateway URL for a config with no CloudFront distribution", async () => {
@@ -248,7 +221,6 @@ describe("pairing", () => {
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toMatch(/no cloud URL/);
     expect(putDeviceKeyParameter).not.toHaveBeenCalled();
-    expect(await listed()).toEqual([]);
   });
 });
 
@@ -285,14 +257,13 @@ describe("the Manager hop", () => {
     expect(res.status).toBe(500);
     expect(((await res.json()) as { error: string }).error).toContain("config.json");
     expect(putDeviceKeyParameter).not.toHaveBeenCalled();
-    expect(await listed()).toEqual([]);
   });
 
-  it("answers 500, listing nothing, when Manager cannot be assumed", async () => {
+  it("answers 500, writing nothing, when Manager cannot be assumed", async () => {
     roleChain.mockRejectedValue(new Error("ExpiredToken"));
     const res = await pair(pairBody());
     expect(res.status).toBe(500);
-    expect(await listed()).toEqual([]);
+    expect(putDeviceKeyParameter).not.toHaveBeenCalled();
   });
 
   it("answers 500 when the config names no ARN and carries nothing to derive one from", async () => {
@@ -304,35 +275,33 @@ describe("the Manager hop", () => {
 });
 
 describe("listing", () => {
-  it("reads the list through the local data server", async () => {
-    await pair(pairBody({ label: "Pixel 9" }));
-    const res = await GET();
+  it("lists the device records through the same Manager hop, without their keys", async () => {
+    await pair(pairBody({ label: "Pixel 9", userId: "u-1" }));
+    const res = await list();
     expect(res.status).toBe(200);
     const body = (await res.json()) as { devices: Device[] };
-    expect(body.devices.map((d) => [d.deviceId, d.label])).toEqual([["pixel-9", "Pixel 9"]]);
+    expect(body.devices).toEqual([
+      expect.objectContaining({ deviceId: "pixel-9", label: "Pixel 9", kind: "phone", userId: "u-1" }),
+    ]);
+    expect(body.devices[0]).not.toHaveProperty("publicKeySpki");
+    const [args] = listDeviceRecords.mock.calls[0] as [{ awsCreds: { accessKeyId: string } }];
+    expect(args.awsCreds.accessKeyId).toBe("ASIA-MANAGER");
   });
 
-  it("says the daemon is down rather than showing an empty list", async () => {
-    const res = await withDaemonDown(() => GET());
-    expect(res.status).toBe(503);
+  it("answers 500 rather than an empty list when SSM cannot be read", async () => {
+    listDeviceRecords.mockRejectedValue(new Error("AccessDeniedException"));
+    const res = await list();
+    expect(res.status).toBe(500);
   });
 });
 
 describe("revoking", () => {
-  it("deletes the key through the same Manager hop, then the entry", async () => {
+  it("deletes the record through the same Manager hop", async () => {
     await pair(pairBody());
-    let listedAtKeyDelete: Device[] = [];
-    deleteDeviceKeyParameter.mockImplementation(async () => {
-      listedAtKeyDelete = await listed();
-    });
-
     const res = await revoke(pairBody());
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ revoked: "pixel-9", devices: [] });
-    // The entry outlived the key, so a failure between the two could only have
-    // left a harmless entry.
-    expect(listedAtKeyDelete.map((d) => d.deviceId)).toEqual(["pixel-9"]);
-    expect(await listed()).toEqual([]);
+    expect(await res.json()).toEqual({ revoked: "pixel-9" });
+    expect(stored()).toEqual([]);
 
     const [args] = deleteDeviceKeyParameter.mock.calls[0] as [
       { stackPrefix: string; deviceId: string; awsCreds: { accessKeyId: string } },
@@ -347,23 +316,12 @@ describe("revoking", () => {
     expect(deleteDeviceKeyParameter).not.toHaveBeenCalled();
   });
 
-  it("keeps the entry when the key delete fails, so the device can still be found", async () => {
+  it("answers 500 when the delete fails, and the device stays listed", async () => {
     await pair(pairBody());
     deleteDeviceKeyParameter.mockRejectedValue(new Error("AccessDeniedException"));
     const res = await revoke(pairBody());
     expect(res.status).toBe(500);
     expect(((await res.json()) as { error: string }).error).toContain("AccessDeniedException");
-    expect((await listed()).map((d) => d.deviceId)).toEqual(["pixel-9"]);
-  });
-
-  it("reports the revoke but names the list problem when the daemon is down", async () => {
-    // The key is what lets a device sync, so a deleted key is a revoked device
-    // whatever happens to the list afterwards.
-    await pair(pairBody());
-    const res = await withDaemonDown(() => revoke(pairBody()));
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { revoked: string; listError: string };
-    expect(body.revoked).toBe("pixel-9");
-    expect(body.listError).toMatch(/local data server is not running/);
+    expect(stored().map((d) => d.deviceId)).toEqual(["pixel-9"]);
   });
 });

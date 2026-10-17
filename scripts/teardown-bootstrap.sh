@@ -390,6 +390,29 @@ else
   skip
 fi
 
+# ── Step 2b: Delete the platform's own parameters ────────────────────────────
+# Paired-device records (/${STACK_PREFIX}/platform/devices/<id>) and the
+# deployment's settings (/${STACK_PREFIX}/platform/deployment-settings), written
+# by admin-web through Manager. Nothing uninstalls these, so the sweep is the
+# only thing that removes them.
+PLATFORM_PREFIX="/${STACK_PREFIX}/platform/"
+step "Deleting platform SSM parameters under $PLATFORM_PREFIX"
+PLATFORM_NAMES=$(aws ssm get-parameters-by-path \
+  --path "$PLATFORM_PREFIX" \
+  --recursive \
+  --region "$REGION" \
+  --query 'Parameters[].Name' \
+  --output text 2>/dev/null || true)
+if [ -n "$PLATFORM_NAMES" ] && [ "$PLATFORM_NAMES" != "None" ]; then
+  for name in $PLATFORM_NAMES; do
+    aws ssm delete-parameter --name "$name" --region "$REGION" 2>/dev/null \
+      && echo "  Deleted $name" \
+      || echo "  Could not delete $name (continuing)"
+  done
+else
+  skip
+fi
+
 # ── Step 3: Delete IAM roles and policies manually ───────────────────────────
 # Done before CF deletion so CF never races against us or gets stuck on
 # dependency errors (e.g. can't delete a policy while a role holds it as a

@@ -22,6 +22,7 @@ import {
   ParameterAlreadyExists,
   PutParameterCommand,
   DeleteParameterCommand,
+  GetParametersByPathCommand,
 } from "@aws-sdk/client-ssm";
 import type { AwsCredentials } from "./session";
 
@@ -45,45 +46,52 @@ export function cloudFrontSigningParameterName(stackPrefix: string): string {
 }
 
 /**
- * Name of a paired device's public-key parameter.
+ * The SSM prefix for the platform's own non-secret parameters: paired devices
+ * and the deployment's settings.
  *
- * Same reservation trick as {@link cloudFrontSigningParameterName}, for the
- * same three reasons: real app ids start alphanumeric so `_device-` can never
- * collide with one; it rides the CDS Lambda's existing `app-creds/*` read grant
- * rather than needing a new IAM path and a bootstrap change; and teardown's
- * `app-creds/*` sweep removes paired devices along with everything else.
- *
- * The value is `{ publicKeySpki, userId, appIds, pairedAt, label }` and is **not
- * secret** — it is the public half. It is still stored as a SecureString,
- * because one convention under this prefix is cheaper to reason about than two.
+ * A prefix of its own, rather than reserved names under `app-creds/*`, so that
+ * Manager can read and list device records without any read on the app
+ * secrets. Manager writes app secrets but never reads them, and admin-web's
+ * device list needs a read. One prefix keeps the cloud data server's runtime
+ * grant and the foundational boundary to a single resource each.
+ */
+export function platformParameterPrefix(stackPrefix: string): string {
+  return `/${stackPrefix}/platform`;
+}
+
+/**
+ * Name of a paired device's record. The value is a {@link DeviceRegistration}
+ * and is **not secret**: it is the public half of the device's key. Stored as
+ * a plain `String`.
  */
 export function deviceKeyParameterName(stackPrefix: string, deviceId: string): string {
-  return `/${stackPrefix}/app-creds/_device-${deviceId}`;
+  return `${platformParameterPrefix(stackPrefix)}/devices/${deviceId}`;
 }
+
+/** What kind of machine a device is. The broker scopes each kind differently. */
+export type DeviceKind = "phone" | "desktop";
 
 /** What a paired device is, as admin-web records it. */
 export interface DeviceRegistration {
   /** Base64 SPKI Ed25519 public key, as the device published it. */
   readonly publicKeySpki: string;
-  /**
-   * The Cognito user this device was paired for.
-   *
-   * Recorded from the first pairing even though **nothing reads it yet**: the
-   * data plane is app-identified, not user-identified, and making it otherwise
-   * is a partitioning project rather than an auth change (todo #52). Capturing
-   * it now is what saves every already-paired device a migration later, and it
-   * costs one field.
-   */
+  /** The Cognito user (`sub`) this device was paired for. */
   readonly userId: string | null;
+  readonly kind: DeviceKind;
   /**
    * The apps the device may act as. The broker refuses any other app id, and
    * refuses a record without this field, so a device key is a key to the
    * apps it was paired for and no others.
    */
   readonly appIds: readonly string[];
-  /** Human-readable, so the operator can tell two phones apart when revoking. */
+  /** Human-readable, so the operator can tell two devices apart when revoking. */
   readonly label: string | null;
   readonly pairedAt: string;
+}
+
+/** One device record as admin-web lists it. */
+export interface DeviceRecord extends DeviceRegistration {
+  readonly deviceId: string;
 }
 
 /**
@@ -104,33 +112,15 @@ export async function putDeviceKeyParameter(opts: {
   const ssm = makeSsmClient(opts.region, opts.awsCreds);
   const name = deviceKeyParameterName(opts.stackPrefix, opts.deviceId);
   // Shape MUST match CachedDeviceKey's parse in the cloud-data-server handler.
-  const value = JSON.stringify(opts.registration);
-  const description = `Starkeep paired device ${opts.deviceId}. Public key only.`;
-  try {
-    await ssm.send(
-      new PutParameterCommand({
-        Name: name,
-        Type: "SecureString",
-        Value: value,
-        Description: description,
-        Tags: [
-          { Key: "starkeep:appId", Value: "cloud-data-server" },
-          { Key: "starkeep:managed", Value: "true" },
-        ],
-      }),
-    );
-  } catch (err) {
-    if (!(err instanceof ParameterAlreadyExists)) throw err;
-    await ssm.send(
-      new PutParameterCommand({
-        Name: name,
-        Type: "SecureString",
-        Value: value,
-        Overwrite: true,
-        Description: description,
-      }),
-    );
-  }
+  await ssm.send(
+    new PutParameterCommand({
+      Name: name,
+      Type: "String",
+      Value: JSON.stringify(opts.registration),
+      Overwrite: true,
+      Description: `Starkeep paired device ${opts.deviceId}. Public key only.`,
+    }),
+  );
   return name;
 }
 
@@ -152,6 +142,56 @@ export async function deleteDeviceKeyParameter(opts: {
     // Already gone is the desired end state, not an error.
     if (!(err instanceof ParameterNotFound)) throw err;
   }
+}
+
+/**
+ * Every paired device. The records are the authority, so the list cannot
+ * disagree with what the broker accepts. A record that does not parse is
+ * listed with its id and nothing else it claims, so the operator can still
+ * revoke it.
+ */
+export async function listDeviceRecords(opts: {
+  stackPrefix: string;
+  region: string;
+  awsCreds: AwsCredentials;
+}): Promise<DeviceRecord[]> {
+  const ssm = makeSsmClient(opts.region, opts.awsCreds);
+  const path = `${platformParameterPrefix(opts.stackPrefix)}/devices`;
+  const records: DeviceRecord[] = [];
+  let nextToken: string | undefined;
+  do {
+    const page = await ssm.send(
+      new GetParametersByPathCommand({ Path: path, Recursive: false, NextToken: nextToken }),
+    );
+    for (const p of page.Parameters ?? []) {
+      const deviceId = p.Name?.slice(path.length + 1);
+      if (!deviceId) continue;
+      records.push({ deviceId, ...parseDeviceRegistration(p.Value) });
+    }
+    nextToken = page.NextToken;
+  } while (nextToken);
+  return records.sort((a, b) => a.pairedAt.localeCompare(b.pairedAt));
+}
+
+/** A stored registration, read defensively. A field that does not parse reads as empty. */
+export function parseDeviceRegistration(raw: string | undefined): DeviceRegistration {
+  let v: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(raw ?? "{}");
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      v = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // An unreadable record lists as empty, and revoking it still works.
+  }
+  return {
+    publicKeySpki: typeof v.publicKeySpki === "string" ? v.publicKeySpki : "",
+    userId: typeof v.userId === "string" ? v.userId : null,
+    kind: v.kind === "desktop" ? "desktop" : "phone",
+    appIds: Array.isArray(v.appIds) ? v.appIds.filter((a): a is string => typeof a === "string") : [],
+    label: typeof v.label === "string" ? v.label : null,
+    pairedAt: typeof v.pairedAt === "string" ? v.pairedAt : "",
+  };
 }
 
 function makeSsmClient(region: string, creds: AwsCredentials): SSMClient {

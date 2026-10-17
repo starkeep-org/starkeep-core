@@ -129,6 +129,21 @@ export function managerPolicyStatements(stackPrefix: string): IamStatement[] {
       Resource: SUB(`arn:aws:ssm:*:*:parameter/${stackPrefix}/app-creds/*`),
     },
     {
+      // The platform's own non-secret parameters: paired-device records and
+      // the deployment's settings. Unlike the app secrets, Manager reads these
+      // too, because admin-web lists devices and edits settings through it.
+      // `GetParametersByPath` on `platform/devices` matches `platform/*`.
+      Sid: "ManagerManagePlatformParameters",
+      Effect: "Allow",
+      Action: [
+        "ssm:GetParameter",
+        "ssm:GetParametersByPath",
+        "ssm:PutParameter",
+        "ssm:DeleteParameter",
+      ],
+      Resource: SUB(`arn:aws:ssm:*:*:parameter/${stackPrefix}/platform/*`),
+    },
+    {
       // SecureString PutParameter calls KMS Encrypt under the SSM service
       // key. Scoped by kms:ViaService so Manager can only encrypt
       // SSM-bound ciphertexts.

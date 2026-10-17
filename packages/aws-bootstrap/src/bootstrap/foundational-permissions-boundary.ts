@@ -159,7 +159,7 @@ export function foundationalPermissionsBoundaryStatements(
       ],
     },
     {
-      // The two SSM parameters this role reads with ssm:GetParameter, merged
+      // The SSM parameters this role reads with ssm:GetParameter, merged
       // into one statement (union of resources) to conserve managed-policy
       // size:
       //  - /pulumi/passphrase: the Pulumi state-encryption passphrase.
@@ -167,12 +167,16 @@ export function foundationalPermissionsBoundaryStatements(
       //    app's creds to verify HMAC-signed /apps/{appId}/* requests. The
       //    role's broker-power inline policy grants the same; the boundary
       //    admits it so the intersection holds at runtime.
+      //  - /platform/*: paired-device records and the deployment's settings,
+      //    which cloud-data-server reads to verify a device and to serve the
+      //    settings. Not secret.
       Sid: "FoundationalReadSsmParameters",
       Effect: "Allow",
       Action: "ssm:GetParameter",
       Resource: [
         `arn:aws:ssm:*:*:parameter/${stackPrefix}/pulumi/passphrase`,
         `arn:aws:ssm:*:*:parameter/${stackPrefix}/app-creds/*`,
+        `arn:aws:ssm:*:*:parameter/${stackPrefix}/platform/*`,
       ],
     },
     {

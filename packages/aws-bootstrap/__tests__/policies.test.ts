@@ -65,6 +65,8 @@ describe("manager policy (the install/uninstall allow-list)", () => {
         "iam:GetRolePolicy",
         "sts:AssumeRole",
         "sts:GetCallerIdentity",
+        "ssm:GetParameter",
+        "ssm:GetParametersByPath",
         "ssm:PutParameter",
         "ssm:DeleteParameter",
         "ssm:AddTagsToResource",
@@ -74,9 +76,15 @@ describe("manager policy (the install/uninstall allow-list)", () => {
         "kms:Decrypt",
       ].sort(),
     );
-    // The load-bearing negatives: Manager can never read user data or app secrets.
+    // The load-bearing negatives: Manager can never read user data or app
+    // secrets. Its SSM reads reach the platform's non-secret parameters only.
     const actions = actionsOf(statements);
-    expect(actions).not.toContain("ssm:GetParameter");
+    for (const s of statements) {
+      const acts = Array.isArray(s.Action) ? s.Action : [s.Action];
+      if (acts.some((a) => a === "ssm:GetParameter" || a === "ssm:GetParametersByPath")) {
+        expect(cfnString(s.Resource as CfnValue)).toBe(`arn:aws:ssm:*:*:parameter/${PREFIX}/platform/*`);
+      }
+    }
     expect(actions.some((a) => a.startsWith("s3:"))).toBe(false);
     expect(actions.some((a) => a.startsWith("dsql:"))).toBe(false);
   });
