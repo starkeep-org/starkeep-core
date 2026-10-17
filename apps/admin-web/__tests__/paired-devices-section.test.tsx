@@ -85,6 +85,16 @@ beforeEach(() => {
       const override = respond(call);
       if (override) return Response.json(override.body, { status: override.status });
       if (url === "/api/devices/list") return Response.json({ devices });
+      if (url === "/api/users/list") {
+        return Response.json({
+          users: [
+            { username: "sub-operator", email: "op@example.com", enabled: true, admin: true, data: true },
+            { username: "sub-sam", email: "sam@example.com", enabled: true, admin: false, data: true },
+            { username: "sub-admin-only", email: "ops@example.com", enabled: true, admin: true, data: false },
+            { username: "sub-gone", email: "gone@example.com", enabled: false, admin: false, data: true },
+          ],
+        });
+      }
       if (url === "/api/devices/inspect") {
         return Response.json({
           request: { deviceId: "dev_sam", label: "Sam's laptop", kind: "desktop" },
@@ -239,5 +249,19 @@ describe("approving a device from its code", () => {
     });
     const list = await screen.findByRole("list", { name: "Paired devices" });
     expect(await within(list).findByText("Sam's laptop")).toBeTruthy();
+  });
+
+  it("offers every enabled account with a data library, and approves for the one chosen", async () => {
+    const user = await open();
+    await user.type(screen.getByLabelText("Pairing code to approve"), "CODE123");
+    await user.click(screen.getByRole("button", { name: "Check the code" }));
+    const picker = (await screen.findByLabelText("Account this device syncs for")) as HTMLSelectElement;
+    await vi.waitFor(() => expect(picker.value).toBe("sub-operator"));
+    expect([...picker.options].map((o) => o.value)).toEqual(["sub-operator", "sub-sam"]);
+
+    await user.selectOptions(picker, "sub-sam");
+    await user.click(screen.getByRole("button", { name: /fingerprint matches/ }));
+    expect(await screen.findByText(/Approved Sam's laptop/)).toBeTruthy();
+    expect(calls.find((c) => c.url === "/api/devices/approve")!.body).toMatchObject({ userId: "sub-sam" });
   });
 });

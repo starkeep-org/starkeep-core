@@ -75,6 +75,19 @@ async function runOne(
   return { verdict: result.overallResult as Verdict };
 }
 
+/**
+ * One call against a context as built, or as a test has adjusted it — a
+ * session with a context variable removed, for instance.
+ */
+export function simulateOne(
+  ctx: ReturnType<typeof buildContext>,
+  accountId: string,
+  action: string,
+  resourceArn: string,
+): Promise<{ verdict: Verdict; errorMessage?: string }> {
+  return runOne(ctx, accountId, action, resourceArn);
+}
+
 export async function simulateCalls(
   calls: CapturedCall[],
   options: SimulateOptions,

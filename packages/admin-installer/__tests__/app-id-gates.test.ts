@@ -49,8 +49,24 @@ describe("app data role trust policy", () => {
     expect(principalsOf(doc)).toEqual([
       "arn:aws:iam::111122223333:role/starkeep-manager-role",
       "arn:aws:iam::111122223333:role/starkeep-app-cloud-data-server-role",
+      "arn:aws:iam::111122223333:role/starkeep-app-cloud-data-server-role",
     ]);
     for (const s of doc.Statement) expect(s.Effect).toBe("Allow");
+  });
+
+  it("lets the broker tag a session with its user, and with no other key", () => {
+    const doc = JSON.parse(buildAppRoleTrustPolicy("starkeep", "111122223333", true));
+    const tagging = doc.Statement.filter((s: { Action: string }) => s.Action === "sts:TagSession");
+    expect(tagging).toEqual([
+      {
+        Effect: "Allow",
+        Principal: { AWS: "arn:aws:iam::111122223333:role/starkeep-app-cloud-data-server-role" },
+        Action: "sts:TagSession",
+        Condition: { "ForAllValues:StringEquals": { "aws:TagKeys": ["starkeep:userId"] } },
+      },
+    ]);
+    // Manager's install and uninstall sessions carry no user.
+    expect(JSON.stringify(doc)).not.toMatch(/manager-role"\},"Action":"sts:TagSession/);
   });
 
   it("does not let Lambda assume an app's data role", () => {

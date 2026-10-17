@@ -33,6 +33,9 @@ import { managerPolicyStatements } from "../../aws-bootstrap/src/bootstrap/manag
 import { appPermissionsBoundaryStatements } from "../../aws-bootstrap/src/bootstrap/permissions-boundary";
 import { userDataOwnerPermissionsBoundaryStatements } from "../../aws-bootstrap/src/bootstrap/user-data-owner-permissions-boundary";
 
+/** The user a modelled runtime session acts for. */
+const SESSION_USER = "test-user";
+
 export interface ContextInput {
   stackPrefix: string;
   accountId: string;
@@ -687,12 +690,14 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         permissionBoundaryPolicies: [appPermissionsBoundary(stackPrefix)],
         contextVariables: {
           "aws:PrincipalTag/starkeep:appId": id,
+          // The broker tags every runtime session with the user it acts for.
+          "aws:PrincipalTag/starkeep:userId": SESSION_USER,
         },
       };
     },
     expectedCalls({ stackPrefix, appId }) {
       const id = requireAppId("runtime-app", appId);
-      const sharedObject = `arn:aws:s3:::${stackPrefix}-files-*/shared/image/photo.jpg`;
+      const sharedObject = `arn:aws:s3:::${stackPrefix}-files-*/shared/${SESSION_USER}/image/photo.jpg`;
       return [
         {
           action: "s3:GetObject",
@@ -721,8 +726,8 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         },
         {
           action: "s3:GetObject",
-          resource: `arn:aws:s3:::${stackPrefix}-files-*/apps/${id}/blob`,
-          why: "App-private reads under the app's own prefix.",
+          resource: `arn:aws:s3:::${stackPrefix}-files-*/apps/${id}/${SESSION_USER}/syncable/blob`,
+          why: "App-private reads under the session user's part of the app's own prefix.",
         },
       ];
     },
@@ -935,11 +940,12 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         permissionBoundaryPolicies: [userDataOwnerBoundary(stackPrefix)],
         contextVariables: {
           "aws:PrincipalTag/starkeep:appId": USER_DATA_OWNER_APP_ID,
+          "aws:PrincipalTag/starkeep:userId": SESSION_USER,
         },
       };
     },
     expectedCalls({ stackPrefix }) {
-      const sharedObject = `arn:aws:s3:::${stackPrefix}-files-*/shared/image/photo.jpg`;
+      const sharedObject = `arn:aws:s3:::${stackPrefix}-files-*/shared/${SESSION_USER}/image/photo.jpg`;
       return [
         {
           action: "s3:GetObject",
@@ -979,8 +985,9 @@ const CONTEXTS: Record<string, ContextBuilder> = {
       const runtime: PolicyDoc = {
         name: "runtime",
         // fileAccess/fileAccessAll shape the policy, but the .keep write uses
-        // only AppS3OwnPrefix, which is unconditional — so an empty-categories
-        // policy is sufficient for modeling the install-time call.
+        // only AppS3OwnPrefixNoUser — Manager's install session names no user
+        // — so an empty-categories policy is sufficient for modeling the
+        // install-time call.
         policy: JSON.parse(
           buildRuntimePolicy(stackPrefix, id, [], false, false),
         ),

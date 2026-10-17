@@ -345,9 +345,10 @@ export function foundationalPermissionsBoundaryStatements(
       // `broker-power` policy grants the same action; without this matching
       // statement in the boundary, the intersection cap denies AssumeRole at
       // runtime and every /apps/{appId}/sync/{pull,push} ends in 403.
+      // TagSession: the broker tags each session with the user it acts for.
       Sid: "FoundationalBrokerAssumeAppRoles",
       Effect: "Allow",
-      Action: "sts:AssumeRole",
+      Action: ["sts:AssumeRole", "sts:TagSession"],
       Resource: `arn:aws:iam::*:role/${stackPrefix}-app-*`,
     },
     {

@@ -700,9 +700,11 @@ export function buildCloudDataServerProgram(
 
     // Per-app health endpoint. App identity is established by the handler's
     // HMAC verifier (X-Starkeep-App-Id + X-Starkeep-App-Sig against the SSM
-    // SecureString at /${stackPrefix}/app-creds/${appId}), not by the
-    // gateway's JWT authorizer. The data plane identifies the *app*, not the
-    // end user; end-user identity is the app's business.
+    // SecureString at /${stackPrefix}/app-creds/${appId}) or a device's
+    // signature, not by the gateway's JWT authorizer. Every data route past
+    // this one also names a user — the token's `sub` or the device's paired
+    // user — and acts on that user's data alone; the handler, not the
+    // gateway, checks both.
     new aws.apigatewayv2.Route("route-app-health", {
       apiId: api.id,
       routeKey: "GET /apps/{appId}/health",

@@ -10,17 +10,20 @@ import type { IamStatement } from "../iam-utils.js";
  * the cloud under Drive's role, type-confined locally before ship (layer 1) and
  * bounded here in the cloud by Drive's IAM grant (layer 2 — the hard floor).
  *
- * It is wider than the per-app boundary in that it permits read/write across the
- * *entire* shared-data prefix (`shared/*`); it also retains the same per-app
- * own-prefix grant every per-app role gets (`apps/<appId>/*`), which the generic
- * install/uninstall flow relies on (the `.keep` sentinel write and the
- * files-bucket cleanup both target `apps/starkeep-drive/*`). It is narrower than
+ * It permits read/write across the *whole* of one user's shared data
+ * (`shared/<userId>/*`, the user the session's `starkeep:userId` tag names),
+ * where Drive's runtime policy keeps it; an ordinary app's runtime policy
+ * narrows the same ceiling to its granted categories. It also retains the same
+ * own-prefix grant every per-app role gets, which the generic install/uninstall
+ * flow relies on (the `.keep` sentinel write and the files-bucket cleanup both
+ * target `apps/starkeep-drive/*`, from a session that names no user). It is
+ * narrower than
  * the foundational boundary: no Lambda, no API Gateway, no per-app schema, no
  * DSQL cluster admin, and no IAM mutation.
  *
  * A magic-string check in the installer (createAppRole) routes only the
  * `starkeep-drive` app id to this boundary, so a third-party app cannot opt into
- * the cross-cutting `shared/*` ceiling.
+ * the cross-category shared ceiling.
  */
 export function userDataOwnerPermissionsBoundaryStatements(
   stackPrefix: string,
@@ -43,16 +46,27 @@ export function userDataOwnerPermissionsBoundaryStatements(
       // boundary. Plain ${aws:PrincipalTag/...} literal (no Fn::Sub — the slash
       // in the variable name is rejected by Sub; stackPrefix is interpolated at
       // generation time).
-      Sid: "UserDataOwnerS3OwnPrefix",
+      //
+      // Split by session the way the per-app boundary splits it: a session
+      // tagged with a user reaches that user's part, and an untagged install
+      // or uninstall session reaches the whole prefix.
+      Sid: "UserDataOwnerS3OwnUserPrefix",
+      Effect: "Allow",
+      Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      Resource: `arn:aws:s3:::${stackPrefix}-files-*/apps/\${aws:PrincipalTag/starkeep:appId}/\${aws:PrincipalTag/starkeep:userId}/*`,
+    },
+    {
+      Sid: "UserDataOwnerS3OwnPrefixNoUser",
       Effect: "Allow",
       Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
       Resource: `arn:aws:s3:::${stackPrefix}-files-*/apps/\${aws:PrincipalTag/starkeep:appId}/*`,
+      Condition: { Null: { "aws:PrincipalTag/starkeep:userId": "true" } },
     },
     {
-      // The layer-2 hard floor: read/write across the whole shared-data prefix.
-      // Drive's runtime policy narrows this to its granted types; the boundary
-      // caps it at `shared/*` so a compromised host writing through Drive can
-      // never exceed the shared-data prefix.
+      // The layer-2 hard floor: read/write across one user's shared data, the
+      // user the session's `starkeep:userId` tag names. The boundary caps Drive
+      // at `shared/<userId>/*`, so a compromised host writing through Drive can
+      // never exceed that user's shared data.
       Sid: "UserDataOwnerS3SharedData",
       Effect: "Allow",
       Action: [
@@ -64,7 +78,7 @@ export function userDataOwnerPermissionsBoundaryStatements(
         "s3:PutObjectTagging",
         "s3:RestoreObject",
       ],
-      Resource: `arn:aws:s3:::${stackPrefix}-files-*/shared/*`,
+      Resource: `arn:aws:s3:::${stackPrefix}-files-*/shared/\${aws:PrincipalTag/starkeep:userId}/*`,
     },
     {
       // The daily inventory report. Drive is the identity the CDS Lambda wears
@@ -88,10 +102,21 @@ export function userDataOwnerPermissionsBoundaryStatements(
       Condition: {
         StringLike: {
           "s3:prefix": [
-            `apps/\${aws:PrincipalTag/starkeep:appId}/*`,
-            "shared/*",
+            `apps/\${aws:PrincipalTag/starkeep:appId}/\${aws:PrincipalTag/starkeep:userId}/*`,
+            `shared/\${aws:PrincipalTag/starkeep:userId}/*`,
           ],
         },
+      },
+    },
+    {
+      // Uninstall enumerates the app's whole prefix to delete it.
+      Sid: "UserDataOwnerS3ListOwnPrefixNoUser",
+      Effect: "Allow",
+      Action: "s3:ListBucket",
+      Resource: `arn:aws:s3:::${stackPrefix}-files-*`,
+      Condition: {
+        StringLike: { "s3:prefix": [`apps/\${aws:PrincipalTag/starkeep:appId}/*`] },
+        Null: { "aws:PrincipalTag/starkeep:userId": "true" },
       },
     },
     {

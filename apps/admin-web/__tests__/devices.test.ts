@@ -18,7 +18,20 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { mockClient } from "aws-sdk-client-mock";
+import {
+  AdminListGroupsForUserCommand,
+  CognitoIdentityProviderClient,
+} from "@aws-sdk/client-cognito-identity-provider";
 import { jsonRequest, makeDataDir } from "./helpers";
+
+/** Each account's groups. A device is paired only for one in starkeep-users. */
+const GROUPS: Record<string, string[]> = {
+  "u-1": ["starkeep-users"],
+  "sub-admin": ["starkeep-admins", "starkeep-users"],
+  "sub-admin-only": ["starkeep-admins"],
+};
+const cognito = mockClient(CognitoIdentityProviderClient);
 
 interface Device {
   deviceId: string;
@@ -77,6 +90,7 @@ const CONFIG = {
   managerRoleArn: "arn:aws:iam::123456789012:role/sktest-manager-role",
   publicBaseUrl: "https://d123.cloudfront.net",
   apiGatewayUrl: "https://abc.execute-api.us-east-2.amazonaws.com",
+  userPoolId: "us-east-2_TEST",
 };
 
 function pairBody(over: Record<string, unknown> = {}) {
@@ -86,6 +100,7 @@ function pairBody(over: Record<string, unknown> = {}) {
     region: "us-east-2",
     deviceId: "pixel-9",
     publicKeySpki: SPKI,
+    userId: "u-1",
     ...over,
   };
 }
@@ -110,6 +125,10 @@ beforeAll(async () => {
 }, 60_000);
 
 beforeEach(() => {
+  cognito.reset();
+  cognito.on(AdminListGroupsForUserCommand).callsFake(async (input: { Username: string }) => ({
+    Groups: (GROUPS[input.Username] ?? []).map((GroupName) => ({ GroupName })),
+  }));
   records.clear();
   putDeviceKeyParameter.mockReset().mockImplementation(
     async (opts: { deviceId: string; registration: Omit<Device, "deviceId"> }) => {
@@ -387,7 +406,7 @@ describe("approving a device from its pairing code", () => {
   });
 
   it("gives a phone approved by code the phone's apps", async () => {
-    await approve({ code: code({ kind: "phone" }), credentials: CREDENTIALS, stackPrefix: "sktest", region: "us-east-2" });
+    await approve({ code: code({ kind: "phone" }), credentials: CREDENTIALS, stackPrefix: "sktest", region: "us-east-2", userId: "u-1" });
     expect(stored()[0]).toMatchObject({ kind: "phone", appIds: ["starkeep-drive"] });
   });
 
@@ -395,5 +414,34 @@ describe("approving a device from its pairing code", () => {
     const res = await approve({ code: code() });
     expect(res.status).toBe(401);
     expect(putDeviceKeyParameter).not.toHaveBeenCalled();
+  });
+});
+
+describe("the account a device syncs for", () => {
+  const approve = (body: unknown) => APPROVE(jsonRequest("/api/devices/approve", body));
+  const session = { credentials: CREDENTIALS, stackPrefix: "sktest", region: "us-east-2" };
+
+  it("refuses an account with no data library, and writes nothing", async () => {
+    const res = await pair(pairBody({ userId: "sub-admin-only" }));
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/starkeep-users/);
+    expect(putDeviceKeyParameter).not.toHaveBeenCalled();
+  });
+
+  it("refuses a device approved for no account", async () => {
+    const res = await pair(pairBody({ userId: undefined }));
+    expect(res.status).toBe(400);
+    expect(putDeviceKeyParameter).not.toHaveBeenCalled();
+  });
+
+  it("approves a code for a member, not only for the admin", async () => {
+    const code = Buffer.from(
+      JSON.stringify({ v: 1, deviceId: "dev_member", publicKeySpki: SPKI, label: null, kind: "desktop" }),
+    ).toString("base64url");
+    const res = await approve({ code, ...session, userId: "u-1" });
+    expect(res.status, JSON.stringify(await res.clone().json())).toBe(200);
+    expect(records.get("dev_member")).toMatchObject({ userId: "u-1", kind: "desktop" });
+    const refused = await approve({ code, ...session, userId: "sub-admin-only" });
+    expect(refused.status).toBe(400);
   });
 });

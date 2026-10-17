@@ -79,7 +79,7 @@ describe("bootstrap template structure", () => {
 
   it("interpolates a custom stack prefix into generation-time strings", () => {
     const raw = generateBootstrapTemplate({ stackPrefix: "teststk" });
-    expect(raw).toContain("arn:aws:s3:::teststk-files-*/shared/*");
+    expect(raw).toContain("arn:aws:s3:::teststk-files-*/shared/${aws:PrincipalTag/starkeep:userId}/*");
     expect(raw).not.toContain("arn:aws:s3:::starkeep-files-*");
   });
 });

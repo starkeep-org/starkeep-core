@@ -30,6 +30,7 @@ import {
   AdminCreateUserCommand,
   AdminDisableUserCommand,
   AdminEnableUserCommand,
+  AdminListGroupsForUserCommand,
   AdminRemoveUserFromGroupCommand,
   AdminUserGlobalSignOutCommand,
   CognitoIdentityProviderClient,
@@ -121,6 +122,31 @@ async function listUsers(client: CognitoIdentityProviderClient, poolId: string):
       data: data.has(u.Username),
     }))
     .sort((a, b) => (a.email ?? a.username).localeCompare(b.email ?? b.username));
+}
+
+/**
+ * Why a device may not be paired for `userId`, or null. A device syncs for one
+ * user's data library, so the user must be an enabled account in
+ * `starkeep-users`; the broker refuses the device's every call otherwise, and
+ * saying so at pairing puts the reason in front of the admin who can fix it.
+ */
+export async function devicePairingRefusal(
+  session: Pick<SessionBody, "credentials" | "region">,
+  userId: string | null | undefined,
+): Promise<string | null> {
+  if (!userId) return "Choose the account this device syncs for.";
+  const client = cognito(session as SessionBody);
+  const poolId = userPoolId();
+  const groups = new Set<string>();
+  let token: string | undefined;
+  do {
+    const page = await client.send(
+      new AdminListGroupsForUserCommand({ UserPoolId: poolId, Username: userId, NextToken: token }),
+    );
+    for (const group of page.Groups ?? []) if (group.GroupName) groups.add(group.GroupName);
+    token = page.NextToken;
+  } while (token);
+  return groups.has(DATA_GROUP) ? null : `That account is not in ${DATA_GROUP}, so it has no data library to sync.`;
 }
 
 function failed(err: unknown, act: string): Response {

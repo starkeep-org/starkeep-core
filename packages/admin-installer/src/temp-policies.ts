@@ -884,34 +884,59 @@ export function buildRuntimePolicy(
   hasWriteAccess: boolean,
   fileAccessAll: boolean,
 ): string {
+  // Every shared and app-file grant names the session's user: the broker tags
+  // each session with `starkeep:userId`, so one user's request reaches only
+  // that user's objects. A session that names no user (Manager's install and
+  // uninstall) reaches the app's own prefix whole, and no shared data.
+  const user = "${aws:PrincipalTag/starkeep:userId}";
   const s3SharedResources: string[] = [];
   if (fileAccessAll) {
-    s3SharedResources.push(`arn:aws:s3:::${stackPrefix}-files-*/shared/*`);
+    s3SharedResources.push(`arn:aws:s3:::${stackPrefix}-files-*/shared/${user}/*`);
   } else {
     for (const category of categories) {
       s3SharedResources.push(
-        `arn:aws:s3:::${stackPrefix}-files-*/shared/${category}/*`,
+        `arn:aws:s3:::${stackPrefix}-files-*/shared/${user}/${category}/*`,
       );
     }
   }
+  const noUser = { Null: { "aws:PrincipalTag/starkeep:userId": "true" } };
 
   const statements: object[] = [
     {
-      Sid: "AppS3OwnPrefix",
+      Sid: "AppS3OwnUserPrefix",
+      Effect: "Allow",
+      Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      Resource: `arn:aws:s3:::${stackPrefix}-files-*/apps/${appId}/${user}/*`,
+    },
+    {
+      // The `.keep` marker at install, and every user's files at uninstall.
+      Sid: "AppS3OwnPrefixNoUser",
       Effect: "Allow",
       Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
       Resource: `arn:aws:s3:::${stackPrefix}-files-*/apps/${appId}/*`,
+      Condition: noUser,
     },
     {
       // ListBucket is a bucket-level action. The s3:prefix condition restricts
-      // enumeration to the app's own prefix; cross-prefix listing (other apps'
-      // keys, foreign shared/* prefixes) is denied.
+      // enumeration to the user's part of the app's own prefix; cross-prefix
+      // listing (other apps' keys, other users', shared/* prefixes) is denied.
       Sid: "AppS3ListOwnPrefix",
       Effect: "Allow",
       Action: "s3:ListBucket",
       Resource: `arn:aws:s3:::${stackPrefix}-files-*`,
       Condition: {
+        StringLike: { "s3:prefix": [`apps/${appId}/${user}/*`] },
+      },
+    },
+    {
+      // Uninstall enumerates the app's whole prefix to delete it.
+      Sid: "AppS3ListOwnPrefixNoUser",
+      Effect: "Allow",
+      Action: "s3:ListBucket",
+      Resource: `arn:aws:s3:::${stackPrefix}-files-*`,
+      Condition: {
         StringLike: { "s3:prefix": [`apps/${appId}/*`] },
+        ...noUser,
       },
     },
     {

@@ -29,6 +29,13 @@ import {
 import type { FileAccess } from "@starkeep/admin-manifest";
 import { APP_GRANTABLE_CATEGORIES, typeCategory, isGrantableCategory } from "@starkeep/protocol-primitives";
 
+/**
+ * The session tag the broker sets on each per-app session: the user the
+ * request acts for. The per-app boundaries and runtime policies scope every
+ * shared and app-file object to `${aws:PrincipalTag/starkeep:userId}`.
+ */
+export const SESSION_USER_TAG = "starkeep:userId";
+
 function makeIamClient(creds: AwsCredentials): IAMClient {
   return new IAMClient({
     credentials: {
@@ -224,6 +231,19 @@ export async function createAppRole(input: CreateAppRoleInput): Promise<string> 
               Effect: "Allow",
               Action: "sts:AssumeRole",
               Resource: `arn:aws:iam::${accountId}:role/${stackPrefix}-app-*`,
+            },
+            {
+              // The broker tags each per-app session with the user the request
+              // acts for, and with nothing else: a session tag overrides a role
+              // tag of the same key, so a broker free to set `starkeep:appId`
+              // could widen one app's session into another app's prefix.
+              Sid: "BrokerTagAppSessionsWithUser",
+              Effect: "Allow",
+              Action: "sts:TagSession",
+              Resource: `arn:aws:iam::${accountId}:role/${stackPrefix}-app-*`,
+              Condition: {
+                "ForAllValues:StringEquals": { "aws:TagKeys": [SESSION_USER_TAG] },
+              },
             },
             {
               // Broker reads every per-app HMAC credential so it can verify
@@ -659,13 +679,25 @@ export function buildAppRoleTrustPolicy(
     },
   ];
   if (includeCloudDataServerPrincipal) {
-    statements.push({
-      Effect: "Allow",
-      Principal: {
-        AWS: `arn:aws:iam::${accountId}:role/${stackPrefix}-app-cloud-data-server-role`,
+    const broker = `arn:aws:iam::${accountId}:role/${stackPrefix}-app-cloud-data-server-role`;
+    statements.push(
+      {
+        Effect: "Allow",
+        Principal: { AWS: broker },
+        Action: "sts:AssumeRole",
       },
-      Action: "sts:AssumeRole",
-    });
+      {
+        // The broker names the user each session acts for, and only that:
+        // the role's `starkeep:appId` tag cannot be overridden by a session
+        // tag the broker sets. See the per-app boundaries.
+        Effect: "Allow",
+        Principal: { AWS: broker },
+        Action: "sts:TagSession",
+        Condition: {
+          "ForAllValues:StringEquals": { "aws:TagKeys": [SESSION_USER_TAG] },
+        },
+      },
+    );
   }
   return JSON.stringify({ Version: "2012-10-17", Statement: statements });
 }

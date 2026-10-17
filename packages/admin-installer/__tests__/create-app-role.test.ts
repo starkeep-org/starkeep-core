@@ -116,16 +116,23 @@ describe("inline policies", () => {
     const sids = broker.Statement.map((s: { Sid: string }) => s.Sid);
     expect(sids).toEqual([
       "BrokerAssumeAppRoles",
+      "BrokerTagAppSessionsWithUser",
       "BrokerReadAppCreds",
       "BrokerReadPlatformParameters",
       "BrokerListUserGroups",
       "BrokerReadAppCredsKmsDecrypt",
     ]);
-    expect(broker.Statement[2].Resource).toBe(
+    expect(broker.Statement[3].Resource).toBe(
       "arn:aws:ssm:*:111122223333:parameter/starkeep/platform/*",
     );
     expect(broker.Statement[0].Resource).toBe(
       "arn:aws:iam::111122223333:role/starkeep-app-*",
     );
+    // The broker may name a session's user and nothing else: a session tag
+    // overrides the role's `starkeep:appId` tag of the same key.
+    expect(broker.Statement[1]).toMatchObject({
+      Action: "sts:TagSession",
+      Condition: { "ForAllValues:StringEquals": { "aws:TagKeys": ["starkeep:userId"] } },
+    });
   });
 });

@@ -194,6 +194,7 @@ interface CachedCreds {
   expiresAt: number; // ms epoch
 }
 
+/** Keyed by app and user: each user's session carries that user's tag. */
 const credentialCache = new Map<string, CachedCreds>();
 const CRED_REFRESH_BUFFER_MS = 60_000; // refresh 60s before expiry
 
@@ -411,15 +412,15 @@ export const ADMINS_GROUP = "starkeep-admins";
 export const DATA_GROUP = "starkeep-users";
 
 /**
- * Whether a user may reach data.
+ * Whether a user may reach data: any account in the data group, admin or not.
  *
- * Until data separates by user (step 4.11 of
- * plan-multi-user-roles-2026-10-16.md), only an admin with a data library may.
- * Every library is still one library, so a member who reached data would read
- * the admin's. Step 4.11 drops the admin half.
+ * Every request acts for one user, and every row and object it reaches is that
+ * user's: the database through the user-scoped compiler, S3 through the
+ * session's `starkeep:userId` tag. Being an admin grants nothing here; an
+ * admin with no data library has no data to reach.
  */
 export function groupsMayUseData(groups: readonly string[]): boolean {
-  return groups.includes(DATA_GROUP) && groups.includes(ADMINS_GROUP);
+  return groups.includes(DATA_GROUP);
 }
 
 interface CachedGroups {
@@ -712,8 +713,19 @@ function validateDeviceSignature(
   return { ok: true };
 }
 
-async function getAppCreds(appId: string, accountId: string): Promise<CachedCreds> {
-  const cached = credentialCache.get(appId);
+/**
+ * Credentials for one app's role, acting for one user.
+ *
+ * The session carries the `starkeep:userId` tag, and the per-app boundary and
+ * runtime policy scope every shared and app-file object to it, so S3 itself
+ * refuses one user's session another user's objects — the IAM layer under
+ * the broker's own key checks. `userId` null is a session that names no user,
+ * which reaches no user's objects: the health check and the S3-event path,
+ * which write only database rows.
+ */
+async function getAppCreds(appId: string, accountId: string, userId: string | null): Promise<CachedCreds> {
+  const cacheKey = `${appId}\u0000${userId ?? ""}`;
+  const cached = credentialCache.get(cacheKey);
   if (cached && cached.expiresAt - Date.now() > CRED_REFRESH_BUFFER_MS) {
     return cached;
   }
@@ -734,6 +746,7 @@ async function getAppCreds(appId: string, accountId: string): Promise<CachedCred
     RoleArn: appRoleArn,
     RoleSessionName: `lambda-app-${appId}-${Date.now()}`,
     DurationSeconds: 900,
+    ...(userId !== null ? { Tags: [{ Key: SESSION_USER_TAG, Value: userId }] } : {}),
   }));
   const ac = appResult.Credentials;
   if (!ac?.AccessKeyId || !ac.SecretAccessKey || !ac.SessionToken || !ac.Expiration) {
@@ -746,7 +759,7 @@ async function getAppCreds(appId: string, accountId: string): Promise<CachedCred
     sessionToken: ac.SessionToken,
     expiresAt: ac.Expiration.getTime(),
   };
-  credentialCache.set(appId, creds);
+  credentialCache.set(cacheKey, creds);
   return creds;
 }
 
@@ -1160,6 +1173,12 @@ async function seedCloudClock(client: DatabaseClient, userId: string): Promise<H
 // USER_DATA_OWNER_APP_ID in packages/admin-installer/src/iam.ts; kept in sync by
 // hand because this handler is a separately-deployed artifact.
 const DRIVE_APP_ID = "starkeep-drive";
+
+// The session tag naming the user a per-app session acts for. Mirror of
+// SESSION_USER_TAG in packages/admin-installer/src/iam.ts, which the trust and
+// broker policies restrict the broker to; kept in sync by hand because this
+// handler is a separately-deployed artifact.
+const SESSION_USER_TAG = "starkeep:userId";
 
 export function parseAppPath(rawPath: string): { appId: string; subPath: string } | null {
   const match = rawPath.match(/^\/apps\/([a-z0-9][a-z0-9._-]*)(\/.*)?$/);
@@ -2336,9 +2355,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // record custody. Availability is a fact about shared blobs, so Drive is
     // already the role that may write it, and the Lambda's own execution role
     // deliberately has no data-plane access of its own.
+    // Untagged: the path writes database rows and touches no object.
     const creds = await getAppCreds(
       DRIVE_APP_ID,
       getAccountId(context.invokedFunctionArn),
+      null,
     );
     // One adapter per user the batch names: an availability row belongs to
     // the user whose key it describes.
@@ -2575,12 +2596,12 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     }
 
     const accountId = getAccountId(context.invokedFunctionArn);
-    const creds = await getAppCreds(appId, accountId);
 
     // GET /apps/{appId}/health — app-scoped health check. It reads no one's
-    // data, so it runs before the user is required.
+    // data, so it runs before the user is required, on a session that names
+    // no user.
     if (method === "GET" && subPath === "/health") {
-      return ok(await checkAppHealth(appId, creds));
+      return ok(await checkAppHealth(appId, await getAppCreds(appId, accountId, null)));
     }
 
     // Every route past the health check reads or writes one user's data. The
@@ -2590,6 +2611,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       return clientErr("This request names no user", 401);
     }
     const subject: BrokerSubject = { appId, userId: subjectUserId };
+    const creds = await getAppCreds(appId, accountId, subject.userId);
 
     // Every database read and write below is this user's alone: the adapter,
     // the app-syncable source and the byte watermark all compile through a
@@ -2602,7 +2624,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     const platformStorage = (): Promise<ObjectStorageAdapter> =>
       appId === DRIVE_APP_ID
         ? Promise.resolve(storage)
-        : (platformStoragePromise ??= getAppCreds(DRIVE_APP_ID, accountId).then(makeStorage));
+        : (platformStoragePromise ??= getAppCreds(DRIVE_APP_ID, accountId, subject.userId).then(makeStorage));
 
     await db.init();
     toClose.push(() => db.close());

@@ -676,13 +676,14 @@ describe("GET /device/self", () => {
 });
 
 describe("the user a device syncs for", () => {
-  it("must be an admin with a data library until data separates by user", async () => {
+  it("may be a member who is no admin: data is per user", async () => {
     const device = makeDevice();
     scriptRegistered("dev-member", device.publicKeySpki, "starkeep-drive", "member-1");
     userGroups.set("member-1", ["starkeep-users"]);
-    const res = await deviceCall(device, "dev-member", "starkeep-drive", "POST", "/sync/exchange", "{}");
-    expect(res.statusCode).toBe(403);
-    expect(errorOf(res)).toMatch(/no data library/);
+    const res = await deviceCall(device, "dev-member", "starkeep-drive", "GET", "/health");
+    // Past the gate: the test database refuses the connection, which is a 500,
+    // not the gate's 403.
+    expect(res.statusCode).not.toBe(403);
   });
 
   it("is refused once removed from the data group, including an admin", async () => {
