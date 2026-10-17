@@ -51,8 +51,11 @@ import {
   serializeHLC,
   deserializeHLC,
   appSyncableObjectKey,
+  categoryFromSharedObjectKey,
   contentHashFromDataRecordObjectKey,
   dataRecordObjectKey,
+  userIdFromObjectKey,
+  USER_SEGMENT_PATTERN,
   isRetrievalIntent,
   tagsForIntent,
   observationFor,
@@ -134,6 +137,7 @@ import {
   archiveTriggersFor,
   pageBacklog,
   BACKLOG_KINDS,
+  FILE_RECORDS_TABLE,
   type ArchiveTrigger,
   type BacklogKind,
   type RecordQueryPlan,
@@ -259,7 +263,7 @@ function getSsmClient(): SSMClient {
 interface CachedDeviceKey {
   /** Base64 SPKI, exactly as registered. */
   publicKeySpki: string;
-  /** The Cognito user this device was paired for. Recorded, not yet enforced. */
+  /** The Cognito user this device was paired for: the user it syncs as. */
   userId: string | null;
   /** A phone or a desktop. A record without the field is a phone. */
   kind: "phone" | "desktop";
@@ -350,7 +354,43 @@ export function deviceWriteRefusal(method: string, subPath: string, body: Buffer
     return touchesPlatform ? refusal : null;
   }
   const key = (parsed as { key?: unknown }).key;
-  return typeof key === "string" && key.startsWith(`shared/${PLATFORM_CATEGORY}/`) ? refusal : null;
+  return typeof key === "string" && categoryFromSharedObjectKey(key) === PLATFORM_CATEGORY ? refusal : null;
+}
+
+/**
+ * Why an exchange is refused for naming another user's objects, or null.
+ *
+ * A pushed record or file-index row names its blob by key, and the key
+ * carries its owner's segment. The exchange applies rows and later answers
+ * byte-coverage questions by those keys, so a key under another user's
+ * segment would plant a row pointing at that user's bytes. Every key a push
+ * names must be the caller's own. Rows with no key carry no blob and pass.
+ */
+export function exchangeKeyRefusal(
+  body: {
+    readonly records?: ReadonlyArray<{ readonly objectStorageKey?: string | null }>;
+    readonly appSyncableRows?: ReadonlyArray<{
+      readonly table: string;
+      readonly row?: Record<string, unknown>;
+      readonly where?: Record<string, unknown>;
+    }>;
+  },
+  userId: string,
+): string | null {
+  const foreign = (key: unknown): boolean =>
+    typeof key === "string" && key.length > 0 && userIdFromObjectKey(key) !== userId;
+  for (const record of body.records ?? []) {
+    if (foreign(record.objectStorageKey)) {
+      return `A pushed record names ${record.objectStorageKey}, which is not under this user's segment`;
+    }
+  }
+  for (const entry of body.appSyncableRows ?? []) {
+    if (entry.table !== FILE_RECORDS_TABLE) continue;
+    for (const key of [entry.row?.["id"], entry.row?.["object_storage_key"], entry.where?.["id"]]) {
+      if (foreign(key)) return `A pushed file row names ${String(key)}, which is not under this user's segment`;
+    }
+  }
+  return null;
 }
 
 const deviceKeyCache = new Map<string, CachedDeviceKey>();
@@ -1067,13 +1107,28 @@ export function parseAppPath(rawPath: string): { appId: string; subPath: string 
   return { appId: match[1]!, subPath: match[2] ?? "/" };
 }
 
+/**
+ * Who a request acts for: the app that signed it and the user behind it. The
+ * user is the token's `sub` on the HMAC branch and the paired user on the
+ * device branch. Every key a request builds or names carries this user's
+ * segment.
+ */
+export interface BrokerSubject {
+  readonly appId: string;
+  readonly userId: string;
+}
+
 // Authorize an object-storage key against the caller's grants. Keys live in
 // two namespaces (see packages/protocol-primitives/src/storage/object-keys.ts):
-//   shared/<typeId>/<shard>/<hash>   — gated by per-type read/write grants
-//   apps/<appId>/syncable/<...>      — owned by the named app; only that app
+//   shared/<userId>/<category>/<shard>/<hash>
+//                                    — gated by per-category read/write grants
+//   apps/<appId>/<userId>/syncable/<...>
+//                                    — owned by the named app; only that app
 //                                       may touch it via its own files routes
+// In both, the user segment must be the caller's own: no grant reaches
+// another user's objects.
 export function parseObjectKey(
-  callerAppId: string,
+  subject: BrokerSubject,
   decodedKey: string,
   grants: AccessGrants,
   mode: "read" | "write",
@@ -1088,16 +1143,17 @@ export function parseObjectKey(
     return { ok: false, status: 400, message: "Invalid key" };
   }
   if (decodedKey.startsWith("shared/")) {
-    // Strict shape: shared/<category>/<shard>/<hash>, every segment drawn from
-    // a safe alphabet (no dots, slashes, %-escapes, whitespace, or control
-    // chars). The category is the derived category (see object-keys.ts), so
-    // authorize at the category level. Anything that isn't a clean
-    // content-addressed blob key is rejected before it can be signed.
+    // Strict shape: shared/<userId>/<category>/<shard>/<hash>, every segment
+    // drawn from a safe alphabet (no dots, slashes, %-escapes, whitespace, or
+    // control chars). The category is the derived category (see
+    // object-keys.ts), so authorize at the category level. Anything that isn't
+    // a clean content-addressed blob key is rejected before it can be signed.
     const m = decodedKey.match(
-      /^shared\/([a-z0-9_-]+)\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/,
+      /^shared\/([A-Za-z0-9_-]+)\/([a-z0-9_-]+)\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/,
     );
     if (!m) return { ok: false, status: 400, message: "Invalid shared key" };
-    const category = m[1]!;
+    if (m[1] !== subject.userId) return { ok: false, status: 403, message: "Forbidden (another user's key)" };
+    const category = m[2]!;
     const allowed =
       mode === "read" ? canReadCategory(grants, category) : canWriteCategory(grants, category);
     if (!allowed) return { ok: false, status: 403, message: "Forbidden" };
@@ -1106,15 +1162,19 @@ export function parseObjectKey(
   if (decodedKey.startsWith("apps/")) {
     const segments = decodedKey.split("/");
     if (
-      segments.length < 4 ||
+      segments.length < 5 ||
       !segments[1] ||
-      segments[2] !== "syncable" ||
-      !segments[3]
+      !USER_SEGMENT_PATTERN.test(segments[2] ?? "") ||
+      segments[3] !== "syncable" ||
+      !segments[4]
     ) {
       return { ok: false, status: 400, message: "Invalid app-syncable key" };
     }
-    if (segments[1] !== callerAppId) {
+    if (segments[1] !== subject.appId) {
       return { ok: false, status: 403, message: "Forbidden (cross-app syncable key)" };
+    }
+    if (segments[2] !== subject.userId) {
+      return { ok: false, status: 403, message: "Forbidden (another user's key)" };
     }
     return { ok: true };
   }
@@ -1176,14 +1236,15 @@ async function loadCloudFrontSigningConfig(): Promise<CloudFrontSigningConfig> {
  * so it is covered by dedicated tests.
  */
 export async function signSharedCloudFrontUrl(
-  callerAppId: string,
+  subject: BrokerSubject,
   key: string,
   grants: AccessGrants,
   expiresInSec: number,
 ): Promise<{ ok: true; url: string } | { ok: false; status: number; message: string }> {
   // (1) Re-validate the key against the caller's grants (namespace, segment
-  // shape, and — for shared/ — the category read grant).
-  const check = parseObjectKey(callerAppId, key, grants, "read");
+  // shape, the caller's own user segment, and — for shared/ — the category
+  // read grant).
+  const check = parseObjectKey(subject, key, grants, "read");
   if (!check.ok) return check;
   // (2) Namespace requirement: CloudFront only ever signs shared/* bytes. Any
   // other namespace (apps/*, unknown) is rejected even though parseObjectKey
@@ -1192,10 +1253,13 @@ export async function signSharedCloudFrontUrl(
   if (!key.startsWith("shared/")) {
     return { ok: false, status: 400, message: "CloudFront signing is only for shared keys" };
   }
-  // (3) Redundant category re-check. parseObjectKey already did this for the
-  // shared/ branch, but this is the load-bearing defense line, so assert it
-  // explicitly here rather than trusting the call above.
-  const category = key.split("/")[1];
+  // (3) Redundant user and category re-checks. parseObjectKey already did
+  // both for the shared/ branch, but this is the load-bearing defense line, so
+  // assert them explicitly here rather than trusting the call above.
+  if (userIdFromObjectKey(key) !== subject.userId) {
+    return { ok: false, status: 403, message: "Forbidden (another user's key)" };
+  }
+  const category = categoryFromSharedObjectKey(key);
   if (!category || !canReadCategory(grants, category)) {
     return { ok: false, status: 403, message: "Forbidden" };
   }
@@ -1557,7 +1621,7 @@ async function cloudPlacementOf(): Promise<"cloud"> {
  */
 async function standInSummariesForPage(
   db: DatabaseAdapter,
-  appId: string,
+  subject: BrokerSubject,
   grants: AccessGrants,
   records: readonly DataRecord[],
   withUrls: boolean,
@@ -1578,7 +1642,7 @@ async function standInSummariesForPage(
           ? async (size) => {
               if (!size.objectStorageKey) return undefined;
               const signed = await signSharedCloudFrontUrl(
-                appId,
+                subject,
                 size.objectStorageKey,
                 grants,
                 VARIANT_URL_TTL_SECONDS,
@@ -1616,7 +1680,7 @@ interface SignedCandidate {
  * They cannot be ordered, so there is nothing a caller could do with one.
  */
 async function signCandidatesForPage(
-  appId: string,
+  subject: BrokerSubject,
   grants: AccessGrants,
   byRecord: Map<StarkeepId, VariantCandidate[]>,
 ): Promise<Map<StarkeepId, SignedCandidate[]>> {
@@ -1644,7 +1708,7 @@ async function signCandidatesForPage(
       let url = urlByKey.get(candidate.objectStorageKey);
       if (url === undefined) {
         const result = await signSharedCloudFrontUrl(
-          appId,
+          subject,
           candidate.objectStorageKey,
           grants,
           VARIANT_URL_TTL_SECONDS,
@@ -2269,6 +2333,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     const deviceId = normalizedHeaders["x-starkeep-device-id"];
     /** The device that signed this request, when a device did. */
     let callingDevice: (CachedDeviceKey & { deviceId: string }) | null = null;
+    /**
+     * The user the request acts for: the device's paired user, or the token's
+     * `sub`. Null only for the app-scoped health check, which needs no token.
+     */
+    let subjectUserId: string | null = null;
     if (deviceId) {
       const device = await loadDevicePublicKey(deviceId);
       if (!device) {
@@ -2315,6 +2384,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         return clientErr("The account this device syncs for has no data library on this cloud", 403);
       }
       callingDevice = { ...device, deviceId };
+      subjectUserId = device.userId;
       // No end-user token is required on this branch, and that is not an
       // oversight or a carve-out. A registered device key IS an end-user
       // credential: admin-web writes it against a named Cognito userId at
@@ -2389,6 +2459,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         if (!groupsMayUseData(claims.groups)) {
           return clientErr("This account has no data library on this cloud", 403);
         }
+        subjectUserId = claims.sub;
       }
     }
 
@@ -2436,6 +2507,21 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
 
     await db.init();
     toClose.push(() => db.close());
+
+    // GET /apps/{appId}/health — app-scoped health check
+    if (method === "GET" && subPath === "/health") {
+      const dbHealthy = await db.healthCheck();
+      const storageHealthy = await storage.healthCheck();
+      return ok({ status: dbHealthy && storageHealthy ? "ok" : "degraded", db: dbHealthy, storage: storageHealthy });
+    }
+
+    // Every route past the health check reads or writes one user's data. The
+    // gate set the user on both branches, so a null here is a gate that let a
+    // tokenless request through, and the request is refused.
+    if (subjectUserId === null || !USER_SEGMENT_PATTERN.test(subjectUserId)) {
+      return clientErr("This request names no user", 401);
+    }
+    const subject: BrokerSubject = { appId, userId: subjectUserId };
 
     // Per-type read/write enforcement on shared.records. DSQL has no RLS and
     // the table is shared across every type, so we load the caller app's
@@ -2513,6 +2599,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         applier: source.applier,
         fileStorage: storage,
         clock,
+        userId: () => subject.userId,
       });
       appSpecificView = factory({ subjectType: "app", subjectId: appId });
       return appSpecificView;
@@ -2525,13 +2612,6 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     function clampPresignExpiresIn(requested: number): number {
       const remainingSec = Math.floor((creds.expiresAt - Date.now()) / 1000) - 30;
       return Math.max(1, Math.min(requested, remainingSec));
-    }
-
-    // GET /apps/{appId}/health — app-scoped health check
-    if (method === "GET" && subPath === "/health") {
-      const dbHealthy = await db.healthCheck();
-      const storageHealthy = await storage.healthCheck();
-      return ok({ status: dbHealthy && storageHealthy ? "ok" : "degraded", db: dbHealthy, storage: storageHealthy });
     }
 
     // GET /apps/{appId}/data/types
@@ -2663,7 +2743,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         const candidatesById =
           variantLabel
             ? await signCandidatesForPage(
-                appId,
+                subject,
                 grants,
                 await loadVariantCandidatesForPage(db, labelled, variantLabel),
               )
@@ -2671,7 +2751,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         const availabilityById = await loadAvailabilityForPage(db, labelled);
         const standInsById = await standInSummariesForPage(
           db,
-          appId,
+          subject,
           grants,
           labelled,
           plan.includeStandInUrls,
@@ -2708,7 +2788,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const candidatesById =
         variantLabel
           ? await signCandidatesForPage(
-              appId,
+              subject,
               grants,
               await loadVariantCandidatesForPage(db, records, variantLabel),
             )
@@ -2716,7 +2796,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const availabilityById = await loadAvailabilityForPage(db, records);
       const standInsById = await standInSummariesForPage(
         db,
-        appId,
+        subject,
         grants,
         records,
         plan.includeStandInUrls,
@@ -3065,7 +3145,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (isStandInWrite || originalFidelity.fidelity !== null) await readLibrarySettings();
 
       const contentHash = body.contentHash;
-      const objectStorageKey = dataRecordObjectKey(body.type, contentHash);
+      const objectStorageKey = dataRecordObjectKey(subject.userId, body.type, contentHash);
       const sizeBytes = body.sizeBytes;
       const exists = await storage.has(objectStorageKey);
       if (!exists) {
@@ -3316,7 +3396,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (fileBuffer.length === 0) return clientErr("Request body must not be empty", 400);
       if (fileBuffer.length > 20_000_000) return clientErr("File too large (20 MB limit)", 413);
       const hex = createHash("sha256").update(fileBuffer).digest("hex");
-      const key = dataRecordObjectKey(typeId, hex);
+      const key = dataRecordObjectKey(subject.userId, typeId, hex);
       // Same refusal as the presign path. Both are blob-write entry points, and
       // guarding only the one the sync engine happens to use would leave the
       // constraint enforceable by convention rather than by the server.
@@ -3339,12 +3419,20 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         : (event.body ?? "{}");
       const body = JSON.parse(rawBody) as {
         key?: string;
+        type?: string;
         contentType?: string;
         intent?: string;
         contentHash?: string;
       };
-      if (!body.key) return clientErr("key is required", 400);
-      const check = parseObjectKey(appId, body.key, grants, "write");
+      // A shared record's key is the caller's user, the type's category and
+      // the hash, so a caller may name the type and hash and let the broker
+      // build it. An app then never needs to know which user it acts for.
+      if (!body.key && body.type && body.contentHash) {
+        if (!isSha256Hex(body.contentHash)) return clientErr("contentHash must be a lowercase hex SHA-256", 400);
+        body.key = dataRecordObjectKey(subject.userId, body.type, body.contentHash);
+      }
+      if (!body.key) return clientErr("key, or type and contentHash, is required", 400);
+      const check = parseObjectKey(subject, body.key, grants, "write");
       if (!check.ok) return clientErr(check.message, check.status);
       // Declared retrieval intent, in the platform's vocabulary — the app says
       // what latency it can tolerate, not which storage class it wants. An
@@ -3402,6 +3490,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // class even is).
       return ok({
         url,
+        key: body.key,
         ...(checksumSha256 ? { checksumSha256 } : {}),
         intent,
         storageClass: WRITE_STORAGE_CLASS,
@@ -3417,14 +3506,14 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     const filePresignGetMatch = subPath.match(/^\/files\/(.+)\/presign$/);
     if (filePresignGetMatch && method === "GET") {
       const key = decodeURIComponent(filePresignGetMatch[1]!);
-      const check = parseObjectKey(appId, key, grants, "read");
+      const check = parseObjectKey(subject, key, grants, "read");
       if (!check.ok) return clientErr(check.message, check.status);
       const exists = await storage.has(key);
       if (!exists) return clientErr("Not found", 404);
       // Shared bytes → CloudFront signed URL (through the chokepoint); app
       // syncable bytes stay on S3 presign (CloudFront never serves apps/*).
       if (key.startsWith("shared/")) {
-        const signed = await signSharedCloudFrontUrl(appId, key, grants, 3600);
+        const signed = await signSharedCloudFrontUrl(subject, key, grants, 3600);
         if (!signed.ok) return clientErr(signed.message, signed.status);
         return ok({ url: signed.url });
       }
@@ -3443,7 +3532,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     const fileStatMatch = subPath.match(/^\/files\/(.+)\/stat$/);
     if (fileStatMatch && method === "GET") {
       const key = decodeURIComponent(fileStatMatch[1]!);
-      const check = parseObjectKey(appId, key, grants, "read");
+      const check = parseObjectKey(subject, key, grants, "read");
       if (!check.ok) return clientErr(check.message, check.status);
       const facts = await storage.stat(key);
       if (!facts) return clientErr("Not found", 404);
@@ -3455,14 +3544,14 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     const fileObjectMatch = subPath.match(/^\/files\/(.+)$/);
     if (fileObjectMatch && method === "HEAD") {
       const key = decodeURIComponent(fileObjectMatch[1]!);
-      const check = parseObjectKey(appId, key, grants, "read");
+      const check = parseObjectKey(subject, key, grants, "read");
       if (!check.ok) return { statusCode: check.status, body: "" };
       const exists = await storage.has(key);
       return { statusCode: exists ? 200 : 404, body: "" };
     }
     if (fileObjectMatch && method === "DELETE") {
       const key = decodeURIComponent(fileObjectMatch[1]!);
-      const check = parseObjectKey(appId, key, grants, "write");
+      const check = parseObjectKey(subject, key, grants, "write");
       if (!check.ok) return clientErr(check.message, check.status);
       await storage.delete(key);
       return ok({ ok: true });
@@ -3683,7 +3772,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
               // Through the pre-sign revalidation chokepoint. A key whose
               // category the caller can't read (a route/data mismatch) is
               // silently omitted, matching this batch route's per-id semantics.
-              const signed = await signSharedCloudFrontUrl(appId, key, grants, requestedExpiresIn);
+              const signed = await signSharedCloudFrontUrl(subject, key, grants, requestedExpiresIn);
               if (!signed.ok) return;
               url = signed.url;
             } else {
@@ -3899,7 +3988,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         Math.max(parseInt(query["expiresIn"] ?? "3600", 10) || 3600, 60),
         VARIANT_URL_TTL_SECONDS,
       );
-      const signed = await signSharedCloudFrontUrl(appId, served.objectStorageKey, grants, expiresIn);
+      const signed = await signSharedCloudFrontUrl(subject, served.objectStorageKey, grants, expiresIn);
       if (!signed.ok) return clientErr(signed.message, signed.status);
       return ok({
         record_id: served.id,
@@ -3933,7 +4022,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // Shared bytes → CloudFront signed URL (through the chokepoint); any
       // non-shared key stays on S3 presign.
       if (key.startsWith("shared/")) {
-        const signed = await signSharedCloudFrontUrl(appId, key, grants, expiresIn);
+        const signed = await signSharedCloudFrontUrl(subject, key, grants, expiresIn);
         if (!signed.ok) return clientErr(signed.message, signed.status);
         return ok({ url: signed.url, source: "remote", mimeType: record.mimeType, sizeBytes: record.sizeBytes, expiresIn });
       }
@@ -3962,7 +4051,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           ? await loadMetadataForPage(db, grants, [record])
           : null;
         const detailAvailability = await loadAvailabilityForPage(db, [record]);
-        const detailStandIns = await standInSummariesForPage(db, appId, grants, [record], false);
+        const detailStandIns = await standInSummariesForPage(db, subject, grants, [record], false);
         return ok({
           record: recordToResponse(
             record,
@@ -4126,7 +4215,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           if (!body.contentHash || !isSha256Hex(body.contentHash)) {
             return clientErr("contentHash (a lowercase hex SHA-256 of the bytes) is required", 400);
           }
-          const key = appSyncableObjectKey(appId, body.subKey);
+          const key = appSyncableObjectKey(appId, subject.userId, body.subKey);
           const checksumSha256 = sha256HexToBase64(body.contentHash);
           const url = await storage.getSignedPutUrl!(key, {
             expiresIn: clampPresignExpiresIn(3600),
@@ -4218,7 +4307,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           for (const subKey of new Set(body.subKeys as string[])) {
             const stat = await view.statFile(subKey);
             if (!stat) continue;
-            urls[subKey] = await storage.getSignedUrl(appSyncableObjectKey(appId, subKey), {
+            urls[subKey] = await storage.getSignedUrl(appSyncableObjectKey(appId, subject.userId, subKey), {
               expiresIn,
             });
           }
@@ -4247,7 +4336,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             const expiresIn = clampPresignExpiresIn(
               Number.isFinite(requested) ? requested : 3600,
             );
-            const objectKey = appSyncableObjectKey(appId, subKey);
+            const objectKey = appSyncableObjectKey(appId, subject.userId, subKey);
             const url = await storage.getSignedUrl(objectKey, { expiresIn });
             return ok({ url, expiresIn });
           }
@@ -4285,6 +4374,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         if (err instanceof SyntaxError) return clientErr("Body is not valid JSON", 400);
         throw err;
       }
+      const keyRefusal = exchangeKeyRefusal(body, subject.userId);
+      if (keyRefusal) return clientErr(keyRefusal, 403);
 
       // Channel split. The Starkeep Drive channel carries *all* shared
       // records (and nothing app-specific); every per-app channel carries only

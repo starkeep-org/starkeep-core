@@ -484,7 +484,7 @@ describe("a device acts only as the apps it was paired for", () => {
 });
 
 describe("a device reaches only the routes the phone calls", () => {
-  const KEY = "shared/image/ab/abcdef0123456789";
+  const KEY = "shared/test-user/image/ab/abcdef0123456789";
 
   it.each([
     ["GET", "/health", undefined],
@@ -569,7 +569,7 @@ describe("a device may not write the platform's own files", () => {
   it("403s a presigned upload into the platform category", async () => {
     const device = makeDevice();
     scriptRegistered("dev-presign-settings", device.publicKeySpki, "starkeep-drive");
-    const body = JSON.stringify({ key: "shared/starkeep/ab/abcdef0123456789" });
+    const body = JSON.stringify({ key: "shared/test-user/starkeep/ab/abcdef0123456789" });
     const res = await deviceCall(device, "dev-presign-settings", "starkeep-drive", "POST", "/files/presign", body);
     expect(res.statusCode).toBe(403);
   });

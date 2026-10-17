@@ -27,7 +27,10 @@ interface MachineView {
   fingerprint: string | null;
   pairingCode: string | null;
   label: string | null;
-  approval: { state: "no-key" | "pending" | "unknown" } | { state: "approved"; userId: string | null; label: string | null };
+  approval:
+    | { state: "no-key" | "pending" | "unknown" }
+    | { state: "approved"; userId: string | null; label: string | null }
+    | { state: "bound-elsewhere"; message: string };
   cloudUrl: string | null;
 }
 
@@ -72,7 +75,11 @@ export function ThisMachineSection({ canConnect }: { canConnect: boolean }) {
   }, [refresh]);
 
   const view = load.kind === "ready" ? load.view : null;
-  const waiting = view !== null && view.pairingCode !== null && view.approval.state !== "approved";
+  const waiting =
+    view !== null &&
+    view.pairingCode !== null &&
+    view.approval.state !== "approved" &&
+    view.approval.state !== "bound-elsewhere";
 
   // A machine showing a code asks the cloud again until an admin approves it.
   useEffect(() => {
@@ -172,6 +179,11 @@ export function ThisMachineSection({ canConnect }: { canConnect: boolean }) {
             </Button>
           </div>
         </>
+      ) : v.approval.state === "bound-elsewhere" ? (
+        <Alert variant="destructive">
+          <AlertTitle>This machine does not sync</AlertTitle>
+          <AlertDescription>{v.approval.message}</AlertDescription>
+        </Alert>
       ) : v.approval.state === "approved" ? (
         <p className="text-sm" role="status">
           This machine syncs with {v.cloudUrl}

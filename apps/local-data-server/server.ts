@@ -73,7 +73,13 @@ import {
   type AccessGrants,
 } from "../../packages/protocol-primitives/src/access/grants.js";
 import { deserializeHLC } from "../../packages/protocol-primitives/src/hlc/index.js";
-import { dataRecordObjectKey, appSyncableObjectKey, contentHashFromDataRecordObjectKey } from "../../packages/protocol-primitives/src/storage/object-keys.js";
+import {
+  dataRecordObjectKey,
+  appSyncableObjectKey,
+  categoryFromSharedObjectKey,
+  contentHashFromDataRecordObjectKey,
+  userIdFromObjectKey,
+} from "../../packages/protocol-primitives/src/storage/object-keys.js";
 import { sha256HexToBase64, loadVariantCandidatesForPage } from "@starkeep/storage-adapter";
 import type { RecordAvailability } from "@starkeep/protocol-primitives";
 import {
@@ -160,6 +166,7 @@ import { pipeline } from "node:stream/promises";
 import { openSync, mkdirSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createFileWatchManager } from "./watcher.js";
+import { bindLibrary, libraryUserSegment, LibraryBoundElsewhereError } from "./library-binding.js";
 import {
   type CognitoConfig,
   type STSCredentials,
@@ -768,9 +775,12 @@ async function main() {
    * - `pending`: the cloud does not know the key; an admin has not approved it.
    * - `approved`: the cloud answered with this device's record.
    * - `unknown`: the cloud could not be asked, or has not been yet.
+   * - `bound-elsewhere`: the cloud approved the key for a different user than
+   *   the one this library belongs to, so sync stays off.
    */
   type DeviceApproval =
     | { readonly state: "no-key" | "pending" | "unknown" }
+    | { readonly state: "bound-elsewhere"; readonly message: string }
     | {
         readonly state: "approved";
         readonly userId: string | null;
@@ -882,6 +892,9 @@ async function main() {
   // adapter operates on the same DB; we use raw access for the shared_*
   // tables (registry, grants) that have no adapter wrapper.
   const localDb = databaseAdapter.getRawDatabase();
+  // The segment every key this library writes carries: the user a cloud bound
+  // it to, or `local` until one does. `checkDeviceApproval` binds it.
+  let libraryUser = libraryUserSegment(localDb);
 
   // The node's residency: every file no stand-in can replace, every stand-in
   // at or below this node's ceilings, and whatever someone asks for. Nothing
@@ -926,6 +939,7 @@ async function main() {
     },
     clock,
     changeNotifier,
+    userId: () => libraryUser,
   });
 
   const sdk = await createStarkeepSdk({
@@ -937,6 +951,7 @@ async function main() {
     getAppSpecific: appSpecificFactory,
     // The same instance the route handlers and the app-specific factory use.
     clock,
+    userId: () => libraryUser,
   });
 
   const sseClients = new Set<import("node:http").ServerResponse>();
@@ -1117,6 +1132,9 @@ async function main() {
       deviceApproval = { state: "unknown" };
     }
     if (deviceApproval.state === "approved") {
+      deviceApproval = await bindToApprovedUser(deviceApproval);
+    }
+    if (deviceApproval.state === "approved" || deviceApproval.state === "bound-elsewhere") {
       if (approvalPoll) {
         clearInterval(approvalPoll);
         approvalPoll = null;
@@ -1127,6 +1145,42 @@ async function main() {
       approvalPoll.unref();
     }
     return deviceApproval;
+  }
+
+  /**
+   * Bind this library to the user the cloud approved the key for, before any
+   * sync. Every key then carries that user's segment, as the cloud requires.
+   * The pass runs on every approval, so it also sweeps up a write that built
+   * its key under `local` while the first pass ran. A cloud that names another
+   * user than the library's stops sync: the two libraries must not mix.
+   */
+  async function bindToApprovedUser(
+    approval: Extract<DeviceApproval, { state: "approved" }>,
+  ): Promise<DeviceApproval> {
+    if (!approval.userId) {
+      return { state: "bound-elsewhere", message: "The cloud approved this machine for no user. Pair it again." };
+    }
+    try {
+      const report = bindLibrary(localDb, objectsBasePath, approval.userId);
+      if (libraryUser !== report.userId || report.movedDirs > 0 || report.rewrittenKeys > 0) {
+        console.log(
+          `[device] bound this library to user ${report.userId}: ` +
+            `${report.movedDirs} folders moved, ${report.rewrittenKeys} keys rewritten`,
+        );
+      }
+      libraryUser = report.userId;
+      return approval;
+    } catch (err) {
+      if (!(err instanceof LibraryBoundElsewhereError)) throw err;
+      console.error(`[device] ${err.message}`);
+      // Sync that already runs stops for good: a stopped supervisor does not
+      // start again, so the machine syncs again only after a restart.
+      if (supervisorStarted) {
+        await supervisor?.stop();
+        console.error("[device] sync stopped. Restart the local data server once this machine is paired for the right user.");
+      }
+      return { state: "bound-elsewhere", message: err.message };
+    }
   }
 
   function startOrKickSupervisor(): void {
@@ -2398,7 +2452,7 @@ async function main() {
             json(res, { error: "sizeBytes is required and must be a non-negative number" });
             return;
           }
-          const expectedKey = dataRecordObjectKey(type, contentHash);
+          const expectedKey = dataRecordObjectKey(libraryUser, type, contentHash);
           const exists = await localAdapter.has(expectedKey);
           if (!exists) {
             res.writeHead(409);
@@ -2516,7 +2570,10 @@ async function main() {
 
       // POST /files/presign — issue a short-lived URL the caller can PUT to.
       // Mirrors the cloud-data-server API so a single client code path works
-      // against either backend. Body: { key, contentType? }. Response: { url }.
+      // against either backend. Body: { key, contentType? }, or
+      // { type, contentHash, contentType? } to have the server build the key,
+      // so an app never needs to know the library's user. Response:
+      // { url, key }.
       //
       // Auth: requires the caller's app HMAC (same as any /data/ endpoint).
       // The issued URL itself is bearer-style: anyone holding it can PUT to
@@ -2524,26 +2581,42 @@ async function main() {
       if (path === "/files/presign" && req.method === "POST") {
         const body = JSON.parse(await readBody(req)) as {
           key?: string;
+          type?: string;
+          contentHash?: string;
           contentType?: string;
           expiresIn?: number;
         };
+        if (!body.key && body.type && body.contentHash) {
+          if (!/^[a-f0-9]{64}$/.test(body.contentHash)) {
+            res.writeHead(400);
+            json(res, { error: "contentHash must be a 64-char lowercase hex sha256" });
+            return;
+          }
+          body.key = dataRecordObjectKey(libraryUser, body.type, body.contentHash);
+        }
         if (!body.key) {
           res.writeHead(400);
-          json(res, { error: "key is required" });
+          json(res, { error: "key, or type and contentHash, is required" });
           return;
         }
-        // Extract the category from the canonical shared/<category>/<shard>/<hash>
-        // key and enforce that this app can write that category. Object keys are
-        // category-namespaced (see object-keys.ts), so this is a category check.
-        const sharedMatch = body.key.match(/^shared\/([^/]+)\//);
-        if (!sharedMatch) {
+        // Read the category from the canonical
+        // shared/<userId>/<category>/<shard>/<hash> key and enforce that this
+        // app can write that category. Object keys are category-namespaced (see
+        // object-keys.ts), so this is a category check. The user segment must
+        // be this library's: no other user's keys live here.
+        const category = categoryFromSharedObjectKey(body.key);
+        if (category === null || contentHashFromDataRecordObjectKey(body.key) === null) {
           res.writeHead(400);
           json(res, {
-            error: "presign currently only supports shared/<category>/... keys",
+            error: "presign currently only supports shared/<userId>/<category>/<shard>/<hash> keys",
           });
           return;
         }
-        const category = sharedMatch[1]!;
+        if (userIdFromObjectKey(body.key) !== libraryUser) {
+          res.writeHead(403);
+          json(res, { error: "AccessDenied", detail: `the key is not under this library's user, ${libraryUser}` });
+          return;
+        }
         if (!appCanWriteCategory(localDb, appId!, category)) {
           res.writeHead(403);
           json(res, {
@@ -2565,6 +2638,7 @@ async function main() {
         const contentHash = contentHashFromDataRecordObjectKey(body.key);
         json(res, {
           url: `http://127.0.0.1:${PORT}/data/files/upload/${token}`,
+          key: body.key,
           ...(contentHash ? { checksumSha256: sha256HexToBase64(contentHash) } : {}),
         });
         return;
@@ -2660,7 +2734,7 @@ async function main() {
         }
         const mimeType = (req.headers["content-type"] ?? "application/octet-stream").split(";")[0]!.trim();
         const hex = createHash("sha256").update(fileBuffer as unknown as Uint8Array).digest("hex");
-        const key = dataRecordObjectKey(typeId, hex);
+        const key = dataRecordObjectKey(libraryUser, typeId, hex);
         await localAdapter.put(key, fileBuffer, { contentType: mimeType });
         json(res, { key, contentHash: hex, mimeType, sizeBytes: fileBuffer.length });
         return;
@@ -2761,7 +2835,7 @@ async function main() {
             }
             // statFile enforces filesEnabled before we mint an upload token.
             await view.statFile(body.subKey);
-            const key = appSyncableObjectKey(appId!, body.subKey);
+            const key = appSyncableObjectKey(appId!, libraryUser, body.subKey);
             const mimeType = body.contentType ?? "application/octet-stream";
             const token = createUploadToken(key, mimeType, body.expiresIn ?? 3600);
             json(res, {
@@ -4332,9 +4406,9 @@ async function main() {
         const targetAppId = decodeURIComponent(uninstallMatch[1]!);
         uninstallLocal(localDb, targetAppId, {
           deleteFilesPrefix: async (prefix) => {
-            // Storage layout is the FS adapter's basePath/<key>. The syncable
-            // prefix is its own directory tree under apps/<appId>/syncable/,
-            // so removing it is just an rm -rf of that subtree.
+            // Storage layout is the FS adapter's basePath/<key>. The app's
+            // files are their own directory tree under apps/<appId>/, so
+            // removing them is just an rm -rf of that subtree.
             const target = join(objectsBasePath, prefix);
             await rm(target, { recursive: true, force: true });
           },

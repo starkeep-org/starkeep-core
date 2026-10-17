@@ -244,7 +244,7 @@ export async function createStarkeepSdk(
     originalFilename: string | null,
   ): Promise<DataRecord> {
     const contentHash = await sha256Hex(fileBytes);
-    const objectStorageKey = dataRecordObjectKey(input.type, contentHash);
+    const objectStorageKey = dataRecordObjectKey(options.userId(), input.type, contentHash);
 
     const record = createDataRecord(
       {
@@ -272,7 +272,7 @@ export async function createStarkeepSdk(
     data: {
       async putWithFile(input, file, contentType) {
         const contentHash = await sha256Hex(file);
-        const objectStorageKey = dataRecordObjectKey(input.type, contentHash);
+        const objectStorageKey = dataRecordObjectKey(options.userId(), input.type, contentHash);
 
         await objectStorageAdapter.put(objectStorageKey, file, { contentType: contentType ?? undefined });
         return writeRecordAndMetadata(
@@ -286,7 +286,7 @@ export async function createStarkeepSdk(
       async putWithLocalFile(input, filePath, contentType) {
         const fileBytes = await readFile(filePath);
         const contentHash = await sha256Hex(fileBytes);
-        const objectStorageKey = dataRecordObjectKey(input.type, contentHash);
+        const objectStorageKey = dataRecordObjectKey(options.userId(), input.type, contentHash);
 
         if (objectStorageAdapter.putSymlink) {
           await objectStorageAdapter.putSymlink(objectStorageKey, filePath, { contentType: contentType ?? undefined });

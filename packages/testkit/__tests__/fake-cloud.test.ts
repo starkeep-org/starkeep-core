@@ -136,7 +136,7 @@ describe("fake cloud responder", () => {
   describe("blob uploads are verified against the key", () => {
     const bytes = Buffer.from("content-addressed payload");
     const hash = createHash("sha256").update(bytes as unknown as Uint8Array).digest("hex");
-    const key = `shared/image/${hash.slice(0, 2)}/${hash}`;
+    const key = `shared/test-user/image/${hash.slice(0, 2)}/${hash}`;
     const digest = createHash("sha256").update(bytes as unknown as Uint8Array).digest("base64");
 
     async function presign(): Promise<{ url: string; checksumSha256?: string }> {

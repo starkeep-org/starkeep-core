@@ -16,3 +16,11 @@ export {
 } from "./app-syncable/namespace.js";
 export type { AppSyncableNamespace, AppSyncableTableInfo } from "./app-syncable/namespace.js";
 export { SqliteAppSyncableApplier } from "./app-syncable/apply.js";
+export {
+  boundUserId,
+  libraryUserSegment,
+  checkLibraryBindable,
+  commitLibraryBinding,
+  LibraryBoundElsewhereError,
+  type LibraryKeyColumn,
+} from "./library-owner.js";

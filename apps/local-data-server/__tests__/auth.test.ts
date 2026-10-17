@@ -3,7 +3,7 @@
  * signed tokens in file URLs. (Plan §3 "Request auth".)
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
 import { signRequest } from "@starkeep/app-client";
 import { installApp, testAppManifest, createRecordWithBytes, type InstalledApp } from "./helpers.js";
@@ -158,7 +158,7 @@ describe("token-in-URL exemptions", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        key: `shared/image/aa/${"a".repeat(64)}`,
+        key: `shared/local/image/aa/${"a".repeat(64)}`,
         contentType: "image/jpeg",
       }),
     });
@@ -168,6 +168,31 @@ describe("token-in-URL exemptions", () => {
     const bad = await fetch(url, { method: "PUT", body: bytes });
     expect(bad.status).toBe(400);
     expect(hash).toBeDefined();
+  });
+
+  it("builds the key from a type and a hash, under the library's user", async () => {
+    const bytes = Buffer.from("presigned-by-type");
+    const contentHash = createHash("sha256").update(bytes).digest("hex");
+    const presign = await app.fetch("/files/presign", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "image/jpeg", contentHash, contentType: "image/jpeg" }),
+    });
+    expect(presign.status).toBe(200);
+    const { url, key } = (await presign.json()) as { url: string; key: string };
+    // An unbound library writes under the placeholder segment.
+    expect(key).toBe(`shared/local/image/${contentHash.slice(0, 2)}/${contentHash}`);
+    const put = await fetch(url, { method: "PUT", body: bytes });
+    expect(put.status).toBe(204);
+  });
+
+  it("refuses to presign a key under another user's segment", async () => {
+    const presign = await app.fetch("/files/presign", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: `shared/someone-else/image/aa/${"a".repeat(64)}` }),
+    });
+    expect(presign.status).toBe(403);
   });
 
   it("invalidates outstanding file tokens on server restart (per-boot secret)", async () => {

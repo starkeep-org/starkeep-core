@@ -27,6 +27,7 @@ import {
   createHLCClock,
   DEFAULT_STAND_IN_STANDARDS,
   DEFAULT_SYNC_DOWN_CEILINGS,
+  LOCAL_USER_SEGMENT,
   type HLCClock,
   type StarkeepId,
 } from "@starkeep/protocol-primitives";
@@ -107,6 +108,7 @@ async function node(options: { keepOriginals?: boolean } = {}): Promise<Node> {
     objectStorageAdapter: objects,
     nodeId: "node-a",
     clock,
+    userId: () => LOCAL_USER_SEGMENT,
   });
 
   let current: FileWatchManager | null = null;

@@ -38,6 +38,13 @@ export interface AppSpecificFactoryOptions {
    * wake the sync loop (e.g. cloud-server use where there is no supervisor).
    */
   changeNotifier?: ChangeNotifier;
+  /**
+   * The user whose files these are: the segment every key carries
+   * (`apps/<appId>/<userId>/syncable/...`). On a node, the library's bound
+   * user, or `LOCAL_USER_SEGMENT` before binding; in the cloud, the request's
+   * subject. An accessor, because a node's library can be bound while it runs.
+   */
+  userId: () => string;
 }
 
 /**
@@ -52,7 +59,7 @@ export interface AppSpecificFactoryOptions {
 export function createAppSpecificFactory(
   options: AppSpecificFactoryOptions,
 ): (subject: ApiSubject) => AppSpecificOperations | null {
-  const { namespace, applier, fileStorage, buildFileUrl, clock, changeNotifier } = options;
+  const { namespace, applier, fileStorage, buildFileUrl, clock, changeNotifier, userId } = options;
 
   return (subject) => {
     if (subject.subjectType !== "app") return null;
@@ -318,7 +325,7 @@ export function createAppSpecificFactory(
         // direct-to-S3 presign flow), so the file becomes visible to statFile
         // and cross-channel sync without the server ever holding the bytes.
         ensureFilesEnabled();
-        const key = appSyncableObjectKey(appId, subKey);
+        const key = appSyncableObjectKey(appId, userId(), subKey);
         await upsertFileRecord(key, meta);
         emitLocalChange();
         return { key };
@@ -326,7 +333,7 @@ export function createAppSpecificFactory(
 
       async getFile(subKey) {
         ensureFilesEnabled();
-        const key = appSyncableObjectKey(appId, subKey);
+        const key = appSyncableObjectKey(appId, userId(), subKey);
         const result = await fileStorage.get(key);
         if (!result) return null;
         const data =
@@ -340,7 +347,7 @@ export function createAppSpecificFactory(
         // Existence + metadata from the index row — no S3 round-trip and no
         // byte download. The index is the authoritative existence signal.
         ensureFilesEnabled();
-        const key = appSyncableObjectKey(appId, subKey);
+        const key = appSyncableObjectKey(appId, userId(), subKey);
         const row = await readFileRecord(key);
         if (!row) return null;
         return {
@@ -352,7 +359,7 @@ export function createAppSpecificFactory(
 
       async deleteFile(subKey) {
         ensureFilesEnabled();
-        const key = appSyncableObjectKey(appId, subKey);
+        const key = appSyncableObjectKey(appId, userId(), subKey);
         await fileStorage.delete(key);
         await tombstoneFileRecord(key);
         emitLocalChange();
@@ -360,7 +367,7 @@ export function createAppSpecificFactory(
 
       async fileUrl(subKey, opts) {
         ensureFilesEnabled();
-        const key = appSyncableObjectKey(appId, subKey);
+        const key = appSyncableObjectKey(appId, userId(), subKey);
         // Existence via the index (no byte download); presign only if present.
         const row = await readFileRecord(key);
         if (!row) return null;

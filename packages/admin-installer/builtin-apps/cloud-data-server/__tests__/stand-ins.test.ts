@@ -314,7 +314,7 @@ function smallRow() {
     parent_id: PARENT_ID,
     stand_in_role: "smaller",
     fidelity: 640,
-    object_storage_key: `shared/image/dd/${"d".repeat(64)}`,
+    object_storage_key: `shared/test-user/image/dd/${"d".repeat(64)}`,
   });
 }
 function canonicalRow() {
@@ -324,7 +324,7 @@ function canonicalRow() {
     parent_id: PARENT_ID,
     stand_in_role: "canonical",
     fidelity: 4272,
-    object_storage_key: `shared/image/ee/${"e".repeat(64)}`,
+    object_storage_key: `shared/test-user/image/ee/${"e".repeat(64)}`,
   });
 }
 
@@ -369,7 +369,7 @@ describe("GET /data/records", () => {
     const sizes = JSON.parse(res.body).records[0].stand_ins.sizes as Array<{ fidelity: number; url?: string }>;
     // Existing sizes are signed against the platform distribution; missing
     // sizes have nothing to sign.
-    expect(sizes.find((s) => s.fidelity === 640)!.url).toMatch(/^https:\/\/d1234testcdn\.cloudfront\.net\/shared\/image\//);
+    expect(sizes.find((s) => s.fidelity === 640)!.url).toMatch(/^https:\/\/d1234testcdn\.cloudfront\.net\/shared\/test-user\/image\//);
     expect(sizes.find((s) => s.fidelity === 320)!.url).toBeUndefined();
   });
 });
@@ -753,7 +753,7 @@ describe("reading the deployment's settings", () => {
       deletedAt: null,
       version: 1,
       contentHash: HASH,
-      objectStorageKey: `shared/image/cc/${HASH}`,
+      objectStorageKey: `shared/test-user/image/cc/${HASH}`,
       mimeType: "image/jpeg",
       sizeBytes: 8 * 1024 * 1024,
       originalFilename: null,

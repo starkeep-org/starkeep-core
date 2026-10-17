@@ -307,4 +307,11 @@ export interface StarkeepSdkOptions {
    * the syncable-namespace registry and storage layout.
    */
   readonly getAppSpecific?: (subject: ApiSubject) => AppSpecificOperations | null;
+  /**
+   * The library's user: the segment every object key carries
+   * (`shared/<userId>/...`). The bound user, or `LOCAL_USER_SEGMENT` before a
+   * cloud binds the library. An accessor, because binding can happen while
+   * the SDK runs.
+   */
+  readonly userId: () => string;
 }

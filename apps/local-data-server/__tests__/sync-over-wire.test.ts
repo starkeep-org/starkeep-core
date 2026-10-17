@@ -25,6 +25,7 @@ import {
   fakeIdToken,
   type LocalDataServer,
   type FakeCloud,
+  FAKE_CLOUD_USER_ID,
 } from "@starkeep/testkit";
 import {
   builtinAppCreds,
@@ -574,9 +575,9 @@ describe("app-specific files across the wire", () => {
       const cloudKeys = cloud
         .appRows("files-app", "_starkeep_sync_records")
         .map((r) => r["object_storage_key"]);
-      expect(cloudKeys).toContain("apps/files-app/syncable/cover");
+      expect(cloudKeys).toContain(`apps/files-app/${FAKE_CLOUD_USER_ID}/syncable/cover`);
       // And the blob is resident in cloud storage.
-      expect(await cloud.hasBlob("apps/files-app/syncable/cover")).toBe(true);
+      expect(await cloud.hasBlob(`apps/files-app/${FAKE_CLOUD_USER_ID}/syncable/cover`)).toBe(true);
     });
 
     // Came down to B: existence (index) + bytes (blob) both resident locally.

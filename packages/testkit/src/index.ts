@@ -7,6 +7,7 @@ export {
 } from "./local-data-server.js";
 export {
   startFakeCloud,
+  FAKE_CLOUD_USER_ID,
   type FakeCloud,
   type FakeCloudFailures,
   type FakeCloudDevice,

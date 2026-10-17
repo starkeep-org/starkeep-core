@@ -72,7 +72,7 @@ describe("write grants", () => {
     const presign = await pdfReader.fetch("/files/presign", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: `shared/document/aa/${"a".repeat(64)}` }),
+      body: JSON.stringify({ key: `shared/local/document/aa/${"a".repeat(64)}` }),
     });
     expect(presign.status).toBe(403);
   });
