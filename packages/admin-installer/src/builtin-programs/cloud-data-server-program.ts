@@ -319,13 +319,19 @@ export function buildCloudDataServerProgram(
     // primary user-facing setting rather than a safety margin: it buys a week
     // to catch a derivation bug before the input is behind a 48-hour thaw, and
     // it is what someone who edits recent originals will ask to change.
+    //
+    // Paused since 2026-10-17: the rule is installed `Disabled` until the
+    // platform stabilizes, so no original moves to Deep Archive while the data
+    // layout is still changing. Routes keep writing both tags. S3 counts `days`
+    // from object creation, so re-enabling moves every tagged object older than
+    // the threshold on the next evaluation.
     if (!ctx.ephemeral) {
       new aws.s3.BucketLifecycleConfigurationV2(`${ctx.stackPrefix}-files-lifecycle`, {
         bucket: bucket.id,
         rules: [
           {
             id: "starkeep-archive-complete-originals",
-            status: "Enabled",
+            status: "Disabled",
             filter: {
               and: {
                 tags: {

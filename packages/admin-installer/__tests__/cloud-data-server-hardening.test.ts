@@ -234,6 +234,14 @@ describe("the archive lifecycle rule (media plan item 18)", () => {
     expect((configs[0]!.inputs.rules as unknown[])).toHaveLength(1);
   });
 
+  // Archiving is paused until the platform stabilizes (2026-10-17). A reinstall
+  // must not quietly turn transitions back on.
+  it("installs the rule disabled while archiving is paused", async () => {
+    await run(false);
+    const rule = (lifecycle()[0]!.inputs.rules as Array<Record<string, never>>)[0]!;
+    expect(rule.status).toBe("Disabled");
+  });
+
   // The conjunction is the whole safety argument. `intent=archive` alone would
   // freeze originals whose derived ladder does not exist yet — which is exactly
   // when the original is the only readable form of the record — and
