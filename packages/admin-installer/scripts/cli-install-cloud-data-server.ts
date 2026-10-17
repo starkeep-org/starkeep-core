@@ -69,6 +69,8 @@ interface StarkeepConfig {
   sessionAuthorizerId?: string;
   s3Bucket?: string;
   auroraEndpoint?: string;
+  /** The deployment's settings this machine held with no cloud; seeds SSM once. */
+  deploymentSettings?: unknown;
 }
 
 const STARKEEP_DIR = starkeepDir();
@@ -208,6 +210,7 @@ const outputs = await installCloudDataServer({
   // inherited process.env of admin-web's real-install spawn. See
   // isEphemeralInstall.
   ephemeral: isEphemeralInstall(flags),
+  ...(config.deploymentSettings !== undefined ? { deploymentSettings: config.deploymentSettings } : {}),
 }).catch(exitOnInstallFailure);
 
 // There is no separate cloud sync identity to install here: shared-record sync

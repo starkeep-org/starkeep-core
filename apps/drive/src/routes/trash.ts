@@ -11,7 +11,7 @@
  * be reclaimed tomorrow and one that will still be there next year look identical.
  * So the list carries `deletes_at` per item, computed from the item's own
  * `deleted_at` and the library's configured retention window — and when this node
- * cannot read the winning settings file, `deletes_at` is null rather than a date
+ * cannot read the deployment's settings, `deletes_at` is null rather than a date
  * computed from a default the person may never have chosen.
  *
  * ## What the list cannot show

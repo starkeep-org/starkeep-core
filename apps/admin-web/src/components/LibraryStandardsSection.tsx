@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { saveDeploymentSettings } from "@/lib/deployment-settings-client";
 import {
   Dialog,
   DialogContent,
@@ -14,7 +15,7 @@ import {
  *
  * An original above its threshold archives behind a canonical stand-in at the
  * threshold, which is what the person sees until a paid restore. The value is
- * library-wide — one settings file that syncs to every node — and mostly an
+ * deployment-wide — one document every node and the cloud read — and mostly an
  * upfront choice, so the section also appears once in the install flow of an
  * app that reads photos or videos, before the library holds any.
  *
@@ -89,7 +90,7 @@ export function draftOf(view: Record<Category, CategoryView>): LibraryStandardsD
   };
 }
 
-/** The PUT body: the settings file's shape. */
+/** The change: the deployment settings document's shape. */
 export function settingsBodyOf(draft: LibraryStandardsDraft): unknown {
   return {
     standIns: {
@@ -301,16 +302,9 @@ export function LibraryStandardsFields({
   );
 }
 
-/** Save a draft through the daemon. Returns the refusal's sentences, or none. */
+/** Save a draft as a change to the deployment's settings. Returns the refusal's sentences, or none. */
 export async function saveLibraryStandards(draft: LibraryStandardsDraft): Promise<string[]> {
-  const res = await fetch("/api/library/stand-in-standards", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(settingsBodyOf(draft)),
-  });
-  if (res.ok) return [];
-  const body = (await res.json().catch(() => ({}))) as { problems?: string[]; error?: string };
-  return body.problems ?? [body.error ?? `Save failed (${res.status})`];
+  return saveDeploymentSettings(settingsBodyOf(draft));
 }
 
 export function LibraryStandardsSection() {

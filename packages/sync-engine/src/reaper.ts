@@ -38,10 +38,10 @@
  *
  * ## The window, and a host that cannot read it
  *
- * `trash.retentionDays` in the library's settings file, defaulting to 30. A host
- * that cannot read the winning settings file is in the dark about the library's
- * value, and **a reaper in the dark reaps nothing**: reaping to the default under
- * a library whose owner chose a year would destroy bytes the person was promised,
+ * `trash.retentionDays` in the deployment's settings, defaulting to 30. A host
+ * that cannot read the settings is in the dark about the value, and **a reaper
+ * in the dark reaps nothing**: reaping to the default under a deployment whose
+ * operator chose a year would destroy bytes the person was promised,
  * and nothing can record "reaped under a guess" and be corrected later.
  *
  * The age test is lexicographic. A serialized HLC leads with a zero-padded hex

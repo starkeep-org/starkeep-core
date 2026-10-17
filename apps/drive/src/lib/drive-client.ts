@@ -164,8 +164,8 @@ export async function listTypes(): Promise<DriveTypeSummary[]> {
  * The library's promise about a deleted item: how long it stays recoverable, and
  * how long its bytes stay.
  *
- * `retention_days: null` means this node cannot read the winning settings file, so
- * it does not know the library's value. A Trash view then shows no date rather than
+ * `retention_days: null` means this node cannot read the deployment's settings, so
+ * it does not know the value. A Trash view then shows no date rather than
  * a date it made up, and the reaper reaps nothing.
  */
 export interface TrashPolicy {

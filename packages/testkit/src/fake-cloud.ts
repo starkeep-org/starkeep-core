@@ -34,8 +34,9 @@ import {
   createHLCClock,
   appSyncableObjectKey,
   contentHashFromDataRecordObjectKey,
-  isSettingsRecord,
+  DEPLOYMENT_SETTINGS_ROUTE,
   type AnyRecord,
+  type DeploymentSettings,
 } from "@starkeep/protocol-primitives";
 import { sha256HexToBase64 } from "@starkeep/storage-adapter";
 import { createAppSpecificFactory, stampUnstampedOriginals } from "@starkeep/shared-space-api";
@@ -92,6 +93,8 @@ export interface FakeCloudFailures {
   blobGets: number;
   /** Fail this many upcoming blob-upload presigns (PUT path) with a 500. */
   blobPuts: number;
+  /** While true, the deployment-settings route answers 503. */
+  deploymentSettings: boolean;
 }
 
 export interface FakeCloud {
@@ -131,6 +134,12 @@ export interface FakeCloud {
    * that differs from the local registry's reproduces HMAC-secret drift.
    */
   setAppSecret(appId: string, hmacSecret: string): void;
+  /**
+   * Set the deployment's settings document, as admin-web writes the SSM
+   * parameter. Null means none is set. The Drive channel's settings route and
+   * the cloud's own stamps read it.
+   */
+  setDeploymentSettings(settings: DeploymentSettings | null): void;
   /** Shared records currently in the cloud DB. */
   sharedRecords(): Promise<AnyRecord[]>;
   /** Rows in a cloud-side app-syncable table (empty if table absent). */
@@ -163,12 +172,12 @@ export async function startFakeCloud(): Promise<FakeCloud> {
   await objectStorage.init();
 
   const clock = createHLCClock({ nodeId: `fake-cloud-${port}`, wallClockFunction: Date.now });
-  // The cloud always knows the library's value: its settings file, or the
-  // defaults. See `createLibrarySettings` in sync-engine.
+  // The deployment's settings, as the SSM parameter would hold them. The cloud
+  // always knows the value: the document, or the defaults. See
+  // `createLibrarySettings` in sync-engine.
+  let deploymentSettings: DeploymentSettings | null = null;
   const librarySettings = createLibrarySettings({
-    db: databaseAdapter,
-    storage: objectStorage,
-    clock,
+    read: async () => deploymentSettings,
     cloudConfigured: () => false,
   });
   const namespaceStore = new SqliteAppSyncableNamespaceStore(db);
@@ -191,6 +200,7 @@ export async function startFakeCloud(): Promise<FakeCloud> {
     allExchanges: false,
     blobGets: 0,
     blobPuts: 0,
+    deploymentSettings: false,
   };
 
   // Per-app HMAC secrets. Empty by default (auth rubber-stamped); a test that
@@ -262,15 +272,11 @@ export async function startFakeCloud(): Promise<FakeCloud> {
             clock,
             objectStorage,
             syncSharedRecords: true,
-            // As the real cloud's Drive channel: a settings row waits for its
-            // bytes, because the stamps it drives are permanent.
-            requiresFileToApply: isSettingsRecord,
-            // The real cloud's Drive channel: read an arriving settings file,
-            // then stamp what a node recorded without knowing the library's
-            // value, so the reply carries the stamp back. One process holds
-            // one cache, so the arrival is the only read it needs.
+            // The real cloud's Drive channel: stamp what a node recorded
+            // without knowing the deployment's value, so the reply carries
+            // the stamp back.
             onApplied: async ({ records }) => {
-              if (records.some(isSettingsRecord)) await librarySettings.refresh();
+              await librarySettings.refresh();
               await stampUnstampedOriginals(databaseAdapter, records, librarySettings.standards(), clock);
             },
           })
@@ -406,6 +412,19 @@ export async function startFakeCloud(): Promise<FakeCloud> {
       !verifyAppHmac(appId, req.method ?? "GET", rest, rawBody, req.headers, registeredSecret)
     ) {
       sendJson(res, 401, { error: "Invalid signature" });
+      return;
+    }
+
+    if (rest === DEPLOYMENT_SETTINGS_ROUTE && req.method === "GET") {
+      if (appId !== "starkeep-drive") {
+        sendJson(res, 404, { error: "Not found" });
+        return;
+      }
+      if (failures.deploymentSettings) {
+        sendJson(res, 503, { error: "injected settings failure" });
+        return;
+      }
+      sendJson(res, 200, { settings: deploymentSettings });
       return;
     }
 
@@ -589,6 +608,9 @@ export async function startFakeCloud(): Promise<FakeCloud> {
     failures,
     latency,
     peakConcurrentExchanges: (appId) => peakExchanges.get(appId) ?? 0,
+    setDeploymentSettings: (settings) => {
+      deploymentSettings = settings;
+    },
     setAppSecret: (appId, hmacSecret) => {
       appSecrets.set(appId, hmacSecret);
     },

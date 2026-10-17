@@ -162,12 +162,13 @@ export {
 } from "./stand-in-slots.js";
 export {
   createLibrarySettings,
+  type DeploymentSettingsCache,
   type LibrarySettings,
-  type LibrarySettingsIo,
   type LibrarySettingsOptions,
   type LibrarySettingsStatus,
   type RetentionWindow,
 } from "./library-settings.js";
+export { createSqliteDeploymentSettingsCache } from "./deployment-settings-cache-sqlite.js";
 export {
   advanceBytesWatermark,
   clampToRows,

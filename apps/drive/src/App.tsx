@@ -330,8 +330,8 @@ function TrashView({
     <>
       {policy && policy.retention_days === null && (
         <div className="notice warn">
-          This machine cannot read the library&apos;s settings file yet, so it does not know how
-          long a deleted item is kept. Nothing will be reclaimed until it can.
+          This machine cannot read the deployment&apos;s settings, so it does not know how long a
+          deleted item is kept. Nothing will be reclaimed until it can.
         </div>
       )}
       {policy && policy.retention_days !== null && (

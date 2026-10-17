@@ -11,6 +11,9 @@ import { LibraryStandardsSection } from "../src/components/LibraryStandardsSecti
 import { LocalAppsSection } from "../src/components/LocalAppsSection";
 import type { LocalAppEntry } from "../src/lib/app-types";
 
+// No one is signed in; the route decides where the change goes.
+vi.mock("@/lib/operator-session", () => ({ operatorSessionIfSignedIn: async () => null }));
+
 const VIEW = {
   image: { canonicalThreshold: 4272, standardSizes: [320, 640, 1280, 2560], advisoryLongEdges: null },
   video: {
@@ -71,7 +74,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const puts = () => calls.filter((c) => c.method === "PUT" && c.url === "/api/library/stand-in-standards");
+/** Each saved change, as the route receives it. */
+const puts = () =>
+  calls
+    .filter((c) => c.method === "PUT" && c.url === "/api/deployment-settings")
+    .map((c) => ({ ...c, body: (c.body as { change: unknown }).change }));
 
 describe("the library's quality section", () => {
   it("offers the standard choices with the default marked, and a custom value", async () => {
@@ -128,7 +135,7 @@ describe("the library's quality section", () => {
   it("saves straight away while the library holds no originals of that kind", async () => {
     stubFetch({
       "GET /api/library/stand-in-standards": () => ({ body: standards() }),
-      "PUT /api/library/stand-in-standards": () => ({ body: { ok: true } }),
+      "PUT /api/deployment-settings": () => ({ body: { ok: true } }),
     });
     const user = userEvent.setup();
     render(<LibraryStandardsSection />);
@@ -142,7 +149,7 @@ describe("the library's quality section", () => {
   it("explains that existing originals keep theirs before saving a change over them", async () => {
     stubFetch({
       "GET /api/library/stand-in-standards": () => ({ body: standards({ images: 1000 }) }),
-      "PUT /api/library/stand-in-standards": () => ({ body: { ok: true } }),
+      "PUT /api/deployment-settings": () => ({ body: { ok: true } }),
     });
     const user = userEvent.setup();
     render(<LibraryStandardsSection />);
@@ -160,7 +167,7 @@ describe("the library's quality section", () => {
   it("saves a resolution change with no dialog, since it changes no original", async () => {
     stubFetch({
       "GET /api/library/stand-in-standards": () => ({ body: standards({ videos: 50 }) }),
-      "PUT /api/library/stand-in-standards": () => ({ body: { ok: true } }),
+      "PUT /api/deployment-settings": () => ({ body: { ok: true } }),
     });
     const user = userEvent.setup();
     render(<LibraryStandardsSection />);
@@ -202,7 +209,7 @@ describe("the install flow's quality step", () => {
   function routes(body: ReturnType<typeof standards>) {
     stubFetch({
       "GET /api/library/stand-in-standards": () => ({ body }),
-      "PUT /api/library/stand-in-standards": () => ({ body: { ok: true } }),
+      "PUT /api/deployment-settings": () => ({ body: { ok: true } }),
       "POST /api/apps/install": () => ({ body: { ok: true } }),
       "POST /api/apps/status": () => ({ body: {} }),
     });
@@ -254,6 +261,6 @@ describe("the install flow's quality step", () => {
     await user.click(screen.getByRole("button", { name: "Approve & Install" }));
     await vi.waitFor(() => expect(calls.some((c) => c.url === "/api/apps/install")).toBe(true));
     const order = calls.map((c) => `${c.method} ${c.url}`);
-    expect(order.indexOf("PUT /api/library/stand-in-standards")).toBeLessThan(order.indexOf("POST /api/apps/install"));
+    expect(order.indexOf("PUT /api/deployment-settings")).toBeLessThan(order.indexOf("POST /api/apps/install"));
   });
 });

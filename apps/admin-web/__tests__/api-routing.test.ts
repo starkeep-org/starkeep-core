@@ -61,9 +61,9 @@ vi.mock("../src/routes/stand-ins", () =>
     "POST_REAP",
     "POST_VERIFY",
     "GET_LIBRARY_STANDARDS",
-    "PUT_LIBRARY_STANDARDS",
   ]),
 );
+vi.mock("../src/routes/deployment-settings", () => spy("deployment-settings", ["GET", "PUT"]));
 vi.mock("../src/routes/runtime-config", () => spy("runtime-config", ["GET"]));
 
 const { api } = await import("../src/api");
@@ -104,7 +104,8 @@ const ROUTES: Array<[string, string, string, string]> = [
   ["POST", "/api/residency/reap", "stand-ins", "POST_REAP"],
   ["POST", "/api/sync/verify", "stand-ins", "POST_VERIFY"],
   ["GET", "/api/library/stand-in-standards", "stand-ins", "GET_LIBRARY_STANDARDS"],
-  ["PUT", "/api/library/stand-in-standards", "stand-ins", "PUT_LIBRARY_STANDARDS"],
+  ["GET", "/api/deployment-settings", "deployment-settings", "GET"],
+  ["PUT", "/api/deployment-settings", "deployment-settings", "PUT"],
   ["GET", "/api/runtime-config", "runtime-config", "GET"],
 ];
 
