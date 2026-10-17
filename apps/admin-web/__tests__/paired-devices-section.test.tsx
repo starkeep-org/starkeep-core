@@ -85,6 +85,16 @@ beforeEach(() => {
       const override = respond(call);
       if (override) return Response.json(override.body, { status: override.status });
       if (url === "/api/devices/list") return Response.json({ devices });
+      if (url === "/api/devices/inspect") {
+        return Response.json({
+          request: { deviceId: "dev_sam", label: "Sam's laptop", kind: "desktop" },
+          fingerprint: "ab12 cd34",
+        });
+      }
+      if (url === "/api/devices/approve") {
+        devices = [...devices, { ...PIXEL, deviceId: "dev_sam", label: "Sam's laptop", kind: "desktop" }];
+        return Response.json({ approved: { deviceId: "dev_sam" } });
+      }
       if (call.method === "POST") {
         devices = [...devices, { ...PIXEL, deviceId: String(call.body!.deviceId), label: (call.body!.label as string) ?? null }];
         return Response.json({ paired: {}, baseUrl: "https://d123.cloudfront.net" });
@@ -106,14 +116,14 @@ afterEach(() => {
 async function open() {
   const user = userEvent.setup();
   render(<PairedDevicesSection />);
-  await user.click(screen.getByRole("button", { name: /Paired phones/ }));
+  await user.click(screen.getByRole("button", { name: /Devices/ }));
   return user;
 }
 
 describe("the list", () => {
   it("shows each paired phone by name and id", async () => {
     await open();
-    const list = await screen.findByRole("list", { name: "Paired phones" });
+    const list = await screen.findByRole("list", { name: "Paired devices" });
     expect(within(list).getByText("Pixel 8")).toBeTruthy();
     expect(within(list).getByText(/dev_pixel/)).toBeTruthy();
   });
@@ -121,12 +131,12 @@ describe("the list", () => {
   it("says so when no phone is paired", async () => {
     devices = [];
     await open();
-    expect(await screen.findByText("No phones are paired.")).toBeTruthy();
+    expect(await screen.findByText("No devices are paired.")).toBeTruthy();
   });
 
   it("reads the list with the operator's session", async () => {
     await open();
-    await screen.findByRole("list", { name: "Paired phones" });
+    await screen.findByRole("list", { name: "Paired devices" });
     const listCall = calls.find((c) => c.url === "/api/devices/list")!;
     expect(listCall.body).toMatchObject({ stackPrefix: "sktest", region: "us-east-2" });
     expect((listCall.body!.credentials as { accessKeyId: string }).accessKeyId).toBe("AKIA");
@@ -162,7 +172,7 @@ describe("pairing", () => {
     expect(JSON.stringify(post.body)).not.toContain(keys!.privateKeySeed);
 
     // The list picked up the new phone.
-    const list = await screen.findByRole("list", { name: "Paired phones" });
+    const list = await screen.findByRole("list", { name: "Paired devices" });
     await waitFor(() => expect(within(list).getByText("Tablet")).toBeTruthy());
 
     await user.click(screen.getByRole("button", { name: "Done" }));
@@ -192,22 +202,42 @@ describe("pairing", () => {
 describe("revoking", () => {
   it("asks for confirmation, then revokes by id", async () => {
     const user = await open();
-    const list = await screen.findByRole("list", { name: "Paired phones" });
+    const list = await screen.findByRole("list", { name: "Paired devices" });
     await user.click(within(list).getByRole("button", { name: "Revoke" }));
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
 
     await user.click(within(list).getByRole("button", { name: "Confirm revoke" }));
     expect(await screen.findByText("Revoked Pixel 8")).toBeTruthy();
     expect(calls.find((c) => c.method === "DELETE")!.body).toMatchObject({ deviceId: "dev_pixel" });
-    expect(await screen.findByText("No phones are paired.")).toBeTruthy();
+    expect(await screen.findByText("No devices are paired.")).toBeTruthy();
   });
 
   it("can be cancelled", async () => {
     const user = await open();
-    const list = await screen.findByRole("list", { name: "Paired phones" });
+    const list = await screen.findByRole("list", { name: "Paired devices" });
     await user.click(within(list).getByRole("button", { name: "Revoke" }));
     await user.click(within(list).getByRole("button", { name: "Cancel" }));
     expect(within(list).getByRole("button", { name: "Revoke" })).toBeTruthy();
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+});
+
+describe("approving a device from its code", () => {
+  it("shows the fingerprint before approving, then approves for the signed-in operator", async () => {
+    const user = await open();
+    await user.type(screen.getByLabelText("Pairing code to approve"), "CODE123");
+    await user.click(screen.getByRole("button", { name: "Check the code" }));
+    expect(await screen.findByText("ab12 cd34")).toBeTruthy();
+    expect(calls.some((c) => c.url === "/api/devices/approve")).toBe(false);
+
+    await user.click(screen.getByRole("button", { name: /fingerprint matches/ }));
+    expect(await screen.findByText(/Approved Sam's laptop/)).toBeTruthy();
+    expect(calls.find((c) => c.url === "/api/devices/approve")!.body).toMatchObject({
+      code: "CODE123",
+      userId: "sub-operator",
+      stackPrefix: "sktest",
+    });
+    const list = await screen.findByRole("list", { name: "Paired devices" });
+    expect(await within(list).findByText("Sam's laptop")).toBeTruthy();
   });
 });

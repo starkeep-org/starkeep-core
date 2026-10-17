@@ -38,16 +38,24 @@ const deleteDeviceKeyParameter = vi.fn();
 const listDeviceRecords = vi.fn();
 const roleChain = vi.fn();
 
-vi.mock("@starkeep/admin-installer/app-creds", () => ({
-  putDeviceKeyParameter: (...args: unknown[]) => putDeviceKeyParameter(...args),
-  deleteDeviceKeyParameter: (...args: unknown[]) => deleteDeviceKeyParameter(...args),
-  listDeviceRecords: (...args: unknown[]) => listDeviceRecords(...args),
-}));
+vi.mock("@starkeep/admin-installer/app-creds", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@starkeep/admin-installer/app-creds")>();
+  return {
+    // The real code reader and fingerprint; only the SSM calls are faked.
+    parsePairingRequest: actual.parsePairingRequest,
+    deviceFingerprint: actual.deviceFingerprint,
+    putDeviceKeyParameter: (...args: unknown[]) => putDeviceKeyParameter(...args),
+    deleteDeviceKeyParameter: (...args: unknown[]) => deleteDeviceKeyParameter(...args),
+    listDeviceRecords: (...args: unknown[]) => listDeviceRecords(...args),
+  };
+});
 vi.mock("@starkeep/admin-installer/session", () => ({
   roleChain: (...args: unknown[]) => roleChain(...args),
 }));
 
 let LIST: (req: Request) => Promise<Response>;
+let INSPECT: (req: Request) => Promise<Response>;
+let APPROVE: (req: Request) => Promise<Response>;
 let POST: (req: Request) => Promise<Response>;
 let DELETE: (req: Request) => Promise<Response>;
 let dataDir: string;
@@ -95,6 +103,8 @@ beforeAll(async () => {
   process.env.STARKEEP_DIR = dataDir;
   const route = await import("../src/routes/devices");
   LIST = route.LIST;
+  INSPECT = route.INSPECT;
+  APPROVE = route.APPROVE;
   POST = route.POST;
   DELETE = route.DELETE;
 }, 60_000);
@@ -195,8 +205,18 @@ describe("pairing", () => {
     ]);
   });
 
-  it("decides the device's kind and apps itself, whatever the request says", async () => {
-    await pair(pairBody({ appIds: ["photos", "memo"], kind: "desktop" }));
+  it("decides the device's apps itself, whatever the request says", async () => {
+    await pair(pairBody({ appIds: ["photos", "memo"] }));
+    expect(stored()[0]).toMatchObject({ kind: "phone", appIds: ["starkeep-drive"] });
+  });
+
+  it("records a desktop with no app list, because the cloud scopes a desktop to its installed apps", async () => {
+    await pair(pairBody({ kind: "desktop", appIds: ["photos"] }));
+    expect(stored()[0]).toMatchObject({ kind: "desktop", appIds: [] });
+  });
+
+  it("records anything that is not a desktop as a phone", async () => {
+    await pair(pairBody({ kind: "server" }));
     expect(stored()[0]).toMatchObject({ kind: "phone", appIds: ["starkeep-drive"] });
   });
 
@@ -323,5 +343,57 @@ describe("revoking", () => {
     expect(res.status).toBe(500);
     expect(((await res.json()) as { error: string }).error).toContain("AccessDeniedException");
     expect(stored().map((d) => d.deviceId)).toEqual(["pixel-9"]);
+  });
+});
+
+describe("approving a device from its pairing code", () => {
+  const code = (over: Record<string, unknown> = {}) =>
+    Buffer.from(
+      JSON.stringify({ v: 1, deviceId: "dev_member", publicKeySpki: SPKI, label: "Sam's laptop", kind: "desktop", ...over }),
+    ).toString("base64url");
+  const approve = (body: unknown) => APPROVE(jsonRequest("/api/devices/approve", body));
+
+  it("shows what the code says and its fingerprint, touching nothing", async () => {
+    const res = await INSPECT(jsonRequest("/api/devices/inspect", { code: code() }));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { request: unknown; fingerprint: string };
+    expect(body.request).toEqual({ deviceId: "dev_member", publicKeySpki: SPKI, label: "Sam's laptop", kind: "desktop" });
+    expect(body.fingerprint).toMatch(/^[0-9a-f]{4} [0-9a-f]{4}$/);
+    expect(roleChain).not.toHaveBeenCalled();
+  });
+
+  it("refuses a code that does not parse, naming why", async () => {
+    const res = await INSPECT(jsonRequest("/api/devices/inspect", { code: "not a code" }));
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/not a Starkeep pairing code/);
+  });
+
+  it("records the device as the code describes it, for the user the admin names, as Manager", async () => {
+    const res = await approve({ code: code(), credentials: CREDENTIALS, stackPrefix: "sktest", region: "us-east-2", userId: "sub-admin" });
+    expect(res.status).toBe(200);
+    expect(stored()).toEqual([
+      {
+        deviceId: "dev_member",
+        publicKeySpki: SPKI,
+        userId: "sub-admin",
+        kind: "desktop",
+        label: "Sam's laptop",
+        appIds: [],
+        pairedAt: expect.any(String),
+      },
+    ]);
+    const [args] = putDeviceKeyParameter.mock.calls[0] as [{ awsCreds: { accessKeyId: string } }];
+    expect(args.awsCreds.accessKeyId).toBe("ASIA-MANAGER");
+  });
+
+  it("gives a phone approved by code the phone's apps", async () => {
+    await approve({ code: code({ kind: "phone" }), credentials: CREDENTIALS, stackPrefix: "sktest", region: "us-east-2" });
+    expect(stored()[0]).toMatchObject({ kind: "phone", appIds: ["starkeep-drive"] });
+  });
+
+  it("refuses without a signed-in operator, and writes nothing", async () => {
+    const res = await approve({ code: code() });
+    expect(res.status).toBe(401);
+    expect(putDeviceKeyParameter).not.toHaveBeenCalled();
   });
 });

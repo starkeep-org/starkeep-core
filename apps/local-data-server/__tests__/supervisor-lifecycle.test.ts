@@ -8,9 +8,8 @@
  *     `sync()` with no `maxRounds`, so a drain in progress kept issuing requests
  *     and kept writing `sync_state` after the supervisor was nominally down —
  *     plausibly the leaking test process filed in `71a97ef`.
- *   - `rescan()` started engines in a loop, and `makeSignerFor` throws for an
- *     app with no `hmac_secret` — deliberately, but from inside that loop, so
- *     every app sorted after the broken one silently never got an engine.
+ *   - Every request carries this machine's device signature, and a machine
+ *     with no key starts no engine at all rather than a loop of refusals.
  *
  * Assembled in-process rather than through a server subprocess: both cases are
  * about the supervisor's own control flow, and a subprocess would only let us
@@ -20,7 +19,8 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createServer } from "node:http";
 import { DatabaseSync } from "node:sqlite";
-import { createHLCClock } from "@starkeep/protocol-primitives";
+import { createPublicKey, randomBytes, verify } from "node:crypto";
+import { createHLCClock, deviceSigner, signedMessage, type DeviceSigner } from "@starkeep/protocol-primitives";
 import {
   MockDatabaseAdapter,
   MockObjectStorageAdapter,
@@ -42,8 +42,8 @@ import type {
 } from "../../../packages/sync-engine/src/types.js";
 import type { StarkeepSdk } from "../../../packages/sdk/src/types.js";
 
-/** Just enough registry for `appRegistryRow` to answer. */
-function registryDb(rows: Array<{ appId: string; hmacSecret: string | null }>): RawDatabase {
+/** Just enough registry and sync state for an engine to be built. */
+function registryDb(rows: Array<{ appId: string }>): RawDatabase {
   const db = new DatabaseSync(":memory:");
   db.exec(`
     CREATE TABLE shared_app_registry (
@@ -64,7 +64,7 @@ function registryDb(rows: Array<{ appId: string; hmacSecret: string | null }>): 
       `INSERT INTO shared_app_registry
          (app_id, name, version, tier, manifest, status, hmac_secret, installed_at, updated_at)
        VALUES (?, ?, '1.0.0', 'community', '{}', 'active', ?, '2026-08-04', '2026-08-04')`,
-    ).run(row.appId, row.appId, row.hmacSecret);
+    ).run(row.appId, row.appId, null);
   }
   return db as unknown as RawDatabase;
 }
@@ -138,7 +138,7 @@ afterEach(async () => {
 });
 
 async function build(options: {
-  readonly apps: Array<{ appId: string; hmacSecret: string | null }>;
+  readonly apps: Array<{ appId: string }>;
   readonly exchangeIntervalMs?: number;
   readonly cloudUrl?: string;
   /**
@@ -148,15 +148,15 @@ async function build(options: {
    * *listed*, not a row disappearing out from under a signer.
    */
   readonly installed?: () => Array<{ appId: string }>;
-  /** Defaults to a live token; pass an accessor to observe rotation. */
-  readonly getIdToken?: () => string | null;
+  /** Defaults to a fresh key; null is a machine nobody has connected. */
+  readonly signer?: DeviceSigner | null;
 }) {
   const databaseAdapter = new MockDatabaseAdapter();
   const localObjectStorage = new MockObjectStorageAdapter();
   await databaseAdapter.init();
   await localObjectStorage.init();
   const localDb = registryDb([
-    { appId: DRIVE_APP_ID, hmacSecret: "drive-secret" },
+    { appId: DRIVE_APP_ID },
     ...options.apps,
   ]);
   const listInstalledApps = (): AppRegistryEntry[] =>
@@ -185,64 +185,22 @@ async function build(options: {
     underlyingSyncStateStore: memorySyncState(),
     exchangeIntervalMs: options.exchangeIntervalMs ?? 600_000,
     nudgeDebounceMs: 5,
-    getIdToken: options.getIdToken ?? (() => "id-token-1"),
+    getDeviceSigner: () => (options.signer === undefined ? testSigner() : options.signer),
   });
 }
 
-describe("rescan() with one app it cannot sign for", () => {
-  it("starts the others rather than stopping at the broken one", async () => {
-    // Test 18. Sorted so the broken app is not last — the bug was invisible to
-    // any fixture where it was.
-    supervisor = await build({
-      apps: [
-        { appId: "aaa-app", hmacSecret: "s1" },
-        { appId: "bbb-broken", hmacSecret: null },
-        { appId: "ccc-app", hmacSecret: "s2" },
-      ],
-    });
+/** A device key for the test machine. */
+function testSigner(): DeviceSigner {
+  return deviceSigner("dev_test", new Uint8Array(randomBytes(32)));
+}
+
+describe("a machine with no device key", () => {
+  it("starts no channel, rather than a loop of refused requests", async () => {
+    supervisor = await build({ apps: [{ appId: "aaa-app" }], signer: null });
     supervisor.start();
-
-    const started = supervisor.status().perApp.map((p) => p.appId);
-    expect(started).toContain("aaa-app");
-    expect(
-      started,
-      "an app sorted after the broken one must still get an engine",
-    ).toContain("ccc-app");
-    expect(started, "the app with no secret must not get one").not.toContain("bbb-broken");
-  });
-
-  it("still starts per-app channels when the Drive channel cannot start", async () => {
-    // Drive failing is serious — it carries all shared data — but it is not a
-    // reason for every other channel to be silently absent too.
-    const supervisorWithoutDrive = await (async () => {
-      const databaseAdapter = new MockDatabaseAdapter();
-      const localObjectStorage = new MockObjectStorageAdapter();
-      await databaseAdapter.init();
-      await localObjectStorage.init();
-      return createSyncSupervisor({
-        sdk: {
-          clock: createHLCClock({ nodeId: "L" }),
-          changeNotifier: createChangeNotifier(),
-        } as unknown as StarkeepSdk,
-        databaseAdapter,
-        localObjectStorage,
-        localDb: registryDb([{ appId: "aaa-app", hmacSecret: "s1" }]),
-        cloudUrl: "http://127.0.0.1:1",
-        listInstalledApps: () => [{ appId: "aaa-app", status: "active" }],
-        namespaceStore: emptyNamespaces,
-        appApplier: noopApplier,
-        underlyingSyncStateStore: memorySyncState(),
-        exchangeIntervalMs: 600_000,
-        nudgeDebounceMs: 5,
-        getIdToken: () => "id-token-1",
-      });
-    })();
-    supervisor = supervisorWithoutDrive;
-    supervisor.start();
-
-    const started = supervisor.status().perApp.map((p) => p.appId);
-    expect(started).toContain("aaa-app");
-    expect(started).not.toContain(DRIVE_APP_ID);
+    expect(supervisor.status().perApp).toEqual([]);
+    supervisor.rescan();
+    expect(supervisor.status().perApp).toEqual([]);
   });
 });
 
@@ -271,7 +229,7 @@ describe("stop() during a drain", () => {
 
     try {
       supervisor = await build({
-        apps: [{ appId: "aaa-app", hmacSecret: "s1" }],
+        apps: [{ appId: "aaa-app" }],
         exchangeIntervalMs: 5,
         cloudUrl: `http://127.0.0.1:${port}`,
       });
@@ -327,8 +285,8 @@ describe("rescan() dropping an app during its drain", () => {
     try {
       supervisor = await build({
         apps: [
-          { appId: "aaa-app", hmacSecret: "s1" },
-          { appId: "bbb-app", hmacSecret: "s2" },
+          { appId: "aaa-app" },
+          { appId: "bbb-app" },
         ],
         installed: () => installed,
         exchangeIntervalMs: 5,
@@ -372,24 +330,26 @@ describe("rescan() dropping an app during its drain", () => {
   }, 20_000);
 });
 
-describe("the end-user token on outbound sync", () => {
+describe("the device signature on outbound sync", () => {
   /**
-   * The broker requires a credential bound to a named end user on every
-   * data-plane call — the HMAC says which app is calling, this says a real
-   * person is behind it. The supervisor already holds one and already refuses
-   * to run without it, so this is about whether it *sends* it.
+   * Every data-plane call carries this machine's device signature. The
+   * signature names the machine, and the cloud's record of the device names
+   * the person it syncs for, so no app secret and no end-user token travel.
    *
-   * Observed at the wire rather than by reaching into `makeSignerFor`, for the
-   * same reason the cases above are: what matters is the header that arrives,
-   * and a signer asserted in isolation can be correct while nothing calls it.
+   * Observed at the wire rather than by reaching into `makeSignerFor`: what
+   * matters is the header that arrives, and a signer asserted in isolation can
+   * be correct while nothing calls it.
    */
-  async function captureHeaders(getIdToken: () => string | null) {
-    const seen: Array<Record<string, string | string[] | undefined>> = [];
+  async function captureRequests() {
+    const seen: Array<{ method: string; url: string; headers: Record<string, string | string[] | undefined>; body: Buffer }> = [];
     const server = createServer((req, res) => {
-      seen.push({ ...req.headers });
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "nope" }));
-      req.resume();
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        seen.push({ method: req.method ?? "GET", url: req.url ?? "/", headers: { ...req.headers }, body: Buffer.concat(chunks) });
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "nope" }));
+      });
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
@@ -397,88 +357,44 @@ describe("the end-user token on outbound sync", () => {
     return { seen, port, close: () => new Promise<void>((r) => server.close(() => r())) };
   }
 
-  it("sends the id token alongside the HMAC headers, not instead of them", async () => {
-    const cap = await captureHeaders(() => "id-token-1");
+  it("signs every channel's requests with the device key, which the public half verifies", async () => {
+    const cap = await captureRequests();
+    const signer = testSigner();
     try {
       supervisor = await build({
-        apps: [{ appId: "aaa-app", hmacSecret: "s1" }],
+        apps: [{ appId: "aaa-app" }],
         exchangeIntervalMs: 5,
         cloudUrl: `http://127.0.0.1:${cap.port}`,
-        getIdToken: () => "id-token-1",
+        signer,
       });
       supervisor.start();
       await new Promise((r) => setTimeout(r, 120));
 
       expect(cap.seen.length, "no request reached the cloud").toBeGreaterThan(0);
-      for (const headers of cap.seen) {
-        expect(headers["x-starkeep-user-token"]).toBe("id-token-1");
-        // Neither substitutes for the other, so both are on every request.
-        expect(headers["x-starkeep-app-id"]).toBeTruthy();
-        expect(headers["x-starkeep-app-sig"]).toBeTruthy();
-        expect(headers["x-starkeep-app-ts"]).toBeTruthy();
+      const key = createPublicKey({ key: Buffer.from(signer.publicKeySpki, "base64"), type: "spki", format: "der" });
+      for (const { method, url, headers, body } of cap.seen) {
+        expect(headers["x-starkeep-device-id"]).toBe("dev_test");
+        expect(headers["x-starkeep-user-token"]).toBeUndefined();
+        expect(headers["x-starkeep-app-sig"]).toBeUndefined();
+        const appId = String(headers["x-starkeep-app-id"]);
+        const subPath = url.slice(`/apps/${appId}`.length);
+        const message = signedMessage(
+          appId,
+          method,
+          subPath,
+          Number(headers["x-starkeep-app-ts"]),
+          method === "GET" || method === "HEAD" ? undefined : new Uint8Array(body),
+        );
+        expect(
+          verify(null, message, key, Buffer.from(String(headers["x-starkeep-device-sig"]), "base64")),
+          `${method} ${url}`,
+        ).toBe(true);
       }
 
-      // The Drive channel is not a special case. It is a full cloud principal
-      // carrying every shared record the user owns, so an exemption there
-      // would be the widest one available.
-      const appIds = new Set(cap.seen.map((h) => h["x-starkeep-app-id"]));
+      // The Drive channel is not a special case: it carries every shared record.
+      const appIds = new Set(cap.seen.map((r) => r.headers["x-starkeep-app-id"]));
       expect(appIds).toContain(DRIVE_APP_ID);
       expect(appIds).toContain("aaa-app");
-    } finally {
-      await supervisor?.stop();
-      supervisor = null;
-      await cap.close();
-    }
-  }, 20_000);
-
-  it("reads the token at request time, so an hourly rotation reaches the wire", async () => {
-    // The failure this guards is silent and slow: a signer that captured the
-    // token when the engine was built would keep presenting the boot-time one,
-    // and sync would start 401ing about an hour after every daemon start.
-    let token = "id-token-1";
-    const cap = await captureHeaders(() => token);
-    try {
-      supervisor = await build({
-        apps: [{ appId: "aaa-app", hmacSecret: "s1" }],
-        exchangeIntervalMs: 5,
-        cloudUrl: `http://127.0.0.1:${cap.port}`,
-        getIdToken: () => token,
-      });
-      supervisor.start();
-      await new Promise((r) => setTimeout(r, 100));
-      const before = cap.seen.length;
-      expect(before).toBeGreaterThan(0);
-
-      token = "id-token-2";
-      await new Promise((r) => setTimeout(r, 150));
-
-      const after = cap.seen.slice(before);
-      expect(after.length, "no request after the rotation").toBeGreaterThan(0);
-      expect(after.every((h) => h["x-starkeep-user-token"] === "id-token-2")).toBe(true);
-    } finally {
-      await supervisor?.stop();
-      supervisor = null;
-      await cap.close();
-    }
-  }, 20_000);
-
-  it("sends an empty header rather than omitting it when there is no token", async () => {
-    // The supervisor is not supposed to run in this state at all
-    // (`startOrKickSupervisor` refuses without a live token), so what matters
-    // is that the broker sees an explicit empty credential and refuses, rather
-    // than a missing header that some future carve-out might read as "exempt".
-    const cap = await captureHeaders(() => null);
-    try {
-      supervisor = await build({
-        apps: [{ appId: "aaa-app", hmacSecret: "s1" }],
-        exchangeIntervalMs: 5,
-        cloudUrl: `http://127.0.0.1:${cap.port}`,
-        getIdToken: () => null,
-      });
-      supervisor.start();
-      await new Promise((r) => setTimeout(r, 120));
-      expect(cap.seen.length).toBeGreaterThan(0);
-      expect(cap.seen[0]!["x-starkeep-user-token"]).toBe("");
     } finally {
       await supervisor?.stop();
       supervisor = null;

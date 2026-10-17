@@ -112,6 +112,7 @@ function scriptRegistered(
   appId: string,
   userId?: string,
   appIds: readonly string[] | null = [appId],
+  extra: { kind?: "phone" | "desktop"; label?: string } = {},
 ) {
   ssmMock
     .on(GetParameterCommand, { Name: `/teststack/platform/devices/${deviceId}` })
@@ -121,6 +122,7 @@ function scriptRegistered(
           publicKeySpki,
           ...(userId ? { userId } : {}),
           ...(appIds ? { appIds } : {}),
+          ...extra,
         }),
       },
     });
@@ -559,17 +561,17 @@ describe("a device may not write the platform's own files", () => {
 
 describe("deviceMayCall", () => {
   it("lets a device read the deployment's settings, and nothing else under that path", () => {
-    expect(deviceMayCall("GET", "/deployment/settings")).toBe(true);
-    expect(deviceMayCall("PUT", "/deployment/settings")).toBe(false);
-    expect(deviceMayCall("GET", "/deployment/settings/extra")).toBe(false);
+    expect(deviceMayCall("phone", "GET", "/deployment/settings")).toBe(true);
+    expect(deviceMayCall("phone", "PUT", "/deployment/settings")).toBe(false);
+    expect(deviceMayCall("phone", "GET", "/deployment/settings/extra")).toBe(false);
   });
 
   it("does not match a path that merely starts like an allowed one", () => {
-    expect(deviceMayCall("POST", "/sync/exchange/extra")).toBe(false);
-    expect(deviceMayCall("GET", "/healthz")).toBe(false);
-    expect(deviceMayCall("GET", "/files/presign")).toBe(false);
-    expect(deviceMayCall("PUT", "/files/shared/image/ab/cd")).toBe(false);
-    expect(deviceMayCall("GET", "/files/shared/image/ab/cd")).toBe(false);
+    expect(deviceMayCall("phone", "POST", "/sync/exchange/extra")).toBe(false);
+    expect(deviceMayCall("phone", "GET", "/healthz")).toBe(false);
+    expect(deviceMayCall("phone", "GET", "/files/presign")).toBe(false);
+    expect(deviceMayCall("phone", "PUT", "/files/shared/image/ab/cd")).toBe(false);
+    expect(deviceMayCall("phone", "GET", "/files/shared/image/ab/cd")).toBe(false);
   });
 });
 
@@ -587,5 +589,68 @@ describe("deviceWriteRefusal", () => {
   it("ignores records with no type, such as app-syncable rows", () => {
     const body = Buffer.from(JSON.stringify({ records: [{ id: "x" }, null, 3] }));
     expect(deviceWriteRefusal("POST", "/sync/exchange", body)).toBeNull();
+  });
+});
+
+describe("a desktop device", () => {
+  it("acts as any app installed in the cloud, whatever its record's app list says", async () => {
+    const device = makeDevice();
+    scriptRegistered("dev-desk-memo", device.publicKeySpki, "memo", "u-1", [], { kind: "desktop" });
+    const res = await deviceCall(device, "dev-desk-memo", "memo", "POST", "/sync/exchange", "{}");
+    // Past the gate, into pg connect against a host that does not resolve.
+    expect(res.statusCode).toBe(500);
+  });
+
+  it("is refused an app with no cloud install", async () => {
+    const device = makeDevice();
+    scriptRegistered("dev-desk-ghost", device.publicKeySpki, "starkeep-drive", "u-1", [], { kind: "desktop" });
+    ssmMock
+      .on(GetParameterCommand, { Name: "/teststack/app-creds/ghost", WithDecryption: true })
+      .rejects(new ParameterNotFound({ message: "none", $metadata: {} }));
+    const res = await deviceCall(device, "dev-desk-ghost", "ghost", "POST", "/sync/exchange", "{}");
+    expect(res.statusCode).toBe(401);
+    expect(errorOf(res)).toBe("Unknown app: ghost");
+  });
+
+  it("reads the cloud's record listing, which a phone may not", async () => {
+    expect(deviceMayCall("desktop", "GET", "/data/records")).toBe(true);
+    expect(deviceMayCall("desktop", "GET", "/data/types")).toBe(true);
+    expect(deviceMayCall("phone", "GET", "/data/records")).toBe(false);
+    expect(deviceMayCall("desktop", "POST", "/data/records")).toBe(false);
+    expect(deviceMayCall("desktop", "DELETE", "/data/records/abc")).toBe(false);
+  });
+});
+
+describe("GET /device/self", () => {
+  it("answers the calling device's own record", async () => {
+    const device = makeDevice();
+    scriptRegistered("dev-self", device.publicKeySpki, "starkeep-drive", "sub-1", ["starkeep-drive"], {
+      kind: "desktop",
+      label: "Sam's laptop",
+    });
+    const res = await deviceCall(device, "dev-self", "starkeep-drive", "GET", "/device/self");
+    expect(res.statusCode, res.body).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({
+      deviceId: "dev-self",
+      userId: "sub-1",
+      label: "Sam's laptop",
+      kind: "desktop",
+    });
+  });
+
+  it("answers 401 to a device no admin has approved, which is what the device polls for", async () => {
+    const device = makeDevice();
+    ssmMock
+      .on(GetParameterCommand, { Name: "/teststack/platform/devices/dev-pending" })
+      .rejects(new ParameterNotFound({ message: "none", $metadata: {} }));
+    const res = await deviceCall(device, "dev-pending", "starkeep-drive", "GET", "/device/self");
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("is Drive's route only", async () => {
+    const device = makeDevice();
+    scriptRegistered("dev-self-photos", device.publicKeySpki, "photos", "sub-1", ["photos"]);
+    const res = await deviceCall(device, "dev-self-photos", "photos", "GET", "/device/self");
+    expect(res.statusCode).toBe(404);
   });
 });

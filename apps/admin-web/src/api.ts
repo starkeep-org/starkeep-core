@@ -29,6 +29,7 @@ import * as cloudDataServerInstall from "./routes/cloud-data-server-install";
 import * as config from "./routes/config";
 import * as costs from "./routes/costs";
 import * as devices from "./routes/devices";
+import * as thisMachine from "./routes/this-machine";
 import * as deploymentSettings from "./routes/deployment-settings";
 import * as driveInstall from "./routes/drive-install";
 import * as execDaemon from "./routes/exec-daemon";
@@ -65,6 +66,12 @@ api.get("/exec/deploy-outputs", () => execDeployOutputs.GET());
 // Cloud operations against the operator's own AWS credentials.
 api.post("/costs", (c) => costs.POST(c.req.raw));
 api.post("/devices/list", (c) => devices.LIST(c.req.raw));
+api.post("/devices/inspect", (c) => devices.INSPECT(c.req.raw));
+api.post("/devices/approve", (c) => devices.APPROVE(c.req.raw));
+api.get("/this-machine", () => thisMachine.GET());
+api.post("/this-machine/key", (c) => thisMachine.POST_KEY(c.req.raw));
+api.post("/this-machine/check", () => thisMachine.POST_CHECK());
+api.post("/this-machine/cloud", (c) => thisMachine.POST_CLOUD(c.req.raw));
 api.post("/devices", (c) => devices.POST(c.req.raw));
 api.delete("/devices", (c) => devices.DELETE(c.req.raw));
 

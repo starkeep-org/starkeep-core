@@ -71,6 +71,7 @@ import {
   STAND_IN_MIME_TYPES,
   SETTINGS_TYPE_ID,
   DEPLOYMENT_SETTINGS_ROUTE,
+  DEVICE_SELF_ROUTE,
   stampFor,
   hasMetadataTable,
 } from "@starkeep/protocol-primitives";
@@ -257,6 +258,8 @@ interface CachedDeviceKey {
   userId: string | null;
   /** A phone or a desktop. A record without the field is a phone. */
   kind: "phone" | "desktop";
+  /** What the operator called the device, or null. */
+  label: string | null;
   /**
    * The apps this device may act as, as admin-web recorded them at pairing.
    * Empty for a record written before pairing recorded them, which therefore
@@ -276,24 +279,36 @@ const PLATFORM_CATEGORY = typeCategory(SETTINGS_TYPE_ID);
 /**
  * Whether a paired device may call this route at all.
  *
- * A device acts as Starkeep Drive, and Drive may do anything to shared data,
- * including deleting records and writing the platform's own files. A
- * phone needs a small part of that: it exchanges records and moves bytes. So a
- * device reaches exactly the routes the phone's sync transport and object
- * storage adapter call, and nothing else. A stolen phone can then sync, which
- * its key already allowed, but cannot delete records through the record routes
- * or write the platform's own files.
+ * A device acts as Starkeep Drive or an installed app, and those identities may
+ * do far more than sync — Drive may delete records and write anything shared.
+ * A device needs a small part of that: it exchanges records, moves bytes and
+ * reads the deployment's settings. So a device reaches exactly the routes its
+ * host's sync calls, and nothing else. A stolen device can then sync, which its
+ * key already allowed, but cannot delete records through the record routes.
+ *
+ * - **Both kinds:** health, the deployment's settings, the device's own record,
+ *   the exchange and the file routes the object-storage adapter calls.
+ * - **A desktop also** reads the cloud's view of records, read-only, which
+ *   Drive's UI shows beside the local view through the local data server.
+ *
+ * The desktop list comes from an audit of every cloud call the local data
+ * server makes: its supervisor's transports, its object-storage adapters, its
+ * settings read and its `/cloud/data/*` proxy.
  *
  * Writes that these routes allow are checked separately for the platform
  * category: see {@link deviceWriteRefusal}.
  */
-export function deviceMayCall(method: string, subPath: string): boolean {
+export function deviceMayCall(kind: "phone" | "desktop", method: string, subPath: string): boolean {
   if (method === "GET" && subPath === "/health") return true;
   if (method === "GET" && subPath === DEPLOYMENT_SETTINGS_ROUTE) return true;
+  if (method === "GET" && subPath === DEVICE_SELF_ROUTE) return true;
   if (method === "POST" && subPath === "/sync/exchange") return true;
   if (method === "POST" && subPath === "/files/presign") return true;
   if (method === "GET" && /^\/files\/.+\/(presign|stat)$/.test(subPath)) return true;
   if (method === "HEAD" && /^\/files\/.+$/.test(subPath)) return true;
+  if (kind === "desktop" && method === "GET" && (subPath === "/data/types" || subPath === "/data/records")) {
+    return true;
+  }
   return false;
 }
 
@@ -362,6 +377,7 @@ async function loadDevicePublicKey(deviceId: string): Promise<CachedDeviceKey | 
       publicKeySpki?: string;
       userId?: string;
       kind?: unknown;
+      label?: unknown;
       appIds?: unknown;
     };
     if (!parsed.publicKeySpki) return null;
@@ -369,6 +385,7 @@ async function loadDevicePublicKey(deviceId: string): Promise<CachedDeviceKey | 
       publicKeySpki: parsed.publicKeySpki,
       userId: parsed.userId ?? null,
       kind: parsed.kind === "desktop" ? "desktop" : "phone",
+      label: typeof parsed.label === "string" ? parsed.label : null,
       appIds: Array.isArray(parsed.appIds)
         ? parsed.appIds.filter((a): a is string => typeof a === "string")
         : [],
@@ -2168,6 +2185,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // revoked must be denied, not given a second chance at a shared secret it
     // should not have.
     const deviceId = normalizedHeaders["x-starkeep-device-id"];
+    /** The device that signed this request, when a device did. */
+    let callingDevice: (CachedDeviceKey & { deviceId: string }) | null = null;
     if (deviceId) {
       const device = await loadDevicePublicKey(deviceId);
       if (!device) {
@@ -2190,19 +2209,22 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (!(await loadAppHmacSecret(appId))) {
         return clientErr(`Unknown app: ${appId}`, 401);
       }
-      // Admin-web records which apps a device may act as. A phone acts as
-      // Starkeep Drive and nothing else, so its key is no key to Photos or Memo.
-      if (!device.appIds.includes(appId)) {
+      // A phone acts only as the apps admin-web recorded for it: Starkeep
+      // Drive, so its key is no key to Photos or Memo. A desktop syncs every
+      // app installed on it, so it may act as any app installed in the cloud,
+      // which is what the secret check above established.
+      if (device.kind === "phone" && !device.appIds.includes(appId)) {
         return clientErr(
           `This device may act only as ${device.appIds.join(", ") || "no app"}, not ${appId}. Pair it again from admin-web.`,
           403,
         );
       }
-      if (!deviceMayCall(method, subPath)) {
+      if (!deviceMayCall(device.kind, method, subPath)) {
         return clientErr(`A paired device may not call ${method} ${subPath}`, 403);
       }
       const writeRefusal = deviceWriteRefusal(method, subPath, bodyBytes);
       if (writeRefusal) return clientErr(writeRefusal, 403);
+      callingDevice = { ...device, deviceId };
       // No end-user token is required on this branch, and that is not an
       // oversight or a carve-out. A registered device key IS an end-user
       // credential: admin-web writes it against a named Cognito userId at
@@ -2275,6 +2297,19 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           return clientErr("Invalid or expired end-user token", 401);
         }
       }
+    }
+
+    // GET /apps/starkeep-drive/device/self — the calling device's own record:
+    // whom it was paired for, its label and its kind. A device polls this
+    // after showing a pairing code, to learn that an admin approved it.
+    if (method === "GET" && subPath === DEVICE_SELF_ROUTE) {
+      if (appId !== DRIVE_APP_ID || !callingDevice) return clientErr("Not found", 404);
+      return ok({
+        deviceId: callingDevice.deviceId,
+        userId: callingDevice.userId,
+        label: callingDevice.label,
+        kind: callingDevice.kind,
+      });
     }
 
     // GET /apps/starkeep-drive/deployment/settings — the deployment's

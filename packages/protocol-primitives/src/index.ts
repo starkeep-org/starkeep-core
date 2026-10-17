@@ -7,3 +7,4 @@ export * from "./storage/index.js";
 export * from "./access/index.js";
 export * from "./stand-ins/index.js";
 export * from "./settings/index.js";
+export * from "./devices/index.js";

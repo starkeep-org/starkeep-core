@@ -37,7 +37,9 @@
 import {
   putDeviceKeyParameter,
   deleteDeviceKeyParameter,
+  deviceFingerprint,
   listDeviceRecords,
+  parsePairingRequest,
 } from "@starkeep/admin-installer/app-creds";
 import type { AwsCredentials } from "@starkeep/admin-installer/app-creds";
 import type { STSCredentials } from "../lib/cognito-auth";
@@ -80,6 +82,17 @@ interface PairBody {
   publicKeySpki: string;
   userId?: string | null;
   label?: string | null;
+  /** "phone" unless "desktop": "Connect this machine" registers a desktop. */
+  kind?: string;
+}
+
+/**
+ * The apps a device's record lists. A phone acts as Drive only. A desktop
+ * syncs every app installed on it, so the broker lets it act as any app
+ * installed in the cloud and its record lists none.
+ */
+function appIdsFor(kind: "phone" | "desktop"): readonly string[] {
+  return kind === "phone" ? PHONE_APP_IDS : [];
 }
 
 interface ListBody {
@@ -116,6 +129,7 @@ export async function POST(req: Request): Promise<Response> {
   const body = (await req.json()) as PairBody;
   const { credentials, stackPrefix, region, deviceId, publicKeySpki } = body;
   const label = typeof body.label === "string" && body.label.trim() !== "" ? body.label.trim() : null;
+  const kind = body.kind === "desktop" ? "desktop" : "phone";
 
   if (!deviceId || !DEVICE_ID_RE.test(deviceId)) {
     return Response.json(
@@ -163,8 +177,8 @@ export async function POST(req: Request): Promise<Response> {
       registration: {
         publicKeySpki,
         userId: body.userId ?? null,
-        kind: "phone",
-        appIds: PHONE_APP_IDS,
+        kind,
+        appIds: appIdsFor(kind),
         label,
         pairedAt,
       },
@@ -175,6 +189,69 @@ export async function POST(req: Request): Promise<Response> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[api/devices] pair failed", message);
+    return Response.json({ error: message }, { status: 500 });
+  }
+}
+
+interface CodeBody {
+  code?: string;
+  credentials?: STSCredentials;
+  stackPrefix?: string;
+  region?: string;
+  userId?: string | null;
+}
+
+/**
+ * Read a pasted pairing code without approving it: what the device says it
+ * is, and the fingerprint the admin confirms with the device's owner. Nothing
+ * here touches the cloud.
+ */
+export async function INSPECT(req: Request): Promise<Response> {
+  const { code } = (await req.json()) as CodeBody;
+  const parsed = parsePairingRequest(code ?? "");
+  if (!parsed.ok) return Response.json({ error: parsed.reason }, { status: 400 });
+  return Response.json({
+    request: parsed.request,
+    fingerprint: deviceFingerprint(parsed.request.publicKeySpki),
+  });
+}
+
+/**
+ * Approve a device from its pairing code: publish its record, bound to the
+ * user the admin chose. The device made its own key and sent only the public
+ * half, so the private half never leaves it. The device learns of the
+ * approval by polling `device/self`.
+ */
+export async function APPROVE(req: Request): Promise<Response> {
+  const body = (await req.json()) as CodeBody;
+  const parsed = parsePairingRequest(body.code ?? "");
+  if (!parsed.ok) return Response.json({ error: parsed.reason }, { status: 400 });
+  const { credentials, stackPrefix, region } = body;
+  if (!credentials || !stackPrefix || !region) {
+    return Response.json({ error: "Sign in to approve a device." }, { status: 401 });
+  }
+  const { deviceId, publicKeySpki, label, kind } = parsed.request;
+  try {
+    const config = readConfig();
+    const awsCreds = await managerCredentials(config, credentials, region);
+    await putDeviceKeyParameter({
+      stackPrefix,
+      deviceId,
+      registration: {
+        publicKeySpki,
+        userId: body.userId ?? null,
+        kind,
+        appIds: appIdsFor(kind),
+        label,
+        pairedAt: new Date().toISOString(),
+      },
+      region,
+      awsCreds,
+    });
+    return Response.json({ approved: { deviceId, label, kind } });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[api/devices] approve failed", message);
     return Response.json({ error: message }, { status: 500 });
   }
 }

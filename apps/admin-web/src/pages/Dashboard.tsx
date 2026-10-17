@@ -38,6 +38,7 @@ import { LocalDriveSection } from "../components/LocalDriveSection";
 import { LocalAppsSection } from "../components/LocalAppsSection";
 import { CloudAppsSection } from "../components/CloudAppsSection";
 import { PairedDevicesSection } from "../components/PairedDevicesSection";
+import { ThisMachineSection } from "../components/ThisMachineSection";
 import { LocalFoldersModal, type Watch } from "../components/LocalFoldersModal";
 import { CommandOutputModal } from "../components/CommandOutputModal";
 import { targetsOf, type LocalAppEntry } from "../lib/app-types";
@@ -274,6 +275,9 @@ export function DashboardPage() {
 
   // Deployed once the cloud data server install has written its gateway URL.
   const cloudDeployed = !!cloudConfig?.apiGatewayUrl;
+  // Deployed from here, rather than joined: this machine holds the identity
+  // pool and Manager it administers the cloud through.
+  const cloudAdministered = cloudDeployed && !!cloudConfig?.userPoolId;
 
   // Fetch costs
   useEffect(() => {
@@ -556,13 +560,21 @@ export function DashboardPage() {
               <Skeleton className="h-4 w-48" />
             </div>
           ) : !cloudDeployed ? (
-            <div>
-              {/* With no deployment yet, deploying is what brings the cloud up,
-                  so it wears the dark green of a start action. */}
-              <Button asChild size="sm" className={ACTION_START}>
-                <Link to="/cloud-setup">Deploy Starkeep Cloud</Link>
-              </Button>
-            </div>
+            <>
+              <div>
+                {/* With no deployment yet, deploying is what brings the cloud up,
+                    so it wears the dark green of a start action. */}
+                <Button asChild size="sm" className={ACTION_START}>
+                  <Link to="/cloud-setup">Deploy Starkeep Cloud</Link>
+                </Button>
+              </div>
+              {/* Or join one someone else runs. */}
+              <ThisMachineSection canConnect={false} />
+            </>
+          ) : !cloudAdministered ? (
+            // A machine that joined someone else's cloud holds its address and
+            // nothing to administer it with, so it shows only its own link.
+            <ThisMachineSection canConnect={false} />
           ) : (
             <>
               <CloudAppsSection
@@ -577,6 +589,8 @@ export function DashboardPage() {
                   />
                 }
               />
+
+              <ThisMachineSection canConnect={cognitoSession !== null} />
 
               <PairedDevicesSection />
 

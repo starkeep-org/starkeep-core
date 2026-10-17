@@ -265,59 +265,72 @@ describe("backoff (short tick interval)", () => {
   });
 });
 
-describe("auth gate (no id token)", () => {
+describe("device gate", () => {
   let cloud: FakeCloud;
-  let server: LocalDataServer;
-  let drive: InstalledApp;
 
   beforeAll(async () => {
     cloud = await startFakeCloud();
-    // Cloud URL configured but no auth.json — the supervisor must not start.
-    server = await startLocalDataServer({
-      config: {
-        apiGatewayUrl: cloud.url,
-        pullIntervalMs: 100,
-        pushDebounceMs: 25,
-      },
-    });
-    drive = await builtinAppCreds(server, "starkeep-drive");
   }, 60_000);
 
   afterAll(async () => {
-    await server?.stop();
     await cloud?.close();
   });
 
-  it("skips all exchanges and reports a disabled supervisor", async () => {
-    // Plenty of would-be tick periods.
-    await sleep(500);
-    expect(cloud.exchangeLog).toEqual([]);
-
-    const status = await syncStatus(drive);
-    expect(status.enabled).toBe(false);
-    expect(status.perApp).toEqual([]);
-    expect(status.lastError).toBeNull();
-
-    // Manual trigger is a clean no-op, not a 401 storm.
-    const now = await drive.fetch("/sync/now", { method: "POST" });
-    expect(now.status).toBe(200);
-    expect(await now.json()).toEqual({ applied: 0, shipped: 0, complete: true });
-    expect(cloud.exchangeLog).toEqual([]);
-  });
-
-  it("an expired token is treated as no token", async () => {
-    const expired = await startLocalDataServer({
+  it("skips all exchanges on a machine with no device key", async () => {
+    const server = await startLocalDataServer({
       config: { apiGatewayUrl: cloud.url, pullIntervalMs: 100, pushDebounceMs: 25 },
-      auth: { idToken: fakeIdToken(-3600) },
+      deviceKey: false,
     });
-    const expiredDrive = await builtinAppCreds(expired, "starkeep-drive");
     try {
-      await sleep(400);
-      const status = await syncStatus(expiredDrive);
+      const drive = await builtinAppCreds(server, "starkeep-drive");
+      await sleep(500);
+      expect(cloud.exchangeLog).toEqual([]);
+
+      const status = await syncStatus(drive);
       expect(status.enabled).toBe(false);
+      expect(status.perApp).toEqual([]);
+      expect(status.lastError).toBeNull();
+
+      // Manual trigger is a clean no-op, not a 401 storm.
+      const now = await drive.fetch("/sync/now", { method: "POST" });
+      expect(now.status).toBe(200);
+      expect(await now.json()).toEqual({ applied: 0, shipped: 0, complete: true });
       expect(cloud.exchangeLog).toEqual([]);
     } finally {
-      await expired.stop();
+      await server.stop();
+    }
+  });
+
+  it("waits while no admin has approved the key, and starts once one has", async () => {
+    cloud.devicePolicy.autoApprove = false;
+    cloud.clearExchangeLog();
+    const server = await startLocalDataServer({
+      config: { apiGatewayUrl: cloud.url, pullIntervalMs: 100, pushDebounceMs: 25 },
+    });
+    try {
+      const drive = await builtinAppCreds(server, "starkeep-drive");
+      await sleep(400);
+      expect((await syncStatus(drive)).enabled).toBe(false);
+      expect(cloud.exchangeLog).toEqual([]);
+      const pending = (await (await fetch(`${server.url}/device`)).json()) as { approval: { state: string } };
+      expect(pending.approval.state).toBe("pending");
+
+      cloud.registerDevice(server.device!.deviceId, {
+        publicKeySpki: server.device!.publicKeySpki,
+        userId: "sub-1",
+        kind: "desktop",
+        label: null,
+      });
+      const checked = (await (await fetch(`${server.url}/device/check`, { method: "POST" })).json()) as {
+        approval: { state: string; userId: string };
+      };
+      expect(checked.approval).toMatchObject({ state: "approved", userId: "sub-1" });
+      expect((await syncStatus(drive)).enabled).toBe(true);
+      await sleep(300);
+      expect(cloud.exchangeLog.length).toBeGreaterThan(0);
+    } finally {
+      cloud.devicePolicy.autoApprove = true;
+      await server.stop();
     }
   });
 });

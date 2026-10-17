@@ -9,5 +9,6 @@ export {
   startFakeCloud,
   type FakeCloud,
   type FakeCloudFailures,
+  type FakeCloudDevice,
   type FakeCloudExchangeLogEntry,
 } from "./fake-cloud.js";

@@ -16,7 +16,9 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { deviceSigner, fromBase64, generateDeviceId, toBase64 } from "@starkeep/protocol-primitives";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
@@ -53,12 +55,18 @@ export interface LocalDataServerOptions {
   /** Milliseconds to wait for /health before failing. */
   startTimeoutMs?: number;
   /**
-   * Written to `<dir>/auth.json` before boot. The server's id-token liveness
-   * gate only decodes the JWT `exp` claim locally (no signature check), so a
-   * `fakeIdToken()` here is enough to let the sync supervisor start against a
-   * fake cloud.
+   * Written to `<dir>/auth.json` before boot: the local data server's own
+   * Cognito sign-in. Sync no longer reads it; see {@link deviceKey}.
    */
   auth?: { idToken: string; refreshToken?: string };
+  /**
+   * This machine's device key, written to `<dir>/device-key.json` before boot.
+   * The server signs every call to the cloud with it and starts sync once the
+   * cloud accepts it, which a fake cloud does by default. Written by default
+   * whenever `config.apiGatewayUrl` names a cloud; `false` boots with none, as
+   * a machine nobody has connected yet.
+   */
+  deviceKey?: false;
 }
 
 /**
@@ -81,6 +89,8 @@ export interface LocalDataServer {
   url: string;
   port: number;
   starkeepDir: string;
+  /** The device key written before boot, or null when none was. */
+  device: { deviceId: string; publicKeySpki: string } | null;
   child: ChildProcess;
   /** Combined stdout+stderr captured so far (for debugging assertions). */
   logs(): string;
@@ -128,6 +138,29 @@ export async function startLocalDataServer(
     // need its first-boot generation path when a partial config is given.
     const config = { nodeId: `test-${port}-${Date.now()}`, ...options.config };
     await writeFile(join(starkeepDir, "config.json"), JSON.stringify(config, null, 2));
+  }
+
+  let device: { deviceId: string; publicKeySpki: string } | null = null;
+  if (options.config?.["apiGatewayUrl"] && options.deviceKey !== false) {
+    await mkdir(starkeepDir, { recursive: true });
+    const keyPath = join(starkeepDir, "device-key.json");
+    let stored: { deviceId: string; seed: string } | null = null;
+    try {
+      // A reused dir keeps its key, as a restarted machine does.
+      stored = JSON.parse(await readFile(keyPath, "utf8")) as { deviceId: string; seed: string };
+    } catch {
+      const deviceId = generateDeviceId((n) => new Uint8Array(randomBytes(n)));
+      stored = { deviceId, seed: toBase64(new Uint8Array(randomBytes(32))) };
+      await writeFile(
+        keyPath,
+        JSON.stringify({ ...stored, label: null, createdAt: new Date().toISOString() }),
+        { mode: 0o600 },
+      );
+    }
+    device = {
+      deviceId: stored.deviceId,
+      publicKeySpki: deviceSigner(stored.deviceId, fromBase64(stored.seed)).publicKeySpki,
+    };
   }
 
   if (options.auth) {
@@ -259,6 +292,7 @@ export async function startLocalDataServer(
     url,
     port,
     starkeepDir,
+    device,
     child,
     logs: () => output,
     successorPids: () => [...successors],
