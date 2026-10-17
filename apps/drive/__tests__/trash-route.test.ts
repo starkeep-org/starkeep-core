@@ -5,7 +5,7 @@
  * promise a Trash makes: an item that might be reclaimed tomorrow and one that will
  * still be there next year look identical without it. So the date is computed per
  * item from the library's configured window — and when this node cannot read the
- * winning settings file, it is `null` rather than a date derived from a default the
+ * deployment's settings, it is `null` rather than a date derived from a default the
  * person may never have chosen.
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";

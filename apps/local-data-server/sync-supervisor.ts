@@ -1,5 +1,5 @@
 import type { RawDatabase } from "@starkeep/storage-adapter";
-import type { AnyRecord } from "@starkeep/protocol-primitives";
+import { DEPLOYMENT_SETTINGS_ROUTE, type AnyRecord } from "@starkeep/protocol-primitives";
 import {
   HttpObjectStorageAdapter,
   blobCandidateForRecord,
@@ -246,6 +246,14 @@ export interface SyncSupervisor {
    * file, when this node does not hold the bytes, or when the upload failed.
    */
   pushSharedBlob(record: AnyRecord): Promise<boolean>;
+
+  /**
+   * The deployment's settings document, read from the cloud's Drive channel:
+   * the raw document, or null when none is set. Throws when the cloud cannot
+   * answer. Signed as the Drive channel signs, so it works before the Drive
+   * engine starts.
+   */
+  readDeploymentSettings(): Promise<unknown>;
 }
 
 /**
@@ -723,6 +731,18 @@ export function createSyncSupervisor(
         sizeBytes: record.sizeBytes,
         ...(record.mimeType ? { mimeType: record.mimeType } : {}),
       });
+    },
+
+    async readDeploymentSettings() {
+      // Signed over the path below the app, as the sync transport signs.
+      const url = `${cloudUrlBase}/apps/${encodeURIComponent(DRIVE_APP_ID)}${DEPLOYMENT_SETTINGS_ROUTE}`;
+      const res = await fetch(url, {
+        method: "GET",
+        headers: makeSignerFor(DRIVE_APP_ID)("GET", DEPLOYMENT_SETTINGS_ROUTE, ""),
+      });
+      if (!res.ok) throw new Error(`the cloud answered ${res.status} for the deployment's settings`);
+      const body = (await res.json()) as { settings?: unknown };
+      return body.settings ?? null;
     },
 
     start() {

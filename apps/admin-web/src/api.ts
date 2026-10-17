@@ -29,6 +29,7 @@ import * as cloudDataServerInstall from "./routes/cloud-data-server-install";
 import * as config from "./routes/config";
 import * as costs from "./routes/costs";
 import * as devices from "./routes/devices";
+import * as deploymentSettings from "./routes/deployment-settings";
 import * as driveInstall from "./routes/drive-install";
 import * as execDaemon from "./routes/exec-daemon";
 import * as execDaemonStatus from "./routes/exec-daemon-status";
@@ -80,7 +81,8 @@ api.post("/residency/free-up-space", (c) => standIns.POST_FREE_UP_SPACE(c.req.ra
 api.post("/residency/reap", (c) => standIns.POST_REAP(c.req.raw));
 api.post("/sync/verify", () => standIns.POST_VERIFY());
 api.get("/library/stand-in-standards", () => standIns.GET_LIBRARY_STANDARDS());
-api.put("/library/stand-in-standards", (c) => standIns.PUT_LIBRARY_STANDARDS(c.req.raw));
+api.get("/deployment-settings", () => deploymentSettings.GET());
+api.put("/deployment-settings", (c) => deploymentSettings.PUT(c.req.raw));
 
 api.get("/runtime-config", () => runtimeConfig.GET());
 

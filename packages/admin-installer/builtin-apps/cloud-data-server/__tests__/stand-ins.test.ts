@@ -10,7 +10,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 import { mockClient } from "aws-sdk-client-mock";
-import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
+import { SSMClient, GetParameterCommand, ParameterNotFound } from "@aws-sdk/client-ssm";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 import {
   S3Client,
@@ -18,12 +18,7 @@ import {
   HeadObjectCommand,
   PutObjectTaggingCommand,
 } from "@aws-sdk/client-s3";
-import {
-  SETTINGS_TYPE_ID,
-  serializeHLC,
-  serializeUserSettings,
-  type UserSettings,
-} from "@starkeep/protocol-primitives";
+import { serializeHLC, type DeploymentSettings } from "@starkeep/protocol-primitives";
 import { signRequest } from "@starkeep/app-client";
 import type { APIGatewayEvent, LambdaContext } from "../src/handler-utils.js";
 import {
@@ -51,10 +46,19 @@ const cfKeyPair = generateKeyPairSync("rsa", {
   privateKeyEncoding: { type: "pkcs1", format: "pem" },
 });
 const CF_SIGNING_PARAM = "/teststack/app-creds/_cloudfront-signing";
+const SETTINGS_PARAM = "/teststack/platform/deployment-settings";
+
+/** What the deployment-settings parameter holds for the next request: a document, none, or a failed read. */
+let settingsParam: DeploymentSettings | null | "fail" = null;
+
+/** How many times the cloud read the deployment-settings parameter. */
+const settingsReads = (): number =>
+  ssmMock.commandCalls(GetParameterCommand).filter((c) => c.args[0].input.Name === SETTINGS_PARAM).length;
 
 type HandlerModule = typeof import("../src/api-handler.js");
 let handler: HandlerModule["handler"];
 let setDbFactory: HandlerModule["__setDatabaseClientFactoryForTests"];
+let resetSettingsCache: HandlerModule["_resetDeploymentSettingsCache"];
 let userToken = "";
 
 beforeAll(async () => {
@@ -67,6 +71,7 @@ beforeAll(async () => {
   const mod = await import("../src/api-handler.js");
   handler = mod.handler;
   setDbFactory = mod.__setDatabaseClientFactoryForTests;
+  resetSettingsCache = mod._resetDeploymentSettingsCache;
   ({ token: userToken } = await installUserTokenFixture());
 });
 
@@ -78,7 +83,14 @@ beforeEach(() => {
   ssmMock.reset();
   stsMock.reset();
   s3Mock.reset();
+  settingsParam = null;
+  resetSettingsCache();
   ssmMock.on(GetParameterCommand).callsFake(async (input: { Name?: string }) => {
+    if (input.Name === SETTINGS_PARAM) {
+      if (settingsParam === "fail") throw new Error("ThrottlingException");
+      if (settingsParam === null) throw new ParameterNotFound({ message: "none", $metadata: {} });
+      return { Parameter: { Value: JSON.stringify(settingsParam) } };
+    }
     if (input.Name === CF_SIGNING_PARAM) {
       return {
         Parameter: {
@@ -138,8 +150,6 @@ const GRANTS = [
 const PARENT_ID = "01PARENT000000000000000000";
 const HASH = "c".repeat(64);
 const RECORDS_INSERT = /insert into "shared"\."records"/;
-/** The library-settings lookup: the live record of the settings type. */
-const SETTINGS_QUERY = /from "shared"\."records" where "type" = \$1 and "deleted_at" is null/;
 const GET_BY_ID = /from "shared"\."records" where "id" = \$1/;
 const LIVE_STAND_IN = /from "shared"\."records" where "parent_id" = \$1 and "stand_in_role" = \$2/;
 /** A serialized deletion reading, for a row that has to read as tombstoned. */
@@ -674,7 +684,7 @@ describe("POST /data/records/:id/fidelity", () => {
   it("writes the original's fidelity as a platform write", async () => {
     const db = fakeDsqlWithGrants(GRANTS)
       // Unmeasured and unstamped: the report records both, so the cloud reads
-      // the library's settings to know what to stamp with.
+      // the deployment's settings to know what to stamp with.
       .on(GET_BY_ID, [parentRow({ fidelity: null, canonical_threshold: null, origin_app_id: "drive" })])
       .on(LIVE_STAND_IN, [])
       .on(/from "shared"\."records" where "object_storage_key" = \$1 and "deleted_at" is null/, [parentRow()])
@@ -694,8 +704,8 @@ describe("POST /data/records/:id/fidelity", () => {
       canonical_threshold: 4272,
       origin_app_id: "drive",
     });
-    // The stamp is read from the library's settings first.
-    expect(db.log.some((q) => q.values.includes(SETTINGS_TYPE_ID))).toBe(true);
+    // The stamp is read from the deployment's settings first.
+    expect(settingsReads()).toBe(1);
   });
 
   it("answers 409 for a disagreeing report", async () => {
@@ -703,20 +713,17 @@ describe("POST /data/records/:id/fidelity", () => {
     setDbFactory(db);
     const res = await handler(report("fr2", PARENT_ID, 5000), context);
     expect(res.statusCode).toBe(409);
-    expect(db.log.some((q) => q.values.includes(SETTINGS_TYPE_ID))).toBe(false);
+    expect(settingsReads()).toBe(0);
   });
 });
 
 /**
- * The cloud reads the library's settings from the database only for a request
- * that stamps an original. Each warm Lambda caches the value, and a settings
- * file another instance applied reaches this one only through the database,
- * so a request that stamps reads first; every other request skips the query.
+ * The cloud reads the deployment's settings only for a request that stamps an
+ * original. A request that stamps reads first, through a cache that lasts a
+ * minute; every other request skips the read.
  */
-describe("reading the library's settings", () => {
+describe("reading the deployment's settings", () => {
   const SETTINGS_ID = "01SETTINGS0000000000000000";
-  /** The settings lookup, recognised by the type it asks for. */
-  const settingsReads = (db: FakeDsql) => db.log.filter((q) => q.values.includes(SETTINGS_TYPE_ID));
   const hlc = { wallTime: Date.UTC(2026, 0, 2), counter: 0, nodeId: "peer" };
 
   function exchange(body: unknown): APIGatewayEvent {
@@ -771,37 +778,39 @@ describe("reading the library's settings", () => {
     const db = emptyStore();
     const res = await handler(exchange({ watermarks: {}, records: [shippedOriginal(null)] }), context);
     expect(res.statusCode, res.body).toBe(200);
-    expect(settingsReads(db)).toHaveLength(1);
-    expect(db.log.indexOf(settingsReads(db)[0]!)).toBeLessThan(db.log.indexOf(db.calls(RECORDS_INSERT)[0]!));
+    expect(settingsReads()).toBe(1);
+    expect(db.calls(RECORDS_INSERT).length).toBeGreaterThan(0);
   });
 
   it("skips them for a Drive exchange with nothing to stamp", async () => {
     for (const body of [{ watermarks: {} }, { watermarks: {}, records: [shippedOriginal(4272)] }]) {
-      const db = emptyStore();
+      emptyStore();
       const res = await handler(exchange(body), context);
       expect(res.statusCode, res.body).toBe(200);
-      expect(settingsReads(db), JSON.stringify(body)).toHaveLength(0);
+      expect(settingsReads(), JSON.stringify(body)).toBe(0);
     }
   });
 
   it("reads them for a record write that stamps, and skips them otherwise", async () => {
-    const stamping = emptyStore();
+    emptyStore();
     await handler(
       post("rs1", { type: "image/jpeg", contentType: "image/jpeg", contentHash: HASH, sizeBytes: 3, fidelity: 4000 }),
       context,
     );
-    expect(settingsReads(stamping)).toHaveLength(1);
+    expect(settingsReads()).toBe(1);
 
-    const plain = emptyStore();
+    ssmMock.resetHistory();
+    resetSettingsCache();
+    emptyStore();
     await handler(post("rs2", { type: "image/jpeg", contentType: "image/jpeg", contentHash: HASH, sizeBytes: 3 }), context);
-    expect(settingsReads(plain)).toHaveLength(0);
+    expect(settingsReads()).toBe(0);
   });
 
   it("skips them for a listing", async () => {
-    const db = emptyStore();
+    emptyStore();
     const res = await handler(request("rs3", "GET", "/data/records"), context);
     expect(res.statusCode, res.body).toBe(200);
-    expect(settingsReads(db)).toHaveLength(0);
+    expect(settingsReads()).toBe(0);
   });
 });
 
@@ -820,36 +829,14 @@ describe("reading the library's settings", () => {
 describe("POST /data/reap — the window it applies", () => {
   const TOMBSTONE_SCAN = /"deleted_at" is not null/;
 
-  function reap(settingsRecordId: string | null): FakeDsql {
+  function reap(): FakeDsql {
     const db = fakeDsqlWithGrants(GRANTS)
-      .on(
-        SETTINGS_QUERY,
-        settingsRecordId === null
-          ? []
-          : [
-              recordRow({
-                id: settingsRecordId,
-                type: SETTINGS_TYPE_ID,
-                origin_app_id: "starkeep-drive",
-                object_storage_key: `shared/starkeep/aa/${"a".repeat(64)}`,
-              }),
-            ],
-      )
       // Nothing is past any cutoff, so the report's window is the whole of what
       // this pass decided.
       .on(TOMBSTONE_SCAN, [])
       .otherwise(/from "shared"\."records"/, []);
     setDbFactory(db);
     return db;
-  }
-
-  /** The settings file as Drive's storage serves it. */
-  function settingsFile(settings: UserSettings | null) {
-    s3Mock.on(GetObjectCommand).resolves(
-      (settings === null
-        ? {}
-        : { Body: { transformToByteArray: async () => serializeUserSettings(settings) } }) as never,
-    );
   }
 
   function reapRequest(): APIGatewayEvent {
@@ -867,10 +854,10 @@ describe("POST /data/reap — the window it applies", () => {
     };
   }
 
-  async function report(db: FakeDsql): Promise<Record<string, unknown>> {
+  async function report(_db: FakeDsql): Promise<Record<string, unknown>> {
     const res = await handler(reapRequest(), context);
     expect(res.statusCode, res.body).toBe(200);
-    expect(db.log.filter((q) => q.values.includes(SETTINGS_TYPE_ID))).toHaveLength(1);
+    expect(settingsReads()).toBe(1);
     return JSON.parse(res.body) as Record<string, unknown>;
   }
 
@@ -878,26 +865,79 @@ describe("POST /data/reap — the window it applies", () => {
     // The bug this pins: the route used to read a cache no reap-path code fills,
     // so a cold environment reaped to 30 days under a library whose owner chose
     // a year, destroying bytes still inside the window the Trash promised.
-    settingsFile({ trash: { retentionDays: 365 } });
-    const db = reap("01SETTINGSREAP00000000000A");
+    settingsParam = { trash: { retentionDays: 365 } };
+    const db = reap();
     expect(await report(db)).toMatchObject({ retentionDays: 365, reaped: [] });
   });
 
-  it("reaps nothing when the winning settings file cannot be read", async () => {
-    // A file exists and this host cannot use it, so the library's value is
-    // unknown — and the cloud's `cloudConfigured: () => false`, which says the
-    // defaults are its value for stamping, no longer answers for the window.
-    settingsFile(null);
-    const db = reap("01SETTINGSREAP00000000000B");
+  it("reaps nothing when the deployment's settings cannot be read", async () => {
+    // The value is unknown — and the cloud's `cloudConfigured: () => false`,
+    // which says the defaults are its value for stamping, does not answer for
+    // the window.
+    settingsParam = "fail";
+    const db = reap();
     const body = await report(db);
     expect(body).toMatchObject({ retentionDays: null, reaped: [], reclaimedBytes: 0 });
-    expect((body["retentionProblems"] as string[]).join()).toMatch(/not reached this machine/);
+    expect((body["retentionProblems"] as string[]).join()).toMatch(/ThrottlingException/);
     // Nothing was enumerated, because the pass refused before looking.
     expect(db.calls(TOMBSTONE_SCAN)).toHaveLength(0);
   });
 
-  it("applies the platform default when the person has set no value", async () => {
-    const db = reap(null);
+  it("applies the platform default when the operator has set no value", async () => {
+    const db = reap();
     expect(await report(db)).toMatchObject({ retentionDays: 30 });
+  });
+});
+
+/**
+ * GET /apps/starkeep-drive/deployment/settings — the document every node and
+ * the phone read, answered from SSM before any app role is assumed.
+ */
+describe("GET /deployment/settings", () => {
+  function settingsRequest(appId: string): APIGatewayEvent {
+    const path = "/deployment/settings";
+    return {
+      rawPath: `/apps/${appId}${path}`,
+      requestContext: { http: { method: "GET" } },
+      headers: {
+        ...signRequest({ appId, hmacSecret: `secret-${appId}`, method: "GET", path, body: "" }),
+        "X-Starkeep-User-Token": userToken,
+      },
+      body: "",
+    };
+  }
+
+  it("answers the document, without assuming an app role", async () => {
+    settingsParam = { trash: { retentionDays: 90 } };
+    const res = await handler(settingsRequest("starkeep-drive"), context);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ settings: { trash: { retentionDays: 90 } } });
+    expect(stsMock.commandCalls(AssumeRoleCommand)).toHaveLength(0);
+  });
+
+  it("answers null when no document is set", async () => {
+    const res = await handler(settingsRequest("starkeep-drive"), context);
+    expect(JSON.parse(res.body)).toEqual({ settings: null });
+  });
+
+  it("reuses one read for a minute", async () => {
+    settingsParam = { trash: { retentionDays: 90 } };
+    await handler(settingsRequest("starkeep-drive"), context);
+    await handler(settingsRequest("starkeep-drive"), context);
+    expect(settingsReads()).toBe(1);
+  });
+
+  it("answers 503 when SSM cannot be read, and reads again next time", async () => {
+    settingsParam = "fail";
+    const res = await handler(settingsRequest("starkeep-drive"), context);
+    expect(res.statusCode).toBe(503);
+    settingsParam = { trash: { retentionDays: 7 } };
+    const again = await handler(settingsRequest("starkeep-drive"), context);
+    expect(JSON.parse(again.body)).toEqual({ settings: { trash: { retentionDays: 7 } } });
+  });
+
+  it("is Drive's route only", async () => {
+    const res = await handler(settingsRequest("photos"), context);
+    expect(res.statusCode).toBe(404);
   });
 });

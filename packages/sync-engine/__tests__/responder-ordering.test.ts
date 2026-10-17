@@ -5,9 +5,8 @@
  * order, as step 1 does app rows. It used to iterate the wire order, which was
  * safe only because a shared-record `put()` that throws aborts the whole
  * exchange: no response, so no coverage report over a partially-applied author.
- * A record that needs its file before it applies (`requiresFileToApply`) halts
- * its author *without* throwing, and a halt is only safe over a contiguous
- * prefix, so the sort is now required rather than optional.
+ * A halt is only safe over a contiguous prefix, and the sort keeps every
+ * author's applied records contiguous.
  *
  * These cases pin the pair: out-of-order delivery converges (LWW does not care
  * what order snapshots arrive in); a failed apply still aborts; and a failure

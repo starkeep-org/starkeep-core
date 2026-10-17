@@ -37,17 +37,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import {
-  readCloudConfig,
-  readCognitoSession,
-  writeCloudCredentials,
-  writeCognitoSession,
-} from "@/lib/cloud-config";
-import {
-  refreshTokens,
-  getIdentityPoolCredentials,
-  type STSCredentials,
-} from "@/lib/cognito-auth";
+import { operatorSession } from "@/lib/operator-session";
 import { generateDeviceKeys, pairingPayload } from "@/lib/device-pairing";
 
 /** Must match the route's `MAX_LABEL_LENGTH`. */
@@ -74,42 +64,6 @@ type Status =
   | { kind: "revoked"; deviceId: string }
   | { kind: "error"; message: string };
 
-/**
- * A fresh STS session for one call.
- *
- * Minted per action rather than held, matching `CloudAppsSection`: the
- * credentials expire, and a stale one surfaces as an opaque AWS error at the
- * moment the operator is trying to do something.
- */
-async function credentialsNow(): Promise<{
-  credentials: STSCredentials;
-  stackPrefix: string;
-  region: string;
-  /** The signed-in operator's Cognito `sub`. */
-  userSub: string;
-}> {
-  const cfg = await readCloudConfig();
-  if (!cfg) throw new Error("Cloud is not configured. Complete the cloud setup first.");
-  const session = await readCognitoSession();
-  if (!session?.refreshToken) throw new Error("Not signed in. Sign in from the dashboard first.");
-
-  const tokens = await refreshTokens(cfg.cognitoConfig, session.refreshToken);
-  const credentials = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
-  await writeCloudCredentials(credentials);
-  await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
-
-  return { credentials, stackPrefix: cfg.stackPrefix, region: cfg.region, userSub: subOf(tokens.idToken) };
-}
-
-/** The `sub` claim of an ID token. The token came straight from Cognito, so it is read, not verified. */
-function subOf(idToken: string): string {
-  const payload = idToken.split(".")[1] ?? "";
-  const json = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
-  const sub = (JSON.parse(json) as { sub?: unknown }).sub;
-  if (typeof sub !== "string" || sub === "") throw new Error("The sign-in token names no user.");
-  return sub;
-}
-
 /** The name a person reads for a device. */
 export function deviceName(device: Pick<PairedDevice, "label">): string {
   return device.label ?? "Unnamed device";
@@ -124,7 +78,7 @@ export function PairedDevicesSection() {
 
   const loadList = useCallback(async () => {
     try {
-      const { credentials, stackPrefix, region } = await credentialsNow();
+      const { credentials, stackPrefix, region } = await operatorSession();
       const res = await fetch("/api/devices/list", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -151,7 +105,7 @@ export function PairedDevicesSection() {
     setStatus({ kind: "working" });
     try {
       const keys = await generateDeviceKeys();
-      const { credentials, stackPrefix, region, userSub } = await credentialsNow();
+      const { credentials, stackPrefix, region, userSub } = await operatorSession();
       const res = await fetch("/api/devices", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -189,7 +143,7 @@ export function PairedDevicesSection() {
     setConfirming(null);
     setStatus({ kind: "working" });
     try {
-      const { credentials, stackPrefix, region } = await credentialsNow();
+      const { credentials, stackPrefix, region } = await operatorSession();
       const res = await fetch("/api/devices", {
         method: "DELETE",
         headers: { "content-type": "application/json" },

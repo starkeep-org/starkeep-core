@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { saveDeploymentSettings } from "@/lib/deployment-settings-client";
 
 /**
  * Stand-ins on this machine: the sync-down ceilings, "Keep originals here",
@@ -61,7 +63,7 @@ interface ReapReport {
   reaped: Array<{ objectStorageKey: string; sizeBytes: number }>;
   reclaimedBytes: number;
   refused: Array<{ objectStorageKey: string; reason: string; detail: string }>;
-  /** Null when this machine cannot read the library's settings file. */
+  /** Null when this machine cannot read the deployment's settings. */
   retentionDays: number | null;
   /** Why the window could not be read, when it could not. */
   retentionProblems?: string[];
@@ -533,6 +535,7 @@ function Reaper() {
         deleted item can be restored whole from Drive&apos;s Trash. Nothing else reclaims a deleted
         file, so storage otherwise only grows.
       </p>
+      <TrashWindow />
       <div className="flex flex-wrap items-center gap-2 text-sm">
         <Button size="sm" variant="outline" disabled={busy} onClick={() => void run(true)}>
           Estimate
@@ -547,12 +550,97 @@ function Reaper() {
   );
 }
 
+/**
+ * How long a deleted item stays restorable, for every node and the cloud.
+ *
+ * A deployment setting, so saving it goes to the cloud when there is one,
+ * which needs a signed-in operator, and to this machine's config otherwise.
+ * Shortening it brings the reaper's cutoff closer, so the next reclaim may
+ * remove files that were restorable before.
+ */
+function TrashWindow() {
+  const [days, setDays] = useState<number | null>(null);
+  const [draft, setDraft] = useState("");
+  const [status, setStatus] = useState<"loading" | "ready" | "offline" | "saving" | "saved">("loading");
+  const [problems, setProblems] = useState<string[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/deployment-settings")
+      .then((r) => r.json())
+      .then((body: { retentionDays?: number; offline?: boolean }) => {
+        if (cancelled) return;
+        if (body.offline || typeof body.retentionDays !== "number") {
+          setStatus("offline");
+          return;
+        }
+        setDays(body.retentionDays);
+        setDraft(String(body.retentionDays));
+        setStatus("ready");
+      })
+      .catch(() => {
+        if (!cancelled) setStatus("offline");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (status === "loading" || status === "offline") return null;
+
+  const value = Number(draft);
+  const valid = Number.isInteger(value) && value > 0;
+
+  async function save() {
+    setStatus("saving");
+    const refused = await saveDeploymentSettings({ trash: { retentionDays: value } });
+    setProblems(refused);
+    if (refused.length === 0) setDays(value);
+    setStatus(refused.length === 0 ? "saved" : "ready");
+  }
+
+  return (
+    <div className="space-y-2">
+      <label className="flex flex-wrap items-center gap-2 text-sm">
+        Keep deleted items for
+        <Input
+          className="w-24"
+          type="number"
+          min={1}
+          step={1}
+          value={draft}
+          aria-label="Days a deleted item is kept"
+          onChange={(e) => {
+            setDraft(e.target.value);
+            setStatus("ready");
+          }}
+        />
+        days
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={!valid || value === days || status === "saving"}
+          onClick={() => void save()}
+        >
+          {status === "saving" ? "Saving…" : "Save"}
+        </Button>
+      </label>
+      {status === "saved" && (
+        <p className="text-sm text-muted-foreground" role="status">
+          Saved. Every machine and the cloud use {days} days within a minute.
+        </p>
+      )}
+      {problems.length > 0 && <p className="text-sm text-destructive">{problems.join(" ")}</p>}
+    </div>
+  );
+}
+
 function ReapLine({ report }: { report: ReapReport }) {
   if (report.retentionDays === null) {
     return (
       <p className="text-sm text-muted-foreground" role="status">
-        This machine cannot read the library&apos;s settings file yet, so it does not know how long
-        a deleted item is kept. Nothing will be reclaimed until it can.
+        This machine cannot read the deployment&apos;s settings, so it does not know how long a
+        deleted item is kept. Nothing will be reclaimed until it can.
         {report.retentionProblems && report.retentionProblems.length > 0 && (
           <> The read reported: {report.retentionProblems.join("; ")}.</>
         )}

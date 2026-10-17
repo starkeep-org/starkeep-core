@@ -69,8 +69,8 @@ import {
   labelValueSetKey,
   parseLabelRef,
   STAND_IN_MIME_TYPES,
-  isSettingsRecord,
   SETTINGS_TYPE_ID,
+  DEPLOYMENT_SETTINGS_ROUTE,
   stampFor,
   hasMetadataTable,
 } from "@starkeep/protocol-primitives";
@@ -267,8 +267,9 @@ interface CachedDeviceKey {
 }
 
 /**
- * The category the platform's own files live in — today only the library's
- * settings file. A paired device may not write it. See {@link deviceMayCall}.
+ * The category the platform's own files live in, Drive-only. Today it holds
+ * only the retired settings records. A paired device may not write it. See
+ * {@link deviceMayCall}.
  */
 const PLATFORM_CATEGORY = typeCategory(SETTINGS_TYPE_ID);
 
@@ -276,18 +277,19 @@ const PLATFORM_CATEGORY = typeCategory(SETTINGS_TYPE_ID);
  * Whether a paired device may call this route at all.
  *
  * A device acts as Starkeep Drive, and Drive may do anything to shared data,
- * including deleting records and rewriting the library's settings file. A
+ * including deleting records and writing the platform's own files. A
  * phone needs a small part of that: it exchanges records and moves bytes. So a
  * device reaches exactly the routes the phone's sync transport and object
  * storage adapter call, and nothing else. A stolen phone can then sync, which
  * its key already allowed, but cannot delete records through the record routes
- * or rewrite the library's settings file.
+ * or write the platform's own files.
  *
  * Writes that these routes allow are checked separately for the platform
  * category: see {@link deviceWriteRefusal}.
  */
 export function deviceMayCall(method: string, subPath: string): boolean {
   if (method === "GET" && subPath === "/health") return true;
+  if (method === "GET" && subPath === DEPLOYMENT_SETTINGS_ROUTE) return true;
   if (method === "POST" && subPath === "/sync/exchange") return true;
   if (method === "POST" && subPath === "/files/presign") return true;
   if (method === "GET" && /^\/files\/.+\/(presign|stat)$/.test(subPath)) return true;
@@ -807,12 +809,61 @@ function makeAdapters(appId: string, creds: CachedCreds) {
 const CLOUD_NODE_ID = `cloud-${process.env.AWS_LAMBDA_LOG_STREAM_NAME ?? randomUUID()}`;
 
 /**
- * The library's settings as this warm Lambda last read them. One source per
- * execution environment, refreshed through each request's own adapters, so a
- * settings file is fetched from S3 only when the winning file changes. The
- * cloud always knows the library's value: its settings file, or the defaults.
+ * How long a warm Lambda reuses the deployment's settings before reading the
+ * parameter again. A change made in admin-web reaches every stamp within this
+ * window, and a busy library costs one SSM read a minute rather than one per
+ * request.
  */
-const cloudLibrarySettings = createLibrarySettings({ cloudConfigured: () => false });
+const DEPLOYMENT_SETTINGS_TTL_MS = 60_000;
+
+let deploymentSettingsRead: { value: Promise<unknown>; at: number } | null = null;
+
+/**
+ * The deployment's settings document from SSM, or null when none is set.
+ *
+ * The parameter lives under `/<prefix>/platform/`, which this Lambda's role
+ * reads and only Manager writes. A failed read is not cached, so the next
+ * caller tries again.
+ */
+function readDeploymentSettingsParameter(): Promise<unknown> {
+  const now = Date.now();
+  if (deploymentSettingsRead && now - deploymentSettingsRead.at < DEPLOYMENT_SETTINGS_TTL_MS) {
+    return deploymentSettingsRead.value;
+  }
+  const stackPrefix = process.env.STACK_PREFIX;
+  const value = (async () => {
+    if (!stackPrefix) throw new Error("STACK_PREFIX env var is required");
+    try {
+      const result = await getSsmClient().send(
+        new GetParameterCommand({ Name: `/${stackPrefix}/platform/deployment-settings` }),
+      );
+      const raw = result.Parameter?.Value;
+      return raw ? (JSON.parse(raw) as unknown) : null;
+    } catch (err) {
+      if (err instanceof ParameterNotFound) return null;
+      throw err;
+    }
+  })();
+  deploymentSettingsRead = { value, at: now };
+  value.catch(() => {
+    if (deploymentSettingsRead?.value === value) deploymentSettingsRead = null;
+  });
+  return value;
+}
+
+/** Test seam: forget the cached parameter. */
+export function _resetDeploymentSettingsCache(): void {
+  deploymentSettingsRead = null;
+}
+
+/**
+ * The deployment's settings as this warm Lambda last read them. The cloud
+ * always knows the value: the parameter's document, or the defaults.
+ */
+const cloudLibrarySettings = createLibrarySettings({
+  read: readDeploymentSettingsParameter,
+  cloudConfigured: () => false,
+});
 
 /**
  * The container's one clock, built on first use and reused for its lifetime.
@@ -2226,6 +2277,21 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       }
     }
 
+    // GET /apps/starkeep-drive/deployment/settings — the deployment's
+    // settings document, for every node and the phone. Answered before any
+    // app role is assumed, because the document lives in SSM under this
+    // Lambda's own grant and touches no user's data. Drive only: Drive is the
+    // channel every node holds.
+    if (method === "GET" && subPath === DEPLOYMENT_SETTINGS_ROUTE) {
+      if (appId !== DRIVE_APP_ID) return clientErr("Not found", 404);
+      try {
+        return ok({ settings: (await readDeploymentSettingsParameter()) ?? null });
+      } catch (err) {
+        console.error("[settings] reading the deployment's settings failed:", err);
+        return clientErr("The deployment's settings are unreadable", 503);
+      }
+    }
+
     const accountId = getAccountId(context.invokedFunctionArn);
     const creds = await getAppCreds(appId, accountId);
     const { db, storage, clientFactory, auroraEndpoint, region } = makeAdapters(appId, creds);
@@ -2260,11 +2326,9 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     const grants: AccessGrants = await loadAccessGrants(grantClient, appId);
     const clock: HLCClock = await makeCloudClock(grantClient);
 
-    // The library's settings, read from the database by the request that needs
-    // them. This warm Lambda's cache is one of several, and a settings file
-    // another instance applied reaches this one only through the database, so a
-    // request that reads the cache alone reads whatever earlier traffic left
-    // there.
+    // The deployment's settings, read by the request that needs them through
+    // the minute-long parameter cache above, so a change made in admin-web
+    // reaches a stamp within a minute.
     //
     // Two kinds of request need the value. A request that stamps an original
     // needs it because a stamp is permanent, so a stamp from a stale value stays
@@ -2273,19 +2337,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // afterwards. Every other use judges originals the cloud has already
     // stamped, or names advisory resolutions, which no stamp records either.
     //
-    // Memoized, so a request that does both reads once: one indexed query, and
-    // the file itself fetched through Drive's storage only when the winning file
-    // changed. Only the Drive channel tombstones a losing settings file, since
-    // only Drive may write one.
+    // Memoized, so a request that does both reads once.
     let librarySettingsRead: Promise<RetentionWindow> | null = null;
     const readLibrarySettings = (): Promise<RetentionWindow> =>
       (librarySettingsRead ??= cloudLibrarySettings
-        .acquireRetentionWindow({
-          db,
-          clock,
-          storage: { get: async (key) => (await platformStorage()).get(key) },
-          tombstoneLosers: appId === DRIVE_APP_ID,
-        })
+        .acquireRetentionWindow()
         .then((window) => {
           // A stamping path keeps the last value and carries on, so the reason
           // is logged here rather than left to the one caller that acts on it.
@@ -3667,8 +3723,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const report = await reapDeleted(
         { databaseAdapter: db, objectStorage: storage },
         {
-          // Null when the cloud cannot read the winning settings file, and a reaper
-          // in the dark reaps nothing.
+          // Null when the cloud cannot read the deployment's settings, and a
+          // reaper in the dark reaps nothing.
           retentionDays: window.known ? window.days : null,
           dryRun: body.dryRun === true,
         },
@@ -4111,9 +4167,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const isDriveChannel = appId === DRIVE_APP_ID;
       let transport;
       if (isDriveChannel) {
-        // An original arriving without a stamp is judged by the library's
-        // value during the apply and stamped with it after. An arriving
-        // settings file is read in `onApplied` below.
+        // An original arriving without a stamp is judged by the deployment's
+        // value during the apply and stamped with it after.
         if (body.records?.some(awaitsStamp)) await readLibrarySettings();
         transport = createInProcessSyncTransport({
           databaseAdapter: db,
@@ -4128,10 +4183,6 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           // as held rather than stopping there forever.
           byteCoverage: db.byteCoverageStore(DRIVE_APP_ID),
           declinesBlob: (key) => keyIsCloudExcluded(db, key),
-          // The cloud stamps originals from the settings file, and a stamp is
-          // permanent, so a settings row waits for its bytes; see
-          // `requiresFileToApply`.
-          requiresFileToApply: isSettingsRecord,
           // A canonical stand-in's row lands before its bytes, so the archive
           // decision `onApplied` takes for it finds no bytes and declines.
           // Bytes reach S3 through presigned PUTs this handler never sees, and
@@ -4145,17 +4196,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             await runArchiveTriggers(db, async () => storage, archiveTriggersFor(records, []));
           },
           // The Drive channel is where most stand-ins, originals and labels
-          // reach the cloud, and its storage is already Drive's. A settings
-          // file that arrived is read first, then every original a node
-          // recorded without knowing the library's value is stamped under a
-          // fresh cloud clock, so this exchange's reply carries the stamp back.
+          // reach the cloud, and its storage is already Drive's. Every
+          // original a node recorded without knowing the deployment's value is
+          // stamped under a fresh cloud clock, so this exchange's reply
+          // carries the stamp back.
           onApplied: async ({ records, labels }) => {
-            if (records.some(isSettingsRecord)) {
-              await cloudLibrarySettings.refresh({ db, clock, storage, tombstoneLosers: true });
-              // This request's memoized read now predates the file that just
-              // arrived, so drop it rather than let a later read reuse it.
-              librarySettingsRead = null;
-            }
             const stamped = await stampUnstampedOriginals(db, records, cloudLibrarySettings.standards(), clock);
             await runArchiveTriggers(db, async () => storage, archiveTriggersFor([...records, ...stamped], labels));
           },

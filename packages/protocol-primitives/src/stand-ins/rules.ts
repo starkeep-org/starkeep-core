@@ -86,7 +86,7 @@ export function standardsFor(
  * long as its original lives.
  *
  * Falling back to the library's current value would break the second half of
- * that. A node holding no settings file does not know the library's value, so
+ * that. A node that cannot read the deployment's settings does not know the value, so
  * it records a fidelity with no stamp; a fallback would have it judge such an
  * original by its own defaults, derive a canonical stand-in at that size, and
  * leave the cloud to stamp the real value over the top. The stand-in would

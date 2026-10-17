@@ -1,46 +1,41 @@
 /**
- * The library's settings file: what the person chose for the whole library,
- * kept as an ordinary shared record so it syncs to every node and the cloud
- * over the Drive channel like any other file.
+ * The deployment's settings: what the operator chose for every node and the
+ * cloud. One document per deployment, held outside every user's library.
  *
- * ## Why a file rather than a register on the wire
+ * ## Where the document lives
  *
- * A setting every node must agree on needs a home that replicates. The Drive
- * channel already replicates shared records, their bytes, and their
- * tombstones, to every node and the phone. A file on that path needs no wire
- * field, no table and no grant — and the person can see it in Drive.
+ * - **With a cloud.** An SSM parameter, `/<prefix>/platform/deployment-settings`.
+ *   Admin-web writes it through Manager. The cloud data server reads it and
+ *   serves it at {@link DEPLOYMENT_SETTINGS_ROUTE} on the Drive channel, so
+ *   every node reads one value and no user's data holds it.
+ * - **Without a cloud.** The local data server's `~/.starkeep/config.json`,
+ *   under `deploymentSettings`. Cloud setup seeds the parameter from these
+ *   values once.
  *
  * ## The rules
  *
- * - **Type.** `starkeep/settings`, in the Drive-only `starkeep` category. No
- *   installable app can read or rewrite it, and no extension maps to it, so
- *   only the platform assigns it. A same-named file ingested by extension is
- *   `text/json`, and the platform ignores it.
- * - **Absence.** No file exists until the person sets a value, and a missing
- *   file means the platform defaults. Defaults never count as a write, so a new
- *   node cannot overwrite the person's choice with defaults.
- * - **Edits.** A record's bytes never change, so an edit writes a new settings
- *   record and tombstones the previous one.
- * - **Concurrent edits.** The live settings record with the newest `createdAt`
- *   wins everywhere, and a node holding more than one tombstones the rest.
- *   Concurrent tombstones of the same losers converge.
+ * - **Absence.** No document means the platform defaults. Defaults never count
+ *   as a write, so a new node cannot overwrite the operator's choice.
+ * - **Every field is optional.** An absent field takes the platform's default,
+ *   so a document written by an older build keeps its meaning when a newer
+ *   build adds a setting.
+ * - **Unknown fields are ignored**, so a newer build's document still reads.
  *
- * See `~/projects/starkeep/plan-canonical-stand-in-setting-2026-09-30.md`,
- * plan choice 4.
+ * Node-local settings, such as sync-down ceilings, are not here: they affect
+ * one machine and stay in that machine's config.
+ *
+ * See `~/projects/starkeep/plan-multi-user-roles-2026-10-16.md`, phase 1.
  */
 
-import { compareHLC } from "../hlc/compare.js";
-import type { DataRecord } from "../records/types.js";
 import {
   DEFAULT_STAND_IN_STANDARDS,
   validateStandInStandards,
   type CategoryStandards,
   type StandInStandards,
 } from "../stand-ins/standards.js";
-import { SETTINGS_TYPE_ID } from "../types/core-types.js";
 
 /**
- * How long a deleted item stays recoverable when the settings file says nothing.
+ * How long a deleted item stays recoverable when the settings say nothing.
  *
  * Long enough that a person who notices a mistake a fortnight later still has the
  * item, and short enough that the tombstone set stays a bounded log rather than a
@@ -48,18 +43,15 @@ import { SETTINGS_TYPE_ID } from "../types/core-types.js";
  */
 export const DEFAULT_TRASH_RETENTION_DAYS = 30;
 
-/** The settings file's name, as Drive shows it. */
-export const USER_SETTINGS_FILE_NAME = "starkeep-user-settings.json";
-
-/** The MIME type the settings file is stored and served as. */
-export const USER_SETTINGS_MIME_TYPE = "application/json";
-
 /**
- * The file's contents. Every field is optional: an absent one takes the
- * platform's default, so a file written by an older build keeps its meaning
- * when a newer build adds a setting.
+ * The Drive-channel route that serves the document, relative to
+ * `/apps/starkeep-drive`. Answers `{ settings: DeploymentSettings | null }`,
+ * where null means no document is set.
  */
-export interface UserSettings {
+export const DEPLOYMENT_SETTINGS_ROUTE = "/deployment/settings";
+
+/** The document. Every field is optional; see the rules above. */
+export interface DeploymentSettings {
   /**
    * How long a deleted item stays recoverable, and how long its bytes stay.
    *
@@ -88,17 +80,17 @@ export interface UserSettings {
   };
 }
 
-/** How long a deleted item stays recoverable under a settings file. */
+/** How long a deleted item stays recoverable under these settings. */
 export function retentionDaysFromSettings(
-  settings: UserSettings,
+  settings: DeploymentSettings,
   fallback: number = DEFAULT_TRASH_RETENTION_DAYS,
 ): number {
   return settings.trash?.retentionDays ?? fallback;
 }
 
-/** The library's stand-in standards under a settings file. */
+/** The stand-in standards these settings amount to. */
 export function standardsFromSettings(
-  settings: UserSettings,
+  settings: DeploymentSettings,
   defaults: StandInStandards = DEFAULT_STAND_IN_STANDARDS,
 ): StandInStandards {
   const image = settings.standIns?.image;
@@ -125,9 +117,9 @@ export function standardsFromSettings(
 
 /**
  * The settings a set of standards amounts to, written out whole: every value
- * the file can hold, so the file states what the person saw when they saved.
+ * the document can hold, so it states what the operator saw when they saved.
  */
-export function settingsFromStandards(standards: StandInStandards): UserSettings {
+export function settingsFromStandards(standards: StandInStandards): DeploymentSettings {
   const edges = standards.video.advisoryLongEdges;
   return {
     standIns: {
@@ -147,15 +139,15 @@ export function settingsFromStandards(standards: StandInStandards): UserSettings
   };
 }
 
-export type UserSettingsCheck =
-  | { readonly ok: true; readonly settings: UserSettings; readonly standards: StandInStandards }
+export type DeploymentSettingsCheck =
+  | { readonly ok: true; readonly settings: DeploymentSettings; readonly standards: StandInStandards }
   | { readonly ok: false; readonly problems: readonly string[] };
 
 /**
  * Check a parsed settings value: its shape, and the standards it amounts to.
- * Unknown fields are ignored, so a newer build's file still reads here.
+ * Unknown fields are ignored, so a newer build's document still reads here.
  */
-export function checkUserSettings(value: unknown): UserSettingsCheck {
+export function checkDeploymentSettings(value: unknown): DeploymentSettingsCheck {
   const problems: string[] = [];
   if (!isObject(value)) return { ok: false, problems: ["the settings must be a JSON object"] };
   const trash = value["trash"];
@@ -207,46 +199,47 @@ export function checkUserSettings(value: unknown): UserSettingsCheck {
   }
   if (problems.length > 0) return { ok: false, problems };
 
-  const settings = value as UserSettings;
+  const settings = value as DeploymentSettings;
   const standards = standardsFromSettings(settings);
   const invalid = validateStandInStandards(standards);
   if (invalid.length > 0) return { ok: false, problems: invalid };
   return { ok: true, settings, standards };
 }
 
-/** Parse and check a settings file's bytes. */
-export function parseUserSettings(bytes: Uint8Array): UserSettingsCheck {
+/** Parse and check a document's JSON text. */
+export function parseDeploymentSettings(text: string): DeploymentSettingsCheck {
   let value: unknown;
   try {
-    value = JSON.parse(new TextDecoder().decode(bytes));
+    value = JSON.parse(text);
   } catch {
-    return { ok: false, problems: ["the settings file is not valid JSON"] };
+    return { ok: false, problems: ["the settings are not valid JSON"] };
   }
-  return checkUserSettings(value);
+  return checkDeploymentSettings(value);
 }
 
-/** A settings file's bytes: indented JSON, so the file reads well in Drive. */
-export function serializeUserSettings(settings: UserSettings): Uint8Array {
-  return new TextEncoder().encode(`${JSON.stringify(settings, null, 2)}\n`);
-}
-
-/** Whether a record is a settings record. */
-export function isSettingsRecord(record: Pick<DataRecord, "type">): boolean {
-  return record.type === SETTINGS_TYPE_ID;
+/** A document's JSON text, compact, as SSM stores it. */
+export function serializeDeploymentSettings(settings: DeploymentSettings): string {
+  return JSON.stringify(settings);
 }
 
 /**
- * The winner among settings records, and the live ones it beats. The newest
- * `createdAt` wins; the id breaks an exact tie, so every node picks the same.
+ * The document after one change. A field the change leaves out keeps its
+ * current value, so a writer of one setting never erases another. The
+ * standards are written out whole, as {@link settingsFromStandards} does.
  */
-export function pickSettingsRecord(records: readonly DataRecord[]): {
-  readonly winner: DataRecord | null;
-  readonly losers: readonly DataRecord[];
-} {
-  const live = records
-    .filter((r) => !r.deletedAt && isSettingsRecord(r))
-    .sort((a, b) => compareHLC(b.createdAt, a.createdAt) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
-  return { winner: live[0] ?? null, losers: live.slice(1) };
+export function withDeploymentSettingsChange(
+  current: DeploymentSettings,
+  change: DeploymentSettings,
+): DeploymentSettings {
+  const retentionDays = change.trash?.retentionDays ?? current.trash?.retentionDays;
+  const standIns =
+    change.standIns === undefined
+      ? current.standIns
+      : settingsFromStandards(standardsFromSettings(change, standardsFromSettings(current))).standIns;
+  return {
+    ...(retentionDays !== undefined ? { trash: { retentionDays } } : {}),
+    ...(standIns !== undefined ? { standIns } : {}),
+  };
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

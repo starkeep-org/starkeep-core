@@ -558,6 +558,12 @@ describe("a device may not write the platform's own files", () => {
 });
 
 describe("deviceMayCall", () => {
+  it("lets a device read the deployment's settings, and nothing else under that path", () => {
+    expect(deviceMayCall("GET", "/deployment/settings")).toBe(true);
+    expect(deviceMayCall("PUT", "/deployment/settings")).toBe(false);
+    expect(deviceMayCall("GET", "/deployment/settings/extra")).toBe(false);
+  });
+
   it("does not match a path that merely starts like an allowed one", () => {
     expect(deviceMayCall("POST", "/sync/exchange/extra")).toBe(false);
     expect(deviceMayCall("GET", "/healthz")).toBe(false);

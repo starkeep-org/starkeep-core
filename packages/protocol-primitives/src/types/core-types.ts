@@ -603,9 +603,11 @@ const TYPE_SPECS: readonly TypeSpec[] = [
 export const OTHER_TYPE_ID = "other/other";
 
 /**
- * The library's settings file: one platform-written record that syncs to every
- * node like any other file. No extension maps to it, so only the platform ever
- * assigns it. See `settings/user-settings.ts`.
+ * The retired library settings file. Nothing writes or reads this type any
+ * more: the deployment's settings moved to the cloud data server
+ * (`settings/deployment-settings.ts`). The type stays registered because
+ * existing libraries still hold such records, and it keeps the `starkeep`
+ * category, which stays Drive-only, so no app or device may write into it.
  */
 export const SETTINGS_TYPE_ID = "starkeep/settings";
 

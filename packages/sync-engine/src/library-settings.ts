@@ -1,244 +1,210 @@
 /**
- * The library's settings as one host sees them: the winning settings file,
- * read once and cached, and what that lets the host do.
+ * The deployment's settings as one host sees them: the document, read through
+ * a source and cached, and what that lets the host do.
  *
  * Every host keeps one — both data servers and the phone's embedded node — so
  * the rules below are one implementation rather than three. Here rather than in
  * shared-space-api because the phone links this package and not that one. The
- * file format and the winner rule live in protocol-primitives
- * (`settings/user-settings.ts`).
+ * document's shape lives in protocol-primitives
+ * (`settings/deployment-settings.ts`).
+ *
+ * ## Where a host reads from
+ *
+ * The host supplies the source. The cloud reads its SSM parameter. A node with
+ * a cloud fetches the Drive channel's settings route. A node without a cloud
+ * reads its own config. A source answers the raw document, or null when no
+ * document is set, and throws when it cannot answer.
  *
  * ## What a host knows
  *
- * A host knows the library's value in three cases:
+ * A host knows the deployment's value in three cases:
  *
- * - It holds the winning settings file's bytes and they parse.
- * - No live settings file exists at all. The person has not set a value, so
- *   the platform's defaults *are* the library's value and there is nothing to
- *   wait for. A later file overrides the defaults for originals stamped after
- *   it arrives, which is what the stamp is for.
- * - No cloud is configured, since then this host is the whole library and its
- *   own file, or the defaults, are the value.
+ * - Its last read returned a document that checks out.
+ * - Its last read returned no document. The operator has not set a value, so
+ *   the platform's defaults *are* the value and there is nothing to wait for.
+ * - No cloud is configured, since then this host is the whole deployment and
+ *   its own config, or the defaults, are the value.
  *
- * One case is left: a live settings file exists and this host cannot use it,
- * because the bytes have not arrived or do not parse. Only then is the host in
- * the dark. Such a host records a null stamp, the original waits
- * (`awaiting-stamp`), and the cloud, which always knows, stamps it on the next
- * exchange. Every other host stamps with the value (`stampFor`).
+ * One case is left: a cloud exists and this host has never read a usable
+ * document from it, because every read failed or the document does not check
+ * out. Only then is the host in the dark. Such a host records a null stamp,
+ * the original waits (`awaiting-stamp`), and the cloud, which always knows,
+ * stamps it on the next exchange. Every other host stamps with the value
+ * (`stampFor`).
  *
- * Telling "no file" from "a file I cannot read" matters because the stamp is
- * the only threshold any rule reads (`thresholdOf`). Treating a fresh library
- * as unknown would leave every original in a library whose owner never touched
- * the setting waiting on the cloud before any app could derive a stand-in.
+ * A read that fails after a good one keeps the good value. A stamp from the
+ * last value read is what a stamping path has always accepted, and an offline
+ * laptop has to keep importing.
+ *
+ * ## The cache
+ *
+ * A host may keep the last good read in a {@link DeploymentSettingsCache}, so a
+ * node that restarts offline still knows the value. The cache holds what the
+ * source answered and nothing else.
  *
  * ## Stamping a value, and consuming one
  *
- * The three cases above answer "may this host stamp an original", which is what
- * `knowsLibraryValue` reports and what every `standards` reader depends on. A
- * stamp is the mechanism that makes a cached read safe there: the paths that
- * stamp refresh first, and a host in the dark stamps nothing and waits.
+ * The cases above answer "may this host stamp an original", which is what
+ * `knowsLibraryValue` reports and what every `standards` reader depends on.
  *
  * The retention window has no stamp. Nothing records "reaped under an unknown
- * window" and is corrected later, so a consumer of the window has to acquire it
- * itself rather than read whatever the cache holds —
- * {@link LibrarySettings.acquireRetentionWindow} takes the IO to do that, which
- * makes the obligation a parameter rather than a convention. The third case
- * above is not available to it either: "no cloud is configured" says the
- * defaults are the library's value for stamping, not that this host has read
- * the library's settings.
+ * window" and corrects it later, so a consumer of the window reads through the
+ * source itself — {@link LibrarySettings.acquireRetentionWindow} — rather than
+ * trusting the cache. A failed read is an unknown window, whatever the cache
+ * holds. "No cloud is configured" is not available to it either: that case
+ * says the defaults are the value for stamping, not that this host has read
+ * anything.
  *
- * See `~/projects/starkeep/design-settings-read-at-point-of-use-2026-10-07.md`.
+ * See `~/projects/starkeep/design-settings-read-at-point-of-use-2026-10-07.md`
+ * and `~/projects/starkeep/plan-multi-user-roles-2026-10-16.md`, phase 1.
  */
 
 import {
+  checkDeploymentSettings,
   DEFAULT_STAND_IN_STANDARDS,
   DEFAULT_TRASH_RETENTION_DAYS,
-  parseUserSettings,
-  pickSettingsRecord,
   retentionDaysFromSettings,
-  SETTINGS_TYPE_ID,
-  type DataRecord,
-  type HLCClock,
+  type DeploymentSettings,
   type StandInStandards,
-  type StarkeepId,
-  type UserSettings,
 } from "@starkeep/protocol-primitives";
-import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
-
-/** Upper bound on live settings records; far above anything concurrent edits leave. */
-const MAX_SETTINGS_RECORDS = 50;
 
 export interface LibrarySettingsStatus {
-  /** Whether the person has set a value: a live settings record exists. */
+  /** Whether the last good read found a document. */
   readonly set: boolean;
-  /** The winning settings record, when there is one. */
-  readonly recordId: string | null;
-  /** The winning file's contents, when its bytes are here and parse. */
-  readonly settings: UserSettings | null;
+  /** The document in force, when the last good read found one. */
+  readonly settings: DeploymentSettings | null;
   /**
-   * Why the winning file cannot be used, as sentences: bytes not here yet, or
-   * contents that do not parse. Empty when the file is in force or absent.
+   * Why the last read failed, or why its document does not check out, as
+   * sentences. Empty when the last read succeeded.
    */
   readonly problems: readonly string[];
+  /** When the last good read happened, in epoch milliseconds, or null for never. */
+  readonly readAt: number | null;
 }
 
 /**
  * How long a deleted item stays recoverable, and how long its bytes stay, as
  * one operation read it — or the reasons this host could not read it.
  *
- * An unknown window is not the default window. A host that cannot read the
- * winning settings file is in the dark about the library's value, and a reaper
- * in the dark reaps nothing: reaping to a 30-day default under a library whose
- * owner chose 365 would destroy bytes the person was promised, and a Trash view
- * that stated a date from the same default would promise something the library
- * does not hold to.
+ * An unknown window is not the default window. A reaper in the dark reaps
+ * nothing: reaping to a 30-day default under a deployment whose operator chose
+ * 365 would destroy bytes the person was promised, and a Trash view that stated
+ * a date from the same default would promise something nothing holds to.
  */
 export type RetentionWindow =
   | { readonly known: true; readonly days: number }
   | { readonly known: false; readonly problems: readonly string[] };
 
+/** Where a host keeps its last good read. */
+export interface DeploymentSettingsCache {
+  /** The last document the source answered, or null when it answered none. Undefined: never read. */
+  load(): { readonly document: unknown } | undefined;
+  save(document: unknown): void;
+}
+
 export interface LibrarySettings {
-  /** The library's stand-in standards: the settings file's, or the defaults. */
+  /** The deployment's stand-in standards: the document's, or the defaults. */
   standards(): StandInStandards;
   /**
-   * Read the library's settings through `io`, then answer with the retention
-   * window the caller may act on.
-   *
-   * The parameter is the point. The window reaches its consumer with no stamp in
-   * between, so the read belongs to the operation that consumes the value rather
-   * than to whatever traffic last warmed the cache — and a required `io` makes
-   * that a compile-time fact. Memoize the call per request if one request both
-   * stamps and consumes: a refresh costs one indexed query, and fetches the file
-   * itself only when the winning record's id changed.
-   *
-   * Unknown covers every way this host can fail to read the winning file: a
-   * failed query, bytes that have not arrived, contents that do not parse. No
-   * live file at all is known rather than unknown, because the person has not
-   * set a value and the platform's default is then the library's value.
+   * Read the document through the source, then answer with the retention
+   * window the caller may act on. A failed read is unknown.
    */
-  acquireRetentionWindow(
-    io: LibrarySettingsIo & { readonly tombstoneLosers?: boolean },
-  ): Promise<RetentionWindow>;
+  acquireRetentionWindow(): Promise<RetentionWindow>;
   /** Whether this host may stamp originals with {@link standards}. */
   knowsLibraryValue(): boolean;
   status(): LibrarySettingsStatus;
   /**
-   * Re-read the settings records, tombstone every live one but the winner, and
-   * reload the winner's bytes when the winner changed or was unreadable.
-   * Returns the tombstones written.
-   *
-   * `io` replaces the adapters the source was built with, for a host that
-   * builds its adapters per request but keeps one source — the cloud's
-   * Lambda, whose cache then outlives the request. `tombstoneLosers: false`
-   * leaves losing files alone, for a caller whose identity may not write them.
+   * Read the document through the source. A failure keeps the last good value
+   * and records the reason in {@link status}; it never throws.
    */
-  refresh(io?: Partial<LibrarySettingsIo> & { readonly tombstoneLosers?: boolean }): Promise<DataRecord[]>;
+  refresh(): Promise<void>;
 }
 
-/** What a refresh reads and writes through. */
-export interface LibrarySettingsIo {
-  readonly db: DatabaseAdapter;
-  readonly storage: Pick<ObjectStorageAdapter, "get">;
-  readonly clock: HLCClock;
-}
-
-export interface LibrarySettingsOptions extends Partial<LibrarySettingsIo> {
+export interface LibrarySettingsOptions {
+  /** Answers the raw document, or null when none is set. Throws when it cannot answer. */
+  readonly read: () => Promise<unknown>;
   /**
    * Whether this host syncs with a cloud. The cloud itself answers false: it
-   * is where the library's value is decided, so it always knows it.
+   * is where the deployment's value is decided, so it always knows it.
    */
   readonly cloudConfigured: () => boolean;
+  readonly cache?: DeploymentSettingsCache;
+}
+
+interface Loaded {
+  readonly settings: DeploymentSettings | null;
+  readonly standards: StandInStandards;
 }
 
 export function createLibrarySettings(options: LibrarySettingsOptions): LibrarySettings {
-  const { cloudConfigured } = options;
+  const { read, cloudConfigured, cache } = options;
 
-  let winnerId: StarkeepId | null = null;
-  let loaded: { settings: UserSettings; standards: StandInStandards } | null = null;
+  let loaded: Loaded | null = null;
   let problems: string[] = [];
+  let readAt: number | null = null;
 
-  // `winnerId !== null && loaded === null` is the one state that means "a settings
-  // file exists and this host cannot use it".
-  const knows = (): boolean => loaded !== null || winnerId === null || !cloudConfigured();
-
-  async function refresh(
-    io: Partial<LibrarySettingsIo> & { readonly tombstoneLosers?: boolean } = {},
-  ): Promise<DataRecord[]> {
-    const db = io.db ?? options.db;
-    const storage = io.storage ?? options.storage;
-    const clock = io.clock ?? options.clock;
-    if (!db || !storage || !clock) throw new Error("library settings: no adapters to refresh through");
-    const result = await db.query({
-      filters: [
-        { field: "type", operator: "eq", value: SETTINGS_TYPE_ID },
-        { field: "deletedAt", operator: "isNull" },
-      ],
-      limit: MAX_SETTINGS_RECORDS,
-    });
-    const { winner, losers } = pickSettingsRecord(result.records);
-
-    // Every host tombstones the losers the same way, so concurrent edits on
-    // two offline desktops converge on one live settings record.
-    const tombstones: DataRecord[] = [];
-    for (const loser of io.tombstoneLosers === false ? [] : losers) {
-      const hlc = clock.now();
-      await db.delete(loser.id as StarkeepId, hlc);
-      tombstones.push({ ...loser, deletedAt: hlc, updatedAt: hlc, version: loser.version + 1 });
+  /** Take one answer from the source. Returns the problems, or none. */
+  function accept(document: unknown): string[] {
+    if (document === null) {
+      loaded = { settings: null, standards: DEFAULT_STAND_IN_STANDARDS };
+      return [];
     }
-
-    if (!winner) {
-      winnerId = null;
+    const checked = checkDeploymentSettings(document);
+    if (!checked.ok) {
+      // A document that does not check out is not the defaults. Using the
+      // defaults would stamp originals against values the operator never chose.
       loaded = null;
-      problems = [];
-      return tombstones;
+      return [...checked.problems];
     }
-    if (winner.id === winnerId && loaded !== null) return tombstones;
+    loaded = { settings: checked.settings, standards: checked.standards };
+    return [];
+  }
 
-    winnerId = winner.id as StarkeepId;
-    loaded = null;
-    const bytes = winner.objectStorageKey ? await storage.get(winner.objectStorageKey) : null;
-    if (!bytes) {
-      problems = ["the settings file's bytes have not reached this machine yet"];
-      return tombstones;
+  const cached = cache?.load();
+  if (cached !== undefined) accept(cached.document);
+
+  /** One read through the source. Resolves to the problems, empty on success. */
+  async function load(): Promise<string[]> {
+    let document: unknown;
+    try {
+      document = await read();
+    } catch (err) {
+      problems = [`reading the deployment's settings failed: ${err instanceof Error ? err.message : String(err)}`];
+      return problems;
     }
-    const parsed = parseUserSettings(bytes.data);
-    if (parsed.ok) {
-      loaded = { settings: parsed.settings, standards: parsed.standards };
-      problems = [];
-    } else {
-      problems = [...parsed.problems];
+    problems = accept(document);
+    if (problems.length === 0) {
+      readAt = Date.now();
+      try {
+        cache?.save(document);
+      } catch (err) {
+        console.warn("[settings] could not cache the deployment's settings:", err);
+      }
     }
-    return tombstones;
+    return problems;
   }
 
   return {
     standards: () => loaded?.standards ?? DEFAULT_STAND_IN_STANDARDS,
-    knowsLibraryValue: knows,
+    knowsLibraryValue: () => loaded !== null || !cloudConfigured(),
     status: () => ({
-      set: winnerId !== null,
-      recordId: winnerId,
+      set: loaded?.settings != null,
       settings: loaded?.settings ?? null,
       problems,
+      readAt,
     }),
-    refresh,
-
-    async acquireRetentionWindow(io) {
-      try {
-        await refresh(io);
-      } catch (err) {
-        // A stamping path keeps the last value through a failed read, because an
-        // unstamped original waits and the cloud stamps it on the next exchange.
-        // Nothing waits here and nothing corrects a reap afterwards, so a failed
-        // read is an unknown window.
-        return { known: false, problems: [`reading the library's settings failed: ${String(err)}`] };
+    async refresh() {
+      await load();
+    },
+    async acquireRetentionWindow() {
+      const failed = await load();
+      if (failed.length > 0 || loaded === null) {
+        return { known: false, problems: failed.length > 0 ? failed : ["the deployment's settings are unreadable"] };
       }
-      if (loaded !== null) return { known: true, days: retentionDaysFromSettings(loaded.settings) };
-      // No live settings file: the person has not set a value, so the platform's
-      // default *is* the library's value and there is nothing to wait for. The
-      // refresh above is what makes this distinguishable from a host that has
-      // simply never looked.
-      if (winnerId === null) return { known: true, days: DEFAULT_TRASH_RETENTION_DAYS };
-      return { known: false, problems: [...problems] };
+      return {
+        known: true,
+        days: loaded.settings ? retentionDaysFromSettings(loaded.settings) : DEFAULT_TRASH_RETENTION_DAYS,
+      };
     },
   };
 }

@@ -96,18 +96,14 @@ import {
   STAND_IN_MIME_TYPES,
   standardsFor,
   stampFor,
-  checkUserSettings,
+  checkDeploymentSettings,
   DEFAULT_TRASH_RETENTION_DAYS,
-  serializeUserSettings,
-  settingsFromStandards,
-  standardsFromSettings,
+  retentionDaysFromSettings,
+  withDeploymentSettingsChange,
   CANONICAL_THRESHOLD_RANGES,
   ADVISORY_LONG_EDGE_RANGE,
-  SETTINGS_TYPE_ID,
-  USER_SETTINGS_FILE_NAME,
-  USER_SETTINGS_MIME_TYPE,
+  type DeploymentSettings,
   type StandInCategory,
-  type UserSettings,
   type StandInSize,
   type SyncDownCeilings,
   hasMetadataTable,
@@ -140,6 +136,7 @@ import {
   createLibrarySettings,
   type RetentionWindow,
 } from "../../packages/sync-engine/src/library-settings.js";
+import { createSqliteDeploymentSettingsCache } from "../../packages/sync-engine/src/deployment-settings-cache-sqlite.js";
 import {
   renderStandInSummary,
   resolveContentRead,
@@ -387,6 +384,12 @@ interface StarkeepConfig {
    * is low enough that guessing produces 503s which read as app bugs.
    */
   lambdaConcurrency?: number;
+  /**
+   * The deployment's settings while no cloud exists. With a cloud, the
+   * document lives in SSM and this field is ignored; cloud setup seeds the
+   * parameter from it once. See `settings/deployment-settings.ts`.
+   */
+  deploymentSettings?: DeploymentSettings;
 }
 
 // Detects the unique-violation from the
@@ -820,46 +823,29 @@ async function main() {
   const nodeClock = await createNodeClock({ nodeId: NODE_ID, syncStateStore });
   const clock = nodeClock.clock;
 
-  // The library's settings: the winning settings file, which syncs to every
-  // node over the Drive channel. Refreshed at boot, after every Drive drain,
-  // and after the person saves a change. See `settings/library-settings.ts` in
-  // shared-space-api.
+  // The deployment's settings. With a cloud, read from the Drive channel's
+  // settings route and cached in this node's database, so an offline restart
+  // still knows the value. Without one, read from this machine's config.
+  // `supervisor` is assigned further down; a read before then fails, and the
+  // cached value stands.
   const librarySettings = createLibrarySettings({
-    db: databaseAdapter,
-    storage: localAdapter,
-    clock,
+    read: async () => {
+      if (!CLOUD_URL) return starkeepConfig.deploymentSettings ?? null;
+      if (!supervisor) throw new Error("sync is not configured on this machine");
+      return supervisor.readDeploymentSettings();
+    },
     cloudConfigured: () => Boolean(CLOUD_URL),
+    cache: createSqliteDeploymentSettingsCache({ db: databaseAdapter.getRawDatabase() }),
   });
-  await librarySettings.refresh();
-
-  /** Re-read the settings, shipping any tombstones of losing settings files. */
-  async function refreshLibrarySettings(): Promise<void> {
-    const tombstones = await librarySettings.refresh();
-    if (tombstones.length > 0) {
-      changeNotifier.emit({
-        eventType: "local-change-recorded",
-        recordIds: tombstones.map((r) => r.id),
-        timestamp: tombstones[tombstones.length - 1]!.updatedAt,
-      });
-    }
-  }
 
   /**
    * The retention window, read for the operation about to use it.
    *
    * The window reaches a reap or a Trash date with no stamp in between, so the
    * read belongs to the operation rather than to whatever last refreshed the
-   * cache — one indexed query, and the file itself only when the winning record
-   * changed. Losers are left alone here because the paths above are the ones
-   * that tombstone them and announce the tombstones to sync.
+   * cache.
    */
-  const retentionWindow = (): Promise<RetentionWindow> =>
-    librarySettings.acquireRetentionWindow({
-      db: databaseAdapter,
-      storage: localAdapter,
-      clock,
-      tombstoneLosers: false,
-    });
+  const retentionWindow = (): Promise<RetentionWindow> => librarySettings.acquireRetentionWindow();
 
   // Direct sqlite handle for app-identity / grant lookups. The records-layer
   // adapter operates on the same DB; we use raw access for the shared_*
@@ -922,68 +908,6 @@ async function main() {
     clock,
   });
 
-  type SettingsWrite =
-    | { readonly ok: true; readonly settings: UserSettings; readonly recordId: string }
-    | { readonly ok: false; readonly status: number; readonly error: string; readonly problems: readonly string[] };
-
-  /** Settings writes, one at a time, so two changes cannot both start from the same file. */
-  let settingsWrites: Promise<unknown> = Promise.resolve();
-
-  /**
-   * Write the library's settings file as a change to the current one.
-   *
-   * Every settings write goes through here, for two reasons.
-   *
-   * - **A change keeps what it does not touch.** The file holds unrelated
-   *   settings — stand-in standards and the trash window —
-   *   and a new file replaces the old one whole. A writer that serialized only
-   *   its own field would erase the rest.
-   * - **A host in the dark writes nothing.** When a settings file exists and
-   *   its bytes have not reached this machine, the current value is unknown.
-   *   The newest file wins everywhere, so a change built on the defaults would
-   *   overwrite the person's settings on every node. Refused with 409 instead.
-   */
-  function writeLibrarySettings(change: (current: UserSettings) => UserSettings): Promise<SettingsWrite> {
-    const run = async (): Promise<SettingsWrite> => {
-      await refreshLibrarySettings();
-      const status = librarySettings.status();
-      if (status.set && status.settings === null) {
-        return {
-          ok: false,
-          status: 409,
-          error:
-            "This machine cannot read the library's settings file yet, so a change made here would overwrite settings it cannot see. Let it sync, then try again.",
-          problems: status.problems,
-        };
-      }
-      const base = status.settings ?? {};
-      const next = change(base);
-      // Nothing changed, so nothing is written. A write here would create a
-      // settings file where none existed, and an absent file is what tells
-      // every host that the person has set nothing.
-      if (next === base) return { ok: true, settings: base, recordId: status.recordId ?? "" };
-      const checked = checkUserSettings(next);
-      if (!checked.ok) {
-        return { ok: false, status: 422, error: "the settings are not valid", problems: checked.problems };
-      }
-      const record = await sdk.data.putWithFile(
-        {
-          type: SETTINGS_TYPE_ID,
-          originAppId: DRIVE_APP_ID,
-          originalFilename: USER_SETTINGS_FILE_NAME,
-        },
-        serializeUserSettings(next),
-        USER_SETTINGS_MIME_TYPE,
-      );
-      // The new file is the newest, so this tombstones the one it replaces.
-      await refreshLibrarySettings();
-      return { ok: true, settings: next, recordId: record.id };
-    };
-    const result = settingsWrites.then(run, run);
-    settingsWrites = result.catch(() => undefined);
-    return result;
-  }
-
   const sseClients = new Set<import("node:http").ServerResponse>();
   setInterval(() => {
     for (const client of sseClients) client.write(": ping\n\n");
@@ -997,16 +921,6 @@ async function main() {
   // /events is loopback-authorized with no per-app filtering and the data
   // plane (which is HMAC-authenticated and grant-checked) is the only place
   // record-shaped information should leave this process.
-  // A round that applied records may have brought a settings file, or a second
-  // one beside the first. One refresh at a time, in arrival order.
-  let settingsRefresh: Promise<void> = Promise.resolve();
-  sdk.changeNotifier.subscribe((event) => {
-    if (event.eventType !== "local-data-synced") return;
-    settingsRefresh = settingsRefresh
-      .then(refreshLibrarySettings)
-      .catch((err) => console.warn("[settings] refreshing the library's settings failed:", err));
-  });
-
   sdk.changeNotifier.subscribe((event) => {
     console.log(`[sync] ${event.eventType} records=${event.recordIds.length}`);
     for (const client of sseClients) client.write(`data: \n\n`);
@@ -1168,6 +1082,15 @@ async function main() {
   }
   startOrKickSupervisor();
 
+  // Re-read the deployment's settings once a minute, so a change made in
+  // admin-web reaches this node's stamps within the cloud's own cache window.
+  // A failed read keeps the last value; see `createLibrarySettings`. Without
+  // a cloud the value changes only through this server, which refreshes then.
+  await librarySettings.refresh();
+  if (CLOUD_URL) {
+    setInterval(() => void librarySettings.refresh(), 60_000).unref();
+  }
+
   // File watch manager — monitors local directories and syncs to Starkeep
   const watchManager = createFileWatchManager({
     sdk,
@@ -1179,7 +1102,7 @@ async function main() {
     // halves of that need the node's residency: the durability proof reads the
     // same probe "Free up space" reads, and the departure is recorded in the same
     // index. Read through accessors because the probe comes and goes with the
-    // cloud connection and the standards come from the library's settings file.
+    // cloud connection and the standards come from the deployment's settings.
     residency: residencyManager,
     probes: () => {
       const probe = supervisor?.cloudReplicaProbe() ?? null;
@@ -1283,11 +1206,10 @@ async function main() {
       // made — nothing is reaped inside the retention window, and a node that
       // cannot read that window reaps nothing at all.
       /^\/residency\/(stand-ins|free-up-space|reap)$/,
-      // The library's canonical thresholds. Loopback-gated like the admin
-      // surface that installs apps: the person sets them from admin-web, and
-      // no installable app may, which is also why the file they are stored in
-      // sits in the Drive-only `starkeep` category.
-      /^\/library\/stand-in-standards$/,
+      // The deployment's settings and the canonical thresholds they hold.
+      // Loopback-gated like the admin surface that installs apps: the
+      // operator sets them from admin-web, and no installable app may.
+      /^\/library\/(stand-in-standards|deployment-settings(\/refresh)?)$/,
       // The integrity check. An operator control over this machine's sync, and
       // one the phone has had a button for since before the laptop had any entry
       // point at all. The result is counts per channel — rows here, rows there,
@@ -3333,14 +3255,40 @@ async function main() {
         return;
       }
 
-      // PUT /library/stand-in-standards — change the library's values.
-      //
-      // Body: the settings file's shape, `{ standIns: { image?, video? } }`;
-      // a value it leaves out keeps its current value. The whole result is
-      // written as a new settings file, which the Drive channel carries to
-      // every node and the cloud, and the previous file is tombstoned. Existing
-      // originals keep the threshold stamped on them. No restart is needed.
-      if (path === "/library/stand-in-standards" && req.method === "PUT") {
+      // GET /library/deployment-settings — the deployment's settings as this
+      // node holds them: the document, whether one is set, whether this node
+      // may stamp with it, and why the last read failed. Admin-web reads the
+      // current values here before it writes a change.
+      if (path === "/library/deployment-settings" && req.method === "GET") {
+        const status = librarySettings.status();
+        json(res, {
+          settings: status.settings,
+          set: status.set,
+          problems: status.problems,
+          readAt: status.readAt,
+          knowsLibraryValue: librarySettings.knowsLibraryValue(),
+          cloudConfigured: Boolean(CLOUD_URL),
+          retentionDays: status.settings
+            ? retentionDaysFromSettings(status.settings)
+            : DEFAULT_TRASH_RETENTION_DAYS,
+          defaults: { retentionDays: DEFAULT_TRASH_RETENTION_DAYS },
+        });
+        return;
+      }
+
+      // PUT /library/deployment-settings — change the values on a machine with
+      // no cloud. Body: the document's shape; a field it leaves out keeps its
+      // current value. With a cloud, the document lives in SSM and only
+      // Manager writes it, so admin-web writes there and this route refuses.
+      if (path === "/library/deployment-settings" && req.method === "PUT") {
+        if (CLOUD_URL) {
+          res.writeHead(409);
+          json(res, {
+            error:
+              "This machine syncs with a cloud, so the deployment's settings live there. Change them from admin-web while signed in.",
+          });
+          return;
+        }
         let body: unknown;
         try {
           body = JSON.parse((await readBody(req)) || "{}");
@@ -3349,26 +3297,37 @@ async function main() {
           json(res, { error: "Body is not valid JSON" });
           return;
         }
-        const requested = checkUserSettings(body);
+        const requested = checkDeploymentSettings(body);
         if (!requested.ok) {
           res.writeHead(422);
           json(res, { error: "the settings are not valid", problems: requested.problems });
           return;
         }
-        // Only the standards change. The trash window and the paired-device
-        // list ride along untouched.
-        const written = await writeLibrarySettings((current) => ({
-          ...current,
-          ...settingsFromStandards(
-            standardsFromSettings(requested.settings, standardsFromSettings(current)),
-          ),
-        }));
-        if (!written.ok) {
-          res.writeHead(written.status);
-          json(res, { error: written.error, problems: written.problems });
+        const next = withDeploymentSettingsChange(
+          starkeepConfig.deploymentSettings ?? {},
+          requested.settings,
+        );
+        const checked = checkDeploymentSettings(next);
+        if (!checked.ok) {
+          res.writeHead(422);
+          json(res, { error: "the settings are not valid", problems: checked.problems });
           return;
         }
-        json(res, { ok: true, recordId: written.recordId, current: settingsFromStandards(librarySettings.standards()) });
+        const updated: StarkeepConfig = { ...starkeepConfig, deploymentSettings: next };
+        await writeFile(STARKEEP_CONFIG_PATH, JSON.stringify(updated, null, 2), "utf8");
+        starkeepConfig.deploymentSettings = next;
+        await librarySettings.refresh();
+        json(res, { ok: true, settings: next });
+        return;
+      }
+
+      // POST /library/deployment-settings/refresh — read the document again
+      // now. Admin-web calls this after writing the SSM parameter, so this
+      // node stamps with the new value at once rather than within a minute.
+      if (path === "/library/deployment-settings/refresh" && req.method === "POST") {
+        await librarySettings.refresh();
+        const status = librarySettings.status();
+        json(res, { settings: status.settings, set: status.set, problems: status.problems });
         return;
       }
 
@@ -3431,7 +3390,7 @@ async function main() {
             borrowsBytes: (key) => localAdapter.isAlias(key),
           },
           {
-            // Null when this node cannot read the winning settings file, and a
+            // Null when this node cannot read the deployment's settings, and a
             // reaper in the dark reaps nothing.
             retentionDays: window.known ? window.days : null,
             dryRun: body.dryRun === true,

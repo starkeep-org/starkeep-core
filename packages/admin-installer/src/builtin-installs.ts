@@ -45,7 +45,8 @@ import {
 import { pulumiUpInline, pulumiDestroyInline } from "./compute-stack";
 import { initializeSharedSchema } from "./dsql-schema-init";
 import { buildCloudDataServerProgram } from "./builtin-programs/cloud-data-server-program";
-import { putCloudFrontSigningParameter } from "./app-creds";
+import { putCloudFrontSigningParameter, putDeploymentSettingsParameter } from "./app-creds";
+import { checkDeploymentSettings, serializeDeploymentSettings } from "@starkeep/protocol-primitives";
 import {
   logAppRoleSnapshot,
   logCallerIdentity,
@@ -109,6 +110,13 @@ export interface CloudDataServerInstallConfig {
    * false so real user installs are hardened. See CloudDataServerProgramContext.
    */
   ephemeral?: boolean;
+  /**
+   * The deployment's settings this machine held while it had no cloud
+   * (`deploymentSettings` in `~/.starkeep/config.json`). The install seeds the
+   * SSM parameter from them, only when no parameter exists yet, so a later
+   * install never overwrites what the operator chose since.
+   */
+  deploymentSettings?: unknown;
 }
 
 /**
@@ -399,6 +407,29 @@ export async function installCloudDataServer(
       awsCreds: managerCreds,
     });
     console.log("CloudFront signing config persisted.");
+
+    // Step 4.6: Seed the deployment's settings from this machine's local
+    // values, once. A document that does not check out is not seeded; the
+    // deployment then runs on the defaults until the operator saves a value.
+    if (config.deploymentSettings !== undefined) {
+      const checked = checkDeploymentSettings(config.deploymentSettings);
+      if (!checked.ok) {
+        console.warn(`Not seeding the deployment's settings: ${checked.problems.join("; ")}`);
+      } else {
+        const seeded = await putDeploymentSettingsParameter({
+          stackPrefix: config.stackPrefix,
+          document: serializeDeploymentSettings(checked.settings),
+          region: config.region,
+          awsCreds: managerCreds,
+          onlyIfAbsent: true,
+        });
+        console.log(
+          seeded
+            ? "Seeded the deployment's settings from this machine's values."
+            : "The deployment's settings already exist; leaving them as they are.",
+        );
+      }
+    }
 
     // Step 5: Initialize the shared schema against the now-existing DSQL
     // cluster. Fully idempotent — see dsql-schema-init.ts.

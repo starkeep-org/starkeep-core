@@ -24,6 +24,12 @@ import {
   DeleteParameterCommand,
   GetParametersByPathCommand,
 } from "@aws-sdk/client-ssm";
+import {
+  checkDeploymentSettings,
+  serializeDeploymentSettings,
+  withDeploymentSettingsChange,
+  type DeploymentSettings,
+} from "@starkeep/protocol-primitives";
 import type { AwsCredentials } from "./session";
 
 /** Re-exported so a consumer of this subpath needs only this one import. */
@@ -66,6 +72,93 @@ export function platformParameterPrefix(stackPrefix: string): string {
  */
 export function deviceKeyParameterName(stackPrefix: string, deviceId: string): string {
   return `${platformParameterPrefix(stackPrefix)}/devices/${deviceId}`;
+}
+
+/** Name of the deployment's settings document. See `settings/deployment-settings.ts`. */
+export function deploymentSettingsParameterName(stackPrefix: string): string {
+  return `${platformParameterPrefix(stackPrefix)}/deployment-settings`;
+}
+
+/**
+ * The deployment's settings document as SSM holds it, parsed but not checked,
+ * or null when none is set.
+ */
+export async function getDeploymentSettingsParameter(opts: {
+  stackPrefix: string;
+  region: string;
+  awsCreds: AwsCredentials;
+}): Promise<unknown> {
+  const ssm = makeSsmClient(opts.region, opts.awsCreds);
+  try {
+    const result = await ssm.send(
+      new GetParameterCommand({ Name: deploymentSettingsParameterName(opts.stackPrefix) }),
+    );
+    const raw = result.Parameter?.Value;
+    return raw ? (JSON.parse(raw) as unknown) : null;
+  } catch (err) {
+    if (err instanceof ParameterNotFound) return null;
+    throw err;
+  }
+}
+
+/**
+ * Write the deployment's settings document. The caller checks it first.
+ *
+ * `onlyIfAbsent` writes nothing over an existing document, and answers whether
+ * it wrote: cloud setup seeds the parameter from a machine's local values once,
+ * and a second machine's setup must not overwrite what the operator chose since.
+ */
+export async function putDeploymentSettingsParameter(opts: {
+  stackPrefix: string;
+  document: string;
+  region: string;
+  awsCreds: AwsCredentials;
+  onlyIfAbsent?: boolean;
+}): Promise<boolean> {
+  const ssm = makeSsmClient(opts.region, opts.awsCreds);
+  try {
+    await ssm.send(
+      new PutParameterCommand({
+        Name: deploymentSettingsParameterName(opts.stackPrefix),
+        Type: "String",
+        Value: opts.document,
+        Overwrite: !opts.onlyIfAbsent,
+        Description: "Starkeep deployment settings. Written by admin-web through Manager.",
+      }),
+    );
+    return true;
+  } catch (err) {
+    if (opts.onlyIfAbsent && err instanceof ParameterAlreadyExists) return false;
+    throw err;
+  }
+}
+
+export type DeploymentSettingsChange =
+  | { readonly ok: true; readonly settings: DeploymentSettings }
+  | { readonly ok: false; readonly problems: readonly string[] };
+
+/**
+ * Apply one change to the deployment's settings in SSM: read the document,
+ * merge the change so a field it leaves out keeps its value, check the result,
+ * and write it. A stored document that does not check out is replaced by the
+ * change alone, because no field of it can be trusted.
+ */
+export async function changeDeploymentSettingsParameter(opts: {
+  stackPrefix: string;
+  change: unknown;
+  region: string;
+  awsCreds: AwsCredentials;
+}): Promise<DeploymentSettingsChange> {
+  const requested = checkDeploymentSettings(opts.change);
+  if (!requested.ok) return { ok: false, problems: requested.problems };
+  const stored = await getDeploymentSettingsParameter(opts);
+  const current = stored === null ? null : checkDeploymentSettings(stored);
+  const base = current?.ok ? current.settings : {};
+  const next = withDeploymentSettingsChange(base, requested.settings);
+  const checked = checkDeploymentSettings(next);
+  if (!checked.ok) return { ok: false, problems: checked.problems };
+  await putDeploymentSettingsParameter({ ...opts, document: serializeDeploymentSettings(next) });
+  return { ok: true, settings: next };
 }
 
 /** What kind of machine a device is. The broker scopes each kind differently. */

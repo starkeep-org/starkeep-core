@@ -11,6 +11,9 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import userEvent from "@testing-library/user-event";
 import { StandInsSection } from "../src/components/StandInsSection";
 
+// No one is signed in; the route decides where a settings change goes.
+vi.mock("@/lib/operator-session", () => ({ operatorSessionIfSignedIn: async () => null }));
+
 /**
  * "Free up space"'s own panel.
  *
@@ -314,9 +317,9 @@ describe("the stand-in section", () => {
     });
 
     it("says it does not know the window rather than reporting a clean run", async () => {
-      // A host that cannot read the winning settings file reaps nothing, because
-      // reaping to the default under a library whose owner chose a year would destroy
-      // bytes the person was promised.
+      // A host that cannot read the deployment's settings reaps nothing, because
+      // reaping to the default under a deployment whose operator chose a year
+      // would destroy bytes the person was promised.
       vi.stubGlobal(
         "fetch",
         stubFetch({
@@ -329,7 +332,7 @@ describe("the stand-in section", () => {
               refused: [],
               // The read says which of its ways of failing happened, so the
               // operator sees whether to wait for bytes or to fix a file.
-              retentionProblems: ["the settings file's bytes have not reached this machine yet"],
+              retentionProblems: ["reading the deployment's settings failed: the cloud answered 503"],
             }),
           }),
         }),
@@ -339,8 +342,8 @@ describe("the stand-in section", () => {
       const reap = await panel("Reclaim deleted files");
       await user.click(reap.getByRole("button", { name: "Estimate" }));
       const status = (await reap.findByRole("status")).textContent;
-      expect(status).toMatch(/cannot read the library's settings file/);
-      expect(status).toMatch(/bytes have not reached this machine/);
+      expect(status).toMatch(/cannot read the deployment's settings/);
+      expect(status).toMatch(/the cloud answered 503/);
     });
 
     it("names the deep-archive exception, so its standing cost stays visible", async () => {
@@ -423,5 +426,34 @@ describe("the stand-in section", () => {
       await user.click(verify.getByRole("button", { name: "Check now" }));
       expect((await verify.findByRole("status")).textContent).toMatch(/No sync channels/);
     });
+  });
+});
+
+describe("the trash window", () => {
+  it("shows the deployment's window and saves a change through the settings route", async () => {
+    const saved: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      stubFetch({
+        "GET /api/residency/stand-ins": () => ({ body: STAND_INS }),
+        "GET /api/deployment-settings": () => ({ body: { retentionDays: 30 } }),
+        "PUT /api/deployment-settings": (call) => {
+          saved.push(call.body);
+          return { body: { ok: true } };
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    render(<StandInsSection />);
+    const reap = await panel("Reclaim deleted files");
+    const input = await reap.findByLabelText("Days a deleted item is kept");
+    expect((input as HTMLInputElement).value).toBe("30");
+    expect(reap.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
+
+    await user.clear(input);
+    await user.type(input, "90");
+    await user.click(reap.getByRole("button", { name: "Save" }));
+    expect(await reap.findByText(/use 90 days within a minute/)).toBeTruthy();
+    expect(saved).toEqual([{ change: { trash: { retentionDays: 90 } } }]);
   });
 });

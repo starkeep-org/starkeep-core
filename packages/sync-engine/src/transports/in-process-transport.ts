@@ -130,19 +130,6 @@ export interface InProcessTransportOptions {
    */
   readonly declinesBlob?: (objectStorageKey: string) => Promise<boolean>;
   /**
-   * True for a record this side must not apply until its file is in this
-   * side's storage. Such a record halts its author for the round instead,
-   * exactly as a failed apply does, and the requester re-ships it after its
-   * upload pass has sent the file.
-   *
-   * Rows travel ahead of their files, which is right for nearly everything: a
-   * photo's row is useful at once. A record whose *meaning* is in its file is
-   * different. The cloud stamps originals from the library's settings file,
-   * and a stamp is permanent, so applying the settings row before its bytes
-   * would have the cloud stamp from the defaults for as long as the bytes took.
-   */
-  readonly requiresFileToApply?: (record: DataRecord) => boolean;
-  /**
    * Called with the shared records whose files this side's bytes watermark has
    * just moved past, after the walk saves the new value. A declined file
    * counts, as it does for the watermark.
@@ -180,7 +167,6 @@ export function createInProcessSyncTransport(
     keepLiveOnTombstone,
     onApplied,
     declinesBlob,
-    requiresFileToApply,
     onFilesHeld,
   } = options;
   const byteCoverage = options.byteCoverage ?? createMemoryByteCoverageStore();
@@ -351,16 +337,14 @@ export function createInProcessSyncTransport(
       //    nodes halted in step 1 are skipped to preserve the contiguous
       //    prefix (they re-ship next round).
       //
-      //    ## Per node, in HLC order, because a record can now halt its node.
+      //    ## Per node, in HLC order.
       //
-      //    A shared-record `put()` that throws still aborts the whole exchange,
-      //    and that alone never needed an order: no response, no coverage
-      //    report over a partial author. But a record that needs its file to
-      //    apply (`requiresFileToApply`) halts its node without throwing, and a
-      //    halt is only safe over a contiguous prefix — a later record applied
-      //    ahead of the halted one would lift the node's coverage over it, and
-      //    the requester would never re-ship it. So records are sorted per node
-      //    and each node stops at its first halt.
+      //    A shared-record `put()` that throws aborts the whole exchange, so
+      //    no response reports coverage over a partial author. Applying each
+      //    author's records in HLC order keeps that true if a record ever
+      //    halts its node without throwing: a halt is only safe over a
+      //    contiguous prefix, because a later record applied ahead of the
+      //    halted one would lift the node's coverage over it.
       //
       //    (Records are still applied entirely before labels rather than merged
       //    per author in HLC order, unlike the requester's inbound loop. A
@@ -377,18 +361,6 @@ export function createInProcessSyncTransport(
         });
         for (const item of inboundRecords) {
           if (haltedNodes.has(item.updatedAt.nodeId)) continue;
-          if (
-            requiresFileToApply?.(item) &&
-            !item.deletedAt &&
-            item.objectStorageKey &&
-            !(await options.objectStorage.has(item.objectStorageKey))
-          ) {
-            console.warn(
-              `[sync] record ${item.id} needs its file before it applies; halting node ${item.updatedAt.nodeId} this round`,
-            );
-            haltedNodes.add(item.updatedAt.nodeId);
-            continue;
-          }
           // The metadata passenger comes off before the row is written; see
           // `SyncRecordItem`.
           const { metadata: incomingMetadata, ...snapshot } = item;
