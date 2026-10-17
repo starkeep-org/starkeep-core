@@ -573,6 +573,11 @@ function Step3CreateUser({
                     </p>
                   </li>
                   <li>
+                    Open the new user, choose <strong>Add user to group</strong>, and add it to both{" "}
+                    <strong>starkeep-admins</strong> and <strong>starkeep-users</strong>. The first
+                    group lets you administer Starkeep; the second gives you a library that syncs.
+                  </li>
+                  <li>
                     Click <strong>User created - Continue</strong>.
                   </li>
                 </ol>

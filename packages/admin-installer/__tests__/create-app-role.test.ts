@@ -118,6 +118,7 @@ describe("inline policies", () => {
       "BrokerAssumeAppRoles",
       "BrokerReadAppCreds",
       "BrokerReadPlatformParameters",
+      "BrokerListUserGroups",
       "BrokerReadAppCredsKmsDecrypt",
     ]);
     expect(broker.Statement[2].Resource).toBe(

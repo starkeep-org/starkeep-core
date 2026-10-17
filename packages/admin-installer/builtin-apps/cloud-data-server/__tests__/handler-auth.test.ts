@@ -290,6 +290,31 @@ describe("the end-user gate", () => {
     expect(stsMock.commandCalls(AssumeRoleCommand)).toHaveLength(0);
   });
 
+  it.each([
+    ["a member", ["starkeep-users"]],
+    ["an admin without a data library", ["starkeep-admins"]],
+    ["a user in no group", []],
+  ])("refuses %s with 403, before any role assumption", async (_who, groups) => {
+    // Until data separates by user, only an admin with a data library may
+    // reach data: every library is still one library.
+    const appId = `app-groups-${groups.length}-${groups.join("-") || "none"}`;
+    scriptSecret(appId, `secret-${appId}`);
+    scriptAssumeRole();
+    const token = await mintTestUserToken({ "cognito:groups": groups });
+    const res = await handler(
+      makeEvent({
+        method: "GET",
+        path: `/apps/${appId}/data/records`,
+        headers: signedFor(appId, "/data/records"),
+        userToken: token,
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(403);
+    expect(errorOf(res)).toMatch(/no data library/);
+    expect(stsMock.commandCalls(AssumeRoleCommand)).toHaveLength(0);
+  });
+
   it("refuses on every data path, with no route carve-out", async () => {
     // The property is "no exemptions", so it is asserted over the whole
     // reserved surface rather than on one representative path.

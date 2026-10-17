@@ -49,6 +49,7 @@ vi.mock("../src/routes/config", () => spy("config", ["GET", "PATCH"]));
 vi.mock("../src/routes/costs", () => spy("costs", ["POST"]));
 vi.mock("../src/routes/devices", () => spy("devices", ["LIST", "INSPECT", "APPROVE", "POST", "DELETE"]));
 vi.mock("../src/routes/this-machine", () => spy("this-machine", ["GET", "POST_KEY", "POST_CHECK", "POST_CLOUD"]));
+vi.mock("../src/routes/users", () => spy("users", ["LIST", "CREATE", "SET_GROUP", "SET_ENABLED"]));
 vi.mock("../src/routes/drive-install", () => spy("drive-install", ["POST"]));
 vi.mock("../src/routes/exec-daemon", () => spy("exec-daemon", ["POST"]));
 vi.mock("../src/routes/exec-daemon-status", () => spy("exec-daemon-status", ["GET"]));
@@ -95,6 +96,10 @@ const ROUTES: Array<[string, string, string, string]> = [
   ["POST", "/api/devices/inspect", "devices", "INSPECT"],
   ["POST", "/api/devices/approve", "devices", "APPROVE"],
   ["GET", "/api/this-machine", "this-machine", "GET"],
+  ["POST", "/api/users/list", "users", "LIST"],
+  ["POST", "/api/users", "users", "CREATE"],
+  ["POST", "/api/users/group", "users", "SET_GROUP"],
+  ["POST", "/api/users/enabled", "users", "SET_ENABLED"],
   ["POST", "/api/this-machine/key", "this-machine", "POST_KEY"],
   ["POST", "/api/this-machine/check", "this-machine", "POST_CHECK"],
   ["POST", "/api/this-machine/cloud", "this-machine", "POST_CLOUD"],

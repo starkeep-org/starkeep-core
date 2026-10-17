@@ -60,6 +60,9 @@ export async function mintTestUserToken(
       sub: "test-user",
       email: "test@example.com",
       exp: Math.floor(Date.now() / 1000) + 3600,
+      // An admin with a data library: the one account that may reach data
+      // until it separates by user.
+      "cognito:groups": ["starkeep-admins", "starkeep-users"],
       ...over,
     }),
   ).toString("base64url");

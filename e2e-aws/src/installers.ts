@@ -18,7 +18,9 @@ import { fileURLToPath } from "node:url";
 import {
   cognitoPasswordAuthTokens,
   getIdentityPoolCredentials,
+  putDeviceKeyParameter,
   regionFromUserPoolId,
+  roleChain,
   type IdentityPoolCredentials,
 } from "@starkeep/admin-installer";
 import type { AdminCredentials, RunPaths, TestStackConfig } from "./run-state.js";
@@ -94,4 +96,46 @@ export async function runInstallCli(
       else rejectDone(new Error(`${label} exited with code ${code}`));
     });
   });
+}
+
+/**
+ * "Connect this machine", as admin-web does it: register the local data
+ * server's device key for the signed-in admin through Manager, then have the
+ * daemon ask the cloud again. Sync starts once the cloud accepts the key.
+ * Resolves with the daemon's approval state.
+ */
+export async function connectThisMachine(
+  ldsUrl: string,
+  config: TestStackConfig,
+  session: AdminSession,
+): Promise<{ state: string; userId?: string | null }> {
+  const keyRes = await fetch(`${ldsUrl}/device/key`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label: "tier3 e2e" }),
+  });
+  const device = (await keyRes.json()) as { deviceId: string; publicKeySpki: string; label: string | null };
+  if (!config.managerRoleArn) throw new Error("config.json has no managerRoleArn");
+  const awsCreds = await roleChain([config.managerRoleArn], {
+    baseCredentials: { ...session.awsCredentials, expiration: new Date(Date.now() + 3_600_000) },
+    region: session.region,
+    sessionPrefix: "starkeep-e2e-connect",
+  });
+  const sub = (JSON.parse(Buffer.from(session.idToken.split(".")[1]!, "base64url").toString("utf8")) as { sub: string }).sub;
+  await putDeviceKeyParameter({
+    stackPrefix: config.stackPrefix,
+    deviceId: device.deviceId,
+    registration: {
+      publicKeySpki: device.publicKeySpki,
+      userId: sub,
+      kind: "desktop",
+      appIds: [],
+      label: device.label,
+      pairedAt: new Date().toISOString(),
+    },
+    region: session.region,
+    awsCreds,
+  });
+  const check = await fetch(`${ldsUrl}/device/check`, { method: "POST" });
+  return ((await check.json()) as { approval: { state: string; userId?: string | null } }).approval;
 }

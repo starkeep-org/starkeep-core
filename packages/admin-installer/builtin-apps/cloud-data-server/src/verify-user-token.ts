@@ -20,6 +20,8 @@ export interface UserClaims {
   sub: string;
   email?: string;
   exp: number;
+  /** The Cognito groups the user belongs to, from `cognito:groups`. Empty for none. */
+  groups: readonly string[];
 }
 
 export interface PoolConfig {
@@ -149,7 +151,9 @@ export async function verifyUserToken(
     const sub = payload.sub;
     if (typeof sub !== "string" || !sub) return null;
 
-    return { sub, email: typeof payload.email === "string" ? payload.email : undefined, exp };
+    const rawGroups = payload["cognito:groups"];
+    const groups = Array.isArray(rawGroups) ? rawGroups.filter((g): g is string => typeof g === "string") : [];
+    return { sub, email: typeof payload.email === "string" ? payload.email : undefined, exp, groups };
   } catch {
     return null;
   }

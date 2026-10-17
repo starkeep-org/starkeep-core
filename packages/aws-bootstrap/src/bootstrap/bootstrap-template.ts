@@ -240,12 +240,44 @@ ${adminAppPolicyYaml}
         - Key: StackPrefix
           Value: !Ref StackPrefix
 
+  # Only members of starkeep-admins get AWS credentials. Every other user —
+  # a member, or an admin removed from the group — matches no rule, and
+  # AmbiguousRoleResolution: Deny refuses them, with no default role to fall
+  # back to. Membership in starkeep-users is the data plane's concern, checked
+  # by the cloud data server, not here.
   IdentityPoolRoleAttachment:
     Type: AWS::Cognito::IdentityPoolRoleAttachment
     Properties:
       IdentityPoolId: !Ref IdentityPool
-      Roles:
-        authenticated: !GetAtt AdminAppRole.Arn
+      RoleMappings:
+        userpool:
+          IdentityProvider: !Sub '\${UserPool.ProviderName}:\${UserPoolClient}'
+          Type: Rules
+          AmbiguousRoleResolution: Deny
+          RulesConfiguration:
+            Rules:
+              - Claim: cognito:groups
+                MatchType: Contains
+                Value: starkeep-admins
+                RoleARN: !GetAtt AdminAppRole.Arn
+
+  # ---------------------------------------------------------------------------
+  # The two account groups. An admin is in starkeep-admins; a user whose data
+  # syncs is in starkeep-users. An admin may be in either or both.
+  # ---------------------------------------------------------------------------
+  AdminsGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: starkeep-admins
+      UserPoolId: !Ref UserPool
+      Description: Manages users, cloud apps, settings and the deployment.
+
+  UsersGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: starkeep-users
+      UserPoolId: !Ref UserPool
+      Description: Has a data library that syncs through the cloud.
 
   # ---------------------------------------------------------------------------
   # Manager Role — pure delegation; no data-plane actions
@@ -471,7 +503,8 @@ Outputs:
 
   ConsoleLink:
     Description: >
-      Click to create your Starkeep user account in the Cognito console.
+      Click to create your Starkeep user account in the Cognito console, then
+      add it to both the starkeep-admins and starkeep-users groups.
     Value: !Sub >
       https://\${AWS::Region}.console.aws.amazon.com/cognito/v2/idp/user-pools/\${UserPool}/users/create
 

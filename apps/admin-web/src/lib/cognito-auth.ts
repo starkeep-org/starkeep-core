@@ -46,6 +46,25 @@ export function extractEmailFromIdToken(idToken: string): string | null {
   }
 }
 
+/** The group whose members administer the deployment. */
+export const ADMINS_GROUP = "starkeep-admins";
+
+/** The refusal an account outside the admin group gets from admin-web. */
+export const NOT_AN_ADMIN = "This account has no admin rights on this cloud. Ask an admin to make you one.";
+
+/** The `cognito:groups` claim of an ID token, or none. The token came straight from Cognito, so it is read, not verified. */
+export function groupsOfIdToken(idToken: string): string[] {
+  try {
+    const payload = JSON.parse(atob(idToken.split(".")[1]!.replace(/-/g, "+").replace(/_/g, "/"))) as {
+      "cognito:groups"?: unknown;
+    };
+    const groups = payload["cognito:groups"];
+    return Array.isArray(groups) ? groups.filter((g): g is string => typeof g === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 function makeTokens(result: AuthenticationResultType): AuthTokens {
   if (!result.AccessToken || !result.IdToken || !result.RefreshToken) {
     throw new Error("Incomplete auth result from Cognito");
@@ -141,6 +160,10 @@ export async function getIdentityPoolCredentials(
   config: CognitoConfig,
   idToken: string,
 ): Promise<STSCredentials> {
+  // The identity pool hands credentials to admins only and denies everyone
+  // else with an error that names no reason. Saying so here, from the token,
+  // is what lets the sign-in say why.
+  if (!groupsOfIdToken(idToken).includes(ADMINS_GROUP)) throw new Error(NOT_AN_ADMIN);
   const client = new CognitoIdentityClient({ region: config.region });
 
   const loginKey = `cognito-idp.${config.region}.amazonaws.com/${config.userPoolId}`;
