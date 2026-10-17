@@ -40,7 +40,7 @@ describe("create — key-ref shape", () => {
     expect(deduped).toBeUndefined();
     expect(record.type).toBe("image/jpeg");
     expect(record.original_filename).toBe("keyref.jpg");
-    expect(record.object_storage_key).toMatch(/^shared\/image\//); // category-namespaced
+    expect(record.object_storage_key).toMatch(/^shared\/local\/image\//); // category-namespaced
     // Readable back through GET /data/records/:id
     const got = await app.fetch(`/data/records/${record.id}`);
     expect(got.status).toBe(200);

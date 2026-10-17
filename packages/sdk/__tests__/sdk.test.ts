@@ -17,6 +17,7 @@ describe("createStarkeepSdk", () => {
     });
 
     const sdk = await createStarkeepSdk({
+        userId: () => "local",
       databaseAdapter: localDatabase,
       objectStorageAdapter: localObjectStorage,
       nodeId: "test-node",
@@ -41,10 +42,11 @@ describe("createStarkeepSdk", () => {
       expect(record.mimeType).toBe("image/jpeg");
       expect(record.sizeBytes).toBe(fileData.length);
 
-      // Key must live under shared/<category>/... (jpg → image) so that any app
-      // with read access to the category can resolve it under its own IAM
-      // grants — the key MUST NOT carry the writing app's identifier.
-      expect(record.objectStorageKey).toMatch(/^shared\/image\/[0-9a-f]{2}\/[0-9a-f]{64}$/);
+      // Key must live under shared/<userId>/<category>/... (jpg → image) so
+      // that any app with read access to the category can resolve it under its
+      // own IAM grants — the key MUST NOT carry the writing app's identifier.
+      // An unbound library writes under the `local` user segment.
+      expect(record.objectStorageKey).toMatch(/^shared\/local\/image\/[0-9a-f]{2}\/[0-9a-f]{64}$/);
 
       const stored = await localObjectStorage.get(record.objectStorageKey);
       expect(stored).not.toBeNull();
@@ -58,12 +60,14 @@ describe("createStarkeepSdk", () => {
         wallClockFunction: () => 1000,
       });
       const sdkA = await createStarkeepSdk({
+        userId: () => "local",
         databaseAdapter: localDatabase,
         objectStorageAdapter: localObjectStorage,
         nodeId: "app-a",
         clock,
       });
       const sdkB = await createStarkeepSdk({
+        userId: () => "local",
         databaseAdapter: localDatabase,
         objectStorageAdapter: localObjectStorage,
         nodeId: "app-b",
@@ -80,7 +84,7 @@ describe("createStarkeepSdk", () => {
       const readBack = await sdkB.data.get(written.id);
       expect(readBack).not.toBeNull();
       expect(readBack!.objectStorageKey).toBe(written.objectStorageKey);
-      expect(written.objectStorageKey).toMatch(/^shared\/image\//);
+      expect(written.objectStorageKey).toMatch(/^shared\/local\/image\//);
 
       const fileFromB = await localObjectStorage.get(readBack!.objectStorageKey);
       expect(fileFromB).not.toBeNull();
@@ -157,6 +161,7 @@ describe("label operations", () => {
     const localObjectStorage = new MockObjectStorageAdapter();
     const clock = createHLCClock({ nodeId: "test-node", wallClockFunction: () => 1000 });
     const sdk = await createStarkeepSdk({
+        userId: () => "local",
       databaseAdapter: localDatabase,
       objectStorageAdapter: localObjectStorage,
       nodeId: "test-node",
@@ -341,6 +346,7 @@ describe("setLabels owns the chunking", () => {
     const localDatabase = new CountingAdapter();
     const clock = createHLCClock({ nodeId: "test-node", wallClockFunction: () => 1000 });
     const sdk = await createStarkeepSdk({
+        userId: () => "local",
       databaseAdapter: localDatabase,
       objectStorageAdapter: new MockObjectStorageAdapter(),
       nodeId: "test-node",
@@ -513,6 +519,7 @@ describe("the SDK sits below the trust boundary", () => {
     const localDatabase = new MockDatabaseAdapter();
     const clock = createHLCClock({ nodeId: "test-node", wallClockFunction: () => 1000 });
     const sdk = await createStarkeepSdk({
+        userId: () => "local",
       databaseAdapter: localDatabase,
       objectStorageAdapter: new MockObjectStorageAdapter(),
       nodeId: "test-node",
@@ -548,6 +555,7 @@ describe("delete cascades to labels", () => {
     const localObjectStorage = new MockObjectStorageAdapter();
     const clock = createHLCClock({ nodeId: "test-node", wallClockFunction: () => 1000 });
     const sdk = await createStarkeepSdk({
+        userId: () => "local",
       databaseAdapter: localDatabase,
       objectStorageAdapter: localObjectStorage,
       nodeId: "test-node",

@@ -104,6 +104,13 @@ export interface FakeCloudFailures {
   deploymentSettings: boolean;
 }
 
+/**
+ * The one user the fake cloud serves. Every key it builds carries this
+ * segment, and an auto-approved device is paired for this user, so a local
+ * data server that syncs with it binds its library to this user.
+ */
+export const FAKE_CLOUD_USER_ID = "test-user";
+
 /** A device record, as `/<prefix>/platform/devices/<id>` holds one. */
 export interface FakeCloudDevice {
   readonly publicKeySpki: string;
@@ -215,6 +222,7 @@ export async function startFakeCloud(): Promise<FakeCloud> {
     applier,
     fileStorage: objectStorage,
     clock,
+    userId: () => FAKE_CLOUD_USER_ID,
   });
 
   const exchangeLog: FakeCloudExchangeLogEntry[] = [];
@@ -477,7 +485,7 @@ export async function startFakeCloud(): Promise<FakeCloud> {
         }
         callingDevice = { ...registered, deviceId: deviceIdHeader };
       } else if (devicePolicy.autoApprove) {
-        callingDevice = { deviceId: deviceIdHeader, publicKeySpki: "", userId: "test-user", kind: "desktop", label: null };
+        callingDevice = { deviceId: deviceIdHeader, publicKeySpki: "", userId: FAKE_CLOUD_USER_ID, kind: "desktop", label: null };
       } else {
         sendJson(res, 401, { error: "Unknown or revoked device" });
         return;
@@ -724,7 +732,7 @@ export async function startFakeCloud(): Promise<FakeCloud> {
       const view = appFactory({ subjectType: "app", subjectId: appId });
       if (!view) throw new Error(`fake-cloud: app "${appId}" not installed`);
       const body = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
-      const key = appSyncableObjectKey(appId, subKey);
+      const key = appSyncableObjectKey(appId, FAKE_CLOUD_USER_ID, subKey);
       await objectStorage.put(key, body, { contentType: mimeType });
       return view.registerFile(subKey, {
         contentHash: createHash("sha256").update(body as unknown as Uint8Array).digest("hex"),

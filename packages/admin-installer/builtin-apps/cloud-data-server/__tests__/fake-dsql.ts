@@ -160,7 +160,7 @@ export function recordRow(
     deleted_at: null,
     version: 1,
     content_hash: "a".repeat(64),
-    object_storage_key: `shared/image/aa/${"a".repeat(64)}`,
+    object_storage_key: `shared/test-user/image/aa/${"a".repeat(64)}`,
     mime_type: "application/octet-stream",
     size_bytes: 3,
     original_filename: null,

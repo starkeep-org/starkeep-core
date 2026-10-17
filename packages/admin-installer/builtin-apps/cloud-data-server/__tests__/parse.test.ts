@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { parseAppPath, parseObjectKey } from "../src/api-handler.js";
+import type { BrokerSubject } from "../src/api-handler.js";
 import type { AccessGrants } from "../src/access-enforcer.js";
+
+/** A subject acting for user `u1`. */
+function as(appId: string, userId = "u1"): BrokerSubject {
+  return { appId, userId };
+}
 
 function grants(overrides: Partial<{
   readableCategories: string[];
@@ -51,18 +57,18 @@ describe("parseAppPath", () => {
 describe("parseObjectKey — shared/ namespace", () => {
   it("allows a shared key whose category the caller can read/write", () => {
     const g = grants({ readableCategories: ["image"], writableCategories: ["image"] });
-    expect(parseObjectKey("photos", "shared/image/ab/abc123", g, "read")).toEqual({ ok: true });
-    expect(parseObjectKey("photos", "shared/image/ab/abc123", g, "write")).toEqual({ ok: true });
+    expect(parseObjectKey(as("photos"), "shared/u1/image/ab/abc123", g, "read")).toEqual({ ok: true });
+    expect(parseObjectKey(as("photos"), "shared/u1/image/ab/abc123", g, "write")).toEqual({ ok: true });
   });
 
   it("403s a shared key outside the caller's grants, per mode", () => {
     const g = grants({ readableCategories: ["image"] });
-    expect(parseObjectKey("photos", "shared/video/ab/abc123", g, "read")).toMatchObject({
+    expect(parseObjectKey(as("photos"), "shared/u1/video/ab/abc123", g, "read")).toMatchObject({
       ok: false,
       status: 403,
     });
     // read-only image grant: write mode must still be forbidden
-    expect(parseObjectKey("photos", "shared/image/ab/abc123", g, "write")).toMatchObject({
+    expect(parseObjectKey(as("photos"), "shared/u1/image/ab/abc123", g, "write")).toMatchObject({
       ok: false,
       status: 403,
     });
@@ -70,11 +76,11 @@ describe("parseObjectKey — shared/ namespace", () => {
 
   it("400s malformed shared keys before authorization", () => {
     const g = grants({ readableCategories: ["image"] });
-    expect(parseObjectKey("photos", "shared/image/onlyhash", g, "read")).toMatchObject({
+    expect(parseObjectKey(as("photos"), "shared/u1/image/onlyhash", g, "read")).toMatchObject({
       ok: false,
       status: 400,
     });
-    expect(parseObjectKey("photos", "shared//ab/abc123", g, "read")).toMatchObject({
+    expect(parseObjectKey(as("photos"), "shared/u1//ab/abc123", g, "read")).toMatchObject({
       ok: false,
       status: 400,
     });
@@ -82,10 +88,10 @@ describe("parseObjectKey — shared/ namespace", () => {
 
   it("all-access (Drive) passes any shared category, including other", () => {
     const g = grants({ allAccess: true });
-    expect(parseObjectKey("starkeep-drive", "shared/other/ab/abc123", g, "write")).toEqual({
+    expect(parseObjectKey(as("starkeep-drive"), "shared/u1/other/ab/abc123", g, "write")).toEqual({
       ok: true,
     });
-    expect(parseObjectKey("starkeep-drive", "shared/video/ab/abc123", g, "read")).toEqual({
+    expect(parseObjectKey(as("starkeep-drive"), "shared/u1/video/ab/abc123", g, "read")).toEqual({
       ok: true,
     });
   });
@@ -94,37 +100,73 @@ describe("parseObjectKey — shared/ namespace", () => {
 describe("parseObjectKey — apps/ namespace", () => {
   it("allows the caller's own syncable keys", () => {
     expect(
-      parseObjectKey("photos", "apps/photos/syncable/files/thumb.png", grants(), "write"),
+      parseObjectKey(as("photos"), "apps/photos/u1/syncable/files/thumb.png", grants(), "write"),
     ).toEqual({ ok: true });
   });
 
   it("403s another app's syncable keys, even for all-access", () => {
     expect(
-      parseObjectKey("photos", "apps/notes/syncable/files/x", grants(), "read"),
+      parseObjectKey(as("photos"), "apps/notes/u1/syncable/files/x", grants(), "read"),
     ).toMatchObject({ ok: false, status: 403 });
     expect(
-      parseObjectKey("starkeep-drive", "apps/photos/syncable/files/x", grants({ allAccess: true }), "read"),
+      parseObjectKey(as("starkeep-drive"), "apps/photos/u1/syncable/files/x", grants({ allAccess: true }), "read"),
     ).toMatchObject({ ok: false, status: 403 });
   });
 
   it("400s app keys missing the syncable segment or a sub-key", () => {
-    expect(parseObjectKey("photos", "apps/photos/private/x", grants(), "read")).toMatchObject({
+    expect(parseObjectKey(as("photos"), "apps/photos/u1/private/x", grants(), "read")).toMatchObject({
       ok: false,
       status: 400,
     });
-    expect(parseObjectKey("photos", "apps/photos/syncable", grants(), "read")).toMatchObject({
+    expect(parseObjectKey(as("photos"), "apps/photos/u1/syncable", grants(), "read")).toMatchObject({
       ok: false,
       status: 400,
     });
   });
 });
 
-describe("parseObjectKey — unknown namespaces", () => {
-  it("400s keys outside shared/ and apps/", () => {
-    expect(parseObjectKey("photos", "private/photos/x", grants({ allAccess: true }), "read")).toMatchObject({
+describe("parseObjectKey — the user segment", () => {
+  it("403s another user's shared key, even for all-access", () => {
+    const g = grants({ allAccess: true });
+    expect(parseObjectKey(as("starkeep-drive"), "shared/u2/image/ab/abc123", g, "read")).toMatchObject({
+      ok: false,
+      status: 403,
+    });
+    expect(parseObjectKey(as("starkeep-drive", "u2"), "shared/u2/image/ab/abc123", g, "read")).toEqual({
+      ok: true,
+    });
+  });
+
+  it("403s another user's syncable key of the caller's own app", () => {
+    expect(
+      parseObjectKey(as("photos"), "apps/photos/u2/syncable/files/x", grants(), "read"),
+    ).toMatchObject({ ok: false, status: 403 });
+  });
+
+  it("400s the old layout, which names no user", () => {
+    const g = grants({ allAccess: true });
+    expect(parseObjectKey(as("starkeep-drive"), "shared/image/ab/abc123", g, "read")).toMatchObject({
       ok: false,
       status: 400,
     });
-    expect(parseObjectKey("photos", "", grants(), "read")).toMatchObject({ ok: false, status: 400 });
+    expect(
+      parseObjectKey(as("photos"), "apps/photos/syncable/files/x", grants(), "read"),
+    ).toMatchObject({ ok: false, status: 400 });
+  });
+
+  it("400s a user segment outside the safe alphabet", () => {
+    expect(
+      parseObjectKey(as("photos"), "apps/photos/u.1/syncable/files/x", grants(), "read"),
+    ).toMatchObject({ ok: false, status: 400 });
+  });
+});
+
+describe("parseObjectKey — unknown namespaces", () => {
+  it("400s keys outside shared/ and apps/", () => {
+    expect(parseObjectKey(as("photos"), "private/photos/x", grants({ allAccess: true }), "read")).toMatchObject({
+      ok: false,
+      status: 400,
+    });
+    expect(parseObjectKey(as("photos"), "", grants(), "read")).toMatchObject({ ok: false, status: 400 });
   });
 });

@@ -60,12 +60,13 @@ async function upload(file) {
   const buf = await file.arrayBuffer();
   const contentHash = await sha256Hex(buf);
   const type = file.type === "image/jpeg" ? "image/jpeg" : "image/png";
-  const key = "shared/image/" + contentHash.slice(0, 2) + "/" + contentHash;
 
   if (cloud) {
     const p = await fetch(api + "/files/presign", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key, contentType: type, intent: "instant" }),
+      // The broker builds the key: it carries the signed-in user's segment,
+      // which this page does not know.
+      body: JSON.stringify({ type, contentHash, contentType: type, intent: "instant" }),
     });
     if (!p.ok) { statusEl.textContent = "presign → " + p.status; return; }
     const presign = await p.json();

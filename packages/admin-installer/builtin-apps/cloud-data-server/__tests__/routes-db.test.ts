@@ -18,7 +18,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { signRequest } from "@starkeep/app-client";
 import { appSyncableTableInfo, FILE_RECORDS_TABLE_INFO } from "@starkeep/shared-space-api";
-import { installUserTokenFixture } from "./user-token.js";
+import { installUserTokenFixture, TEST_USER_ID } from "./user-token.js";
 import { dataRecordObjectKey, serializeHLC } from "@starkeep/protocol-primitives";
 import type { APIGatewayEvent, LambdaContext } from "../src/handler-utils.js";
 import { CHILDREN_OF, STAND_INS_OF_PAGE, fakeDsqlWithGrants, recordRow } from "./fake-dsql.js";
@@ -46,6 +46,7 @@ const CF_SIGNING_PARAM = "/teststack/app-creds/_cloudfront-signing";
 type HandlerModule = typeof import("../src/api-handler.js");
 let handler: HandlerModule["handler"];
 let setDbFactory: HandlerModule["__setDatabaseClientFactoryForTests"];
+let exchangeKeyRefusal: HandlerModule["exchangeKeyRefusal"];
 
 beforeAll(async () => {
   process.env.STACK_PREFIX = "teststack";
@@ -57,6 +58,7 @@ beforeAll(async () => {
   const mod = await import("../src/api-handler.js");
   handler = mod.handler;
   setDbFactory = mod.__setDatabaseClientFactoryForTests;
+  exchangeKeyRefusal = mod.exchangeKeyRefusal;
 });
 
 afterAll(() => {
@@ -297,12 +299,12 @@ describe("record registration", () => {
       type: "image/jpeg",
       category: "image",
       content_hash: VALID_HASH,
-      object_storage_key: dataRecordObjectKey("image/jpeg", VALID_HASH),
+      object_storage_key: dataRecordObjectKey(TEST_USER_ID, "image/jpeg", VALID_HASH),
       original_filename: "cat.jpg",
       version: 1,
     });
     expect(s3Mock.commandCalls(HeadObjectCommand)[0]!.args[0].input.Key).toBe(
-      dataRecordObjectKey("image/jpeg", VALID_HASH),
+      dataRecordObjectKey(TEST_USER_ID, "image/jpeg", VALID_HASH),
     );
     const inserts = db.calls(RECORDS_INSERT);
     expect(inserts).toHaveLength(1);
@@ -1062,7 +1064,7 @@ describe("per-record routes honor read/write grants", () => {
     // the single file-url route 403s instead of signing a foreign-category URL.
     const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(
       /from "shared"\."records" where "id" =/,
-      [recordRow({ id: "mm1", type: "image/jpeg", object_storage_key: `shared/audio/ab/${"a".repeat(64)}` })],
+      [recordRow({ id: "mm1", type: "image/jpeg", object_storage_key: `shared/test-user/audio/ab/${"a".repeat(64)}` })],
     );
     setDbFactory(db);
     const res = await handler(
@@ -1077,7 +1079,7 @@ describe("per-record routes honor read/write grants", () => {
     // silently omitted (batch semantics) rather than signed.
     const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(RECORDS_SELECT, [
       recordRow({ id: "ok1", type: "image/jpeg" }),
-      recordRow({ id: "bad1", type: "image/jpeg", object_storage_key: `shared/audio/ab/${"a".repeat(64)}` }),
+      recordRow({ id: "bad1", type: "image/jpeg", object_storage_key: `shared/test-user/audio/ab/${"a".repeat(64)}` }),
     ]);
     setDbFactory(db);
     const res = await handler(
@@ -1264,13 +1266,32 @@ describe("sync exchange channel split", () => {
     deletedAt: null,
     version: 1,
     contentHash: VALID_HASH,
-    objectStorageKey: dataRecordObjectKey("image/jpeg", VALID_HASH),
+    objectStorageKey: dataRecordObjectKey(TEST_USER_ID, "image/jpeg", VALID_HASH),
     mimeType: "image/jpeg",
     sizeBytes: 3,
     originalFilename: null,
     parentId: null,
     label: null,
   };
+
+  it("refuses a pushed record whose key is under another user's segment, and applies nothing", async () => {
+    const db = fakeDsqlWithGrants();
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "starkeep-drive",
+        method: "POST",
+        subPath: "/sync/exchange",
+        body: {
+          watermarks: {},
+          records: [{ ...incomingRecord, objectStorageKey: dataRecordObjectKey("someone-else", "image/jpeg", VALID_HASH) }],
+        },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(403);
+    expect(db.calls(RECORDS_INSERT)).toHaveLength(0);
+  });
 
   it("the Drive channel applies incoming shared records", async () => {
     const db = fakeDsqlWithGrants()
@@ -1372,6 +1393,37 @@ describe("sync exchange channel split", () => {
   });
 });
 
+describe("exchangeKeyRefusal", () => {
+  const own = `apps/memo/${TEST_USER_ID}/syncable/media/a.mp3`;
+  const foreign = "apps/memo/someone-else/syncable/media/a.mp3";
+  const fileRow = (id: string) => ({ table: "_starkeep_sync_records", row: { id, object_storage_key: id } });
+
+  it("passes keys under the caller's segment, and rows with no key", () => {
+    expect(
+      exchangeKeyRefusal(
+        {
+          records: [{ objectStorageKey: dataRecordObjectKey(TEST_USER_ID, "image/jpeg", VALID_HASH) }, { objectStorageKey: null }],
+          appSyncableRows: [fileRow(own), { table: "cards", row: { id: "card-1" } }],
+        },
+        TEST_USER_ID,
+      ),
+    ).toBeNull();
+  });
+
+  it("refuses a file row, or a file-row delete, naming another user's key", () => {
+    expect(exchangeKeyRefusal({ appSyncableRows: [fileRow(foreign)] }, TEST_USER_ID)).toMatch(/not under this user's segment/);
+    expect(
+      exchangeKeyRefusal({ appSyncableRows: [{ table: "_starkeep_sync_records", where: { id: foreign } }] }, TEST_USER_ID),
+    ).toMatch(/not under this user's segment/);
+  });
+
+  it("refuses a key in the old layout, which names no user", () => {
+    expect(
+      exchangeKeyRefusal({ records: [{ objectStorageKey: `shared/image/aa/${"a".repeat(64)}` }] }, TEST_USER_ID),
+    ).not.toBeNull();
+  });
+});
+
 describe("the cloud's bytes watermark on /sync/exchange", () => {
   // The cloud reports, per author, how far every file it wants is in S3, so a
   // phone knows which uploads it still owes. It keeps the value in the
@@ -1387,7 +1439,7 @@ describe("the cloud's bytes watermark on /sync/exchange", () => {
     );
   }
 
-  /** One record from author `test` whose file is at `shared/image/aa/aaa…`. */
+  /** One record from author `test` whose file is at `shared/test-user/image/aa/aaa…`. */
   function storeWithOneRecord() {
     return fakeDsqlWithGrants()
       .on(RECORDS_SELECT, [recordRow({ id: "rec-1", type: "image/jpeg" })])
@@ -1808,8 +1860,8 @@ describe("/app-data routes", () => {
   const FILE_RECORDS_SELECT = /from "app_appdata1"\."_starkeep_sync_records"/;
   const FILE_RECORDS_INSERT = /insert into "app_appdata1"\."_starkeep_sync_records"/;
   const fileRow = {
-    id: "apps/appdata1/syncable/cover",
-    object_storage_key: "apps/appdata1/syncable/cover",
+    id: "apps/appdata1/test-user/syncable/cover",
+    object_storage_key: "apps/appdata1/test-user/syncable/cover",
     content_hash: "c".repeat(64),
     mime_type: "image/png",
     size_bytes: 21,
@@ -1832,7 +1884,7 @@ describe("/app-data routes", () => {
     );
     expect(res.statusCode).toBe(200);
     const body = bodyOf(res);
-    expect(body["key"]).toBe("apps/appdata1/syncable/cover");
+    expect(body["key"]).toBe("apps/appdata1/test-user/syncable/cover");
     expect(String(body["url"])).toContain("fake-bucket");
     // The broker never reads or writes bytes on the presign path.
     expect(db.calls(FILE_RECORDS_INSERT)).toHaveLength(0);
@@ -1873,7 +1925,7 @@ describe("/app-data routes", () => {
       context,
     );
     expect(res.statusCode).toBe(200);
-    expect(bodyOf(res)["key"]).toBe("apps/appdata1/syncable/cover");
+    expect(bodyOf(res)["key"]).toBe("apps/appdata1/test-user/syncable/cover");
     expect(db.calls(FILE_RECORDS_INSERT)).toHaveLength(1);
   });
 
@@ -1918,7 +1970,7 @@ describe("/app-data routes", () => {
   // waits for one here, which is what exhausted the concurrency ceiling and
   // silently dropped memo's study audio.
   describe("POST /app-data/file-urls", () => {
-    const backRow = { ...fileRow, id: "apps/appdata1/syncable/back" };
+    const backRow = { ...fileRow, id: "apps/appdata1/test-user/syncable/back" };
     /** Index rows keyed by the id the applier binds into the select. */
     const rowsById = (present: Record<string, unknown>[]) => (q: { values: unknown[] }) => {
       const wanted = q.values.find((v) => typeof v === "string" && String(v).startsWith("apps/"));
@@ -2202,7 +2254,7 @@ describe("POST /data/records/:id/archive-gate", () => {
 // or "the caller is refused rather than silently committed".
 describe("availability and restore", () => {
   const grants = [{ type_id: "image/jpeg", access: "readwrite" }];
-  const archivedKey = `shared/image/aa/${"a".repeat(64)}`;
+  const archivedKey = `shared/test-user/image/aa/${"a".repeat(64)}`;
 
   function archivedRow(over: Record<string, unknown> = {}) {
     return {
@@ -2464,7 +2516,7 @@ describe("availability and restore", () => {
 // handed back an S3 presigned URL the sync path would quietly keep paying
 // origin egress with no edge caching, and nothing would look wrong.
 describe("GET /files/{key}/presign — the sync download path", () => {
-  const sharedImageKey = `shared/image/aa/${"a".repeat(64)}`;
+  const sharedImageKey = `shared/test-user/image/aa/${"a".repeat(64)}`;
 
   it("signs shared bytes through CloudFront, not S3", async () => {
     setDbFactory(fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]));
@@ -2503,7 +2555,7 @@ describe("GET /files/{key}/presign — the sync download path", () => {
       signedEvent({
         appId: "app1",
         method: "GET",
-        subPath: "/files/apps/app1/syncable/cover/presign",
+        subPath: "/files/apps/app1/test-user/syncable/cover/presign",
       }),
       context,
     );
@@ -2648,7 +2700,7 @@ describe("GET /data/records derived children", () => {
 // here follows from that.
 describe("POST /files/presign pins the expected checksum", () => {
   const hash = "b".repeat(64);
-  const sharedKey = `shared/image/bb/${hash}`;
+  const sharedKey = `shared/test-user/image/bb/${hash}`;
   const expectedChecksum = Buffer.from(hash, "hex").toString("base64");
 
   // Every presign first asks whether a live record at this key is marked
@@ -2678,6 +2730,40 @@ describe("POST /files/presign pins the expected checksum", () => {
     // Signed into the URL, not merely advertised beside it — otherwise an
     // uploader could drop the header and write whatever it liked.
     expect(String(body["url"])).toContain("x-amz-checksum-sha256");
+  });
+
+  it("builds the key from a type and a hash, under the caller's user", async () => {
+    setDbFactory(
+      fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
+    );
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "POST",
+        subPath: "/files/presign",
+        body: { type: "image/jpeg", contentHash: hash, contentType: "image/jpeg" },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(bodyOf(res)["key"]).toBe(sharedKey);
+    expect(bodyOf(res)["checksumSha256"]).toBe(expectedChecksum);
+  });
+
+  it("refuses a key under another user's segment", async () => {
+    setDbFactory(
+      fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
+    );
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "POST",
+        subPath: "/files/presign",
+        body: { key: `shared/someone-else/image/bb/${hash}` },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(403);
   });
 
   // The caller never supplies the checksum, so it cannot lie about it. A body
@@ -2864,7 +2950,7 @@ describe("POST /files/presign pins the expected checksum", () => {
   // SHA-256, which is what a node proves a cloud copy against.
   it("pins the declared hash for a key that does not name its own", async () => {
     setDbFactory(fakeDsqlWithGrants().on(noRecordAtKey, []));
-    const appKey = "apps/app1/syncable/cover";
+    const appKey = "apps/app1/test-user/syncable/cover";
     const declared = "d".repeat(64);
     const res = await handler(
       signedEvent({

@@ -171,8 +171,10 @@ export function installLocal(db: RawDatabase, rawManifest: unknown): InstallLoca
  */
 export interface UninstallLocalOptions {
   /**
-   * Called with the `apps/<appId>/syncable/` prefix so the caller can delete
-   * any object-storage entries for the uninstalled app. The installer itself
+   * Called with the `apps/<appId>/` prefix so the caller can delete any
+   * object-storage entries for the uninstalled app. The prefix spans every
+   * user segment under the app (`apps/<appId>/<userId>/syncable/`): a node
+   * holds one library, plus any `local` files binding has yet to sweep. The installer itself
    * doesn't know about the storage adapter; the local-data-server wires this
    * up. Errors here don't roll back the uninstall — the DB cleanup is
    * authoritative — but they are logged.
@@ -219,7 +221,7 @@ export function uninstallLocal(
   runStep(db, appId, "uninstall", "delete_syncable_files", done, () => {
     const ns = getAppSyncableNamespace(db, appId);
     if (ns?.filesEnabled && options.deleteFilesPrefix) {
-      const prefix = `apps/${appId}/syncable/`;
+      const prefix = `apps/${appId}/`;
       try {
         const result = options.deleteFilesPrefix(prefix);
         if (result && typeof (result as Promise<void>).then === "function") {

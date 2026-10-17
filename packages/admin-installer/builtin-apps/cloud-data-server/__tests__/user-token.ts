@@ -22,6 +22,8 @@ type JsonWebKey = webcrypto.JsonWebKey;
 export const TEST_REGION = "us-east-1";
 export const TEST_POOL_ID = "us-east-1_TESTPOOL";
 export const TEST_CLIENT_ID = "test-client-id";
+/** The `sub` of the fixture's token: the user every key in these suites belongs to. */
+export const TEST_USER_ID = "test-user";
 
 let signingKey: { privateKey: CryptoKey; jwk: JsonWebKey & { kid: string } } | null = null;
 
@@ -57,7 +59,7 @@ export async function mintTestUserToken(
       iss: `https://cognito-idp.${TEST_REGION}.amazonaws.com/${TEST_POOL_ID}`,
       aud: TEST_CLIENT_ID,
       token_use: "id",
-      sub: "test-user",
+      sub: TEST_USER_ID,
       email: "test@example.com",
       exp: Math.floor(Date.now() / 1000) + 3600,
       // An admin with a data library: the one account that may reach data
