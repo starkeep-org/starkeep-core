@@ -1,5 +1,17 @@
 export { AuroraDsqlDatabaseAdapter } from "./adapter.js";
-export { buildPostgresQuery, compiler as postgresCompiler } from "./query-builder.js";
+export {
+  buildPostgresQuery,
+  compiler as postgresCompiler,
+  ownerScopedCompiler,
+  type PostgresCompiler,
+} from "./query-builder.js";
+export {
+  OWNER_COLUMN,
+  OwnerScopePlugin,
+  assertOwnerScoped,
+  isOwnedTable,
+  withoutOwner,
+} from "./owner-scope.js";
 export type { BuiltPostgresQuery } from "./query-builder.js";
 export type {
   AuroraDsqlDatabaseAdapterOptions,

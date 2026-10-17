@@ -546,6 +546,9 @@ importers:
         specifier: ^8.13.0
         version: 8.20.0
     devDependencies:
+      '@electric-sql/pglite':
+        specifier: ^0.5.4
+        version: 0.5.4
       '@noble/curves':
         specifier: ^2.2.0
         version: 2.2.0

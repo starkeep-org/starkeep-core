@@ -73,7 +73,7 @@
 import pg from "pg";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
-import { CATEGORIES, pgMetadataDdl, metadataIndexDdls, hasMetadataTable } from "@starkeep/protocol-primitives";
+import { CATEGORIES, pgMetadataDdl, metadataIndexDdls, hasMetadataTable, OWNER_COLUMN } from "@starkeep/protocol-primitives";
 
 export interface SchemaInitOptions {
   hostname: string;
@@ -195,10 +195,19 @@ export async function initializeSharedSchema(
     // node_id is denormalized from updated_at (its nodeId component) on every
     // write. Feeds the sync responder's per-node coverage watermark via the
     // (node_id, updated_at) index without scanning the table.
+    //
+    // Owned tables — records, labels, availability and the metadata tables —
+    // lead with `user_id`, first in the primary key and in every index. The
+    // cloud holds every user's library in these tables, and the broker's
+    // user-scoped compiler fills and filters the column on every statement;
+    // see storage-aurora-dsql's `owner-scope.ts`. Record ids are
+    // content-addressed, so two users holding one file hold one id each, and
+    // the key keeps them two rows.
     await db.schema
       .createTable("shared.records")
       .ifNotExists()
-      .addColumn("id", "text", (c) => c.primaryKey())
+      .addColumn(OWNER_COLUMN, "text", (c) => c.notNull())
+      .addColumn("id", "text", (c) => c.notNull())
       .addColumn("type", "text", (c) => c.notNull())
       .addColumn("created_at", "text", (c) => c.notNull())
       .addColumn("updated_at", "text", (c) => c.notNull())
@@ -219,6 +228,7 @@ export async function initializeSharedSchema(
       .addColumn("canonical_threshold", "integer")
       .addColumn("self_canonical", "boolean")
       .addColumn("stand_in_slot", "text")
+      .addPrimaryKeyConstraint("records_pkey", [OWNER_COLUMN, "id"] as never[])
       .execute();
 
     // The stand-in columns, for a cluster whose `shared.records` predates
@@ -291,6 +301,7 @@ export async function initializeSharedSchema(
     await db.schema
       .createTable("shared.record_labels")
       .ifNotExists()
+      .addColumn(OWNER_COLUMN, "text", (c) => c.notNull())
       .addColumn("record_id", "text", (c) => c.notNull())
       .addColumn("app_id", "text", (c) => c.notNull())
       .addColumn("key", "text", (c) => c.notNull())
@@ -301,6 +312,7 @@ export async function initializeSharedSchema(
       .addColumn("node_id", "text", (c) => c.notNull())
       .addColumn("deleted_at", "text")
       .addPrimaryKeyConstraint("record_labels_pkey", [
+        OWNER_COLUMN,
         "record_id",
         "app_id",
         "key",
@@ -330,13 +342,15 @@ export async function initializeSharedSchema(
     await db.schema
       .createTable("shared.object_availability")
       .ifNotExists()
-      .addColumn("object_storage_key", "text", (c) => c.primaryKey())
+      .addColumn(OWNER_COLUMN, "text", (c) => c.notNull())
+      .addColumn("object_storage_key", "text", (c) => c.notNull())
       .addColumn("state", "text", (c) => c.notNull())
       .addColumn("tier", "text")
       .addColumn("expected_latency_hours", "integer")
       .addColumn("ready_at_ms", "bigint")
       .addColumn("restored_until_ms", "bigint")
       .addColumn("observed_at_ms", "bigint", (c) => c.notNull())
+      .addPrimaryKeyConstraint("object_availability_pkey", [OWNER_COLUMN, "object_storage_key"] as never[])
       .execute();
 
     // Granted to PUBLIC for the same reason shared.record_labels is: every app
@@ -495,7 +509,7 @@ export async function initializeSharedSchema(
     await ensureIndex(
       db,
       `CREATE UNIQUE INDEX ASYNC IF NOT EXISTS uq_records_parent_filename_hash
-         ON shared.records (parent_id, original_filename, content_hash, deleted_at)
+         ON shared.records (user_id, parent_id, original_filename, content_hash, deleted_at)
          NULLS NOT DISTINCT`,
     );
 
@@ -514,7 +528,7 @@ export async function initializeSharedSchema(
     await ensureIndex(
       db,
       `CREATE INDEX ASYNC IF NOT EXISTS idx_records_content_hash
-         ON shared.records (content_hash, parent_id, deleted_at)`,
+         ON shared.records (user_id, content_hash, parent_id, deleted_at)`,
     );
 
     // One live canonical stand-in per original, and one live stand-in per
@@ -527,7 +541,7 @@ export async function initializeSharedSchema(
     await ensureIndex(
       db,
       `CREATE UNIQUE INDEX ASYNC IF NOT EXISTS uq_records_stand_in_slot
-         ON shared.records (parent_id, stand_in_slot)`,
+         ON shared.records (user_id, parent_id, stand_in_slot)`,
     );
 
     // Backs the sync responder's per-node coverage watermark
@@ -536,7 +550,7 @@ export async function initializeSharedSchema(
     await ensureIndex(
       db,
       `CREATE INDEX ASYNC IF NOT EXISTS idx_records_node_watermark
-         ON shared.records (node_id, updated_at)`,
+         ON shared.records (user_id, node_id, updated_at)`,
     );
 
     // The reverse label path: "which records has `alpha` labelled
@@ -565,13 +579,16 @@ export async function initializeSharedSchema(
     //   and promoting it would push it into the residual sort order that the
     //   pagination cursor is derived from.
     //
-    // The residual order with app_id/key/deleted_at pinned is
+    //   user_id leads, pinned by equality on every statement: each user's
+    //   labels are a range of their own.
+    //
+    // The residual order with user_id/app_id/key/deleted_at pinned is
     // (value, record_id) — which is exactly what the cursor encodes. Do not
     // "tidy" the column order.
     await ensureIndex(
       db,
       `CREATE INDEX ASYNC IF NOT EXISTS idx_record_labels_reverse
-         ON shared.record_labels (app_id, key, deleted_at, value, record_id)
+         ON shared.record_labels (user_id, app_id, key, deleted_at, value, record_id)
          INCLUDE (record_type)`,
     );
 
@@ -579,7 +596,7 @@ export async function initializeSharedSchema(
     await ensureIndex(
       db,
       `CREATE INDEX ASYNC IF NOT EXISTS idx_record_labels_node_watermark
-         ON shared.record_labels (node_id, updated_at)`,
+         ON shared.record_labels (user_id, node_id, updated_at)`,
     );
 
     // DSQL-side IAM-to-PG mapping for the cloud install registry. The

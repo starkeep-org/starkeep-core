@@ -76,6 +76,7 @@ beforeEach(async () => {
   adapter = new AuroraDsqlDatabaseAdapter(
     { hostname: "fake.dsql", region: "us-east-1" },
     factoryOf(client),
+    "user-a",
   );
   await adapter.init();
 });
@@ -83,9 +84,10 @@ beforeEach(async () => {
 describe("lifecycle", () => {
   it("refuses queries before init", async () => {
     const cold = new AuroraDsqlDatabaseAdapter(
-      { hostname: "fake.dsql", region: "us-east-1" },
-      factoryOf(new FakeClient()),
-    );
+    { hostname: "fake.dsql", region: "us-east-1" },
+    factoryOf(new FakeClient()),
+    "user-a",
+  );
     await expect(cold.get(sampleRecord().id)).rejects.toThrow(StorageError);
   });
 
@@ -105,11 +107,12 @@ describe("put / get / delete", () => {
     await adapter.put(record);
     const [call] = client.calls;
     expect(call.text).toMatch(/^insert into "shared"\."records" \(/);
-    expect(call.text).toContain('on conflict ("id") do update set');
+    expect(call.text).toContain('on conflict ("user_id", "id") do update set');
     expect(call.text).toContain('"updated_at" = "excluded"."updated_at"');
     // id must never be in the update list (it's the conflict key)
     expect(call.text).not.toContain('"id" = "excluded"."id",');
-    expect(call.values).toEqual(Object.values(recordToRow(record)));
+    // The owner rides last: the scoped compiler stamps every insert.
+    expect(call.values).toEqual([...Object.values(recordToRow(record)), "user-a"]);
   });
 
   it("get round-trips a row and returns null on miss", async () => {
@@ -129,7 +132,7 @@ describe("put / get / delete", () => {
     await adapter.delete(record.id, hlc);
     const [call] = client.calls;
     expect(call.text).toBe(
-      'update "shared"."records" set "deleted_at" = $1, "updated_at" = $2, "node_id" = $3, "stand_in_slot" = $4 where "id" = $5',
+      'update "shared"."records" set "deleted_at" = $1, "updated_at" = $2, "node_id" = $3, "stand_in_slot" = $4 where "id" = $5 and "shared"."records"."user_id" = $6',
     );
     expect(call.values![0]).toBe(call.values![1]);
     expect(call.values![2]).toBe(hlc.nodeId);
@@ -263,14 +266,14 @@ describe("metadata tables", () => {
     await adapter.putMetadata("image/jpeg", { recordId: record.id, width: 800, height: 600 });
     const [call] = client.calls;
     expect(call.text).toContain('insert into "shared"."record_image_metadata"');
-    expect(call.text).toContain('on conflict ("record_id") do update set');
+    expect(call.text).toContain('on conflict ("user_id", "record_id") do update set');
     expect(call.text).toContain('"width" = "excluded"."width"');
     // `record_type` rides after `record_id`: it is the grant discriminant
     // every read of the row gates on, set from the type this call names.
     // `deleted_at` follows it, always null: writing metadata asserts the row is
     // live, so an app re-reporting a restored record's dimensions lifts the
     // tombstone rather than writing into a row nobody can read.
-    expect(call.values).toEqual([record.id, "image/jpeg", null, 800, 600]);
+    expect(call.values).toEqual([record.id, "image/jpeg", null, 800, 600, "user-a"]);
   });
 
   it("still updates the discriminant when the row carries nothing else", async () => {
@@ -279,8 +282,8 @@ describe("metadata tables", () => {
     // `record_type` is always a column to update, so the DO NOTHING branch is
     // now unreachable — which is right: an upsert that left the discriminant
     // alone would be an upsert that could leave a stale one behind.
-    expect(client.calls[0].text).toContain('on conflict ("record_id") do update set');
-    expect(client.calls[0].values).toEqual([record.id, "image/jpeg", null]);
+    expect(client.calls[0].text).toContain('on conflict ("user_id", "record_id") do update set');
+    expect(client.calls[0].values).toEqual([record.id, "image/jpeg", null, "user-a"]);
   });
 
   it("refuses a bare category, which would store an ungated discriminant", async () => {
@@ -309,7 +312,7 @@ describe("metadata tables", () => {
     const record = sampleRecord();
     await adapter.deleteMetadata("image/jpeg", record.id);
     expect(client.calls[0].text).toBe(
-      'delete from "shared"."record_image_metadata" where "record_id" = $1',
+      'delete from "shared"."record_image_metadata" where "record_id" = $1 and "shared"."record_image_metadata"."user_id" = $2',
     );
   });
 
@@ -321,7 +324,7 @@ describe("metadata tables", () => {
       nodeId: "node-a",
     });
     expect(client.calls[0].text).toBe(
-      'update "shared"."record_image_metadata" set "deleted_at" = $1 where "record_id" = $2',
+      'update "shared"."record_image_metadata" set "deleted_at" = $1 where "record_id" = $2 and "shared"."record_image_metadata"."user_id" = $3',
     );
     expect(client.calls[0].values[1]).toBe(record.id);
   });
@@ -330,8 +333,8 @@ describe("metadata tables", () => {
     const record = sampleRecord();
     await adapter.restoreMetadata("image/jpeg", record.id);
     expect(client.calls[0].text).toBe(
-      'update "shared"."record_image_metadata" set "deleted_at" = $1 where "record_id" = $2',
+      'update "shared"."record_image_metadata" set "deleted_at" = $1 where "record_id" = $2 and "shared"."record_image_metadata"."user_id" = $3',
     );
-    expect(client.calls[0].values).toEqual([null, record.id]);
+    expect(client.calls[0].values).toEqual([null, record.id, "user-a"]);
   });
 });

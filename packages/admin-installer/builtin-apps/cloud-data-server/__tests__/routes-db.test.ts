@@ -141,7 +141,7 @@ const RECORDS_TYPE_COUNTS =
   /count\(\*\).*from "shared"\."records".*group by "shared"\."records"\."type"/;
 // The responder's coverage-watermark summary, computed on every exchange.
 const RECORDS_NODE_WATERMARKS =
-  /select "node_id", max\("updated_at"\).*from "shared"\."records" group by "node_id"/;
+  /select "node_id", max\("updated_at"\).*from "shared"\."records" (?:where "shared"\."records"\."user_id" = \$\d+ )?group by "node_id"/;
 const VALID_HASH = "b".repeat(64);
 /** Matches `recordRow`'s stamp, so a seeded label deserializes like a real one. */
 const TEST_HLC_FOR_LABELS = serializeHLC({
@@ -714,7 +714,7 @@ describe("list metadata enrichment (?include=metadata)", () => {
     expect(body.records[1]!.metadata).toBeNull();
     // One batched metadata read for the whole page (not one per record).
     expect(db.calls(IMAGE_META_SELECT)).toHaveLength(1);
-    expect(db.calls(IMAGE_META_SELECT)[0]!.values).toEqual(["rec-1", "rec-2"]);
+    expect(db.calls(IMAGE_META_SELECT)[0]!.values).toEqual(["rec-1", "rec-2", TEST_USER_ID]);
   });
 
   it("omits metadata and issues no metadata query by default", async () => {
@@ -803,7 +803,8 @@ describe("metadata routes", () => {
     // would let the caller decide who may read it.
     // `deleted_at` follows it, always null: writing metadata asserts the row is
     // live, so an app re-reporting after a restore lifts the tombstone.
-    expect(writes[0]!.values).toEqual(["r1", "image/jpeg", null, 100, 50]);
+    // The owner rides last: the scoped compiler stamps every insert.
+    expect(writes[0]!.values).toEqual(["r1", "image/jpeg", null, 100, 50, TEST_USER_ID]);
   });
 
   it("takes record_type from the record, not from the caller's typeId", async () => {
@@ -833,6 +834,7 @@ describe("metadata routes", () => {
       "image/png",
       null,
       100,
+      TEST_USER_ID,
     ]);
   });
 

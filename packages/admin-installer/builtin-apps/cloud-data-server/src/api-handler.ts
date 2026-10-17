@@ -43,6 +43,8 @@ import {
   createDsqlByteCoverageStore,
   applyPgTypeParsers,
   postgresCompiler,
+  ownerScopedCompiler,
+  assertOwnerScoped,
 } from "@starkeep/storage-aurora-dsql";
 import { S3ObjectStorageAdapter } from "@starkeep/storage-s3";
 import {
@@ -907,24 +909,32 @@ export function __setDatabaseClientFactoryForTests(
   databaseClientFactoryOverride = factory;
 }
 
-function makeAdapters(appId: string, creds: CachedCreds) {
+/**
+ * A factory whose clients refuse any statement against an owned table that
+ * the user-scoped compiler did not compile. The scoped compiler is the cut
+ * between users; this is the tripwire for code that goes around it. See
+ * storage-aurora-dsql's `owner-scope.ts`.
+ */
+function ownerGuardedFactory(inner: DatabaseClientFactory): DatabaseClientFactory {
+  return {
+    async createClient(options) {
+      const client = await inner.createClient(options);
+      return {
+        query(text, values) {
+          assertOwnerScoped(text);
+          return client.query(text, values);
+        },
+        end: () => client.end(),
+      };
+    },
+  };
+}
+
+function makeStorage(creds: CachedCreds): S3ObjectStorageAdapter {
   const region = process.env.AWS_REGION ?? "us-east-1";
-  const auroraEndpoint = process.env.AURORA_ENDPOINT;
   const s3Bucket = process.env.S3_BUCKET;
-  const stackPrefix = process.env.STACK_PREFIX ?? "starkeep";
-
-  if (!auroraEndpoint) throw new Error("AURORA_ENDPOINT env var is required");
   if (!s3Bucket) throw new Error("S3_BUCKET env var is required");
-
-  const clientFactory: DatabaseClientFactory =
-    databaseClientFactoryOverride ?? new AppDsqlClientFactory(appId, creds, stackPrefix);
-
-  const db = new AuroraDsqlDatabaseAdapter(
-    { hostname: auroraEndpoint, region },
-    clientFactory,
-  );
-
-  const storage = new S3ObjectStorageAdapter({
+  return new S3ObjectStorageAdapter({
     bucketName: s3Bucket,
     region,
     credentials: {
@@ -933,8 +943,55 @@ function makeAdapters(appId: string, creds: CachedCreds) {
       sessionToken: creds.sessionToken,
     },
   });
+}
 
+/** The DSQL connection pieces for one app's role, every client guarded. */
+function makeConnection(appId: string, creds: CachedCreds) {
+  const region = process.env.AWS_REGION ?? "us-east-1";
+  const auroraEndpoint = process.env.AURORA_ENDPOINT;
+  const stackPrefix = process.env.STACK_PREFIX ?? "starkeep";
+  if (!auroraEndpoint) throw new Error("AURORA_ENDPOINT env var is required");
+  const clientFactory = ownerGuardedFactory(
+    databaseClientFactoryOverride ?? new AppDsqlClientFactory(appId, creds, stackPrefix),
+  );
+  return { clientFactory, auroraEndpoint, region };
+}
+
+/**
+ * The adapters for one request: one app's role, acting for one user. The
+ * database adapter reads and writes only `userId`'s rows.
+ */
+function makeAdapters(appId: string, creds: CachedCreds, userId: string) {
+  const { clientFactory, auroraEndpoint, region } = makeConnection(appId, creds);
+  const db = new AuroraDsqlDatabaseAdapter(
+    { hostname: auroraEndpoint, region },
+    clientFactory,
+    userId,
+  );
+  const storage = makeStorage(creds);
   return { db, storage, clientFactory, auroraEndpoint, region };
+}
+
+/**
+ * The app-scoped health check: the database answers and the bucket is
+ * reachable. It reads no one's data, so it needs no user.
+ */
+async function checkAppHealth(appId: string, creds: CachedCreds) {
+  const { clientFactory, auroraEndpoint, region } = makeConnection(appId, creds);
+  // A connection that cannot open is an error, as it is on every other route;
+  // a connection that opens and cannot answer is a degraded database.
+  const client = await clientFactory.createClient({ hostname: auroraEndpoint, region });
+  let dbHealthy = false;
+  try {
+    await client.query("SELECT 1");
+    dbHealthy = true;
+  } catch {
+    dbHealthy = false;
+  } finally {
+    await client.end().catch(() => {});
+  }
+  const storageHealthy = await makeStorage(creds).healthCheck();
+  return { status: dbHealthy && storageHealthy ? "ok" : "degraded", db: dbHealthy, storage: storageHealthy };
 }
 
 // Per-Lambda-instance nodeId. The HLC clock requires nodeId to be unique
@@ -1035,9 +1092,9 @@ const cloudLibrarySettings = createLibrarySettings({
  */
 let cloudClockPromise: Promise<HLCClock> | null = null;
 
-function makeCloudClock(client: DatabaseClient): Promise<HLCClock> {
+function makeCloudClock(client: DatabaseClient, userId: string): Promise<HLCClock> {
   if (!cloudClockPromise) {
-    cloudClockPromise = seedCloudClock(client).catch((err: unknown) => {
+    cloudClockPromise = seedCloudClock(client, userId).catch((err: unknown) => {
       cloudClockPromise = null;
       throw err;
     });
@@ -1066,8 +1123,11 @@ function makeCloudClock(client: DatabaseClient): Promise<HLCClock> {
 // existing stamps, because Date.now() otherwise dominates immediately. Widening
 // the seed beyond shared.records would not remove that bound, which is why it
 // is not worth the extra queries.
-async function seedCloudClock(client: DatabaseClient): Promise<HLCClock> {
-  const seedQuery = postgresCompiler
+//
+// The seed reads the first caller's user's records only, the same bound again:
+// the clock is one per container, and every user's rows are stamped by it.
+async function seedCloudClock(client: DatabaseClient, userId: string): Promise<HLCClock> {
+  const seedQuery = ownerScopedCompiler(userId)
     .selectFrom("shared.records")
     .select("updated_at")
     .where("updated_at", "like", "%:cloud-%")
@@ -1994,7 +2054,12 @@ function isS3Event(event: unknown): event is S3EventEnvelope {
  */
 export async function handleS3Availability(
   event: S3EventEnvelope,
-  db: DatabaseAdapter,
+  /**
+   * The adapter for one user's rows. An availability row belongs to the user
+   * whose key it describes, so each record is written through its own user's
+   * adapter.
+   */
+  dbFor: (userId: string) => Promise<DatabaseAdapter>,
   storage?: ObjectStorageAdapter,
 ): Promise<{ applied: number; skipped: number }> {
   let applied = 0;
@@ -2029,6 +2094,13 @@ export async function handleS3Availability(
         skipped += 1;
         continue;
       }
+      // A key outside both namespaces describes nobody's data.
+      const userId = userIdFromObjectKey(objectStorageKey);
+      if (userId === null) {
+        skipped += 1;
+        continue;
+      }
+      const db = await dbFor(userId);
 
       const expiry =
         record.glacierEventData?.restoreEventData?.lifecycleRestorationExpiryTime;
@@ -2268,12 +2340,23 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       DRIVE_APP_ID,
       getAccountId(context.invokedFunctionArn),
     );
-    const { db, storage } = makeAdapters(DRIVE_APP_ID, creds);
+    // One adapter per user the batch names: an availability row belongs to
+    // the user whose key it describes.
+    const dbs = new Map<string, Promise<AuroraDsqlDatabaseAdapter>>();
+    const dbFor = (userId: string): Promise<DatabaseAdapter> => {
+      let db = dbs.get(userId);
+      if (!db) {
+        const adapter = makeAdapters(DRIVE_APP_ID, creds, userId).db;
+        db = adapter.init().then(() => adapter);
+        dbs.set(userId, db);
+      }
+      return db;
+    };
     try {
       const result = await handleS3Availability(
         event as unknown as S3EventEnvelope,
-        db,
-        storage,
+        dbFor,
+        makeStorage(creds),
       );
       // Returned in the HTTP shape even though nothing reads it: an
       // S3-triggered invocation's return value is discarded, and keeping one
@@ -2281,7 +2364,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // they will never see the other half of.
       return { statusCode: 200, body: JSON.stringify(result) };
     } finally {
-      await db.close();
+      await Promise.allSettled([...dbs.values()].map(async (db) => (await db).close()));
     }
   }
 
@@ -2493,26 +2576,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
 
     const accountId = getAccountId(context.invokedFunctionArn);
     const creds = await getAppCreds(appId, accountId);
-    const { db, storage, clientFactory, auroraEndpoint, region } = makeAdapters(appId, creds);
-    // Storage as Starkeep Drive, for the platform's own acts on shared blobs —
-    // archiving. Built only when an event needs it, and reused within the
-    // request.
-    let platformStoragePromise: Promise<ObjectStorageAdapter> | null = null;
-    const platformStorage = (): Promise<ObjectStorageAdapter> =>
-      appId === DRIVE_APP_ID
-        ? Promise.resolve(storage)
-        : (platformStoragePromise ??= getAppCreds(DRIVE_APP_ID, accountId).then(
-            (driveCreds) => makeAdapters(DRIVE_APP_ID, driveCreds).storage,
-          ));
 
-    await db.init();
-    toClose.push(() => db.close());
-
-    // GET /apps/{appId}/health — app-scoped health check
+    // GET /apps/{appId}/health — app-scoped health check. It reads no one's
+    // data, so it runs before the user is required.
     if (method === "GET" && subPath === "/health") {
-      const dbHealthy = await db.healthCheck();
-      const storageHealthy = await storage.healthCheck();
-      return ok({ status: dbHealthy && storageHealthy ? "ok" : "degraded", db: dbHealthy, storage: storageHealthy });
+      return ok(await checkAppHealth(appId, creds));
     }
 
     // Every route past the health check reads or writes one user's data. The
@@ -2522,6 +2590,22 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       return clientErr("This request names no user", 401);
     }
     const subject: BrokerSubject = { appId, userId: subjectUserId };
+
+    // Every database read and write below is this user's alone: the adapter,
+    // the app-syncable source and the byte watermark all compile through a
+    // compiler scoped to the subject's user.
+    const { db, storage, clientFactory, auroraEndpoint, region } = makeAdapters(appId, creds, subject.userId);
+    // Storage as Starkeep Drive, for the platform's own acts on shared blobs —
+    // archiving. Built only when an event needs it, and reused within the
+    // request.
+    let platformStoragePromise: Promise<ObjectStorageAdapter> | null = null;
+    const platformStorage = (): Promise<ObjectStorageAdapter> =>
+      appId === DRIVE_APP_ID
+        ? Promise.resolve(storage)
+        : (platformStoragePromise ??= getAppCreds(DRIVE_APP_ID, accountId).then(makeStorage));
+
+    await db.init();
+    toClose.push(() => db.close());
 
     // Per-type read/write enforcement on shared.records. DSQL has no RLS and
     // the table is shared across every type, so we load the caller app's
@@ -2538,7 +2622,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     const grantClient = await clientFactory.createClient({ hostname: auroraEndpoint, region });
     toClose.push(() => grantClient.end());
     const grants: AccessGrants = await loadAccessGrants(grantClient, appId);
-    const clock: HLCClock = await makeCloudClock(grantClient);
+    const clock: HLCClock = await makeCloudClock(grantClient, subject.userId);
 
     // The deployment's settings, read by the request that needs them through
     // the minute-long parameter cache above, so a change made in admin-web
@@ -2576,7 +2660,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       | null = null;
     async function getAppSyncableSource() {
       if (!appSyncableSource) {
-        appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region);
+        appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region, subject.userId);
         toClose.push(() => appSyncableSource!.client.end());
       }
       return appSyncableSource;
@@ -4449,7 +4533,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           syncSharedRecords: false,
           // In this app's schema, under this app's role, over the same
           // connection the applier uses.
-          byteCoverage: createDsqlByteCoverageStore(source.client, appId),
+          byteCoverage: createDsqlByteCoverageStore(source.client, appId, subject.userId),
         });
       }
       const exchangeStartedAt = Date.now();
@@ -4513,6 +4597,7 @@ async function buildAppSyncableSource(
   clientFactory: DatabaseClientFactory,
   hostname: string,
   region: string,
+  userId: string,
 ): Promise<{
   namespaces: DsqlAppSyncableNamespaceStore;
   applier: DsqlAppSyncableApplier;
@@ -4521,7 +4606,7 @@ async function buildAppSyncableSource(
   const client = await clientFactory.createClient({ hostname, region });
   const namespaces = new DsqlAppSyncableNamespaceStore(client);
   await namespaces.load();
-  const applier = new DsqlAppSyncableApplier(client, namespaces);
+  const applier = new DsqlAppSyncableApplier(client, namespaces, userId);
   return { namespaces, applier, client };
 }
 

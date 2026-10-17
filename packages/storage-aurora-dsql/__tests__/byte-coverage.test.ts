@@ -32,7 +32,7 @@ describe("createDsqlByteCoverageStore", () => {
     const { client, calls } = recordingClient(() => [
       { node_id: "phone", hlc: serializeHLC(hlc("phone", 1_700_000_000_000)) },
     ]);
-    const loaded = await createDsqlByteCoverageStore(client, "starkeep-drive").load();
+    const loaded = await createDsqlByteCoverageStore(client, "starkeep-drive", "user-a").load();
 
     expect(calls[0]!.text).toContain('from "app_starkeep_drive"."_starkeep_byte_coverage"');
     expect(loaded).toEqual({ phone: hlc("phone", 1_700_000_000_000) });
@@ -40,20 +40,20 @@ describe("createDsqlByteCoverageStore", () => {
 
   it("upserts every entry, so a lowered value replaces a higher one", async () => {
     const { client, calls } = recordingClient(() => []);
-    await createDsqlByteCoverageStore(client, "photos").save({
+    await createDsqlByteCoverageStore(client, "photos", "user-a").save({
       a: hlc("a", 5),
       b: hlc("b", 7),
     });
 
     expect(calls).toHaveLength(1);
     expect(calls[0]!.text).toContain('insert into "app_photos"."_starkeep_byte_coverage"');
-    expect(calls[0]!.text).toContain('on conflict ("node_id") do update set "hlc" = "excluded"."hlc"');
-    expect(calls[0]!.values).toEqual(["a", serializeHLC(hlc("a", 5)), "b", serializeHLC(hlc("b", 7))]);
+    expect(calls[0]!.text).toContain('on conflict ("user_id", "node_id") do update set "hlc" = "excluded"."hlc"');
+    expect(calls[0]!.values).toEqual(["a", serializeHLC(hlc("a", 5)), "user-a", "b", serializeHLC(hlc("b", 7)), "user-a"]);
   });
 
   it("writes nothing for an empty map", async () => {
     const { client, calls } = recordingClient(() => []);
-    await createDsqlByteCoverageStore(client, "photos").save({});
+    await createDsqlByteCoverageStore(client, "photos", "user-a").save({});
     expect(calls).toHaveLength(0);
   });
 
@@ -63,6 +63,6 @@ describe("createDsqlByteCoverageStore", () => {
         code: "42P01",
       }),
     );
-    await expect(createDsqlByteCoverageStore(client, "photos").load()).rejects.toThrow(/does not exist/);
+    await expect(createDsqlByteCoverageStore(client, "photos", "user-a").load()).rejects.toThrow(/does not exist/);
   });
 });

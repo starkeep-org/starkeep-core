@@ -81,31 +81,34 @@ async function makeHarness(): Promise<ConformanceHarness> {
   await pg.waitReady;
   open.push(pg);
 
-  // The same column set `dsql-ddl.ts` emits for a syncable table: the app's own
-  // columns plus the three the protocol owns, and the index the delta scan and
-  // the digest both seek.
+  // The same column set `dsql-ddl.ts` emits for a syncable table: the owner,
+  // the app's own columns plus the three the protocol owns, and the index the
+  // delta scan and the digest both seek. The owner leads the primary key.
   await pg.exec(`
     CREATE SCHEMA ${SCHEMA};
     CREATE TABLE ${SCHEMA}.${TABLE} (
-      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      id TEXT NOT NULL,
       payload TEXT,
       updated_at TEXT,
       node_id TEXT,
-      deleted_at TEXT
+      deleted_at TEXT,
+      PRIMARY KEY (user_id, id)
     );
     CREATE INDEX idx_${TABLE}_node_watermark
-      ON ${SCHEMA}.${TABLE} (node_id, updated_at);
+      ON ${SCHEMA}.${TABLE} (user_id, node_id, updated_at);
     CREATE TABLE ${SCHEMA}.${COMPOSITE_TABLE} (
+      user_id TEXT NOT NULL,
       tenant TEXT,
       id TEXT,
       payload TEXT,
       updated_at TEXT,
       node_id TEXT,
       deleted_at TEXT,
-      PRIMARY KEY (tenant, id)
+      PRIMARY KEY (user_id, tenant, id)
     );
     CREATE INDEX idx_${COMPOSITE_TABLE}_node_watermark
-      ON ${SCHEMA}.${COMPOSITE_TABLE} (node_id, updated_at);
+      ON ${SCHEMA}.${COMPOSITE_TABLE} (user_id, node_id, updated_at);
   `);
 
   const ns: AppSyncableNamespace = {
@@ -123,7 +126,7 @@ async function makeHarness(): Promise<ConformanceHarness> {
   };
 
   return {
-    applier: new DsqlAppSyncableApplier(clientFor(pg), namespaces) as never,
+    applier: new DsqlAppSyncableApplier(clientFor(pg), namespaces, "user-a") as never,
     appId: APP,
     table: TABLE,
     compositeTable: COMPOSITE_TABLE,

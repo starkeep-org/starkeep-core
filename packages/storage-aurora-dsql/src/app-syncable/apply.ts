@@ -30,7 +30,7 @@ import { sql, type CompiledQuery } from "kysely";
 import type { DatabaseClient } from "../types.js";
 import { withOccRetry } from "../occ-retry.js";
 import { isMissingRelation } from "../missing-relation.js";
-import { compiler as qb } from "../query-builder.js";
+import { ownerScopedCompiler, type PostgresCompiler } from "../query-builder.js";
 import { fromPgRows, pgConvertersFor, withAggregateOutputs } from "../pg-timestamps.js";
 
 /**
@@ -44,10 +44,16 @@ import { fromPgRows, pgConvertersFor, withAggregateOutputs } from "../pg-timesta
 export class DsqlAppSyncableApplier
   implements AppSyncableApplier, ScanCapableApplier
 {
+  private readonly qb: PostgresCompiler;
+
   constructor(
     private readonly client: DatabaseClient,
     private readonly namespace: AppSyncableNamespaceStore,
-  ) {}
+    /** The user whose rows this applier reads and writes. See `owner-scope.ts`. */
+    readonly ownerId: string,
+  ) {
+    this.qb = ownerScopedCompiler(ownerId);
+  }
 
   private async run(compiled: CompiledQuery): Promise<{ rows: Record<string, unknown>[] }> {
     return (await this.client.query(compiled.sql, [...compiled.parameters])) as {
@@ -97,7 +103,7 @@ export class DsqlAppSyncableApplier
 
     if (pkColumns.length === 0) {
       await this.run(
-        qb
+        this.qb
           .insertInto(schemaTable)
           .values({ ...row })
           .onConflict((oc) => oc.doNothing())
@@ -109,7 +115,7 @@ export class DsqlAppSyncableApplier
     const updateCols = cols.filter((c) => !pkColumns.includes(c));
     if (updateCols.length === 0) {
       await this.run(
-        qb
+        this.qb
           .insertInto(schemaTable)
           .values({ ...row })
           .onConflict((oc) => oc.columns(pkColumns as never[]).doNothing())
@@ -119,7 +125,7 @@ export class DsqlAppSyncableApplier
     }
 
     await this.run(
-      qb
+      this.qb
         .insertInto(schemaTable)
         .values({ ...row })
         .onConflict((oc) =>
@@ -148,7 +154,7 @@ export class DsqlAppSyncableApplier
     if (patchCols.length === 0) return;
 
     const incomingUpdatedAt = patch["updated_at"] as string | undefined;
-    let query = qb.updateTable(schemaTable).set({ ...patch });
+    let query = this.qb.updateTable(schemaTable).set({ ...patch });
     for (const c of whereCols) {
       query = query.where(c, "=", where[c]);
     }
@@ -190,7 +196,7 @@ export class DsqlAppSyncableApplier
       const row = withNodeId({ ...entry.row, updated_at: ts, deleted_at: ts }, entry);
       const updateCols = Object.keys(row).filter((c) => !pkColumns.includes(c));
       await this.run(
-        qb
+        this.qb
           .insertInto(schemaTable)
           .values({ ...row })
           .onConflict((oc) =>
@@ -206,7 +212,7 @@ export class DsqlAppSyncableApplier
       return;
     }
 
-    let query = qb
+    let query = this.qb
       .updateTable(schemaTable)
       .set({ deleted_at: ts, updated_at: ts, node_id: nodeIdOf(ts, entry) });
     for (const c of whereCols) {
@@ -246,7 +252,7 @@ export class DsqlAppSyncableApplier
         limit,
         async (scan, remaining) => {
           const result = await this.run(
-            buildScanSinceForNode(qb, schemaTable, scan, remaining),
+            buildScanSinceForNode(this.qb, schemaTable, scan, remaining),
           );
           return result.rows;
         },
@@ -297,7 +303,7 @@ export class DsqlAppSyncableApplier
   ): Promise<DigestBucket[]> {
     const schemaTable = `app_${appId.replace(/-/g, "_")}.${table}`;
     try {
-      const result = await this.run(buildBucketDigest(qb, schemaTable, prefixLength));
+      const result = await this.run(buildBucketDigest(this.qb, schemaTable, prefixLength));
       return toDigestBuckets(result.rows as Record<string, unknown>[]);
     } catch (err) {
       if (isMissingRelation(err)) return [];
@@ -323,7 +329,7 @@ export class DsqlAppSyncableApplier
     let result: { rows: Record<string, unknown>[] };
     try {
       result = await this.run(
-        qb
+        this.qb
           .selectFrom(schemaTable)
           .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])
           .groupBy("node_id")
@@ -361,7 +367,7 @@ export class DsqlAppSyncableApplier
 
     if (query.mode === "aggregate") {
       const compiled = buildAppAggregateQuery(
-        qb,
+        this.qb,
         schemaTable,
         query,
         POSTGRES_APP_QUERY_DIALECT,
@@ -377,7 +383,7 @@ export class DsqlAppSyncableApplier
       );
     }
 
-    const compiled = buildAppRowQuery(qb, schemaTable, query, options);
+    const compiled = buildAppRowQuery(this.qb, schemaTable, query, options);
     // The broker holds a plain `pg` client rather than a cursor, so the rows
     // arrive as an array and the fetch budget is applied over it. The row limit
     // bounds what that array can hold; the response budget's job here is to keep

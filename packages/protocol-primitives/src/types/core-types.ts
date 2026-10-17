@@ -768,6 +768,13 @@ export function checkMetadataValues(
 export const METADATA_DISCRIMINANT_COLUMN = "record_type";
 
 /**
+ * The column that names a row's owner in the cloud's database: the same user
+ * id the row's object keys carry. Every owned cloud table leads its primary key
+ * with it. Nodes hold one library each and have no such column.
+ */
+export const OWNER_COLUMN = "user_id";
+
+/**
  * The tombstone column on every per-category metadata table.
  *
  * A metadata row used to be hard-deleted with its record while everything else
@@ -816,13 +823,16 @@ export const METADATA_DELETED_AT_COLUMN = "deleted_at";
  */
 export function pgMetadataDdl(c: CategoryDef): string {
   const cols = [
-    `         record_id   text PRIMARY KEY`,
+    `         ${OWNER_COLUMN} text NOT NULL`,
+    `         record_id   text NOT NULL`,
     `         ${METADATA_DISCRIMINANT_COLUMN} text NOT NULL`,
     `         ${METADATA_DELETED_AT_COLUMN} text`,
     ...c.metadataColumns.map((col) => {
       const nullSuffix = col.nullable === false ? " NOT NULL" : "";
       return `         ${col.name} ${pgColumnType(col.type)}${nullSuffix}`;
     }),
+    // Each user's rows apart: the cloud holds many libraries in one table.
+    `         PRIMARY KEY (${OWNER_COLUMN}, record_id)`,
   ];
   return `CREATE TABLE IF NOT EXISTS ${pgMetadataTableName(c.id)} (\n${cols.join(",\n")}\n       )`;
 }
@@ -867,6 +877,7 @@ export function metadataIndexDdls(
   if (!c.metadataColumns.some((col) => col.name === CAPTURED_AT_METADATA_COLUMN)) return [];
   const columns = `("${METADATA_DISCRIMINANT_COLUMN}", "${CAPTURED_AT_METADATA_COLUMN}")`;
   if (dialect === "pg") {
+    const pgColumns = `("${OWNER_COLUMN}", "${METADATA_DISCRIMINANT_COLUMN}", "${CAPTURED_AT_METADATA_COLUMN}")`;
     // ASYNC because DSQL builds an index in the background and the statement
     // returns before it is usable. `IF NOT EXISTS` because install is
     // re-runnable — DSQL accepts the guard on the async form, probed against
@@ -876,7 +887,7 @@ export function metadataIndexDdls(
     return [
       {
         name,
-        sql: `CREATE INDEX ASYNC IF NOT EXISTS "${name}" ON ${pgMetadataTableName(c.id)}${columns}`,
+        sql: `CREATE INDEX ASYNC IF NOT EXISTS "${name}" ON ${pgMetadataTableName(c.id)}${pgColumns}`,
       },
     ];
   }

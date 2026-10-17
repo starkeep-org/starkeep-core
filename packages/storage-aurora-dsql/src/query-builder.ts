@@ -13,6 +13,7 @@ import {
   PostgresIntrospector,
   PostgresQueryCompiler,
 } from "kysely";
+import { OwnerScopePlugin } from "./owner-scope.js";
 
 // Compile-only Kysely instance (DummyDriver never executes). The dialect's
 // PostgresQueryCompiler produces `$1`-style placeholders that `pg.Client`
@@ -46,17 +47,28 @@ export interface BuiltPostgresQuery {
   values: unknown[];
 }
 
-export function buildPostgresQuery(query: Query): BuiltPostgresQuery {
-  const compiled = buildRecordSelect(compiler, DIALECT, query);
+/** A compiler the builders below compile with: the plain one, or a user-scoped one. */
+export type PostgresCompiler = Kysely<DB>;
+
+/**
+ * The compiler for one user's rows: every statement it compiles reads and
+ * writes only `userId`'s rows. See `owner-scope.ts`.
+ */
+export function ownerScopedCompiler(userId: string): PostgresCompiler {
+  return compiler.withPlugin(new OwnerScopePlugin(userId));
+}
+
+export function buildPostgresQuery(query: Query, qb: PostgresCompiler = compiler): BuiltPostgresQuery {
+  const compiled = buildRecordSelect(qb, DIALECT, query);
   return { text: compiled.sql, values: [...compiled.parameters] };
 }
 
-export function buildPostgresCountQuery(query: Query): BuiltPostgresQuery {
-  const compiled = buildRecordCount(compiler, DIALECT, query);
+export function buildPostgresCountQuery(query: Query, qb: PostgresCompiler = compiler): BuiltPostgresQuery {
+  const compiled = buildRecordCount(qb, DIALECT, query);
   return { text: compiled.sql, values: [...compiled.parameters] };
 }
 
-export function buildPostgresTypeCountsQuery(query: Query): BuiltPostgresQuery {
-  const compiled = buildRecordTypeCounts(compiler, DIALECT, query);
+export function buildPostgresTypeCountsQuery(query: Query, qb: PostgresCompiler = compiler): BuiltPostgresQuery {
+  const compiled = buildRecordTypeCounts(qb, DIALECT, query);
   return { text: compiled.sql, values: [...compiled.parameters] };
 }

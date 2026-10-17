@@ -18,7 +18,7 @@
 
 import { deserializeHLC, serializeHLC, type HLCTimestamp } from "@starkeep/protocol-primitives";
 import type { DatabaseClient } from "./types.js";
-import { compiler as qb } from "./query-builder.js";
+import { ownerScopedCompiler } from "./query-builder.js";
 import { withOccRetry } from "./occ-retry.js";
 import { BYTE_COVERAGE_TABLE } from "@starkeep/shared-space-api";
 
@@ -49,8 +49,11 @@ export interface DsqlByteCoverageStore {
 export function createDsqlByteCoverageStore(
   client: DatabaseClient,
   appId: string,
+  /** The user whose watermark this is: each user's library is covered apart. */
+  ownerId: string,
 ): DsqlByteCoverageStore {
   const table = `${appSchemaName(appId)}.${BYTE_COVERAGE_TABLE}`;
+  const qb = ownerScopedCompiler(ownerId);
   return {
     async load() {
       const compiled = qb.selectFrom(table).select(["node_id", "hlc"]).compile();

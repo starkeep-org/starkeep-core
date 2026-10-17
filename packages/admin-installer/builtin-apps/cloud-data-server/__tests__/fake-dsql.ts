@@ -121,7 +121,7 @@ export function fakeDsqlWithGrants(
     // the ordinary case. Tests that exercise dedup override it.
     .on(/from "shared"\."records" where "content_hash" =/, dedupRows)
     .on(/from "shared"\."record_labels" order by "record_id"/, [])
-    .on(/from "shared"\."record_labels" group by "node_id"/, [])
+    .on(/from "shared"\."record_labels" (?:where "shared"\."record_labels"\."user_id" = \$\d+ )?group by "node_id"/, [])
     // DELETE /data/records/:id cascades to labels on every record delete,
     // since DSQL has no foreign keys to do it. Returns no rows; tests that
     // assert on the cascade read `db.calls(...)`, which logs every statement

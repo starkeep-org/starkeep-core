@@ -24,6 +24,7 @@ import {
   type Category,
   pgColumnType,
   hasMetadataTable,
+  OWNER_COLUMN,
 } from "@starkeep/protocol-primitives";
 import {
   FILE_RECORDS_TABLE,
@@ -324,9 +325,18 @@ export async function runAppInstallDdl(
       // columns for inline-HLC change tracking, plus an index on `updated_at`
       // for efficient pull scans and one on (node_id, updated_at) for the
       // responder's per-node coverage watermark.
+      //
+      // Every table also leads with the owner column, `user_id`, first in its
+      // primary key and in every index: each user's rows are a library of
+      // their own, and an app may use fixed row ids, so two users' rows with
+      // one id are two rows. The broker's user-scoped compiler fills and
+      // filters the column; see storage-aurora-dsql's `owner-scope.ts`.
       const schemaName = `app_${appId.replace(/-/g, "_")}`;
       for (const table of appSyncableTables) {
-        let tb = db.schema.createTable(`${schemaName}.${table.name}`).ifNotExists();
+        let tb = db.schema
+          .createTable(`${schemaName}.${table.name}`)
+          .ifNotExists()
+          .addColumn(OWNER_COLUMN, "text", (col) => col.notNull());
         for (const c of table.columns) {
           const pgType = pgColumnType(c.type);
           tb = tb.addColumn(c.name, sql.raw(pgType), (col) =>
@@ -339,17 +349,17 @@ export async function runAppInstallDdl(
           .addColumn("deleted_at", "text");
         const pks = table.columns.filter((c) => c.primaryKey).map((c) => c.name);
         if (pks.length > 0) {
-          tb = tb.addPrimaryKeyConstraint(`pk_${schemaName}_${table.name}`, pks as never[]);
+          tb = tb.addPrimaryKeyConstraint(`pk_${schemaName}_${table.name}`, [OWNER_COLUMN, ...pks] as never[]);
         }
         await tb.execute();
         await sql
           .raw(
-            `CREATE INDEX ASYNC IF NOT EXISTS "idx_${schemaName}_${table.name}_updated_at" ON ${schemaName}."${table.name}"("updated_at")`,
+            `CREATE INDEX ASYNC IF NOT EXISTS "idx_${schemaName}_${table.name}_updated_at" ON ${schemaName}."${table.name}"("${OWNER_COLUMN}", "updated_at")`,
           )
           .execute(db);
         await sql
           .raw(
-            `CREATE INDEX ASYNC IF NOT EXISTS "idx_${schemaName}_${table.name}_node_watermark" ON ${schemaName}."${table.name}"("node_id", "updated_at")`,
+            `CREATE INDEX ASYNC IF NOT EXISTS "idx_${schemaName}_${table.name}_node_watermark" ON ${schemaName}."${table.name}"("${OWNER_COLUMN}", "node_id", "updated_at")`,
           )
           .execute(db);
         // App-declared indexes. The query grammar makes an expensive question
@@ -365,7 +375,7 @@ export async function runAppInstallDdl(
           await sql
             .raw(
               `CREATE INDEX ASYNC IF NOT EXISTS "${syncableIndexName(`${schemaName}_${table.name}`, index.columns)}" ` +
-                `ON ${schemaName}."${table.name}"(${index.columns.map((c) => `"${c}"`).join(", ")})`,
+                `ON ${schemaName}."${table.name}"(${[OWNER_COLUMN, ...index.columns].map((c) => `"${c}"`).join(", ")})`,
             )
             .execute(db);
         }
@@ -380,7 +390,10 @@ export async function runAppInstallDdl(
       // updated_at/deleted_at HLC + GRANT pattern as the manifest-declared
       // syncable tables.
       if (appSyncableFilesEnabled) {
-        let tb = db.schema.createTable(`${schemaName}.${FILE_RECORDS_TABLE}`).ifNotExists();
+        let tb = db.schema
+          .createTable(`${schemaName}.${FILE_RECORDS_TABLE}`)
+          .ifNotExists()
+          .addColumn(OWNER_COLUMN, "text", (col) => col.notNull());
         for (const c of FILE_RECORDS_COLUMNS) {
           // Through the one mapping, like every other table on both planes.
           // This was a hand-written `c.type === "integer" ? "bigint" : "text"`,
@@ -399,18 +412,18 @@ export async function runAppInstallDdl(
         if (reservedPks.length > 0) {
           tb = tb.addPrimaryKeyConstraint(
             `pk_${schemaName}_${FILE_RECORDS_TABLE}`,
-            reservedPks as never[],
+            [OWNER_COLUMN, ...reservedPks] as never[],
           );
         }
         await tb.execute();
         await sql
           .raw(
-            `CREATE INDEX ASYNC IF NOT EXISTS "idx_${schemaName}_${FILE_RECORDS_TABLE}_updated_at" ON ${schemaName}."${FILE_RECORDS_TABLE}"("updated_at")`,
+            `CREATE INDEX ASYNC IF NOT EXISTS "idx_${schemaName}_${FILE_RECORDS_TABLE}_updated_at" ON ${schemaName}."${FILE_RECORDS_TABLE}"("${OWNER_COLUMN}", "updated_at")`,
           )
           .execute(db);
         await sql
           .raw(
-            `CREATE INDEX ASYNC IF NOT EXISTS "idx_${schemaName}_${FILE_RECORDS_TABLE}_node_watermark" ON ${schemaName}."${FILE_RECORDS_TABLE}"("node_id", "updated_at")`,
+            `CREATE INDEX ASYNC IF NOT EXISTS "idx_${schemaName}_${FILE_RECORDS_TABLE}_node_watermark" ON ${schemaName}."${FILE_RECORDS_TABLE}"("${OWNER_COLUMN}", "node_id", "updated_at")`,
           )
           .execute(db);
         await sql
@@ -431,11 +444,15 @@ export async function runAppInstallDdl(
       // here rather than in `shared` is what stops one app's role from moving
       // another channel's value. Never registered as a syncable table: it is
       // one node's statement about its own storage, not data that travels.
+      // Per user, like every other table here: each library's files are
+      // covered apart.
       await db.schema
         .createTable(`${schemaName}.${BYTE_COVERAGE_TABLE}`)
         .ifNotExists()
-        .addColumn("node_id", "text", (col) => col.primaryKey())
+        .addColumn(OWNER_COLUMN, "text", (col) => col.notNull())
+        .addColumn("node_id", "text", (col) => col.notNull())
         .addColumn("hlc", "text", (col) => col.notNull())
+        .addPrimaryKeyConstraint(`pk_${schemaName}_${BYTE_COVERAGE_TABLE}`, [OWNER_COLUMN, "node_id"] as never[])
         .execute();
       await sql
         .raw(`GRANT SELECT, INSERT, UPDATE ON ${schemaName}."${BYTE_COVERAGE_TABLE}" TO ${pgRole}`)

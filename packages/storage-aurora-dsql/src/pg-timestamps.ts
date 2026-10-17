@@ -31,6 +31,7 @@
  * conformance suite does not apply is a divergence the suite cannot catch.
  */
 
+import { withoutOwner } from "./owner-scope.js";
 import { isCanonicalTimestamp } from "@starkeep/protocol-primitives";
 
 /** `timestamp without time zone`. */
@@ -159,9 +160,10 @@ export function fromPgRows(
   rows: Record<string, unknown>[],
   converters: PgValueConverters | null,
 ): Record<string, unknown>[] {
-  if (!converters || converters.size === 0) return rows;
+  // The owner column is the cloud's own: it scopes the row and never leaves.
+  if (!converters || converters.size === 0) return rows.map(withoutOwner);
   return rows.map((row) => {
-    const out: Record<string, unknown> = { ...row };
+    const out: Record<string, unknown> = withoutOwner(row);
     for (const [name, convert] of converters) {
       if (name in out) out[name] = convert(out[name]);
     }
