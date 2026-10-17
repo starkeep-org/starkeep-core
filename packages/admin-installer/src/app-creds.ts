@@ -30,6 +30,15 @@ import {
   withDeploymentSettingsChange,
   type DeploymentSettings,
 } from "@starkeep/protocol-primitives";
+
+// Re-exported for admin-web's server routes, which reach the installer only
+// through this subpath: approving a device reads its pairing code and shows the
+// fingerprint the admin confirms.
+export {
+  deviceFingerprint,
+  parsePairingRequest,
+  type PairingRequest,
+} from "@starkeep/protocol-primitives";
 import type { AwsCredentials } from "./session";
 
 /** Re-exported so a consumer of this subpath needs only this one import. */

@@ -38,6 +38,7 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { operatorSession } from "@/lib/operator-session";
+import { readCloudConfig } from "@/lib/cloud-config";
 import { generateDeviceKeys, pairingPayload } from "@/lib/device-pairing";
 
 /** Must match the route's `MAX_LABEL_LENGTH`. */
@@ -163,7 +164,7 @@ export function PairedDevicesSection() {
   return (
     <Collapsible className="rounded-lg border p-4">
       <CollapsibleTrigger className="group flex w-full items-center gap-2 text-left">
-        <h3 className="font-medium">Paired phones</h3>
+        <h3 className="font-medium">Devices</h3>
         <Badge variant="outline" className="text-xs">Experimental</Badge>
         <ChevronDownIcon className="ml-auto size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
       </CollapsibleTrigger>
@@ -222,6 +223,8 @@ export function PairedDevicesSection() {
           </Alert>
         ) : null}
 
+        <ApproveDevice onApproved={() => void loadList()} />
+
         <DeviceList
           list={list}
           busy={busy}
@@ -248,25 +251,30 @@ function DeviceList({
   onRevoke: (device: PairedDevice) => void;
 }) {
   if (list.kind === "loading") {
-    return <p className="text-muted-foreground text-sm">Loading paired phones…</p>;
+    return <p className="text-muted-foreground text-sm">Loading devices…</p>;
   }
   if (list.kind === "error") {
     return (
       <Alert variant="destructive">
-        <AlertTitle>Could not load paired phones</AlertTitle>
+        <AlertTitle>Could not load devices</AlertTitle>
         <AlertDescription>{list.message}</AlertDescription>
       </Alert>
     );
   }
   if (list.devices.length === 0) {
-    return <p className="text-muted-foreground text-sm">No phones are paired.</p>;
+    return <p className="text-muted-foreground text-sm">No devices are paired.</p>;
   }
   return (
-    <ul className="divide-y rounded-md border" aria-label="Paired phones">
+    <ul className="divide-y rounded-md border" aria-label="Paired devices">
       {list.devices.map((device) => (
         <li key={device.deviceId} className="flex items-center gap-3 p-3">
           <div className="min-w-0 flex-1">
-            <p className="text-sm font-medium">{deviceName(device)}</p>
+            <p className="text-sm font-medium">
+              {deviceName(device)}
+              <span className="ml-2 text-xs font-normal text-muted-foreground">
+                {device.kind === "desktop" ? "Computer" : "Phone"}
+              </span>
+            </p>
             <p className="truncate font-mono text-xs text-muted-foreground">
               {device.deviceId} · paired {new Date(device.pairedAt).toLocaleDateString()}
             </p>
@@ -288,5 +296,127 @@ function DeviceList({
         </li>
       ))}
     </ul>
+  );
+}
+
+type Inspected = {
+  request: { deviceId: string; label: string | null; kind: "phone" | "desktop" };
+  fingerprint: string;
+};
+
+/**
+ * Approve a device from the pairing code it shows.
+ *
+ * The device made its own key and the code carries only the public half, so
+ * nothing secret passes through here. What can go wrong is approving the wrong
+ * device: anyone can make a code. So the page shows the device's fingerprint
+ * and asks the admin to confirm it with the device's owner before approving.
+ * The device then finds out by itself, within seconds, and starts syncing.
+ */
+function ApproveDevice({ onApproved }: { onApproved: () => void }) {
+  const [code, setCode] = useState("");
+  const [inspected, setInspected] = useState<Inspected | null>(null);
+  const [cloudAddress, setCloudAddress] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+
+  useEffect(() => {
+    void readCloudConfig().then((cfg) => setCloudAddress(cfg?.publicBaseUrl ?? cfg?.apiGatewayUrl ?? null));
+  }, []);
+
+  async function inspect() {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const res = await fetch("/api/devices/inspect", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      const body = (await res.json()) as Inspected & { error?: string };
+      if (!res.ok) throw new Error(body.error ?? `Request failed (${res.status})`);
+      setInspected(body);
+    } catch (err) {
+      setInspected(null);
+      setMessage({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function approve() {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const { credentials, stackPrefix, region, userSub } = await operatorSession();
+      const res = await fetch("/api/devices/approve", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        // Until accounts other than the admin's can hold data, an approved
+        // device syncs for the signed-in admin.
+        body: JSON.stringify({ code, credentials, stackPrefix, region, userId: userSub }),
+      });
+      const body = (await res.json()) as { error?: string };
+      if (!res.ok) throw new Error(body.error ?? `Request failed (${res.status})`);
+      setMessage({ kind: "ok", text: `Approved ${inspected?.request.label ?? "the device"}. It starts syncing within seconds.` });
+      setCode("");
+      setInspected(null);
+      onApproved();
+    } catch (err) {
+      setMessage({ kind: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2 rounded-md border p-3" aria-label="Approve a device">
+      <h4 className="text-sm font-medium">Approve a device</h4>
+      <p className="text-muted-foreground text-sm">
+        A computer or phone that joins this cloud shows a pairing code. Paste it here.
+        {cloudAddress && (
+          <>
+            {" "}The device joins with this cloud&apos;s address:{" "}
+            <span className="font-mono break-all">{cloudAddress}</span>
+          </>
+        )}
+      </p>
+      <textarea
+        className="w-full rounded-md border p-2 font-mono text-xs"
+        rows={3}
+        value={code}
+        aria-label="Pairing code to approve"
+        onChange={(e) => {
+          setCode(e.target.value);
+          setInspected(null);
+        }}
+        disabled={busy}
+      />
+      {inspected ? (
+        <div className="space-y-2">
+          <p className="text-sm">
+            {inspected.request.kind === "desktop" ? "Computer" : "Phone"}{" "}
+            <span className="font-medium">{inspected.request.label ?? "Unnamed device"}</span>, fingerprint{" "}
+            <span className="font-mono">{inspected.fingerprint}</span>.
+          </p>
+          <p className="text-sm">
+            Ask the device&apos;s owner to read the fingerprint their screen shows. Approve only if it
+            matches: anyone can make a pairing code, and an approved device syncs as you.
+          </p>
+          <Button onClick={() => void approve()} disabled={busy}>
+            {busy ? "Working…" : "The fingerprint matches — approve"}
+          </Button>
+        </div>
+      ) : (
+        <Button variant="outline" onClick={() => void inspect()} disabled={busy || code.trim() === ""}>
+          Check the code
+        </Button>
+      )}
+      {message && (
+        <p className={message.kind === "error" ? "text-sm text-destructive" : "text-sm"} role="status">
+          {message.text}
+        </p>
+      )}
+    </div>
   );
 }

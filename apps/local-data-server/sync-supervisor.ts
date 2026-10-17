@@ -1,5 +1,10 @@
 import type { RawDatabase } from "@starkeep/storage-adapter";
-import { DEPLOYMENT_SETTINGS_ROUTE, type AnyRecord } from "@starkeep/protocol-primitives";
+import {
+  DEPLOYMENT_SETTINGS_ROUTE,
+  DEVICE_SELF_ROUTE,
+  type AnyRecord,
+  type DeviceSigner,
+} from "@starkeep/protocol-primitives";
 import {
   HttpObjectStorageAdapter,
   blobCandidateForRecord,
@@ -23,8 +28,6 @@ import type { ReplicaProbe } from "../../packages/sync-engine/src/durability.js"
 import { createPerAppSyncStateStore } from "./per-app-sync-state-store.js";
 import { createEngineRunner, type EngineRunner } from "./engine-runner.js";
 import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js";
-import { signRequest, USER_TOKEN_HEADER } from "../../packages/app-client/src/sign.js";
-import { appRegistryRow } from "../../packages/admin-installer/src/local/registry.js";
 
 /**
  * The reserved app id of the always-on Starkeep Drive channel — the single
@@ -43,6 +46,13 @@ const NO_PER_APP_CHANNEL_APP_IDS: ReadonlySet<string> = new Set([
   DRIVE_APP_ID,
   LOCAL_WATCHER_APP_ID,
 ]);
+
+/**
+ * How long a one-off read from the cloud may take: the device record and the
+ * deployment's settings. Node's `fetch` has no timeout of its own, and the
+ * server awaits the device check at boot.
+ */
+const CLOUD_READ_TIMEOUT_MS = 10_000;
 
 export interface AppRegistryEntry {
   readonly appId: string;
@@ -99,19 +109,14 @@ export interface SyncSupervisorOptions {
     signal: { readonly aborted: boolean },
   ) => Promise<void>;
   /**
-   * The current Cognito ID token, read at request time.
+   * This machine's device key, read at request time, or null when it has none.
    *
-   * The cloud data plane requires a credential bound to a named end user on
-   * every /apps/{appId}/* call — the HMAC says which app is calling, and this
-   * says a real person is behind it. The supervisor already holds one and
-   * already refuses to run without it (`startOrKickSupervisor` opens with
-   * `if (!idTokenIsLive()) return;`), so attaching it adds no failure mode:
-   * an expired refresh token stops sync today either way.
-   *
-   * An accessor rather than a value, because the token rotates hourly and
-   * engines outlive it by a long way.
+   * Every call to the cloud is signed with it: the signature names this
+   * machine, and the device record the cloud holds names the person it syncs
+   * for. An accessor rather than a value, because the key can be made while
+   * the server runs. Without a key no engine starts.
    */
-  readonly getIdToken: () => string | null;
+  readonly getDeviceSigner: () => DeviceSigner | null;
 }
 
 interface EngineEntry {
@@ -254,6 +259,16 @@ export interface SyncSupervisor {
    * engine starts.
    */
   readDeploymentSettings(): Promise<unknown>;
+
+  /**
+   * This machine's device record as the cloud holds it. `approved` is false
+   * when the cloud does not know the key yet — an admin has not approved it —
+   * and the call throws when the cloud cannot answer.
+   */
+  readDeviceSelf(): Promise<
+    | { readonly approved: true; readonly userId: string | null; readonly label: string | null; readonly kind: string }
+    | { readonly approved: false }
+  >;
 }
 
 /**
@@ -323,49 +338,34 @@ export function createSyncSupervisor(
     maxItems,
     residency,
     afterDriveDrain,
-    getIdToken,
+    getDeviceSigner,
   } = options;
 
   const engines = new Map<string, EngineEntry>();
   let paused = false;
   const cloudUrlBase = cloudUrl.replace(/\/+$/, "");
 
-  // Per-engine HMAC signer. The cloud verifier requires every /apps/{appId}/*
-  // request to carry an X-Starkeep-App-Sig HMAC over `${appId}:` ++ body bytes
-  // (see packages/app-client/src/sign.ts and the verifier in
-  // cloud-data-server/src/api-handler.ts). The per-app hmac secret is the same
-  // value the installer wrote into both the local registry and the SSM
-  // SecureString at cloud install, so both sides agree.
+  // Per-engine signer. Every /apps/{appId}/* request carries this machine's
+  // device signature over the same bytes an app would HMAC (see
+  // `devices/device-key.ts` in protocol-primitives and the verifier in
+  // cloud-data-server/src/api-handler.ts). The signature names the machine,
+  // and the cloud's record of the device names the person it syncs for, so no
+  // app secret and no end-user token travel with it.
   //
-  // Hard-fail if the secret is missing. The previous warn-and-return-undefined
-  // sent unsigned traffic to the broker, which would 401 — but the supervisor
-  // would keep retrying and the warning was easy to miss. Refusing to start
-  // the engine is louder and matches the install invariant: every registered
-  // app has an hmac_secret.
-  //
-  // Alongside the signature, every request carries the end user's ID token.
-  // The broker requires both: the HMAC identifies the app, the token
-  // identifies the person the app is acting for, and neither substitutes for
-  // the other.
+  // Hard-fail without a key. An engine that sent unsigned traffic would 401 on
+  // every tick and back off, and the cause would be easy to miss.
   function makeSignerFor(
     appId: string,
-  ): (method: string, path: string, body: string) => Record<string, string> {
-    const row = appRegistryRow(localDb, appId);
-    const hmacSecret = row?.hmacSecret;
-    if (!hmacSecret) {
+  ): (method: string, path: string, body?: string | Uint8Array) => Record<string, string> {
+    const signer = getDeviceSigner();
+    if (!signer) {
       throw new Error(
-        `[sync] no hmac_secret in local registry for app=${appId}. ` +
-        `Re-run the local install for this app; the supervisor will not sign ` +
-        `outbound requests without it.`,
+        `[sync] this machine has no device key, so app=${appId} cannot sync. ` +
+          `Connect this machine from admin-web.`,
       );
     }
-    return (method: string, path: string, body: string) => ({
-      ...signRequest({ appId, hmacSecret, method, path, body }),
-      // Read here, inside the closure, and not at makeSignerFor time. The
-      // token rotates roughly hourly; an engine started once at boot would
-      // otherwise keep presenting the token it was born with.
-      [USER_TOKEN_HEADER]: getIdToken() ?? "",
-    });
+    return (method, path, body) =>
+      signer.signRequest(appId, method, path, typeof body === "string" ? new TextEncoder().encode(body) : body);
   }
 
   function makeEngineEntry(
@@ -658,6 +658,8 @@ export function createSyncSupervisor(
   });
 
   function rescan(): void {
+    // No key, no engine: every request would be refused.
+    if (!getDeviceSigner()) return;
     // Exclude apps that have no per-app cloud channel (Drive and the built-in
     // local-watcher): their writes ride the always-on Drive engine, and
     // spinning a per-app engine for them would just 403 forever.
@@ -738,20 +740,38 @@ export function createSyncSupervisor(
       const url = `${cloudUrlBase}/apps/${encodeURIComponent(DRIVE_APP_ID)}${DEPLOYMENT_SETTINGS_ROUTE}`;
       const res = await fetch(url, {
         method: "GET",
-        headers: makeSignerFor(DRIVE_APP_ID)("GET", DEPLOYMENT_SETTINGS_ROUTE, ""),
+        headers: makeSignerFor(DRIVE_APP_ID)("GET", DEPLOYMENT_SETTINGS_ROUTE),
+        signal: AbortSignal.timeout(CLOUD_READ_TIMEOUT_MS),
       });
       if (!res.ok) throw new Error(`the cloud answered ${res.status} for the deployment's settings`);
       const body = (await res.json()) as { settings?: unknown };
       return body.settings ?? null;
     },
 
+    async readDeviceSelf() {
+      const url = `${cloudUrlBase}/apps/${encodeURIComponent(DRIVE_APP_ID)}${DEVICE_SELF_ROUTE}`;
+      const res = await fetch(url, {
+        method: "GET",
+        headers: makeSignerFor(DRIVE_APP_ID)("GET", DEVICE_SELF_ROUTE),
+        signal: AbortSignal.timeout(CLOUD_READ_TIMEOUT_MS),
+      });
+      if (res.status === 401) return { approved: false } as const;
+      if (!res.ok) throw new Error(`the cloud answered ${res.status} for this machine's device record`);
+      const body = (await res.json()) as { userId?: string | null; label?: string | null; kind?: string };
+      return { approved: true, userId: body.userId ?? null, label: body.label ?? null, kind: body.kind ?? "desktop" } as const;
+    },
+
     start() {
+      if (!getDeviceSigner()) {
+        console.warn("[sync] this machine has no device key, so no channel starts. Connect it from admin-web.");
+        return;
+      }
       // Always-on Drive channel first, then reconcile per-app channels.
       //
       // Drive failing to start is serious — it is the channel that carries all
       // shared data — but it is not a reason for the per-app channels not to
       // run. Same argument as the per-app loop in `rescan`: one channel's
-      // missing secret must not silently take the others with it.
+      // failure must not silently take the others with it.
       try {
         startDriveEngine();
       } catch (err) {

@@ -1,39 +1,26 @@
 /**
- * Integration coverage for the local-data-server `/cloud/data/*` proxy seam
- * (todo 38, gaps 1 & 3): the wired chain drive-client → LDS `/cloud/data/*`
- * proxy → cloud verifier, exercised as one path with a *real* HMAC check.
+ * Integration coverage for the local-data-server `/cloud/data/*` proxy seam:
+ * the wired chain drive-client → LDS `/cloud/data/*` proxy → cloud verifier,
+ * exercised as one path with a *real* signature check.
  *
  * Why this earns its keep:
  *   The proxy once shipped `Authorization: Bearer <idToken>` instead of the
- *   per-app HMAC headers the cloud verifier requires — fully breaking the Drive
- *   cloud view — and CI never caught it. The e2e reaches cloud data endpoints
- *   via `cloudApp(drive)`, signing and hitting the API Gateway *directly*,
- *   bypassing the LDS proxy; the hermetic sync tests run against a fake cloud
- *   whose auth was a rubber stamp. So no test ever drove a real signature check
- *   *through the proxy*.
+ *   signature the cloud verifier requires — fully breaking the Drive cloud
+ *   view — and CI never caught it, because no test drove a real signature
+ *   check *through the proxy*. The fake cloud verifies a registered device's
+ *   Ed25519 signature exactly as the real cloud does, and these cases hit
+ *   `/cloud/data/*` through the proxy.
  *
- *   This test closes that gap hermetically: `fake-cloud` now verifies the app
- *   HMAC (opt-in via `setAppSecret`) exactly as the real cloud does, and we hit
- *   `/cloud/data/types` *through the LDS proxy*. Against the pre-fix Bearer
- *   proxy this fails with 401; against the HMAC-signing proxy it succeeds.
- *
- * Gap 3 (HMAC secret drift, todo 39) is characterized here too: when the cloud
- * secret has drifted from the local registry's, both the Drive cloud view
- * (proxy) and Drive sync return 401 `Invalid signature`. The *durable* fix for
- * todo 39 lives in the installer — `resolveLocalHmacSecret`
- * (admin-installer/src/orchestrator.ts) now mirrors the *local registry*
- * secret (the one the supervisor signs with) to SSM instead of a separately
- * minted creds-file value, so the stores can no longer diverge through the
- * install flow (regression: admin-installer/__tests__/orchestrator.test.ts).
- * The drift case below stays asserting 401 on purpose: it injects a mismatch
- * the install path can no longer produce, keeping the proxy's signature check
- * honest (a real bad signature must still be rejected).
+ * A key the cloud does not accept is characterized too: the machine neither
+ * syncs nor proxies, and says why, rather than forwarding requests that can
+ * only come back 401.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { randomBytes } from "node:crypto";
+import { deviceSigner } from "@starkeep/protocol-primitives";
 import {
   startLocalDataServer,
   startFakeCloud,
-  fakeIdToken,
   type LocalDataServer,
   type FakeCloud,
 } from "@starkeep/testkit";
@@ -45,22 +32,25 @@ function serverConfig(cloudUrl: string) {
   return { apiGatewayUrl: cloudUrl, pullIntervalMs: 600_000, pushDebounceMs: 50 };
 }
 
-describe("LDS /cloud/data proxy with a real cloud HMAC check (gap 1)", () => {
+describe("LDS /cloud/data proxy with a real device signature check", () => {
   let cloud: FakeCloud;
   let server: LocalDataServer;
   let drive: InstalledApp;
 
   beforeAll(async () => {
     cloud = await startFakeCloud();
-    server = await startLocalDataServer({
-      config: serverConfig(cloud.url),
-      auth: { idToken: fakeIdToken() },
+    // The cloud accepts only devices it has a record of, and verifies each
+    // signature against the recorded key — the sync exchange *and* the proxy.
+    cloud.devicePolicy.autoApprove = false;
+    server = await startLocalDataServer({ config: serverConfig(cloud.url) });
+    cloud.registerDevice(server.device!.deviceId, {
+      publicKeySpki: server.device!.publicKeySpki,
+      userId: "sub-1",
+      kind: "desktop",
+      label: null,
     });
+    await fetch(`${server.url}/device/check`, { method: "POST" });
     drive = await builtinAppCreds(server, DRIVE);
-    // Make the cloud verify against the same secret the local registry signs
-    // with — the agreement the forward install establishes (local → SSM mirror).
-    // This now gates the sync exchange *and* the proxy on a genuine signature.
-    cloud.setAppSecret(DRIVE, drive.hmacSecret);
   }, 60_000);
 
   afterAll(async () => {
@@ -68,9 +58,9 @@ describe("LDS /cloud/data proxy with a real cloud HMAC check (gap 1)", () => {
     await cloud?.close();
   });
 
-  it("ships a record up under real HMAC, then reads the cloud view back through the proxy", async () => {
-    // Push a record to the cloud. The exchange + file requests are now
-    // HMAC-verified by the fake cloud, so this also proves the sync signer.
+  it("ships a record up under a real signature, then reads the cloud view back through the proxy", async () => {
+    // Push a record to the cloud. The exchange and file requests are verified
+    // by the fake cloud, so this also proves the sync signer.
     await createRecordWithBytes(drive, { bytes: "proxy-bytes", fileName: "proxy-1.jpg" });
     const now = await drive.fetch("/sync/now", { method: "POST" });
     expect(now.status).toBe(200);
@@ -94,10 +84,7 @@ describe("LDS /cloud/data proxy with a real cloud HMAC check (gap 1)", () => {
     expect(types.map((t) => t.record_type)).toContain("image/jpeg");
   });
 
-  it("rejects a proxied read whose app is unknown to the cloud (no rubber stamp)", async () => {
-    // Sanity that the cloud check is real, not always-true: the LDS signs the
-    // proxied call as `starkeep-drive`, so a verifier that only trusts a
-    // different app would 401. (Asserted directly via drift below.)
+  it("reads records through the proxy under the same check", async () => {
     const res = await drive.fetch(
       `/cloud/data/records?where=${encodeURIComponent(JSON.stringify({ type: "image/jpeg" }))}`,
     );
@@ -107,23 +94,24 @@ describe("LDS /cloud/data proxy with a real cloud HMAC check (gap 1)", () => {
   });
 });
 
-describe("HMAC secret drift between local registry and cloud (gap 3 / todo 39 characterization)", () => {
+describe("a key the cloud records differently", () => {
   let cloud: FakeCloud;
   let server: LocalDataServer;
   let drive: InstalledApp;
 
   beforeAll(async () => {
     cloud = await startFakeCloud();
-    server = await startLocalDataServer({
-      config: serverConfig(cloud.url),
-      auth: { idToken: fakeIdToken() },
+    cloud.devicePolicy.autoApprove = false;
+    server = await startLocalDataServer({ config: serverConfig(cloud.url) });
+    // The cloud's record names this device with some other key, so no
+    // signature this machine makes verifies.
+    cloud.registerDevice(server.device!.deviceId, {
+      publicKeySpki: deviceSigner("other", new Uint8Array(randomBytes(32))).publicKeySpki,
+      userId: "sub-1",
+      kind: "desktop",
+      label: null,
     });
     drive = await builtinAppCreds(server, DRIVE);
-    // Drift: the cloud-side secret no longer matches the local registry's. This
-    // is the documented todo-39 state (a local reinstall regenerated the local
-    // secret without re-mirroring to SSM). The local signer still signs with the
-    // local secret; the cloud verifies against a different one.
-    cloud.setAppSecret(DRIVE, `${drive.hmacSecret}-drifted`);
   }, 60_000);
 
   afterAll(async () => {
@@ -131,27 +119,20 @@ describe("HMAC secret drift between local registry and cloud (gap 3 / todo 39 ch
     await cloud?.close();
   });
 
-  // The durable todo-39 fix landed in the installer (see header): cloud install
-  // now mirrors the local registry secret, so this mismatch can't arise through
-  // the install flow. These 401s stay asserted on purpose — they prove the
-  // proxy/verifier still reject a genuinely wrong signature, not that drift is
-  // tolerated.
-  it("returns 401 on the Drive cloud view through the proxy", async () => {
-    const res = await drive.fetch("/cloud/data/types");
-    expect(res.status).toBe(401);
-    expect(((await res.json()) as { error: string }).error).toMatch(/Invalid signature/);
+  it("does not sync, and says the machine is not connected", async () => {
+    const device = (await (await fetch(`${server.url}/device/check`, { method: "POST" })).json()) as {
+      approval: { state: string };
+    };
+    expect(device.approval.state).toBe("pending");
+    const status = (await (await drive.fetch("/sync/status")).json()) as { enabled: boolean };
+    expect(status.enabled).toBe(false);
   });
 
-  it("fails the Drive sync exchange with an Invalid signature error", async () => {
-    await createRecordWithBytes(drive, { bytes: "drift-bytes", fileName: "drift-1.jpg" });
-    const now = await drive.fetch("/sync/now", { method: "POST" });
-    // exchangeAll swallows the per-engine error and reports a quiet round…
-    expect(now.status).toBe(200);
-    // …but records it as the engine's lastError.
-    const status = await drive.fetch("/sync/status");
-    const { perApp } = (await status.json()) as {
-      perApp: Array<{ appId: string; lastError: string | null }>;
-    };
-    expect(perApp.find((e) => e.appId === DRIVE)?.lastError).toMatch(/Invalid signature/);
+  it("refuses the cloud view locally rather than forwarding a request the cloud must reject", async () => {
+    const before = cloud.exchangeLog.length;
+    const res = await drive.fetch("/cloud/data/types");
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { error: string }).error).toMatch(/not connected to the cloud/);
+    expect(cloud.exchangeLog.length).toBe(before);
   });
 });

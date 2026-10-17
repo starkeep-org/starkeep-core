@@ -35,12 +35,19 @@ import {
   appSyncableObjectKey,
   contentHashFromDataRecordObjectKey,
   DEPLOYMENT_SETTINGS_ROUTE,
+  DEVICE_SELF_ROUTE,
   type AnyRecord,
   type DeploymentSettings,
 } from "@starkeep/protocol-primitives";
 import { sha256HexToBase64 } from "@starkeep/storage-adapter";
 import { createAppSpecificFactory, stampUnstampedOriginals } from "@starkeep/shared-space-api";
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import {
+  createHash,
+  createHmac,
+  createPublicKey,
+  timingSafeEqual,
+  verify as verifySignature,
+} from "node:crypto";
 import {
   SqliteDatabaseAdapter,
   SqliteAppSyncableNamespaceStore,
@@ -97,6 +104,14 @@ export interface FakeCloudFailures {
   deploymentSettings: boolean;
 }
 
+/** A device record, as `/<prefix>/platform/devices/<id>` holds one. */
+export interface FakeCloudDevice {
+  readonly publicKeySpki: string;
+  readonly userId: string | null;
+  readonly kind: "phone" | "desktop";
+  readonly label: string | null;
+}
+
 export interface FakeCloud {
   url: string;
   port: number;
@@ -140,6 +155,17 @@ export interface FakeCloud {
    * the cloud's own stamps read it.
    */
   setDeploymentSettings(settings: DeploymentSettings | null): void;
+  /**
+   * How the fake cloud treats a device it has no record of. While
+   * `autoApprove` is true, as by default, it accepts any device id unchecked
+   * and answers `device/self` for it, so a test local data server syncs with
+   * no pairing step. A test of pairing turns it off.
+   */
+  devicePolicy: { autoApprove: boolean };
+  /** Record a device as admin-web would. Its signatures are then verified. */
+  registerDevice(deviceId: string, record: FakeCloudDevice): void;
+  /** Delete a device's record. The device is refused from then on. */
+  revokeDevice(deviceId: string): void;
   /** Shared records currently in the cloud DB. */
   sharedRecords(): Promise<AnyRecord[]>;
   /** Rows in a cloud-side app-syncable table (empty if table absent). */
@@ -206,6 +232,39 @@ export async function startFakeCloud(): Promise<FakeCloud> {
   // Per-app HMAC secrets. Empty by default (auth rubber-stamped); a test that
   // wants real signature checks registers the app's secret via setAppSecret.
   const appSecrets = new Map<string, string>();
+
+  // Device records. A registered device's signature is verified as the real
+  // cloud verifies it; an unregistered one passes while `autoApprove` holds.
+  const devices = new Map<string, FakeCloudDevice>();
+  const devicePolicy = { autoApprove: true };
+
+  /** Mirror of the real cloud's `validateDeviceSignature`. */
+  function verifyDeviceSignature(
+    appId: string,
+    method: string,
+    subPath: string,
+    body: Buffer,
+    headers: IncomingMessage["headers"],
+    device: FakeCloudDevice,
+  ): boolean {
+    const sig = headers["x-starkeep-device-sig"];
+    const ts = headers["x-starkeep-app-ts"];
+    if (typeof sig !== "string" || typeof ts !== "string") return false;
+    const tsMs = Number(ts);
+    if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > APP_SIG_MAX_SKEW_MS) return false;
+    const upper = method.toUpperCase();
+    const signedBody = upper === "GET" || upper === "HEAD" ? Buffer.alloc(0) : body;
+    const message = Buffer.concat([
+      Buffer.from(`${appId}:${upper}:${canonicalSignedPath(subPath)}:${tsMs}:`, "utf8") as unknown as Uint8Array,
+      signedBody as unknown as Uint8Array,
+    ]);
+    try {
+      const key = createPublicKey({ key: Buffer.from(device.publicKeySpki, "base64"), type: "spki", format: "der" });
+      return verifySignature(null, message as unknown as Uint8Array, key, Buffer.from(sig, "base64") as unknown as Uint8Array);
+    } catch {
+      return false;
+    }
+  }
 
   /**
    * Mirror of the real cloud verifier (cloud-data-server/api-handler.ts →
@@ -404,14 +463,43 @@ export async function startFakeCloud(): Promise<FakeCloud> {
     const rawBody =
       req.method === "POST" || req.method === "PUT" ? await readBody(req) : Buffer.alloc(0);
 
-    // Real signature check, opt-in per app via setAppSecret (see verifyAppHmac).
-    // Off by default so existing rubber-stamp sync tests are unaffected.
-    const registeredSecret = appSecrets.get(appId);
-    if (
-      registeredSecret &&
-      !verifyAppHmac(appId, req.method ?? "GET", rest, rawBody, req.headers, registeredSecret)
-    ) {
-      sendJson(res, 401, { error: "Invalid signature" });
+    // A device signs with its own key; anything else signs with the app's
+    // HMAC. The HMAC check is opt-in per app via setAppSecret (see
+    // verifyAppHmac), off by default so rubber-stamp sync tests are unaffected.
+    const deviceIdHeader = req.headers["x-starkeep-device-id"];
+    let callingDevice: (FakeCloudDevice & { deviceId: string }) | null = null;
+    if (typeof deviceIdHeader === "string") {
+      const registered = devices.get(deviceIdHeader);
+      if (registered) {
+        if (!verifyDeviceSignature(appId, req.method ?? "GET", rest, rawBody, req.headers, registered)) {
+          sendJson(res, 401, { error: "Invalid device signature" });
+          return;
+        }
+        callingDevice = { ...registered, deviceId: deviceIdHeader };
+      } else if (devicePolicy.autoApprove) {
+        callingDevice = { deviceId: deviceIdHeader, publicKeySpki: "", userId: "test-user", kind: "desktop", label: null };
+      } else {
+        sendJson(res, 401, { error: "Unknown or revoked device" });
+        return;
+      }
+    } else {
+      const registeredSecret = appSecrets.get(appId);
+      if (
+        registeredSecret &&
+        !verifyAppHmac(appId, req.method ?? "GET", rest, rawBody, req.headers, registeredSecret)
+      ) {
+        sendJson(res, 401, { error: "Invalid signature" });
+        return;
+      }
+    }
+
+    if (rest === DEVICE_SELF_ROUTE && req.method === "GET") {
+      if (appId !== "starkeep-drive" || !callingDevice) {
+        sendJson(res, 404, { error: "Not found" });
+        return;
+      }
+      const { deviceId, userId, label, kind } = callingDevice;
+      sendJson(res, 200, { deviceId, userId, label, kind });
       return;
     }
 
@@ -608,6 +696,13 @@ export async function startFakeCloud(): Promise<FakeCloud> {
     failures,
     latency,
     peakConcurrentExchanges: (appId) => peakExchanges.get(appId) ?? 0,
+    devicePolicy,
+    registerDevice: (deviceId, record) => {
+      devices.set(deviceId, record);
+    },
+    revokeDevice: (deviceId) => {
+      devices.delete(deviceId);
+    },
     setDeploymentSettings: (settings) => {
       deploymentSettings = settings;
     },
