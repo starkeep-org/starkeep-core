@@ -73,7 +73,12 @@ export interface LibraryKeyColumn {
 /**
  * The key columns every SQLite node has: records, availability, the resident
  * set, and each app's file index, which stores the full key as its row id.
+ * Only the tables this database holds.
  */
+export function libraryKeyColumns(db: RawDatabase): LibraryKeyColumn[] {
+  return coreKeyColumns(db).filter(({ table }) => tableExists(db, table));
+}
+
 function coreKeyColumns(db: RawDatabase): LibraryKeyColumn[] {
   const columns: LibraryKeyColumn[] = [
     { table: "shared_records", column: "object_storage_key", primaryKey: false },
