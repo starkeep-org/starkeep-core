@@ -32,7 +32,7 @@ export function renderStatementsYaml(
     if (s.Condition) {
       lines.push(`${indent}  Condition:`);
       for (const [op, kvs] of Object.entries(s.Condition)) {
-        lines.push(`${indent}    ${op}:`);
+        lines.push(`${indent}    ${quoteKey(op)}:`);
         for (const [k, v] of Object.entries(kvs)) {
           if (Array.isArray(v)) {
             lines.push(`${indent}      ${quoteKey(k)}:`);
@@ -80,8 +80,15 @@ function quoteScalar(s: string): string {
   return `'${escapeSingleQuoted(s)}'`;
 }
 
+/**
+ * Words YAML reads as something other than a string. The IAM condition
+ * operator `Null` is one: written bare, YAML parses the key as null and
+ * CloudFormation rejects the statement as malformed.
+ */
+const YAML_RESERVED = /^(null|true|false|yes|no|on|off|y|n|~)$/i;
+
 function quoteKey(k: string): string {
-  if (/^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(k)) return k;
+  if (/^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(k) && !YAML_RESERVED.test(k)) return k;
   return `'${escapeSingleQuoted(k)}'`;
 }
 

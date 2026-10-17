@@ -21,6 +21,7 @@ export {
   libraryUserSegment,
   checkLibraryBindable,
   commitLibraryBinding,
+  libraryKeyColumns,
   LibraryBoundElsewhereError,
   type LibraryKeyColumn,
 } from "./library-owner.js";

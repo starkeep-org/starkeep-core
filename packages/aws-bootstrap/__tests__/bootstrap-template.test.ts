@@ -206,4 +206,12 @@ describe("console URL helpers", () => {
     expect(url).toContain("eu-west-1.console.aws.amazon.com/cloudformation");
     expect(url).toContain("filteringText=starkeep-bootstrap");
   });
+
+  it("quotes a condition operator YAML would read as null", () => {
+    // `Null:` unquoted is a YAML null key, and CloudFormation rejects the
+    // statement. The per-user boundaries split sessions on a Null condition.
+    const raw = generateBootstrapTemplate();
+    expect(raw).toContain("'Null':");
+    expect(raw).not.toMatch(/^\s+Null:/m);
+  });
 });
