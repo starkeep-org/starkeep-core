@@ -40,7 +40,6 @@ import {
   createAppRole,
   deleteAppRoleWithPolicies,
   detachTempInstallCloudDataServerPolicy,
-  updateAppRoleTrustPolicy,
 } from "./iam";
 import { pulumiUpInline, pulumiDestroyInline } from "./compute-stack";
 import { initializeSharedSchema } from "./dsql-schema-init";
@@ -280,29 +279,23 @@ export async function installCloudDataServer(
 
   const managerCreds = await roleChain([config.managerRoleArn]);
 
-  // Step 1: Ensure the cloud-data-server role exists.
-  if (!(await appRoleExists(config.stackPrefix, appId, managerCreds))) {
-    console.log(`Creating ${config.stackPrefix}-app-${appId}-role…`);
-    await createAppRole({
-      stackPrefix: config.stackPrefix,
-      appId,
-      accountId: config.accountId,
-      permissionsBoundaryArn: config.permissionsBoundaryArn,
-      foundationalPermissionsBoundaryArn: config.foundationalPermissionsBoundaryArn,
-      userDataOwnerPermissionsBoundaryArn: config.userDataOwnerPermissionsBoundaryArn,
-      fileAccess: [],
-      fileAccessAll: false,
-      brokerPower: manifest.infraRequirements.brokerPower,
-      managerCreds,
-    });
-  } else {
-    console.log(`${config.stackPrefix}-app-${appId}-role already exists; skipping create.`);
-    // Heal trust-policy drift in case the manager role was deleted +
-    // recreated (its RoleId would have changed, leaving any existing app
-    // role's trust policy pointing at the dead AROA). Idempotent.
-    console.log("Refreshing app role trust policy…");
-    await updateAppRoleTrustPolicy(config.stackPrefix, appId, config.accountId, managerCreds);
-  }
+  // Step 1: Create the cloud-data-server role, or bring an existing one up to
+  // date. createAppRole refreshes the trust policy of a role that exists and
+  // rewrites both inline policies, so a reinstall carries the broker's new
+  // grants, as an app's reinstall does.
+  console.log(`Creating or updating ${config.stackPrefix}-app-${appId}-role…`);
+  await createAppRole({
+    stackPrefix: config.stackPrefix,
+    appId,
+    accountId: config.accountId,
+    permissionsBoundaryArn: config.permissionsBoundaryArn,
+    foundationalPermissionsBoundaryArn: config.foundationalPermissionsBoundaryArn,
+    userDataOwnerPermissionsBoundaryArn: config.userDataOwnerPermissionsBoundaryArn,
+    fileAccess: [],
+    fileAccessAll: false,
+    brokerPower: manifest.infraRequirements.brokerPower,
+    managerCreds,
+  });
 
   // Step 2: Attach the wider temp-install-cloud-data-server policy.
   // Returns true when PutRolePolicy was actually called (policy is new or changed).

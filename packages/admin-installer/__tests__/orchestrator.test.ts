@@ -91,6 +91,7 @@ vi.mock("../src/compute-stack", () => ({
 import { installApp, uninstallApp, type InstallerConfig } from "../src/orchestrator";
 import {
   createAppRole,
+  createAppExecRole,
   attachTempInstallInfraPolicy,
   detachTempInstallInfraPolicy,
   attachTempInstallDdlPolicy,
@@ -298,11 +299,13 @@ describe("install", () => {
       config,
       registryCredentials,
     });
-    expect(vi.mocked(createAppRole)).toHaveBeenCalledTimes(1);
-    // put_app_creds_parameter is an alwaysRun step (reconciles SSM to the
-    // current local secret), so it runs on every drive — once per drive here,
-    // unlike createAppRole which is skipped once recorded done.
+    expect(vi.mocked(createAppExecRole)).toHaveBeenCalledTimes(1);
+    // put_app_creds_parameter and create_iam_role are alwaysRun steps (they
+    // reconcile SSM and the role's policies), so they run on every drive —
+    // once per drive here, unlike createAppExecRole which is skipped once
+    // recorded done.
     expect(vi.mocked(putAppCredsParameter)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(createAppRole)).toHaveBeenCalledTimes(2);
     expect(vi.mocked(putAppKeepFile)).toHaveBeenCalledTimes(2);
     expect(doneSteps("install")).toEqual(INSTALL_STEPS_WITH_COMPUTE);
   });
@@ -340,10 +343,10 @@ describe("install", () => {
     // grant → S3/Pulumi AccessDenied. They must re-attach and re-detach.
     expect(vi.mocked(attachTempInstallInfraPolicy)).toHaveBeenCalledTimes(2);
     expect(vi.mocked(detachTempInstallInfraPolicy)).toHaveBeenCalledTimes(2);
-    // ...while a normal one-shot step (create_iam_role) stays skipped — proving
-    // the ledger genuinely skips non-alwaysRun "done" steps, so the counts above
-    // reflect alwaysRun and not a harness that never skips anything.
-    expect(vi.mocked(createAppRole)).toHaveBeenCalledTimes(1);
+    // ...while a normal one-shot step (create_iam_exec_role) stays skipped —
+    // proving the ledger genuinely skips non-alwaysRun "done" steps, so the
+    // counts above reflect alwaysRun and not a harness that never skips anything.
+    expect(vi.mocked(createAppExecRole)).toHaveBeenCalledTimes(1);
     // Both re-runs also re-record "done" in the ledger (pending→done again).
     expect(
       ledger.filter((e) => e.step === "install_compute_stack" && e.status === "done"),
@@ -385,7 +388,7 @@ describe("install", () => {
       "run_dsql_ddl",
       "detach_temp_install_ddl_policy",
     ]);
-    expect(vi.mocked(createAppRole)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(createAppRole)).toHaveBeenCalledTimes(2);
   });
 
   it("rejects reserved app ids before recording any step, unless explicitly allowed", async () => {

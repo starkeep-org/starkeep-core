@@ -227,6 +227,9 @@ async function installAppInner(
     { alwaysRun: true },
   );
 
+  // alwaysRun: a role made by an older install keeps that install's trust and
+  // inline policies until something rewrites them. createAppRole rewrites
+  // both on a role that exists, so every reinstall carries the current ones.
   await runStep(registry, appId, "install", "create_iam_role", done, async () => {
     await createAppRole({
       stackPrefix: config.stackPrefix,
@@ -240,7 +243,7 @@ async function installAppInner(
       brokerPower: ir.brokerPower,
       managerCreds,
     });
-  });
+  }, { alwaysRun: true });
 
   // The app's Lambda execution identity, separate from the data role above.
   // Handlers run as this: logs, their own HMAC credential, their own sibling
