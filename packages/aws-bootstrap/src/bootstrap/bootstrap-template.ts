@@ -244,11 +244,13 @@ ${adminAppPolicyYaml}
   # a member, or an admin removed from the group — matches no rule, and
   # AmbiguousRoleResolution: Deny refuses them, with no default role to fall
   # back to. Membership in starkeep-users is the data plane's concern, checked
-  # by the cloud data server, not here.
+  # by the cloud data server, not here. Roles stays an empty map: Cognito's
+  # SetIdentityPoolRoles requires the field and rejects an update that omits it.
   IdentityPoolRoleAttachment:
     Type: AWS::Cognito::IdentityPoolRoleAttachment
     Properties:
       IdentityPoolId: !Ref IdentityPool
+      Roles: {}
       RoleMappings:
         userpool:
           IdentityProvider: !Sub '\${UserPool.ProviderName}:\${UserPoolClient}'
