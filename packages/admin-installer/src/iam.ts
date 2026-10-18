@@ -702,25 +702,6 @@ export function buildAppRoleTrustPolicy(
   return JSON.stringify({ Version: "2012-10-17", Statement: statements });
 }
 
-export async function updateAppRoleTrustPolicy(
-  stackPrefix: string,
-  appId: string,
-  accountId: string,
-  managerCreds: AwsCredentials,
-): Promise<void> {
-  const iam = makeIamClient(managerCreds);
-  await iam.send(
-    new UpdateAssumeRolePolicyCommand({
-      RoleName: `${stackPrefix}-app-${appId}-role`,
-      PolicyDocument: buildAppRoleTrustPolicy(
-        stackPrefix,
-        accountId,
-        appId !== FOUNDATIONAL_APP_ID,
-      ),
-    }),
-  );
-}
-
 /** True if the app role exists in IAM. */
 export async function appRoleExists(
   stackPrefix: string,
