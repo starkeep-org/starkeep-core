@@ -6,22 +6,29 @@
  * mode only when it creates the file. ID tokens are never written; they live
  * fifteen minutes and are re-obtained on demand.
  *
- * Besides the session the file keeps two things a fresh process needs before
+ * Besides the session the file keeps three things a fresh process needs before
  * it can reach the network:
  *
  * - **How to reach the pool** (`auth`): the region, pool and device client the
  *   token belongs to. A refresh token is only good with its own client, and a
  *   member's machine learned these from the cloud's `/auth/config` rather than
- *   from its config file. Kept after sign-out, so a revocation that could not
- *   reach the pool can still be finished later.
+ *   from its config file.
  * - **Whose session it is** (`userId`): the token's `sub`, so a machine that
  *   starts offline can tell its library is bound to the signed-in user and
  *   start sync without waiting for a refresh.
+ * - **A sign-out still waiting on its pool** (`pendingRevocation`): the token
+ *   and the pool that issued it, so a retry after a move to another cloud
+ *   still reaches the right pool.
  */
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { DeviceAuthConfig, SessionStore, StoredSession } from "@starkeep/protocol-primitives";
+import type {
+  DeviceAuthConfig,
+  PendingRevocation,
+  SessionStore,
+  StoredSession,
+} from "@starkeep/protocol-primitives";
 
 export const DEVICE_SESSION_FILE = "device-session.json";
 
@@ -29,7 +36,7 @@ interface FileShape {
   auth: DeviceAuthConfig | null;
   userId: string | null;
   session: StoredSession | null;
-  pendingRevocation: string | null;
+  pendingRevocation: PendingRevocation | null;
 }
 
 const EMPTY: FileShape = { auth: null, userId: null, session: null, pendingRevocation: null };
@@ -81,8 +88,8 @@ export function openDeviceSessionFile(starkeepDir: string): DeviceSessionFile {
     async readPendingRevocation() {
       return read().pendingRevocation;
     },
-    async writePendingRevocation(refreshToken) {
-      update((f) => ({ ...f, pendingRevocation: refreshToken }));
+    async writePendingRevocation(pending) {
+      update((f) => ({ ...f, pendingRevocation: pending }));
     },
     async clearPendingRevocation() {
       update((f) => ({ ...f, pendingRevocation: null }));

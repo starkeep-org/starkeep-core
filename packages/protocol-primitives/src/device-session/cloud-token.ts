@@ -78,10 +78,13 @@ export function createCloudTokenSource(options: CloudTokenSourceOptions): CloudT
   let cached: Cached | null = null;
   let inFlight: Promise<string | null> | null = null;
 
-  async function refresh(): Promise<string | null> {
+  async function refresh(retry = true): Promise<string | null> {
     const session = await loadStoredSession(options.store);
     if (!session) return null;
     const outcome = await refreshSession(options.client, options.store, session);
+    // The person signed out or in again mid-refresh. Start over from what the
+    // store holds now, once: no session there answers null, a new one refreshes.
+    if (outcome.kind === "superseded" && retry) return refresh(false);
     if (outcome.kind !== "live" || !outcome.session.tokens) {
       // "offline" leaves the session standing and the request to fail as a
       // network error, which is what it is; "rejected" has already cleared it.
@@ -140,7 +143,10 @@ export function withUserToken(
     if (!url.startsWith(channelUrl)) return fetchImpl(input, init);
     const token = await tokens.current();
     if (!token) throw new SignedOutError();
-    const headers = new Headers(init?.headers);
+    // `init.headers` replaces a Request's own headers outright, so start from
+    // the Request's and lay `init`'s over them, as `fetch` itself would.
+    const headers = new Headers(input instanceof Request ? input.headers : undefined);
+    new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
     headers.set(USER_TOKEN_HEADER, token);
     return fetchImpl(input, { ...init, headers });
   };

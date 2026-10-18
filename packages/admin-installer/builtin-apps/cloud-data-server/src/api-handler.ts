@@ -83,6 +83,7 @@ import {
   DEPLOYMENT_SETTINGS_ROUTE,
   DEVICE_SELF_ROUTE,
   AUTH_CONFIG_ROUTE,
+  DATA_GROUP,
   stampFor,
   hasMetadataTable,
 } from "@starkeep/protocol-primitives";
@@ -410,7 +411,8 @@ const deviceKeyCache = new Map<string, CachedDeviceKey>();
 // branch looks up the user its record names.
 
 export const ADMINS_GROUP = "starkeep-admins";
-export const DATA_GROUP = "starkeep-users";
+/** Shared with the devices, which check it at sign-in. */
+export { DATA_GROUP };
 
 /**
  * Whether a user may reach data: any account in the data group, admin or not.

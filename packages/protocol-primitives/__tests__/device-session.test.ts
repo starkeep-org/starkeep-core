@@ -226,6 +226,8 @@ describe("sessionFromTokens", () => {
 describe("signing out", () => {
   const notRefreshing = () => Promise.reject(new Error("not used"));
   const live = (refreshToken: string): ActiveSession => ({ email: "a@example.com", refreshToken, tokens: null });
+  const AUTH = { region: "us-east-2", userPoolId: "us-east-2_Pool1", deviceClientId: "client1" };
+  const pending = (refreshToken: string) => ({ refreshToken, auth: AUTH });
 
   it("revokes this sign-in at the pool and leaves nothing behind", async () => {
     const revoked: string[] = [];
@@ -234,7 +236,7 @@ describe("signing out", () => {
     });
     const store = await storeWith({ refreshToken: "r1", email: "a@example.com" }).seed();
 
-    expect(await signOut(client, store, live("r1"))).toBe("revoked");
+    expect(await signOut(() => client, store, live("r1"), AUTH)).toBe("revoked");
 
     expect(revoked).toEqual(["r1"]);
     expect(await store.read()).toBeNull();
@@ -245,21 +247,22 @@ describe("signing out", () => {
     const client = clientThat(notRefreshing, () => Promise.reject(new TypeError("Network request failed")));
     const store = await storeWith({ refreshToken: "r1", email: "a@example.com" }).seed();
 
-    expect(await signOut(client, store, live("r1"))).toBe("pending");
+    expect(await signOut(() => client, store, live("r1"), AUTH)).toBe("pending");
 
     expect(await store.read()).toBeNull();
-    expect(await store.readPendingRevocation()).toBe("r1");
+    expect(await store.readPendingRevocation()).toEqual(pending("r1"));
   });
 
   it("finishes the revocation on a later launch with a network", async () => {
     const revoked: string[] = [];
     const store = await storeWith().seed();
-    await store.writePendingRevocation("r1");
+    await store.writePendingRevocation(pending("r1"));
 
     const outcome = await revokePendingSignOut(
-      clientThat(notRefreshing, async (t) => {
-        revoked.push(t);
-      }),
+      () =>
+        clientThat(notRefreshing, async (t) => {
+          revoked.push(t);
+        }),
       store,
     );
 
@@ -270,36 +273,36 @@ describe("signing out", () => {
 
   it("drops a pending token the pool refuses, since a refused token is already unusable", async () => {
     const store = await storeWith().seed();
-    await store.writePendingRevocation("r1");
+    await store.writePendingRevocation(pending("r1"));
     const client = clientThat(notRefreshing, () =>
       Promise.reject(new CognitoError("UnauthorizedException", "token already revoked", 400)),
     );
 
-    expect(await revokePendingSignOut(client, store)).toBe("revoked");
+    expect(await revokePendingSignOut(() => client, store)).toBe("revoked");
     expect(await store.readPendingRevocation()).toBeNull();
   });
 
   it("keeps a pending token through a server error", async () => {
     const store = await storeWith().seed();
-    await store.writePendingRevocation("r1");
+    await store.writePendingRevocation(pending("r1"));
     const client = clientThat(notRefreshing, () =>
       Promise.reject(new CognitoError("InternalErrorException", "try again", 500)),
     );
 
-    expect(await revokePendingSignOut(client, store)).toBe("pending");
-    expect(await store.readPendingRevocation()).toBe("r1");
+    expect(await revokePendingSignOut(() => client, store)).toBe("pending");
+    expect(await store.readPendingRevocation()).toEqual(pending("r1"));
   });
 
   it("does nothing at launch when no sign-out is waiting", async () => {
     const store = await storeWith().seed();
-    expect(await revokePendingSignOut(clientThat(notRefreshing), store)).toBe("none");
+    expect(await revokePendingSignOut(() => clientThat(notRefreshing), store)).toBe("none");
   });
 
   it("leaves a newer sign-in's session alone while finishing an old revocation", async () => {
     const store = await storeWith({ refreshToken: "r2", email: "a@example.com" }).seed();
-    await store.writePendingRevocation("r1");
+    await store.writePendingRevocation(pending("r1"));
 
-    await revokePendingSignOut(clientThat(notRefreshing, async () => {}), store);
+    await revokePendingSignOut(() => clientThat(notRefreshing, async () => {}), store);
 
     expect(await store.read()).toEqual({ refreshToken: "r2", email: "a@example.com" });
   });

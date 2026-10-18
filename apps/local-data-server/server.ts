@@ -85,6 +85,7 @@ import type { RecordAvailability } from "@starkeep/protocol-primitives";
 import {
   createCloudTokenSource,
   createCognitoClient,
+  DATA_GROUP,
   deviceFingerprint,
   encodePairingRequest,
   fetchDeviceAuthConfig,
@@ -92,6 +93,7 @@ import {
   isRejection,
   LOCAL_USER_SEGMENT,
   MAX_DEVICE_LABEL_LENGTH,
+  endReplacedSession,
   revokePendingSignOut,
   signOut,
   USER_TOKEN_HEADER,
@@ -102,6 +104,7 @@ import {
   type DeviceSigner,
 } from "@starkeep/protocol-primitives";
 import { openDeviceSessionFile } from "./device-session-file.js";
+import { isLoopbackHost } from "./loopback-host.js";
 import {
   createResidencyManager,
   reapDeleted,
@@ -389,7 +392,11 @@ interface StarkeepConfig {
   stage?: string;
   userPoolId?: string;
   userPoolClientId?: string;
-  /** The pool's device client, which this machine signs in with to sync. */
+  /**
+   * The pool's device client, which the cloud data server's install hands the
+   * broker. This machine's own sign-in asks the cloud's `/auth/config` instead,
+   * so a Join to another cloud cannot leave it signing in at the old pool.
+   */
   deviceUserPoolClientId?: string;
   identityPoolId?: string;
   s3Bucket?: string;
@@ -766,9 +773,8 @@ async function main() {
     | { readonly state: "bound-elsewhere"; readonly email: string | null; readonly message: string };
   let sessionState: SessionState = { state: "signed-out" };
 
-  // The pool client and token source for the stored session's pool, rebuilt
-  // when a sign-in names a different pool. Null before any sign-in.
-  let cognitoClient: CognitoClient | null = null;
+  // The token source for the stored session's pool, rebuilt when a sign-in
+  // names a different pool. Null before any sign-in.
   let tokenSource: CloudTokenSource | null = null;
 
   /** A Cognito client for the device client of `auth`'s pool. */
@@ -782,9 +788,8 @@ async function main() {
   }
 
   function useSessionPool(auth: DeviceAuthConfig): void {
-    cognitoClient = cognitoClientFor(auth);
     tokenSource = createCloudTokenSource({
-      client: cognitoClient,
+      client: cognitoClientFor(auth),
       store: deviceSession.store,
       // The pool rejected the refresh token: an admin signed this user out
       // everywhere, disabled the account, or the token expired. The session is
@@ -804,10 +809,8 @@ async function main() {
     if (stored && auth) {
       sessionState = { state: "signed-in", email: stored.email, userId: deviceSession.userId(), bound: false };
     }
-    // A sign-out that could not reach the pool finishes now, in the background.
-    if (cognitoClient) {
-      void revokePendingSignOut(cognitoClient, deviceSession.store).catch(() => undefined);
-    }
+    // A sign-out that could not reach its pool finishes now, in the background.
+    void revokePendingSignOut(cognitoClientFor, deviceSession.store).catch(() => undefined);
   }
 
   /** The token source while this machine is signed in, for the supervisor. */
@@ -1305,6 +1308,13 @@ async function main() {
   }
 
   const server = createServer(async (req, res) => {
+    // Loopback names only, so a DNS-rebinding page cannot read this server's
+    // answers as its own. See `loopback-host.ts`.
+    if (!isLoopbackHost(req.headers.host)) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "This server answers on its loopback address only" }));
+      return;
+    }
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
     // The `x-amz-*` entries are the upload headers this server's own presign
@@ -1533,20 +1543,12 @@ async function main() {
           return;
         }
 
-        // The pool and client, from this machine's config when it set up the
-        // cloud, or from the cloud itself — a member's machine knows only the
-        // address it joined.
-        const fresh = await loadStarkeepConfig();
+        // The pool and client, from the cloud itself. The cloud is the one
+        // source for which pool its address signs in at: pool ids in this
+        // machine's config outlive a Join to another cloud.
         let auth: DeviceAuthConfig;
         try {
-          auth =
-            fresh.userPoolId && fresh.deviceUserPoolClientId
-              ? {
-                  region: regionFromUserPoolId(fresh.userPoolId),
-                  userPoolId: fresh.userPoolId,
-                  deviceClientId: fresh.deviceUserPoolClientId,
-                }
-              : await fetchDeviceAuthConfig(CLOUD_URL);
+          auth = await fetchDeviceAuthConfig(CLOUD_URL);
         } catch (err) {
           res.writeHead(502);
           json(res, { error: err instanceof Error ? err.message : String(err) });
@@ -1572,10 +1574,23 @@ async function main() {
           return;
         }
 
-        const userId = idTokenClaims(tokens.idToken).sub;
+        const claims = idTokenClaims(tokens.idToken);
+        const userId = claims.sub;
         if (!userId) {
           res.writeHead(502);
           json(res, { error: "The pool's token names no user" });
+          return;
+        }
+        // An account without a data library, such as an admin-only one, can
+        // never sync: the cloud refuses its token. Refused before the library
+        // binds to it, which would leave the library stuck with that account.
+        if (!claims.groups.includes(DATA_GROUP)) {
+          await client.revoke(tokens.refreshToken).catch(() => undefined);
+          res.writeHead(403);
+          json(res, {
+            error:
+              "This account has no library to sync. An admin can give it one in admin-web's Users section.",
+          });
           return;
         }
         // A library already bound to another person stays theirs. Refused
@@ -1589,13 +1604,10 @@ async function main() {
           return;
         }
 
-        // A previous session on this machine is replaced, and ended at the pool.
-        const previous = await deviceSession.store.read();
-        if (previous && cognitoClient) {
-          await deviceSession.store.writePendingRevocation(previous.refreshToken);
-          void revokePendingSignOut(cognitoClient, deviceSession.store).catch(() => undefined);
-        }
-        const signedInEmail = idTokenClaims(tokens.idToken).email ?? email;
+        // A sign-out still waiting on its pool finishes now, and a previous
+        // session on this machine is replaced and ended at its own pool.
+        await endReplacedSession(cognitoClientFor, deviceSession.store, deviceSession.auth());
+        const signedInEmail = claims.email ?? email;
         deviceSession.writeSignIn(auth, userId, { refreshToken: tokens.refreshToken, email: signedInEmail });
         useSessionPool(auth);
         sessionState = { state: "signed-in", email: signedInEmail, userId, bound: false };
@@ -1614,9 +1626,10 @@ async function main() {
       // the pool as soon as it answers. Sync stops unless a paired key remains.
       if (path === "/auth/sign-out" && req.method === "POST") {
         const stored = await deviceSession.store.read();
+        const storedAuth = deviceSession.auth();
         let revocation: "none" | "revoked" | "pending" = "none";
-        if (stored && cognitoClient) {
-          revocation = await signOut(cognitoClient, deviceSession.store, stored);
+        if (stored && storedAuth) {
+          revocation = await signOut(cognitoClientFor, deviceSession.store, stored, storedAuth);
         } else {
           await deviceSession.store.clear();
         }
