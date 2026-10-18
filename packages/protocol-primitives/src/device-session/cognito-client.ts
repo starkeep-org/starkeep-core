@@ -207,7 +207,16 @@ export interface IdTokenClaims {
   readonly email: string | null;
   /** Expiry, in epoch seconds. */
   readonly exp: number | null;
+  /** The account's Cognito groups (`cognito:groups`), empty when it has none. */
+  readonly groups: readonly string[];
 }
+
+/**
+ * The group whose members have a data library that syncs. The cloud data
+ * server refuses a device token without it; a device checks it at sign-in too,
+ * so an account that can never sync does not bind the device's library.
+ */
+export const DATA_GROUP = "starkeep-users";
 
 /**
  * An ID token's claims, decoded and **not verified**.
@@ -222,7 +231,7 @@ export interface IdTokenClaims {
  * on across Hermes versions, and the alternative is a dependency.
  */
 export function idTokenClaims(idToken: string): IdTokenClaims {
-  const none: IdTokenClaims = { sub: null, email: null, exp: null };
+  const none: IdTokenClaims = { sub: null, email: null, exp: null, groups: [] };
   try {
     const payload = idToken.split(".")[1];
     if (!payload) return none;
@@ -231,6 +240,9 @@ export function idTokenClaims(idToken: string): IdTokenClaims {
       sub: typeof claims["sub"] === "string" && claims["sub"] ? claims["sub"] : null,
       email: typeof claims["email"] === "string" ? claims["email"] : null,
       exp: typeof claims["exp"] === "number" ? claims["exp"] : null,
+      groups: Array.isArray(claims["cognito:groups"])
+        ? claims["cognito:groups"].filter((g): g is string => typeof g === "string")
+        : [],
     };
   } catch {
     return none;

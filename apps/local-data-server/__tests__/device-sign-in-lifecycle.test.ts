@@ -4,10 +4,10 @@
  * the pool ends, a start with the pool out of reach, and the move from a paired
  * key to a sign-in.
  *
- * `device-sign-in.test.ts` covers the first sign-in itself. Every `it.fails`
- * here records a suspected bug. See
- * `~/projects/starkeep/review-test-gaps-device-sign-in-multi-user-2026-10-18.md`,
- * section "Tier 2: a local data server against the fake cloud".
+ * `device-sign-in.test.ts` covers the first sign-in itself. The stale pool
+ * ids, the account with no data library and the sign-out the pool did not hear
+ * started as `it.fails` in the 2026-10-18 test-gap review. See
+ * `~/projects/starkeep/assessment-failing-tests-device-sign-in-2026-10-18.md`.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { readFile, rm } from "node:fs/promises";
@@ -236,11 +236,11 @@ describe("a machine that joined a different cloud than the one its config names"
   afterAll(async () => {
     await server?.stop();
     await cloud?.close();
+    if (server) await rm(server.starkeepDir, { recursive: true, force: true });
   });
 
-  it.fails("signs in to the pool of the cloud it joined", async () => {
-    // Problem 8: the sign-in prefers the config file's pool ids over the
-    // joined cloud's `/auth/config`.
+  it("signs in to the pool of the cloud it joined", async () => {
+    // The joined cloud's `/auth/config` names the pool, not the config file.
     const res = await post(server, "/auth/login", { email: EMAIL, password: PASSWORD });
     expect(res.status, JSON.stringify(res.body)).toBe(200);
   });
@@ -260,15 +260,80 @@ describe("an account with no data library", () => {
   afterAll(async () => {
     await server?.stop();
     await cloud?.close();
+    if (server) await rm(server.starkeepDir, { recursive: true, force: true });
   });
 
-  it.fails("is refused at sign-in, before the library is bound to it", async () => {
-    // Problem 9: the sign-in binds the library to any account the pool
-    // accepts. The cloud then refuses every sync call for an account outside
-    // `starkeep-users`, and the library stays bound to that account for good.
+  it("is refused at sign-in, before the library is bound to it", async () => {
+    // The cloud refuses every sync call for an account outside
+    // `starkeep-users`. Bound to such an account, the library could never
+    // sync and would refuse every other account.
     const res = await post(server, "/auth/login", { email: EMAIL, password: PASSWORD });
-    expect(res.status).toBeGreaterThanOrEqual(400);
-    expect(await status(server)).toMatchObject({ libraryUserId: null });
+    expect(res.status).toBe(403);
+    expect(String(res.body["error"])).toMatch(/no library to sync/);
+    expect(await status(server)).toMatchObject({ state: "signed-out", libraryUserId: null });
+    // The sign-in the refusal threw away is ended at the pool too.
+    expect(cloud.pool.revoked.size).toBe(1);
+  });
+});
+
+describe("a sign-out the pool did not hear", () => {
+  let cloud: FakeCloud;
+  let server: LocalDataServer;
+
+  beforeAll(async () => {
+    cloud = await startFakeCloud();
+    cloud.pool.addUser(EMAIL, PASSWORD, { sub: FAKE_CLOUD_USER_ID });
+    server = await joinedMachine(cloud);
+  }, 60_000);
+
+  afterAll(async () => {
+    await server?.stop();
+    await cloud?.close();
+    if (server) await rm(server.starkeepDir, { recursive: true, force: true });
+  });
+
+  async function pendingOnDisk(): Promise<unknown> {
+    const file = JSON.parse(await readFile(join(server.starkeepDir, "device-session.json"), "utf8")) as {
+      pendingRevocation: unknown;
+    };
+    return file.pendingRevocation;
+  }
+
+  it("is finished by the next sign-in, so a second offline sign-out cannot overwrite it", async () => {
+    expect((await post(server, "/auth/login", { email: EMAIL, password: PASSWORD })).status).toBe(200);
+    const first = await storedRefreshToken(server);
+
+    cloud.pool.reachable = false;
+    expect((await post(server, "/auth/sign-out", {})).body).toMatchObject({ revocation: "pending" });
+    // The waiting token names the pool that issued it.
+    expect(await pendingOnDisk()).toEqual({
+      refreshToken: first,
+      auth: expect.objectContaining({ deviceClientId: expect.any(String), userPoolId: expect.any(String) }),
+    });
+
+    cloud.pool.reachable = true;
+    expect((await post(server, "/auth/login", { email: EMAIL, password: PASSWORD })).status).toBe(200);
+    expect(cloud.pool.revoked.has(first!)).toBe(true);
+    expect(await pendingOnDisk()).toBeNull();
+
+    const second = await storedRefreshToken(server);
+    cloud.pool.reachable = false;
+    expect((await post(server, "/auth/sign-out", {})).body).toMatchObject({ revocation: "pending" });
+    expect(await pendingOnDisk()).toMatchObject({ refreshToken: second });
+  });
+
+  it("is finished at the next start once the pool answers", { timeout: 60_000 }, async () => {
+    const waiting = ((await pendingOnDisk()) as { refreshToken: string }).refreshToken;
+    cloud.pool.reachable = true;
+    await server.stopKeepData();
+    server = await startLocalDataServer({
+      starkeepDir: server.starkeepDir,
+      deviceKey: false,
+      env: { STARKEEP_COGNITO_ENDPOINT: cloud.cognitoEndpoint },
+    });
+
+    await eventually(() => expect(cloud.pool.revoked.has(waiting)).toBe(true));
+    await eventually(async () => expect(await pendingOnDisk()).toBeNull());
   });
 });
 

@@ -64,7 +64,7 @@ The admin app is the command center, allowing you to install and start other app
 pnpm --filter admin-web dev
 ```
 
-The admin app is meant to be opened from the same machine (`http://localhost:3000`). If you want to reach it from another device on your LAN, Vite's dev server rejects requests carrying a Host it was not told to expect — set `STARKEEP_ADMIN_DEV_ORIGINS` (comma-separated hostnames/IPs as the other device sees this host, e.g. `STARKEEP_ADMIN_DEV_ORIGINS=192.168.1.51`) in the repo-root `.env` and restart.
+The admin app is meant to be opened from the same machine (`http://localhost:3000`). It listens on `127.0.0.1` and refuses any request whose `Host` is not a loopback name. To reach it from another device on your LAN, set `STARKEEP_ADMIN_DEV_ORIGINS` (comma-separated hostnames/IPs as the other device sees this host, e.g. `STARKEEP_ADMIN_DEV_ORIGINS=192.168.1.51`) in the repo-root `.env` and restart. admin-web then listens on every interface and accepts those names too. Any device on the network can then reach it, so set the variable only on a network you trust.
 
 ### 3. Start the local data-server
 

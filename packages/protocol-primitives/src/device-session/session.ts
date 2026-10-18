@@ -15,6 +15,7 @@
  * inside a `catch`, and only one of them should cost a device its session.
  */
 
+import type { DeviceAuthConfig } from "./auth-config.js";
 import { CognitoError, idTokenClaims, type AuthTokens, type CognitoClient } from "./cognito-client.js";
 
 /** What a device keeps across restarts. Only the refresh token and the email. */
@@ -22,6 +23,20 @@ export interface StoredSession {
   readonly refreshToken: string;
   readonly email: string | null;
 }
+
+/**
+ * A refresh token signed out of locally but not yet revoked, and the pool that
+ * issued it. A pool revokes only its own tokens and refuses any other with a
+ * 4xx, which reads as "already revoked". So a retry has to reach the issuing
+ * pool, whichever cloud the device uses by then.
+ */
+export interface PendingRevocation {
+  readonly refreshToken: string;
+  readonly auth: DeviceAuthConfig;
+}
+
+/** A Cognito client for a pool's device client. */
+export type CognitoClientFor = (auth: DeviceAuthConfig) => CognitoClient;
 
 /**
  * Where a device keeps its session: a `0600` file on a desktop, the secure
@@ -33,9 +48,9 @@ export interface SessionStore {
   read(): Promise<StoredSession | null>;
   write(session: StoredSession): Promise<void>;
   clear(): Promise<void>;
-  /** A refresh token signed out of locally but not yet revoked at the pool. */
-  readPendingRevocation(): Promise<string | null>;
-  writePendingRevocation(refreshToken: string): Promise<void>;
+  /** A refresh token signed out of locally but not yet revoked at its pool. */
+  readPendingRevocation(): Promise<PendingRevocation | null>;
+  writePendingRevocation(pending: PendingRevocation): Promise<void>;
   clearPendingRevocation(): Promise<void>;
 }
 
@@ -56,7 +71,13 @@ export type RefreshOutcome =
   /** The pool could not be reached. The session stands, unrefreshed. */
   | { readonly kind: "offline"; readonly reason: string }
   /** The pool rejected the refresh token. The session is over and cleared. */
-  | { readonly kind: "rejected"; readonly reason: string };
+  | { readonly kind: "rejected"; readonly reason: string }
+  /**
+   * The store changed while the refresh was in flight: the person signed out,
+   * or signed in again. The outcome belongs to a session that no longer
+   * exists, so nothing was written or cleared.
+   */
+  | { readonly kind: "superseded" };
 
 /** The session this device already has. Never touches the network. */
 export async function loadStoredSession(store: SessionStore): Promise<ActiveSession | null> {
@@ -81,6 +102,37 @@ export async function storeSignIn(store: SessionStore, tokens: AuthTokens): Prom
   return session;
 }
 
+/**
+ * Get the store ready for a completed sign-in. Run before the new session is
+ * written.
+ *
+ * First it finishes a sign-out still waiting on the pool. The sign-in has just
+ * reached a pool, so the network is back, and leaving the old token waiting
+ * until the next restart would let a second offline sign-out overwrite it.
+ * Then it parks the session this sign-in replaces, at its own pool, and
+ * revokes it in the background.
+ *
+ * One slot still holds one token. When the waiting token's pool stays out of
+ * reach through the sign-in, which only a move to another cloud allows, the
+ * replaced session takes the slot.
+ */
+export async function endReplacedSession(
+  clientFor: CognitoClientFor,
+  store: SessionStore,
+  previousAuth: DeviceAuthConfig | null,
+): Promise<void> {
+  await revokePendingSignOut(clientFor, store).catch(() => undefined);
+  const previous = await store.read();
+  if (!previous || !previousAuth) return;
+  await store.writePendingRevocation({ refreshToken: previous.refreshToken, auth: previousAuth });
+  void revokePendingSignOut(clientFor, store).catch(() => undefined);
+}
+
+/** Whether the store still holds the session a slow call started from. */
+async function stillCurrent(store: SessionStore, session: ActiveSession): Promise<boolean> {
+  return (await store.read())?.refreshToken === session.refreshToken;
+}
+
 /** Whether an error is the pool's answer that a credential is no good. */
 export function isRejection(err: unknown): boolean {
   return err instanceof CognitoError && err.status >= 400 && err.status < 500;
@@ -93,6 +145,9 @@ export async function refreshSession(
 ): Promise<RefreshOutcome> {
   try {
     const tokens = await client.refresh(session.refreshToken);
+    // A sign-out or a new sign-in may have landed while the refresh was in
+    // flight. Writing now would undo the first or overwrite the second.
+    if (!(await stillCurrent(store, session))) return { kind: "superseded" };
     const email = idTokenClaims(tokens.idToken).email ?? session.email;
 
     // Written back only when something actually changed. The email is normally
@@ -111,6 +166,8 @@ export async function refreshSession(
     // later", and discarding a working refresh token on any of them is how
     // being briefly offline turns into being signed out for good.
     if (isRejection(err)) {
+      // The rejection is about this token. A newer sign-in keeps its session.
+      if (!(await stillCurrent(store, session))) return { kind: "superseded" };
       await store.clear();
       return { kind: "rejected", reason: (err as Error).message };
     }
@@ -140,36 +197,41 @@ export type RevocationOutcome =
  * one forgotten while valid.
  */
 export async function signOut(
-  client: CognitoClient,
+  clientFor: CognitoClientFor,
   store: SessionStore,
   session: StoredSession,
+  auth: DeviceAuthConfig,
 ): Promise<RevocationOutcome> {
-  await store.writePendingRevocation(session.refreshToken);
+  await store.writePendingRevocation({ refreshToken: session.refreshToken, auth });
   await store.clear();
-  return revokePendingSignOut(client, store);
+  return revokePendingSignOut(clientFor, store);
 }
 
 /**
- * Finish a sign-out that could not reach the pool. Run at start, so a device
- * signed out without a network revokes its old token the next time it has one.
+ * Finish a sign-out that could not reach the pool. Run at start and at every
+ * sign-in (see {@link endReplacedSession}), so a device signed out without a
+ * network revokes its old token the next time it has one. The token goes to
+ * the pool that issued it.
  *
  * Same line as {@link refreshSession}: a 4xx is the pool's answer about this
  * token — revoked now, or already revoked or expired — and either way there is
  * nothing left to do. Anything else is the pool not answering.
  */
 export async function revokePendingSignOut(
-  client: CognitoClient,
+  clientFor: CognitoClientFor,
   store: SessionStore,
 ): Promise<RevocationOutcome> {
   const pending = await store.readPendingRevocation();
   if (!pending) return "none";
   try {
-    await client.revoke(pending);
+    await clientFor(pending.auth).revoke(pending.refreshToken);
   } catch (err) {
     if (!isRejection(err)) return "pending";
   }
   // Only clear what was revoked: a sign-out that parked a newer token while
   // this call was in flight keeps it.
-  if ((await store.readPendingRevocation()) === pending) await store.clearPendingRevocation();
+  if ((await store.readPendingRevocation())?.refreshToken === pending.refreshToken) {
+    await store.clearPendingRevocation();
+  }
   return "revoked";
 }

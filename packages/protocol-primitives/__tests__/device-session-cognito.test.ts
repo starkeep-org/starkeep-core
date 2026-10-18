@@ -260,7 +260,14 @@ describe("idTokenClaims", () => {
       sub: "u-1",
       email: null,
       exp: 1_800_000_000,
+      groups: [],
     });
+  });
+
+  it("reads the account's groups, and ignores anything that is not a string", () => {
+    const claims = idTokenClaims(idTokenWith({ sub: "u-1", "cognito:groups": ["starkeep-users", 7, "starkeep-admins"] }));
+    expect(claims.groups).toEqual(["starkeep-users", "starkeep-admins"]);
+    expect(idTokenClaims(idTokenWith({ sub: "u-1", "cognito:groups": "starkeep-users" })).groups).toEqual([]);
   });
 
   it("returns null rather than throwing on anything unreadable", () => {

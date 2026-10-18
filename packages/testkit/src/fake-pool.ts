@@ -40,6 +40,11 @@ export interface FakePool {
   signOutEverywhere(email: string): void;
   /** Refresh tokens a device revoked with `RevokeToken`. */
   readonly revoked: ReadonlySet<string>;
+  /**
+   * While false, every call answers 503, which a device reads as a pool out of
+   * reach rather than a refusal. True to begin with.
+   */
+  reachable: boolean;
   /** How many sign-ins succeeded, by email. */
   signIns(email: string): number;
   /** The claims of a valid, unexpired ID token this pool issued, or null. */
@@ -111,6 +116,8 @@ export function createFakePool(): FakePool {
 
     revoked,
 
+    reachable: true,
+
     signIns: (email) => signInCounts.get(email) ?? 0,
 
     verify(idToken) {
@@ -135,6 +142,7 @@ export function createFakePool(): FakePool {
     },
 
     handle(target, body) {
+      if (!this.reachable) return { status: 503, body: { __type: "ServiceUnavailable", message: "Out of reach" } };
       if (body["ClientId"] !== FAKE_DEVICE_CLIENT_ID) {
         return { status: 400, body: { __type: "ResourceNotFoundException", message: "User pool client does not exist." } };
       }

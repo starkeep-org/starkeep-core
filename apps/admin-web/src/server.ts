@@ -35,6 +35,7 @@ import { fileURLToPath } from "node:url";
 import { getRequestListener } from "@hono/node-server";
 import { Hono } from "hono";
 import { api } from "./api";
+import { serverRefusal } from "./lib/same-origin";
 
 const PKG_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST_DIR = join(PKG_DIR, "dist");
@@ -135,12 +136,23 @@ async function main(): Promise<void> {
   // development without Hono having to know Vite exists.
   const apiListener = getRequestListener(app.fetch);
   const server = createServer((req, res) => {
+    // Ahead of the split, so the client and the API get the same boundary.
+    // See `lib/same-origin.ts`.
+    const refusal = serverRefusal({ method: req.method, host: req.headers.host, origin: req.headers.origin });
+    if (refusal) {
+      res.writeHead(403, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: refusal }));
+      return;
+    }
     if (req.url?.startsWith("/api/")) apiListener(req, res);
     else handleRest(req, res);
   });
 
-  server.listen(port, () => {
-    console.log(`admin-web listening on http://localhost:${port}${dev ? " (dev)" : ""}`);
+  // Loopback only, unless the operator listed other devices' names for this
+  // host in STARKEEP_ADMIN_DEV_ORIGINS to reach admin-web from them.
+  const lan = Boolean(process.env.STARKEEP_ADMIN_DEV_ORIGINS?.trim());
+  server.listen(port, lan ? undefined : "127.0.0.1", () => {
+    console.log(`admin-web listening on http://localhost:${port}${dev ? " (dev)" : ""}${lan ? ", and on the LAN" : ""}`);
   });
 }
 
