@@ -24,6 +24,8 @@ import * as pulumi from "@pulumi/pulumi";
 import * as tls from "@pulumi/tls";
 import {
   ARCHIVE_SIZE_FLOOR_BYTES,
+  DEPLOYMENT_SETTINGS_ROUTE,
+  DEVICE_SELF_ROUTE,
   INTENT_TAG_KEY,
   LADDER_TAG_KEY,
   LADDER_TAG_COMPLETE,
@@ -534,6 +536,7 @@ export function buildCloudDataServerProgram(
     //   - OPTIONS /{proxy+}             (CORS preflight, no auth)
     //   - GET     /health               (public liveness check)
     //   - GET     /apps/{appId}/health  (per-app authenticated health)
+    //   - GET     /apps/{appId}/device/self, /apps/{appId}/deployment/settings
     //   - ANY     /apps/{appId}/data/{proxy+}
     //   - ANY     /apps/{appId}/files/{proxy+}
     //   - ANY     /apps/{appId}/sync/{proxy+}
@@ -708,6 +711,21 @@ export function buildCloudDataServerProgram(
     new aws.apigatewayv2.Route("route-app-health", {
       apiId: api.id,
       routeKey: "GET /apps/{appId}/health",
+      target: pulumi.interpolate`integrations/${integration.id}`,
+    });
+
+    // A device's own record, which a machine polls to learn that an admin
+    // approved its key, and the deployment's settings. The handler answers
+    // both for Starkeep Drive only, before any role is assumed.
+    new aws.apigatewayv2.Route("route-device-self", {
+      apiId: api.id,
+      routeKey: `GET /apps/{appId}${DEVICE_SELF_ROUTE}`,
+      target: pulumi.interpolate`integrations/${integration.id}`,
+    });
+
+    new aws.apigatewayv2.Route("route-deployment-settings", {
+      apiId: api.id,
+      routeKey: `GET /apps/{appId}${DEPLOYMENT_SETTINGS_ROUTE}`,
       target: pulumi.interpolate`integrations/${integration.id}`,
     });
 
