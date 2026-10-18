@@ -29,6 +29,17 @@ function onDisk(): Record<string, unknown> {
 
 const patch = (body: unknown) => PATCH(jsonRequest("/api/config", body, "PATCH"));
 
+describe("cross-site requests", () => {
+  it("refuses a PATCH another site's page sends, and writes nothing", async () => {
+    const before = existsSync(configPath) ? readFileSync(configPath, "utf-8") : null;
+    const res = await PATCH(
+      jsonRequest("/api/config", { apiGatewayUrl: "https://evil.example" }, "PATCH", "https://evil.example"),
+    );
+    expect(res.status).toBe(403);
+    expect(existsSync(configPath) ? readFileSync(configPath, "utf-8") : null).toBe(before);
+  });
+});
+
 describe("GET seeding", () => {
   it("first read with no config file seeds appParentDirs with the default apps dir", async () => {
     expect(existsSync(configPath)).toBe(false);

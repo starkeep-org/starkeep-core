@@ -136,6 +136,33 @@ Resources:
       RefreshTokenValidity: 30
       PreventUserExistenceErrors: ENABLED
 
+  # The device client: desktops (through the local data server) and phones
+  # sign in here and sync with the ID token alone, on the cloud data server's
+  # device-token branch. The identity pool below does NOT trust this client, so
+  # a device token is no route to an AWS role. Ten-year refresh tokens, because
+  # an expired one stops background sync silently; fifteen-minute ID tokens,
+  # because they bound how long a disabled or ungrouped user keeps syncing.
+  # Public (no secret) with revocation on, so a device can revoke its own
+  # sign-in with RevokeToken.
+  DeviceUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub '\${StackPrefix}-devices'
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      TokenValidityUnits:
+        IdToken: minutes
+        AccessToken: minutes
+        RefreshToken: days
+      IdTokenValidity: 15
+      AccessTokenValidity: 15
+      RefreshTokenValidity: 3650
+      EnableTokenRevocation: true
+      PreventUserExistenceErrors: ENABLED
+
   # ---------------------------------------------------------------------------
   # Cognito Identity Pool — exchanges Cognito ID tokens for STS credentials
   # ---------------------------------------------------------------------------
@@ -454,6 +481,10 @@ Outputs:
   UserPoolClientId:
     Description: Cognito App Client ID
     Value: !Ref UserPoolClient
+
+  DeviceUserPoolClientId:
+    Description: Cognito app client that desktops and phones sign in with to sync
+    Value: !Ref DeviceUserPoolClient
 
   IdentityPoolId:
     Description: Cognito Identity Pool ID

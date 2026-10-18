@@ -55,11 +55,6 @@ export interface LocalDataServerOptions {
   /** Milliseconds to wait for /health before failing. */
   startTimeoutMs?: number;
   /**
-   * Written to `<dir>/auth.json` before boot: the local data server's own
-   * Cognito sign-in. Sync no longer reads it; see {@link deviceKey}.
-   */
-  auth?: { idToken: string; refreshToken?: string };
-  /**
    * This machine's device key, written to `<dir>/device-key.json` before boot.
    * The server signs every call to the cloud with it and starts sync once the
    * cloud accepts it, which a fake cloud does by default. Written by default
@@ -67,21 +62,6 @@ export interface LocalDataServerOptions {
    * a machine nobody has connected yet.
    */
   deviceKey?: false;
-}
-
-/**
- * An unsigned JWT whose payload carries a far-future (or caller-chosen) `exp`,
- * sufficient for the local-data-server's local-only liveness check.
- */
-export function fakeIdToken(expiresInSeconds = 3600): string {
-  const encode = (obj: unknown) =>
-    Buffer.from(JSON.stringify(obj)).toString("base64url");
-  const header = encode({ alg: "none", typ: "JWT" });
-  const payload = encode({
-    sub: "test-user",
-    exp: Math.floor(Date.now() / 1000) + expiresInSeconds,
-  });
-  return `${header}.${payload}.fake-signature`;
 }
 
 export interface LocalDataServer {
@@ -161,15 +141,6 @@ export async function startLocalDataServer(
       deviceId: stored.deviceId,
       publicKeySpki: deviceSigner(stored.deviceId, fromBase64(stored.seed)).publicKeySpki,
     };
-  }
-
-  if (options.auth) {
-    await mkdir(starkeepDir, { recursive: true });
-    const auth = {
-      refreshToken: options.auth.refreshToken ?? "test-refresh-token",
-      idToken: options.auth.idToken,
-    };
-    await writeFile(join(starkeepDir, "auth.json"), JSON.stringify(auth, null, 2));
   }
 
   let output = "";

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router";
-import { Check, TriangleAlert } from "lucide-react";
+import { Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -41,30 +41,6 @@ import {
   type CognitoConfig,
   type STSCredentials,
 } from "../lib/cognito-auth";
-import { localDataServerUrl } from "../lib/runtime-config";
-
-async function isLocalDataServerOnline(): Promise<boolean> {
-  try {
-    const base = await localDataServerUrl();
-    const resp = await fetch(`${base}/health`, { signal: AbortSignal.timeout(1500) });
-    return resp.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function pushAuthToLocalDataServer(tokens: { idToken: string; refreshToken: string }): Promise<void> {
-  const base = await localDataServerUrl();
-  const resp = await fetch(`${base}/auth/tokens`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ idToken: tokens.idToken, refreshToken: tokens.refreshToken }),
-  });
-  if (!resp.ok) {
-    const body = await resp.json().catch(() => ({})) as { error?: string };
-    throw new Error(body.error ?? `Local data server rejected tokens (HTTP ${resp.status})`);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Types & constants
@@ -387,17 +363,24 @@ function Step2Outputs({
   stackPrefix,
   fallbackRegion,
   initialCognitoConfig,
+  initialDeviceUserPoolClientId,
   onContinue,
   onBack,
 }: {
   stackPrefix: string;
   fallbackRegion: string;
   initialCognitoConfig: Partial<CognitoConfig>;
-  onContinue: (config: Pick<CognitoConfig, "userPoolId" | "userPoolClientId" | "identityPoolId">) => void;
+  initialDeviceUserPoolClientId?: string;
+  onContinue: (
+    config: Pick<CognitoConfig, "userPoolId" | "userPoolClientId" | "identityPoolId"> & {
+      deviceUserPoolClientId: string;
+    },
+  ) => void;
   onBack: () => void;
 }) {
   const [userPoolId, setUserPoolId] = useState(initialCognitoConfig.userPoolId ?? "");
   const [userPoolClientId, setUserPoolClientId] = useState(initialCognitoConfig.userPoolClientId ?? "");
+  const [deviceUserPoolClientId, setDeviceUserPoolClientId] = useState(initialDeviceUserPoolClientId ?? "");
   const [identityPoolId, setIdentityPoolId] = useState(initialCognitoConfig.identityPoolId ?? "");
   const [touched, setTouched] = useState<Record<string, boolean>>({});
 
@@ -406,6 +389,7 @@ function Step2Outputs({
   const errors = {
     userPoolId: validateUserPoolId(userPoolId),
     userPoolClientId: validateUserPoolClientId(userPoolClientId),
+    deviceUserPoolClientId: validateUserPoolClientId(deviceUserPoolClientId),
     identityPoolId: validateIdentityPoolId(identityPoolId),
   };
   const isValid = Object.values(errors).every((e) => e === null);
@@ -427,12 +411,28 @@ function Step2Outputs({
         ) : (
           "CloudFormation stack"
         )}{" "}
-        <strong>Outputs</strong> tab and copy the three values below.
+        <strong>Outputs</strong> tab and copy the four values below.
       </p>
 
       <p className="text-sm text-muted-foreground">The outputs are listed in alphabetical order.</p>
 
       <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-1.5">
+          <label className="text-sm font-medium" htmlFor="deviceUserPoolClientId">DeviceUserPoolClientId</label>
+          <Input
+            id="deviceUserPoolClientId"
+            placeholder="7abc4defghij5klmnopq6rstuv"
+            value={deviceUserPoolClientId}
+            onChange={(e) => setDeviceUserPoolClientId(e.currentTarget.value.trim())}
+            onBlur={() => touch("deviceUserPoolClientId")}
+            aria-invalid={touched.deviceUserPoolClientId && !!errors.deviceUserPoolClientId}
+            className={cn(touched.deviceUserPoolClientId && errors.deviceUserPoolClientId && "border-destructive")}
+          />
+          {touched.deviceUserPoolClientId && errors.deviceUserPoolClientId && (
+            <p className="text-xs text-destructive">{errors.deviceUserPoolClientId}</p>
+          )}
+        </div>
+
         <div className="flex flex-col gap-1.5">
           <label className="text-sm font-medium" htmlFor="identityPoolId">IdentityPoolId</label>
           <Input
@@ -485,7 +485,7 @@ function Step2Outputs({
       <div className="flex justify-between">
         <Button variant="ghost" onClick={onBack}>Back to previous step</Button>
         <Button
-          onClick={() => onContinue({ userPoolId, userPoolClientId, identityPoolId })}
+          onClick={() => onContinue({ userPoolId, userPoolClientId, identityPoolId, deviceUserPoolClientId })}
           disabled={!isValid}
         >
           Continue
@@ -631,39 +631,6 @@ function Step4SignIn({
   const [session, setSession] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [serverOnline, setServerOnline] = useState<boolean | null>(null);
-  const [serverStarting, setServerStarting] = useState(false);
-
-  // Poll the local data server's reachability. Sign-in pushes the resulting
-  // tokens to it (so the data server, the browser, and the cloud all agree on
-  // who's signed in), so we require it to be up before allowing sign-in.
-  useEffect(() => {
-    let cancelled = false;
-    const tick = async () => {
-      const online = await isLocalDataServerOnline();
-      if (!cancelled) setServerOnline(online);
-    };
-    tick();
-    const id = setInterval(tick, 2000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, []);
-
-  const handleStartServer = async () => {
-    setServerStarting(true);
-    setError(null);
-    try {
-      await fetch("/api/exec/daemon", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "start", id: "local-data-server" }),
-      });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setServerStarting(false);
-    }
-  };
-
   const handleSignIn = async () => {
     setLoading(true);
     setError(null);
@@ -671,7 +638,6 @@ function Step4SignIn({
       const result = await initiateAuth(cognitoConfig, email, password);
       if (result.tokens) {
         const creds = await getIdentityPoolCredentials(cognitoConfig, result.tokens.idToken);
-        await pushAuthToLocalDataServer(result.tokens);
         const userEmail = extractEmailFromIdToken(result.tokens.idToken);
         onSuccess(
           { idToken: result.tokens.idToken, refreshToken: result.tokens.refreshToken },
@@ -705,7 +671,6 @@ function Step4SignIn({
     try {
       const tokens = await respondNewPasswordChallenge(cognitoConfig, session, email, newPassword);
       const creds = await getIdentityPoolCredentials(cognitoConfig, tokens.idToken);
-      await pushAuthToLocalDataServer(tokens);
       const userEmail = extractEmailFromIdToken(tokens.idToken);
       onSuccess({ idToken: tokens.idToken, refreshToken: tokens.refreshToken }, creds, userEmail);
     } catch (err) {
@@ -715,21 +680,7 @@ function Step4SignIn({
     }
   };
 
-  const serverGate = serverOnline === false ? (
-    <Alert>
-      <AlertDescription className="flex items-center justify-between gap-3">
-        <span className="flex items-center gap-2">
-          <TriangleAlert className="size-4 shrink-0" />
-          You must start your local data server to continue cloud setup.
-        </span>
-        <Button size="sm" onClick={handleStartServer} disabled={serverStarting}>
-          {serverStarting && <span className="mr-2 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
-          Start
-        </Button>
-      </AlertDescription>
-    </Alert>
-  ) : null;
-  const signInDisabled = loading || serverOnline !== true;
+  const signInDisabled = loading;
 
   if (session) {
     return (
@@ -737,7 +688,6 @@ function Step4SignIn({
         <p className="text-sm text-muted-foreground">
           Your temporary password has expired. Please set a new permanent password.
         </p>
-        {serverGate}
         {error && (
           <Alert variant="destructive">
             <AlertDescription>{error}</AlertDescription>
@@ -789,7 +739,6 @@ function Step4SignIn({
       <p className="text-sm text-muted-foreground">
         You should receive an email &ldquo;Your Starkeep account&rdquo; with a temp password.
       </p>
-      {serverGate}
       {error && (
         <Alert variant="destructive">
           <AlertDescription>{error}</AlertDescription>
@@ -1253,7 +1202,11 @@ export function CloudSetupWizard({ onComplete }: Props) {
 
       const done = new Set<StepId>();
       if (cfg?.stackPrefix) done.add(1);
-      const hasCognito = !!(cfg?.userPoolId && cfg?.userPoolClientId && cfg?.identityPoolId);
+      // A config from before the device client existed reopens this step, so
+      // the operator copies the new output in after updating the stack.
+      const hasCognito = !!(
+        cfg?.userPoolId && cfg?.userPoolClientId && cfg?.identityPoolId && cfg?.deviceUserPoolClientId
+      );
       if (hasCognito) done.add(2);
 
       // Step 3 (create user) leaves no persistent state — it's "done" iff we
@@ -1360,6 +1313,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
                   stackPrefix: prefix,
                   stage: prefix,
                   userPoolId: null, userPoolClientId: null, identityPoolId: null,
+                  deviceUserPoolClientId: null,
                   accountId: null, permissionsBoundaryArn: null,
                   foundationalPermissionsBoundaryArn: null,
                   userDataOwnerPermissionsBoundaryArn: null, managerRoleArn: null,
@@ -1385,6 +1339,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
             stackPrefix={stackPrefix}
             fallbackRegion={bootstrapRegion}
             initialCognitoConfig={cognitoConfig}
+            initialDeviceUserPoolClientId={cloudConfig?.deviceUserPoolClientId}
             onContinue={async (config) => {
               const isChanging = !!cloudConfig?.userPoolId && cloudConfig.userPoolId !== config.userPoolId;
               const hasDownstream = !!(cloudConfig?.s3Bucket || cloudConfig?.apiGatewayUrl);
@@ -1397,6 +1352,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
                   userPoolId: config.userPoolId,
                   userPoolClientId: config.userPoolClientId,
                   identityPoolId: config.identityPoolId,
+                  deviceUserPoolClientId: config.deviceUserPoolClientId,
                   s3Bucket: null, auroraEndpoint: null,
                   apiGatewayUrl: null, publicBaseUrl: null, apiGatewayId: null, authorizerId: null,
                 });
@@ -1413,6 +1369,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
                   userPoolId: config.userPoolId,
                   userPoolClientId: config.userPoolClientId,
                   identityPoolId: config.identityPoolId,
+                  deviceUserPoolClientId: config.deviceUserPoolClientId,
                 });
                 setCloudConfig(updated);
               }
@@ -1453,17 +1410,6 @@ export function CloudSetupWizard({ onComplete }: Props) {
               const fresh = await getIdentityPoolCredentials(cogCfg, tokens.idToken);
               setSignInResult({ idToken: tokens.idToken, refreshToken: tokens.refreshToken });
               setCredentials(fresh);
-              // Notifying the local daemon is a side-benefit, not part of minting
-              // credentials — and it races with the daemon restart that pass 1's
-              // installer fires right before pass 2 calls this. If the daemon is
-              // mid-restart the fetch throws ECONNREFUSED; swallowing it here keeps
-              // that transient failure from bubbling up as a null "session expired"
-              // and aborting the deploy. The daemon refreshes its own auth anyway.
-              try {
-                await pushAuthToLocalDataServer({ idToken: tokens.idToken, refreshToken: tokens.refreshToken });
-              } catch (err) {
-                console.warn("[cloud-setup] could not push refreshed auth to local-data-server (continuing):", err);
-              }
               const userEmail = extractEmailFromIdToken(tokens.idToken);
               await writeCognitoSession({ refreshToken: tokens.refreshToken, userEmail: userEmail ?? undefined });
               await writeCloudCredentials(fresh);

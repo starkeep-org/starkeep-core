@@ -14,6 +14,7 @@ import {
   AdminCreateUserCommand,
   AdminDisableUserCommand,
   AdminRemoveUserFromGroupCommand,
+  AdminSetUserPasswordCommand,
   AdminUserGlobalSignOutCommand,
   CognitoIdentityProviderClient,
   ListUsersCommand,
@@ -176,5 +177,62 @@ describe("disabling an account", () => {
     const res = await post(route.SET_ENABLED, { ...SESSION, username: "sub-admin", enabled: false });
     expect(res.status).toBe(409);
     expect(cognito.commandCalls(AdminDisableUserCommand)).toHaveLength(0);
+  });
+});
+
+describe("the temporary password's fit to the pool", () => {
+  it("always satisfies the password policy the bootstrap template gives the pool", async () => {
+    // Cognito refuses a temporary password that breaks the pool's policy, and
+    // "Reset password" would then fail for that one draw. The policy lives in
+    // the bootstrap template, so check every draw against it there.
+    const { generateBootstrapTemplate } = await import("@starkeep/aws-bootstrap");
+    const template = generateBootstrapTemplate();
+    const policy = template.match(/PasswordPolicy:\s*\n((?:\s+\w+: .+\n)+)/)?.[1] ?? "";
+    const field = (name: string) => policy.match(new RegExp(`${name}: (\\S+)`))?.[1];
+    const minimum = Number(field("MinimumLength"));
+    expect(minimum).toBeGreaterThan(0);
+
+    for (let i = 0; i < 2_000; i++) {
+      const password = route.temporaryPassword();
+      expect(password.length).toBeGreaterThanOrEqual(minimum);
+      if (field("RequireUppercase") === "true") expect(password).toMatch(/[A-Z]/);
+      if (field("RequireLowercase") === "true") expect(password).toMatch(/[a-z]/);
+      if (field("RequireNumbers") === "true") expect(password).toMatch(/[0-9]/);
+      if (field("RequireSymbols") === "true") expect(password).toMatch(/[^A-Za-z0-9]/);
+    }
+  });
+});
+
+describe("resetting a password", () => {
+  it("sets a temporary password the person must replace, and answers it once", async () => {
+    cognito.on(AdminSetUserPasswordCommand).resolves({});
+    const res = await route.RESET_PASSWORD(jsonRequest("/api/users/password", { ...SESSION, username: "sub-sam" }));
+    expect(res.status).toBe(200);
+    const { temporaryPassword } = (await res.json()) as { temporaryPassword: string };
+    expect(temporaryPassword).toMatch(/^[A-HJ-NP-Za-km-z2-9]{16}$/);
+    const sent = cognito.commandCalls(AdminSetUserPasswordCommand)[0]!.args[0].input;
+    expect(sent).toEqual({ UserPoolId: "us-east-2_POOL", Username: "sub-sam", Password: temporaryPassword, Permanent: false });
+  });
+
+  it("leaves the account enabled and its sessions alone", async () => {
+    cognito.on(AdminSetUserPasswordCommand).resolves({});
+    await route.RESET_PASSWORD(jsonRequest("/api/users/password", { ...SESSION, username: "sub-sam" }));
+    expect(cognito.commandCalls(AdminDisableUserCommand)).toHaveLength(0);
+    expect(cognito.commandCalls(AdminUserGlobalSignOutCommand)).toHaveLength(0);
+  });
+
+  it("draws a fresh password each time", async () => {
+    cognito.on(AdminSetUserPasswordCommand).resolves({});
+    const passwords = new Set<string>();
+    for (let i = 0; i < 5; i += 1) {
+      const res = await route.RESET_PASSWORD(jsonRequest("/api/users/password", { ...SESSION, username: "sub-sam" }));
+      passwords.add(((await res.json()) as { temporaryPassword: string }).temporaryPassword);
+    }
+    expect(passwords.size).toBe(5);
+  });
+
+  it("refuses a request that names no account", async () => {
+    const res = await route.RESET_PASSWORD(jsonRequest("/api/users/password", { ...SESSION }));
+    expect(res.status).toBe(400);
   });
 });

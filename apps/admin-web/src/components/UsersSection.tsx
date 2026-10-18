@@ -6,12 +6,11 @@
  *   deployment. Only admins can sign in to admin-web's cloud sections.
  * - **Data** (`starkeep-users`): has a library that syncs through the cloud.
  *
- * An admin may hold either or both. Until data separates by user, the cloud
- * lets only an admin with data reach data, so a member's devices cannot sync
- * yet; the note under the list says so.
+ * An admin may hold either or both.
  *
  * Creating an account sends Cognito's invitation email with a temporary
- * password. Disabling one signs it out everywhere and revokes its devices.
+ * password. "Reset password" gives an account a new temporary password, shown
+ * once for the admin to send. Disabling an account signs it out everywhere.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -37,7 +36,10 @@ type ListState =
   | { kind: "error"; message: string };
 
 /** POST one users route with the operator's session. Returns the refreshed list. */
-async function call(path: string, extra: Record<string, unknown> = {}): Promise<{ users: UserView[]; devicesRevoked?: string[] }> {
+async function call(
+  path: string,
+  extra: Record<string, unknown> = {},
+): Promise<{ users: UserView[]; devicesRevoked?: string[]; temporaryPassword?: string }> {
   const session = await operatorSession();
   const res = await fetch(path, {
     method: "POST",
@@ -50,9 +52,18 @@ async function call(path: string, extra: Record<string, unknown> = {}): Promise<
       ...extra,
     }),
   });
-  const body = (await res.json()) as { users?: UserView[]; devicesRevoked?: string[]; error?: string };
+  const body = (await res.json()) as {
+    users?: UserView[];
+    devicesRevoked?: string[];
+    temporaryPassword?: string;
+    error?: string;
+  };
   if (!res.ok || !body.users) throw new Error(body.error ?? `Request failed (${res.status})`);
-  return { users: body.users, ...(body.devicesRevoked ? { devicesRevoked: body.devicesRevoked } : {}) };
+  return {
+    users: body.users,
+    ...(body.devicesRevoked ? { devicesRevoked: body.devicesRevoked } : {}),
+    ...(body.temporaryPassword ? { temporaryPassword: body.temporaryPassword } : {}),
+  };
 }
 
 export function UsersSection() {
@@ -75,13 +86,17 @@ export function UsersSection() {
     void load();
   }, [load]);
 
-  async function act(path: string, extra: Record<string, unknown>, done: (revoked?: string[]) => string) {
+  async function act(
+    path: string,
+    extra: Record<string, unknown>,
+    done: (result: { devicesRevoked?: string[]; temporaryPassword?: string }) => string,
+  ) {
     setBusy(true);
     setMessage(null);
     try {
       const result = await call(path, extra);
       setList({ kind: "ready", users: result.users });
-      setMessage({ kind: "ok", text: done(result.devicesRevoked) });
+      setMessage({ kind: "ok", text: done(result) });
     } catch (err) {
       setMessage({ kind: "error", text: err instanceof Error ? err.message : String(err) });
     } finally {
@@ -99,10 +114,16 @@ export function UsersSection() {
     act("/api/users/group", { username: user.username, group, member }, () => `Updated ${user.email ?? user.username}.`);
 
   const setEnabled = (user: UserView, enabled: boolean) =>
-    act("/api/users/enabled", { username: user.username, enabled }, (revoked) =>
+    act("/api/users/enabled", { username: user.username, enabled }, ({ devicesRevoked }) =>
       enabled
-        ? `Enabled ${user.email ?? user.username}. Their devices pair again.`
-        : `Disabled ${user.email ?? user.username}, signed them out and revoked ${revoked?.length ?? 0} device(s).`,
+        ? `Enabled ${user.email ?? user.username}. They sign in again on each device.`
+        : `Disabled ${user.email ?? user.username}, signed them out and revoked ${devicesRevoked?.length ?? 0} device(s).`,
+    );
+
+  const resetPassword = (user: UserView) =>
+    act("/api/users/password", { username: user.username }, ({ temporaryPassword }) =>
+      `New temporary password for ${user.email ?? user.username}: ${temporaryPassword ?? "(none)"}. ` +
+      "Send it to them; they choose their own at their next sign-in. It is not shown again.",
     );
 
   return (
@@ -187,6 +208,9 @@ export function UsersSection() {
                   />
                   Has data
                 </label>
+                <Button size="sm" variant="outline" disabled={busy} onClick={() => void resetPassword(user)}>
+                  Reset password
+                </Button>
                 <Button
                   size="sm"
                   variant="outline"
@@ -201,8 +225,8 @@ export function UsersSection() {
         )}
 
         <p className="text-muted-foreground text-xs">
-          Until each user&apos;s data is kept apart, only an admin with data can sync. A user without
-          admin rights can be created now, and their devices will sync once separation is in place.
+          Each user signs in on their own devices to sync. A user who forgets their password gets a
+          new temporary one here.
         </p>
       </CollapsibleContent>
     </Collapsible>

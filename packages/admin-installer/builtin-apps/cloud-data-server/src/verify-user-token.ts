@@ -48,6 +48,19 @@ export function userPoolConfig(): PoolConfig | null {
   return { region, userPoolId, userPoolClientId };
 }
 
+/**
+ * The pool's device client: the one client whose tokens a desktop or phone may
+ * present with no app signature. Null when the deployment predates it, which
+ * leaves device sign-in off.
+ */
+export function devicePoolConfig(): PoolConfig | null {
+  const region = process.env.AWS_REGION;
+  const userPoolId = process.env.STARKEEP_USER_POOL_ID;
+  const userPoolClientId = process.env.STARKEEP_DEVICE_USER_POOL_CLIENT_ID;
+  if (!region || !userPoolId || !userPoolClientId) return null;
+  return { region, userPoolId, userPoolClientId };
+}
+
 export function issuerFor(cfg: PoolConfig): string {
   return `https://cognito-idp.${cfg.region}.amazonaws.com/${cfg.userPoolId}`;
 }

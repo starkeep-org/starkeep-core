@@ -83,11 +83,25 @@ import {
 import { sha256HexToBase64, loadVariantCandidatesForPage } from "@starkeep/storage-adapter";
 import type { RecordAvailability } from "@starkeep/protocol-primitives";
 import {
+  createCloudTokenSource,
+  createCognitoClient,
   deviceFingerprint,
   encodePairingRequest,
+  fetchDeviceAuthConfig,
+  idTokenClaims,
+  isRejection,
+  LOCAL_USER_SEGMENT,
   MAX_DEVICE_LABEL_LENGTH,
+  revokePendingSignOut,
+  signOut,
+  USER_TOKEN_HEADER,
+  type AuthTokens,
+  type CloudTokenSource,
+  type CognitoClient,
+  type DeviceAuthConfig,
   type DeviceSigner,
 } from "@starkeep/protocol-primitives";
+import { openDeviceSessionFile } from "./device-session-file.js";
 import {
   createResidencyManager,
   reapDeleted,
@@ -159,7 +173,7 @@ import type { MetadataRow, StarkeepId } from "@starkeep/protocol-primitives";
 import { starkeepDir } from "@starkeep/app-client";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { stat as fsStat, readFile, writeFile, mkdir, unlink, rm } from "node:fs/promises";
+import { stat as fsStat, readFile, writeFile, mkdir, unlink, rm, chmod } from "node:fs/promises";
 import { Readable } from "node:stream";
 import { parseRangeHeader } from "./range.js";
 import { pipeline } from "node:stream/promises";
@@ -167,14 +181,6 @@ import { openSync, mkdirSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createFileWatchManager } from "./watcher.js";
 import { bindLibrary, libraryUserSegment, LibraryBoundElsewhereError } from "./library-binding.js";
-import {
-  type CognitoConfig,
-  type STSCredentials,
-  initiateAuth,
-  respondNewPasswordChallenge,
-  getIdentityPoolCredentials,
-  startCredentialRefreshTimer,
-} from "./cognito-auth.js";
 
 // Signing key for self-hosted file tokens — regenerated each startup so
 // all outstanding tokens are invalidated on restart (revocable by design).
@@ -383,6 +389,8 @@ interface StarkeepConfig {
   stage?: string;
   userPoolId?: string;
   userPoolClientId?: string;
+  /** The pool's device client, which this machine signs in with to sync. */
+  deviceUserPoolClientId?: string;
   identityPoolId?: string;
   s3Bucket?: string;
   s3Region?: string;
@@ -493,10 +501,6 @@ function regionFromUserPoolId(userPoolId: string): string {
   return parts.length > 1 ? parts[0] : "";
 }
 
-interface PersistedAuth {
-  refreshToken: string;
-  idToken?: string;
-}
 
 function restartProcess(): void {
   console.log("[server] Restarting to apply config changes…");
@@ -598,50 +602,6 @@ async function loadStarkeepConfig(): Promise<StarkeepConfig> {
 }
 
 /**
- * Assemble the Cognito config from a StarkeepConfig, or null if the three
- * required pool fields aren't all present. Region is derived from the
- * userPoolId (AWS encodes it in the prefix), never stored separately.
- *
- * Callers that authenticate must derive this from a *freshly loaded* config
- * rather than a boot-time snapshot: the admin panel writes the pool IDs to
- * ~/.starkeep/config.json directly (it does not restart this daemon), so a
- * value captured at boot goes stale the moment cloud setup fills them in.
- */
-function cognitoConfigFrom(config: StarkeepConfig): CognitoConfig | null {
-  if (!config.userPoolId || !config.userPoolClientId || !config.identityPoolId) {
-    return null;
-  }
-  return {
-    region: regionFromUserPoolId(config.userPoolId),
-    userPoolId: config.userPoolId,
-    userPoolClientId: config.userPoolClientId,
-    identityPoolId: config.identityPoolId,
-  };
-}
-
-async function loadPersistedAuth(): Promise<PersistedAuth | null> {
-  try {
-    return JSON.parse(await readFile(join(STARKEEP_DIR, "auth.json"), "utf8")) as PersistedAuth;
-  } catch {
-    return null;
-  }
-}
-
-async function savePersistedAuth(auth: PersistedAuth): Promise<void> {
-  await mkdir(STARKEEP_DIR, { recursive: true });
-  await writeFile(join(STARKEEP_DIR, "auth.json"), JSON.stringify(auth, null, 2), "utf8");
-}
-
-async function loadIdToken(): Promise<string | null> {
-  try {
-    const auth = JSON.parse(await readFile(join(STARKEEP_DIR, "auth.json"), "utf8")) as PersistedAuth;
-    return auth.idToken ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Missing files a batch file-url read fetches at once. The Drive channel moves
  * each file whole, so a batch of originals at full width would compete with
  * the sync round for the same link.
@@ -662,11 +622,6 @@ async function forEachBounded<T>(
     }
   });
   await Promise.all(workers);
-}
-
-async function saveCloudCredentials(creds: STSCredentials): Promise<void> {
-  await mkdir(STARKEEP_DIR, { recursive: true });
-  await writeFile(join(STARKEEP_DIR, "cloud-credentials.json"), JSON.stringify(creds, null, 2), "utf8");
 }
 
 /**
@@ -789,54 +744,85 @@ async function main() {
       };
   let deviceApproval: DeviceApproval = { state: deviceSigner ? "unknown" : "no-key" };
 
-  // Persistent auth: if a stored refresh token exists, start credential rotation
-  const persistedAuth = await loadPersistedAuth();
-  let currentRefreshToken: string | null = persistedAuth?.refreshToken ?? null;
-  let currentIdToken: string | null = await loadIdToken();
-  let stopCredentialRefresh: (() => void) | null = null;
+  // This machine's sign-in through the pool's device client. While signed in,
+  // every call to the cloud carries the ID token, and the paired key above is
+  // used only by a machine that has not signed in yet. See
+  // `device-session-file.ts` for what is stored, and `@starkeep/protocol-primitives`'
+  // device-session module for the sign-in, refresh and sign-out rules.
+  const deviceSession = openDeviceSessionFile(STARKEEP_DIR);
 
   /**
-   * Local JWT exp check (no network). Cognito id tokens are standard JWTs
-   * with an `exp` claim in seconds. We treat a token within 5s of expiry as
-   * unusable so the supervisor doesn't start an exchange that will 401
-   * mid-flight.
+   * Where this machine stands with its sign-in.
+   *
+   * - `signed-out`: no session.
+   * - `signed-in`: a session; `bound` once the library is bound to its user,
+   *   which is when sync may start.
+   * - `bound-elsewhere`: the session's user is not the user this library
+   *   belongs to, so sync stays off.
    */
-  function idTokenIsLive(): boolean {
-    if (!currentIdToken) return false;
-    const parts = currentIdToken.split(".");
-    if (parts.length !== 3) return false;
-    try {
-      const payload = JSON.parse(
-        Buffer.from(parts[1], "base64url").toString("utf8"),
-      ) as { exp?: number };
-      return typeof payload.exp === "number" && payload.exp * 1000 > Date.now() + 5_000;
-    } catch {
-      return false;
+  type SessionState =
+    | { readonly state: "signed-out" }
+    | { readonly state: "signed-in"; readonly email: string | null; readonly userId: string | null; readonly bound: boolean }
+    | { readonly state: "bound-elsewhere"; readonly email: string | null; readonly message: string };
+  let sessionState: SessionState = { state: "signed-out" };
+
+  // The pool client and token source for the stored session's pool, rebuilt
+  // when a sign-in names a different pool. Null before any sign-in.
+  let cognitoClient: CognitoClient | null = null;
+  let tokenSource: CloudTokenSource | null = null;
+
+  /** A Cognito client for the device client of `auth`'s pool. */
+  function cognitoClientFor(auth: DeviceAuthConfig): CognitoClient {
+    return createCognitoClient({
+      region: auth.region,
+      userPoolClientId: auth.deviceClientId,
+      // Test seam: the tier-2 suite's fake cloud plays the pool.
+      ...(process.env.STARKEEP_COGNITO_ENDPOINT ? { endpoint: process.env.STARKEEP_COGNITO_ENDPOINT } : {}),
+    });
+  }
+
+  function useSessionPool(auth: DeviceAuthConfig): void {
+    cognitoClient = cognitoClientFor(auth);
+    tokenSource = createCloudTokenSource({
+      client: cognitoClient,
+      store: deviceSession.store,
+      // The pool rejected the refresh token: an admin signed this user out
+      // everywhere, disabled the account, or the token expired. The session is
+      // already cleared; stop syncing and say "Sign in to sync".
+      onRejected: (reason) => {
+        console.warn(`[auth] the pool ended this machine's sign-in: ${reason}`);
+        sessionState = { state: "signed-out" };
+        pauseSyncWithoutCredential();
+      },
+    });
+  }
+
+  {
+    const auth = deviceSession.auth();
+    if (auth) useSessionPool(auth);
+    const stored = await deviceSession.store.read();
+    if (stored && auth) {
+      sessionState = { state: "signed-in", email: stored.email, userId: deviceSession.userId(), bound: false };
+    }
+    // A sign-out that could not reach the pool finishes now, in the background.
+    if (cognitoClient) {
+      void revokePendingSignOut(cognitoClient, deviceSession.store).catch(() => undefined);
     }
   }
 
-  // Boot-time snapshot — used only to decide whether to start the credential
-  // refresh timer below. Request handlers that authenticate must NOT trust this
-  // (it goes stale once cloud setup writes the pool IDs); they reload from disk.
-  const cognitoConfig: CognitoConfig | null = cognitoConfigFrom(starkeepConfig);
-
-  if (cognitoConfig && currentRefreshToken) {
-    console.log("Stored auth found — starting credential refresh timer");
-    stopCredentialRefresh = startCredentialRefreshTimer(
-      cognitoConfig,
-      () => currentRefreshToken,
-      async (creds) => {
-        await saveCloudCredentials(creds);
-        console.log("Cloud credentials refreshed");
-      },
-      (err) => console.error("Credential refresh failed:", err.message),
-      async (idToken) => {
-        currentIdToken = idToken;
-        await savePersistedAuth({ refreshToken: currentRefreshToken!, idToken });
-        startOrKickSupervisor();
-      },
-    );
+  /** The token source while this machine is signed in, for the supervisor. */
+  function activeTokenSource(): CloudTokenSource | null {
+    return sessionState.state === "signed-in" ? tokenSource : null;
   }
+
+  // The old admin sign-in kept the admin's refresh token and live AWS
+  // credentials here. Sync never read them; a machine upgraded from that
+  // design keeps no stale admin credential.
+  for (const stale of ["auth.json", "cloud-credentials.json"]) {
+    await unlink(join(STARKEEP_DIR, stale)).catch(() => undefined);
+  }
+  // The directory holds this machine's sign-in and its library: the owner's alone.
+  await chmod(STARKEEP_DIR, 0o700).catch(() => undefined);
 
   // App identities are stored in shared_app_registry; populated by the
   // installer (POST /admin/apps/install). No startup-time auto-discovery —
@@ -1036,9 +1022,11 @@ async function main() {
       afterDriveDrain: acquireWanted,
       localDb: databaseAdapter.getRawDatabase(),
       cloudUrl: CLOUD_URL,
-      // Every call is signed with this machine's device key. An accessor
-      // rather than the value, because the key can be made while the server
-      // runs — see makeSignerFor in sync-supervisor.ts.
+      // While signed in, every call carries the device token; otherwise a
+      // paired machine signs with its device key. Accessors rather than values,
+      // because both change while the server runs — see makeSignerFor in
+      // sync-supervisor.ts.
+      getTokenSource: activeTokenSource,
       getDeviceSigner: () => deviceSigner,
       listInstalledApps: () =>
         listAppRegistry(localDb).map((row) => ({
@@ -1183,17 +1171,83 @@ async function main() {
     }
   }
 
+  /** Whether this machine holds a credential the cloud accepts for its own user. */
+  function syncAllowed(): boolean {
+    if (sessionState.state === "signed-in") return sessionState.bound;
+    return deviceApproval.state === "approved";
+  }
+
+  // Set when sync stopped because the machine lost its credential (signed out,
+  // or the pool ended the sign-in), so the next sign-in resumes it.
+  let syncPausedForCredential = false;
+
   function startOrKickSupervisor(): void {
     if (!supervisor) return;
-    if (deviceApproval.state !== "approved") return;
+    if (!syncAllowed()) return;
     if (!supervisorStarted) {
       supervisor.start();
       supervisorStarted = true;
       return;
     }
+    if (syncPausedForCredential) {
+      syncPausedForCredential = false;
+      // Engines that never started — the machine had no credential when the
+      // supervisor did — start here; `resume` restarts the ones that did.
+      supervisor.start();
+      void supervisor.resume();
+      return;
+    }
     supervisor.kick();
   }
+
+  /** Stop sync when no credential is left. A paired key keeps it going. */
+  function pauseSyncWithoutCredential(): void {
+    if (!supervisor || !supervisorStarted || syncAllowed()) return;
+    supervisor.pause();
+    syncPausedForCredential = true;
+  }
+
+  let sessionPoll: NodeJS.Timeout | null = null;
+
+  /**
+   * Bind this library to the signed-in user, and start sync once it is.
+   *
+   * The user comes from the ID token's `sub`, so it needs one live token. A
+   * machine that starts offline with a library already bound to the stored
+   * user starts at once — the engines retry until the network returns — and
+   * one that cannot tell yet tries again every thirty seconds.
+   */
+  async function checkSession(): Promise<SessionState> {
+    if (sessionState.state !== "signed-in" || !tokenSource) return sessionState;
+    const { email } = sessionState;
+    const token = await tokenSource.current().catch(() => null);
+    if (sessionState.state !== "signed-in") return sessionState;
+    let userId: string | null = token ? idTokenClaims(token).sub : null;
+    if (!token && libraryUser !== LOCAL_USER_SEGMENT && libraryUser === deviceSession.userId()) {
+      userId = libraryUser;
+    }
+    if (!userId) {
+      if (!sessionPoll) {
+        sessionPoll = setInterval(() => void checkSession(), 30_000);
+        sessionPoll.unref();
+      }
+      return sessionState;
+    }
+    if (sessionPoll) {
+      clearInterval(sessionPoll);
+      sessionPoll = null;
+    }
+    const bound = await bindToApprovedUser({ state: "approved", userId, label: null, kind: "desktop" });
+    sessionState =
+      bound.state === "approved"
+        ? { state: "signed-in", email, userId, bound: true }
+        : { state: "bound-elsewhere", email, message: bound.state === "bound-elsewhere" ? bound.message : "" };
+    startOrKickSupervisor();
+    return sessionState;
+  }
+
   await checkDeviceApproval();
+  await checkSession();
 
   // Re-read the deployment's settings once a minute, so a change made in
   // admin-web reaches this node's stamps within the cloud's own cache window.
@@ -1401,6 +1455,14 @@ async function main() {
       }
 
       if (path === "/config" && req.method === "PATCH") {
+        // The config names the cloud this machine joins, and so where its
+        // sign-in goes. Admin-web sets it through its own server, which sends
+        // no `Origin`; a web page, which always does, may not.
+        if (req.headers.origin !== undefined) {
+          res.writeHead(403);
+          json(res, { error: "Change this machine's settings from admin-web" });
+          return;
+        }
         const patch = JSON.parse(await readBody(req)) as Partial<StarkeepConfig>;
         // nodeId is generated once on first boot and must never change.
         delete (patch as { nodeId?: unknown }).nodeId;
@@ -1412,138 +1474,156 @@ async function main() {
         return;
       }
 
+      // This machine's sign-in. Admin-web's "This machine" section drives all
+      // three routes through its own server, which sends no `Origin` header.
+      //
+      // The routes are loopback-authorized and this server answers every
+      // origin, so any web page open in the person's browser can reach them.
+      // A hostile page could otherwise sign a machine whose library is not
+      // bound yet in to the attacker's account, and the machine would upload
+      // its whole library there. Browsers send `Origin` on every POST and on
+      // every cross-origin read, so a request carrying one is refused.
+      if (path.startsWith("/auth/") && req.headers.origin !== undefined) {
+        res.writeHead(403);
+        json(res, { error: "Sign in from admin-web" });
+        return;
+      }
+
+      // GET /auth/status — whether this machine is signed in, and as whom.
       if (path === "/auth/status" && req.method === "GET") {
-        // Reload from disk so this reflects setup that completed after boot.
-        const freshCognito = cognitoConfigFrom(await loadStarkeepConfig());
         json(res, {
-          configLoaded: freshCognito !== null,
-          authenticated: currentRefreshToken !== null,
+          cloudUrl: CLOUD_URL ?? null,
+          ...(sessionState.state === "signed-in"
+            ? { state: sessionState.bound ? "signed-in" : "connecting", email: sessionState.email, userId: sessionState.userId }
+            : sessionState.state === "bound-elsewhere"
+              ? { state: "bound-elsewhere", email: sessionState.email, message: sessionState.message, userId: null }
+              : { state: "signed-out", email: null, userId: null }),
+          libraryUserId: libraryUser === LOCAL_USER_SEGMENT ? null : libraryUser,
         });
         return;
       }
 
+      // POST /auth/login — sign this machine in through the pool's device
+      // client. Body: { email, password, newPassword? }. An account an admin
+      // created answers its first sign-in with `NEW_PASSWORD_REQUIRED`; the
+      // form then sends the same request again with `newPassword`.
       if (path === "/auth/login" && req.method === "POST") {
-        // Reload from disk: the admin panel writes the Cognito pool IDs to
-        // config.json without restarting this daemon, so the boot-time snapshot
-        // may be stale (null) even though setup is complete.
-        const cognitoConfig = cognitoConfigFrom(await loadStarkeepConfig());
-        if (!cognitoConfig) {
+        if (!CLOUD_URL) {
           res.writeHead(503);
-          json(res, { error: "No ~/.starkeep/config.json found — cannot authenticate" });
+          json(res, { error: "Join a cloud first" });
           return;
         }
-        const body = JSON.parse(await readBody(req)) as {
-          email: string;
-          password: string;
-          newPassword?: string;
-        };
-        if (!body.email || !body.password) {
+        let body: { email?: unknown; password?: unknown; newPassword?: unknown };
+        try {
+          body = JSON.parse(await readBody(req)) as typeof body;
+        } catch {
           res.writeHead(400);
-          json(res, { error: "email and password are required" });
+          json(res, { error: "Body is not valid JSON" });
+          return;
+        }
+        const { email, password, newPassword } = body;
+        if (typeof email !== "string" || !email || typeof password !== "string" || !password) {
+          res.writeHead(400);
+          json(res, { error: "Email and password are required" });
+          return;
+        }
+        if (newPassword !== undefined && typeof newPassword !== "string") {
+          res.writeHead(400);
+          json(res, { error: "newPassword must be a string" });
           return;
         }
 
-        let authResult = await initiateAuth(cognitoConfig, body.email, body.password);
+        // The pool and client, from this machine's config when it set up the
+        // cloud, or from the cloud itself — a member's machine knows only the
+        // address it joined.
+        const fresh = await loadStarkeepConfig();
+        let auth: DeviceAuthConfig;
+        try {
+          auth =
+            fresh.userPoolId && fresh.deviceUserPoolClientId
+              ? {
+                  region: regionFromUserPoolId(fresh.userPoolId),
+                  userPoolId: fresh.userPoolId,
+                  deviceClientId: fresh.deviceUserPoolClientId,
+                }
+              : await fetchDeviceAuthConfig(CLOUD_URL);
+        } catch (err) {
+          res.writeHead(502);
+          json(res, { error: err instanceof Error ? err.message : String(err) });
+          return;
+        }
 
-        if (authResult.challengeName === "NEW_PASSWORD_REQUIRED") {
-          if (!body.newPassword) {
-            json(res, { challenge: "NEW_PASSWORD_REQUIRED" });
-            return;
+        const client = cognitoClientFor(auth);
+        let tokens: AuthTokens;
+        try {
+          const result = await client.signIn(email, password);
+          if (result.kind === "new-password-required") {
+            if (!newPassword) {
+              json(res, { challenge: "NEW_PASSWORD_REQUIRED" });
+              return;
+            }
+            tokens = await client.setNewPassword(email, result.session, newPassword);
+          } else {
+            tokens = result.tokens;
           }
-          const tokens = await respondNewPasswordChallenge(
-            cognitoConfig,
-            authResult.session!,
-            body.email,
-            body.newPassword,
-          );
-          authResult = { tokens };
-        }
-
-        if (!authResult.tokens) {
-          res.writeHead(400);
-          json(res, { error: `Unhandled auth challenge: ${authResult.challengeName}` });
+        } catch (err) {
+          res.writeHead(isRejection(err) ? 401 : 502);
+          json(res, { error: err instanceof Error ? err.message : String(err) });
           return;
         }
 
-        const creds = await getIdentityPoolCredentials(cognitoConfig, authResult.tokens.idToken);
-        currentRefreshToken = authResult.tokens.refreshToken;
-        currentIdToken = authResult.tokens.idToken;
-        await savePersistedAuth({ refreshToken: currentRefreshToken, idToken: currentIdToken });
-        await saveCloudCredentials(creds);
+        const userId = idTokenClaims(tokens.idToken).sub;
+        if (!userId) {
+          res.writeHead(502);
+          json(res, { error: "The pool's token names no user" });
+          return;
+        }
+        // A library already bound to another person stays theirs. Refused
+        // before anything is stored, and the new sign-in is ended at the pool.
+        if (libraryUser !== LOCAL_USER_SEGMENT && libraryUser !== userId) {
+          await client.revoke(tokens.refreshToken).catch(() => undefined);
+          res.writeHead(409);
+          json(res, {
+            error: "This machine's library belongs to another account. Sign in as that account to sync it.",
+          });
+          return;
+        }
 
-        // (Re)start credential refresh timer
-        stopCredentialRefresh?.();
-        stopCredentialRefresh = startCredentialRefreshTimer(
-          cognitoConfig,
-          () => currentRefreshToken,
-          async (newCreds) => {
-            await saveCloudCredentials(newCreds);
-            console.log("Cloud credentials refreshed");
-          },
-          (err) => console.error("Credential refresh failed:", err.message),
-          async (idToken) => {
-            currentIdToken = idToken;
-            await savePersistedAuth({ refreshToken: currentRefreshToken!, idToken });
-            startOrKickSupervisor();
-          },
-        );
-
-        startOrKickSupervisor();
-        json(res, { ok: true });
+        // A previous session on this machine is replaced, and ended at the pool.
+        const previous = await deviceSession.store.read();
+        if (previous && cognitoClient) {
+          await deviceSession.store.writePendingRevocation(previous.refreshToken);
+          void revokePendingSignOut(cognitoClient, deviceSession.store).catch(() => undefined);
+        }
+        const signedInEmail = idTokenClaims(tokens.idToken).email ?? email;
+        deviceSession.writeSignIn(auth, userId, { refreshToken: tokens.refreshToken, email: signedInEmail });
+        useSessionPool(auth);
+        sessionState = { state: "signed-in", email: signedInEmail, userId, bound: false };
+        console.log(`[auth] this machine signed in as ${signedInEmail}`);
+        const state = await checkSession();
+        if (state.state === "bound-elsewhere") {
+          res.writeHead(409);
+          json(res, { error: state.message });
+          return;
+        }
+        json(res, { ok: true, email: signedInEmail, userId });
         return;
       }
 
-      if (path === "/auth/tokens" && req.method === "POST") {
-        // Reload from disk — see the note in /auth/login. The boot-time
-        // cognitoConfig const is null until this daemon is restarted, but cloud
-        // setup writes the pool IDs directly to config.json.
-        const cognitoConfig = cognitoConfigFrom(await loadStarkeepConfig());
-        if (!cognitoConfig) {
-          res.writeHead(503);
-          json(res, { error: "No cloud config loaded — cannot authenticate" });
-          return;
+      // POST /auth/sign-out — sign this machine out: locally at once, and at
+      // the pool as soon as it answers. Sync stops unless a paired key remains.
+      if (path === "/auth/sign-out" && req.method === "POST") {
+        const stored = await deviceSession.store.read();
+        let revocation: "none" | "revoked" | "pending" = "none";
+        if (stored && cognitoClient) {
+          revocation = await signOut(cognitoClient, deviceSession.store, stored);
+        } else {
+          await deviceSession.store.clear();
         }
-        const body = JSON.parse(await readBody(req)) as { idToken: string; refreshToken: string };
-        if (!body.idToken || !body.refreshToken) {
-          res.writeHead(400);
-          json(res, { error: "idToken and refreshToken are required" });
-          return;
-        }
-        const creds = await getIdentityPoolCredentials(cognitoConfig, body.idToken);
-        currentRefreshToken = body.refreshToken;
-        currentIdToken = body.idToken;
-        await savePersistedAuth({ refreshToken: currentRefreshToken, idToken: currentIdToken });
-        await saveCloudCredentials(creds);
-        stopCredentialRefresh?.();
-        stopCredentialRefresh = startCredentialRefreshTimer(
-          cognitoConfig,
-          () => currentRefreshToken,
-          async (newCreds) => {
-            await saveCloudCredentials(newCreds);
-            console.log("Cloud credentials refreshed");
-          },
-          (err) => console.error("Credential refresh failed:", err.message),
-          async (idToken) => {
-            currentIdToken = idToken;
-            await savePersistedAuth({ refreshToken: currentRefreshToken!, idToken });
-            startOrKickSupervisor();
-          },
-        );
-        startOrKickSupervisor();
-        json(res, { ok: true });
-        return;
-      }
-
-      if (path === "/auth/logout" && req.method === "POST") {
-        stopCredentialRefresh?.();
-        stopCredentialRefresh = null;
-        currentRefreshToken = null;
-        currentIdToken = null;
-        for (const file of ["auth.json", "cloud-credentials.json", "cloud-config.json"]) {
-          await unlink(join(STARKEEP_DIR, file)).catch(() => {});
-        }
-        console.log("Auth cleared");
-        json(res, { ok: true });
+        sessionState = { state: "signed-out" };
+        pauseSyncWithoutCredential();
+        console.log(`[auth] this machine signed out (revocation: ${revocation})`);
+        json(res, { ok: true, revocation });
         return;
       }
 
@@ -1624,8 +1704,8 @@ async function main() {
       }
 
       // GET /cloud/data/types and /cloud/data/records — read-only proxy to the
-      // cloud-data-server, signed with this machine's device key as the
-      // calling app. The app (e.g. starkeep-drive) authenticates to *us* with
+      // cloud-data-server, with this machine's sign-in (or, until it signs in,
+      // its paired device key) as the calling app. The app (e.g. starkeep-drive) authenticates to *us* with
       // its local HMAC as usual; we then sign as this machine for the cloud,
       // exactly as the sync supervisor does (sync-supervisor.ts →
       // makeSignerFor). The cloud lets a desktop device read these two routes
@@ -1645,19 +1725,33 @@ async function main() {
         }
         // Refuse here rather than forward a request that can only come back
         // 401, so the Drive UI says why instead of quoting a status.
-        if (!deviceSigner || deviceApproval.state !== "approved") {
+        const tokens = syncAllowed() ? activeTokenSource() : null;
+        if (!syncAllowed() || (!tokens && !deviceSigner)) {
           res.writeHead(503);
-          json(res, { error: "This machine is not connected to the cloud yet — connect it from admin-web" });
+          json(res, { error: "This machine is not signed in to the cloud yet — sign in from admin-web" });
           return;
         }
         const subPath = path.slice("/cloud".length); // "/data/types" | "/data/records"
-        // Signed over the cloud sub-path (everything after /apps/{appId}), since
-        // the cloud verifier strips that prefix before checking the signature.
-        // The query string is excluded from the signed message (canonicalSignedPath).
-        const signedHeaders = deviceSigner.signRequest(appId!, "GET", subPath, undefined);
+        let cloudHeaders: Record<string, string>;
+        if (tokens) {
+          // Signed in: the device token alone, as the sync channels send it.
+          const token = await tokens.current();
+          if (!token) {
+            res.writeHead(503);
+            json(res, { error: "This machine cannot reach the pool to refresh its sign-in" });
+            return;
+          }
+          cloudHeaders = { [USER_TOKEN_HEADER]: token };
+        } else {
+          // Paired: signed over the cloud sub-path (everything after
+          // /apps/{appId}), since the cloud verifier strips that prefix before
+          // checking the signature. The query string is excluded from the
+          // signed message (canonicalSignedPath).
+          cloudHeaders = deviceSigner!.signRequest(appId!, "GET", subPath, undefined);
+        }
         const cloudUrl = `${CLOUD_URL.replace(/\/+$/, "")}/apps/${encodeURIComponent(appId!)}${subPath}${url.search}`;
         try {
-          const cloudRes = await fetch(cloudUrl, { headers: signedHeaders });
+          const cloudRes = await fetch(cloudUrl, { headers: cloudHeaders });
           const text = await cloudRes.text();
           res.writeHead(cloudRes.status, {
             "Content-Type": cloudRes.headers.get("content-type") ?? "application/json",

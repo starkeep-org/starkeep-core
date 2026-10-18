@@ -1,20 +1,12 @@
 /**
  * @vitest-environment jsdom
  *
- * "This machine": joining a cloud, the pairing code, and "Connect this machine".
+ * "This machine": joining a cloud, signing in to sync — including the first
+ * sign-in's new password — and signing out.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-
-vi.mock("@/lib/operator-session", () => ({
-  operatorSession: async () => ({
-    credentials: { accessKeyId: "AKIA", secretAccessKey: "s", sessionToken: "t", expiration: "x" },
-    stackPrefix: "sktest",
-    region: "us-east-2",
-    userSub: "sub-admin",
-  }),
-}));
 
 const { ThisMachineSection } = await import("../src/components/ThisMachineSection");
 
@@ -26,30 +18,19 @@ interface Call {
 
 let calls: Call[];
 let machine: Record<string, unknown>;
+/** What the sign-in route answers next. */
+let signInAnswer: () => Response;
 
-const NO_KEY = {
-  deviceId: null,
-  publicKeySpki: null,
-  fingerprint: null,
-  pairingCode: null,
-  label: null,
-  approval: { state: "no-key" },
-  cloudUrl: "https://d1.cloudfront.net",
-};
-
-const KEYED = {
-  ...NO_KEY,
-  deviceId: "dev_laptop",
-  publicKeySpki: "M".repeat(59) + "=",
-  fingerprint: "ab12 cd34",
-  pairingCode: "CODE123",
-  label: "Laptop",
-  approval: { state: "pending" },
-};
+const SIGNED_OUT = { cloudUrl: "https://d1.cloudfront.net", state: "signed-out", email: null };
+const SIGNED_IN = { cloudUrl: "https://d1.cloudfront.net", state: "signed-in", email: "sam@example.com" };
 
 beforeEach(() => {
   calls = [];
-  machine = NO_KEY;
+  machine = SIGNED_OUT;
+  signInAnswer = () => {
+    machine = SIGNED_IN;
+    return Response.json({ ok: true, email: "sam@example.com" });
+  };
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: RequestInit) => {
@@ -59,15 +40,13 @@ beforeEach(() => {
         body: init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : null,
       };
       calls.push(call);
-      if (url === "/api/this-machine/key") {
-        machine = { ...KEYED, label: (call.body?.label as string) ?? null };
-        return Response.json(machine);
+      if (url === "/api/this-machine/sign-in") return signInAnswer();
+      if (url === "/api/this-machine/sign-out") {
+        machine = SIGNED_OUT;
+        return Response.json({ ok: true, revocation: "revoked" });
       }
-      if (url === "/api/devices") {
-        machine = { ...machine, approval: { state: "approved", userId: "sub-admin", label: machine.label } };
-        return Response.json({ paired: {} });
-      }
-      if (url.startsWith("/api/this-machine")) return Response.json(machine);
+      if (url === "/api/this-machine/cloud") return Response.json({ ok: true });
+      if (url === "/api/this-machine") return Response.json(machine);
       return Response.json({ error: `unexpected ${url}` }, { status: 404 });
     }),
   );
@@ -78,41 +57,97 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("a machine with no key", () => {
-  it("shows a pairing code and its fingerprint, and keeps asking the cloud", async () => {
+describe("a signed-out machine", () => {
+  it("signs in to sync with an email and password", async () => {
     const user = userEvent.setup();
-    render(<ThisMachineSection canConnect={false} />);
-    await user.type(await screen.findByLabelText("Machine name"), "Laptop");
-    expect(screen.queryByRole("button", { name: "Connect this machine" })).toBeNull();
-    await user.click(screen.getByRole("button", { name: "Show a pairing code" }));
+    render(<ThisMachineSection />);
+    await user.type(await screen.findByLabelText("Email"), "sam@example.com");
+    await user.type(screen.getByLabelText("Password"), "Sam-password-1");
+    await user.click(screen.getByRole("button", { name: "Sign in to sync" }));
 
-    expect(((await screen.findByLabelText("Pairing code")) as HTMLTextAreaElement).value).toBe("CODE123");
-    expect(screen.getByText("ab12 cd34")).toBeTruthy();
-    expect(screen.getByText(/Waiting for an admin/)).toBeTruthy();
-    expect(calls.find((c) => c.url === "/api/this-machine/key")!.body).toEqual({ label: "Laptop" });
+    expect(await screen.findByText(/This machine syncs with https:\/\/d1.cloudfront.net as sam@example.com/)).toBeTruthy();
+    expect(calls.find((c) => c.url === "/api/this-machine/sign-in")!.body).toEqual({
+      email: "sam@example.com",
+      password: "Sam-password-1",
+    });
   });
 
-  it("connects in one action for a signed-in admin, sending only the public half", async () => {
+  it("asks for a new password at an account's first sign-in, and sends it with the temporary one", async () => {
+    let first = true;
+    signInAnswer = () => {
+      if (first) {
+        first = false;
+        return Response.json({ challenge: "NEW_PASSWORD_REQUIRED" });
+      }
+      machine = SIGNED_IN;
+      return Response.json({ ok: true });
+    };
     const user = userEvent.setup();
-    render(<ThisMachineSection canConnect />);
-    await user.click(await screen.findByRole("button", { name: "Connect this machine" }));
-    expect(await screen.findByText(/This machine syncs with https:\/\/d1.cloudfront.net/)).toBeTruthy();
-    const registered = calls.find((c) => c.url === "/api/devices")!;
-    expect(registered.body).toMatchObject({
-      deviceId: "dev_laptop",
-      publicKeySpki: KEYED.publicKeySpki,
-      kind: "desktop",
-      userId: "sub-admin",
-      stackPrefix: "sktest",
-    });
+    render(<ThisMachineSection />);
+    await user.type(await screen.findByLabelText("Email"), "sam@example.com");
+    await user.type(screen.getByLabelText("Password"), "Temp-1");
+    await user.click(screen.getByRole("button", { name: "Sign in to sync" }));
+
+    await user.type(await screen.findByLabelText("New password"), "Chosen-password-2");
+    await user.type(screen.getByLabelText("Confirm new password"), "Chosen-password-2");
+    await user.click(screen.getByRole("button", { name: "Set password and sign in" }));
+
+    expect(await screen.findByText(/This machine syncs with/)).toBeTruthy();
+    const sent = calls.filter((c) => c.url === "/api/this-machine/sign-in").map((c) => c.body);
+    expect(sent).toEqual([
+      { email: "sam@example.com", password: "Temp-1" },
+      { email: "sam@example.com", password: "Temp-1", newPassword: "Chosen-password-2" },
+    ]);
+  });
+
+  it("does not send new passwords that differ", async () => {
+    signInAnswer = () => Response.json({ challenge: "NEW_PASSWORD_REQUIRED" });
+    const user = userEvent.setup();
+    render(<ThisMachineSection />);
+    await user.type(await screen.findByLabelText("Email"), "sam@example.com");
+    await user.type(screen.getByLabelText("Password"), "Temp-1");
+    await user.click(screen.getByRole("button", { name: "Sign in to sync" }));
+    await user.type(await screen.findByLabelText("New password"), "Chosen-password-2");
+    await user.type(screen.getByLabelText("Confirm new password"), "Chosen-password-3");
+    await user.click(screen.getByRole("button", { name: "Set password and sign in" }));
+
+    expect(await screen.findByText("The two new passwords do not match.")).toBeTruthy();
+    expect(calls.filter((c) => c.url === "/api/this-machine/sign-in")).toHaveLength(1);
+  });
+
+  it("says why a sign-in failed", async () => {
+    signInAnswer = () => Response.json({ error: "Incorrect username or password." }, { status: 401 });
+    const user = userEvent.setup();
+    render(<ThisMachineSection />);
+    await user.type(await screen.findByLabelText("Email"), "sam@example.com");
+    await user.type(screen.getByLabelText("Password"), "wrong");
+    await user.click(screen.getByRole("button", { name: "Sign in to sync" }));
+    expect(await screen.findByText("Incorrect username or password.")).toBeTruthy();
+  });
+});
+
+describe("a signed-in machine", () => {
+  it("signs out", async () => {
+    machine = SIGNED_IN;
+    const user = userEvent.setup();
+    render(<ThisMachineSection />);
+    await user.click(await screen.findByRole("button", { name: "Sign out" }));
+    expect(await screen.findByRole("button", { name: "Sign in to sync" })).toBeTruthy();
+    expect(calls.some((c) => c.url === "/api/this-machine/sign-out" && c.method === "POST")).toBe(true);
+  });
+
+  it("says when its library belongs to another account", async () => {
+    machine = { ...SIGNED_IN, state: "bound-elsewhere", message: "This library belongs to another account." };
+    render(<ThisMachineSection />);
+    expect(await screen.findByText("This library belongs to another account.")).toBeTruthy();
   });
 });
 
 describe("a machine with no cloud", () => {
   it("joins a cloud by its address", async () => {
-    machine = { ...NO_KEY, cloudUrl: null };
+    machine = { ...SIGNED_OUT, cloudUrl: null };
     const user = userEvent.setup();
-    render(<ThisMachineSection canConnect={false} />);
+    render(<ThisMachineSection />);
     await user.type(await screen.findByLabelText("Cloud address"), "https://d1.cloudfront.net");
     await user.click(screen.getByRole("button", { name: "Join" }));
     expect(await screen.findByText(/Restarting the local data server/)).toBeTruthy();

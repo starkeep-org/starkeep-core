@@ -12,7 +12,6 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import {
   startLocalDataServer,
   startFakeCloud,
-  fakeIdToken,
   type LocalDataServer,
   type FakeCloud,
 } from "@starkeep/testkit";
@@ -65,7 +64,6 @@ describe("nudge routing and pause/resume (long tick interval)", () => {
         pullIntervalMs: 600_000,
         pushDebounceMs: 50,
       },
-      auth: { idToken: fakeIdToken() },
     });
     const manifest = testAppManifest();
     app = await installApp(server, manifest);
@@ -233,7 +231,6 @@ describe("backoff (short tick interval)", () => {
         pullIntervalMs: INTERVAL,
         pushDebounceMs: 50,
       },
-      auth: { idToken: fakeIdToken() },
     });
     drive = await builtinAppCreds(server, "starkeep-drive");
     await eventually(async () => {
@@ -368,7 +365,6 @@ describe("concurrent triggers on one engine", () => {
         pullIntervalMs: 600_000,
         pushDebounceMs: 25,
       },
-      auth: { idToken: fakeIdToken() },
     });
     const manifest = testAppManifest();
     app = await installApp(server, manifest);

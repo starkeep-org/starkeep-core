@@ -50,7 +50,7 @@ import { appSyncableTableName, sqliteCompiler } from "@starkeep/storage-sqlite";
 import { AWS_TESTS_ENABLED, STACK_PREFIX, REGION, TEARDOWN } from "./env.js";
 import { ensureBootstrapStack, type BootstrapOutputs } from "./bootstrap-stack.js";
 import { ensureAdminUser } from "./admin-user.js";
-import { connectThisMachine, signInAdmin, runInstallCli, type AdminSession } from "./installers.js";
+import { signInThisMachine, signInAdmin, runInstallCli, type AdminSession } from "./installers.js";
 import {
   runPaths,
   readConfig,
@@ -60,6 +60,7 @@ import {
   type AdminCredentials,
 } from "./run-state.js";
 import type { JourneyApp, JourneyContext } from "./journey-app.js";
+import { defineMemberSteps } from "./member-steps.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -149,6 +150,11 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
    * minted in step 2 and this helper is defined before it.
    */
   function cloudApp(local: AppCredentials): LdsApp {
+    return cloudAppAs(local, () => session.idToken);
+  }
+
+  /** {@link cloudApp}, acting for the person whose ID token `idToken` reads. */
+  function cloudAppAs(local: AppCredentials, idToken: () => string): LdsApp {
     const creds: AppCredentials = {
       appId: local.appId,
       hmacSecret: local.hmacSecret,
@@ -159,7 +165,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
       fetch: (path, init) =>
         signedFetch(creds, path, {
           ...init,
-          headers: { ...(init?.headers ?? {}), [USER_TOKEN_HEADER]: session.idToken },
+          headers: { ...(init?.headers ?? {}), [USER_TOKEN_HEADER]: idToken() },
         }),
     };
   }
@@ -457,8 +463,8 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
       // (config.json) and its admin user re-signed-in (admin.json) — but the
       // LOCAL node state in that same dir must be fresh every run, or the last
       // run's registry and auth leak into this one. See resetLocalNodeState for
-      // the two failure modes this prevents (stale schema; stale auth.json
-      // starting sync before the /auth/tokens handoff does).
+      // the two failure modes this prevents (stale schema; a stale sign-in
+      // starting sync before the sign-in step does).
       beforeAll(async () => {
         // A throw in here skips every test, so no `afterEach` fires and
         // `anyFailed` would stay false — and afterAll would tear the stack down
@@ -531,6 +537,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
           stackPrefix: STACK_PREFIX,
           userPoolId: outputs.userPoolId,
           userPoolClientId: outputs.userPoolClientId,
+          deviceUserPoolClientId: outputs.deviceUserPoolClientId,
           identityPoolId: outputs.identityPoolId,
           managerRoleArn: outputs.managerRoleArn,
           permissionsBoundaryArn: outputs.appPermissionsBoundaryArn,
@@ -599,65 +606,32 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
       });
 
       it("boots a local data server against the real cloud", async () => {
-        // Boot with the Cognito pool config but NO pre-seeded auth.json. The real
-        // wizard never injects a token at boot; it signs the user in afterwards
-        // through the LDS /auth/tokens handoff (next step). Sync itself waits for
-        // the cloud to accept this machine's device key, which the
-        // "connects this machine" step below arranges — so the later
-        // `shipped > 0` assertion depends on that approval.
+        // Boot signed out and unpaired, as a machine is before its owner signs
+        // in: no device session and no device key. Sync waits for the "signs
+        // this machine in" step below, so the later `shipped > 0` assertion
+        // depends on that sign-in.
         // Share the run-state dir as the LDS's STARKEEP_DIR, so config.json (written
         // by the cloud-data-server install) and data.db (the LDS's registry) live in
         // one dir — the single-root model the install CLIs also use, mirroring
         // ~/.starkeep in production. Pass the full on-disk config so the boot write
         // preserves the install's apiGatewayUrl/auroraEndpoint rather than clobbering
-        // them. No auth.json is seeded — sign-in happens via /auth/tokens next.
+        // them.
         //
-        // Assert that precondition rather than assume it. This comment has always
-        // claimed "no auth.json", but nothing checked, and the LDS *writes* that
-        // file itself on a successful handoff — so a prior run left one behind and
-        // the daemon booted already authenticated, starting sync before the
-        // handoff and making the later `shipped > 0` pass for the wrong reason.
-        // resetLocalNodeState clears it; this is the guard that keeps it true.
+        // Assert that precondition rather than assume it: a session left by a
+        // prior run would start sync before the sign-in step and make the later
+        // `shipped > 0` pass for the wrong reason. resetLocalNodeState clears it;
+        // this is the guard that keeps it true.
         expect(
-          existsSync(join(paths.dataDir, "auth.json")),
-          "boot must be unauthenticated — the /auth/tokens handoff is exercised next",
+          existsSync(join(paths.dataDir, "device-session.json")),
+          "boot must be signed out — the sign-in is exercised below",
         ).toBe(false);
 
         lds = await startLocalDataServer({
           starkeepDir: paths.dataDir,
           config: { ...config } as Record<string, unknown>,
+          deviceKey: false,
         });
         drive = await driveCreds(lds.url);
-      });
-
-      it("signs in through the LDS /auth/tokens handoff (real Cognito→STS exchange)", async () => {
-        // The user-visible step 4 of cloud setup: the wizard POSTs the freshly
-        // minted Cognito tokens to the daemon, which then performs the in-process
-        // Identity-Pool (STS) exchange, persists cloud credentials and starts the
-        // credential-refresh timer. Sync no longer depends on it (step 2.8 of
-        // plan-multi-user-roles-2026-10-16.md decides whether it stays); the
-        // handoff keeps its end-to-end coverage until then.
-        const res = await fetch(`${lds!.url}/auth/tokens`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            idToken: session.idToken,
-            refreshToken: session.refreshToken,
-          }),
-        });
-        expect(res.status).toBe(200);
-
-        // The daemon now reports cloud config loaded and an authenticated session
-        // backed by credentials it minted itself (not the test's out-of-band
-        // signInAdmin exchange).
-        const status = await fetch(`${lds!.url}/auth/status`);
-        expect(status.status).toBe(200);
-        const auth = (await status.json()) as {
-          configLoaded: boolean;
-          authenticated: boolean;
-        };
-        expect(auth.configLoaded).toBe(true);
-        expect(auth.authenticated).toBe(true);
       });
 
       it("installs Drive in the cloud (User-Data-Owner identity)", async () => {
@@ -672,13 +646,13 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         expect(res.status).toBe(200);
       });
 
-      it("connects this machine, which is what starts sync", async () => {
-        // The local data server signs every cloud call with its own device key
-        // and starts no channel until the cloud accepts that key. "Connect this
-        // machine" registers it for the signed-in admin through Manager. After
-        // Drive's cloud install, because `device/self` is a Drive route.
-        const approval = await connectThisMachine(lds!.url, config, session);
-        expect(approval.state).toBe("approved");
+      it("signs this machine in, which is what starts sync", async () => {
+        // The local data server signs in through the pool's device client with
+        // the admin's own password — real Cognito — and every cloud call then
+        // carries the device token alone, on the broker's device-token branch.
+        // After Drive's cloud install, so the first exchange finds the channel.
+        const signedIn = await signInThisMachine(lds!.url, admin);
+        expect(signedIn.state).toBe("signed-in");
       });
 
       it(`installs ${app.appId} in the cloud (bundle, Lambda, routes)`, async () => {
@@ -1822,6 +1796,17 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
       // that, at the tier where it actually cost a run to discover. Do not
       // reorder these to keep them apart — the meeting is the point.
       app.extraSteps?.(ctx);
+
+      // A second account, end to end: a member created by the admin, a second
+      // machine that signs in as the member, and two libraries kept apart.
+      defineMemberSteps({
+        paths,
+        config: () => config,
+        session: () => session,
+        adminDrive: () => drive,
+        adminRecordId: () => syncedRecordId,
+        cloudAppAs,
+      });
 
       it(`uninstalls ${app.appId}: app plane gone, shared records persist`, async () => {
         await runInstallCli("cli-uninstall-app", [app.appId], paths, session);

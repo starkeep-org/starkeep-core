@@ -34,12 +34,14 @@ import {
   createHLCClock,
   appSyncableObjectKey,
   contentHashFromDataRecordObjectKey,
+  AUTH_CONFIG_ROUTE,
   DEPLOYMENT_SETTINGS_ROUTE,
   DEVICE_SELF_ROUTE,
   type AnyRecord,
   type DeploymentSettings,
 } from "@starkeep/protocol-primitives";
 import { sha256HexToBase64 } from "@starkeep/storage-adapter";
+import { createFakePool, FAKE_DEVICE_CLIENT_ID, FAKE_POOL_ID, FAKE_POOL_REGION, type FakePool } from "./fake-pool.js";
 import { createAppSpecificFactory, stampUnstampedOriginals } from "@starkeep/shared-space-api";
 import {
   createHash,
@@ -171,6 +173,16 @@ export interface FakeCloud {
   devicePolicy: { autoApprove: boolean };
   /** Record a device as admin-web would. Its signatures are then verified. */
   registerDevice(deviceId: string, record: FakeCloudDevice): void;
+  /**
+   * The fake user pool behind the device client. Add accounts with
+   * `pool.addUser`; a local data server reaches it when started with
+   * `STARKEEP_COGNITO_ENDPOINT` set to {@link cognitoEndpoint}. The cloud
+   * answers `/auth/config` with this pool, and accepts the ID tokens it issues
+   * alone, as the real device-token branch does.
+   */
+  pool: FakePool;
+  /** The fake pool's API endpoint. */
+  cognitoEndpoint: string;
   /** Delete a device's record. The device is refused from then on. */
   revokeDevice(deviceId: string): void;
   /** Shared records currently in the cloud DB. */
@@ -245,6 +257,7 @@ export async function startFakeCloud(): Promise<FakeCloud> {
   // cloud verifies it; an unregistered one passes while `autoApprove` holds.
   const devices = new Map<string, FakeCloudDevice>();
   const devicePolicy = { autoApprove: true };
+  const pool = createFakePool();
 
   /** Mirror of the real cloud's `validateDeviceSignature`. */
   function verifyDeviceSignature(
@@ -399,6 +412,19 @@ export async function startFakeCloud(): Promise<FakeCloud> {
       return;
     }
 
+    // The discovery route a signed-out device reads, and the fake pool.
+    if (pathname === AUTH_CONFIG_ROUTE && req.method === "GET") {
+      sendJson(res, 200, { region: FAKE_POOL_REGION, userPoolId: FAKE_POOL_ID, deviceClientId: FAKE_DEVICE_CLIENT_ID });
+      return;
+    }
+    if (pathname === "/cognito/" && req.method === "POST") {
+      const target = String(req.headers["x-amz-target"] ?? "").replace("AWSCognitoIdentityProviderService.", "");
+      const answer = pool.handle(target, JSON.parse((await readBody(req)).toString("utf8")) as Record<string, unknown>);
+      res.writeHead(answer.status, { "Content-Type": "application/x-amz-json-1.1" });
+      res.end(JSON.stringify(answer.body));
+      return;
+    }
+
     const blobMatch = pathname.match(/^\/__blob\/([^/]+)$/);
     if (blobMatch) {
       const key = decodeURIComponent(blobMatch[1]!);
@@ -475,8 +501,30 @@ export async function startFakeCloud(): Promise<FakeCloud> {
     // HMAC. The HMAC check is opt-in per app via setAppSecret (see
     // verifyAppHmac), off by default so rubber-stamp sync tests are unaffected.
     const deviceIdHeader = req.headers["x-starkeep-device-id"];
+    const userTokenHeader = req.headers["x-starkeep-user-token"];
     let callingDevice: (FakeCloudDevice & { deviceId: string }) | null = null;
-    if (typeof deviceIdHeader === "string") {
+    if (typeof deviceIdHeader !== "string" && typeof userTokenHeader === "string" && !req.headers["x-starkeep-app-sig"]) {
+      // A signed-in device: the pool's token alone, as the real device-token
+      // branch accepts it. This cloud serves one user, so the token must be
+      // theirs.
+      const claims = pool.verify(userTokenHeader);
+      if (!claims) {
+        sendJson(res, 401, { error: "Invalid or expired device token" });
+        return;
+      }
+      if (!claims.groups.includes("starkeep-users")) {
+        sendJson(res, 403, { error: "This account has no data library on this cloud" });
+        return;
+      }
+      if (claims.sub !== FAKE_CLOUD_USER_ID) {
+        sendJson(res, 403, { error: `the fake cloud serves only ${FAKE_CLOUD_USER_ID}` });
+        return;
+      }
+      if (rest === DEVICE_SELF_ROUTE) {
+        sendJson(res, 403, { error: "A signed-in device has no device record" });
+        return;
+      }
+    } else if (typeof deviceIdHeader === "string") {
       const registered = devices.get(deviceIdHeader);
       if (registered) {
         if (!verifyDeviceSignature(appId, req.method ?? "GET", rest, rawBody, req.headers, registered)) {
@@ -705,6 +753,8 @@ export async function startFakeCloud(): Promise<FakeCloud> {
     latency,
     peakConcurrentExchanges: (appId) => peakExchanges.get(appId) ?? 0,
     devicePolicy,
+    pool,
+    cognitoEndpoint: `${url}/cognito/`,
     registerDevice: (deviceId, record) => {
       devices.set(deviceId, record);
     },

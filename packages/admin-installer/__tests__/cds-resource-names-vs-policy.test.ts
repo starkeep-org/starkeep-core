@@ -75,6 +75,7 @@ function makeCtx(): CloudDataServerProgramContext {
     bundleHash: "abc123hash",
     userPoolId: "us-east-2_pool",
     userPoolClientId: "client123",
+    deviceUserPoolClientId: "deviceclient456",
     ephemeral: false,
   };
 }

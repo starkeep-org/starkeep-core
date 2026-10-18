@@ -52,6 +52,9 @@ type HandlerModule = typeof import("../src/api-handler.js");
 let handler: HandlerModule["handler"];
 let setDbFactory: HandlerModule["__setDatabaseClientFactoryForTests"];
 const tokens: Record<string, string> = {};
+/** Each user's token from the device client, as a signed-in desktop or phone holds it. */
+const deviceTokens: Record<string, string> = {};
+const DEVICE_CLIENT_ID = "test-device-client";
 let pg: PGlite;
 
 beforeAll(async () => {
@@ -68,6 +71,10 @@ beforeAll(async () => {
   await installUserTokenFixture();
   tokens[A] = await mintTestUserToken({ sub: A });
   tokens[B] = await mintTestUserToken({ sub: B });
+  process.env.STARKEEP_DEVICE_USER_POOL_CLIENT_ID = DEVICE_CLIENT_ID;
+  for (const user of [A, B]) {
+    deviceTokens[user] = await mintTestUserToken({ sub: user, aud: DEVICE_CLIENT_ID });
+  }
 });
 
 afterAll(() => {
@@ -145,6 +152,21 @@ function as(userId: string, method: string, subPath: string, body?: unknown): AP
   };
 }
 
+/** The same call from a signed-in device: the device token alone, no app signature. */
+async function callAsDevice(userId: string, method: string, subPath: string, body?: unknown) {
+  const bodyStr = body === undefined ? undefined : JSON.stringify(body);
+  const res = await handler(
+    {
+      rawPath: `/apps/${DRIVE}${subPath}`,
+      requestContext: { http: { method } },
+      headers: { "X-Starkeep-User-Token": deviceTokens[userId]! },
+      ...(bodyStr !== undefined ? { body: bodyStr } : {}),
+    },
+    context,
+  );
+  return { status: res.statusCode, body: res.body ? (JSON.parse(res.body) as Record<string, unknown>) : {} };
+}
+
 async function call(userId: string, method: string, subPath: string, body?: unknown) {
   const res = await handler(as(userId, method, subPath, body), context);
   return { status: res.statusCode, body: res.body ? (JSON.parse(res.body) as Record<string, unknown>) : {} };
@@ -196,6 +218,38 @@ describe("two users through the broker", () => {
     expect(forB.body["records"]).toEqual([]);
     const forA = await call(A, "POST", "/sync/exchange", { watermarks: {} });
     expect((forA.body["records"] as Array<{ id: string }>).map((r) => r.id)).toEqual([id]);
+  });
+
+  it("B's signed-in device syncs none of A's records, and A's syncs A's", async () => {
+    const id = await aWritesAPhoto();
+
+    const forB = await callAsDevice(B, "POST", "/sync/exchange", { watermarks: {} });
+    expect(forB.status, JSON.stringify(forB.body)).toBe(200);
+    expect(forB.body["records"]).toEqual([]);
+    const forA = await callAsDevice(A, "POST", "/sync/exchange", { watermarks: {} });
+    expect((forA.body["records"] as Array<{ id: string }>).map((r) => r.id)).toEqual([id]);
+  });
+
+  it("B's signed-in device reads none of A's records through the read-only routes", async () => {
+    await aWritesAPhoto();
+
+    expect((await callAsDevice(B, "GET", "/data/records")).body["records"]).toEqual([]);
+    expect((await callAsDevice(A, "GET", "/data/types")).body["total"]).toBe(1);
+  });
+
+  it("B's signed-in device can neither presign, stat nor HEAD A's file", async () => {
+    await aWritesAPhoto();
+    const aKey = `shared/${A}/image/cc/${HASH}`;
+
+    expect((await callAsDevice(B, "POST", "/files/presign", { key: aKey })).status).toBe(403);
+    expect((await callAsDevice(B, "GET", `/files/${aKey}/presign`)).status).toBe(403);
+    expect((await callAsDevice(B, "GET", `/files/${aKey}/stat`)).status).toBe(403);
+    expect((await callAsDevice(B, "HEAD", `/files/${aKey}`)).status).toBe(403);
+
+    // A's own device reaches the same file, so the refusals above are about
+    // the user, not the route.
+    expect((await callAsDevice(A, "GET", `/files/${aKey}/stat`)).status).toBe(200);
+    expect((await callAsDevice(A, "HEAD", `/files/${aKey}`)).status).toBe(200);
   });
 
   it("B cannot delete A's record", async () => {

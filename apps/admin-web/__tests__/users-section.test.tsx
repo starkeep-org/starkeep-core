@@ -45,6 +45,9 @@ beforeEach(() => {
           u.username === body.username ? { ...u, [body.group === "starkeep-admins" ? "admin" : "data"]: body.member } : u,
         );
       }
+      if (url === "/api/users/password") {
+        return Response.json({ users, temporaryPassword: "Temp2345abcdWXYZ" });
+      }
       if (url === "/api/users/enabled") {
         users = users.map((u) => (u.username === body.username ? { ...u, enabled: body.enabled } : u));
         return Response.json({ users, devicesRevoked: ["dev-1"] });
@@ -97,5 +100,14 @@ describe("the users section", () => {
     await user.click(within(samRow).getByRole("button", { name: "Disable" }));
     expect(await screen.findByText(/revoked 1 device/)).toBeTruthy();
     expect(calls.find((c) => c.url === "/api/users/enabled")!.body).toMatchObject({ username: "sub-sam", enabled: false, userSub: "sub-admin" });
+  });
+
+  it("resets a user's password and shows the temporary one once", async () => {
+    const user = await open();
+    const list = await screen.findByRole("list", { name: "Users" });
+    const samRow = within(list).getByText("sam@example.com").closest("li")!;
+    await user.click(within(samRow).getByRole("button", { name: "Reset password" }));
+    expect(await screen.findByText(/New temporary password for sam@example.com: Temp2345abcdWXYZ/)).toBeTruthy();
+    expect(calls.find((c) => c.url === "/api/users/password")!.body).toMatchObject({ username: "sub-sam" });
   });
 });

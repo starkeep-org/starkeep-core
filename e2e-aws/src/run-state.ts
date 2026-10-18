@@ -57,6 +57,8 @@ export interface TestStackConfig {
   accountId?: string;
   userPoolId: string;
   userPoolClientId: string;
+  /** The client desktops and phones sign in with to sync. */
+  deviceUserPoolClientId: string;
   identityPoolId: string;
   permissionsBoundaryArn?: string;
   foundationalPermissionsBoundaryArn?: string;
@@ -101,12 +103,12 @@ export function writeConfig(paths: RunPaths, config: TestStackConfig): void {
  *     references the new column. Reusing the dir across runs quietly violated
  *     that precondition, so ANY local schema change broke the next run.
  *
- *   - **Stale auth.** The local-data-server WRITES `auth.json` itself when the
- *     `/auth/tokens` handoff lands. Left behind, the next run boots already
- *     authenticated ("Stored auth found") and its sync supervisor starts before
- *     the handoff — defeating the boot step's whole point, which is that the
- *     handoff is what starts sync. The later `shipped > 0` then passes for the
- *     wrong reason.
+ *   - **Stale sign-in.** The local-data-server WRITES `device-session.json`
+ *     itself when the machine signs in. Left behind, the next run boots already
+ *     signed in and its sync supervisor starts before the sign-in step —
+ *     defeating that step's whole point, which is that signing in is what starts
+ *     sync. The later `shipped > 0` then passes for the wrong reason. The old
+ *     admin sign-in's `auth.json` and `cloud-credentials.json` go too.
  *
  *   - **Stale app-local state.** `app-local/<appId>/` holds what an app knows
  *     about *this node* rather than about the library: Photos keeps its sweep
@@ -122,6 +124,8 @@ export function resetLocalNodeState(paths: RunPaths): void {
     "data.db-shm",
     "auth.json",
     "cloud-credentials.json",
+    "device-session.json",
+    "device-key.json",
     "cloud-config.json",
     "objects",
     "app-creds",

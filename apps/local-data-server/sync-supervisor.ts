@@ -2,7 +2,9 @@ import type { RawDatabase } from "@starkeep/storage-adapter";
 import {
   DEPLOYMENT_SETTINGS_ROUTE,
   DEVICE_SELF_ROUTE,
+  withUserToken,
   type AnyRecord,
+  type CloudTokenSource,
   type DeviceSigner,
 } from "@starkeep/protocol-primitives";
 import {
@@ -109,12 +111,18 @@ export interface SyncSupervisorOptions {
     signal: { readonly aborted: boolean },
   ) => Promise<void>;
   /**
-   * This machine's device key, read at request time, or null when it has none.
-   *
-   * Every call to the cloud is signed with it: the signature names this
-   * machine, and the device record the cloud holds names the person it syncs
-   * for. An accessor rather than a value, because the key can be made while
-   * the server runs. Without a key no engine starts.
+   * This machine's sign-in, read at request time, or null when it is signed
+   * out. While signed in, every call to the cloud carries the device client's
+   * ID token and nothing else; the token names the person it syncs for.
+   * Preferred over the device key below whenever both exist.
+   */
+  readonly getTokenSource: () => CloudTokenSource | null;
+  /**
+   * This machine's paired device key, read at request time, or null when it
+   * has none. Used only while the machine is not signed in, so a paired machine
+   * keeps syncing until its owner signs in. An accessor rather than a value,
+   * because the key and the sign-in can both change while the server runs.
+   * Without either credential no engine starts.
    */
   readonly getDeviceSigner: () => DeviceSigner | null;
 }
@@ -338,6 +346,7 @@ export function createSyncSupervisor(
     maxItems,
     residency,
     afterDriveDrain,
+    getTokenSource,
     getDeviceSigner,
   } = options;
 
@@ -345,27 +354,51 @@ export function createSyncSupervisor(
   let paused = false;
   const cloudUrlBase = cloudUrl.replace(/\/+$/, "");
 
-  // Per-engine signer. Every /apps/{appId}/* request carries this machine's
-  // device signature over the same bytes an app would HMAC (see
-  // `devices/device-key.ts` in protocol-primitives and the verifier in
-  // cloud-data-server/src/api-handler.ts). The signature names the machine,
-  // and the cloud's record of the device names the person it syncs for, so no
-  // app secret and no end-user token travel with it.
+  /** Whether this machine holds any credential the cloud would accept. */
+  function hasCredential(): boolean {
+    return getTokenSource() !== null || getDeviceSigner() !== null;
+  }
+
+  // Per-engine credentials, decided per request so a sign-in or sign-out takes
+  // effect without rebuilding the engines.
   //
-  // Hard-fail without a key. An engine that sent unsigned traffic would 401 on
+  // - **Signed in:** the channel's `fetch` (below) adds the device client's ID
+  //   token to every data-plane request, and the signer adds nothing. The
+  //   cloud's device-token branch accepts the token alone.
+  // - **Paired only:** the signer adds this machine's device signature over
+  //   the same bytes an app would HMAC (see `devices/device-key.ts` in
+  //   protocol-primitives and the verifier in
+  //   cloud-data-server/src/api-handler.ts).
+  //
+  // Hard-fail with neither. An engine that sent unsigned traffic would 401 on
   // every tick and back off, and the cause would be easy to miss.
   function makeSignerFor(
     appId: string,
   ): (method: string, path: string, body?: string | Uint8Array) => Record<string, string> {
-    const signer = getDeviceSigner();
-    if (!signer) {
+    if (!hasCredential()) {
       throw new Error(
-        `[sync] this machine has no device key, so app=${appId} cannot sync. ` +
-          `Connect this machine from admin-web.`,
+        `[sync] this machine is not signed in, so app=${appId} cannot sync. ` +
+          `Sign in from admin-web's "This machine" section.`,
       );
     }
-    return (method, path, body) =>
-      signer.signRequest(appId, method, path, typeof body === "string" ? new TextEncoder().encode(body) : body);
+    return (method, path, body) => {
+      if (getTokenSource()) return {};
+      const signer = getDeviceSigner();
+      if (!signer) throw new Error("[sync] this machine signed out; sign in again to sync");
+      return signer.signRequest(appId, method, path, typeof body === "string" ? new TextEncoder().encode(body) : body);
+    };
+  }
+
+  /**
+   * The `fetch` one channel uses: the ID token goes on every request under the
+   * channel's own URL while the machine is signed in. Presigned S3 and
+   * CloudFront URLs, which the same adapters fetch, never see it.
+   */
+  function channelFetch(channelUrl: string): typeof globalThis.fetch {
+    return (input, init) => {
+      const tokens = getTokenSource();
+      return tokens ? withUserToken(globalThis.fetch, channelUrl, tokens)(input, init) : globalThis.fetch(input, init);
+    };
   }
 
   function makeEngineEntry(
@@ -417,10 +450,12 @@ export function createSyncSupervisor(
     if (engines.has(DRIVE_APP_ID)) return;
     const baseUrl = `${cloudUrlBase}/apps/${encodeURIComponent(DRIVE_APP_ID)}`;
     const driveSigner = makeSignerFor(DRIVE_APP_ID);
-    const transport = createHttpSyncTransport({ baseUrl, signRequest: driveSigner });
+    const driveFetch = channelFetch(baseUrl);
+    const transport = createHttpSyncTransport({ baseUrl, signRequest: driveSigner, fetch: driveFetch });
     const remoteStorage = new HttpObjectStorageAdapter({
       baseUrl: `${baseUrl}/files`,
       signRequest: driveSigner,
+      fetch: driveFetch,
     });
     driveRemoteStorage = remoteStorage;
     const syncState = createPerAppSyncStateStore(
@@ -449,15 +484,18 @@ export function createSyncSupervisor(
 
     const perAppBaseUrl = `${cloudUrlBase}/apps/${encodeURIComponent(appId)}`;
     const appSigner = makeSignerFor(appId);
+    const appFetch = channelFetch(perAppBaseUrl);
 
     const transport = createHttpSyncTransport({
       baseUrl: perAppBaseUrl,
       signRequest: appSigner,
+      fetch: appFetch,
     });
 
     const remoteStorage = new HttpObjectStorageAdapter({
       baseUrl: `${perAppBaseUrl}/files`,
       signRequest: appSigner,
+      fetch: appFetch,
     });
 
     const syncState = createPerAppSyncStateStore(
@@ -658,8 +696,8 @@ export function createSyncSupervisor(
   });
 
   function rescan(): void {
-    // No key, no engine: every request would be refused.
-    if (!getDeviceSigner()) return;
+    // No credential, no engine: every request would be refused.
+    if (!hasCredential()) return;
     // Exclude apps that have no per-app cloud channel (Drive and the built-in
     // local-watcher): their writes ride the always-on Drive engine, and
     // spinning a per-app engine for them would just 403 forever.
@@ -737,8 +775,9 @@ export function createSyncSupervisor(
 
     async readDeploymentSettings() {
       // Signed over the path below the app, as the sync transport signs.
-      const url = `${cloudUrlBase}/apps/${encodeURIComponent(DRIVE_APP_ID)}${DEPLOYMENT_SETTINGS_ROUTE}`;
-      const res = await fetch(url, {
+      const channelUrl = `${cloudUrlBase}/apps/${encodeURIComponent(DRIVE_APP_ID)}`;
+      const url = `${channelUrl}${DEPLOYMENT_SETTINGS_ROUTE}`;
+      const res = await channelFetch(channelUrl)(url, {
         method: "GET",
         headers: makeSignerFor(DRIVE_APP_ID)("GET", DEPLOYMENT_SETTINGS_ROUTE),
         signal: AbortSignal.timeout(CLOUD_READ_TIMEOUT_MS),
@@ -749,10 +788,13 @@ export function createSyncSupervisor(
     },
 
     async readDeviceSelf() {
+      // Always the paired key, never the sign-in: the record belongs to the key.
+      const signer = getDeviceSigner();
+      if (!signer) throw new Error("this machine has no device key");
       const url = `${cloudUrlBase}/apps/${encodeURIComponent(DRIVE_APP_ID)}${DEVICE_SELF_ROUTE}`;
       const res = await fetch(url, {
         method: "GET",
-        headers: makeSignerFor(DRIVE_APP_ID)("GET", DEVICE_SELF_ROUTE),
+        headers: signer.signRequest(DRIVE_APP_ID, "GET", DEVICE_SELF_ROUTE, undefined),
         signal: AbortSignal.timeout(CLOUD_READ_TIMEOUT_MS),
       });
       if (res.status === 401) return { approved: false } as const;
@@ -762,8 +804,8 @@ export function createSyncSupervisor(
     },
 
     start() {
-      if (!getDeviceSigner()) {
-        console.warn("[sync] this machine has no device key, so no channel starts. Connect it from admin-web.");
+      if (!hasCredential()) {
+        console.warn("[sync] this machine is not signed in, so no channel starts. Sign in from admin-web.");
         return;
       }
       // Always-on Drive channel first, then reconcile per-app channels.

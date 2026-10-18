@@ -61,11 +61,14 @@ export function jsonRequest(
   path: string,
   body: unknown,
   method: "POST" | "PATCH" | "PUT" | "DELETE" = "POST",
+  origin = "http://localhost",
 ): Request {
-  // `duplex` is required by undici when an init body is present.
+  // `duplex` is required by undici when an init body is present. The
+  // `Origin` is what a browser sends from admin-web's own page; routes that act
+  // for the person refuse any other.
   return new Request(`http://localhost${path}`, {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Origin: origin },
     body: typeof body === "string" ? body : JSON.stringify(body),
     duplex: "half",
   } as RequestInit);
@@ -87,7 +90,7 @@ export function getRequest(path: string): Request {
 export interface StubServer {
   url: string;
   /** Every request the routes made, in order. */
-  seen: Array<{ method: string; url: string; body: string }>;
+  seen: Array<{ method: string; url: string; body: string; headers?: Record<string, string | string[] | undefined> }>;
   stop(): Promise<void>;
 }
 
@@ -108,6 +111,7 @@ export async function startStubServer(
         method: req.method ?? "GET",
         url: req.url ?? "/",
         body: Buffer.concat(chunks).toString("utf-8"),
+        headers: { ...req.headers },
       };
       seen.push(seenReq);
       const out = respond(seenReq);

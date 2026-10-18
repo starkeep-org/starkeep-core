@@ -1,6 +1,6 @@
 /**
  * Managing the deployment's accounts: listing them, creating one, moving one
- * in and out of the two groups, and disabling one.
+ * in and out of the two groups, resetting a password, and disabling one.
  *
  * ## The two groups
  *
@@ -32,12 +32,14 @@ import {
   AdminEnableUserCommand,
   AdminListGroupsForUserCommand,
   AdminRemoveUserFromGroupCommand,
+  AdminSetUserPasswordCommand,
   AdminUserGlobalSignOutCommand,
   CognitoIdentityProviderClient,
   ListUsersCommand,
   ListUsersInGroupCommand,
   type UserType,
 } from "@aws-sdk/client-cognito-identity-provider";
+import { randomBytes } from "node:crypto";
 import { deleteDeviceKeyParameter, listDeviceRecords } from "@starkeep/admin-installer/app-creds";
 import { managerCredentials, readStarkeepConfig } from "../lib/manager-credentials";
 import type { STSCredentials } from "../lib/cognito-auth";
@@ -266,5 +268,55 @@ export async function SET_ENABLED(req: Request): Promise<Response> {
     return Response.json({ users: await listUsers(client, poolId), devicesRevoked: revoked });
   } catch (err) {
     return failed(err, "set enabled");
+  }
+}
+
+/**
+ * The letters a temporary password is drawn from: no 0/O or 1/l/I, because an
+ * admin reads it to the person or types it into a message.
+ */
+const TEMPORARY_PASSWORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+
+/** Sixteen letters from {@link TEMPORARY_PASSWORD_ALPHABET}: about 93 bits. */
+export function temporaryPassword(): string {
+  const bytes = randomBytes(16);
+  let out = "";
+  // 256 is not a multiple of the alphabet's size, so the bias toward early
+  // letters is a fraction of a bit over the whole password. Not worth a
+  // rejection loop for a password the person replaces at once.
+  for (const byte of bytes) out += TEMPORARY_PASSWORD_ALPHABET[byte % TEMPORARY_PASSWORD_ALPHABET.length];
+  return out;
+}
+
+/**
+ * Give an account a new temporary password, for a person who forgot theirs.
+ * Body: session plus `{ username }`. Answers the password once, for the admin
+ * to send; it is stored nowhere.
+ *
+ * The account returns to `FORCE_CHANGE_PASSWORD`, so the person chooses a new
+ * password at their next sign-in, on any device. Existing sessions are left
+ * alone: a person who only forgot a password keeps syncing on the devices
+ * still signed in. Self-service reset waits for the managed sign-in page.
+ */
+export async function RESET_PASSWORD(req: Request): Promise<Response> {
+  const body = (await req.json()) as SessionBody & { username?: string };
+  if (!body.username) {
+    return Response.json({ error: "username is required" }, { status: 400 });
+  }
+  try {
+    const client = cognito(body);
+    const poolId = userPoolId();
+    const password = temporaryPassword();
+    await client.send(
+      new AdminSetUserPasswordCommand({
+        UserPoolId: poolId,
+        Username: body.username,
+        Password: password,
+        Permanent: false,
+      }),
+    );
+    return Response.json({ users: await listUsers(client, poolId), temporaryPassword: password });
+  } catch (err) {
+    return failed(err, "reset password");
   }
 }
