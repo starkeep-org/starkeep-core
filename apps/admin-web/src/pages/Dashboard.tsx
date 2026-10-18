@@ -328,11 +328,6 @@ export function DashboardPage() {
       const result = await initiateAuth(cognitoConfig, signInEmail, signInPassword);
       if (result.tokens) {
         const email = extractEmailFromIdToken(result.tokens.idToken);
-        await fetch(`${await localDataServerUrl()}/auth/tokens`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ idToken: result.tokens.idToken, refreshToken: result.tokens.refreshToken }),
-        });
         await writeCognitoSession({ refreshToken: result.tokens.refreshToken, userEmail: email ?? undefined });
         setSignInOpen(false);
         bumpAll();
@@ -357,11 +352,6 @@ export function DashboardPage() {
     try {
       const tokens = await respondNewPasswordChallenge(cognitoConfig, signInChallenge.session, signInEmail, signInNewPassword);
       const email = extractEmailFromIdToken(tokens.idToken);
-      await fetch(`${await localDataServerUrl()}/auth/tokens`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ idToken: tokens.idToken, refreshToken: tokens.refreshToken }),
-      });
       await writeCognitoSession({ refreshToken: tokens.refreshToken, userEmail: email ?? undefined });
       setSignInOpen(false);
       bumpAll();
@@ -446,7 +436,6 @@ export function DashboardPage() {
   }
 
   async function handleSignOut() {
-    await fetch(`${await localDataServerUrl()}/auth/logout`, { method: "POST" }).catch(() => {});
     await clearCloudCredentials();
     setCognitoSession(null);
     bumpAll();
@@ -570,12 +559,12 @@ export function DashboardPage() {
                 </Button>
               </div>
               {/* Or join one someone else runs. */}
-              <ThisMachineSection canConnect={false} />
+              <ThisMachineSection />
             </>
           ) : !cloudAdministered ? (
             // A machine that joined someone else's cloud holds its address and
             // nothing to administer it with, so it shows only its own link.
-            <ThisMachineSection canConnect={false} />
+            <ThisMachineSection />
           ) : (
             <>
               <CloudAppsSection
@@ -591,7 +580,7 @@ export function DashboardPage() {
                 }
               />
 
-              <ThisMachineSection canConnect={cognitoSession !== null} />
+              <ThisMachineSection />
 
               <PairedDevicesSection />
 

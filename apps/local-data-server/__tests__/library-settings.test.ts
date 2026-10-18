@@ -12,7 +12,6 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import {
   startLocalDataServer,
   startFakeCloud,
-  fakeIdToken,
   type LocalDataServer,
   type FakeCloud,
 } from "@starkeep/testkit";
@@ -69,8 +68,8 @@ async function record(app: InstalledApp, id: string): Promise<Record<string, unk
 
 beforeAll(async () => {
   cloud = await startFakeCloud();
-  serverA = await startLocalDataServer({ config: cloudConfig(), auth: { idToken: fakeIdToken() } });
-  serverB = await startLocalDataServer({ config: cloudConfig(), auth: { idToken: fakeIdToken() } });
+  serverA = await startLocalDataServer({ config: cloudConfig() });
+  serverB = await startLocalDataServer({ config: cloudConfig() });
   driveA = await builtinAppCreds(serverA, "starkeep-drive");
   driveB = await builtinAppCreds(serverB, "starkeep-drive");
 }, 60_000);
@@ -150,7 +149,7 @@ describe("the deployment's settings on a node with a cloud", () => {
     // and has never read a usable document from it.
     cloud.setDeploymentSettings({ standIns: { image: { canonicalThreshold: 5120 } } });
     cloud.failures.deploymentSettings = true;
-    const serverC = await startLocalDataServer({ config: cloudConfig(), auth: { idToken: fakeIdToken() } });
+    const serverC = await startLocalDataServer({ config: cloudConfig() });
     try {
       const driveC = await builtinAppCreds(serverC, "starkeep-drive");
       const dark = await settingsOf(serverC);

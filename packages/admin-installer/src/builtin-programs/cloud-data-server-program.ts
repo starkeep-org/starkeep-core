@@ -26,6 +26,7 @@ import {
   ARCHIVE_SIZE_FLOOR_BYTES,
   DEPLOYMENT_SETTINGS_ROUTE,
   DEVICE_SELF_ROUTE,
+  AUTH_CONFIG_ROUTE,
   INTENT_TAG_KEY,
   LADDER_TAG_KEY,
   LADDER_TAG_COMPLETE,
@@ -75,6 +76,12 @@ export interface CloudDataServerProgramContext {
   /** Cognito user-pool resources from bootstrap, needed to wire the JWT authorizer. */
   userPoolId: string;
   userPoolClientId: string;
+  /**
+   * The client desktops and phones sign in with. The broker accepts its
+   * tokens with no app signature, on the device-token branch, and serves its
+   * id to devices from `GET /auth/config`.
+   */
+  deviceUserPoolClientId: string;
   /**
    * When true, this install provisions *disposable* infrastructure (the cloud
    * e2e suite) and the production data-protection hardening is skipped:
@@ -426,6 +433,9 @@ export function buildCloudDataServerProgram(
             // admitting — so a missing value here is an outage, not a hole.
             STARKEEP_USER_POOL_ID: ctx.userPoolId,
             STARKEEP_USER_POOL_CLIENT_ID: ctx.userPoolClientId,
+            // The device client, whose tokens alone admit a signed-in
+            // desktop or phone. Unset turns device sign-in off, never on.
+            STARKEEP_DEVICE_USER_POOL_CLIENT_ID: ctx.deviceUserPoolClientId,
             // Part B: SSM SecureString holding { keyPairId, domain, privateKey }
             // for signing shared-file CloudFront URLs. Name only — the Lambda
             // reads and caches the value once per warm container.
@@ -720,6 +730,15 @@ export function buildCloudDataServerProgram(
     new aws.apigatewayv2.Route("route-device-self", {
       apiId: api.id,
       routeKey: `GET /apps/{appId}${DEVICE_SELF_ROUTE}`,
+      target: pulumi.interpolate`integrations/${integration.id}`,
+    });
+
+    // How a device signs in: public, and answered before any app path is
+    // parsed. CloudFront's default behavior forwards it, and its viewer
+    // function leaves every path outside /apps/* alone.
+    new aws.apigatewayv2.Route("route-auth-config", {
+      apiId: api.id,
+      routeKey: `GET ${AUTH_CONFIG_ROUTE}`,
       target: pulumi.interpolate`integrations/${integration.id}`,
     });
 

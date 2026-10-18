@@ -46,6 +46,7 @@ const DEPLOYED_CONFIG = {
   stage: "sktest",
   userPoolId: "us-east-2_abc123",
   userPoolClientId: "client",
+  deviceUserPoolClientId: "deviceclient",
   identityPoolId: "us-east-2:pool",
   s3Bucket: "sktest-files",
   auroraEndpoint: "abc.dsql.us-east-2.on.aws",
@@ -152,6 +153,18 @@ describe("resuming onto the last step", () => {
     // Steps 1–4 all leave evidence behind; the wizard reads it rather than
     // making the operator walk them again.
     expect(screen.queryByRole("heading", { name: "Bootstrap Stack" })).toBeNull();
+  });
+
+  it("reopens the stack-outputs step for a config from before the device client existed", async () => {
+    const { deviceUserPoolClientId: _dropped, ...older } = DEPLOYED_CONFIG;
+    vi.stubGlobal("fetch", stubFetch({ "/api/config": () => Response.json({ config: older }) }));
+    render(
+      <MemoryRouter initialEntries={["/cloud-setup"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByLabelText("DeviceUserPoolClientId", {}, { timeout: 5_000 })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Deploy Starkeep cloud" })).toBeNull();
   });
 });
 

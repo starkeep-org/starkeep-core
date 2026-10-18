@@ -67,6 +67,7 @@ describe("bootstrap template structure", () => {
   it("creates the Cognito auth chain and the two buckets", () => {
     expect(resources.UserPool.Type).toBe("AWS::Cognito::UserPool");
     expect(resources.UserPoolClient.Type).toBe("AWS::Cognito::UserPoolClient");
+    expect(resources.DeviceUserPoolClient.Type).toBe("AWS::Cognito::UserPoolClient");
     expect(resources.IdentityPool.Type).toBe("AWS::Cognito::IdentityPool");
     expect(resources.IdentityPoolRoleAttachment.Type).toBe(
       "AWS::Cognito::IdentityPoolRoleAttachment",
@@ -167,12 +168,43 @@ describe("trust policies (who can assume which role)", () => {
   });
 });
 
+describe("the device client", () => {
+  const props = () => resources.DeviceUserPoolClient!.Properties as Record<string, unknown>;
+
+  it("signs devices in with a password and refreshes, and offers no other flow", () => {
+    expect((props().ExplicitAuthFlows as string[]).sort()).toEqual([
+      "ALLOW_REFRESH_TOKEN_AUTH",
+      "ALLOW_USER_PASSWORD_AUTH",
+    ]);
+    expect(props().GenerateSecret).toBe(false);
+    expect(props().AllowedOAuthFlows).toBeUndefined();
+    expect(props().CallbackURLs).toBeUndefined();
+  });
+
+  it("issues fifteen-minute ID tokens and ten-year refresh tokens, revocable one at a time", () => {
+    expect(props().TokenValidityUnits).toEqual({ IdToken: "minutes", AccessToken: "minutes", RefreshToken: "days" });
+    expect(props().IdTokenValidity).toBe(15);
+    expect(props().RefreshTokenValidity).toBe(3650);
+    expect(props().EnableTokenRevocation).toBe(true);
+    expect(props().PreventUserExistenceErrors).toBe("ENABLED");
+  });
+
+  it("is not trusted by the identity pool, so a device token reaches no AWS role", () => {
+    const providers = (resources.IdentityPool!.Properties as {
+      CognitoIdentityProviders: Array<{ ClientId: unknown }>;
+    }).CognitoIdentityProviders;
+    expect(providers).toHaveLength(1);
+    expect(providers[0]!.ClientId).toEqual({ Ref: "UserPoolClient" });
+  });
+});
+
 describe("stack outputs", () => {
   it("exposes every output the wizard and installer consume", () => {
     expect(Object.keys(template.Outputs).sort()).toEqual(
       [
         "UserPoolId",
         "UserPoolClientId",
+        "DeviceUserPoolClientId",
         "IdentityPoolId",
         "AdminAppRoleArn",
         "ManagerRoleArn",

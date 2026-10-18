@@ -16,6 +16,8 @@ export interface StarkeepConfig {
   stage: string;
   userPoolId: string;
   userPoolClientId: string;
+  /** The bootstrap's device client, which desktops and phones sign in with to sync. */
+  deviceUserPoolClientId?: string;
   identityPoolId: string;
   accountId?: string;
   permissionsBoundaryArn?: string;

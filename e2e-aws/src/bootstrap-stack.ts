@@ -23,6 +23,7 @@ import { generateBootstrapTemplate } from "@starkeep/aws-bootstrap";
 export interface BootstrapOutputs {
   userPoolId: string;
   userPoolClientId: string;
+  deviceUserPoolClientId: string;
   identityPoolId: string;
   adminAppRoleArn: string;
   managerRoleArn: string;
@@ -38,6 +39,7 @@ export interface BootstrapOutputs {
 const REQUIRED_OUTPUT_KEYS: Record<keyof BootstrapOutputs, string> = {
   userPoolId: "UserPoolId",
   userPoolClientId: "UserPoolClientId",
+  deviceUserPoolClientId: "DeviceUserPoolClientId",
   identityPoolId: "IdentityPoolId",
   adminAppRoleArn: "AdminAppRoleArn",
   managerRoleArn: "ManagerRoleArn",

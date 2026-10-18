@@ -2,8 +2,8 @@
  * Characterization (todo 38, gap 2): the local-data-server boot-captures
  * `CLOUD_URL` (server.ts: `const CLOUD_URL = starkeepConfig.apiGatewayUrl`),
  * so the `/cloud/data/*` proxy does NOT pick up `apiGatewayUrl` written to
- * config.json *after* boot — unlike the auth handlers, which reload config per
- * request (see auth-config-reload.test.ts).
+ * config.json *after* boot — unlike the sign-in handler, which reloads config
+ * per request.
  *
  * Real-world ordering this reproduces: the cloud-setup wizard writes
  * `apiGatewayUrl` to config.json through admin-web's `/api/config` route while
@@ -13,14 +13,14 @@
  *
  * This pins the *current, wrong* behavior on purpose. The install route now
  * restarts the LDS on success as a stopgap (added 2026-06-18), and the durable
- * fix — making `CLOUD_URL` a per-request read like the auth handlers — is
+ * fix — making `CLOUD_URL` a per-request read like the sign-in handler — is
  * deferred. When that fix lands, flip the second assertion to expect the proxy
  * to see the post-boot apiGatewayUrl (i.e. NOT 503) and drop this note.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { startLocalDataServer, fakeIdToken, type LocalDataServer } from "@starkeep/testkit";
+import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
 import { builtinAppCreds, type InstalledApp } from "./helpers.js";
 
 let server: LocalDataServer;
@@ -29,7 +29,7 @@ let drive: InstalledApp;
 beforeAll(async () => {
   // Boot WITHOUT apiGatewayUrl — i.e. the daemon is running before cloud setup
   // fills it in. CLOUD_URL is undefined at boot.
-  server = await startLocalDataServer({ config: {}, auth: { idToken: fakeIdToken() } });
+  server = await startLocalDataServer({ config: {} });
   drive = await builtinAppCreds(server, "starkeep-drive");
 }, 60_000);
 

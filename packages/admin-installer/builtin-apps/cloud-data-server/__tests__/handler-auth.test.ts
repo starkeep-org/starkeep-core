@@ -115,7 +115,7 @@ describe("HMAC gate", () => {
       .on(GetParameterCommand)
       .rejects(new ParameterNotFound({ message: "not found", $metadata: {} }));
     const res = await handler(
-      makeEvent({ method: "GET", path: "/apps/ghost-app/health" }),
+      makeEvent({ method: "GET", path: "/apps/ghost-app/health", userToken: null }),
       context,
     );
     expect(res.statusCode).toBe(401);
@@ -124,8 +124,10 @@ describe("HMAC gate", () => {
 
   it("401s requests missing the signature headers", async () => {
     scriptSecret("app-nohdr", "secret-nohdr");
+    // No token either: a token with no signature is a signed-in device's
+    // shape, which `handler-device-token.test.ts` covers.
     const res = await handler(
-      makeEvent({ method: "GET", path: "/apps/app-nohdr/health" }),
+      makeEvent({ method: "GET", path: "/apps/app-nohdr/health", userToken: null }),
       context,
     );
     expect(res.statusCode).toBe(401);

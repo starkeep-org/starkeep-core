@@ -78,6 +78,7 @@ function makeCtx(ephemeral: boolean): CloudDataServerProgramContext {
     bundleHash: "abc123hash",
     userPoolId: "us-east-2_pool",
     userPoolClientId: "client123",
+    deviceUserPoolClientId: "deviceclient456",
     ephemeral,
   };
 }
@@ -451,5 +452,40 @@ describe("ephemeral e2e installs (ephemeral=true) skip hardening", () => {
   it("still creates the inventory, so the e2e install covers it", async () => {
     await run(true);
     expect(byTypeSuffix("s3/inventory:Inventory")).toHaveLength(1);
+  });
+});
+
+describe("device sign-in wiring", () => {
+  // `plan-device-sign-in-2026-10-18.md`, phases 1 and 2: the gateway's JWT
+  // authorizer keeps trusting the admin client alone, the broker learns the
+  // device client's id, and a member's machine can reach `/auth/config` with
+  // no credential. Step 9 of the multi-user cutover runbook recorded what an
+  // undeclared gateway route costs: the route answers 404 at the edge.
+  it("keeps the JWT authorizer on the admin client, and hands the broker the device client", async () => {
+    await run(false);
+
+    const authorizers = byTypeSuffix("apigatewayv2/authorizer:Authorizer");
+    expect(authorizers.length).toBeGreaterThan(0);
+    for (const authorizer of authorizers) {
+      const jwt = authorizer.inputs.jwtConfiguration as { audiences?: string[] } | undefined;
+      if (!jwt) continue;
+      expect(jwt.audiences).toEqual(["client123"]);
+    }
+
+    const functions = byTypeSuffix("lambda/function:Function");
+    const withDeviceClient = functions.filter((f) => {
+      const env = (f.inputs.environment as { variables?: Record<string, string> } | undefined)?.variables;
+      return env?.STARKEEP_DEVICE_USER_POOL_CLIENT_ID === "deviceclient456";
+    });
+    expect(withDeviceClient.map((f) => f.name)).toHaveLength(1);
+  });
+
+  it("declares GET /auth/config on the gateway with no authorizer", async () => {
+    await run(false);
+
+    const routes = byTypeSuffix("apigatewayv2/route:Route").filter((r) => r.inputs.routeKey === "GET /auth/config");
+    expect(routes).toHaveLength(1);
+    expect(routes[0]!.inputs.authorizationType ?? "NONE").toBe("NONE");
+    expect(routes[0]!.inputs.authorizerId).toBeUndefined();
   });
 });

@@ -38,7 +38,7 @@
 
 import "@starkeep/app-client/load-env";
 import { createHmac } from "node:crypto";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
@@ -51,6 +51,7 @@ import {
   sqliteMetadataTableName,
   type Category,
 } from "@starkeep/protocol-primitives";
+import { adminBaseCredentials } from "./admin-credentials";
 
 interface Creds {
   accessKeyId: string;
@@ -69,25 +70,6 @@ function loadStarkeepConfig() {
   };
 }
 
-function loadBaseCreds(): Creds {
-  if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
-    return {
-      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-      sessionToken: process.env.AWS_SESSION_TOKEN,
-    };
-  }
-  const cached = join(homedir(), ".starkeep", "cloud-credentials.json");
-  if (existsSync(cached)) {
-    const raw = JSON.parse(readFileSync(cached, "utf8")) as Creds;
-    return {
-      accessKeyId: raw.accessKeyId,
-      secretAccessKey: raw.secretAccessKey,
-      sessionToken: raw.sessionToken,
-    };
-  }
-  throw new Error("No AWS credentials: set AWS_* env vars or sign in via admin-web.");
-}
 
 async function assume(
   arn: string,
@@ -186,7 +168,7 @@ async function main(): Promise<void> {
   const region = cfg.region ?? "us-east-2";
   const mgr = await assume(
     cfg.managerRoleArn,
-    loadBaseCreds(),
+    await adminBaseCredentials(),
     `reship-${process.pid}-mgr`,
     region,
   );

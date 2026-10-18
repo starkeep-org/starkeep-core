@@ -20,7 +20,13 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createServer } from "node:http";
 import { DatabaseSync } from "node:sqlite";
 import { createPublicKey, randomBytes, verify } from "node:crypto";
-import { createHLCClock, deviceSigner, signedMessage, type DeviceSigner } from "@starkeep/protocol-primitives";
+import {
+  createHLCClock,
+  deviceSigner,
+  signedMessage,
+  type CloudTokenSource,
+  type DeviceSigner,
+} from "@starkeep/protocol-primitives";
 import {
   MockDatabaseAdapter,
   MockObjectStorageAdapter,
@@ -150,6 +156,8 @@ async function build(options: {
   readonly installed?: () => Array<{ appId: string }>;
   /** Defaults to a fresh key; null is a machine nobody has connected. */
   readonly signer?: DeviceSigner | null;
+  /** This machine's sign-in; absent is a machine that has not signed in. */
+  readonly tokens?: CloudTokenSource | null;
 }) {
   const databaseAdapter = new MockDatabaseAdapter();
   const localObjectStorage = new MockObjectStorageAdapter();
@@ -185,6 +193,7 @@ async function build(options: {
     underlyingSyncStateStore: memorySyncState(),
     exchangeIntervalMs: options.exchangeIntervalMs ?? 600_000,
     nudgeDebounceMs: 5,
+    getTokenSource: () => options.tokens ?? null,
     getDeviceSigner: () => (options.signer === undefined ? testSigner() : options.signer),
   });
 }
@@ -401,4 +410,45 @@ describe("the device signature on outbound sync", () => {
       await cap.close();
     }
   }, 20_000);
+
+  it("sends the device token alone once the machine is signed in, even with a paired key", async () => {
+    // The device-token branch is chosen by the token arriving with no device
+    // signature and no app signature, so a signed-in machine must send neither.
+    const cap = await captureRequests();
+    const tokens: CloudTokenSource = { current: async () => "id-token-1" };
+    try {
+      supervisor = await build({
+        apps: [{ appId: "aaa-app" }],
+        exchangeIntervalMs: 5,
+        cloudUrl: `http://127.0.0.1:${cap.port}`,
+        signer: testSigner(),
+        tokens,
+      });
+      supervisor.start();
+      await new Promise((r) => setTimeout(r, 120));
+
+      expect(cap.seen.length, "no request reached the cloud").toBeGreaterThan(0);
+      for (const { method, url, headers } of cap.seen) {
+        expect(headers["x-starkeep-user-token"], `${method} ${url}`).toBe("id-token-1");
+        expect(headers["x-starkeep-device-id"]).toBeUndefined();
+        expect(headers["x-starkeep-device-sig"]).toBeUndefined();
+        expect(headers["x-starkeep-app-sig"]).toBeUndefined();
+      }
+      const paths = new Set(cap.seen.map((r) => r.url.split("/")[2]));
+      expect(paths).toContain(DRIVE_APP_ID);
+      expect(paths).toContain("aaa-app");
+    } finally {
+      await supervisor?.stop();
+      supervisor = null;
+      await cap.close();
+    }
+  }, 20_000);
+
+  it("starts no channel for a machine with neither a sign-in nor a key", async () => {
+    supervisor = await build({ apps: [{ appId: "aaa-app" }], signer: null, tokens: null });
+    supervisor.start();
+    expect(supervisor.status().perApp).toEqual([]);
+    await supervisor.stop();
+    supervisor = null;
+  });
 });

@@ -18,7 +18,6 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import {
   startLocalDataServer,
   startFakeCloud,
-  fakeIdToken,
   type LocalDataServer,
   type FakeCloud,
 } from "@starkeep/testkit";
@@ -86,11 +85,9 @@ beforeAll(async () => {
   cloud = await startFakeCloud();
   serverA = await startLocalDataServer({
     config: serverConfig(cloud.url),
-    auth: { idToken: fakeIdToken() },
   });
   serverB = await startLocalDataServer({
     config: serverConfig(cloud.url),
-    auth: { idToken: fakeIdToken() },
   });
   driveA = await builtinAppCreds(serverA, "starkeep-drive");
   driveB = await builtinAppCreds(serverB, "starkeep-drive");

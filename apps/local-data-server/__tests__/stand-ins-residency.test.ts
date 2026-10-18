@@ -18,7 +18,6 @@ import { describe, it, expect, beforeAll, afterAll, afterEach } from "vitest";
 import {
   startLocalDataServer,
   startFakeCloud,
-  fakeIdToken,
   type LocalDataServer,
   type FakeCloud,
 } from "@starkeep/testkit";
@@ -80,8 +79,8 @@ async function waitForRestart(server: LocalDataServer): Promise<void> {
 beforeAll(async () => {
   cloud = await startFakeCloud();
   config = { apiGatewayUrl: cloud.url, pullIntervalMs: 600_000, pushDebounceMs: 50, syncMaxItems: 5 };
-  serverA = await startLocalDataServer({ config, auth: { idToken: fakeIdToken() } });
-  serverB = await startLocalDataServer({ config, auth: { idToken: fakeIdToken() } });
+  serverA = await startLocalDataServer({ config });
+  serverB = await startLocalDataServer({ config });
   driveA = await builtinAppCreds(serverA, "starkeep-drive");
   driveB = await builtinAppCreds(serverB, "starkeep-drive");
 }, 60_000);
@@ -244,7 +243,6 @@ describe("a node at the phone's ceiling", () => {
   beforeAll(async () => {
     serverC = await startLocalDataServer({
       config: { ...config, standInCeilings: { image: 1280 } },
-      auth: { idToken: fakeIdToken() },
     });
     driveC = await builtinAppCreds(serverC, "starkeep-drive");
   }, 60_000);
@@ -310,7 +308,6 @@ describe("a node that keeps originals", () => {
   beforeAll(async () => {
     serverD = await startLocalDataServer({
       config: { ...config, keepOriginals: true },
-      auth: { idToken: fakeIdToken() },
     });
     driveD = await builtinAppCreds(serverD, "starkeep-drive");
   }, 60_000);

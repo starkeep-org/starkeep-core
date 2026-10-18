@@ -132,7 +132,7 @@ describe("a key the cloud records differently", () => {
     const before = cloud.exchangeLog.length;
     const res = await drive.fetch("/cloud/data/types");
     expect(res.status).toBe(503);
-    expect(((await res.json()) as { error: string }).error).toMatch(/not connected to the cloud/);
+    expect(((await res.json()) as { error: string }).error).toMatch(/not signed in to the cloud/);
     expect(cloud.exchangeLog.length).toBe(before);
   });
 });

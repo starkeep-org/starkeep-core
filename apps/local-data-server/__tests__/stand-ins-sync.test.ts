@@ -10,7 +10,6 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import {
   startLocalDataServer,
   startFakeCloud,
-  fakeIdToken,
   type LocalDataServer,
   type FakeCloud,
 } from "@starkeep/testkit";
@@ -50,8 +49,8 @@ async function converge(maxRounds = 30): Promise<void> {
 beforeAll(async () => {
   cloud = await startFakeCloud();
   const config = { apiGatewayUrl: cloud.url, pullIntervalMs: 600_000, pushDebounceMs: 50, syncMaxItems: 5 };
-  serverA = await startLocalDataServer({ config, auth: { idToken: fakeIdToken() } });
-  serverB = await startLocalDataServer({ config, auth: { idToken: fakeIdToken() } });
+  serverA = await startLocalDataServer({ config });
+  serverB = await startLocalDataServer({ config });
   driveA = await builtinAppCreds(serverA, "starkeep-drive");
   driveB = await builtinAppCreds(serverB, "starkeep-drive");
 }, 60_000);

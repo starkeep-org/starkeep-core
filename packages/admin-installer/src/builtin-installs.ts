@@ -102,6 +102,8 @@ export interface CloudDataServerInstallConfig {
   /** Cognito user-pool resources from the bootstrap CFN stack. */
   userPoolId: string;
   userPoolClientId: string;
+  /** The bootstrap's device client, which desktops and phones sign in with. */
+  deviceUserPoolClientId: string;
   /**
    * When true, provision disposable infrastructure and skip the production
    * data-protection hardening (files-bucket versioning/SSE/public-access-block
@@ -358,6 +360,7 @@ export async function installCloudDataServer(
       bundleHash,
       userPoolId: config.userPoolId,
       userPoolClientId: config.userPoolClientId,
+      deviceUserPoolClientId: config.deviceUserPoolClientId,
       ephemeral: config.ephemeral ?? false,
     });
 

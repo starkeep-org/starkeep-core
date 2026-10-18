@@ -18,9 +18,7 @@ import { fileURLToPath } from "node:url";
 import {
   cognitoPasswordAuthTokens,
   getIdentityPoolCredentials,
-  putDeviceKeyParameter,
   regionFromUserPoolId,
-  roleChain,
   type IdentityPoolCredentials,
 } from "@starkeep/admin-installer";
 import type { AdminCredentials, RunPaths, TestStackConfig } from "./run-state.js";
@@ -32,9 +30,7 @@ const INSTALLER_DIR = resolve(REPO_ROOT, "packages/admin-installer");
 export interface AdminSession {
   idToken: string;
   // The refresh token from the same Cognito sign-in. The install CLIs only
-  // need the idToken-derived AWS creds, but the LDS `/auth/tokens` handoff
-  // (journey step 4) needs the refresh token to seed the daemon's credential
-  // refresh timer — see the journey's sign-in handoff step.
+  // need the idToken-derived AWS creds; kept for callers that refresh.
   refreshToken: string;
   awsCredentials: IdentityPoolCredentials;
   region: string;
@@ -99,43 +95,21 @@ export async function runInstallCli(
 }
 
 /**
- * "Connect this machine", as admin-web does it: register the local data
- * server's device key for the signed-in admin through Manager, then have the
- * daemon ask the cloud again. Sync starts once the cloud accepts the key.
- * Resolves with the daemon's approval state.
+ * "Sign in to sync", as admin-web's "This machine" section does it: the local
+ * data server signs in through the pool's device client with the person's own
+ * email and password, binds its library to the token's user and starts sync.
+ * Resolves with the daemon's sign-in state.
  */
-export async function connectThisMachine(
+export async function signInThisMachine(
   ldsUrl: string,
-  config: TestStackConfig,
-  session: AdminSession,
+  admin: AdminCredentials,
 ): Promise<{ state: string; userId?: string | null }> {
-  const keyRes = await fetch(`${ldsUrl}/device/key`, {
+  const res = await fetch(`${ldsUrl}/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ label: "tier3 e2e" }),
+    body: JSON.stringify({ email: admin.email, password: admin.password }),
   });
-  const device = (await keyRes.json()) as { deviceId: string; publicKeySpki: string; label: string | null };
-  if (!config.managerRoleArn) throw new Error("config.json has no managerRoleArn");
-  const awsCreds = await roleChain([config.managerRoleArn], {
-    baseCredentials: { ...session.awsCredentials, expiration: new Date(Date.now() + 3_600_000) },
-    region: session.region,
-    sessionPrefix: "starkeep-e2e-connect",
-  });
-  const sub = (JSON.parse(Buffer.from(session.idToken.split(".")[1]!, "base64url").toString("utf8")) as { sub: string }).sub;
-  await putDeviceKeyParameter({
-    stackPrefix: config.stackPrefix,
-    deviceId: device.deviceId,
-    registration: {
-      publicKeySpki: device.publicKeySpki,
-      userId: sub,
-      kind: "desktop",
-      appIds: [],
-      label: device.label,
-      pairedAt: new Date().toISOString(),
-    },
-    region: session.region,
-    awsCreds,
-  });
-  const check = await fetch(`${ldsUrl}/device/check`, { method: "POST" });
-  return ((await check.json()) as { approval: { state: string; userId?: string | null } }).approval;
+  if (!res.ok) throw new Error(`sign-in failed: ${res.status} ${await res.text()}`);
+  const status = await fetch(`${ldsUrl}/auth/status`);
+  return (await status.json()) as { state: string; userId?: string | null };
 }

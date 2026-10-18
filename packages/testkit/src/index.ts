@@ -1,7 +1,6 @@
 export {
   startLocalDataServer,
   getFreePort,
-  fakeIdToken,
   type LocalDataServer,
   type LocalDataServerOptions,
 } from "./local-data-server.js";
@@ -13,3 +12,9 @@ export {
   type FakeCloudDevice,
   type FakeCloudExchangeLogEntry,
 } from "./fake-cloud.js";
+export {
+  FAKE_POOL_ID,
+  FAKE_POOL_REGION,
+  FAKE_DEVICE_CLIENT_ID,
+  type FakePool,
+} from "./fake-pool.js";

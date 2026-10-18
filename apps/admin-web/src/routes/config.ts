@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
 import { DEFAULT_APPS_DIR } from "../lib/exec-commands";
+import { crossSiteRefusal, fromOwnPage } from "../lib/same-origin";
 
 const STARKEEP_DIR = starkeepDir();
 const CONFIG_PATH = join(STARKEEP_DIR, "config.json");
@@ -50,6 +51,9 @@ export async function GET() {
 }
 
 export async function PATCH(req: Request) {
+  // The file names the cloud this machine joins, which is where its sign-in
+  // goes. A web page another site serves must not be able to change it.
+  if (!fromOwnPage(req)) return crossSiteRefusal();
   let patch: Record<string, unknown>;
   try {
     patch = (await req.json()) as Record<string, unknown>;

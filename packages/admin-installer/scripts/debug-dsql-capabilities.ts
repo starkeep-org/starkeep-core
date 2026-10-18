@@ -28,7 +28,7 @@
 
 // First import: load repo-root .env / .env.local so STARKEEP_DIR is populated.
 import "@starkeep/app-client/load-env";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
@@ -39,6 +39,7 @@ import {
 } from "@aws-sdk/client-iam";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
+import { adminBaseCredentials } from "./admin-credentials";
 
 interface Creds {
   accessKeyId: string;
@@ -127,27 +128,6 @@ function loadStarkeepConfig(): StarkeepConfig {
   return JSON.parse(readFileSync(path, "utf8")) as StarkeepConfig;
 }
 
-function loadBaseCreds(): Creds {
-  if (process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) {
-    return {
-      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-      sessionToken: process.env.AWS_SESSION_TOKEN,
-    };
-  }
-  const cached = join(homedir(), ".starkeep", "cloud-credentials.json");
-  if (existsSync(cached)) {
-    const raw = JSON.parse(readFileSync(cached, "utf8")) as Creds & { expiration?: string };
-    return {
-      accessKeyId: raw.accessKeyId,
-      secretAccessKey: raw.secretAccessKey,
-      sessionToken: raw.sessionToken,
-    };
-  }
-  throw new Error(
-    "No AWS credentials: set AWS_* env vars or sign in via admin-web (which writes ~/.starkeep/cloud-credentials.json).",
-  );
-}
 
 async function assume(arn: string, creds: Creds, sessionName: string, region: string): Promise<Creds> {
   const sts = new STSClient({ region, credentials: creds });
@@ -445,7 +425,7 @@ async function main(): Promise<void> {
   const withDdl = process.argv.slice(2).includes("--ddl");
   const cfg = loadStarkeepConfig();
   const region = cfg.region ?? "us-east-2";
-  const base = loadBaseCreds();
+  const base = await adminBaseCredentials();
 
   const sessionTag = `cap-${process.pid}`;
   const mgr = await assume(cfg.managerRoleArn, base, `${sessionTag}-mgr`, region);

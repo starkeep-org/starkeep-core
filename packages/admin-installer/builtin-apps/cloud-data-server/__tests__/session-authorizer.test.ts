@@ -142,6 +142,16 @@ describe("refuses", () => {
     expect((await handler(event(`sk_token=${token}`))).isAuthorized).toBe(false);
   });
 
+  it("a device-client token, on a deployment that has a device client", async () => {
+    // A signed-in desktop or phone holds a token from the device client. Its
+    // signature, issuer and expiry are all good; only the client differs. A
+    // cloud app session must not accept it, so the device client's tokens
+    // never reach an app's compute as a session.
+    process.env.STARKEEP_DEVICE_USER_POOL_CLIENT_ID = "device-client";
+    const token = await signJwt(key, claims({ aud: "device-client", "cognito:groups": ["starkeep-users"] }));
+    expect((await handler(event(`sk_token=${token}`))).isAuthorized).toBe(false);
+  });
+
   it("a wrong-issuer token", async () => {
     const token = await signJwt(key, claims({ iss: "https://evil.example.com/pool" }));
     expect((await handler(event(`sk_token=${token}`))).isAuthorized).toBe(false);

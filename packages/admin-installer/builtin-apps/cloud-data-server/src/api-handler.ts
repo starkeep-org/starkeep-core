@@ -82,6 +82,7 @@ import {
   SETTINGS_TYPE_ID,
   DEPLOYMENT_SETTINGS_ROUTE,
   DEVICE_SELF_ROUTE,
+  AUTH_CONFIG_ROUTE,
   stampFor,
   hasMetadataTable,
 } from "@starkeep/protocol-primitives";
@@ -164,7 +165,7 @@ import {
 } from "@starkeep/storage-adapter";
 import type { StoredAvailability } from "@starkeep/storage-adapter";
 import { ok, clientErr, type APIGatewayEvent, type LambdaContext } from "./handler-utils.js";
-import { userPoolConfig, verifyUserToken } from "./verify-user-token.js";
+import { devicePoolConfig, userPoolConfig, verifyUserToken } from "./verify-user-token.js";
 import {
   loadAccessGrants,
   loadDeclaredLabelKeys,
@@ -2408,6 +2409,15 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       return ok({ status: "ok" });
     }
 
+    // GET /auth/config — how a device signs in, for a desktop or phone that
+    // knows only this cloud's address. Public: a region, a pool id and a
+    // client id are in every token the pool issues, and none is a secret.
+    if (method === "GET" && rawPath === AUTH_CONFIG_ROUTE) {
+      const pool = devicePoolConfig();
+      if (!pool) return clientErr("Device sign-in is not set up on this cloud", 503);
+      return ok({ region: pool.region, userPoolId: pool.userPoolId, deviceClientId: pool.userPoolClientId });
+    }
+
     // All other routes require /apps/{appId}/...
     const parsed = parseAppPath(rawPath);
     if (!parsed) return clientErr("Not found", 404);
@@ -2428,13 +2438,16 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (typeof value === "string") normalizedHeaders[key.toLowerCase()] = value;
     }
 
-    // Two callers, two primitives, one message. A *device* presents an Ed25519
-    // signature over the same bytes an app HMACs; a server presents the HMAC.
-    // The device branch is taken on the presence of the device id header and
-    // never falls back to the HMAC path — a device whose key is unknown or
-    // revoked must be denied, not given a second chance at a shared secret it
-    // should not have.
+    // Three callers. A *paired device* presents an Ed25519 signature over the
+    // same bytes an app HMACs; a *signed-in device* presents an ID token from
+    // the pool's device client and nothing else; a *server* presents the HMAC
+    // and the user's token. The device branches are taken on the presence of
+    // their headers and never fall back to the HMAC path — a device whose
+    // credential is unknown or revoked must be denied, not given a second
+    // chance at a shared secret it should not have.
     const deviceId = normalizedHeaders["x-starkeep-device-id"];
+    const userTokenHeader = normalizedHeaders["x-starkeep-user-token"];
+    const signedInDevice = !deviceId && !!userTokenHeader && !normalizedHeaders["x-starkeep-app-sig"];
     /** The device that signed this request, when a device did. */
     let callingDevice: (CachedDeviceKey & { deviceId: string }) | null = null;
     /**
@@ -2495,6 +2508,43 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // pairing time (see CachedDeviceKey.userId), so the signature already
       // names the person. The requirement below is the same requirement in the
       // other of its two shapes.
+    } else if (signedInDevice) {
+      // A signed-in desktop or phone: an ID token alone, with no app signature.
+      //
+      // What makes a bare token safe here is its `aud`. Only the pool's device
+      // client is accepted. Cloud app Lambdas hold users' tokens from the
+      // admin client, and app code is untrusted, so a token they forward
+      // without their own HMAC must not act as Drive — the verifier below
+      // refuses any token another client issued. The identity pool does not
+      // trust the device client either, so the same token reaches no AWS role.
+      const devicePool = devicePoolConfig();
+      if (!devicePool) {
+        return clientErr("Device sign-in is not set up on this cloud", 401);
+      }
+      const claims = await verifyUserToken(userTokenHeader!, devicePool);
+      if (!claims) {
+        return clientErr("Invalid or expired device token", 401);
+      }
+      // A device acts only as an installed app, so a typo'd or uninstalled
+      // appId is rejected before any role assumption.
+      if (!(await loadAppHmacSecret(appId))) {
+        return clientErr(`Unknown app: ${appId}`, 401);
+      }
+      // One device client serves desktops and phones alike, so a signed-in
+      // device holds the desktop's scope: Drive and every cloud-installed app,
+      // through the sync routes alone.
+      if (!deviceMayCall("desktop", method, subPath) || subPath === DEVICE_SELF_ROUTE) {
+        return clientErr(`A signed-in device may not call ${method} ${subPath}`, 403);
+      }
+      const writeRefusal = deviceWriteRefusal(method, subPath, bodyBytes);
+      if (writeRefusal) return clientErr(writeRefusal, 403);
+      // The 15-minute ID token carries the groups, so removing a user from the
+      // data group stops their devices within one token lifetime, with no
+      // lookup here.
+      if (!groupsMayUseData(claims.groups)) {
+        return clientErr("This account has no data library on this cloud", 403);
+      }
+      subjectUserId = claims.sub;
     } else {
       const hmacSecret = await loadAppHmacSecret(appId);
       if (!hmacSecret) {

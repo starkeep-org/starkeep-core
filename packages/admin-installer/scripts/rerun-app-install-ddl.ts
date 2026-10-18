@@ -25,14 +25,15 @@
  */
 
 import "@starkeep/app-client/load-env";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { appManifestSchema } from "@starkeep/admin-manifest";
-import { roleChain, type AwsCredentials } from "../src/session";
+import { roleChain } from "../src/session";
 import { attachTempInstallDdlPolicy, detachTempInstallDdlPolicy } from "../src/iam";
 import { runAppInstallDdl, type DsqlDdlOptions } from "../src/dsql-ddl";
+import { adminBaseCredentials } from "./admin-credentials";
 
 interface StarkeepConfig {
   accountId: string;
@@ -56,36 +57,6 @@ function loadStarkeepConfig(): StarkeepConfig {
  * fresh session off these immediately, so a far-future stamp is honest about
  * what is known rather than a guess at a real expiry.
  */
-function loadBaseCreds(): AwsCredentials {
-  const neverExpires = new Date(8640000000000000 / 2);
-  const { AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN } = process.env;
-  if (AWS_ACCESS_KEY_ID && AWS_SECRET_ACCESS_KEY) {
-    return {
-      accessKeyId: AWS_ACCESS_KEY_ID,
-      secretAccessKey: AWS_SECRET_ACCESS_KEY,
-      sessionToken: AWS_SESSION_TOKEN ?? "",
-      expiration: neverExpires,
-    };
-  }
-  const cached = join(homedir(), ".starkeep", "cloud-credentials.json");
-  if (existsSync(cached)) {
-    const raw = JSON.parse(readFileSync(cached, "utf8")) as Partial<AwsCredentials> & {
-      expiration?: string;
-    };
-    if (!raw.accessKeyId || !raw.secretAccessKey) {
-      throw new Error(`${cached} carries no access key; sign in via admin-web.`);
-    }
-    return {
-      accessKeyId: raw.accessKeyId,
-      secretAccessKey: raw.secretAccessKey,
-      sessionToken: raw.sessionToken ?? "",
-      expiration: raw.expiration ? new Date(raw.expiration) : neverExpires,
-    };
-  }
-  throw new Error(
-    "No AWS credentials: set AWS_* env vars or sign in via admin-web (which writes ~/.starkeep/cloud-credentials.json).",
-  );
-}
 
 /** Built-in manifests this package can resolve on its own. */
 function builtinManifestPath(appId: string): string | null {
@@ -137,8 +108,10 @@ async function main(): Promise<void> {
 
   const cfg = loadStarkeepConfig();
   const region = cfg.region ?? "us-east-2";
+  const base = await adminBaseCredentials();
   const managerCreds = await roleChain([cfg.managerRoleArn], {
-    baseCredentials: loadBaseCreds(),
+    // The identity pool's credentials last an hour; AWS enforces the real expiry.
+    baseCredentials: { ...base, sessionToken: base.sessionToken ?? "", expiration: new Date(Date.now() + 3_600_000) },
   });
 
   // Same attach / run / detach shape as the orchestrator, through the same

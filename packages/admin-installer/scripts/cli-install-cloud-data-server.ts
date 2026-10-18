@@ -54,6 +54,8 @@ interface StarkeepConfig {
   accountId?: string;
   userPoolId: string;
   userPoolClientId: string;
+  /** The bootstrap's DeviceUserPoolClientId output. */
+  deviceUserPoolClientId?: string;
   identityPoolId: string;
   permissionsBoundaryArn?: string;
   foundationalPermissionsBoundaryArn?: string;
@@ -99,6 +101,17 @@ const nonInteractive = flags.includes("--non-interactive");
 const config = loadConfig();
 const region = regionFromUserPoolId(config.userPoolId);
 const stackPrefix = config.stackPrefix;
+// Desktops and phones sign in through the bootstrap's device client, and the
+// broker accepts their tokens only with its id. A config from before the client
+// existed needs the bootstrap stack updated and the new output copied in.
+const deviceUserPoolClientId = config.deviceUserPoolClientId;
+if (!deviceUserPoolClientId) {
+  console.error("Error: ~/.starkeep/config.json has no deviceUserPoolClientId.");
+  console.error(
+    "Update the bootstrap stack, then copy its DeviceUserPoolClientId output into admin-web's Cognito step.",
+  );
+  process.exit(1);
+}
 
 if (nonInteractive) {
   const { AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN } = process.env;
@@ -204,6 +217,7 @@ const outputs = await installCloudDataServer({
   pulumiStateBucket,
   userPoolId: config.userPoolId,
   userPoolClientId: config.userPoolClientId,
+  deviceUserPoolClientId,
   // The cloud e2e harness passes --ephemeral to provision disposable infra and
   // skip the production data-protection hardening (versioning/SSE/PAB/deletion-
   // protect). A CLI flag — not an env var — so it can't leak in via the
