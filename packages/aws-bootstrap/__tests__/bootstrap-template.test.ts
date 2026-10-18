@@ -145,7 +145,7 @@ describe("trust policies (who can assume which role)", () => {
       }>;
     };
     // No default role: a user who matches no rule gets no credentials.
-    expect(props.Roles).toBeUndefined();
+    expect(props.Roles).toEqual({});
     const mapping = props.RoleMappings["userpool"]!;
     expect(mapping.Type).toBe("Rules");
     expect(mapping.AmbiguousRoleResolution).toBe("Deny");
