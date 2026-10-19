@@ -56,7 +56,6 @@ import {
   LABEL_QUERY_TARGET,
 } from "../../packages/storage-adapter/src/database/label-find.js";
 import { createSyncSupervisor, DRIVE_APP_ID, type SyncSupervisor } from "./sync-supervisor.js";
-import { createDeviceKeyFile, loadDeviceKeyFile } from "./device-key-file.js";
 import {
   typeCategory,
   isCategoryId,
@@ -86,13 +85,10 @@ import {
   createCloudTokenSource,
   createCognitoClient,
   DATA_GROUP,
-  deviceFingerprint,
-  encodePairingRequest,
   fetchDeviceAuthConfig,
   idTokenClaims,
   isRejection,
   LOCAL_USER_SEGMENT,
-  MAX_DEVICE_LABEL_LENGTH,
   endReplacedSession,
   revokePendingSignOut,
   signOut,
@@ -101,7 +97,6 @@ import {
   type CloudTokenSource,
   type CognitoClient,
   type DeviceAuthConfig,
-  type DeviceSigner,
 } from "@starkeep/protocol-primitives";
 import { openDeviceSessionFile } from "./device-session-file.js";
 import { isLoopbackHost } from "./loopback-host.js";
@@ -724,38 +719,11 @@ async function main() {
 
   const CLOUD_URL = starkeepConfig.apiGatewayUrl ?? undefined;
 
-  // This machine's device key, which signs every call to the cloud. Made by
-  // "Connect this machine" or by the pairing code flow, never at boot: a key
-  // nobody approves is only clutter. See `device-key-file.ts`.
-  let deviceKey = loadDeviceKeyFile(STARKEEP_DIR);
-  let deviceSigner: DeviceSigner | null = deviceKey?.signer ?? null;
-
-  /**
-   * Whether the cloud accepts this machine's key.
-   *
-   * - `no-key`: the machine has no key yet.
-   * - `pending`: the cloud does not know the key; an admin has not approved it.
-   * - `approved`: the cloud answered with this device's record.
-   * - `unknown`: the cloud could not be asked, or has not been yet.
-   * - `bound-elsewhere`: the cloud approved the key for a different user than
-   *   the one this library belongs to, so sync stays off.
-   */
-  type DeviceApproval =
-    | { readonly state: "no-key" | "pending" | "unknown" }
-    | { readonly state: "bound-elsewhere"; readonly message: string }
-    | {
-        readonly state: "approved";
-        readonly userId: string | null;
-        readonly label: string | null;
-        readonly kind: string;
-      };
-  let deviceApproval: DeviceApproval = { state: deviceSigner ? "unknown" : "no-key" };
-
-  // This machine's sign-in through the pool's device client. While signed in,
-  // every call to the cloud carries the ID token, and the paired key above is
-  // used only by a machine that has not signed in yet. See
-  // `device-session-file.ts` for what is stored, and `@starkeep/protocol-primitives`'
-  // device-session module for the sign-in, refresh and sign-out rules.
+  // This machine's sign-in through the pool's device client: its only
+  // credential with the cloud. While signed in, every call to the cloud carries
+  // the ID token; signed out, nothing syncs. See `device-session-file.ts` for
+  // what is stored, and `@starkeep/protocol-primitives`' device-session module
+  // for the sign-in, refresh and sign-out rules.
   const deviceSession = openDeviceSessionFile(STARKEEP_DIR);
 
   /**
@@ -882,7 +850,7 @@ async function main() {
   // tables (registry, grants) that have no adapter wrapper.
   const localDb = databaseAdapter.getRawDatabase();
   // The segment every key this library writes carries: the user a cloud bound
-  // it to, or `local` until one does. `checkDeviceApproval` binds it.
+  // it to, or `local` until one does. `checkSession` binds it.
   let libraryUser = libraryUserSegment(localDb);
 
   // The node's residency: every file no stand-in can replace, every stand-in
@@ -1025,12 +993,10 @@ async function main() {
       afterDriveDrain: acquireWanted,
       localDb: databaseAdapter.getRawDatabase(),
       cloudUrl: CLOUD_URL,
-      // While signed in, every call carries the device token; otherwise a
-      // paired machine signs with its device key. Accessors rather than values,
-      // because both change while the server runs — see makeSignerFor in
-      // sync-supervisor.ts.
+      // While signed in, every call carries the device token. An accessor
+      // rather than a value, because the sign-in changes while the server
+      // runs — see makeSignerFor in sync-supervisor.ts.
       getTokenSource: activeTokenSource,
-      getDeviceSigner: () => deviceSigner,
       listInstalledApps: () =>
         listAppRegistry(localDb).map((row) => ({
           appId: row.appId,
@@ -1099,85 +1065,44 @@ async function main() {
   // sync loops (the always-on Drive channel + per-app channels). New installs
   // via /admin/apps/install call `supervisor.rescan()` to pick up the new app.
   //
-  // Sync starts once the cloud accepts this machine's key. Until an admin
-  // approves it, every exchange would 401 and back off, and nothing would
-  // wake the engines once approval landed — so a machine with a pending key
-  // asks `device/self` every ten seconds instead, and starts on the first
-  // answer.
+  // Sync starts once this machine is signed in and its library is bound to the
+  // signed-in user. Signed out, every exchange would 401 and back off.
   let supervisorStarted = false;
-  let approvalPoll: NodeJS.Timeout | null = null;
-
-  /** Ask the cloud whether it accepts this machine's key, and start sync when it does. */
-  async function checkDeviceApproval(): Promise<DeviceApproval> {
-    if (!supervisor || !deviceSigner) {
-      deviceApproval = { state: deviceSigner ? "unknown" : "no-key" };
-      return deviceApproval;
-    }
-    try {
-      const self = await supervisor.readDeviceSelf();
-      deviceApproval = self.approved
-        ? { state: "approved", userId: self.userId, label: self.label, kind: self.kind }
-        : { state: "pending" };
-    } catch (err) {
-      console.warn(`[device] could not ask the cloud about this machine's key: ${String(err)}`);
-      deviceApproval = { state: "unknown" };
-    }
-    if (deviceApproval.state === "approved") {
-      deviceApproval = await bindToApprovedUser(deviceApproval);
-    }
-    if (deviceApproval.state === "approved" || deviceApproval.state === "bound-elsewhere") {
-      if (approvalPoll) {
-        clearInterval(approvalPoll);
-        approvalPoll = null;
-      }
-      startOrKickSupervisor();
-    } else if (!approvalPoll) {
-      approvalPoll = setInterval(() => void checkDeviceApproval(), 10_000);
-      approvalPoll.unref();
-    }
-    return deviceApproval;
-  }
 
   /**
-   * Bind this library to the user the cloud approved the key for, before any
-   * sync. Every key then carries that user's segment, as the cloud requires.
-   * The pass runs on every approval, so it also sweeps up a write that built
-   * its key under `local` while the first pass ran. A cloud that names another
-   * user than the library's stops sync: the two libraries must not mix.
+   * Bind this library to the signed-in user, before any sync. Every key then
+   * carries that user's segment, as the cloud requires. The pass runs on every
+   * check, so it also sweeps up a write that built its key under `local` while
+   * the first pass ran. A user other than the library's stops sync: the two
+   * libraries must not mix.
    */
-  async function bindToApprovedUser(
-    approval: Extract<DeviceApproval, { state: "approved" }>,
-  ): Promise<DeviceApproval> {
-    if (!approval.userId) {
-      return { state: "bound-elsewhere", message: "The cloud approved this machine for no user. Pair it again." };
-    }
+  async function bindToUser(userId: string): Promise<{ readonly ok: true } | { readonly ok: false; readonly message: string }> {
     try {
-      const report = bindLibrary(localDb, objectsBasePath, approval.userId);
+      const report = bindLibrary(localDb, objectsBasePath, userId);
       if (libraryUser !== report.userId || report.movedDirs > 0 || report.rewrittenKeys > 0) {
         console.log(
-          `[device] bound this library to user ${report.userId}: ` +
+          `[auth] bound this library to user ${report.userId}: ` +
             `${report.movedDirs} folders moved, ${report.rewrittenKeys} keys rewritten`,
         );
       }
       libraryUser = report.userId;
-      return approval;
+      return { ok: true };
     } catch (err) {
       if (!(err instanceof LibraryBoundElsewhereError)) throw err;
-      console.error(`[device] ${err.message}`);
+      console.error(`[auth] ${err.message}`);
       // Sync that already runs stops for good: a stopped supervisor does not
       // start again, so the machine syncs again only after a restart.
       if (supervisorStarted) {
         await supervisor?.stop();
-        console.error("[device] sync stopped. Restart the local data server once this machine is paired for the right user.");
+        console.error("[auth] sync stopped. Restart the local data server once this machine signs in as the library's owner.");
       }
-      return { state: "bound-elsewhere", message: err.message };
+      return { ok: false, message: err.message };
     }
   }
 
-  /** Whether this machine holds a credential the cloud accepts for its own user. */
+  /** Whether this machine is signed in, with its library bound to the signed-in user. */
   function syncAllowed(): boolean {
-    if (sessionState.state === "signed-in") return sessionState.bound;
-    return deviceApproval.state === "approved";
+    return sessionState.state === "signed-in" && sessionState.bound;
   }
 
   // Set when sync stopped because the machine lost its credential (signed out,
@@ -1203,7 +1128,7 @@ async function main() {
     supervisor.kick();
   }
 
-  /** Stop sync when no credential is left. A paired key keeps it going. */
+  /** Stop sync when the machine's sign-in ends. */
   function pauseSyncWithoutCredential(): void {
     if (!supervisor || !supervisorStarted || syncAllowed()) return;
     supervisor.pause();
@@ -1240,16 +1165,14 @@ async function main() {
       clearInterval(sessionPoll);
       sessionPoll = null;
     }
-    const bound = await bindToApprovedUser({ state: "approved", userId, label: null, kind: "desktop" });
-    sessionState =
-      bound.state === "approved"
-        ? { state: "signed-in", email, userId, bound: true }
-        : { state: "bound-elsewhere", email, message: bound.state === "bound-elsewhere" ? bound.message : "" };
+    const bound = await bindToUser(userId);
+    sessionState = bound.ok
+      ? { state: "signed-in", email, userId, bound: true }
+      : { state: "bound-elsewhere", email, message: bound.message };
     startOrKickSupervisor();
     return sessionState;
   }
 
-  await checkDeviceApproval();
   await checkSession();
 
   // Re-read the deployment's settings once a minute, so a change made in
@@ -1393,10 +1316,6 @@ async function main() {
       // divergent buckets — and carries no record id, filename or content, which
       // is what makes it safe on a surface with no app identity.
       /^\/sync\/verify$/,
-      // This machine's device key: its public half, its pairing code and
-      // whether the cloud accepts it. An operator control over this machine,
-      // like the ceilings. Nothing here returns the private half.
-      /^\/device(\/(key|check))?$/,
     ];
     const TOKEN_AUTHORIZED_PATTERNS = [
       /^\/data\/files\/upload\/[^/]+$/,
@@ -1618,12 +1537,17 @@ async function main() {
           json(res, { error: state.message });
           return;
         }
+        // The settings read at startup failed while the machine was signed
+        // out, and the next periodic read is up to a minute away. Read them
+        // now, so this node stamps with the deployment's values from its first
+        // write after sign-in. A failed read keeps the cached value.
+        await librarySettings.refresh();
         json(res, { ok: true, email: signedInEmail, userId });
         return;
       }
 
       // POST /auth/sign-out — sign this machine out: locally at once, and at
-      // the pool as soon as it answers. Sync stops unless a paired key remains.
+      // the pool as soon as it answers. Sync stops.
       if (path === "/auth/sign-out" && req.method === "POST") {
         const stored = await deviceSession.store.read();
         const storedAuth = deviceSession.auth();
@@ -1717,11 +1641,11 @@ async function main() {
       }
 
       // GET /cloud/data/types and /cloud/data/records — read-only proxy to the
-      // cloud-data-server, with this machine's sign-in (or, until it signs in,
-      // its paired device key) as the calling app. The app (e.g. starkeep-drive) authenticates to *us* with
-      // its local HMAC as usual; we then sign as this machine for the cloud,
+      // cloud-data-server, with this machine's sign-in as the caller. The app
+      // (e.g. starkeep-drive) authenticates to *us* with its local HMAC as
+      // usual; we then present this machine's device token for the cloud,
       // exactly as the sync supervisor does (sync-supervisor.ts →
-      // makeSignerFor). The cloud lets a desktop device read these two routes
+      // makeSignerFor). The cloud lets a signed-in device read these two routes
       // and enforces the app's grants on them, so this exposes no data the app
       // couldn't already sync. Lets the Drive UI show the cloud-side view (what
       // actually pushed) next to the local view.
@@ -1739,29 +1663,20 @@ async function main() {
         // Refuse here rather than forward a request that can only come back
         // 401, so the Drive UI says why instead of quoting a status.
         const tokens = syncAllowed() ? activeTokenSource() : null;
-        if (!syncAllowed() || (!tokens && !deviceSigner)) {
+        if (!tokens) {
           res.writeHead(503);
           json(res, { error: "This machine is not signed in to the cloud yet — sign in from admin-web" });
           return;
         }
         const subPath = path.slice("/cloud".length); // "/data/types" | "/data/records"
-        let cloudHeaders: Record<string, string>;
-        if (tokens) {
-          // Signed in: the device token alone, as the sync channels send it.
-          const token = await tokens.current();
-          if (!token) {
-            res.writeHead(503);
-            json(res, { error: "This machine cannot reach the pool to refresh its sign-in" });
-            return;
-          }
-          cloudHeaders = { [USER_TOKEN_HEADER]: token };
-        } else {
-          // Paired: signed over the cloud sub-path (everything after
-          // /apps/{appId}), since the cloud verifier strips that prefix before
-          // checking the signature. The query string is excluded from the
-          // signed message (canonicalSignedPath).
-          cloudHeaders = deviceSigner!.signRequest(appId!, "GET", subPath, undefined);
+        // The device token alone, as the sync channels send it.
+        const token = await tokens.current();
+        if (!token) {
+          res.writeHead(503);
+          json(res, { error: "This machine cannot reach the pool to refresh its sign-in" });
+          return;
         }
+        const cloudHeaders: Record<string, string> = { [USER_TOKEN_HEADER]: token };
         const cloudUrl = `${CLOUD_URL.replace(/\/+$/, "")}/apps/${encodeURIComponent(appId!)}${subPath}${url.search}`;
         try {
           const cloudRes = await fetch(cloudUrl, { headers: cloudHeaders });
@@ -3470,61 +3385,6 @@ async function main() {
           knowsLibraryValue: librarySettings.knowsLibraryValue(),
           ranges: { canonicalThreshold: CANONICAL_THRESHOLD_RANGES, advisoryLongEdge: ADVISORY_LONG_EDGE_RANGE },
           libraryOriginals: originalBytesByCategory(localDb),
-        });
-        return;
-      }
-
-      // GET /device — this machine's device key as the operator sees it: its
-      // id, its public half, the fingerprint the admin confirms, the pairing
-      // code, and whether the cloud accepts it. Never the private half.
-      // POST /device/key — make the key, once. Body: { label? }.
-      // POST /device/check — ask the cloud again now, and start sync if it
-      // accepts the key.
-      if (path === "/device" || path === "/device/key" || path === "/device/check") {
-        if (path === "/device/key" && req.method === "POST") {
-          if (!deviceKey) {
-            let body: { label?: unknown } = {};
-            try {
-              body = JSON.parse((await readBody(req)) || "{}") as { label?: unknown };
-            } catch {
-              res.writeHead(400);
-              json(res, { error: "Body is not valid JSON" });
-              return;
-            }
-            const label =
-              typeof body.label === "string" && body.label.trim() !== "" ? body.label.trim() : null;
-            if (label !== null && label.length > MAX_DEVICE_LABEL_LENGTH) {
-              res.writeHead(400);
-              json(res, { error: `A label can be at most ${MAX_DEVICE_LABEL_LENGTH} characters` });
-              return;
-            }
-            deviceKey = createDeviceKeyFile(STARKEEP_DIR, label);
-            deviceSigner = deviceKey.signer;
-            console.log(`[device] made this machine's key ${deviceSigner.deviceId}`);
-          }
-          await checkDeviceApproval();
-        } else if (path === "/device/check" && req.method === "POST") {
-          await checkDeviceApproval();
-        } else if (!(path === "/device" && req.method === "GET")) {
-          res.writeHead(405);
-          json(res, { error: "Method not allowed" });
-          return;
-        }
-        json(res, {
-          deviceId: deviceSigner?.deviceId ?? null,
-          publicKeySpki: deviceSigner?.publicKeySpki ?? null,
-          fingerprint: deviceSigner ? deviceFingerprint(deviceSigner.publicKeySpki) : null,
-          pairingCode: deviceSigner
-            ? encodePairingRequest({
-                deviceId: deviceSigner.deviceId,
-                publicKeySpki: deviceSigner.publicKeySpki,
-                label: deviceKey?.label ?? null,
-                kind: "desktop",
-              })
-            : null,
-          label: deviceKey?.label ?? null,
-          approval: deviceApproval,
-          cloudUrl: CLOUD_URL ?? null,
         });
         return;
       }

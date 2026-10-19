@@ -36,20 +36,13 @@ import {
   contentHashFromDataRecordObjectKey,
   AUTH_CONFIG_ROUTE,
   DEPLOYMENT_SETTINGS_ROUTE,
-  DEVICE_SELF_ROUTE,
   type AnyRecord,
   type DeploymentSettings,
 } from "@starkeep/protocol-primitives";
 import { sha256HexToBase64 } from "@starkeep/storage-adapter";
 import { createFakePool, FAKE_DEVICE_CLIENT_ID, FAKE_POOL_ID, FAKE_POOL_REGION, type FakePool } from "./fake-pool.js";
 import { createAppSpecificFactory, stampUnstampedOriginals } from "@starkeep/shared-space-api";
-import {
-  createHash,
-  createHmac,
-  createPublicKey,
-  timingSafeEqual,
-  verify as verifySignature,
-} from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
   SqliteDatabaseAdapter,
   SqliteAppSyncableNamespaceStore,
@@ -108,18 +101,17 @@ export interface FakeCloudFailures {
 
 /**
  * The one user the fake cloud serves. Every key it builds carries this
- * segment, and an auto-approved device is paired for this user, so a local
- * data server that syncs with it binds its library to this user.
+ * segment, and its default account signs in as this user, so a local data
+ * server that syncs with it binds its library to this user.
  */
 export const FAKE_CLOUD_USER_ID = "test-user";
 
-/** A device record, as `/<prefix>/platform/devices/<id>` holds one. */
-export interface FakeCloudDevice {
-  readonly publicKeySpki: string;
-  readonly userId: string | null;
-  readonly kind: "phone" | "desktop";
-  readonly label: string | null;
-}
+/**
+ * The account every fake cloud's pool holds from the start, for
+ * {@link FAKE_CLOUD_USER_ID}. The test harness signs a local data server in
+ * with it whenever the server has a cloud, as a person signs a machine in.
+ */
+export const FAKE_CLOUD_ACCOUNT = { email: "owner@example.com", password: "Owner-password-1" } as const;
 
 export interface FakeCloud {
   url: string;
@@ -165,26 +157,16 @@ export interface FakeCloud {
    */
   setDeploymentSettings(settings: DeploymentSettings | null): void;
   /**
-   * How the fake cloud treats a device it has no record of. While
-   * `autoApprove` is true, as by default, it accepts any device id unchecked
-   * and answers `device/self` for it, so a test local data server syncs with
-   * no pairing step. A test of pairing turns it off.
-   */
-  devicePolicy: { autoApprove: boolean };
-  /** Record a device as admin-web would. Its signatures are then verified. */
-  registerDevice(deviceId: string, record: FakeCloudDevice): void;
-  /**
-   * The fake user pool behind the device client. Add accounts with
-   * `pool.addUser`; a local data server reaches it when started with
-   * `STARKEEP_COGNITO_ENDPOINT` set to {@link cognitoEndpoint}. The cloud
-   * answers `/auth/config` with this pool, and accepts the ID tokens it issues
-   * alone, as the real device-token branch does.
+   * The fake user pool behind the device client. It holds
+   * {@link FAKE_CLOUD_ACCOUNT} from the start; add more with `pool.addUser`. A
+   * local data server reaches it when started with `STARKEEP_COGNITO_ENDPOINT`
+   * set to {@link cognitoEndpoint}, which the harness does. The cloud answers
+   * `/auth/config` with this pool, and accepts the ID tokens it issues alone,
+   * as the real device-token branch does.
    */
   pool: FakePool;
   /** The fake pool's API endpoint. */
   cognitoEndpoint: string;
-  /** Delete a device's record. The device is refused from then on. */
-  revokeDevice(deviceId: string): void;
   /** Shared records currently in the cloud DB. */
   sharedRecords(): Promise<AnyRecord[]>;
   /** Rows in a cloud-side app-syncable table (empty if table absent). */
@@ -253,39 +235,8 @@ export async function startFakeCloud(): Promise<FakeCloud> {
   // wants real signature checks registers the app's secret via setAppSecret.
   const appSecrets = new Map<string, string>();
 
-  // Device records. A registered device's signature is verified as the real
-  // cloud verifies it; an unregistered one passes while `autoApprove` holds.
-  const devices = new Map<string, FakeCloudDevice>();
-  const devicePolicy = { autoApprove: true };
   const pool = createFakePool();
-
-  /** Mirror of the real cloud's `validateDeviceSignature`. */
-  function verifyDeviceSignature(
-    appId: string,
-    method: string,
-    subPath: string,
-    body: Buffer,
-    headers: IncomingMessage["headers"],
-    device: FakeCloudDevice,
-  ): boolean {
-    const sig = headers["x-starkeep-device-sig"];
-    const ts = headers["x-starkeep-app-ts"];
-    if (typeof sig !== "string" || typeof ts !== "string") return false;
-    const tsMs = Number(ts);
-    if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > APP_SIG_MAX_SKEW_MS) return false;
-    const upper = method.toUpperCase();
-    const signedBody = upper === "GET" || upper === "HEAD" ? Buffer.alloc(0) : body;
-    const message = Buffer.concat([
-      Buffer.from(`${appId}:${upper}:${canonicalSignedPath(subPath)}:${tsMs}:`, "utf8") as unknown as Uint8Array,
-      signedBody as unknown as Uint8Array,
-    ]);
-    try {
-      const key = createPublicKey({ key: Buffer.from(device.publicKeySpki, "base64"), type: "spki", format: "der" });
-      return verifySignature(null, message as unknown as Uint8Array, key, Buffer.from(sig, "base64") as unknown as Uint8Array);
-    } catch {
-      return false;
-    }
-  }
+  pool.addUser(FAKE_CLOUD_ACCOUNT.email, FAKE_CLOUD_ACCOUNT.password, { sub: FAKE_CLOUD_USER_ID });
 
   /**
    * Mirror of the real cloud verifier (cloud-data-server/api-handler.ts →
@@ -497,13 +448,12 @@ export async function startFakeCloud(): Promise<FakeCloud> {
     const rawBody =
       req.method === "POST" || req.method === "PUT" ? await readBody(req) : Buffer.alloc(0);
 
-    // A device signs with its own key; anything else signs with the app's
-    // HMAC. The HMAC check is opt-in per app via setAppSecret (see
-    // verifyAppHmac), off by default so rubber-stamp sync tests are unaffected.
-    const deviceIdHeader = req.headers["x-starkeep-device-id"];
+    // A signed-in device presents the pool's token alone; anything else signs
+    // with the app's HMAC. The HMAC check is opt-in per app via setAppSecret
+    // (see verifyAppHmac), off by default so rubber-stamp sync tests are
+    // unaffected.
     const userTokenHeader = req.headers["x-starkeep-user-token"];
-    let callingDevice: (FakeCloudDevice & { deviceId: string }) | null = null;
-    if (typeof deviceIdHeader !== "string" && typeof userTokenHeader === "string" && !req.headers["x-starkeep-app-sig"]) {
+    if (typeof userTokenHeader === "string" && !req.headers["x-starkeep-app-sig"]) {
       // A signed-in device: the pool's token alone, as the real device-token
       // branch accepts it. This cloud serves one user, so the token must be
       // theirs.
@@ -520,24 +470,6 @@ export async function startFakeCloud(): Promise<FakeCloud> {
         sendJson(res, 403, { error: `the fake cloud serves only ${FAKE_CLOUD_USER_ID}` });
         return;
       }
-      if (rest === DEVICE_SELF_ROUTE) {
-        sendJson(res, 403, { error: "A signed-in device has no device record" });
-        return;
-      }
-    } else if (typeof deviceIdHeader === "string") {
-      const registered = devices.get(deviceIdHeader);
-      if (registered) {
-        if (!verifyDeviceSignature(appId, req.method ?? "GET", rest, rawBody, req.headers, registered)) {
-          sendJson(res, 401, { error: "Invalid device signature" });
-          return;
-        }
-        callingDevice = { ...registered, deviceId: deviceIdHeader };
-      } else if (devicePolicy.autoApprove) {
-        callingDevice = { deviceId: deviceIdHeader, publicKeySpki: "", userId: FAKE_CLOUD_USER_ID, kind: "desktop", label: null };
-      } else {
-        sendJson(res, 401, { error: "Unknown or revoked device" });
-        return;
-      }
     } else {
       const registeredSecret = appSecrets.get(appId);
       if (
@@ -547,16 +479,6 @@ export async function startFakeCloud(): Promise<FakeCloud> {
         sendJson(res, 401, { error: "Invalid signature" });
         return;
       }
-    }
-
-    if (rest === DEVICE_SELF_ROUTE && req.method === "GET") {
-      if (appId !== "starkeep-drive" || !callingDevice) {
-        sendJson(res, 404, { error: "Not found" });
-        return;
-      }
-      const { deviceId, userId, label, kind } = callingDevice;
-      sendJson(res, 200, { deviceId, userId, label, kind });
-      return;
     }
 
     if (rest === DEPLOYMENT_SETTINGS_ROUTE && req.method === "GET") {
@@ -752,15 +674,8 @@ export async function startFakeCloud(): Promise<FakeCloud> {
     failures,
     latency,
     peakConcurrentExchanges: (appId) => peakExchanges.get(appId) ?? 0,
-    devicePolicy,
     pool,
     cognitoEndpoint: `${url}/cognito/`,
-    registerDevice: (deviceId, record) => {
-      devices.set(deviceId, record);
-    },
-    revokeDevice: (deviceId) => {
-      devices.delete(deviceId);
-    },
     setDeploymentSettings: (settings) => {
       deploymentSettings = settings;
     },

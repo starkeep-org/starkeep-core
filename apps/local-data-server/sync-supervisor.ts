@@ -1,11 +1,9 @@
 import type { RawDatabase } from "@starkeep/storage-adapter";
 import {
   DEPLOYMENT_SETTINGS_ROUTE,
-  DEVICE_SELF_ROUTE,
   withUserToken,
   type AnyRecord,
   type CloudTokenSource,
-  type DeviceSigner,
 } from "@starkeep/protocol-primitives";
 import {
   HttpObjectStorageAdapter,
@@ -113,18 +111,11 @@ export interface SyncSupervisorOptions {
   /**
    * This machine's sign-in, read at request time, or null when it is signed
    * out. While signed in, every call to the cloud carries the device client's
-   * ID token and nothing else; the token names the person it syncs for.
-   * Preferred over the device key below whenever both exist.
+   * ID token and nothing else; the token names the person it syncs for. An
+   * accessor rather than a value, because the sign-in changes while the server
+   * runs. Signed out, no engine starts.
    */
   readonly getTokenSource: () => CloudTokenSource | null;
-  /**
-   * This machine's paired device key, read at request time, or null when it
-   * has none. Used only while the machine is not signed in, so a paired machine
-   * keeps syncing until its owner signs in. An accessor rather than a value,
-   * because the key and the sign-in can both change while the server runs.
-   * Without either credential no engine starts.
-   */
-  readonly getDeviceSigner: () => DeviceSigner | null;
 }
 
 interface EngineEntry {
@@ -267,16 +258,6 @@ export interface SyncSupervisor {
    * engine starts.
    */
   readDeploymentSettings(): Promise<unknown>;
-
-  /**
-   * This machine's device record as the cloud holds it. `approved` is false
-   * when the cloud does not know the key yet — an admin has not approved it —
-   * and the call throws when the cloud cannot answer.
-   */
-  readDeviceSelf(): Promise<
-    | { readonly approved: true; readonly userId: string | null; readonly label: string | null; readonly kind: string }
-    | { readonly approved: false }
-  >;
 }
 
 /**
@@ -347,31 +328,24 @@ export function createSyncSupervisor(
     residency,
     afterDriveDrain,
     getTokenSource,
-    getDeviceSigner,
   } = options;
 
   const engines = new Map<string, EngineEntry>();
   let paused = false;
   const cloudUrlBase = cloudUrl.replace(/\/+$/, "");
 
-  /** Whether this machine holds any credential the cloud would accept. */
+  /** Whether this machine is signed in, which is the one credential the cloud accepts. */
   function hasCredential(): boolean {
-    return getTokenSource() !== null || getDeviceSigner() !== null;
+    return getTokenSource() !== null;
   }
 
   // Per-engine credentials, decided per request so a sign-in or sign-out takes
-  // effect without rebuilding the engines.
+  // effect without rebuilding the engines. The channel's `fetch` (below) adds
+  // the device client's ID token to every data-plane request, and the signer
+  // adds nothing: the cloud's device-token branch accepts the token alone.
   //
-  // - **Signed in:** the channel's `fetch` (below) adds the device client's ID
-  //   token to every data-plane request, and the signer adds nothing. The
-  //   cloud's device-token branch accepts the token alone.
-  // - **Paired only:** the signer adds this machine's device signature over
-  //   the same bytes an app would HMAC (see `devices/device-key.ts` in
-  //   protocol-primitives and the verifier in
-  //   cloud-data-server/src/api-handler.ts).
-  //
-  // Hard-fail with neither. An engine that sent unsigned traffic would 401 on
-  // every tick and back off, and the cause would be easy to miss.
+  // Hard-fail when signed out. An engine that sent unsigned traffic would 401
+  // on every tick and back off, and the cause would be easy to miss.
   function makeSignerFor(
     appId: string,
   ): (method: string, path: string, body?: string | Uint8Array) => Record<string, string> {
@@ -381,11 +355,9 @@ export function createSyncSupervisor(
           `Sign in from admin-web's "This machine" section.`,
       );
     }
-    return (method, path, body) => {
-      if (getTokenSource()) return {};
-      const signer = getDeviceSigner();
-      if (!signer) throw new Error("[sync] this machine signed out; sign in again to sync");
-      return signer.signRequest(appId, method, path, typeof body === "string" ? new TextEncoder().encode(body) : body);
+    return () => {
+      if (!getTokenSource()) throw new Error("[sync] this machine signed out; sign in again to sync");
+      return {};
     };
   }
 
@@ -785,22 +757,6 @@ export function createSyncSupervisor(
       if (!res.ok) throw new Error(`the cloud answered ${res.status} for the deployment's settings`);
       const body = (await res.json()) as { settings?: unknown };
       return body.settings ?? null;
-    },
-
-    async readDeviceSelf() {
-      // Always the paired key, never the sign-in: the record belongs to the key.
-      const signer = getDeviceSigner();
-      if (!signer) throw new Error("this machine has no device key");
-      const url = `${cloudUrlBase}/apps/${encodeURIComponent(DRIVE_APP_ID)}${DEVICE_SELF_ROUTE}`;
-      const res = await fetch(url, {
-        method: "GET",
-        headers: signer.signRequest(DRIVE_APP_ID, "GET", DEVICE_SELF_ROUTE, undefined),
-        signal: AbortSignal.timeout(CLOUD_READ_TIMEOUT_MS),
-      });
-      if (res.status === 401) return { approved: false } as const;
-      if (!res.ok) throw new Error(`the cloud answered ${res.status} for this machine's device record`);
-      const body = (await res.json()) as { userId?: string | null; label?: string | null; kind?: string };
-      return { approved: true, userId: body.userId ?? null, label: body.label ?? null, kind: body.kind ?? "desktop" } as const;
     },
 
     start() {

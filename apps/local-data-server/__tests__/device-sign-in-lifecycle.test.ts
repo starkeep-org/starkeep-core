@@ -1,8 +1,7 @@
 /**
  * A machine's sign-in over its life, against the fake cloud and its fake pool:
  * data written before the first sign-in, sign-out and sign-in again, a session
- * the pool ends, a start with the pool out of reach, and the move from a paired
- * key to a sign-in.
+ * the pool ends, and a start with the pool out of reach.
  *
  * `device-sign-in.test.ts` covers the first sign-in itself. The stale pool
  * ids, the account with no data library and the sign-out the pool did not hear
@@ -58,7 +57,7 @@ async function settle(app: InstalledApp): Promise<void> {
 function joinedMachine(cloud: FakeCloud, extra: Record<string, unknown> = {}, env: Record<string, string> = {}) {
   return startLocalDataServer({
     config: { apiGatewayUrl: cloud.url, pullIntervalMs: 600_000, pushDebounceMs: 50, ...extra },
-    deviceKey: false,
+    signIn: false,
     env: { STARKEEP_COGNITO_ENDPOINT: cloud.cognitoEndpoint, ...env },
   });
 }
@@ -66,7 +65,7 @@ function joinedMachine(cloud: FakeCloud, extra: Record<string, unknown> = {}, en
 describe("a machine that has not joined a cloud", () => {
   let server: LocalDataServer;
   beforeAll(async () => {
-    server = await startLocalDataServer({ config: {}, deviceKey: false });
+    server = await startLocalDataServer({ config: {}, signIn: false });
   }, 60_000);
   afterAll(async () => server?.stop());
 
@@ -161,7 +160,7 @@ describe("one machine's sign-in, from first sign-in to a session the pool ends",
     await server.stopKeepData();
     server = await startLocalDataServer({
       starkeepDir: server.starkeepDir,
-      deviceKey: false,
+      signIn: false,
       env: { STARKEEP_COGNITO_ENDPOINT: cloud.cognitoEndpoint },
     });
     drive = await builtinAppCreds(server, "starkeep-drive");
@@ -203,7 +202,7 @@ describe("a signed-in machine that starts while the pool is out of reach", () =>
     // Nothing listens on port 9: every call to the pool fails to connect.
     server = await startLocalDataServer({
       starkeepDir: server.starkeepDir,
-      deviceKey: false,
+      signIn: false,
       env: { STARKEEP_COGNITO_ENDPOINT: "http://127.0.0.1:9/" },
     });
 
@@ -328,62 +327,11 @@ describe("a sign-out the pool did not hear", () => {
     await server.stopKeepData();
     server = await startLocalDataServer({
       starkeepDir: server.starkeepDir,
-      deviceKey: false,
+      signIn: false,
       env: { STARKEEP_COGNITO_ENDPOINT: cloud.cognitoEndpoint },
     });
 
     await eventually(() => expect(cloud.pool.revoked.has(waiting)).toBe(true));
     await eventually(async () => expect(await pendingOnDisk()).toBeNull());
-  });
-});
-
-describe("a paired machine that signs in as the same user", () => {
-  let cloud: FakeCloud;
-  let server: LocalDataServer;
-  let drive: InstalledApp;
-  let pairedRecord: string;
-
-  beforeAll(async () => {
-    // The fake cloud approves the machine's key for its one user, as an admin
-    // would have before sign-in existed.
-    cloud = await startFakeCloud();
-    cloud.pool.addUser(EMAIL, PASSWORD, { sub: FAKE_CLOUD_USER_ID });
-    server = await startLocalDataServer({
-      config: { apiGatewayUrl: cloud.url, pullIntervalMs: 600_000, pushDebounceMs: 50 },
-      env: { STARKEEP_COGNITO_ENDPOINT: cloud.cognitoEndpoint },
-    });
-    drive = await builtinAppCreds(server, "starkeep-drive");
-  }, 60_000);
-
-  afterAll(async () => {
-    await server?.stop();
-    await cloud?.close();
-  });
-
-  it("syncs with its paired key before the sign-in", { timeout: 30_000 }, async () => {
-    const { record } = await createRecordWithBytes(drive, { bytes: "paired-bytes", fileName: "paired.jpg" });
-    pairedRecord = record.id;
-    await eventually(async () => {
-      await drive.fetch("/sync/now", { method: "POST" });
-      expect(await cloudIds(cloud)).toContain(pairedRecord);
-    }, { timeoutMs: 20_000 });
-  });
-
-  it("keeps syncing after the sign-in, and uploads nothing it already sent", { timeout: 30_000 }, async () => {
-    const res = await post(server, "/auth/login", { email: EMAIL, password: PASSWORD });
-    expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(await status(server)).toMatchObject({ state: "signed-in", libraryUserId: FAKE_CLOUD_USER_ID });
-
-    cloud.clearExchangeLog();
-    const { record } = await createRecordWithBytes(drive, { bytes: "signed-in-bytes", fileName: "after.jpg" });
-    await eventually(async () => {
-      await drive.fetch("/sync/now", { method: "POST" });
-      expect(await cloudIds(cloud)).toContain(record.id);
-    }, { timeoutMs: 20_000 });
-
-    const shipped = cloud.exchangeLog
-      .filter((e) => e.appId === "starkeep-drive")
-      .reduce((sum, e) => sum + e.inRecords, 0);
-    expect(shipped).toBe(1);
   });
 });

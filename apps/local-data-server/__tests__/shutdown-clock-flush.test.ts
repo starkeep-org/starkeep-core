@@ -52,6 +52,8 @@ describe("SIGTERM drains the HLC clock before closing the database", () => {
     // interval is long enough that no exchange is attempted during the test.
     const server: LocalDataServer = await startLocalDataServer({
       config: { apiGatewayUrl: "http://127.0.0.1:1/unused", pullIntervalMs: 600_000 },
+      // The address answers nothing, so there is no pool to sign in to.
+      signIn: false,
     });
     dirs.push(server.starkeepDir);
 

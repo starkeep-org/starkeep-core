@@ -226,10 +226,10 @@ export function defineMemberSteps(m: MemberStepsContext): void {
 
   it("the member's machine joins by address alone, and its first sign-in asks for a new password", async () => {
     // A member's machine after "Join": the cloud's address and nothing else.
-    // No pool ids, no device key, no cloud install of its own.
+    // No pool ids, no sign-in, no cloud install of its own.
     memberLds = await startLocalDataServer({
       config: { apiGatewayUrl: cloudAddress() },
-      deviceKey: false,
+      signIn: false,
     });
     memberDir = memberLds.starkeepDir;
     memberDrive = await driveCreds(memberLds.url);
@@ -348,7 +348,7 @@ export function defineMemberSteps(m: MemberStepsContext): void {
     // A restart asks the pool for a fresh token at once; the pool refuses the
     // revoked refresh token, and the machine shows it is signed out.
     await memberLds!.stopKeepData();
-    memberLds = await startLocalDataServer({ starkeepDir: memberDir!, deviceKey: false });
+    memberLds = await startLocalDataServer({ starkeepDir: memberDir!, signIn: false });
     await eventually(async () => expect(await memberStatus()).toMatchObject({ state: "signed-out" }), {
       timeoutMs: 60_000,
       intervalMs: 1_000,

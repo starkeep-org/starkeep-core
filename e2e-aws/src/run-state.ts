@@ -125,7 +125,6 @@ export function resetLocalNodeState(paths: RunPaths): void {
     "auth.json",
     "cloud-credentials.json",
     "device-session.json",
-    "device-key.json",
     "cloud-config.json",
     "objects",
     "app-creds",

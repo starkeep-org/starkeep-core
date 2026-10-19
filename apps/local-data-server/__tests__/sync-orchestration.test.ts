@@ -10,6 +10,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import {
+  FAKE_CLOUD_ACCOUNT,
   startLocalDataServer,
   startFakeCloud,
   type LocalDataServer,
@@ -262,7 +263,7 @@ describe("backoff (short tick interval)", () => {
   });
 });
 
-describe("device gate", () => {
+describe("sign-in gate", () => {
   let cloud: FakeCloud;
 
   beforeAll(async () => {
@@ -273,10 +274,10 @@ describe("device gate", () => {
     await cloud?.close();
   });
 
-  it("skips all exchanges on a machine with no device key", async () => {
+  it("skips all exchanges on a machine that is not signed in", async () => {
     const server = await startLocalDataServer({
       config: { apiGatewayUrl: cloud.url, pullIntervalMs: 100, pushDebounceMs: 25 },
-      deviceKey: false,
+      signIn: false,
     });
     try {
       const drive = await builtinAppCreds(server, "starkeep-drive");
@@ -298,35 +299,29 @@ describe("device gate", () => {
     }
   });
 
-  it("waits while no admin has approved the key, and starts once one has", async () => {
-    cloud.devicePolicy.autoApprove = false;
+  it("waits while signed out, and starts once someone signs the machine in", async () => {
     cloud.clearExchangeLog();
     const server = await startLocalDataServer({
       config: { apiGatewayUrl: cloud.url, pullIntervalMs: 100, pushDebounceMs: 25 },
+      signIn: false,
+      env: { STARKEEP_COGNITO_ENDPOINT: cloud.cognitoEndpoint },
     });
     try {
       const drive = await builtinAppCreds(server, "starkeep-drive");
       await sleep(400);
       expect((await syncStatus(drive)).enabled).toBe(false);
       expect(cloud.exchangeLog).toEqual([]);
-      const pending = (await (await fetch(`${server.url}/device`)).json()) as { approval: { state: string } };
-      expect(pending.approval.state).toBe("pending");
 
-      cloud.registerDevice(server.device!.deviceId, {
-        publicKeySpki: server.device!.publicKeySpki,
-        userId: "sub-1",
-        kind: "desktop",
-        label: null,
+      const signedIn = await fetch(`${server.url}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(FAKE_CLOUD_ACCOUNT),
       });
-      const checked = (await (await fetch(`${server.url}/device/check`, { method: "POST" })).json()) as {
-        approval: { state: string; userId: string };
-      };
-      expect(checked.approval).toMatchObject({ state: "approved", userId: "sub-1" });
+      expect(signedIn.status, await signedIn.clone().text()).toBe(200);
       expect((await syncStatus(drive)).enabled).toBe(true);
       await sleep(300);
       expect(cloud.exchangeLog.length).toBeGreaterThan(0);
     } finally {
-      cloud.devicePolicy.autoApprove = true;
       await server.stop();
     }
   });
