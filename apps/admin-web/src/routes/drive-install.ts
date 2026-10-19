@@ -2,13 +2,14 @@
  * Install (or re-install / update) the Starkeep Drive built-in app — the
  * User-Data-Owner identity for all shared-record sync.
  *
- * Mirrors app/api/cloud-data-server/install/route.ts: spawns
- * `packages/admin-installer/scripts/cli-install-drive.ts` as a child process
- * and streams its stdout/stderr to the browser via SSE. Must run AFTER the
+ * Mirrors the cloud-data-server install route: runs
+ * `packages/admin-installer/scripts/cli-install-drive.ts` as a detached
+ * process and streams its output to the browser via SSE (see
+ * `lib/install-stream.ts`). Must run AFTER the
  * cloud-data-server install (which writes the foundational outputs this CLI
  * reads from ~/.starkeep/config.json) — the wizard sequences the two passes.
  *
- * Request body: { accessKeyId, secretAccessKey, sessionToken }
+ * Request body: { accessKeyId, secretAccessKey, sessionToken, reattach?, resumeFrom? }
  *
  * Response: text/event-stream
  *   data:  <stdout/stderr line>
@@ -16,33 +17,15 @@
  *   event: error  data: { message: string, code?: "EXPIRED_TOKEN" }
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
 import { REPO_ROOT } from "../lib/exec-commands";
 import { getRegion } from "../lib/cloud-config";
-import { isCredentialFailureLine } from "../lib/credential-errors";
+import { installStream } from "../lib/install-stream";
 
 const STARKEEP_DIR = starkeepDir();
 const CONFIG_PATH = join(STARKEEP_DIR, "config.json");
-
-// Module-level store for an in-progress install (mirrors the cloud-data-server
-// route): when the browser suspends, the SSE connection drops but the child
-// keeps running; a reconnecting POST reattaches rather than spawning a dupe.
-let runningChild: ChildProcess | null = null;
-const runningChildListeners = new Map<symbol, (line: string) => void>();
-let runningChildDone: ((code: number | null) => void) | null = null;
-
-function broadcastLine(line: string): void {
-  for (const listener of runningChildListeners.values()) {
-    try {
-      listener(line);
-    } catch {
-      // Listener's controller was already closed — harmless.
-    }
-  }
-}
 
 interface StarkeepConfig {
   userPoolId: string;
@@ -58,6 +41,8 @@ export async function POST(req: Request) {
     accessKeyId: string;
     secretAccessKey: string;
     sessionToken: string;
+    reattach?: boolean;
+    resumeFrom?: string;
   };
 
   if (!body.accessKeyId || !body.secretAccessKey || !body.sessionToken) {
@@ -104,124 +89,16 @@ export async function POST(req: Request) {
     AWS_REGION: region,
   };
 
-  const encoder = new TextEncoder();
-  const listenerId = Symbol();
-
-  const stream = new ReadableStream({
-    start(controller) {
-      let sawExpiredToken = false;
-
-      const emit = (line: string) => {
-        try {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(line)}\n\n`));
-        } catch {
-          // Controller already closed (client disconnected).
-        }
-      };
-
-      const emitEvent = (event: string, data: unknown) => {
-        try {
-          controller.enqueue(
-            encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
-          );
-        } catch {}
-      };
-
-      const finish = (code: number | null) => {
-        if (code === 0) {
-          emitEvent("done", {});
-        } else if (sawExpiredToken) {
-          emitEvent("error", {
-            message:
-              "Your AWS sign-in session was rejected (expired or invalid). Sign in again to retry.",
-            code: "EXPIRED_TOKEN",
-          });
-        } else {
-          emitEvent("error", { message: `Installer exited with code ${code}` });
-        }
-        controller.close();
-      };
-
-      const spawnChild = () => {
-        const child = spawn(
-          "pnpm",
-          ["--filter", "@starkeep/admin-installer", "cli:install-drive", "--non-interactive"],
-          { cwd: REPO_ROOT, env: spawnEnv, stdio: ["ignore", "pipe", "pipe"] },
-        );
-        runningChild = child;
-        runningChildDone = finish;
-
-        runningChildListeners.set(listenerId, (line) => {
-          if (!sawExpiredToken && isCredentialFailureLine(line)) {
-            sawExpiredToken = true;
-          }
-          emit(line);
-        });
-
-        let buffer = "";
-        const onChunk = (chunk: Buffer) => {
-          buffer += chunk.toString();
-          let nl: number;
-          while ((nl = buffer.indexOf("\n")) >= 0) {
-            const line = buffer.slice(0, nl);
-            buffer = buffer.slice(nl + 1);
-            if (line.length > 0) broadcastLine(line);
-          }
-        };
-        child.stdout.on("data", onChunk);
-        child.stderr.on("data", onChunk);
-
-        child.on("error", (err) => {
-          runningChild = null;
-          runningChildListeners.clear();
-          runningChildDone = null;
-          emitEvent("error", { message: err.message });
-          controller.close();
-        });
-
-        child.on("close", (code) => {
-          if (buffer.length > 0) broadcastLine(buffer);
-          runningChild = null;
-          runningChildListeners.clear();
-          const done = runningChildDone;
-          runningChildDone = null;
-          if (done) done(code);
-        });
-      };
-
-      if (runningChild !== null) {
-        emit("[Reconnected to in-progress Drive install]");
-        runningChildListeners.set(listenerId, (line) => {
-          if (!sawExpiredToken && isCredentialFailureLine(line)) {
-            sawExpiredToken = true;
-          }
-          emit(line);
-        });
-        runningChildDone = (code) => {
-          if (code === 0) {
-            finish(code);
-          } else {
-            emit("[Previous run ended — starting fresh Drive install...]");
-            sawExpiredToken = false;
-            spawnChild();
-          }
-        };
-        return;
-      }
-
-      spawnChild();
-    },
-
-    cancel() {
-      runningChildListeners.delete(listenerId);
-    },
-  });
-
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-    },
+  return installStream({
+    key: "drive",
+    noun: "Drive install",
+    command: "pnpm",
+    args: ["--filter", "@starkeep/admin-installer", "cli:install-drive", "--non-interactive"],
+    cwd: REPO_ROOT,
+    env: spawnEnv,
+    reattach: body.reattach === true,
+    ...(typeof body.resumeFrom === "string" ? { resumeFrom: body.resumeFrom } : {}),
+    failureMessage: (code) => `Installer exited with code ${code}`,
+    onSuccess: () => ({ event: "done", data: {} }),
   });
 }

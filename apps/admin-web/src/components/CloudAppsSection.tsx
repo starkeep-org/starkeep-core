@@ -19,6 +19,7 @@ import { refreshTokens, getIdentityPoolCredentials, type STSCredentials } from "
 import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
 import { ACTION_OCCASIONAL, ACTION_OPEN } from "@/lib/action-colors";
 import type { LocalAppEntry } from "@/lib/app-types";
+import { runInstallStream } from "@/lib/install-stream-client";
 
 export function CloudAppsSection({ apps, leading }: {
   apps: LocalAppEntry[] | null;
@@ -242,66 +243,25 @@ function CloudAppInstallModal({
     let aborted = false;
 
     async function run() {
-      try {
-        const resp = await fetch(endpoint!, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            accessKeyId: credentials!.accessKeyId,
-            secretAccessKey: credentials!.secretAccessKey,
-            sessionToken: credentials!.sessionToken,
-            region: (credentials as STSCredentials & { region?: string }).region ?? "",
-          }),
-        });
-
-        if (!resp.ok || !resp.body) {
-          let errMsg = `${resp.status} ${resp.statusText}`;
-          try {
-            const j = (await resp.json()) as { error?: string };
-            if (j.error) errMsg = j.error;
-          } catch { /* not JSON */ }
-          setLines((l) => [...l, `Error: ${errMsg}`]);
-          setStatus("failure");
-          return;
-        }
-
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done || aborted) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const chunks = buffer.split("\n\n");
-          buffer = chunks.pop() ?? "";
-
-          for (const chunk of chunks) {
-            let eventType = "message";
-            let data = "";
-            for (const part of chunk.split("\n")) {
-              if (part.startsWith("event: ")) eventType = part.slice(7);
-              else if (part.startsWith("data: ")) data = part.slice(6);
-            }
-            if (eventType === "done") {
-              setStatus("success");
-              onSuccess?.();
-            } else if (eventType === "error") {
-              try { setLines((l) => [...l, `Error: ${(JSON.parse(data) as { message?: string }).message ?? data}`]); }
-              catch { setLines((l) => [...l, `Error: ${data}`]); }
-              setStatus("failure");
-            } else if (data) {
-              try { setLines((l) => [...l, JSON.parse(data) as string]); }
-              catch { setLines((l) => [...l, data]); }
-            }
-          }
-        }
-      } catch (err) {
-        if (!aborted) {
-          setLines((l) => [...l, `Error: ${err instanceof Error ? err.message : String(err)}`]);
-          setStatus("failure");
-        }
+      // The deploy runs detached on the server, so a dropped stream reconnects
+      // to it rather than leaving the dialog spinning.
+      const outcome = await runInstallStream(
+        endpoint!,
+        {
+          accessKeyId: credentials!.accessKeyId,
+          secretAccessKey: credentials!.secretAccessKey,
+          sessionToken: credentials!.sessionToken,
+          region: (credentials as STSCredentials & { region?: string }).region ?? "",
+        },
+        { onLine: (line) => setLines((l) => [...l, line]), isAborted: () => aborted },
+      );
+      if (aborted) return;
+      if (outcome.kind === "done") {
+        setStatus("success");
+        onSuccess?.();
+      } else {
+        setLines((l) => [...l, `Error: ${outcome.message}`]);
+        setStatus("failure");
       }
     }
 
