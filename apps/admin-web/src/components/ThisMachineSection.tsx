@@ -10,6 +10,12 @@
  *
  * A machine that does not run the cloud joins one first, by the address its
  * admin sent.
+ *
+ * On the machine that administers the cloud, the section also names the address
+ * phones and other computers sign in with. This machine reaches the cloud through
+ * the API gateway directly, and the CloudFront address fronts that same gateway,
+ * so showing the gateway's address here left the person choosing between two
+ * addresses with nothing to say which one a phone needs.
  */
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
@@ -40,7 +46,12 @@ async function post(path: string, body?: unknown): Promise<Record<string, unknow
   return json;
 }
 
-export function ThisMachineSection() {
+export function ThisMachineSection({
+  deviceAddress = null,
+}: {
+  /** The address other devices sign in with, when this machine administers the cloud. */
+  deviceAddress?: string | null;
+} = {}) {
   const [load, setLoad] = useState<Load>({ kind: "loading" });
   const [cloudUrl, setCloudUrl] = useState("");
   const [email, setEmail] = useState("");
@@ -51,6 +62,7 @@ export function ThisMachineSection() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [restarting, setRestarting] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -128,6 +140,13 @@ export function ThisMachineSection() {
       await refresh();
     });
 
+  const copyAddress = (address: string) => {
+    void navigator.clipboard.writeText(address).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2_000);
+    });
+  };
+
   if (load.kind === "loading") return null;
   if (load.kind === "offline") {
     return (
@@ -140,6 +159,9 @@ export function ThisMachineSection() {
     );
   }
   const v = load.view;
+  // On the administering machine, "this cloud" names it; a joined machine names
+  // the address it joined with, which is the one its admin sent.
+  const cloudName = deviceAddress ? "this cloud" : v.cloudUrl;
 
   return (
     <section className="rounded-lg border p-4 space-y-3" aria-label="This machine">
@@ -181,8 +203,8 @@ export function ThisMachineSection() {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <p className="text-sm" role="status">
             {v.state === "signed-in"
-              ? `This machine syncs with ${v.cloudUrl} as ${v.email ?? "you"}.`
-              : `Signed in as ${v.email ?? "you"}. Connecting to ${v.cloudUrl}…`}
+              ? `This machine syncs with ${cloudName} as ${v.email ?? "you"}.`
+              : `Signed in as ${v.email ?? "you"}. Connecting to ${cloudName}…`}
           </p>
           <Button variant="outline" size="sm" onClick={() => void signOut()} disabled={busy}>
             Sign out
@@ -193,7 +215,7 @@ export function ThisMachineSection() {
           <p className="text-sm text-muted-foreground">
             {needsNewPassword
               ? "This is the account's first sign-in. Choose a new password to replace the temporary one."
-              : `Sign in with your Starkeep account to sync this machine with ${v.cloudUrl}.`}
+              : `Sign in with your Starkeep account to sync this machine with ${cloudName}.`}
           </p>
           <Input
             type="email"
@@ -244,6 +266,16 @@ export function ThisMachineSection() {
             {busy ? "Signing in…" : needsNewPassword ? "Set password and sign in" : "Sign in to sync"}
           </Button>
         </form>
+      )}
+
+      {deviceAddress && !restarting && v.cloudUrl !== null && (
+        <div className="flex flex-wrap items-center gap-2 text-sm" aria-label="Address for other devices">
+          <span className="text-muted-foreground">Phones and other computers sign in with</span>
+          <span className="font-mono break-all">{deviceAddress}</span>
+          <Button variant="outline" size="sm" onClick={() => copyAddress(deviceAddress)}>
+            {copied ? "Copied" : "Copy"}
+          </Button>
+        </div>
       )}
 
       {error && (
