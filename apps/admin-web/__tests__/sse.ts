@@ -11,6 +11,8 @@ export interface SseEvent {
   event: string;
   /** The raw `data:` payload, before JSON parsing. */
   data: string;
+  /** The `id:` field, on the frames that carry one. */
+  id?: string;
 }
 
 export interface SseStream {
@@ -35,11 +37,13 @@ export function readSse(res: Response): SseStream {
       if (!chunk) continue;
       let event = "message";
       let data = "";
+      let id: string | undefined;
       for (const part of chunk.split("\n")) {
         if (part.startsWith("event: ")) event = part.slice(7);
         else if (part.startsWith("data: ")) data = part.slice(6);
+        else if (part.startsWith("id: ")) id = part.slice(4);
       }
-      pending.push({ event, data });
+      pending.push(id === undefined ? { event, data } : { event, data, id });
     }
   }
 

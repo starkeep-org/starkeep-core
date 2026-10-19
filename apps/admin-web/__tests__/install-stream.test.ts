@@ -3,17 +3,19 @@
  * `/api/cloud-data-server/install`, `/api/drive/install` and
  * `/api/apps/[appId]/cloud-install`.
  *
- * They share one design and it is the interesting part. Each holds the running
- * child in **module state** so that a browser which suspends — a closed laptop
- * during a ten-minute deploy — reattaches to the run in progress instead of
- * starting a second one on top of it. Nothing tested that, and a second
- * concurrent Pulumi run against one stack is the failure it prevents.
+ * They share one design and it is the interesting part. Each runs its
+ * installer **detached**, with the run's output and exit code on disk under
+ * `~/.starkeep/installs/` (see `src/lib/detached-run.ts`). A browser which
+ * suspends — a closed laptop during a ten-minute deploy — reattaches to the run
+ * in progress instead of starting a second one on top of it, and so does a
+ * browser whose admin-web restarted mid-run. A second concurrent Pulumi run
+ * against one stack is the failure this prevents.
  *
  * The child is faked (see `fake-spawn.ts`); these routes really do run Pulumi
  * against an AWS account otherwise.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { rmSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { jsonRequest, makeDataDir } from "./helpers";
 import { lastChild, resetSpawns, spawnedChildren, type FakeChild } from "./fake-spawn";
@@ -89,11 +91,13 @@ beforeAll(async () => {
 beforeEach(() => {
   resetSpawns();
   writeConfig(FULL_CONFIG);
+  // Each test starts with no run on disk.
+  rmSync(join(dataDir, "installs"), { recursive: true, force: true });
 });
 
 afterEach(async () => {
-  // A child left running is module state that leaks into the next test — which
-  // is the very thing the reattach path keys off.
+  // A run left going would read as in progress to the next test — which is
+  // the very thing the reattach path keys off.
   for (const child of spawnedChildren()) child.exit(0);
 });
 
@@ -342,12 +346,9 @@ describe("reattaching to a run in progress", () => {
     expect((await secondStream.rest()).at(-1)).toEqual({ event: "done", data: "{}" });
   });
 
-  it("sends the terminal event to the connection that reattached, and only to it", async () => {
-    // The reattaching request replaces the completion callback, so the run ends
-    // on the newest connection. The one it replaced is left open without a
-    // terminal event — which is correct for the case this exists for, where
-    // that connection is a socket whose browser went to sleep, and is worth
-    // pinning because it is the surprising half of the design.
+  it("sends the terminal event to every connection following the run", async () => {
+    // Each connection follows the run's log on its own, so the one a sleeping
+    // browser left open ends cleanly too instead of hanging.
     const first = await drive();
     const child = lastChild();
     const firstStream = readSse(first);
@@ -357,12 +358,7 @@ describe("reattaching to a run in progress", () => {
 
     child.exit(0);
     expect((await secondStream.rest()).at(-1)!.event).toBe("done");
-
-    const stillOpen = await Promise.race([
-      firstStream.next(),
-      new Promise<"open">((resolve) => setTimeout(() => resolve("open"), 50)),
-    ]);
-    expect(stillOpen).toBe("open");
+    expect((await firstStream.rest()).at(-1)!.event).toBe("done");
   });
 
   it("starts a fresh run with the new credentials when the one it reattached to fails", async () => {
@@ -377,7 +373,8 @@ describe("reattaching to a run in progress", () => {
     expect(await secondStream.next()).toMatchObject({ event: "message" });
 
     firstChild.exit(1);
-    expect(spawnedChildren()).toHaveLength(2);
+    // The follower sees the failure on its next look at the run.
+    await vi.waitFor(() => expect(spawnedChildren()).toHaveLength(2));
     expect(lastChild().options.env).toMatchObject({ AWS_ACCESS_KEY_ID: "AKIA-FRESH" });
     expect(JSON.parse((await secondStream.next())!.data)).toContain("starting fresh");
 
@@ -405,5 +402,134 @@ describe("reattaching to a run in progress", () => {
     expect(JSON.parse((await stream.next())!.data)).toBe("Creating resources…");
     lastChild().exit(0);
     await stream.rest();
+  });
+});
+
+describe("a run that outlives admin-web", () => {
+  /** A fresh copy of a route module, as a restarted admin-web loads it. */
+  async function restartedDrive(body: Record<string, unknown> = {}): Promise<Response> {
+    vi.resetModules();
+    const fresh = await import("../src/routes/drive-install");
+    return (fresh.POST as unknown as (r: Request) => Promise<Response>)(
+      jsonRequest("/api/drive/install", { ...CREDS, ...body }),
+    );
+  }
+
+  it("starts the installer detached, so a restart of admin-web does not end it", async () => {
+    const res = await drive();
+    expect(lastChild().options.detached).toBe(true);
+    await finish(res, lastChild());
+  });
+
+  it("is followed by a restarted admin-web, which starts no second installer", async () => {
+    const first = await drive();
+    const child = lastChild();
+    const firstStream = readSse(first);
+    child.say("Building protocol-primitives…\n");
+    const seen = (await firstStream.next())!;
+    expect(seen.id).toMatch(/^[0-9a-f]+:\d+$/);
+
+    // The browser's stream dropped with the old process. The installer wrote
+    // on while admin-web restarted, then the browser reconnects.
+    child.say("Policy changed — waiting 60s for IAM propagation\n");
+    const again = await restartedDrive({ reattach: true, resumeFrom: seen.id });
+    const stream = readSse(again);
+    expect(spawnedChildren()).toHaveLength(1);
+    expect(JSON.parse((await stream.next())!.data)).toBe("[Reconnected to in-progress Drive install]");
+
+    child.say("Deploying…\n");
+    child.exit(0);
+    const events = await stream.rest();
+    // The line from the restart's gap arrives, and nothing the browser already had.
+    expect(lines(events)).toEqual(["Policy changed — waiting 60s for IAM propagation", "Deploying…"]);
+    expect(events.at(-1)).toEqual({ event: "done", data: "{}" });
+  });
+
+  it("delivers the lines a finished run wrote while the browser was away, then the outcome", async () => {
+    const first = await drive();
+    const child = lastChild();
+    const firstStream = readSse(first);
+    child.say("one\n");
+    const seen = (await firstStream.next())!;
+    child.say("two\nthree\n");
+    child.exit(0);
+
+    const events = await readSse(await restartedDrive({ reattach: true, resumeFrom: seen.id })).rest();
+    expect(lines(events)).toEqual(["[The Drive install ended while disconnected]", "two", "three"]);
+    expect(events.at(-1)).toEqual({ event: "done", data: "{}" });
+  });
+
+  it("replays a run from its start for a browser whose last line came from another run", async () => {
+    const first = await drive();
+    const firstStream = readSse(first);
+    lastChild().say("old run\n");
+    const stale = (await firstStream.next())!;
+    lastChild().exit(1);
+    await firstStream.rest();
+
+    const second = await drive();
+    readSse(second);
+    lastChild().say("new run\n");
+    const again = readSse(await restartedDrive({ reattach: true, resumeFrom: stale.id }));
+    lastChild().exit(0);
+    const events = await again.rest();
+    expect(lines(events)).toEqual(["[Reconnected to in-progress Drive install]", "new run"]);
+  });
+
+  it("reports how the run ended when the browser reconnects after it finished", async () => {
+    const first = await drive();
+    const child = lastChild();
+    const firstStream = readSse(first);
+    child.exit(0);
+    await firstStream.rest();
+
+    const again = await restartedDrive({ reattach: true });
+    const events = await readSse(again).rest();
+    expect(spawnedChildren()).toHaveLength(1);
+    expect(lines(events)).toEqual(["[The Drive install ended while disconnected]"]);
+    expect(events.at(-1)).toEqual({ event: "done", data: "{}" });
+    // A restarted admin-web's spawns land in the same registry, so the counts
+    // above would have caught a second installer.
+    await restartedDrive();
+    expect(spawnedChildren()).toHaveLength(2);
+  });
+
+  it("reports an expired session that ended the run while the browser was away", async () => {
+    const first = await drive();
+    const child = lastChild();
+    const firstStream = readSse(first);
+    child.sayErr("ExpiredTokenException: The security token is expired\n");
+    child.exit(1);
+    await firstStream.rest();
+
+    const events = await readSse(await restartedDrive({ reattach: true })).rest();
+    expect(JSON.parse(events.at(-1)!.data)).toMatchObject({ code: "EXPIRED_TOKEN" });
+    expect(spawnedChildren()).toHaveLength(1);
+  });
+
+  it("refuses to reconnect when no run ever started, and starts none", async () => {
+    const events = await readSse(await drive({ reattach: true })).rest();
+    expect(events.at(-1)!.event).toBe("error");
+    expect(JSON.parse(events.at(-1)!.data).message).toContain("No Drive install to reconnect to");
+    expect(spawnedChildren()).toHaveLength(0);
+  });
+
+  it("ends with an error when the run's process died without recording an exit code", async () => {
+    const res = await drive();
+    const events = await finish(res, lastChild(), null as unknown as number);
+    expect(events.at(-1)!.event).toBe("error");
+    expect(JSON.parse(events.at(-1)!.data).message).toContain("exited with code null");
+  });
+
+  it("keeps the AWS credentials off the disk", async () => {
+    const res = await cloudDataServer();
+    lastChild().say("Deploying…\n");
+    await finish(res, lastChild());
+    const dir = join(dataDir, "installs", "cloud-data-server");
+    for (const name of readdirSync(dir)) {
+      const text = readFileSync(join(dir, name), "utf8");
+      expect(text, name).not.toContain(CREDS.secretAccessKey);
+      expect(text, name).not.toContain(CREDS.sessionToken);
+    }
   });
 });

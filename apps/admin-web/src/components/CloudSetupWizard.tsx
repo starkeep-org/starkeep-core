@@ -14,6 +14,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { CommandOutput } from "./CommandOutput";
+import { runInstallStream, type InstallOutcome } from "@/lib/install-stream-client";
 import { useCloudDataServerHealth, healthToOnline } from "./CloudDataServerStatus";
 import { StatusBadge } from "./StatusBadge";
 import { cn } from "@/lib/utils";
@@ -843,76 +844,21 @@ function Step5Deploy({
     // resolves with a discriminated outcome so the two-pass driver can decide
     // whether to continue. `done` carries the pass's `event: done` data payload
     // (cloud-data-server returns its outputs; Drive returns `{}`).
-    type PassResult =
-      | { kind: "done"; data: string }
-      | { kind: "error"; message: string; tokenExpired: boolean };
+    type PassResult = InstallOutcome;
 
     async function runPass(url: string, creds: STSCredentials): Promise<PassResult> {
-      const resp = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      // The installer runs detached on the server, so a dropped stream (an
+      // admin-web restart, which the cloud-data-server pass itself causes in
+      // development) reconnects to the run instead of failing the pass.
+      return runInstallStream(
+        url,
+        {
           accessKeyId: creds.accessKeyId,
           secretAccessKey: creds.secretAccessKey,
           sessionToken: creds.sessionToken,
-        }),
-      });
-
-      if (!resp.ok || !resp.body) {
-        let errMsg = `${resp.status} ${resp.statusText}`;
-        try {
-          const j = (await resp.json()) as { error?: string };
-          if (j.error) errMsg = j.error;
-        } catch { /* not JSON */ }
-        return { kind: "error", message: errMsg, tokenExpired: false };
-      }
-
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done || aborted) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const chunks = buffer.split("\n\n");
-        buffer = chunks.pop() ?? "";
-
-        for (const chunk of chunks) {
-          let eventType = "message";
-          let data = "";
-          for (const part of chunk.split("\n")) {
-            if (part.startsWith("event: ")) eventType = part.slice(7);
-            else if (part.startsWith("data: ")) data = part.slice(6);
-          }
-          if (eventType === "done") {
-            return { kind: "done", data };
-          } else if (eventType === "error") {
-            // Server emits structured `{ message, code? }` JSON; keep the
-            // older bare-string form working too.
-            let message = data;
-            let code: string | undefined;
-            try {
-              const parsed = JSON.parse(data);
-              if (typeof parsed === "string") {
-                message = parsed;
-              } else if (parsed && typeof parsed === "object") {
-                if (typeof parsed.message === "string") message = parsed.message;
-                if (typeof parsed.code === "string") code = parsed.code;
-              }
-            } catch {
-              /* not JSON — leave message as-is */
-            }
-            return { kind: "error", message, tokenExpired: code === "EXPIRED_TOKEN" };
-          } else if (data) {
-            try { setLines((l) => [...l, JSON.parse(data) as string]); }
-            catch { setLines((l) => [...l, data]); }
-          }
-        }
-      }
-      // Stream ended without a terminal done/error event.
-      return { kind: "error", message: "Install stream ended unexpectedly", tokenExpired: false };
+        },
+        { onLine: (line) => setLines((l) => [...l, line]), isAborted: () => aborted },
+      );
     }
 
     function failPass(r: { message: string; tokenExpired: boolean }): void {
