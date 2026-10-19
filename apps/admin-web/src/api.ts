@@ -28,7 +28,6 @@ import * as appsInstallStatus from "./routes/apps-install-status";
 import * as cloudDataServerInstall from "./routes/cloud-data-server-install";
 import * as config from "./routes/config";
 import * as costs from "./routes/costs";
-import * as devices from "./routes/devices";
 import * as thisMachine from "./routes/this-machine";
 import * as users from "./routes/users";
 import * as deploymentSettings from "./routes/deployment-settings";
@@ -66,20 +65,16 @@ api.get("/exec/deploy-outputs", () => execDeployOutputs.GET());
 
 // Cloud operations against the operator's own AWS credentials.
 api.post("/costs", (c) => costs.POST(c.req.raw));
-api.post("/devices/list", (c) => devices.LIST(c.req.raw));
-api.post("/devices/inspect", (c) => devices.INSPECT(c.req.raw));
 api.post("/users/list", (c) => users.LIST(c.req.raw));
 api.post("/users", (c) => users.CREATE(c.req.raw));
 api.post("/users/group", (c) => users.SET_GROUP(c.req.raw));
 api.post("/users/enabled", (c) => users.SET_ENABLED(c.req.raw));
 api.post("/users/password", (c) => users.RESET_PASSWORD(c.req.raw));
-api.post("/devices/approve", (c) => devices.APPROVE(c.req.raw));
+api.post("/users/sign-out", (c) => users.SIGN_OUT_EVERYWHERE(c.req.raw));
 api.get("/this-machine", () => thisMachine.GET());
 api.post("/this-machine/sign-in", (c) => thisMachine.POST_SIGN_IN(c.req.raw));
 api.post("/this-machine/sign-out", (c) => thisMachine.POST_SIGN_OUT(c.req.raw));
 api.post("/this-machine/cloud", (c) => thisMachine.POST_CLOUD(c.req.raw));
-api.post("/devices", (c) => devices.POST(c.req.raw));
-api.delete("/devices", (c) => devices.DELETE(c.req.raw));
 
 // Daemons and long-running commands.
 api.post("/exec/daemon", (c) => execDaemon.POST(c.req.raw));

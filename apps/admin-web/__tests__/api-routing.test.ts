@@ -47,9 +47,8 @@ vi.mock("../src/routes/cloud-data-server-install", () =>
 );
 vi.mock("../src/routes/config", () => spy("config", ["GET", "PATCH"]));
 vi.mock("../src/routes/costs", () => spy("costs", ["POST"]));
-vi.mock("../src/routes/devices", () => spy("devices", ["LIST", "INSPECT", "APPROVE", "POST", "DELETE"]));
 vi.mock("../src/routes/this-machine", () => spy("this-machine", ["GET", "POST_SIGN_IN", "POST_SIGN_OUT", "POST_CLOUD"]));
-vi.mock("../src/routes/users", () => spy("users", ["LIST", "CREATE", "SET_GROUP", "SET_ENABLED", "RESET_PASSWORD"]));
+vi.mock("../src/routes/users", () => spy("users", ["LIST", "CREATE", "SET_GROUP", "SET_ENABLED", "RESET_PASSWORD", "SIGN_OUT_EVERYWHERE"]));
 vi.mock("../src/routes/drive-install", () => spy("drive-install", ["POST"]));
 vi.mock("../src/routes/exec-daemon", () => spy("exec-daemon", ["POST"]));
 vi.mock("../src/routes/exec-daemon-status", () => spy("exec-daemon-status", ["GET"]));
@@ -92,20 +91,16 @@ const ROUTES: Array<[string, string, string, string]> = [
   ["GET", "/api/config", "config", "GET"],
   ["PATCH", "/api/config", "config", "PATCH"],
   ["POST", "/api/costs", "costs", "POST"],
-  ["POST", "/api/devices/list", "devices", "LIST"],
-  ["POST", "/api/devices/inspect", "devices", "INSPECT"],
-  ["POST", "/api/devices/approve", "devices", "APPROVE"],
   ["GET", "/api/this-machine", "this-machine", "GET"],
   ["POST", "/api/users/list", "users", "LIST"],
   ["POST", "/api/users", "users", "CREATE"],
   ["POST", "/api/users/group", "users", "SET_GROUP"],
   ["POST", "/api/users/enabled", "users", "SET_ENABLED"],
   ["POST", "/api/users/password", "users", "RESET_PASSWORD"],
+  ["POST", "/api/users/sign-out", "users", "SIGN_OUT_EVERYWHERE"],
   ["POST", "/api/this-machine/sign-in", "this-machine", "POST_SIGN_IN"],
   ["POST", "/api/this-machine/sign-out", "this-machine", "POST_SIGN_OUT"],
   ["POST", "/api/this-machine/cloud", "this-machine", "POST_CLOUD"],
-  ["POST", "/api/devices", "devices", "POST"],
-  ["DELETE", "/api/devices", "devices", "DELETE"],
   ["POST", "/api/drive/install", "drive-install", "POST"],
   ["POST", "/api/exec/daemon", "exec-daemon", "POST"],
   ["GET", "/api/exec/daemon/status", "exec-daemon-status", "GET"],
