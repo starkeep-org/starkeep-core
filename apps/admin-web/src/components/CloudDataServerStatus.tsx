@@ -71,7 +71,7 @@ interface Props {
   cognitoSession: CognitoSession | null;
   /** Bump to retrigger the online check. */
   refreshKey?: number;
-  /** When provided, the card offers Sign in / Sign out. */
+  /** When provided, the card offers "Sign in as admin" / "Sign out of admin". */
   onSignIn?: () => void;
   onSignOut?: () => void;
 }
@@ -91,7 +91,7 @@ export function CloudDataServerStatus({
 
   const signInButton = onSignIn && (
     <Button size="sm" className={ACTION_OPEN} onClick={onSignIn}>
-      Sign in
+      Sign in as admin
     </Button>
   );
 
@@ -114,7 +114,7 @@ export function CloudDataServerStatus({
     actions.push({ label: "Manage deployment…", href: "/cloud-setup" });
   }
   if (configured && signedIn && onSignOut) {
-    actions.push({ label: "Sign out", onSelect: onSignOut, destructive: true });
+    actions.push({ label: "Sign out of admin", onSelect: onSignOut, destructive: true });
   }
 
   return (
@@ -126,15 +126,18 @@ export function CloudDataServerStatus({
           {configured ? (
             <>
               <StatusBadge online={online} />
+              {/* The operator's admin sign-in, held by this browser. The
+                  machine's own sync sign-in is the This Machine section's, so
+                  the badge names the admin to keep the two apart. */}
               {signedIn ? (
                 <Badge
                   variant="secondary"
                   className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
                 >
-                  Signed in
+                  Signed in as admin
                 </Badge>
               ) : (
-                <Badge variant="secondary" className="text-xs">Not signed in</Badge>
+                <Badge variant="secondary" className="text-xs">Not signed in as admin</Badge>
               )}
             </>
           ) : (
