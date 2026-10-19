@@ -2,8 +2,9 @@
  * /api/users — the deployment's accounts and their two groups.
  *
  * Pins what the route refuses as much as what it does: removing the last
- * admin, and disabling the signed-in operator. Disabling also signs the user
- * out and deletes their device records, so their machines stop syncing.
+ * admin, and disabling the signed-in operator. Disabling and "Sign out all
+ * devices" both end every sign-in the user holds, so their machines stop
+ * syncing; neither reaches SSM, because a device holds no record there.
  */
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { writeFileSync } from "node:fs";
@@ -22,14 +23,8 @@ import {
 } from "@aws-sdk/client-cognito-identity-provider";
 import { jsonRequest, makeDataDir } from "./helpers";
 
-const listDeviceRecords = vi.fn();
-const deleteDeviceKeyParameter = vi.fn();
 const roleChain = vi.fn();
 
-vi.mock("@starkeep/admin-installer/app-creds", () => ({
-  listDeviceRecords: (...args: unknown[]) => listDeviceRecords(...args),
-  deleteDeviceKeyParameter: (...args: unknown[]) => deleteDeviceKeyParameter(...args),
-}));
 vi.mock("@starkeep/admin-installer/session", () => ({
   roleChain: (...args: unknown[]) => roleChain(...args),
 }));
@@ -98,11 +93,6 @@ beforeEach(() => {
     return {};
   });
   cognito.on(AdminUserGlobalSignOutCommand).resolves({});
-  listDeviceRecords.mockReset().mockResolvedValue([
-    { deviceId: "dev-sam-phone", userId: "sub-sam" },
-    { deviceId: "dev-admin-laptop", userId: "sub-admin" },
-  ]);
-  deleteDeviceKeyParameter.mockReset().mockResolvedValue(undefined);
   roleChain.mockReset().mockResolvedValue({ accessKeyId: "ASIA-MANAGER", secretAccessKey: "s", sessionToken: "t", expiration: new Date() });
 });
 
@@ -162,21 +152,37 @@ describe("changing groups", () => {
 });
 
 describe("disabling an account", () => {
-  it("disables, signs out everywhere, and deletes that user's device records only", async () => {
+  it("disables and signs that user out everywhere, as the operator", async () => {
     const res = await post(route.SET_ENABLED, { ...SESSION, username: "sub-sam", enabled: false });
     expect(res.status).toBe(200);
-    expect(((await res.json()) as { devicesRevoked: string[] }).devicesRevoked).toEqual(["dev-sam-phone"]);
+    expect(users.find((u) => u.Username === "sub-sam")!.Enabled).toBe(false);
     expect(cognito.commandCalls(AdminUserGlobalSignOutCommand)[0]!.args[0].input).toMatchObject({ Username: "sub-sam" });
-    expect(deleteDeviceKeyParameter).toHaveBeenCalledTimes(1);
-    const [args] = deleteDeviceKeyParameter.mock.calls[0] as [{ deviceId: string; awsCreds: { accessKeyId: string } }];
-    expect(args.deviceId).toBe("dev-sam-phone");
-    expect(args.awsCreds.accessKeyId).toBe("ASIA-MANAGER");
+    expect(roleChain).not.toHaveBeenCalled();
   });
 
   it("refuses to disable the signed-in operator", async () => {
     const res = await post(route.SET_ENABLED, { ...SESSION, username: "sub-admin", enabled: false });
     expect(res.status).toBe(409);
     expect(cognito.commandCalls(AdminDisableUserCommand)).toHaveLength(0);
+  });
+});
+
+describe("signing an account out of every device", () => {
+  it("signs the user out everywhere and leaves the account enabled", async () => {
+    const res = await post(route.SIGN_OUT_EVERYWHERE, { ...SESSION, username: "sub-sam" });
+    expect(res.status).toBe(200);
+    expect(cognito.commandCalls(AdminUserGlobalSignOutCommand)[0]!.args[0].input).toMatchObject({
+      UserPoolId: "us-east-2_POOL",
+      Username: "sub-sam",
+    });
+    expect(cognito.commandCalls(AdminDisableUserCommand)).toHaveLength(0);
+    expect(users.find((u) => u.Username === "sub-sam")!.Enabled).not.toBe(false);
+  });
+
+  it("refuses a request that names no account", async () => {
+    const res = await post(route.SIGN_OUT_EVERYWHERE, SESSION);
+    expect(res.status).toBe(400);
+    expect(cognito.commandCalls(AdminUserGlobalSignOutCommand)).toHaveLength(0);
   });
 });
 

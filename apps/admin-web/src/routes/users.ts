@@ -1,6 +1,7 @@
 /**
  * Managing the deployment's accounts: listing them, creating one, moving one
- * in and out of the two groups, resetting a password, and disabling one.
+ * in and out of the two groups, resetting a password, signing one out of every
+ * device, and disabling one.
  *
  * ## The two groups
  *
@@ -15,9 +16,9 @@
  * ## Whose credentials
  *
  * Cognito user management is the admin-app role's own grant (see
- * `admin-app-policy.ts`), so these calls run as the signed-in operator. Only
- * disabling a user touches SSM, to delete the user's device records, and that
- * hops to Manager as the device routes do.
+ * `admin-app-policy.ts`), so these calls run as the signed-in operator. A
+ * device's only credential is its owner's sign-in, so every act on devices is
+ * an act on the account in the pool, and nothing here reaches SSM.
  *
  * ## What it refuses
  *
@@ -30,7 +31,6 @@ import {
   AdminCreateUserCommand,
   AdminDisableUserCommand,
   AdminEnableUserCommand,
-  AdminListGroupsForUserCommand,
   AdminRemoveUserFromGroupCommand,
   AdminSetUserPasswordCommand,
   AdminUserGlobalSignOutCommand,
@@ -40,8 +40,7 @@ import {
   type UserType,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { randomBytes } from "node:crypto";
-import { deleteDeviceKeyParameter, listDeviceRecords } from "@starkeep/admin-installer/app-creds";
-import { managerCredentials, readStarkeepConfig } from "../lib/manager-credentials";
+import { readStarkeepConfig } from "../lib/manager-credentials";
 import type { STSCredentials } from "../lib/cognito-auth";
 
 export const ADMINS_GROUP = "starkeep-admins";
@@ -126,31 +125,6 @@ async function listUsers(client: CognitoIdentityProviderClient, poolId: string):
     .sort((a, b) => (a.email ?? a.username).localeCompare(b.email ?? b.username));
 }
 
-/**
- * Why a device may not be paired for `userId`, or null. A device syncs for one
- * user's data library, so the user must be an enabled account in
- * `starkeep-users`; the broker refuses the device's every call otherwise, and
- * saying so at pairing puts the reason in front of the admin who can fix it.
- */
-export async function devicePairingRefusal(
-  session: Pick<SessionBody, "credentials" | "region">,
-  userId: string | null | undefined,
-): Promise<string | null> {
-  if (!userId) return "Choose the account this device syncs for.";
-  const client = cognito(session as SessionBody);
-  const poolId = userPoolId();
-  const groups = new Set<string>();
-  let token: string | undefined;
-  do {
-    const page = await client.send(
-      new AdminListGroupsForUserCommand({ UserPoolId: poolId, Username: userId, NextToken: token }),
-    );
-    for (const group of page.Groups ?? []) if (group.GroupName) groups.add(group.GroupName);
-    token = page.NextToken;
-  } while (token);
-  return groups.has(DATA_GROUP) ? null : `That account is not in ${DATA_GROUP}, so it has no data library to sync.`;
-}
-
 function failed(err: unknown, act: string): Response {
   const message = err instanceof Error ? err.message : String(err);
   console.error(`[api/users] ${act} failed`, message);
@@ -232,17 +206,40 @@ export async function SET_GROUP(req: Request): Promise<Response> {
 }
 
 /**
+ * Sign an account out of every device, without disabling it. Body: session
+ * plus `{ username }`.
+ *
+ * Revokes every refresh token the account holds, so each of its devices stops
+ * syncing once its 15-minute ID token expires and asks for a new sign-in. A
+ * lost phone is cut off this way: per-user, because the pool tracks no single
+ * device's session.
+ */
+export async function SIGN_OUT_EVERYWHERE(req: Request): Promise<Response> {
+  const body = (await req.json()) as SessionBody & { username?: string };
+  if (!body.username) {
+    return Response.json({ error: "username is required" }, { status: 400 });
+  }
+  try {
+    const client = cognito(body);
+    const poolId = userPoolId();
+    await client.send(new AdminUserGlobalSignOutCommand({ UserPoolId: poolId, Username: body.username }));
+    return Response.json({ users: await listUsers(client, poolId) });
+  } catch (err) {
+    return failed(err, "sign out everywhere");
+  }
+}
+
+/**
  * Disable an account, or enable it again. Body: session plus
  * `{ username, enabled }`.
  *
  * Disabling also signs the user out everywhere, which revokes their refresh
- * tokens, and deletes their device records, so their machines stop syncing
- * within the cloud's five-minute cache. Enabling restores sign-in only; the
- * user's devices pair again.
+ * tokens, so their devices stop syncing once their 15-minute ID tokens expire.
+ * Enabling restores sign-in only; each device asks for a new sign-in.
  */
 export async function SET_ENABLED(req: Request): Promise<Response> {
   const body = (await req.json()) as SessionBody & { username?: string; enabled?: boolean };
-  const { username, enabled, stackPrefix, region } = body;
+  const { username, enabled } = body;
   if (!username || typeof enabled !== "boolean") {
     return Response.json({ error: "username and enabled are required" }, { status: 400 });
   }
@@ -254,18 +251,11 @@ export async function SET_ENABLED(req: Request): Promise<Response> {
     const poolId = userPoolId();
     if (enabled) {
       await client.send(new AdminEnableUserCommand({ UserPoolId: poolId, Username: username }));
-      return Response.json({ users: await listUsers(client, poolId), devicesRevoked: [] });
+      return Response.json({ users: await listUsers(client, poolId) });
     }
     await client.send(new AdminDisableUserCommand({ UserPoolId: poolId, Username: username }));
     await client.send(new AdminUserGlobalSignOutCommand({ UserPoolId: poolId, Username: username }));
-    const awsCreds = await managerCredentials(readStarkeepConfig(), body.credentials, region, "starkeep-disable-user");
-    const devices = await listDeviceRecords({ stackPrefix, region, awsCreds });
-    const revoked: string[] = [];
-    for (const device of devices.filter((d) => d.userId === username)) {
-      await deleteDeviceKeyParameter({ stackPrefix, deviceId: device.deviceId, region, awsCreds });
-      revoked.push(device.deviceId);
-    }
-    return Response.json({ users: await listUsers(client, poolId), devicesRevoked: revoked });
+    return Response.json({ users: await listUsers(client, poolId) });
   } catch (err) {
     return failed(err, "set enabled");
   }

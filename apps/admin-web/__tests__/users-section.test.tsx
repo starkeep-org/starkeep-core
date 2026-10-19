@@ -50,7 +50,7 @@ beforeEach(() => {
       }
       if (url === "/api/users/enabled") {
         users = users.map((u) => (u.username === body.username ? { ...u, enabled: body.enabled } : u));
-        return Response.json({ users, devicesRevoked: ["dev-1"] });
+        return Response.json({ users });
       }
       return Response.json({ users });
     }),
@@ -87,7 +87,7 @@ describe("the users section", () => {
     expect(calls.find((c) => c.url === "/api/users")!.body).toMatchObject({ email: "kim@example.com", admin: false, data: true });
   });
 
-  it("makes a user an admin, and disables one, revoking their devices", async () => {
+  it("makes a user an admin, and disables one, signing them out everywhere", async () => {
     const user = await open();
     await user.click(await screen.findByLabelText("sam@example.com is an admin"));
     expect(calls.find((c) => c.url === "/api/users/group")!.body).toMatchObject({
@@ -98,8 +98,18 @@ describe("the users section", () => {
     const list = screen.getByRole("list", { name: "Users" });
     const samRow = within(list).getByText("sam@example.com").closest("li")!;
     await user.click(within(samRow).getByRole("button", { name: "Disable" }));
-    expect(await screen.findByText(/revoked 1 device/)).toBeTruthy();
+    expect(await screen.findByText(/Disabled sam@example.com and signed them out of every device/)).toBeTruthy();
     expect(calls.find((c) => c.url === "/api/users/enabled")!.body).toMatchObject({ username: "sub-sam", enabled: false, userSub: "sub-admin" });
+  });
+
+  it("signs a user out of every device without disabling them", async () => {
+    const user = await open();
+    const list = await screen.findByRole("list", { name: "Users" });
+    const samRow = within(list).getByText("sam@example.com").closest("li")!;
+    await user.click(within(samRow).getByRole("button", { name: "Sign out all devices" }));
+    expect(await screen.findByText(/Signed sam@example.com out of every device/)).toBeTruthy();
+    expect(calls.find((c) => c.url === "/api/users/sign-out")!.body).toMatchObject({ username: "sub-sam" });
+    expect(calls.some((c) => c.url === "/api/users/enabled")).toBe(false);
   });
 
   it("resets a user's password and shows the temporary one once", async () => {

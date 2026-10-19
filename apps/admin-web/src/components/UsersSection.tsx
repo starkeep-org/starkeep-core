@@ -10,7 +10,9 @@
  *
  * Creating an account sends Cognito's invitation email with a temporary
  * password. "Reset password" gives an account a new temporary password, shown
- * once for the admin to send. Disabling an account signs it out everywhere.
+ * once for the admin to send. "Sign out all devices" ends every sign-in the
+ * account holds, which is how a lost phone is cut off. Disabling an account
+ * signs it out everywhere too.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -39,7 +41,7 @@ type ListState =
 async function call(
   path: string,
   extra: Record<string, unknown> = {},
-): Promise<{ users: UserView[]; devicesRevoked?: string[]; temporaryPassword?: string }> {
+): Promise<{ users: UserView[]; temporaryPassword?: string }> {
   const session = await operatorSession();
   const res = await fetch(path, {
     method: "POST",
@@ -54,14 +56,12 @@ async function call(
   });
   const body = (await res.json()) as {
     users?: UserView[];
-    devicesRevoked?: string[];
     temporaryPassword?: string;
     error?: string;
   };
   if (!res.ok || !body.users) throw new Error(body.error ?? `Request failed (${res.status})`);
   return {
     users: body.users,
-    ...(body.devicesRevoked ? { devicesRevoked: body.devicesRevoked } : {}),
     ...(body.temporaryPassword ? { temporaryPassword: body.temporaryPassword } : {}),
   };
 }
@@ -89,7 +89,7 @@ export function UsersSection() {
   async function act(
     path: string,
     extra: Record<string, unknown>,
-    done: (result: { devicesRevoked?: string[]; temporaryPassword?: string }) => string,
+    done: (result: { temporaryPassword?: string }) => string,
   ) {
     setBusy(true);
     setMessage(null);
@@ -114,10 +114,19 @@ export function UsersSection() {
     act("/api/users/group", { username: user.username, group, member }, () => `Updated ${user.email ?? user.username}.`);
 
   const setEnabled = (user: UserView, enabled: boolean) =>
-    act("/api/users/enabled", { username: user.username, enabled }, ({ devicesRevoked }) =>
+    act("/api/users/enabled", { username: user.username, enabled }, () =>
       enabled
         ? `Enabled ${user.email ?? user.username}. They sign in again on each device.`
-        : `Disabled ${user.email ?? user.username}, signed them out and revoked ${devicesRevoked?.length ?? 0} device(s).`,
+        : `Disabled ${user.email ?? user.username} and signed them out of every device.`,
+    );
+
+  const signOutEverywhere = (user: UserView) =>
+    act(
+      "/api/users/sign-out",
+      { username: user.username },
+      () =>
+        `Signed ${user.email ?? user.username} out of every device. Each one stops syncing within ` +
+        "15 minutes and asks them to sign in again.",
     );
 
   const resetPassword = (user: UserView) =>
@@ -210,6 +219,9 @@ export function UsersSection() {
                 </label>
                 <Button size="sm" variant="outline" disabled={busy} onClick={() => void resetPassword(user)}>
                   Reset password
+                </Button>
+                <Button size="sm" variant="outline" disabled={busy} onClick={() => void signOutEverywhere(user)}>
+                  Sign out all devices
                 </Button>
                 <Button
                   size="sm"

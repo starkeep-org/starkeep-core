@@ -37,7 +37,6 @@ import { APPS_CHANGED_EVENT } from "../components/AppDiscovery";
 import { LocalDriveSection } from "../components/LocalDriveSection";
 import { LocalAppsSection } from "../components/LocalAppsSection";
 import { CloudAppsSection } from "../components/CloudAppsSection";
-import { PairedDevicesSection } from "../components/PairedDevicesSection";
 import { ThisMachineSection } from "../components/ThisMachineSection";
 import { UsersSection } from "../components/UsersSection";
 import { LocalFoldersModal, type Watch } from "../components/LocalFoldersModal";
@@ -583,8 +582,6 @@ export function DashboardPage() {
               <ThisMachineSection
                 deviceAddress={cloudConfig?.publicBaseUrl ?? cloudConfig?.apiGatewayUrl ?? null}
               />
-
-              <PairedDevicesSection />
 
               {cognitoSession && <UsersSection />}
 
