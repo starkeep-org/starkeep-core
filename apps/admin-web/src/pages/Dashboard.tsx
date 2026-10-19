@@ -580,7 +580,9 @@ export function DashboardPage() {
                 }
               />
 
-              <ThisMachineSection />
+              <ThisMachineSection
+                deviceAddress={cloudConfig?.publicBaseUrl ?? cloudConfig?.apiGatewayUrl ?? null}
+              />
 
               <PairedDevicesSection />
 
