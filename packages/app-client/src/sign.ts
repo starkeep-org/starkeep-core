@@ -17,10 +17,10 @@ export const APP_TS_HEADER = "X-Starkeep-App-Ts";
  * The two are not alternatives and neither substitutes for the other: the HMAC
  * says which *app* is calling, and this says which *person* it is calling for.
  * The broker requires both, with no route carve-out and nothing an app can put
- * in its own manifest to opt out. A paired mobile device presents an Ed25519
- * device signature instead — that is not an exemption from the requirement,
- * it is the other shape of the same one, issued by the platform when the
- * device was registered against a named Cognito user.
+ * in its own manifest to opt out. A signed-in device presents this token
+ * alone, from the pool's device client — that is not an exemption from the
+ * requirement, it is the other shape of the same one: the broker accepts a
+ * token without an HMAC only when the device client issued it.
  */
 export const USER_TOKEN_HEADER = "X-Starkeep-User-Token";
 

@@ -255,22 +255,12 @@ export async function createAppRole(input: CreateAppRoleInput): Promise<string> 
               Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/app-creds/*`,
             },
             {
-              // The platform's own non-secret parameters: paired-device
-              // records, read to verify a device's signature, and the
-              // deployment's settings. Read only; Manager writes both.
+              // The platform's own non-secret parameters: the deployment's
+              // settings. Read only; Manager writes them.
               Sid: "BrokerReadPlatformParameters",
               Effect: "Allow",
               Action: "ssm:GetParameter",
               Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/platform/*`,
-            },
-            {
-              // The device branch looks up the groups of the user a device
-              // record names, so a member removed from the data group stops
-              // syncing. Read-only.
-              Sid: "BrokerListUserGroups",
-              Effect: "Allow",
-              Action: "cognito-idp:AdminListGroupsForUser",
-              Resource: `arn:aws:cognito-idp:*:${accountId}:userpool/*`,
             },
             {
               // SecureString — decrypt via the SSM service key.

@@ -31,6 +31,8 @@ const context: LambdaContext = {
 const DEVICE_CLIENT_ID = "test-device-client";
 
 let handler: (typeof import("../src/api-handler.js"))["handler"];
+let deviceMayCall: (typeof import("../src/api-handler.js"))["deviceMayCall"];
+let deviceWriteRefusal: (typeof import("../src/api-handler.js"))["deviceWriteRefusal"];
 
 /** A token from the device client, for a user in the data group. */
 function deviceToken(over: Record<string, unknown> = {}): Promise<string> {
@@ -46,7 +48,7 @@ beforeAll(async () => {
   vi.spyOn(console, "warn").mockImplementation(() => {});
   await installUserTokenFixture();
   process.env.STARKEEP_DEVICE_USER_POOL_CLIENT_ID = DEVICE_CLIENT_ID;
-  ({ handler } = await import("../src/api-handler.js"));
+  ({ handler, deviceMayCall, deviceWriteRefusal } = await import("../src/api-handler.js"));
 });
 
 beforeEach(() => {
@@ -153,14 +155,6 @@ describe("a device token", () => {
     expect(res.statusCode).toBe(403);
   });
 
-  it("cannot read a paired device's own record, which it has none of", async () => {
-    const res = await handler(
-      event({ method: "GET", path: "/apps/starkeep-drive/device/self", token: await deviceToken() }),
-      context,
-    );
-    expect(res.statusCode).toBe(403);
-  });
-
   it("may not write the platform's own files", async () => {
     const res = await handler(
       event({
@@ -172,6 +166,49 @@ describe("a device token", () => {
       context,
     );
     expect(res.statusCode).toBe(403);
+    expect(errorOf(res)).toBe("A device may not write the platform's own files");
+  });
+
+  it("may not tombstone the platform's own files either", async () => {
+    // Tombstoning the winning settings file reverts every setting to the defaults.
+    const res = await handler(
+      event({
+        method: "POST",
+        path: "/apps/starkeep-drive/sync/exchange",
+        body: JSON.stringify({
+          records: [{ id: "img-1", type: "image/jpeg" }, { id: "s-1", type: "starkeep/settings", deletedAt: "t" }],
+        }),
+        token: await deviceToken(),
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("may not presign an upload into the platform category", async () => {
+    const res = await handler(
+      event({
+        method: "POST",
+        path: "/apps/starkeep-drive/files/presign",
+        body: JSON.stringify({ key: "shared/test-user/starkeep/ab/abcdef0123456789" }),
+        token: await deviceToken(),
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("pushes ordinary records past the gate", async () => {
+    const res = await handler(
+      event({
+        method: "POST",
+        path: "/apps/starkeep-drive/sync/exchange",
+        body: JSON.stringify({ records: [{ id: "img-1", type: "image/jpeg" }] }),
+        token: await deviceToken(),
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(500);
   });
 
   it("is refused for an account outside the data group", async () => {
@@ -231,6 +268,50 @@ describe("a device token, beyond the sync routes", () => {
       context,
     );
     expect(res.statusCode).toBe(401);
+  });
+});
+
+describe("deviceMayCall", () => {
+  it("lets a device read the deployment's settings, and nothing else under that path", () => {
+    expect(deviceMayCall("GET", "/deployment/settings")).toBe(true);
+    expect(deviceMayCall("PUT", "/deployment/settings")).toBe(false);
+    expect(deviceMayCall("GET", "/deployment/settings/extra")).toBe(false);
+  });
+
+  it("does not match a path that merely starts like an allowed one", () => {
+    expect(deviceMayCall("POST", "/sync/exchange/extra")).toBe(false);
+    expect(deviceMayCall("GET", "/healthz")).toBe(false);
+    expect(deviceMayCall("GET", "/files/presign")).toBe(false);
+    expect(deviceMayCall("PUT", "/files/shared/image/ab/cd")).toBe(false);
+    expect(deviceMayCall("GET", "/files/shared/image/ab/cd")).toBe(false);
+  });
+
+  it("reads the cloud's record listing, read-only", () => {
+    expect(deviceMayCall("GET", "/data/records")).toBe(true);
+    expect(deviceMayCall("GET", "/data/types")).toBe(true);
+    expect(deviceMayCall("POST", "/data/records")).toBe(false);
+    expect(deviceMayCall("DELETE", "/data/records/abc")).toBe(false);
+  });
+});
+
+describe("deviceWriteRefusal", () => {
+  it("reads nothing on routes that carry no write", () => {
+    expect(deviceWriteRefusal("GET", "/health", Buffer.from("[]"))).toBeNull();
+    expect(deviceWriteRefusal("HEAD", "/files/shared/starkeep/ab/cd", Buffer.alloc(0))).toBeNull();
+  });
+
+  it("refuses by category, not by the one settings type", () => {
+    const body = Buffer.from(JSON.stringify({ records: [{ type: "starkeep/some-future-file" }] }));
+    expect(deviceWriteRefusal("POST", "/sync/exchange", body)).not.toBeNull();
+  });
+
+  it("ignores records with no type, such as app-syncable rows", () => {
+    const body = Buffer.from(JSON.stringify({ records: [{ id: "x" }, null, 3] }));
+    expect(deviceWriteRefusal("POST", "/sync/exchange", body)).toBeNull();
+  });
+
+  it("leaves a body that does not parse to the route, which refuses it", () => {
+    expect(deviceWriteRefusal("POST", "/sync/exchange", Buffer.from("{not json"))).toBeNull();
   });
 });
 

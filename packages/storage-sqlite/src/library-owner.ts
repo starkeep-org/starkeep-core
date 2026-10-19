@@ -4,8 +4,8 @@
  * One node serves one cloud user. Every object key carries its owner's segment
  * (`shared/<userId>/...`, `apps/<appId>/<userId>/syncable/...`), and a library
  * no cloud has bound yet writes under `LOCAL_USER_SEGMENT`. The first time the
- * cloud accepts the node's device key, `device/self` names the user, and
- * binding renames the `local` segment to that user's id before the first sync:
+ * node signs in, the ID token's `sub` names the user, and binding renames the
+ * `local` segment to that user's id before the first sync:
  * on disk, which each host does its own way, and in every stored key, which
  * this file does for every host. After that, a cloud that names a different
  * user stops sync rather than mixing two users' data.

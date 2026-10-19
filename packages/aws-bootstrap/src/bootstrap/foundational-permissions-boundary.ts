@@ -167,9 +167,8 @@ export function foundationalPermissionsBoundaryStatements(
       //    app's creds to verify HMAC-signed /apps/{appId}/* requests. The
       //    role's broker-power inline policy grants the same; the boundary
       //    admits it so the intersection holds at runtime.
-      //  - /platform/*: paired-device records and the deployment's settings,
-      //    which cloud-data-server reads to verify a device and to serve the
-      //    settings. Not secret.
+      //  - /platform/*: the deployment's settings, which cloud-data-server
+      //    reads to serve them. Not secret.
       Sid: "FoundationalReadSsmParameters",
       Effect: "Allow",
       Action: "ssm:GetParameter",
@@ -178,14 +177,6 @@ export function foundationalPermissionsBoundaryStatements(
         `arn:aws:ssm:*:*:parameter/${stackPrefix}/app-creds/*`,
         `arn:aws:ssm:*:*:parameter/${stackPrefix}/platform/*`,
       ],
-    },
-    {
-      // The broker's device branch reads the groups of the user a device
-      // record names. The role's broker-power policy grants the same.
-      Sid: "FoundationalListUserGroups",
-      Effect: "Allow",
-      Action: "cognito-idp:AdminListGroupsForUser",
-      Resource: "arn:aws:cognito-idp:*:*:userpool/*",
     },
     {
       // SecureString decrypt for the two SSM SecureStrings this role reads

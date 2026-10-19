@@ -66,7 +66,6 @@ describe("manager policy (the install/uninstall allow-list)", () => {
         "sts:AssumeRole",
         "sts:GetCallerIdentity",
         "ssm:GetParameter",
-        "ssm:GetParametersByPath",
         "ssm:PutParameter",
         "ssm:DeleteParameter",
         "ssm:AddTagsToResource",
@@ -81,7 +80,7 @@ describe("manager policy (the install/uninstall allow-list)", () => {
     const actions = actionsOf(statements);
     for (const s of statements) {
       const acts = Array.isArray(s.Action) ? s.Action : [s.Action];
-      if (acts.some((a) => a === "ssm:GetParameter" || a === "ssm:GetParametersByPath")) {
+      if (acts.some((a) => a === "ssm:GetParameter")) {
         expect(cfnString(s.Resource as CfnValue)).toBe(`arn:aws:ssm:*:*:parameter/${PREFIX}/platform/*`);
       }
     }

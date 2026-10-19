@@ -123,13 +123,6 @@ function brokerPowerPolicy(stackPrefix: string, accountId: string): PolicyDoc {
           Action: "ssm:GetParameter",
           Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/platform/*`,
         },
-        {
-          // Matches iam.ts `BrokerListUserGroups`.
-          Sid: "BrokerListUserGroups",
-          Effect: "Allow",
-          Action: "cognito-idp:AdminListGroupsForUser",
-          Resource: `arn:aws:cognito-idp:*:${accountId}:userpool/*`,
-        },
       ],
     },
   };
@@ -480,13 +473,8 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         },
         {
           action: "ssm:GetParameter",
-          resource: `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/platform/devices/dev-01ABC`,
-          why: "The device branch reads a paired device's record to verify its signature.",
-        },
-        {
-          action: "cognito-idp:AdminListGroupsForUser",
-          resource: `arn:aws:cognito-idp:${region}:${accountId}:userpool/${region}_TESTPOOL`,
-          why: "The device branch reads the groups of the user a device record names; a member outside the data group is refused.",
+          resource: `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/platform/deployment-settings`,
+          why: "GET /deployment/settings reads the deployment's settings document for every node and the phone.",
         },
         {
           action: "logs:CreateLogStream",
@@ -758,9 +746,8 @@ const CONTEXTS: Record<string, ContextBuilder> = {
       const installInfraRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-infra-role`;
       const appBoundaryArn = `arn:aws:iam::${accountId}:policy/${stackPrefix}-app-permissions-boundary`;
       const appCredsArn = `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/app-creds/${id}`;
-      // A paired device's record, under the platform's own non-secret prefix.
-      const deviceKeyArn = `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/platform/devices/dev-01ABC`;
-      const deviceListArn = `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/platform/devices`;
+      // The deployment's settings, under the platform's own non-secret prefix.
+      const settingsArn = `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/platform/deployment-settings`;
       const ssmViaService = `ssm.${region}.amazonaws.com`;
       return [
         // ---- Mint / heal the per-app role (createAppRole). --------------
@@ -871,18 +858,13 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         },
         {
           action: "ssm:PutParameter",
-          resource: deviceKeyArn,
-          why: "admin-web device pairing writes the handset's public key; the CDS Lambda reads it to decide whose signatures to trust.",
+          resource: settingsArn,
+          why: "admin-web writes the deployment's settings through Manager; the CDS Lambda reads them for every node.",
         },
         {
-          action: "ssm:GetParametersByPath",
-          resource: deviceListArn,
-          why: "admin-web lists paired devices from their records, which are the authority the broker reads.",
-        },
-        {
-          action: "ssm:DeleteParameter",
-          resource: deviceKeyArn,
-          why: "Revoking a device is deleting its one parameter — it must be as reachable as pairing, or a lost phone cannot be cut off.",
+          action: "ssm:GetParameter",
+          resource: settingsArn,
+          why: "admin-web reads the deployment's settings through Manager before editing them.",
         },
         {
           action: "kms:Encrypt",
