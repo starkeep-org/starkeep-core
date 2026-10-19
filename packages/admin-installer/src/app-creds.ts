@@ -22,7 +22,6 @@ import {
   ParameterAlreadyExists,
   PutParameterCommand,
   DeleteParameterCommand,
-  GetParametersByPathCommand,
 } from "@aws-sdk/client-ssm";
 import {
   checkDeploymentSettings,
@@ -31,14 +30,6 @@ import {
   type DeploymentSettings,
 } from "@starkeep/protocol-primitives";
 
-// Re-exported for admin-web's server routes, which reach the installer only
-// through this subpath: approving a device reads its pairing code and shows the
-// fingerprint the admin confirms.
-export {
-  deviceFingerprint,
-  parsePairingRequest,
-  type PairingRequest,
-} from "@starkeep/protocol-primitives";
 import type { AwsCredentials } from "./session";
 
 /** Re-exported so a consumer of this subpath needs only this one import. */
@@ -61,26 +52,17 @@ export function cloudFrontSigningParameterName(stackPrefix: string): string {
 }
 
 /**
- * The SSM prefix for the platform's own non-secret parameters: paired devices
- * and the deployment's settings.
+ * The SSM prefix for the platform's own non-secret parameters: the
+ * deployment's settings.
  *
- * A prefix of its own, rather than reserved names under `app-creds/*`, so that
- * Manager can read and list device records without any read on the app
- * secrets. Manager writes app secrets but never reads them, and admin-web's
- * device list needs a read. One prefix keeps the cloud data server's runtime
- * grant and the foundational boundary to a single resource each.
+ * A prefix of its own, rather than a reserved name under `app-creds/*`, so that
+ * Manager can read the settings without any read on the app secrets. Manager
+ * writes app secrets but never reads them, and admin-web's settings editor
+ * needs a read. One prefix keeps the cloud data server's runtime grant and the
+ * foundational boundary to a single resource each.
  */
 export function platformParameterPrefix(stackPrefix: string): string {
   return `/${stackPrefix}/platform`;
-}
-
-/**
- * Name of a paired device's record. The value is a {@link DeviceRegistration}
- * and is **not secret**: it is the public half of the device's key. Stored as
- * a plain `String`.
- */
-export function deviceKeyParameterName(stackPrefix: string, deviceId: string): string {
-  return `${platformParameterPrefix(stackPrefix)}/devices/${deviceId}`;
 }
 
 /** Name of the deployment's settings document. See `settings/deployment-settings.ts`. */
@@ -168,132 +150,6 @@ export async function changeDeploymentSettingsParameter(opts: {
   if (!checked.ok) return { ok: false, problems: checked.problems };
   await putDeploymentSettingsParameter({ ...opts, document: serializeDeploymentSettings(next) });
   return { ok: true, settings: next };
-}
-
-/** What kind of machine a device is. The broker scopes each kind differently. */
-export type DeviceKind = "phone" | "desktop";
-
-/** What a paired device is, as admin-web records it. */
-export interface DeviceRegistration {
-  /** Base64 SPKI Ed25519 public key, as the device published it. */
-  readonly publicKeySpki: string;
-  /** The Cognito user (`sub`) this device was paired for. */
-  readonly userId: string | null;
-  readonly kind: DeviceKind;
-  /**
-   * The apps the device may act as. The broker refuses any other app id, and
-   * refuses a record without this field, so a device key is a key to the
-   * apps it was paired for and no others.
-   */
-  readonly appIds: readonly string[];
-  /** Human-readable, so the operator can tell two devices apart when revoking. */
-  readonly label: string | null;
-  readonly pairedAt: string;
-}
-
-/** One device record as admin-web lists it. */
-export interface DeviceRecord extends DeviceRegistration {
-  readonly deviceId: string;
-}
-
-/**
- * Pair a device: publish its public key so the cloud will accept its signatures.
- *
- * Idempotent on device id, so re-pairing a reinstalled app converges rather
- * than erroring. Revocation is {@link deleteDeviceKeyParameter} — one delete,
- * and no other client of any app is disturbed, which is the entire reason a
- * device gets its own asymmetric key instead of the app's shared secret.
- */
-export async function putDeviceKeyParameter(opts: {
-  stackPrefix: string;
-  deviceId: string;
-  registration: DeviceRegistration;
-  region: string;
-  awsCreds: AwsCredentials;
-}): Promise<string> {
-  const ssm = makeSsmClient(opts.region, opts.awsCreds);
-  const name = deviceKeyParameterName(opts.stackPrefix, opts.deviceId);
-  // Shape MUST match CachedDeviceKey's parse in the cloud-data-server handler.
-  await ssm.send(
-    new PutParameterCommand({
-      Name: name,
-      Type: "String",
-      Value: JSON.stringify(opts.registration),
-      Overwrite: true,
-      Description: `Starkeep paired device ${opts.deviceId}. Public key only.`,
-    }),
-  );
-  return name;
-}
-
-/** Revoke a device. The cloud stops accepting its signatures within the cache TTL. */
-export async function deleteDeviceKeyParameter(opts: {
-  stackPrefix: string;
-  deviceId: string;
-  region: string;
-  awsCreds: AwsCredentials;
-}): Promise<void> {
-  const ssm = makeSsmClient(opts.region, opts.awsCreds);
-  try {
-    await ssm.send(
-      new DeleteParameterCommand({
-        Name: deviceKeyParameterName(opts.stackPrefix, opts.deviceId),
-      }),
-    );
-  } catch (err) {
-    // Already gone is the desired end state, not an error.
-    if (!(err instanceof ParameterNotFound)) throw err;
-  }
-}
-
-/**
- * Every paired device. The records are the authority, so the list cannot
- * disagree with what the broker accepts. A record that does not parse is
- * listed with its id and nothing else it claims, so the operator can still
- * revoke it.
- */
-export async function listDeviceRecords(opts: {
-  stackPrefix: string;
-  region: string;
-  awsCreds: AwsCredentials;
-}): Promise<DeviceRecord[]> {
-  const ssm = makeSsmClient(opts.region, opts.awsCreds);
-  const path = `${platformParameterPrefix(opts.stackPrefix)}/devices`;
-  const records: DeviceRecord[] = [];
-  let nextToken: string | undefined;
-  do {
-    const page = await ssm.send(
-      new GetParametersByPathCommand({ Path: path, Recursive: false, NextToken: nextToken }),
-    );
-    for (const p of page.Parameters ?? []) {
-      const deviceId = p.Name?.slice(path.length + 1);
-      if (!deviceId) continue;
-      records.push({ deviceId, ...parseDeviceRegistration(p.Value) });
-    }
-    nextToken = page.NextToken;
-  } while (nextToken);
-  return records.sort((a, b) => a.pairedAt.localeCompare(b.pairedAt));
-}
-
-/** A stored registration, read defensively. A field that does not parse reads as empty. */
-export function parseDeviceRegistration(raw: string | undefined): DeviceRegistration {
-  let v: Record<string, unknown> = {};
-  try {
-    const parsed: unknown = JSON.parse(raw ?? "{}");
-    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-      v = parsed as Record<string, unknown>;
-    }
-  } catch {
-    // An unreadable record lists as empty, and revoking it still works.
-  }
-  return {
-    publicKeySpki: typeof v.publicKeySpki === "string" ? v.publicKeySpki : "",
-    userId: typeof v.userId === "string" ? v.userId : null,
-    kind: v.kind === "desktop" ? "desktop" : "phone",
-    appIds: Array.isArray(v.appIds) ? v.appIds.filter((a): a is string => typeof a === "string") : [],
-    label: typeof v.label === "string" ? v.label : null,
-    pairedAt: typeof v.pairedAt === "string" ? v.pairedAt : "",
-  };
 }
 
 function makeSsmClient(region: string, creds: AwsCredentials): SSMClient {

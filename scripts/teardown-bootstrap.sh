@@ -391,9 +391,9 @@ else
 fi
 
 # ── Step 2b: Delete the platform's own parameters ────────────────────────────
-# Paired-device records (/${STACK_PREFIX}/platform/devices/<id>) and the
-# deployment's settings (/${STACK_PREFIX}/platform/deployment-settings), written
-# by admin-web through Manager. Nothing uninstalls these, so the sweep is the
+# The deployment's settings (/${STACK_PREFIX}/platform/deployment-settings),
+# written by admin-web through Manager, and any device records a deployment kept
+# from before pairing was retired. Nothing uninstalls these, so the sweep is the
 # only thing that removes them.
 PLATFORM_PREFIX="/${STACK_PREFIX}/platform/"
 step "Deleting platform SSM parameters under $PLATFORM_PREFIX"

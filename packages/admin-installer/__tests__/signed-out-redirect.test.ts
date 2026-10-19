@@ -133,7 +133,7 @@ describe("passes through", () => {
   });
 
   it("the reserved data plane — a device signs these and holds no cookie", () => {
-    // Not a preference. A paired handset presents an Ed25519 signature and no
+    // Not a preference. A signed-in handset presents its device token and no
     // cookie at all, so redirecting these would break device sync outright.
     for (const sub of ["data/records", "files/x", "sync/exchange", "app-data/db/decks", "health"]) {
       const r = req(`/apps/photos/${sub}`, { dest: "document" });

@@ -19,22 +19,9 @@
  * Manager is not involved in the runtime data path.
  */
 
-import {
-  createHash,
-  createHmac,
-  createPublicKey,
-  randomUUID,
-  timingSafeEqual,
-  verify as nodeVerify,
-  type KeyObject,
-} from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 import { SSMClient, GetParameterCommand, ParameterNotFound } from "@aws-sdk/client-ssm";
-import {
-  AdminListGroupsForUserCommand,
-  CognitoIdentityProviderClient,
-  UserNotFoundException,
-} from "@aws-sdk/client-cognito-identity-provider";
 import { getSignedUrl as getCloudFrontSignedUrl } from "@aws-sdk/cloudfront-signer";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
@@ -81,7 +68,6 @@ import {
   STAND_IN_MIME_TYPES,
   SETTINGS_TYPE_ID,
   DEPLOYMENT_SETTINGS_ROUTE,
-  DEVICE_SELF_ROUTE,
   AUTH_CONFIG_ROUTE,
   DATA_GROUP,
   stampFor,
@@ -240,58 +226,15 @@ function getSsmClient(): SSMClient {
   return ssmClientSingleton;
 }
 
-// ---------------------------------------------------------------------------
-// Per-device public key cache (SSM, same lifetime as the app secrets above)
-// ---------------------------------------------------------------------------
-//
-// A handset cannot hold a per-app HMAC secret: it is symmetric, so whoever
-// holds it *is* the app; it is extractable from a distributable APK; it never
-// expires; and revoking it after a lost phone would break every other client of
-// that app. So devices get an asymmetric key instead — they sign, we verify,
-// and nothing secret is stored on this side.
-//
-// **Why SSM and not a table.** This runs *before* any per-app role is assumed,
-// and the cloud-data-server's own credentials deliberately have no access to
-// shared data. A device registry in `shared.*` would be unreadable by the code
-// that has to read it. The app secrets already had this problem and already
-// solved it, so devices take the same path and inherit the cache, the failure
-// modes and the revocation story — revoking is deleting one parameter.
-//
-// The records live under `/${stackPrefix}/platform/devices/`, beside the
-// deployment's settings and apart from the app secrets, so Manager can list
-// them for admin-web without any read on `app-creds/*`.
-//
-// Registration is not self-service: admin-web writes the parameter, having
-// authenticated the operator and chosen which Cognito user the device belongs
-// to.
-
-interface CachedDeviceKey {
-  /** Base64 SPKI, exactly as registered. */
-  publicKeySpki: string;
-  /** The Cognito user this device was paired for: the user it syncs as. */
-  userId: string | null;
-  /** A phone or a desktop. A record without the field is a phone. */
-  kind: "phone" | "desktop";
-  /** What the operator called the device, or null. */
-  label: string | null;
-  /**
-   * The apps this device may act as, as admin-web recorded them at pairing.
-   * Empty for a record written before pairing recorded them, which therefore
-   * acts as nothing: the device re-pairs.
-   */
-  appIds: readonly string[];
-  fetchedAt: number;
-}
-
 /**
  * The category the platform's own files live in, Drive-only. Today it holds
- * only the retired settings records. A paired device may not write it. See
+ * only the retired settings records. A device may not write it. See
  * {@link deviceMayCall}.
  */
 const PLATFORM_CATEGORY = typeCategory(SETTINGS_TYPE_ID);
 
 /**
- * Whether a paired device may call this route at all.
+ * Whether a signed-in device may call this route at all.
  *
  * A device acts as Starkeep Drive or an installed app, and those identities may
  * do far more than sync — Drive may delete records and write anything shared.
@@ -300,10 +243,11 @@ const PLATFORM_CATEGORY = typeCategory(SETTINGS_TYPE_ID);
  * host's sync calls, and nothing else. A stolen device can then sync, which its
  * key already allowed, but cannot delete records through the record routes.
  *
- * - **Both kinds:** health, the deployment's settings, the device's own record,
- *   the exchange and the file routes the object-storage adapter calls.
- * - **A desktop also** reads the cloud's view of records, read-only, which
- *   Drive's UI shows beside the local view through the local data server.
+ * That is health, the deployment's settings, the exchange and the file routes
+ * the object-storage adapter calls, plus a read-only view of the cloud's
+ * records, which Drive's UI shows beside the local view through the local data
+ * server. One device client serves desktops and phones, so a phone holds the
+ * same list.
  *
  * The desktop list comes from an audit of every cloud call the local data
  * server makes: its supervisor's transports, its object-storage adapters, its
@@ -312,15 +256,14 @@ const PLATFORM_CATEGORY = typeCategory(SETTINGS_TYPE_ID);
  * Writes that these routes allow are checked separately for the platform
  * category: see {@link deviceWriteRefusal}.
  */
-export function deviceMayCall(kind: "phone" | "desktop", method: string, subPath: string): boolean {
+export function deviceMayCall(method: string, subPath: string): boolean {
   if (method === "GET" && subPath === "/health") return true;
   if (method === "GET" && subPath === DEPLOYMENT_SETTINGS_ROUTE) return true;
-  if (method === "GET" && subPath === DEVICE_SELF_ROUTE) return true;
   if (method === "POST" && subPath === "/sync/exchange") return true;
   if (method === "POST" && subPath === "/files/presign") return true;
   if (method === "GET" && /^\/files\/.+\/(presign|stat)$/.test(subPath)) return true;
   if (method === "HEAD" && /^\/files\/.+$/.test(subPath)) return true;
-  if (kind === "desktop" && method === "GET" && (subPath === "/data/types" || subPath === "/data/records")) {
+  if (method === "GET" && (subPath === "/data/types" || subPath === "/data/records")) {
     return true;
   }
   return false;
@@ -348,7 +291,7 @@ export function deviceWriteRefusal(method: string, subPath: string, body: Buffer
     return null;
   }
   if (typeof parsed !== "object" || parsed === null) return null;
-  const refusal = "A paired device may not write the platform's own files";
+  const refusal = "A device may not write the platform's own files";
   if (subPath === "/sync/exchange") {
     const records = (parsed as { records?: unknown }).records;
     if (!Array.isArray(records)) return null;
@@ -398,17 +341,14 @@ export function exchangeKeyRefusal(
   return null;
 }
 
-const deviceKeyCache = new Map<string, CachedDeviceKey>();
-
 // ---------------------------------------------------------------------------
 // Account groups
 // ---------------------------------------------------------------------------
 //
 // Two Cognito groups define an account. `starkeep-admins` administers the
 // deployment; `starkeep-users` has a data library that syncs. The identity
-// pool hands AWS credentials to admins only. This file checks the data group,
-// on both branches: the HMAC branch reads it from the ID token, and the device
-// branch looks up the user its record names.
+// pool hands AWS credentials to admins only. This file checks the data group
+// on both branches, from the ID token's `cognito:groups` claim.
 
 export const ADMINS_GROUP = "starkeep-admins";
 /** Shared with the devices, which check it at sign-in. */
@@ -424,107 +364,6 @@ export { DATA_GROUP };
  */
 export function groupsMayUseData(groups: readonly string[]): boolean {
   return groups.includes(DATA_GROUP);
-}
-
-interface CachedGroups {
-  groups: readonly string[];
-  fetchedAt: number;
-}
-
-const userGroupsCache = new Map<string, CachedGroups>();
-
-let cognitoClientSingleton: CognitoIdentityProviderClient | null = null;
-function getCognitoClient(): CognitoIdentityProviderClient {
-  cognitoClientSingleton ??= new CognitoIdentityProviderClient({
-    region: process.env.AWS_REGION ?? "us-east-1",
-  });
-  return cognitoClientSingleton;
-}
-
-/**
- * The groups of the user a device record names, cached for the same five
- * minutes as the record itself. Removing a user from a group therefore stops
- * that user's devices within the window, as revoking a device does. A user the
- * pool no longer holds has no groups.
- */
-async function loadUserGroups(userId: string): Promise<readonly string[]> {
-  const cached = userGroupsCache.get(userId);
-  if (cached && Date.now() - cached.fetchedAt < HMAC_CACHE_TTL_MS) return cached.groups;
-  const poolCfg = userPoolConfig();
-  if (!poolCfg) throw new Error("no user pool configured — cannot look up a device's user");
-  const groups: string[] = [];
-  try {
-    let nextToken: string | undefined;
-    do {
-      const page = await getCognitoClient().send(
-        new AdminListGroupsForUserCommand({
-          UserPoolId: poolCfg.userPoolId,
-          Username: userId,
-          NextToken: nextToken,
-        }),
-      );
-      for (const group of page.Groups ?? []) if (group.GroupName) groups.push(group.GroupName);
-      nextToken = page.NextToken;
-    } while (nextToken);
-  } catch (err) {
-    if (!(err instanceof UserNotFoundException)) throw err;
-  }
-  userGroupsCache.set(userId, { groups, fetchedAt: Date.now() });
-  return groups;
-}
-
-/** Test seam: forget cached group lookups. */
-export function _resetUserGroupsCache(): void {
-  userGroupsCache.clear();
-}
-
-/**
- * Device ids are used to build an SSM parameter name, so they are constrained
- * rather than trusted. Without this, a crafted `X-Starkeep-Device-Id` could
- * walk the parameter path with `../` and turn a signature check into a probe
- * for arbitrary parameters — including the app secrets sitting one level up.
- */
-function isValidDeviceId(deviceId: string): boolean {
-  return /^[A-Za-z0-9_-]{1,128}$/.test(deviceId);
-}
-
-async function loadDevicePublicKey(deviceId: string): Promise<CachedDeviceKey | null> {
-  if (!isValidDeviceId(deviceId)) return null;
-  const cached = deviceKeyCache.get(deviceId);
-  if (cached && Date.now() - cached.fetchedAt < HMAC_CACHE_TTL_MS) return cached;
-
-  const stackPrefix = process.env.STACK_PREFIX;
-  if (!stackPrefix) throw new Error("STACK_PREFIX env var is required");
-  try {
-    const result = await getSsmClient().send(
-      new GetParameterCommand({ Name: `/${stackPrefix}/platform/devices/${deviceId}` }),
-    );
-    const raw = result.Parameter?.Value;
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as {
-      publicKeySpki?: string;
-      userId?: string;
-      kind?: unknown;
-      label?: unknown;
-      appIds?: unknown;
-    };
-    if (!parsed.publicKeySpki) return null;
-    const entry: CachedDeviceKey = {
-      publicKeySpki: parsed.publicKeySpki,
-      userId: parsed.userId ?? null,
-      kind: parsed.kind === "desktop" ? "desktop" : "phone",
-      label: typeof parsed.label === "string" ? parsed.label : null,
-      appIds: Array.isArray(parsed.appIds)
-        ? parsed.appIds.filter((a): a is string => typeof a === "string")
-        : [],
-      fetchedAt: Date.now(),
-    };
-    deviceKeyCache.set(deviceId, entry);
-    return entry;
-  } catch (err) {
-    if (err instanceof ParameterNotFound) return null;
-    throw err;
-  }
 }
 
 async function loadAppHmacSecret(appId: string): Promise<string | null> {
@@ -629,89 +468,6 @@ export function validateAppHmac(
     || !timingSafeEqual(Buffer.from(expected, "utf8") as unknown as Uint8Array, Buffer.from(headerSig, "utf8") as unknown as Uint8Array)
   ) {
     return { ok: false, status: 401, message: "Invalid signature" };
-  }
-  return { ok: true };
-}
-
-/**
- * Verify a device-signed request.
- *
- * The signed message is **byte-identical** to the HMAC one — same prefix, same
- * canonical path, same empty-body-on-GET rule, same skew window. Only the
- * primitive differs. That is deliberate: a second canonicalisation is how two
- * implementations come to disagree about what was signed, and the disagreement
- * surfaces as an unexplainable 401 on one route long after the change.
- *
- * The device is authorised for whichever app it names. On a handset our app is
- * the only thing holding the key, and it legitimately needs two channels
- * (`starkeep-drive` for shared records, `photos` for app-specific rows), so a
- * per-app device key would mean several registrations for one pairing. What
- * this gives up is per-app attribution of *authorisation*; origin attribution
- * is unaffected, since `origin_app_id` is on the record itself.
- */
-function validateDeviceSignature(
-  pathAppId: string,
-  method: string,
-  subPath: string,
-  headers: Record<string, string | undefined>,
-  bodyBytes: Buffer,
-  device: CachedDeviceKey,
-): { ok: true } | { ok: false; status: number; message: string } {
-  const headerSig = headers["x-starkeep-device-sig"];
-  const headerTs = headers["x-starkeep-app-ts"];
-  const headerAppId = headers["x-starkeep-app-id"];
-  if (!headerSig || !headerTs || !headerAppId) {
-    return {
-      ok: false,
-      status: 401,
-      message: "Missing X-Starkeep-Device-Sig / X-Starkeep-App-{Id,Ts} headers",
-    };
-  }
-  if (headerAppId !== pathAppId) {
-    return { ok: false, status: 401, message: "Header appId does not match path" };
-  }
-  const tsMs = Number(headerTs);
-  if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > APP_SIG_MAX_SKEW_MS) {
-    return { ok: false, status: 401, message: "Stale or invalid signature timestamp" };
-  }
-
-  const isEmptyBody = method === "GET" || method === "HEAD";
-  const signedBody = isEmptyBody ? Buffer.alloc(0) : bodyBytes;
-  const message = Buffer.concat([
-    Buffer.from(
-      `${pathAppId}:${method.toUpperCase()}:${canonicalSignedPath(subPath)}:${tsMs}:`,
-      "utf8",
-    ) as unknown as Uint8Array,
-    signedBody as unknown as Uint8Array,
-  ]);
-
-  let key: KeyObject;
-  try {
-    key = createPublicKey({
-      key: Buffer.from(device.publicKeySpki, "base64"),
-      type: "spki",
-      format: "der",
-    });
-  } catch {
-    // A registered key that will not parse is a registration bug, not a caller
-    // error — but it must still deny rather than throw, or one malformed
-    // parameter turns every request from that device into a 500.
-    return { ok: false, status: 401, message: "Registered device key is unusable" };
-  }
-  if (key.asymmetricKeyType !== "ed25519") {
-    return { ok: false, status: 401, message: "Registered device key is not Ed25519" };
-  }
-
-  let signature: Buffer;
-  try {
-    signature = Buffer.from(headerSig, "base64");
-  } catch {
-    return { ok: false, status: 401, message: "Invalid device signature encoding" };
-  }
-  // `verify` is constant-time internally and returns false rather than throwing
-  // on a malformed signature.
-  if (!nodeVerify(null, message as unknown as Uint8Array, key, signature as unknown as Uint8Array)) {
-    return { ok: false, status: 401, message: "Invalid device signature" };
   }
   return { ok: true };
 }
@@ -1191,9 +947,8 @@ export function parseAppPath(rawPath: string): { appId: string; subPath: string 
 
 /**
  * Who a request acts for: the app that signed it and the user behind it. The
- * user is the token's `sub` on the HMAC branch and the paired user on the
- * device branch. Every key a request builds or names carries this user's
- * segment.
+ * user is the ID token's `sub` on both branches. Every key a request builds or
+ * names carries this user's segment.
  */
 export interface BrokerSubject {
   readonly appId: string;
@@ -2440,77 +2195,20 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (typeof value === "string") normalizedHeaders[key.toLowerCase()] = value;
     }
 
-    // Three callers. A *paired device* presents an Ed25519 signature over the
-    // same bytes an app HMACs; a *signed-in device* presents an ID token from
-    // the pool's device client and nothing else; a *server* presents the HMAC
-    // and the user's token. The device branches are taken on the presence of
-    // their headers and never fall back to the HMAC path — a device whose
-    // credential is unknown or revoked must be denied, not given a second
-    // chance at a shared secret it should not have.
-    const deviceId = normalizedHeaders["x-starkeep-device-id"];
+    // Two callers. A *signed-in device* presents an ID token from the pool's
+    // device client and nothing else; a *server* presents the HMAC and the
+    // user's token. The device branch is taken on a token without an app
+    // signature and never falls back to the HMAC path — a device whose token
+    // is refused must be denied, not given a second chance at a shared secret
+    // it should not have.
     const userTokenHeader = normalizedHeaders["x-starkeep-user-token"];
-    const signedInDevice = !deviceId && !!userTokenHeader && !normalizedHeaders["x-starkeep-app-sig"];
-    /** The device that signed this request, when a device did. */
-    let callingDevice: (CachedDeviceKey & { deviceId: string }) | null = null;
+    const signedInDevice = !!userTokenHeader && !normalizedHeaders["x-starkeep-app-sig"];
     /**
-     * The user the request acts for: the device's paired user, or the token's
-     * `sub`. Null only for the app-scoped health check, which needs no token.
+     * The user the request acts for: the token's `sub`. Null only for the
+     * app-scoped health check, which needs no token.
      */
     let subjectUserId: string | null = null;
-    if (deviceId) {
-      const device = await loadDevicePublicKey(deviceId);
-      if (!device) {
-        return clientErr("Unknown or revoked device", 401);
-      }
-      const deviceCheck = validateDeviceSignature(
-        appId,
-        method,
-        subPath,
-        normalizedHeaders,
-        bodyBytes,
-        device,
-      );
-      if (!deviceCheck.ok) {
-        return clientErr(deviceCheck.message, deviceCheck.status);
-      }
-      // The app must still exist — a device may only act as an installed app,
-      // so a typo'd or uninstalled appId is rejected here rather than reaching
-      // a role assumption for something that was never provisioned.
-      if (!(await loadAppHmacSecret(appId))) {
-        return clientErr(`Unknown app: ${appId}`, 401);
-      }
-      // A phone acts only as the apps admin-web recorded for it: Starkeep
-      // Drive, so its key is no key to Photos or Memo. A desktop syncs every
-      // app installed on it, so it may act as any app installed in the cloud,
-      // which is what the secret check above established.
-      if (device.kind === "phone" && !device.appIds.includes(appId)) {
-        return clientErr(
-          `This device may act only as ${device.appIds.join(", ") || "no app"}, not ${appId}. Pair it again from admin-web.`,
-          403,
-        );
-      }
-      if (!deviceMayCall(device.kind, method, subPath)) {
-        return clientErr(`A paired device may not call ${method} ${subPath}`, 403);
-      }
-      const writeRefusal = deviceWriteRefusal(method, subPath, bodyBytes);
-      if (writeRefusal) return clientErr(writeRefusal, 403);
-      // The device syncs for the user its record names, so that user must be
-      // allowed data — the same check the HMAC branch makes on the token.
-      if (!device.userId) {
-        return clientErr("This device's record names no user. Pair it again from admin-web.", 403);
-      }
-      if (!groupsMayUseData(await loadUserGroups(device.userId))) {
-        return clientErr("The account this device syncs for has no data library on this cloud", 403);
-      }
-      callingDevice = { ...device, deviceId };
-      subjectUserId = device.userId;
-      // No end-user token is required on this branch, and that is not an
-      // oversight or a carve-out. A registered device key IS an end-user
-      // credential: admin-web writes it against a named Cognito userId at
-      // pairing time (see CachedDeviceKey.userId), so the signature already
-      // names the person. The requirement below is the same requirement in the
-      // other of its two shapes.
-    } else if (signedInDevice) {
+    if (signedInDevice) {
       // A signed-in desktop or phone: an ID token alone, with no app signature.
       //
       // What makes a bare token safe here is its `aud`. Only the pool's device
@@ -2535,7 +2233,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // One device client serves desktops and phones alike, so a signed-in
       // device holds the desktop's scope: Drive and every cloud-installed app,
       // through the sync routes alone.
-      if (!deviceMayCall("desktop", method, subPath) || subPath === DEVICE_SELF_ROUTE) {
+      if (!deviceMayCall(method, subPath)) {
         return clientErr(`A signed-in device may not call ${method} ${subPath}`, 403);
       }
       const writeRefusal = deviceWriteRefusal(method, subPath, bodyBytes);
@@ -2587,11 +2285,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // unauthenticated browser could drive an app's credential straight
       // through this gate.
       //
-      // There is no exemption. Every caller already holds one of the two
-      // shapes: cloud app compute mints an ID token from the session cookie,
-      // the local sync supervisor already refuses to run without a live one,
-      // and a paired device presents the signature handled above. Nothing an
-      // app puts in its own manifest opts out.
+      // There is no exemption. Every caller already holds a token: cloud app
+      // compute mints an ID token from the session cookie, and a signed-in
+      // device presents its own on the branch above. Nothing an app puts in its
+      // own manifest opts out.
       //
       // /health is not a data path, so it stays reachable — a liveness check
       // that requires a signed-in user cannot tell "down" from "signed out".
@@ -2617,19 +2314,6 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         }
         subjectUserId = claims.sub;
       }
-    }
-
-    // GET /apps/starkeep-drive/device/self — the calling device's own record:
-    // whom it was paired for, its label and its kind. A device polls this
-    // after showing a pairing code, to learn that an admin approved it.
-    if (method === "GET" && subPath === DEVICE_SELF_ROUTE) {
-      if (appId !== DRIVE_APP_ID || !callingDevice) return clientErr("Not found", 404);
-      return ok({
-        deviceId: callingDevice.deviceId,
-        userId: callingDevice.userId,
-        label: callingDevice.label,
-        kind: callingDevice.kind,
-      });
     }
 
     // GET /apps/starkeep-drive/deployment/settings — the deployment's
@@ -4619,7 +4303,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         JSON.stringify({
           event: "sync-exchange",
           appId,
-          caller: deviceId ? { device: deviceId } : { app: appId },
+          caller: signedInDevice ? { device: subject.userId } : { app: appId },
           in: {
             records: body.records?.length ?? 0,
             labels: body.labels?.length ?? 0,

@@ -25,7 +25,6 @@ import * as tls from "@pulumi/tls";
 import {
   ARCHIVE_SIZE_FLOOR_BYTES,
   DEPLOYMENT_SETTINGS_ROUTE,
-  DEVICE_SELF_ROUTE,
   AUTH_CONFIG_ROUTE,
   INTENT_TAG_KEY,
   LADDER_TAG_KEY,
@@ -546,7 +545,7 @@ export function buildCloudDataServerProgram(
     //   - OPTIONS /{proxy+}             (CORS preflight, no auth)
     //   - GET     /health               (public liveness check)
     //   - GET     /apps/{appId}/health  (per-app authenticated health)
-    //   - GET     /apps/{appId}/device/self, /apps/{appId}/deployment/settings
+    //   - GET     /auth/config, /apps/{appId}/deployment/settings
     //   - ANY     /apps/{appId}/data/{proxy+}
     //   - ANY     /apps/{appId}/files/{proxy+}
     //   - ANY     /apps/{appId}/sync/{proxy+}
@@ -713,23 +712,13 @@ export function buildCloudDataServerProgram(
 
     // Per-app health endpoint. App identity is established by the handler's
     // HMAC verifier (X-Starkeep-App-Id + X-Starkeep-App-Sig against the SSM
-    // SecureString at /${stackPrefix}/app-creds/${appId}) or a device's
-    // signature, not by the gateway's JWT authorizer. Every data route past
-    // this one also names a user — the token's `sub` or the device's paired
-    // user — and acts on that user's data alone; the handler, not the
-    // gateway, checks both.
+    // SecureString at /${stackPrefix}/app-creds/${appId}) or a signed-in
+    // device's token, not by the gateway's JWT authorizer. Every data route
+    // past this one also names a user — the token's `sub` — and acts on that
+    // user's data alone; the handler, not the gateway, checks both.
     new aws.apigatewayv2.Route("route-app-health", {
       apiId: api.id,
       routeKey: "GET /apps/{appId}/health",
-      target: pulumi.interpolate`integrations/${integration.id}`,
-    });
-
-    // A device's own record, which a machine polls to learn that an admin
-    // approved its key, and the deployment's settings. The handler answers
-    // both for Starkeep Drive only, before any role is assumed.
-    new aws.apigatewayv2.Route("route-device-self", {
-      apiId: api.id,
-      routeKey: `GET /apps/{appId}${DEVICE_SELF_ROUTE}`,
       target: pulumi.interpolate`integrations/${integration.id}`,
     });
 
@@ -742,6 +731,8 @@ export function buildCloudDataServerProgram(
       target: pulumi.interpolate`integrations/${integration.id}`,
     });
 
+    // The deployment's settings. The handler answers for Starkeep Drive only,
+    // before any role is assumed.
     new aws.apigatewayv2.Route("route-deployment-settings", {
       apiId: api.id,
       routeKey: `GET /apps/{appId}${DEPLOYMENT_SETTINGS_ROUTE}`,
@@ -837,7 +828,7 @@ export function buildCloudDataServerProgram(
     // sign-in page at the response stage therefore needs Lambda@Edge on origin
     // response, and distribution-wide `customErrorResponses` is not a
     // substitute: it cannot read the path or `sec-fetch-dest`, so it would
-    // hand a paired device an HTML page in place of its 401 and break the
+    // hand a signed-in device an HTML page in place of its 401 and break the
     // shared-file signed URLs' 403 as well. What recovers a refusal that got
     // through is the app's own fetch layer, which retries once against
     // /api/session/refresh and sends the browser to sign-in when the session
@@ -876,8 +867,8 @@ export function buildCloudDataServerProgram(
     request.uri = uri;
   }
 
-  // The reserved data plane. A paired mobile device signs these and holds no
-  // cookie, so redirecting them would break device sync outright.
+  // The reserved data plane. A signed-in device sends its token on these and
+  // holds no cookie, so redirecting them would break device sync outright.
   if (/^\\/(data|files|sync|app-data|health)(\\/|$)/.test(rest)) return request;
   // Sign-in needs the pool ids before it can render.
   if (rest === "/starkeep-runtime-config") return request;

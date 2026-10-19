@@ -27,18 +27,6 @@ export { formatAnonymousRouteReport } from "./anonymous-route-report";
 export { roleChain } from "./session";
 export type { AwsCredentials } from "./session";
 
-/**
- * Device pairing. Exported for admin-web, which is where an operator pairs a
- * handset — registration is the one step a device cannot authenticate for
- * itself, so it happens in the privileged console.
- */
-export {
-  deviceKeyParameterName,
-  putDeviceKeyParameter,
-  deleteDeviceKeyParameter,
-} from "./app-creds";
-export type { DeviceRegistration } from "./app-creds";
-
 export {
   regionFromUserPoolId,
   cognitoPasswordAuth,
