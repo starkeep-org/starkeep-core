@@ -606,8 +606,8 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
       });
 
       it("boots a local data server against the real cloud", async () => {
-        // Boot signed out and unpaired, as a machine is before its owner signs
-        // in: no device session and no device key. Sync waits for the "signs
+        // Boot signed out, as a machine is before its owner signs in: no
+        // device session. Sync waits for the "signs
         // this machine in" step below, so the later `shipped > 0` assertion
         // depends on that sign-in.
         // Share the run-state dir as the LDS's STARKEEP_DIR, so config.json (written
@@ -629,7 +629,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         lds = await startLocalDataServer({
           starkeepDir: paths.dataDir,
           config: { ...config } as Record<string, unknown>,
-          deviceKey: false,
+          signIn: false,
         });
         drive = await driveCreds(lds.url);
       });

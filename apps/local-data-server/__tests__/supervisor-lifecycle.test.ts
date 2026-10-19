@@ -8,8 +8,8 @@
  *     `sync()` with no `maxRounds`, so a drain in progress kept issuing requests
  *     and kept writing `sync_state` after the supervisor was nominally down —
  *     plausibly the leaking test process filed in `71a97ef`.
- *   - Every request carries this machine's device signature, and a machine
- *     with no key starts no engine at all rather than a loop of refusals.
+ *   - Every request carries this machine's device token, and a machine that
+ *     is not signed in starts no engine at all rather than a loop of refusals.
  *
  * Assembled in-process rather than through a server subprocess: both cases are
  * about the supervisor's own control flow, and a subprocess would only let us
@@ -19,14 +19,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createServer } from "node:http";
 import { DatabaseSync } from "node:sqlite";
-import { createPublicKey, randomBytes, verify } from "node:crypto";
-import {
-  createHLCClock,
-  deviceSigner,
-  signedMessage,
-  type CloudTokenSource,
-  type DeviceSigner,
-} from "@starkeep/protocol-primitives";
+import { createHLCClock, type CloudTokenSource } from "@starkeep/protocol-primitives";
 import {
   MockDatabaseAdapter,
   MockObjectStorageAdapter,
@@ -154,9 +147,7 @@ async function build(options: {
    * *listed*, not a row disappearing out from under a signer.
    */
   readonly installed?: () => Array<{ appId: string }>;
-  /** Defaults to a fresh key; null is a machine nobody has connected. */
-  readonly signer?: DeviceSigner | null;
-  /** This machine's sign-in; absent is a machine that has not signed in. */
+  /** This machine's sign-in. Defaults to a signed-in machine; null is one nobody has signed in. */
   readonly tokens?: CloudTokenSource | null;
 }) {
   const databaseAdapter = new MockDatabaseAdapter();
@@ -193,19 +184,16 @@ async function build(options: {
     underlyingSyncStateStore: memorySyncState(),
     exchangeIntervalMs: options.exchangeIntervalMs ?? 600_000,
     nudgeDebounceMs: 5,
-    getTokenSource: () => options.tokens ?? null,
-    getDeviceSigner: () => (options.signer === undefined ? testSigner() : options.signer),
+    getTokenSource: () => (options.tokens === undefined ? testTokens : options.tokens),
   });
 }
 
-/** A device key for the test machine. */
-function testSigner(): DeviceSigner {
-  return deviceSigner("dev_test", new Uint8Array(randomBytes(32)));
-}
+/** A signed-in test machine's token source. */
+const testTokens: CloudTokenSource = { current: async () => "id-token-test" };
 
-describe("a machine with no device key", () => {
+describe("a machine that is not signed in", () => {
   it("starts no channel, rather than a loop of refused requests", async () => {
-    supervisor = await build({ apps: [{ appId: "aaa-app" }], signer: null });
+    supervisor = await build({ apps: [{ appId: "aaa-app" }], tokens: null });
     supervisor.start();
     expect(supervisor.status().perApp).toEqual([]);
     supervisor.rescan();
@@ -339,11 +327,11 @@ describe("rescan() dropping an app during its drain", () => {
   }, 20_000);
 });
 
-describe("the device signature on outbound sync", () => {
+describe("the credential on outbound sync", () => {
   /**
-   * Every data-plane call carries this machine's device signature. The
-   * signature names the machine, and the cloud's record of the device names
-   * the person it syncs for, so no app secret and no end-user token travel.
+   * Every data-plane call carries this machine's device token and nothing
+   * else. The token names the person the machine syncs for, so no app secret
+   * and no device signature travel.
    *
    * Observed at the wire rather than by reaching into `makeSignerFor`: what
    * matters is the header that arrives, and a signer asserted in isolation can
@@ -366,54 +354,9 @@ describe("the device signature on outbound sync", () => {
     return { seen, port, close: () => new Promise<void>((r) => server.close(() => r())) };
   }
 
-  it("signs every channel's requests with the device key, which the public half verifies", async () => {
-    const cap = await captureRequests();
-    const signer = testSigner();
-    try {
-      supervisor = await build({
-        apps: [{ appId: "aaa-app" }],
-        exchangeIntervalMs: 5,
-        cloudUrl: `http://127.0.0.1:${cap.port}`,
-        signer,
-      });
-      supervisor.start();
-      await new Promise((r) => setTimeout(r, 120));
-
-      expect(cap.seen.length, "no request reached the cloud").toBeGreaterThan(0);
-      const key = createPublicKey({ key: Buffer.from(signer.publicKeySpki, "base64"), type: "spki", format: "der" });
-      for (const { method, url, headers, body } of cap.seen) {
-        expect(headers["x-starkeep-device-id"]).toBe("dev_test");
-        expect(headers["x-starkeep-user-token"]).toBeUndefined();
-        expect(headers["x-starkeep-app-sig"]).toBeUndefined();
-        const appId = String(headers["x-starkeep-app-id"]);
-        const subPath = url.slice(`/apps/${appId}`.length);
-        const message = signedMessage(
-          appId,
-          method,
-          subPath,
-          Number(headers["x-starkeep-app-ts"]),
-          method === "GET" || method === "HEAD" ? undefined : new Uint8Array(body),
-        );
-        expect(
-          verify(null, message, key, Buffer.from(String(headers["x-starkeep-device-sig"]), "base64")),
-          `${method} ${url}`,
-        ).toBe(true);
-      }
-
-      // The Drive channel is not a special case: it carries every shared record.
-      const appIds = new Set(cap.seen.map((r) => r.headers["x-starkeep-app-id"]));
-      expect(appIds).toContain(DRIVE_APP_ID);
-      expect(appIds).toContain("aaa-app");
-    } finally {
-      await supervisor?.stop();
-      supervisor = null;
-      await cap.close();
-    }
-  }, 20_000);
-
-  it("sends the device token alone once the machine is signed in, even with a paired key", async () => {
-    // The device-token branch is chosen by the token arriving with no device
-    // signature and no app signature, so a signed-in machine must send neither.
+  it("sends the device token alone, on every channel", async () => {
+    // The device-token branch is chosen by the token arriving with no app
+    // signature, so a signed-in machine must send none.
     const cap = await captureRequests();
     const tokens: CloudTokenSource = { current: async () => "id-token-1" };
     try {
@@ -421,7 +364,6 @@ describe("the device signature on outbound sync", () => {
         apps: [{ appId: "aaa-app" }],
         exchangeIntervalMs: 5,
         cloudUrl: `http://127.0.0.1:${cap.port}`,
-        signer: testSigner(),
         tokens,
       });
       supervisor.start();
@@ -430,8 +372,6 @@ describe("the device signature on outbound sync", () => {
       expect(cap.seen.length, "no request reached the cloud").toBeGreaterThan(0);
       for (const { method, url, headers } of cap.seen) {
         expect(headers["x-starkeep-user-token"], `${method} ${url}`).toBe("id-token-1");
-        expect(headers["x-starkeep-device-id"]).toBeUndefined();
-        expect(headers["x-starkeep-device-sig"]).toBeUndefined();
         expect(headers["x-starkeep-app-sig"]).toBeUndefined();
       }
       const paths = new Set(cap.seen.map((r) => r.url.split("/")[2]));
@@ -444,11 +384,4 @@ describe("the device signature on outbound sync", () => {
     }
   }, 20_000);
 
-  it("starts no channel for a machine with neither a sign-in nor a key", async () => {
-    supervisor = await build({ apps: [{ appId: "aaa-app" }], signer: null, tokens: null });
-    supervisor.start();
-    expect(supervisor.status().perApp).toEqual([]);
-    await supervisor.stop();
-    supervisor = null;
-  });
 });

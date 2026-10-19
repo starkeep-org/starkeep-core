@@ -50,7 +50,7 @@ beforeAll(async () => {
   cloud.pool.addUser("other@example.com", "Other-password-3", { sub: "someone-else" });
   server = await startLocalDataServer({
     config: { apiGatewayUrl: cloud.url, pullIntervalMs: 600_000, pushDebounceMs: 50 },
-    deviceKey: false,
+    signIn: false,
     env: { STARKEEP_COGNITO_ENDPOINT: cloud.cognitoEndpoint },
   });
   drive = await builtinAppCreds(server, "starkeep-drive");

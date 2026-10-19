@@ -17,12 +17,11 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, rm, mkdir, readFile, writeFile } from "node:fs/promises";
-import { randomBytes } from "node:crypto";
-import { deviceSigner, fromBase64, generateDeviceId, toBase64 } from "@starkeep/protocol-primitives";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { FAKE_CLOUD_ACCOUNT } from "./fake-cloud.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const SERVER_ENTRY = join(REPO_ROOT, "apps/local-data-server/server.ts");
@@ -55,13 +54,15 @@ export interface LocalDataServerOptions {
   /** Milliseconds to wait for /health before failing. */
   startTimeoutMs?: number;
   /**
-   * This machine's device key, written to `<dir>/device-key.json` before boot.
-   * The server signs every call to the cloud with it and starts sync once the
-   * cloud accepts it, which a fake cloud does by default. Written by default
-   * whenever `config.apiGatewayUrl` names a cloud; `false` boots with none, as
-   * a machine nobody has connected yet.
+   * Whether to sign this machine in once it is up. By default, whenever
+   * `config.apiGatewayUrl` names a cloud, the harness points the server at that
+   * fake cloud's pool and signs in with {@link FAKE_CLOUD_ACCOUNT}, as a person
+   * signs a machine in, so sync starts. `false` boots signed out, as a machine
+   * nobody has signed in yet, and leaves the pool endpoint to `env`; a test
+   * against a real cloud always passes `false`. A reused dir that already
+   * holds a sign-in keeps it.
    */
-  deviceKey?: false;
+  signIn?: false;
 }
 
 export interface LocalDataServer {
@@ -69,8 +70,6 @@ export interface LocalDataServer {
   url: string;
   port: number;
   starkeepDir: string;
-  /** The device key written before boot, or null when none was. */
-  device: { deviceId: string; publicKeySpki: string } | null;
   child: ChildProcess;
   /** Combined stdout+stderr captured so far (for debugging assertions). */
   logs(): string;
@@ -120,33 +119,31 @@ export async function startLocalDataServer(
     await writeFile(join(starkeepDir, "config.json"), JSON.stringify(config, null, 2));
   }
 
-  let device: { deviceId: string; publicKeySpki: string } | null = null;
-  if (options.config?.["apiGatewayUrl"] && options.deviceKey !== false) {
-    await mkdir(starkeepDir, { recursive: true });
-    const keyPath = join(starkeepDir, "device-key.json");
-    let stored: { deviceId: string; seed: string } | null = null;
+  // The cloud this machine syncs with: the given config's, or, on a restart in
+  // a reused dir, the config the machine already holds.
+  let cloudUrl: unknown = options.config?.["apiGatewayUrl"];
+  if (cloudUrl === undefined && !options.config) {
     try {
-      // A reused dir keeps its key, as a restarted machine does.
-      stored = JSON.parse(await readFile(keyPath, "utf8")) as { deviceId: string; seed: string };
+      cloudUrl = (JSON.parse(await readFile(join(starkeepDir, "config.json"), "utf8")) as Record<string, unknown>)[
+        "apiGatewayUrl"
+      ];
     } catch {
-      const deviceId = generateDeviceId((n) => new Uint8Array(randomBytes(n)));
-      stored = { deviceId, seed: toBase64(new Uint8Array(randomBytes(32))) };
-      await writeFile(
-        keyPath,
-        JSON.stringify({ ...stored, label: null, createdAt: new Date().toISOString() }),
-        { mode: 0o600 },
-      );
+      // A fresh dir has no config yet.
     }
-    device = {
-      deviceId: stored.deviceId,
-      publicKeySpki: deviceSigner(stored.deviceId, fromBase64(stored.seed)).publicKeySpki,
-    };
   }
+  const signIn = typeof cloudUrl === "string" && options.signIn !== false;
 
   let output = "";
   const childEnv: NodeJS.ProcessEnv = {
     ...process.env,
     STARKEEP_PORT: String(port),
+    // The fake cloud plays the pool at a fixed path under its own address. Set
+    // only when the harness signs in, which is only against a fake cloud: a
+    // real cloud's pool is Cognito itself, and a test that signs in on its own
+    // passes the endpoint it means in `env`.
+    ...(signIn && typeof cloudUrl === "string"
+      ? { STARKEEP_COGNITO_ENDPOINT: `${cloudUrl.replace(/\/+$/, "")}/cognito/` }
+      : {}),
     // Backstop against orphans. Teardown is not guaranteed to run — a killed
     // runner, a hung spec, a failure before the `finally` — and the server the
     // PATCH /config restart leaves behind is detached from us anyway. This tells
@@ -218,6 +215,25 @@ export async function startLocalDataServer(
     );
   }
 
+  if (signIn) {
+    const status = (await (await fetch(`${url}/auth/status`)).json()) as { state?: string };
+    if (status.state !== "signed-in") {
+      const res = await fetch(`${url}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(FAKE_CLOUD_ACCOUNT),
+      });
+      if (!res.ok) {
+        child.kill("SIGKILL");
+        if (ownsDir) await rm(starkeepDir, { recursive: true, force: true });
+        throw new Error(
+          `local-data-server could not sign in to ${String(cloudUrl)}: ${res.status} ${await res.text()}\n` +
+            `--- output ---\n${output}`,
+        );
+      }
+    }
+  }
+
   function isAlive(pid: number): boolean {
     try {
       process.kill(pid, 0);
@@ -263,7 +279,6 @@ export async function startLocalDataServer(
     url,
     port,
     starkeepDir,
-    device,
     child,
     logs: () => output,
     successorPids: () => [...successors],
