@@ -646,7 +646,7 @@ export function DashboardPage() {
       <Dialog open={signInOpen} onOpenChange={(open) => { setSignInOpen(open); if (!open) setSignInChallenge(null); }}>
         <DialogContent className="max-w-sm">
           <DialogHeader>
-            <DialogTitle>Sign in to cloud</DialogTitle>
+            <DialogTitle>Sign in as admin</DialogTitle>
           </DialogHeader>
           {!signInChallenge ? (
             <div className="flex flex-col gap-4">
