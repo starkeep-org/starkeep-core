@@ -25,3 +25,7 @@ infra/user-data/sst-env.d.ts
 
 # Built artifact for the cloud-data-server builtin app
 packages/admin-installer/builtin-apps/cloud-data-server/dist.zip
+
+# Playwright output
+test-results/
+playwright-report/
