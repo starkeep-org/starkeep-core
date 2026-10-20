@@ -99,9 +99,11 @@ async function clickStart(page: Page, card: Locator): Promise<void> {
 }
 
 async function patchParentDirs(dirs: string[]): Promise<void> {
+  // admin-web takes a config change only from its own page (`fromOwnPage`), so
+  // the request carries the Origin that page would send.
   const res = await fetch(`${adminUrl()}/api/config`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Origin: new URL(adminUrl()).origin },
     body: JSON.stringify({ appParentDirs: dirs }),
   });
   expect(res.ok).toBe(true);
