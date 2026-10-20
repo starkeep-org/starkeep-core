@@ -11,7 +11,9 @@
 #     `origin/main`, so what gets published is what was reviewed;
 #   - no changesets are pending, so a version PR has not been skipped;
 #   - every package builds from scratch (turbo's cache bypassed), and format,
-#     lint, typecheck and the unit suites pass on that build.
+#     lint, typecheck, the unit suites and the integration suites pass on that
+#     build. CI does not require the integration suites, so this is where they
+#     gate a release.
 #
 # It then shows the publish plan and asks before publishing. `changeset publish`
 # publishes in dependency order through `pnpm publish` (which turns
@@ -60,6 +62,7 @@ pnpm turbo run build --force
 echo "==> Checking"
 pnpm format:check
 pnpm turbo run lint typecheck test --force
+pnpm turbo run test:integration --force
 
 echo "==> Publish plan"
 pnpm exec changeset publish-plan
