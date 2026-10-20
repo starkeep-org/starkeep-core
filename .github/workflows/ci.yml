@@ -40,7 +40,11 @@ jobs:
             pnpm changeset status --verbose
           fi
       - run: pnpm format:check
-      - run: pnpm turbo run lint typecheck test
+      - run: pnpm turbo run lint typecheck
+      # Every package's vitest pool at once oversubscribes the runner's four
+      # cores until a worker misses its RPC deadline ("Timeout calling
+      # onTaskUpdate") with every test passing. Two suites at a time does not.
+      - run: pnpm turbo run test --concurrency=2
 
   # Tier 2: the local platform end to end, through Playwright. Advisory until
   # it has run two weeks without a flake; branch protection does not require it.
