@@ -151,9 +151,9 @@ describe("honoOriginGate", () => {
 
   it("refuses an undeclared path in cloud mode", async () => {
     process.env.STARKEEP_APP_CLIENT_MODE = "cloud";
-    const res = await (await gatedApp())(
-      event(`${BASE}/api/local-data/records`, { headers: { "sec-fetch-dest": "empty" } }),
-    );
+    const res = await (
+      await gatedApp()
+    )(event(`${BASE}/api/local-data/records`, { headers: { "sec-fetch-dest": "empty" } }));
     expect(res.statusCode).toBe(401);
   });
 
@@ -207,9 +207,9 @@ describe("honoOriginGate", () => {
   it("lets an explicit basePath override the mount it reads from the environment", async () => {
     process.env.STARKEEP_APP_CLIENT_MODE = "cloud";
     process.env.STARKEEP_APP_BASE_PATH = BASE;
-    const res = await (await gatedNavigationApp({ basePath: "/elsewhere" }))(
-      navigation(`${BASE}/settings`),
-    );
+    const res = await (
+      await gatedNavigationApp({ basePath: "/elsewhere" })
+    )(navigation(`${BASE}/settings`));
     expect(res.headers["location"]).toBe("https://probe.example.com/elsewhere/sign-in");
   });
 
@@ -220,9 +220,9 @@ describe("honoOriginGate", () => {
 
   it("lets a request carrying a session cookie through to the real gate", async () => {
     process.env.STARKEEP_APP_CLIENT_MODE = "cloud";
-    const res = await (await gatedApp())(
-      event(`${BASE}/api/local-data/records`, { cookies: ["sk_session=abc"] }),
-    );
+    const res = await (
+      await gatedApp()
+    )(event(`${BASE}/api/local-data/records`, { cookies: ["sk_session=abc"] }));
     expect(res.body).toBe("records");
   });
 

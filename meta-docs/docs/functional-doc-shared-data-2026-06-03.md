@@ -10,7 +10,7 @@
 
 ## Overview
 
-Shared data is the part of Starkeep that holds *items a user would recognize as their own files* — photos, documents, audio, archives, code — in a form that is portable across the apps installed on the system and across the two physical sides of a deployment (the user's local machine and their cloud). The platform's contract is twofold: every shared item is a **file** (bytes in object storage) **plus a row** (in a flat shared-records table), and every item is identified by its **lowercase file extension** drawn from a fixed, hardcoded registry. That registry is what makes interop possible: a photos app and a viewer app can read the same `jpg` because both recognise `jpg` as `image` from the same closed set, not because they've agreed on a vendor schema.
+Shared data is the part of Starkeep that holds _items a user would recognize as their own files_ — photos, documents, audio, archives, code — in a form that is portable across the apps installed on the system and across the two physical sides of a deployment (the user's local machine and their cloud). The platform's contract is twofold: every shared item is a **file** (bytes in object storage) **plus a row** (in a flat shared-records table), and every item is identified by its **lowercase file extension** drawn from a fixed, hardcoded registry. That registry is what makes interop possible: a photos app and a viewer app can read the same `jpg` because both recognise `jpg` as `image` from the same closed set, not because they've agreed on a vendor schema.
 
 The shape repeats on each side. The local data-server hosts the canonical SQLite database, a filesystem object store, and an HTTP surface for installed local apps. The cloud data-server (a Lambda fronting Aurora DSQL + S3) hosts the same logical schema, gated by per-app IAM. A bidirectional version-vector sync engine keeps the two sides aligned at the row and the blob level, using a single hybrid-logical-clock ordering for both metadata and files. Apps never touch raw storage; they go through the **shared-space API** that the data-server exposes, and the data-server is what authoritatively decides what a "type" is, who may read or write it, and whether a file belongs in shared storage at all.
 
@@ -31,7 +31,7 @@ A record may carry a nullable `parentId` pointing at another record. The codebas
 
 ## Types and categories
 
-Two closed registries in `packages/protocol-primitives/src/types/core-types.ts` define the entire shared-data type system: `EXTENSIONS` (lowercase extension → category) and `CATEGORIES` (the eleven category definitions, each with its own metadata column list). A record's `type` is the lowercase extension verbatim — `"jpg"`, `"md"`, `"xyz"`. The category is *derived*, not stored: `category = EXTENSIONS[ext] ?? "other"`.
+Two closed registries in `packages/protocol-primitives/src/types/core-types.ts` define the entire shared-data type system: `EXTENSIONS` (lowercase extension → category) and `CATEGORIES` (the eleven category definitions, each with its own metadata column list). A record's `type` is the lowercase extension verbatim — `"jpg"`, `"md"`, `"xyz"`. The category is _derived_, not stored: `category = EXTENSIONS[ext] ?? "other"`.
 
 There are eleven categories: `image`, `video`, `audio`, `document`, `text`, `code`, `font`, `archive`, `data`, `model3d`, and the terminal catch-all `other`. Mapped categories own a per-category metadata table; `other` does not. The shape is intentional: by hardcoding the map in one file, every part of the system that needs a type view — manifest validation, IAM emission, DSQL schema-init, SQLite bootstrap, object-key construction, the cloud access enforcer — derives its view from the same source. Adding a new file extension or a new metadata column is a one-file edit; there is **no runtime registration path** that lets an app extend either registry. Apps may only declare extensions that are already in `EXTENSIONS`, and they may never declare `other`.
 
@@ -49,7 +49,7 @@ A shared record is two things in two places:
 Two design properties fall out:
 
 - **Content-addressable.** The key is the content hash; identical bytes share one blob. A real edit produces a new hash and therefore a new key — the row's `object_storage_key` simply repoints. This makes conflict resolution cheap on the blob side: the loser's bytes still live at the loser's key, and the winning row simply doesn't reference them; there is no in-place overwrite to coordinate.
-- **The prefix is determined by what is stored, not who writes it.** Even when an app with `readwrite` access produces a record, the blob still lands at `shared/<category>/...`, never under that app's `apps/<appId>/` prefix. That is what allows a *different* app with read access to the same category to fetch the blob under its own IAM grants.
+- **The prefix is determined by what is stored, not who writes it.** Even when an app with `readwrite` access produces a record, the blob still lands at `shared/<category>/...`, never under that app's `apps/<appId>/` prefix. That is what allows a _different_ app with read access to the same category to fetch the blob under its own IAM grants.
 
 A separate prefix, `apps/<appId>/syncable/...`, holds app-specific syncable files (e.g. captions a Photos app stores about a photo it doesn't own as data). The system intentionally does not provide an app-private non-syncable namespace — apps that want one handle it themselves.
 
@@ -62,7 +62,7 @@ Each mapped category owns one metadata table — `shared_record_<category>_metad
 Two invariants distinguish this from app-private metadata:
 
 - **Deterministic, not opinionated.** Every column other than `record_id` "must be deterministically derivable from the record's file bytes" (per `MetadataRow` in `protocol-primitives/src/records/types.ts`). Different apps that look at the same `jpg` will compute the same `width`, so this is safe to share.
-- **App-level fields stay app-private.** Titles, captions, edit provenance, album membership — anything that depends on user intent or one app's UX — are explicitly *not* on these rows. They live in app-private storage (the app-syncable namespace), so two apps disagreeing about a caption never produce a shared-metadata conflict.
+- **App-level fields stay app-private.** Titles, captions, edit provenance, album membership — anything that depends on user intent or one app's UX — are explicitly _not_ on these rows. They live in app-private storage (the app-syncable namespace), so two apps disagreeing about a caption never produce a shared-metadata conflict.
 
 The terminal `other` category has no metadata table and the SQLite/DSQL bootstrap paths both skip it.
 
@@ -70,7 +70,7 @@ The terminal `other` category has no metadata table and the SQLite/DSQL bootstra
 
 Apps reach shared data through the **shared-space API**, a versioned HTTP-shaped surface (`packages/shared-space-api`) that the local data-server hosts and that the cloud Lambda mirrors. Endpoints register under `namespace:version/path` (e.g. `@photos/image:v1/list`), and every request carries an authenticated `ApiSubject` (`{ subjectType: "app", subjectId }`). The router resolves the endpoint; the handler receives an `ApiContext` containing the database adapter, object storage adapter, the side's HLC clock, the `ownerId`, and — when the subject is an installed app — a scoped `appSpecific` view of that app's app-syncable namespace.
 
-The `appSpecific` operations on `ApiContext` are about *app-private* data and are largely out of scope here; they touch shared data in exactly one place — the reserved `_starkeep_sync_records` table the framework materialises in every file-enabled app's namespace carries the row metadata that lets the sync engine ship app-syncable file blobs through the same path it ships shared-record blobs.
+The `appSpecific` operations on `ApiContext` are about _app-private_ data and are largely out of scope here; they touch shared data in exactly one place — the reserved `_starkeep_sync_records` table the framework materialises in every file-enabled app's namespace carries the row metadata that lets the sync engine ship app-syncable file blobs through the same path it ships shared-record blobs.
 
 The architectural fact that matters for shared data is that **the data-server is the authoritative registrar of shared types**: app packages export their type definitions; the data-server imports them on install, registers them in `type_registrations`, and validates every write against the extension-keyed category at the shared database boundary. Apps do not maintain their own type registries.
 

@@ -3,8 +3,12 @@ import { createHash } from "node:crypto";
 import { sha256HexToBase64, sha256Base64ToHex } from "../src/object-storage/checksum.js";
 
 const bytes = Buffer.from("the bytes this key names");
-const hex = createHash("sha256").update(bytes as unknown as Uint8Array).digest("hex");
-const base64 = createHash("sha256").update(bytes as unknown as Uint8Array).digest("base64");
+const hex = createHash("sha256")
+  .update(bytes as unknown as Uint8Array)
+  .digest("hex");
+const base64 = createHash("sha256")
+  .update(bytes as unknown as Uint8Array)
+  .digest("base64");
 
 describe("sha256HexToBase64", () => {
   it("converts a hex digest to the base64 form S3 checksum headers take", () => {

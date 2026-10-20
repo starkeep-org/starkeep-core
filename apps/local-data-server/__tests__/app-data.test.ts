@@ -134,7 +134,9 @@ describe("per-app file namespace", () => {
 
   it("presign → direct upload → register → stat/get round-trip", async () => {
     const body = Buffer.from("presigned-cover-bytes");
-    const contentHash = createHash("sha256").update(body as unknown as Uint8Array).digest("hex");
+    const contentHash = createHash("sha256")
+      .update(body as unknown as Uint8Array)
+      .digest("hex");
 
     // Before any upload, the file is absent.
     const before = await appA.fetch("/app-data/files/cover");
@@ -243,9 +245,9 @@ describe("reserved sync-records table", () => {
     const db = new DatabaseSync(join(server.starkeepDir, "data.db"), { readOnly: true });
     try {
       return (
-        db
-          .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
-          .all() as Array<{ name: string }>
+        db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{
+          name: string;
+        }>
       ).map((r) => r.name);
     } finally {
       db.close();

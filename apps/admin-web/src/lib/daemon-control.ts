@@ -1,5 +1,13 @@
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { starkeepDir } from "@starkeep/app-client";
 import { dirname, join, resolve } from "node:path";
 import { DAEMON_COMMANDS, REPO_ROOT, type DaemonId } from "./exec-commands";
@@ -111,7 +119,11 @@ export function stopById(id: string): StopResult {
   } else {
     const mf = metaFile(id);
     if (existsSync(mf)) {
-      try { port = (JSON.parse(readFileSync(mf, "utf-8")) as { port?: number }).port; } catch { /* ignore */ }
+      try {
+        port = (JSON.parse(readFileSync(mf, "utf-8")) as { port?: number }).port;
+      } catch {
+        /* ignore */
+      }
     }
   }
   if (port) {
@@ -222,7 +234,7 @@ export function diagnoseSpawnEnvironment(cwd: string): string | null {
   if (probe.error || probe.status !== 0) {
     const detail = probe.error
       ? probe.error.message
-      : probe.stderr?.trim().split("\n").pop() ?? `exit code ${probe.status}`;
+      : (probe.stderr?.trim().split("\n").pop() ?? `exit code ${probe.status}`);
     notes.push(
       `Environment check failed: this Node runtime could not spawn a child process that reads ${cwd} and writes under ${PIDS_DIR} (${detail}). No daemon can start until this is fixed.`,
     );
@@ -279,7 +291,9 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<StartOutcom
   child.on("error", (err) => {
     try {
       appendFileSync(logPath, `\n[admin-web] failed to spawn '${command}': ${err.message}\n`);
-    } catch { /* log no longer writable — nothing better to do */ }
+    } catch {
+      /* log no longer writable — nothing better to do */
+    }
   });
   child.once("exit", (code, signal) => {
     try {
@@ -287,7 +301,9 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<StartOutcom
         logPath,
         `\n[admin-web] '${command} ${args.join(" ")}' exited (code ${code}, signal ${signal})\n`,
       );
-    } catch { /* ditto */ }
+    } catch {
+      /* ditto */
+    }
   });
   child.unref();
 
@@ -301,8 +317,16 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<StartOutcom
 
   const failure = (): StartFailure => {
     // Confirmed dead: clean up so status doesn't keep reporting a ghost.
-    try { unlinkSync(pidFile(id)); } catch { /* never written */ }
-    try { unlinkSync(metaFile(id)); } catch { /* never written */ }
+    try {
+      unlinkSync(pidFile(id));
+    } catch {
+      /* never written */
+    }
+    try {
+      unlinkSync(metaFile(id));
+    } catch {
+      /* never written */
+    }
     const tail = readLogTail(logPath);
     const diagnosis = diagnoseSpawnEnvironment(cwd);
     return {

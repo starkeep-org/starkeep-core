@@ -12,10 +12,7 @@ const STARKEEP_DIR = starkeepDir();
 // install route.
 const PULUMI_VERBOSE_TRACE = false;
 
-export async function POST(
-  req: Request,
-  { params }: { params: Promise<{ appId: string }> },
-) {
+export async function POST(req: Request, { params }: { params: Promise<{ appId: string }> }) {
   const { appId } = await params;
   const body = (await req.json()) as {
     accessKeyId: string;

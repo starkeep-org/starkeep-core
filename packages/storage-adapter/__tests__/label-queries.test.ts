@@ -101,14 +101,10 @@ describe("buildLabelUpsert", () => {
   it("clears deleted_at on conflict, so re-setting a retracted label revives it", () => {
     // Without this a set → retract → set cycle writes a row that stays
     // invisible forever.
-    const { sqlite: s, dsql: d } = both((k, dialect) =>
-      buildLabelUpsert(k, dialect, [upsertRow]),
-    );
+    const { sqlite: s, dsql: d } = both((k, dialect) => buildLabelUpsert(k, dialect, [upsertRow]));
     for (const q of [s, d]) {
       const updateSet = q.sql.slice(q.sql.indexOf("do update set"));
-      expect(q.sql).toMatch(
-        /on conflict \("record_id", "app_id", "key", "value"\) do update set/,
-      );
+      expect(q.sql).toMatch(/on conflict \("record_id", "app_id", "key", "value"\) do update set/);
       // `value` is a conflict *target*, not something to overwrite: a differing
       // value is a different row, so there is nothing left for it to update.
       expect(updateSet).not.toMatch(/"value" =/);
@@ -156,9 +152,7 @@ describe("buildLabelUpsert", () => {
   });
 
   it("addresses the right table on each backend", () => {
-    const { sqlite: s, dsql: d } = both((k, dialect) =>
-      buildLabelUpsert(k, dialect, [upsertRow]),
-    );
+    const { sqlite: s, dsql: d } = both((k, dialect) => buildLabelUpsert(k, dialect, [upsertRow]));
     expect(s.sql).toContain('"shared_record_labels"');
     expect(d.sql).toContain('"shared"."record_labels"');
   });
@@ -249,9 +243,7 @@ describe("the sync-facing queries", () => {
     // that feeds sync must see it.
     const { sqlite: s, dsql: d } = both((k, dialect) => buildQueryLabels(k, dialect, {}));
     for (const q of [s, d]) {
-      expect(q.sql).toMatch(
-        /order by "record_id" asc, "app_id" asc, "key" asc, "value" asc/,
-      );
+      expect(q.sql).toMatch(/order by "record_id" asc, "app_id" asc, "key" asc, "value" asc/);
       expect(q.sql).not.toMatch(/"deleted_at" is null/);
     }
   });
@@ -286,9 +278,7 @@ describe("the sync-facing queries", () => {
   });
 
   it("the watermark query folds max(updated_at) per node over every row", () => {
-    const { sqlite: s, dsql: d } = both((k, dialect) =>
-      buildLabelNodeWatermarks(k, dialect),
-    );
+    const { sqlite: s, dsql: d } = both((k, dialect) => buildLabelNodeWatermarks(k, dialect));
     for (const q of [s, d]) {
       expect(q.sql).toMatch(/max\("updated_at"\)/);
       expect(q.sql).toMatch(/group by "node_id"/);

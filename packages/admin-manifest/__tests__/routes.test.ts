@@ -20,7 +20,9 @@ function handler(over: Record<string, unknown> = {}) {
 
 describe("resolveHandlerRoutes", () => {
   it("inherits the handler's auth for bare string routes", () => {
-    const routes = resolveHandlerRoutes(handler({ routes: ["GET /", "ANY /{proxy+}"], auth: "public" }));
+    const routes = resolveHandlerRoutes(
+      handler({ routes: ["GET /", "ANY /{proxy+}"], auth: "public" }),
+    );
     expect(routes.map((r) => r.auth)).toEqual(["public", "public"]);
     expect(routes.map((r) => r.catchAll)).toEqual([false, true]);
   });
@@ -107,7 +109,11 @@ describe("isAnonymouslyReachable", () => {
   it("says yes for the data subtree when the handler is wholly public", () => {
     // This is what photos and memo shipped: one public catch-all over
     // everything, including the signing proxy.
-    const wide = handler({ auth: "public", routes: ["GET /", "ANY /{proxy+}"], publicPaths: ["/"] });
+    const wide = handler({
+      auth: "public",
+      routes: ["GET /", "ANY /{proxy+}"],
+      publicPaths: ["/"],
+    });
     expect(isAnonymouslyReachable(wide, "GET", "/api/data/data/records")).toBe(true);
   });
 });
@@ -176,7 +182,7 @@ describe("probePathFor", () => {
   });
 });
 
-describe("auth: \"session\" — publicPaths become real routes", () => {
+describe('auth: "session" — publicPaths become real routes', () => {
   /**
    * The inversion the 2026-08-23 postmortem asks for. Under `public` a
    * catch-all was wider than the declaration beside it, so `publicPaths` was a

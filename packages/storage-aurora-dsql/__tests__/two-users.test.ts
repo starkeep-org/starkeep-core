@@ -125,7 +125,9 @@ describe("shared records", () => {
     expect((await b.get(ra.id))!.objectStorageKey).toBe(rb.objectStorageKey);
     expect((await a.query({})).records).toHaveLength(1);
     expect(await b.countRecords({})).toBe(1);
-    expect(await a.countRecordsByType({})).toEqual([expect.objectContaining({ type: "image/jpeg", count: 1 })]);
+    expect(await a.countRecordsByType({})).toEqual([
+      expect.objectContaining({ type: "image/jpeg", count: 1 }),
+    ]);
   });
 
   it("lists, counts and finds nothing of the other user's", async () => {
@@ -170,7 +172,14 @@ describe("labels, metadata and availability", () => {
     const ra = photo(A);
     await a.put(ra);
     await a.upsertLabels([
-      { recordId: ra.id, appId: "photos", key: "faces", value: "Alice", recordType: "image/jpeg", hlc: clock.now() },
+      {
+        recordId: ra.id,
+        appId: "photos",
+        key: "faces",
+        value: "Alice",
+        recordType: "image/jpeg",
+        hlc: clock.now(),
+      },
     ]);
 
     expect((await a.getLabelsByRecordIds([ra.id])).get(ra.id)).toHaveLength(1);
@@ -233,7 +242,9 @@ describe("app-specific rows", () => {
     const scanA = await a.scanSince(APP, "cards", {}, 100);
     expect(scanA.rows.map((r) => r.row?.["front"])).toEqual(["from A"]);
     expect(scanA.rows[0]!.row).not.toHaveProperty("user_id");
-    expect((await b.scanSince(APP, "cards", {}, 100)).rows.map((r) => r.row?.["front"])).toEqual(["from B"]);
+    expect((await b.scanSince(APP, "cards", {}, 100)).rows.map((r) => r.row?.["front"])).toEqual([
+      "from B",
+    ]);
     expect(Object.keys(await a.getNodeWatermarks(APP, "cards"))).toEqual(["node-a"]);
 
     const query = await b.runQuery(APP, "cards", {
@@ -273,7 +284,9 @@ describe("app-specific rows", () => {
     });
 
     const scan = await a.scanSince(APP, "cards", {}, 100);
-    expect(scan.rows).toEqual([expect.objectContaining({ op: "insert", row: expect.objectContaining({ front: "from A" }) })]);
+    expect(scan.rows).toEqual([
+      expect.objectContaining({ op: "insert", row: expect.objectContaining({ front: "from A" }) }),
+    ]);
   });
 
   it("keeps each user's bytes watermark apart", async () => {

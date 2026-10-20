@@ -116,13 +116,8 @@ export {
   type LabelFindPlan,
 } from "./database/label-find.js";
 
-export {
-  loadVariantCandidatesForPage,
-} from "./database/variant-queries.js";
-export {
-  loadStandInsForPage,
-  loadStandInSummariesForPage,
-} from "./database/stand-in-queries.js";
+export { loadVariantCandidatesForPage } from "./database/variant-queries.js";
+export { loadStandInsForPage, loadStandInSummariesForPage } from "./database/stand-in-queries.js";
 
 export {
   loadMetadataForRecords,

@@ -8,10 +8,7 @@ import type {
 } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { IndexQuery, IndexResult } from "@starkeep/query-orchestrator";
-import type {
-  ChangeNotifier,
-  SyncStateStore,
-} from "@starkeep/sync-engine";
+import type { ChangeNotifier, SyncStateStore } from "@starkeep/sync-engine";
 import type {
   ApiRequest,
   ApiResponse,
@@ -102,7 +99,10 @@ export interface DataOperations {
    * Returns the rows it restored, original first.
    */
   restore(recordId: StarkeepId): Promise<DataRecord[]>;
-  query(params: { type?: string; filters?: import("@starkeep/storage-adapter").Filter[] }): Promise<DataRecord[]>;
+  query(params: {
+    type?: string;
+    filters?: import("@starkeep/storage-adapter").Filter[];
+  }): Promise<DataRecord[]>;
 
   /**
    * Write a per-type metadata row, upserting the columns it names and leaving
@@ -125,10 +125,7 @@ export interface DataOperations {
   /** Read a per-type metadata row by recordId. */
   getMetadata(typeId: string, recordId: StarkeepId): Promise<MetadataRow | null>;
   /** Batch-read per-type metadata rows. */
-  getMetadataByIds(
-    typeId: string,
-    recordIds: StarkeepId[],
-  ): Promise<Map<StarkeepId, MetadataRow>>;
+  getMetadataByIds(typeId: string, recordIds: StarkeepId[]): Promise<Map<StarkeepId, MetadataRow>>;
 
   // ---- Cross-app record labels -------------------------------------------
   //

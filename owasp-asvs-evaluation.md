@@ -2,13 +2,13 @@
 
 > **What this is.** A high-level, breadth-first walk through every chapter of the
 > OWASP Application Security Verification Standard (ASVS) **5.0.0**, assessing how
-> Starkeep's cloud posture stands against each. 
+> Starkeep's cloud posture stands against each.
 >
 > **Companion document.** This sits alongside [`SECURITY.md`](SECURITY.md),
-> the threat model that reasons about *concrete attack paths* (T1–T11). Where a
+> the threat model that reasons about _concrete attack paths_ (T1–T11). Where a
 > chapter maps onto a threat there, this doc cites it (e.g. "see T8") rather than
-> restating it. Read the threat model for the *why*; read this for *coverage
-> against a standard checklist*. Design context is in
+> restating it. Read the threat model for the _why_; read this for _coverage
+> against a standard checklist_. Design context is in
 > [`system-design.md`](system-design.md) and
 > [`data-roles-and-permissions.md`](data-roles-and-permissions.md).
 >
@@ -25,32 +25,32 @@
 
 ## At a glance
 
-| # | ASVS 5.0 chapter | Relevance | Posture |
-|---|---|---|---|
-| V1 | Encoding & Sanitization | Yes | **Adequate** |
-| V2 | Validation & Business Logic | Yes | **Adequate** |
-| V3 | Web Frontend Security | Yes | **Partial** — no security headers/CSP |
-| V4 | API & Web Service | Yes (core) | **Adequate** (see T2/T4) |
-| V5 | File Handling | Yes | **Partial** |
-| V6 | Authentication | Yes (core) | **Adequate** (MFA to confirm — T7) |
-| V7 | Session Management | Yes | **Adequate** (replay window — T2) |
-| V8 | Authorization | Yes (core strength) | **Strong** (see T1/T3/T6) |
-| V9 | Self-contained Tokens | Partial (Cognito JWT) | **Adequate** (AWS-managed) |
-| V10 | OAuth & OIDC | Minimal | **Out of scope / N/A** (managed) |
-| V11 | Cryptography | Yes | **Adequate** (CMK deferred — T9) |
-| V12 | Secure Communication | Yes | **Adequate** (SecureTransport-deny deferred — T9) |
-| V13 | Configuration | Yes | **Adequate → Strong** |
-| V14 | Data Protection | Yes | **Adequate** (storage growth — T10) |
-| V15 | Secure Coding & Architecture | Yes | **Partial** (supply chain — T8) |
-| V16 | Security Logging & Error Handling | Yes | **Partial** — logs yes, alerting/audit no |
-| V17 | WebRTC | No | **Out of scope / N/A** |
+| #   | ASVS 5.0 chapter                  | Relevance             | Posture                                           |
+| --- | --------------------------------- | --------------------- | ------------------------------------------------- |
+| V1  | Encoding & Sanitization           | Yes                   | **Adequate**                                      |
+| V2  | Validation & Business Logic       | Yes                   | **Adequate**                                      |
+| V3  | Web Frontend Security             | Yes                   | **Partial** — no security headers/CSP             |
+| V4  | API & Web Service                 | Yes (core)            | **Adequate** (see T2/T4)                          |
+| V5  | File Handling                     | Yes                   | **Partial**                                       |
+| V6  | Authentication                    | Yes (core)            | **Adequate** (MFA to confirm — T7)                |
+| V7  | Session Management                | Yes                   | **Adequate** (replay window — T2)                 |
+| V8  | Authorization                     | Yes (core strength)   | **Strong** (see T1/T3/T6)                         |
+| V9  | Self-contained Tokens             | Partial (Cognito JWT) | **Adequate** (AWS-managed)                        |
+| V10 | OAuth & OIDC                      | Minimal               | **Out of scope / N/A** (managed)                  |
+| V11 | Cryptography                      | Yes                   | **Adequate** (CMK deferred — T9)                  |
+| V12 | Secure Communication              | Yes                   | **Adequate** (SecureTransport-deny deferred — T9) |
+| V13 | Configuration                     | Yes                   | **Adequate → Strong**                             |
+| V14 | Data Protection                   | Yes                   | **Adequate** (storage growth — T10)               |
+| V15 | Secure Coding & Architecture      | Yes                   | **Partial** (supply chain — T8)                   |
+| V16 | Security Logging & Error Handling | Yes                   | **Partial** — logs yes, alerting/audit no         |
+| V17 | WebRTC                            | No                    | **Out of scope / N/A**                            |
 
 ---
 
 ## V1 — Encoding & Sanitization
 
-*Contextual output encoding at every sink to prevent injection (SQL, XSS,
-command, etc.).*
+_Contextual output encoding at every sink to prevent injection (SQL, XSS,
+command, etc.)._
 
 - **SQL.** New and modified queries go through **Kysely**, which
   emits parameterized statements — user data never concatenated into SQL. This is
@@ -67,7 +67,7 @@ defense.
 
 ## V2 — Validation & Business Logic
 
-*Input validation and enforcement of business-logic limits.*
+_Input validation and enforcement of business-logic limits._
 
 - App manifests are **schema-validated** at install, with app-id namespace checks
   and gating of the privileged `fileAccessAll` / `brokerPower` flags (see T8).
@@ -82,7 +82,7 @@ handler and isn't standardized platform-wide.
 
 ## V3 — Web Frontend Security
 
-*Browser-side protections: CSP, security headers, cookie flags, clickjacking, CORS.*
+_Browser-side protections: CSP, security headers, cookie flags, clickjacking, CORS._
 
 - **No security-header layer.** A spot-check found no Content-Security-Policy,
   `X-Frame-Options`/frame-ancestors, HSTS, or `X-Content-Type-Options` handling in
@@ -92,7 +92,7 @@ handler and isn't standardized platform-wide.
   This is **not** an access-control gap: CORS is a browser read-gate, not an
   authorization mechanism, and nothing in the design treats Origin as a trust
   boundary. Access is gated entirely at URL-mint time — the bucket carries a
-  full public-access-block so every request must be SigV4-signed. 
+  full public-access-block so every request must be SigV4-signed.
   Non-credentialed requests mean the wildcard-origin-plus-credentials
   leak also doesn't apply.
 - The genuinely cloud-served browser surface is the **Photos sample UI**, served
@@ -111,7 +111,7 @@ origins is optional defense-in-depth, not a fix.
 
 ## V4 — API & Web Service
 
-*REST/HTTP API security: authentication, method/verb handling, rate limiting.*
+_REST/HTTP API security: authentication, method/verb handling, rate limiting._
 
 - Every `/apps/{appId}/*` data-plane request is **HMAC-SHA256 signed**, binding
   method, canonical path, and timestamp, with the header app-id pinned to the URL
@@ -128,7 +128,7 @@ named residuals (within-window replay, no per-app quota) are carried in T2/T4/T1
 
 ## V5 — File Handling
 
-*Safe upload, storage, and download of files.*
+_Safe upload, storage, and download of files._
 
 - Uploads/downloads use **time-bound S3 presigned URLs** so bytes bypass the
   gateway body limit. These are **bearer** credentials: anyone with the URL can use
@@ -144,7 +144,7 @@ safety (validation, scanning, non-bearer download auth) is intentionally unaddre
 
 ## V6 — Authentication
 
-*Verifying the identity of humans and services.*
+_Verifying the identity of humans and services._
 
 - **Humans:** Cognito user pool, `ADMIN_CREATE_USER` only, exchanged for temporary
   STS creds via `AssumeRoleWithWebIdentity`. **No IAM user, no long-lived access
@@ -160,7 +160,7 @@ the admin login is the main hardening item.
 
 ## V7 — Session Management
 
-*Lifecycle and integrity of authenticated sessions.*
+_Lifecycle and integrity of authenticated sessions._
 
 - Human sessions are **Cognito/STS temporary credentials** — short-lived by
   construction, no server-side session store to fixate or steal.
@@ -173,7 +173,7 @@ residual is the replay window, already tracked in T2.
 
 ## V8 — Authorization
 
-*Enforcing that identities can only do what they're permitted.*
+_Enforcing that identities can only do what they're permitted._
 
 This is the architecture's centre of gravity and its strongest area. Confinement
 of an app to exactly its manifest is enforced in **four independent layers** — IAM
@@ -185,7 +185,7 @@ standing data-plane power** (see T1, T3, T5, T6).
 
 Two honest caveats carried from the threat model: (a) **a grant is a grant** —
 shared-data authorization is type-granular but not per-item/per-origin, so the
-install-time grant decision *is* the boundary for shared data (T1); (b) the
+install-time grant decision _is_ the boundary for shared data (T1); (b) the
 application-layer enforcer is load-bearing precisely because DSQL has no row-level
 security.
 
@@ -193,12 +193,12 @@ security.
 
 ## V9 — Self-contained Tokens
 
-*Integrity of stateless tokens (e.g. JWT).*
+_Integrity of stateless tokens (e.g. JWT)._
 
 - The only self-contained token in play is the **Cognito-issued JWT**, validated
   by API Gateway's managed Cognito JWT authorizer on `jwt` routes. Issuance,
   signing, and validation are AWS-managed.
-- The app HMAC signature is *not* a self-contained token (no embedded claims) — it
+- The app HMAC signature is _not_ a self-contained token (no embedded claims) — it
   belongs under V4/V11.
 
 **Adequate.** Token integrity rides on AWS-managed Cognito + API Gateway; nothing
@@ -206,7 +206,7 @@ custom to get wrong here.
 
 ## V10 — OAuth & OIDC
 
-*Security of OAuth2 / OIDC flows where the app acts as client or provider.*
+_Security of OAuth2 / OIDC flows where the app acts as client or provider._
 
 Starkeep operates **no custom OAuth/OIDC server or client flow**. The Cognito
 identity pool performs web-identity federation internally to mint STS credentials,
@@ -216,7 +216,7 @@ but that is an AWS-managed exchange, not an application-implemented OAuth flow.
 
 ## V11 — Cryptography
 
-*Correct use of cryptographic primitives and key management.*
+_Correct use of cryptographic primitives and key management._
 
 - **HMAC-SHA256** for app request signing, compared with `timingSafeEqual`
   (constant-time) — correct primitive, correct comparison (T2).
@@ -225,14 +225,14 @@ but that is an AWS-managed exchange, not an application-implemented OAuth flow.
 - **Deferred:** a **customer-managed KMS key (CMK)** — consciously deferred because
   it requires widening the foundational IAM boundary (T9).
 - **Caveat:** the per-app secret is **symmetric and widely distributed** (cloud SSM
-  + local files), no in-place rotation (T2/T11).
+  - local files), no in-place rotation (T2/T11).
 
-**Adequate.** Primitives and comparisons are right; key *ownership* (CMK) and
-secret *lifecycle* (rotation) are the named, deferred residuals.
+**Adequate.** Primitives and comparisons are right; key _ownership_ (CMK) and
+secret _lifecycle_ (rotation) are the named, deferred residuals.
 
 ## V12 — Secure Communication
 
-*Encryption and authentication of data in transit.*
+_Encryption and authentication of data in transit._
 
 - All external traffic is **HTTPS** (API Gateway) and S3/DSQL access is over TLS —
   transit encryption holds in practice.
@@ -244,7 +244,7 @@ a small, tracked deferral.
 
 ## V13 — Configuration
 
-*Secure defaults, hardened config, secret management, no secrets in code.*
+_Secure defaults, hardened config, secret management, no secrets in code._
 
 - Infrastructure is **declarative IaC** (CloudFormation bootstrap + Pulumi programs)
   with **least-privilege permissions boundaries** as hard ceilings.
@@ -263,7 +263,7 @@ fail-safe hardening design is notable.
 
 ## V14 — Data Protection
 
-*Classification, retention, and protection of sensitive data across its lifecycle.*
+_Classification, retention, and protection of sensitive data across its lifecycle._
 
 - **Classification is explicit and architectural:** shared vs app-specific data,
   with different ownership and access rules (`system-design.md`), enforced by V8's
@@ -279,7 +279,7 @@ retired data** is the honest lifecycle gap, carried in T10.
 
 ## V15 — Secure Coding & Architecture
 
-*Secure-by-design architecture, trust-boundary documentation, dependency/supply-chain integrity.*
+_Secure-by-design architecture, trust-boundary documentation, dependency/supply-chain integrity._
 
 - **Architecture is documented and threat-modelled** — trust boundaries, least
   privilege, and defense-in-depth are written down (this doc's companions) and
@@ -295,7 +295,7 @@ and is named as such in T8.
 
 ## V16 — Security Logging & Error Handling
 
-*Sufficient security event logging, tamper-resistant logs, safe error handling.*
+_Sufficient security event logging, tamper-resistant logs, safe error handling._
 
 - **Operational logging exists:** each Lambda gets a **CloudWatch log group** (via
   the Pulumi programs), and the broker surfaces failures into CloudWatch rather
@@ -313,7 +313,7 @@ the clearest "known unknown" for incident detection.
 
 ## V17 — WebRTC
 
-*Security of WebRTC media/data channels.*
+_Security of WebRTC media/data channels._
 
 Starkeep uses **no WebRTC** anywhere.
 
@@ -324,7 +324,7 @@ Starkeep uses **no WebRTC** anywhere.
 ## Summary
 
 **Strengths (verify-clean).** Authorization (V8), configuration hygiene (V13), and
-the authentication *stance* (V6 — no long-lived keys) are the standout areas,
+the authentication _stance_ (V6 — no long-lived keys) are the standout areas,
 consistent with the threat model's finding that least privilege is structural.
 Cryptographic primitive use (V11) and transit (V12) are correct, with only
 deliberate, tracked deferrals (CMK, SecureTransport-deny).

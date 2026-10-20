@@ -14,10 +14,7 @@ import {
   ListRolePoliciesCommand,
   ListAttachedRolePoliciesCommand,
 } from "@aws-sdk/client-iam";
-import {
-  STSClient,
-  GetCallerIdentityCommand,
-} from "@aws-sdk/client-sts";
+import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import type { AwsCredentials } from "./session";
 
 function iamClient(creds: AwsCredentials): IAMClient {
@@ -73,10 +70,7 @@ export async function logAppRoleSnapshot(
  * Log the caller identity of an STS session — i.e., the assumed-role ARN
  * AWS is actually seeing. Confirms the app session is what we think.
  */
-export async function logCallerIdentity(
-  label: string,
-  creds: AwsCredentials,
-): Promise<void> {
+export async function logCallerIdentity(label: string, creds: AwsCredentials): Promise<void> {
   const sts = stsClient(creds);
   try {
     const res = await sts.send(new GetCallerIdentityCommand({}));

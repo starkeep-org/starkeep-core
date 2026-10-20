@@ -163,7 +163,9 @@ describe("resuming onto the last step", () => {
         <App />
       </MemoryRouter>,
     );
-    expect(await screen.findByLabelText("DeviceUserPoolClientId", {}, { timeout: 5_000 })).toBeTruthy();
+    expect(
+      await screen.findByLabelText("DeviceUserPoolClientId", {}, { timeout: 5_000 }),
+    ).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Deploy Starkeep cloud" })).toBeNull();
   });
 });

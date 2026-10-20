@@ -49,7 +49,12 @@ export function testAppManifest(over: Record<string, unknown> = {}): Record<stri
     tier: "community",
     infraRequirements: {
       fileAccess: [
-        { types: ["image/jpeg", "image/png"], access: "readwrite", metadataWrite: true, rationale: "test" },
+        {
+          types: ["image/jpeg", "image/png"],
+          access: "readwrite",
+          metadataWrite: true,
+          rationale: "test",
+        },
       ],
     },
     ...over,
@@ -90,7 +95,12 @@ export function getRequest(path: string): Request {
 export interface StubServer {
   url: string;
   /** Every request the routes made, in order. */
-  seen: Array<{ method: string; url: string; body: string; headers?: Record<string, string | string[] | undefined> }>;
+  seen: Array<{
+    method: string;
+    url: string;
+    body: string;
+    headers?: Record<string, string | string[] | undefined>;
+  }>;
   stop(): Promise<void>;
 }
 

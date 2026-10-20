@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { compiler } from "../src/query-builder.js";
-import { assertOwnerScoped, isOwnedTable, OwnerScopePlugin, withoutOwner } from "../src/owner-scope.js";
+import {
+  assertOwnerScoped,
+  isOwnedTable,
+  OwnerScopePlugin,
+  withoutOwner,
+} from "../src/owner-scope.js";
 
 const USER = "user-a";
 const qb = compiler.withPlugin(new OwnerScopePlugin(USER));
@@ -73,7 +78,11 @@ describe("reads", () => {
       .where((eb) => eb.or([eb("id", "=", "r1"), eb("shared.records.user_id", "=", USER)]))
       .compile();
     expect(either.sql).toMatch(/\) and "shared"\."records"\."user_id" = \$3$/);
-    const another = qb.selectFrom("shared.records").selectAll().where("shared.records.user_id", "=", "user-b").compile();
+    const another = qb
+      .selectFrom("shared.records")
+      .selectAll()
+      .where("shared.records.user_id", "=", "user-b")
+      .compile();
     expect(another.parameters).toEqual(["user-b", USER]);
   });
 
@@ -98,7 +107,13 @@ describe("writes", () => {
   });
 
   it("overrides an owner the row names itself", () => {
-    const q = qb.insertInto("app_memo.cards").values([{ id: "c1", user_id: "user-b" }, { id: "c2", user_id: "user-b" }]).compile();
+    const q = qb
+      .insertInto("app_memo.cards")
+      .values([
+        { id: "c1", user_id: "user-b" },
+        { id: "c2", user_id: "user-b" },
+      ])
+      .compile();
     expect(q.parameters).toEqual(["c1", USER, "c2", USER]);
   });
 
@@ -123,28 +138,39 @@ describe("writes", () => {
       .insertInto("app_memo.cards")
       .values({ id: "c1", front: "x" })
       .onConflict((oc) =>
-        oc.column("id").doUpdateSet((eb) => ({ front: eb.ref("excluded.front"), user_id: eb.ref("excluded.user_id") })),
+        oc.column("id").doUpdateSet((eb) => ({
+          front: eb.ref("excluded.front"),
+          user_id: eb.ref("excluded.user_id"),
+        })),
       )
       .compile();
-    expect(q.sql).toContain('on conflict ("user_id", "id") do update set "front" = "excluded"."front"');
+    expect(q.sql).toContain(
+      'on conflict ("user_id", "id") do update set "front" = "excluded"."front"',
+    );
     expect(q.sql).not.toContain('"user_id" = "excluded"."user_id"');
   });
 });
 
 describe("the tripwire", () => {
   it("passes a statement the plugin scoped", () => {
-    expect(() => assertOwnerScoped(qb.selectFrom("shared.records").selectAll().compile().sql)).not.toThrow();
+    expect(() =>
+      assertOwnerScoped(qb.selectFrom("shared.records").selectAll().compile().sql),
+    ).not.toThrow();
   });
 
   it("refuses a statement compiled around it", () => {
-    expect(() => assertOwnerScoped(compiler.selectFrom("shared.records").selectAll().compile().sql)).toThrow(
-      /unscoped statement/,
-    );
-    expect(() => assertOwnerScoped(compiler.selectFrom("app_memo.cards").selectAll().compile().sql)).toThrow();
+    expect(() =>
+      assertOwnerScoped(compiler.selectFrom("shared.records").selectAll().compile().sql),
+    ).toThrow(/unscoped statement/);
+    expect(() =>
+      assertOwnerScoped(compiler.selectFrom("app_memo.cards").selectAll().compile().sql),
+    ).toThrow();
   });
 
   it("passes statements against the deployment's own tables", () => {
-    expect(() => assertOwnerScoped(compiler.selectFrom("shared.access_grants").selectAll().compile().sql)).not.toThrow();
+    expect(() =>
+      assertOwnerScoped(compiler.selectFrom("shared.access_grants").selectAll().compile().sql),
+    ).not.toThrow();
   });
 });
 

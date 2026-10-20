@@ -112,7 +112,11 @@ beforeEach(async () => {
     if (input.Name === CF_SIGNING_PARAM) {
       return {
         Parameter: {
-          Value: JSON.stringify({ keyPairId: "KTEST", domain: "dtest.cloudfront.net", privateKey: cfKeyPair.privateKey }),
+          Value: JSON.stringify({
+            keyPairId: "KTEST",
+            domain: "dtest.cloudfront.net",
+            privateKey: cfKeyPair.privateKey,
+          }),
         },
       };
     }
@@ -164,12 +168,18 @@ async function callAsDevice(userId: string, method: string, subPath: string, bod
     },
     context,
   );
-  return { status: res.statusCode, body: res.body ? (JSON.parse(res.body) as Record<string, unknown>) : {} };
+  return {
+    status: res.statusCode,
+    body: res.body ? (JSON.parse(res.body) as Record<string, unknown>) : {},
+  };
 }
 
 async function call(userId: string, method: string, subPath: string, body?: unknown) {
   const res = await handler(as(userId, method, subPath, body), context);
-  return { status: res.statusCode, body: res.body ? (JSON.parse(res.body) as Record<string, unknown>) : {} };
+  return {
+    status: res.statusCode,
+    body: res.body ? (JSON.parse(res.body) as Record<string, unknown>) : {},
+  };
 }
 
 /** A's photo, registered by hash: the bytes are "already uploaded". */
@@ -201,7 +211,9 @@ describe("two users through the broker", () => {
   it("B can neither label nor sign A's record", async () => {
     const id = await aWritesAPhoto();
 
-    const label = await call(B, "POST", "/data/labels", { labels: [{ recordId: id, key: "faces", value: "Eve" }] });
+    const label = await call(B, "POST", "/data/labels", {
+      labels: [{ recordId: id, key: "faces", value: "Eve" }],
+    });
     expect(label.status).not.toBe(200);
     const { rows } = await pg.query("SELECT * FROM shared.record_labels");
     expect(rows).toEqual([]);

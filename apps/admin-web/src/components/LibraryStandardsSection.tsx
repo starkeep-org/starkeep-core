@@ -122,7 +122,9 @@ export function draftProblems(
   for (const c of CATEGORIES) {
     const { min, max } = ranges.canonicalThreshold[c];
     if (!Number.isInteger(draft[c]) || draft[c] < min || draft[c] > max) {
-      problems.push(`${CATEGORY_LABELS[c]}: choose a whole number from ${min} to ${max} ${UNITS[c]}.`);
+      problems.push(
+        `${CATEGORY_LABELS[c]}: choose a whole number from ${min} to ${max} ${UNITS[c]}.`,
+      );
     }
   }
   return problems;
@@ -138,7 +140,9 @@ function formatBytes(bytes: number): string {
 }
 
 function resolutionLabel(longEdge: number): string {
-  return RESOLUTION_CHOICES.find((r) => r.longEdge === longEdge)?.label ?? `${longEdge} px long edge`;
+  return (
+    RESOLUTION_CHOICES.find((r) => r.longEdge === longEdge)?.label ?? `${longEdge} px long edge`
+  );
 }
 
 /** One threshold: the offered choices, the saved value, and a custom value. */
@@ -204,9 +208,9 @@ function ResolutionSelect({
   defaultValue: number;
   onChange: (longEdge: number) => void;
 }) {
-  const choices = [...new Set([...RESOLUTION_CHOICES.map((r) => r.longEdge), value, defaultValue])].sort(
-    (a, b) => a - b,
-  );
+  const choices = [
+    ...new Set([...RESOLUTION_CHOICES.map((r) => r.longEdge), value, defaultValue]),
+  ].sort((a, b) => a - b);
   return (
     <select
       aria-label={label}
@@ -310,7 +314,9 @@ export async function saveLibraryStandards(draft: LibraryStandardsDraft): Promis
 export function LibraryStandardsSection() {
   const [state, setState] = useState<LibraryStandardsResponse | null>(null);
   const [draft, setDraft] = useState<LibraryStandardsDraft | null>(null);
-  const [status, setStatus] = useState<"loading" | "ready" | "offline" | "saving" | "saved">("loading");
+  const [status, setStatus] = useState<"loading" | "ready" | "offline" | "saving" | "saved">(
+    "loading",
+  );
   const [problems, setProblems] = useState<string[]>([]);
   const [confirming, setConfirming] = useState<Category[] | null>(null);
 
@@ -357,7 +363,8 @@ export function LibraryStandardsSection() {
   if (status === "offline" || !state || !draft) {
     return (
       <p className="text-sm text-muted-foreground">
-        The local data server isn&apos;t running, so the library&apos;s settings can&apos;t be shown yet.
+        The local data server isn&apos;t running, so the library&apos;s settings can&apos;t be shown
+        yet.
       </p>
     );
   }
@@ -369,7 +376,9 @@ export function LibraryStandardsSection() {
   const requestSave = () => {
     // A threshold change in a category that already holds originals needs the
     // person to know what happens to those originals. Nothing else does.
-    const affected = changedThresholds(draft, saved).filter((c) => state.libraryOriginals[c].count > 0);
+    const affected = changedThresholds(draft, saved).filter(
+      (c) => state.libraryOriginals[c].count > 0,
+    );
     if (affected.length > 0) setConfirming(affected);
     else void save();
   };
@@ -379,13 +388,17 @@ export function LibraryStandardsSection() {
       <h3 className="text-sm font-medium">Quality kept when originals archive</h3>
       <p className="text-sm text-muted-foreground">
         An original larger than this archives to deep storage, and a copy at this size stays
-        instantly available. A higher value keeps more detail and costs more to store. This
-        setting applies to the whole library, on every device.
+        instantly available. A higher value keeps more detail and costs more to store. This setting
+        applies to the whole library, on every device.
       </p>
-      <LibraryStandardsFields state={state} draft={draft} onChange={(next) => {
-        setDraft(next);
-        setStatus("ready");
-      }} />
+      <LibraryStandardsFields
+        state={state}
+        draft={draft}
+        onChange={(next) => {
+          setDraft(next);
+          setStatus("ready");
+        }}
+      />
       {[...invalid, ...problems].length > 0 && (
         <ul className="text-sm text-destructive">
           {[...invalid, ...problems].map((p) => (
@@ -402,7 +415,9 @@ export function LibraryStandardsSection() {
           {status === "saving" ? "Saving…" : "Save"}
         </Button>
         {status === "saved" && (
-          <span className="text-xs text-muted-foreground">Saved. Every device picks it up at its next sync.</span>
+          <span className="text-xs text-muted-foreground">
+            Saved. Every device picks it up at its next sync.
+          </span>
         )}
       </div>
 
@@ -412,8 +427,8 @@ export function LibraryStandardsSection() {
             <DialogTitle>Change the quality kept when originals archive?</DialogTitle>
             <DialogDescription>
               {confirming?.map((c) => CATEGORY_LABELS[c]).join(" and ")} already in the library keep
-              their current archived-quality copies. The new value applies to originals added from now
-              on.
+              their current archived-quality copies. The new value applies to originals added from
+              now on.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -429,9 +444,16 @@ export function LibraryStandardsSection() {
 }
 
 /** The saved draft, as the response's per-category view. */
-function viewOf(draft: LibraryStandardsDraft, state: LibraryStandardsResponse): Record<Category, CategoryView> {
+function viewOf(
+  draft: LibraryStandardsDraft,
+  state: LibraryStandardsResponse,
+): Record<Category, CategoryView> {
   return {
     image: { ...state.current.image, canonicalThreshold: draft.image },
-    video: { ...state.current.video, canonicalThreshold: draft.video, advisoryLongEdges: draft.videoEdges },
+    video: {
+      ...state.current.video,
+      canonicalThreshold: draft.video,
+      advisoryLongEdges: draft.videoEdges,
+    },
   };
 }

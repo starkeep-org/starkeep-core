@@ -193,9 +193,7 @@ export interface SyncSupervisor {
    * of a range, in either direction; without a caller the digest machinery is
    * unreachable on this node.
    */
-  verifyAll(): Promise<
-    Array<{ appId: string; result: VerifyResult | null; error: string | null }>
-  >;
+  verifyAll(): Promise<Array<{ appId: string; result: VerifyResult | null; error: string | null }>>;
   /**
    * Reset per-app backoff and trigger an immediate exchange across every
    * engine. Use after a recoverable external state change (most notably an
@@ -308,9 +306,7 @@ function narrowNamespaceStore(
  */
 const SYNC_NOW_MAX_ROUNDS = 50;
 
-export function createSyncSupervisor(
-  options: SyncSupervisorOptions,
-): SyncSupervisor {
+export function createSyncSupervisor(options: SyncSupervisorOptions): SyncSupervisor {
   const {
     sdk,
     databaseAdapter,
@@ -356,7 +352,8 @@ export function createSyncSupervisor(
       );
     }
     return () => {
-      if (!getTokenSource()) throw new Error("[sync] this machine signed out; sign in again to sync");
+      if (!getTokenSource())
+        throw new Error("[sync] this machine signed out; sign in again to sync");
       return {};
     };
   }
@@ -369,7 +366,9 @@ export function createSyncSupervisor(
   function channelFetch(channelUrl: string): typeof globalThis.fetch {
     return (input, init) => {
       const tokens = getTokenSource();
-      return tokens ? withUserToken(globalThis.fetch, channelUrl, tokens)(input, init) : globalThis.fetch(input, init);
+      return tokens
+        ? withUserToken(globalThis.fetch, channelUrl, tokens)(input, init)
+        : globalThis.fetch(input, init);
     };
   }
 
@@ -423,18 +422,18 @@ export function createSyncSupervisor(
     const baseUrl = `${cloudUrlBase}/apps/${encodeURIComponent(DRIVE_APP_ID)}`;
     const driveSigner = makeSignerFor(DRIVE_APP_ID);
     const driveFetch = channelFetch(baseUrl);
-    const transport = createHttpSyncTransport({ baseUrl, signRequest: driveSigner, fetch: driveFetch });
+    const transport = createHttpSyncTransport({
+      baseUrl,
+      signRequest: driveSigner,
+      fetch: driveFetch,
+    });
     const remoteStorage = new HttpObjectStorageAdapter({
       baseUrl: `${baseUrl}/files`,
       signRequest: driveSigner,
       fetch: driveFetch,
     });
     driveRemoteStorage = remoteStorage;
-    const syncState = createPerAppSyncStateStore(
-      localDb,
-      underlyingSyncStateStore,
-      DRIVE_APP_ID,
-    );
+    const syncState = createPerAppSyncStateStore(localDb, underlyingSyncStateStore, DRIVE_APP_ID);
     const engine = createSyncEngine({
       localDatabaseAdapter: databaseAdapter,
       localObjectStorage,
@@ -470,11 +469,7 @@ export function createSyncSupervisor(
       fetch: appFetch,
     });
 
-    const syncState = createPerAppSyncStateStore(
-      localDb,
-      underlyingSyncStateStore,
-      appId,
-    );
+    const syncState = createPerAppSyncStateStore(localDb, underlyingSyncStateStore, appId);
 
     const narrowedNamespaces = narrowNamespaceStore(namespaceStore, appId);
 
@@ -617,9 +612,9 @@ export function createSyncSupervisor(
         // spaces the retries out; what made this noisy was a stack per tick.
         if (!repeated) {
           console.warn(
-            `[sync] app=${entry.appId} has no cloud half yet — the data server `
-            + `does not know it. Install it in the cloud to start syncing; `
-            + `retrying meanwhile with backoff.`,
+            `[sync] app=${entry.appId} has no cloud half yet — the data server ` +
+              `does not know it. Install it in the cloud to start syncing; ` +
+              `retrying meanwhile with backoff.`,
           );
         }
       } else {
@@ -754,14 +749,17 @@ export function createSyncSupervisor(
         headers: makeSignerFor(DRIVE_APP_ID)("GET", DEPLOYMENT_SETTINGS_ROUTE),
         signal: AbortSignal.timeout(CLOUD_READ_TIMEOUT_MS),
       });
-      if (!res.ok) throw new Error(`the cloud answered ${res.status} for the deployment's settings`);
+      if (!res.ok)
+        throw new Error(`the cloud answered ${res.status} for the deployment's settings`);
       const body = (await res.json()) as { settings?: unknown };
       return body.settings ?? null;
     },
 
     start() {
       if (!hasCredential()) {
-        console.warn("[sync] this machine is not signed in, so no channel starts. Sign in from admin-web.");
+        console.warn(
+          "[sync] this machine is not signed in, so no channel starts. Sign in from admin-web.",
+        );
         return;
       }
       // Always-on Drive channel first, then reconcile per-app channels.

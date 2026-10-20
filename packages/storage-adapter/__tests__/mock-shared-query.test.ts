@@ -77,11 +77,9 @@ describe("MockDatabaseAdapter.queryShared", () => {
   ];
 
   it("applies the server's grant predicate inside the query", async () => {
-    const result = await adapter.queryShared(
-      { kind: "metadata", category: "image" },
-      rowQuery(),
-      { serverWhere: jpegOnly },
-    );
+    const result = await adapter.queryShared({ kind: "metadata", category: "image" }, rowQuery(), {
+      serverWhere: jpegOnly,
+    });
     if (result.mode !== "rows") throw new Error("expected rows");
     expect(result.rows.map((r) => r["record_id"])).toEqual(ids.slice(0, 3).sort());
   });
@@ -131,11 +129,9 @@ describe("MockDatabaseAdapter.queryShared", () => {
       order: [],
       limit: 100,
     };
-    const result = await adapter.queryShared(
-      { kind: "metadata", category: "image" },
-      query,
-      { serverWhere: jpegOnly },
-    );
+    const result = await adapter.queryShared({ kind: "metadata", category: "image" }, query, {
+      serverWhere: jpegOnly,
+    });
     if (result.mode !== "aggregate") throw new Error("expected aggregate");
     // The png's 999 is in the same table and out of reach.
     expect(result.groups).toEqual([{ n: 3, widest: 300 }]);

@@ -21,8 +21,8 @@ we are not yet in).
 
 ## The requirement
 
-An arbitrary app holding only a **read** grant on images should be able to ask *"which
-photos contain Alice?"* — where the labels were written by a different app (Photos),
+An arbitrary app holding only a **read** grant on images should be able to ask _"which
+photos contain Alice?"_ — where the labels were written by a different app (Photos),
 without calling Photos about each record.
 
 This is the query labels exist for. Today it cannot be expressed.
@@ -41,7 +41,7 @@ query surface into a publication that only its author can interpret.
 ### Why substring matching is the wrong fix
 
 - **It cannot use the index.** A leading-wildcard `LIKE '%Alice%'` is a full scan of
-  the app's label space, forever, and it is the *reverse* path — the one the design
+  the app's label space, forever, and it is the _reverse_ path — the one the design
   explicitly protects because it runs over an unbounded set.
 - **It is wrong.** `Alice` matches `Alicent`. Delimiter-aware matching just moves the
   bug (`Alice` vs `Alice Smith`).
@@ -57,6 +57,7 @@ The reverse index is already shaped for this query:
 ```
 idx_record_labels_reverse ON shared.record_labels (app_id, key, deleted_at, value, record_id)
 ```
+
 (`dsql-schema-init.ts:416`, mirrored in the SQLite bootstrap.)
 
 `value` sits **ahead of** `record_id`, so `(app_id, key, value) → record_ids` is
@@ -85,7 +86,7 @@ single row. With `value` in the PK, writes accumulate and removing a name requir
 explicit retraction. Leaving this to callers means every writer reimplements the
 same diff, non-atomically.
 
-*Recommendation:* add a set-valued write — `{ recordId, key, values: [...] }` — that
+_Recommendation:_ add a set-valued write — `{ recordId, key, values: [...] }` — that
 upserts the given values and tombstones the absent ones for that `(record, app, key)`
 in one statement. Per-row upsert stays for single-valued keys.
 
@@ -93,7 +94,7 @@ in one statement. Per-row upsert stays for single-valued keys.
 > `DatabaseAdapter.replaceLabelValues` / `sdk.data.replaceLabelValues`. Two statements
 > in one transaction rather than one — a tombstone `UPDATE … WHERE value NOT IN (…)`
 > and the ordinary multi-row upsert — because the intermediate state is wrong in a way
-> a reader would believe (a single-valued key looks *unset*, not mid-update).
+> a reader would believe (a single-valued key looks _unset_, not mid-update).
 >
 > The last sentence above turned out to be the trap, not the fallback: since `value`
 > joined the primary key, a per-row upsert no longer overwrites, so a single-valued key
@@ -113,7 +114,7 @@ schema and to stop an app smuggling content through an unbounded key space. Wide
 the PK moves that hole to values: 500 rows of `faces=<chunk>` reconstruct a blob and
 poison the reverse index — precisely what the key cap defends against.
 
-*Recommendation:* cap values per `(record_id, app_id, key)`. 32 is generous for faces
+_Recommendation:_ cap values per `(record_id, app_id, key)`. 32 is generous for faces
 and small enough to be pointless as a smuggling channel. Enforce it in both data
 servers' write paths, next to the existing key-declaration check.
 
@@ -135,8 +136,8 @@ servers' write paths, next to the existing key-declaration check.
 cannot be nullable, and `value` is nullable today because that is how a bare flag is
 represented.
 
-*Recommendation: drop NULL from `value` everywhere — storage, wire, and types — and
-let `''` be an ordinary value.* Not a sentinel with a mapping layer: there simply
+_Recommendation: drop NULL from `value` everywhere — storage, wire, and types — and
+let `''` be an ordinary value._ Not a sentinel with a mapping layer: there simply
 stops being a distinction between "a bare flag" and "a label whose value is empty".
 
 This is not a workaround for the PK. It is a simplification worth making on its own,
@@ -149,11 +150,11 @@ NULL or `''` adds nothing on top of that. So the domain goes from four states
 distinct meaning. A key whose values are genuinely open-ended can then use `''` to
 mean the empty string, straightforwardly.
 
-*What this deletes, concretely:*
+_What this deletes, concretely:_
 
 - **`spellOutNullsFirst`** — the `LabelDialect` field and both adapter configs
   (`storage-aurora-dsql/src/adapter.ts:63`, `storage-sqlite/src/adapter.ts:59`) exist
-  *only* because SQLite sorts NULLs first in an ASC scan and Postgres/DSQL sorts them
+  _only_ because SQLite sorts NULLs first in an ASC scan and Postgres/DSQL sorts them
   last. With NOT NULL the backends agree natively: the divergence is removed rather
   than normalized, along with the "Null ordering is normalized to NULLS FIRST" block
   in `label-cursor.ts` and `label-queries.ts` that explains it.
@@ -161,19 +162,19 @@ mean the empty string, straightforwardly.
   comparison `(value, record_id) > (?, ?)` is unusable because a NULL on either side
   evaluates to NULL — silently returning an empty page rather than erroring — so
   `labelCursorPredicate` expands it manually. With NOT NULL the row-value form becomes
-  usable and maps directly onto the reverse index. A simplification *and* a better
+  usable and maps directly onto the reverse index. A simplification _and_ a better
   plan, not just a deletion.
 - The null branches at `label-cursor.ts:125-126`, the `value !== null && typeof value
-  !== "string"` check in `decodeLabelCursor`, and the `?? null` coercions at
+!== "string"` check in `decodeLabelCursor`, and the `?? null` coercions at
   `sdk.ts:301` and `sdk.ts:334`.
 
-*Types and wire:* `RecordLabel.value` becomes `string`; the write shape becomes
+_Types and wire:_ `RecordLabel.value` becomes `string`; the write shape becomes
 `value?: string` defaulting to `''`, so `{ recordId, key }` with no value still works
 and still reads back as a flag. `validateLabelWrite` must accept `''` (0 bytes is
 trivially within `LABEL_VALUE_MAX_BYTES`). Every `value === null` check on the branch
 becomes `value === ""` — or, more often, disappears.
 
-*`deleted_at` stays nullable.* It is genuinely two-state (tombstoned or not) and is
+_`deleted_at` stays nullable._ It is genuinely two-state (tombstoned or not) and is
 pinned by equality in the reverse index rather than participating in the cursor order.
 Only `value` changes.
 
@@ -192,7 +193,7 @@ per-row. A rename is retract + set: two rows, both carrying HLCs, both tombstone
 both shipped.
 
 **5. Row growth is real but small.** A ten-person group photo is ten rows, not one.
-Note that the DSQL 3,000-modified-row transaction cap now bounds a *variable* number
+Note that the DSQL 3,000-modified-row transaction cap now bounds a _variable_ number
 of rows per image, so publisher chunking can no longer assume a fixed rows-per-record
 (the Photos publisher must chunk on rows, not images).
 
@@ -235,16 +236,16 @@ single-`label` parameter does not express it. Worth doing only if a caller wants
 
 ## Touch list
 
-| Area | Change |
-| --- | --- |
-| `packages/admin-installer/src/dsql-schema-init.ts` | PK columns; `value` NOT NULL |
-| `packages/storage-sqlite/src/schema/bootstrap.ts` | same, mirrored |
-| `packages/storage-adapter/src/database/label-queries.ts` | `PK_COLUMNS`, `dedupeUpserts`, set-valued upsert; delete `spellOutNullsFirst` |
-| `packages/storage-adapter/src/database/label-cursor.ts` | drop null ordering; switch to a row-value cursor predicate |
-| `packages/storage-adapter/src/database/label-row.ts` | `value` non-null |
-| `packages/storage-{sqlite,aurora-dsql}/src/adapter.ts` | drop `spellOutNullsFirst` from the dialect config |
-| `packages/sdk/src/sdk.ts` | drop `?? null` coercions (301, 334) |
-| `packages/protocol-primitives/src/records/labels.ts` | `RecordLabel.value: string`; `dedupeLabelWrites`; accept `''`; new per-key value cap |
-| `apps/local-data-server/server.ts` | `POST /data/labels` set-valued shape; cap enforcement; `labelValue` `.has()` vs `.get()` |
-| cloud-data-server `api-handler.ts` / `access-enforcer.ts` | same |
-| `system-design.md`, `authoring-an-app.md` §9 | labels are set-valued; what that means for writers |
+| Area                                                      | Change                                                                                   |
+| --------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `packages/admin-installer/src/dsql-schema-init.ts`        | PK columns; `value` NOT NULL                                                             |
+| `packages/storage-sqlite/src/schema/bootstrap.ts`         | same, mirrored                                                                           |
+| `packages/storage-adapter/src/database/label-queries.ts`  | `PK_COLUMNS`, `dedupeUpserts`, set-valued upsert; delete `spellOutNullsFirst`            |
+| `packages/storage-adapter/src/database/label-cursor.ts`   | drop null ordering; switch to a row-value cursor predicate                               |
+| `packages/storage-adapter/src/database/label-row.ts`      | `value` non-null                                                                         |
+| `packages/storage-{sqlite,aurora-dsql}/src/adapter.ts`    | drop `spellOutNullsFirst` from the dialect config                                        |
+| `packages/sdk/src/sdk.ts`                                 | drop `?? null` coercions (301, 334)                                                      |
+| `packages/protocol-primitives/src/records/labels.ts`      | `RecordLabel.value: string`; `dedupeLabelWrites`; accept `''`; new per-key value cap     |
+| `apps/local-data-server/server.ts`                        | `POST /data/labels` set-valued shape; cap enforcement; `labelValue` `.has()` vs `.get()` |
+| cloud-data-server `api-handler.ts` / `access-enforcer.ts` | same                                                                                     |
+| `system-design.md`, `authoring-an-app.md` §9              | labels are set-valued; what that means for writers                                       |

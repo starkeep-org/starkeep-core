@@ -26,8 +26,19 @@ export function CommandOutput({ lines, status, className }: Props) {
             <span className="text-xs text-muted-foreground">Running</span>
           </div>
         )}
-        {status === "success" && <Badge variant="secondary" className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">Done</Badge>}
-        {status === "failure" && <Badge variant="destructive" className="text-xs">Failed</Badge>}
+        {status === "success" && (
+          <Badge
+            variant="secondary"
+            className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+          >
+            Done
+          </Badge>
+        )}
+        {status === "failure" && (
+          <Badge variant="destructive" className="text-xs">
+            Failed
+          </Badge>
+        )}
       </div>
       <ScrollArea className="h-64">
         <pre className="p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap break-all">

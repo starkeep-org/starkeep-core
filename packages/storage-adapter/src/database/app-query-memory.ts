@@ -61,10 +61,7 @@ export async function runInMemoryQuery(
  * the mock would start answering `{"parent_id": null}` differently from the two
  * SQL adapters.
  */
-export function matchesWhere(
-  row: Record<string, unknown>,
-  where: readonly WhereClause[],
-): boolean {
+export function matchesWhere(row: Record<string, unknown>, where: readonly WhereClause[]): boolean {
   return matches(row, where);
 }
 
@@ -82,7 +79,9 @@ function holds(raw: unknown, predicate: Predicate): boolean {
       // `col <> 'x'` excludes nulls in SQL, and a caller asking for "not x"
       // means every row that is not x — nulls included. The compiler adds the
       // null bucket back explicitly; so does this.
-      return predicate.value === null ? value !== null : value === null || value !== predicate.value;
+      return predicate.value === null
+        ? value !== null
+        : value === null || value !== predicate.value;
     case "lt":
     case "lte":
     case "gt":
@@ -156,7 +155,10 @@ function escapeRegExp(ch: string): string {
  * the SQL compiler selects them under, so the page token is cut from the values
  * that were actually ordered on whatever the projection kept.
  */
-function page(rows: readonly Record<string, unknown>[], query: RowQuery): Record<string, unknown>[] {
+function page(
+  rows: readonly Record<string, unknown>[],
+  query: RowQuery,
+): Record<string, unknown>[] {
   const sorted = [...rows].sort((a, b) => {
     for (const term of query.order) {
       const decided = compareByTerm(normalize(a[term.column]), normalize(b[term.column]), term);
@@ -206,11 +208,7 @@ function isAfterToken(
   for (let i = 0; i < order.length; i += 1) {
     const term = order[i]!;
     const key = keys[i]!;
-    const decided = compareByTerm(
-      normalize(row[term.column]),
-      key.isNull ? null : key.value,
-      term,
-    );
+    const decided = compareByTerm(normalize(row[term.column]), key.isNull ? null : key.value, term);
     if (decided !== 0) return decided > 0;
   }
   return false;
@@ -235,7 +233,8 @@ function aggregate(
   }
   // No `GROUP BY` at all is one global group, even over zero rows — which is
   // what makes `sum` and `avg` return null there rather than nothing.
-  const groups = query.groupBy.length === 0 ? [rows as Record<string, unknown>[]] : [...buckets.values()];
+  const groups =
+    query.groupBy.length === 0 ? [rows as Record<string, unknown>[]] : [...buckets.values()];
 
   const out = groups.map((bucket) => {
     const group: Record<string, unknown> = {};
@@ -255,10 +254,7 @@ function aggregate(
   return out;
 }
 
-function applyAggregate(
-  rows: readonly Record<string, unknown>[],
-  term: AggregateTerm,
-): unknown {
+function applyAggregate(rows: readonly Record<string, unknown>[], term: AggregateTerm): unknown {
   if (term.fn === "count") {
     // `count(*)` counts every matching row including all-null ones; `count(x)`
     // skips nulls, and the difference is the caller's to choose.

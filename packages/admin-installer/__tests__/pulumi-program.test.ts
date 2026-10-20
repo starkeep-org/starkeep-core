@@ -26,7 +26,10 @@ const created: CreatedResource[] = [];
 
 pulumi.runtime.setMocks(
   {
-    newResource(args: pulumi.runtime.MockResourceArgs): { id: string; state: Record<string, unknown> } {
+    newResource(args: pulumi.runtime.MockResourceArgs): {
+      id: string;
+      state: Record<string, unknown>;
+    } {
       created.push({ type: args.type, name: args.name, inputs: args.inputs });
       return { id: `${args.name}-id`, state: { ...args.inputs, arn: `arn:fake:${args.name}` } };
     },
@@ -137,7 +140,12 @@ describe("route resource naming", () => {
 
   it("plans exactly the names the program registers", async () => {
     const manifest = manifestWithHandlers([
-      { name: "static", routes: ["GET /", "ANY /{proxy+}"], auth: "session", publicPaths: ["/", "/sign-in"] },
+      {
+        name: "static",
+        routes: ["GET /", "ANY /{proxy+}"],
+        auth: "session",
+        publicPaths: ["/", "/sign-in"],
+      },
       { name: "api", routes: ["POST /api/resize"] },
     ]);
     await run(manifest);
@@ -303,7 +311,9 @@ describe("auth wiring: session", () => {
   });
 
   it("leaves a jwt handler on the same app untouched", async () => {
-    await run(manifestWithHandlers([sessionHandler, { name: "api", routes: ["POST /api/resize"] }]));
+    await run(
+      manifestWithHandlers([sessionHandler, { name: "api", routes: ["POST /api/resize"] }]),
+    );
     const byKey = Object.fromEntries(routes().map((r) => [r.inputs.routeKey as string, r.inputs]));
     expect(byKey["POST /apps/photos/api/resize"].authorizationType).toBe("JWT");
     expect(byKey["POST /apps/photos/api/resize"].authorizerId).toBe("auth123");
@@ -355,7 +365,13 @@ describe("the execution identity", () => {
 
     const policy = JSON.parse(
       buildTempInstallInfraPolicy(ctx.stackPrefix, ctx.appId, "111122223333", "us-east-1"),
-    ) as { Statement: Array<{ Effect: string; Action?: string | string[]; Resource?: string | string[] }> };
+    ) as {
+      Statement: Array<{
+        Effect: string;
+        Action?: string | string[];
+        Resource?: string | string[];
+      }>;
+    };
     const toArray = (x: string | string[] | undefined): string[] =>
       x === undefined ? [] : Array.isArray(x) ? x : [x];
     const passable = policy.Statement.filter(

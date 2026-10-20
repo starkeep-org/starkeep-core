@@ -42,11 +42,7 @@ import {
   assertCloudInstallableAppId,
   assertNotReservedAppId,
 } from "./iam";
-import {
-  appCredsParameterName,
-  deleteAppCredsParameter,
-  putAppCredsParameter,
-} from "./app-creds";
+import { appCredsParameterName, deleteAppCredsParameter, putAppCredsParameter } from "./app-creds";
 import { runAppInstallDdl, runAppUninstallDdl, type DsqlDdlOptions } from "./dsql-ddl";
 import {
   putAppKeepFile,
@@ -180,10 +176,7 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
   }
 }
 
-async function installAppInner(
-  input: InstallInput,
-  registry: Registry,
-): Promise<InstallResult> {
+async function installAppInner(input: InstallInput, registry: Registry): Promise<InstallResult> {
   const { appId, manifest, zipBuffer, config } = input;
   const ir = manifest.infraRequirements;
   const done = await registry.getCompletedSteps(appId, "install");
@@ -230,20 +223,28 @@ async function installAppInner(
   // alwaysRun: a role made by an older install keeps that install's trust and
   // inline policies until something rewrites them. createAppRole rewrites
   // both on a role that exists, so every reinstall carries the current ones.
-  await runStep(registry, appId, "install", "create_iam_role", done, async () => {
-    await createAppRole({
-      stackPrefix: config.stackPrefix,
-      appId,
-      accountId: config.accountId,
-      permissionsBoundaryArn: config.permissionsBoundaryArn,
-      foundationalPermissionsBoundaryArn: config.foundationalPermissionsBoundaryArn,
-      userDataOwnerPermissionsBoundaryArn: config.userDataOwnerPermissionsBoundaryArn,
-      fileAccess: ir.fileAccess,
-      fileAccessAll: ir.fileAccessAll,
-      brokerPower: ir.brokerPower,
-      managerCreds,
-    });
-  }, { alwaysRun: true });
+  await runStep(
+    registry,
+    appId,
+    "install",
+    "create_iam_role",
+    done,
+    async () => {
+      await createAppRole({
+        stackPrefix: config.stackPrefix,
+        appId,
+        accountId: config.accountId,
+        permissionsBoundaryArn: config.permissionsBoundaryArn,
+        foundationalPermissionsBoundaryArn: config.foundationalPermissionsBoundaryArn,
+        userDataOwnerPermissionsBoundaryArn: config.userDataOwnerPermissionsBoundaryArn,
+        fileAccess: ir.fileAccess,
+        fileAccessAll: ir.fileAccessAll,
+        brokerPower: ir.brokerPower,
+        managerCreds,
+      });
+    },
+    { alwaysRun: true },
+  );
 
   // The app's Lambda execution identity, separate from the data role above.
   // Handlers run as this: logs, their own HMAC credential, their own sibling
@@ -344,14 +345,20 @@ async function installAppInner(
     // would leave install-infra with no grant, and the alwaysRun upload_bundle
     // + install_compute_stack steps below (which run under install-infra) would
     // fail with AccessDenied. Attach is idempotent (PutRolePolicy overwrites).
-    await runStep(registry, appId, "install", "attach_temp_install_infra_policy", done, () =>
-      attachTempInstallInfraPolicy(
-        config.stackPrefix,
-        appId,
-        config.accountId,
-        config.region,
-        managerCreds,
-      ),
+    await runStep(
+      registry,
+      appId,
+      "install",
+      "attach_temp_install_infra_policy",
+      done,
+      () =>
+        attachTempInstallInfraPolicy(
+          config.stackPrefix,
+          appId,
+          config.accountId,
+          config.region,
+          managerCreds,
+        ),
       { alwaysRun: true },
     );
 
@@ -365,15 +372,21 @@ async function installAppInner(
       // though the step is already "done" from the first install — otherwise
       // the Lambda keeps serving the original code and Redeploy is a no-op.
       // Idempotent: it overwrites the same apps/<appId>/latest/dist.zip key.
-      await runStep(registry, appId, "install", "upload_bundle", done, () =>
-        uploadAppBundle(
-          config.stackPrefix,
-          appId,
-          config.artifactsBucket,
-          zipBuffer,
-          config.region,
-          infraCreds,
-        ),
+      await runStep(
+        registry,
+        appId,
+        "install",
+        "upload_bundle",
+        done,
+        () =>
+          uploadAppBundle(
+            config.stackPrefix,
+            appId,
+            config.artifactsBucket,
+            zipBuffer,
+            config.region,
+            infraCreds,
+          ),
         { alwaysRun: true },
       );
     }
@@ -384,41 +397,54 @@ async function installAppInner(
       // it "done") is why Redeploy never updated the app. Idempotent: a
       // no-change up is a cheap no-op; a changed bundleHash/manifest updates the
       // Lambda code and API Gateway routes.
-      await runStep(registry, appId, "install", "install_compute_stack", done, async () => {
-        const bundleHash = zipBuffer
-          ? createHash("sha256").update(zipBuffer).digest("base64")
-          : undefined;
-        const computeCtx: ComputeContext = {
-          stackPrefix: config.stackPrefix,
-          appId,
-          appRoleArn,
-          appExecRoleArn,
-          apiGatewayId: config.apiGatewayId,
-          apiGatewayExecutionArn: config.apiGatewayExecutionArn,
-          apiGatewayUrl: config.apiGatewayUrl,
-          authorizerId: config.authorizerId,
-          ...(config.sessionAuthorizerId
-            ? { sessionAuthorizerId: config.sessionAuthorizerId }
-            : {}),
-          region: config.region,
-          accountId: config.accountId,
-          pulumiStateBucket: config.pulumiStateBucket,
-          artifactsBucket: config.artifactsBucket,
-          dsqlHostname: config.dsqlHostname,
-          filesBucket: config.filesBucket,
-          infraCreds,
-          bundleHash,
-        };
-        receipt = await installComputeStack(manifest, computeCtx);
-      }, { alwaysRun: true });
+      await runStep(
+        registry,
+        appId,
+        "install",
+        "install_compute_stack",
+        done,
+        async () => {
+          const bundleHash = zipBuffer
+            ? createHash("sha256").update(zipBuffer).digest("base64")
+            : undefined;
+          const computeCtx: ComputeContext = {
+            stackPrefix: config.stackPrefix,
+            appId,
+            appRoleArn,
+            appExecRoleArn,
+            apiGatewayId: config.apiGatewayId,
+            apiGatewayExecutionArn: config.apiGatewayExecutionArn,
+            apiGatewayUrl: config.apiGatewayUrl,
+            authorizerId: config.authorizerId,
+            ...(config.sessionAuthorizerId
+              ? { sessionAuthorizerId: config.sessionAuthorizerId }
+              : {}),
+            region: config.region,
+            accountId: config.accountId,
+            pulumiStateBucket: config.pulumiStateBucket,
+            artifactsBucket: config.artifactsBucket,
+            dsqlHostname: config.dsqlHostname,
+            filesBucket: config.filesBucket,
+            infraCreds,
+            bundleHash,
+          };
+          receipt = await installComputeStack(manifest, computeCtx);
+        },
+        { alwaysRun: true },
+      );
     }
 
     // alwaysRun: mirror the attach above — the policy is re-attached on every
     // run, so it must be torn down on every run too (never left dangling on
     // install-infra after the install completes). Idempotent: detach tolerates
     // an already-absent policy.
-    await runStep(registry, appId, "install", "detach_temp_install_infra_policy", done, () =>
-      detachTempInstallInfraPolicy(config.stackPrefix, appId, managerCreds),
+    await runStep(
+      registry,
+      appId,
+      "install",
+      "detach_temp_install_infra_policy",
+      done,
+      () => detachTempInstallInfraPolicy(config.stackPrefix, appId, managerCreds),
       { alwaysRun: true },
     );
   }
@@ -445,10 +471,7 @@ export async function uninstallApp(input: UninstallInput): Promise<void> {
   }
 }
 
-async function uninstallAppInner(
-  input: UninstallInput,
-  registry: Registry,
-): Promise<void> {
+async function uninstallAppInner(input: UninstallInput, registry: Registry): Promise<void> {
   const { appId, manifest, config } = input;
   const ir = manifest.infraRequirements;
   const done = await registry.getCompletedSteps(appId, "uninstall");
@@ -485,9 +508,7 @@ async function uninstallAppInner(
         apiGatewayExecutionArn: config.apiGatewayExecutionArn,
         apiGatewayUrl: config.apiGatewayUrl,
         authorizerId: config.authorizerId,
-        ...(config.sessionAuthorizerId
-          ? { sessionAuthorizerId: config.sessionAuthorizerId }
-          : {}),
+        ...(config.sessionAuthorizerId ? { sessionAuthorizerId: config.sessionAuthorizerId } : {}),
         region: config.region,
         accountId: config.accountId,
         pulumiStateBucket: config.pulumiStateBucket,

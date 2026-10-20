@@ -1,6 +1,6 @@
 # Developing a local app for Starkeep — Functional Review (2026-06-08)
 
-Scope: the `developing-a-local-app-for-starkeep` topic. 
+Scope: the `developing-a-local-app-for-starkeep` topic.
 
 Part 1 is a **how-to guide** for a developer building a new local Starkeep app. Part 2 is the usual functional review of gaps and bugs surfaced while writing Part 1.
 
@@ -91,7 +91,7 @@ Two things to be deliberate about:
 - **Extensions, not wildcards.** Every extension is matched against the platform's known set; unknown extensions are rejected. There is no "all images" macro — you list `jpg`, `jpeg`, `png`, … explicitly, the way Photos does. The `fileAccessAll: true` escape hatch is reserved for the built-in Drive app and is rejected by the validator for anything else.
 - **`metadataWrite: true` is its own permission.** It governs whether your app may write into the per-category metadata tables (EXIF for images, tag rows, etc.). Read-only consumers leave it false.
 
-`fileAccess` only confers rights on the *shared* plane. Your app's app-specific tables (next section) are unconditionally available to your app and require no grant.
+`fileAccess` only confers rights on the _shared_ plane. Your app's app-specific tables (next section) are unconditionally available to your app and require no grant.
 
 ### App-specific data (`infraRequirements.appSpecificSyncable`)
 
@@ -100,7 +100,7 @@ This block carves out a private namespace for your app — SQLite tables only yo
 - `tables[].columns[]` is `{ name, type, notNull?, primaryKey? }` with types `text | integer | real | blob | boolean`. Standard SQLite.
 - `files: true` opts you into a sync-eligible per-app file prefix at `apps/<appId>/syncable/`, addressable via `/app-data/files/:subKey`. It also provisions the framework-reserved `_starkeep_sync_records` table that drives byte-sync. Apps with row-only state leave this off.
 
-A common confusion: "I write thumbnails for the user's photos — does that go in app-specific files?" No. **Derived bytes produced from shared data are themselves shared records** authored by your app (with a `parent_id` linkage), not app-specific files. App-specific files are for blobs that belong to *the app itself* and would be meaningless to other apps.
+A common confusion: "I write thumbnails for the user's photos — does that go in app-specific files?" No. **Derived bytes produced from shared data are themselves shared records** authored by your app (with a `parent_id` linkage), not app-specific files. App-specific files are for blobs that belong to _the app itself_ and would be meaningless to other apps.
 
 ### Local run command (`localRun`)
 
@@ -119,7 +119,7 @@ A common confusion: "I write thumbnails for the user's photos — does that go i
 - `cwd` is relative to the manifest directory; default `.`.
 - Omit `localRun` entirely if your app has no long-running process (a pure CLI utility, for example). It will still install; it just won't get a Start button.
 
-The Photos manifest uses `pnpm` + `dev` + `-p` *without* a `--` separator. The comment in `apps/admin-web/src/lib/exec-commands.ts` records why: with `--`, pnpm passes the separator through verbatim to Next, which then misinterprets `--` as a positional. Mimic the Photos pattern if you are using pnpm.
+The Photos manifest uses `pnpm` + `dev` + `-p` _without_ a `--` separator. The comment in `apps/admin-web/src/lib/exec-commands.ts` records why: with `--`, pnpm passes the separator through verbatim to Next, which then misinterprets `--` as a positional. Mimic the Photos pattern if you are using pnpm.
 
 ### Cloud-only fields (ignored locally)
 
@@ -165,16 +165,16 @@ A few practical notes:
 
 Once authenticated, the shared-data HTTP surface (in `apps/local-data-server/server.ts`) is the same one admin-web and the watcher use. The relevant endpoints for an app:
 
-| Endpoint | Use |
-|---|---|
-| `GET /data/types` | List the record types your app may see, derived from your `fileAccess` grants. |
-| `GET /data/records?limit=&updated_after=` | Page through records. With no `type` filter, scoped to your granted extensions — Photos uses this to fetch all granted image types in one call. |
-| `POST /data/records` | Register a new shared record (typically after uploading bytes via presign — see below). |
-| `GET /data/records/:id` | Fetch a single record. |
-| `GET /data/records/:id/file-url` | Get a short-lived URL to the underlying file bytes — embeddable in `<img>` etc. |
-| `GET /data/records/:id/metadata/:category` | Read per-category metadata (EXIF, etc.). |
-| `POST /data/records/:id/metadata` | Write metadata (requires `metadataWrite: true` on the relevant `fileAccess` grant). |
-| `POST /files/presign` | Mint a presigned S3 PUT URL for large uploads. The canonical flow for files > a few MB. |
+| Endpoint                                   | Use                                                                                                                                             |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /data/types`                          | List the record types your app may see, derived from your `fileAccess` grants.                                                                  |
+| `GET /data/records?limit=&updated_after=`  | Page through records. With no `type` filter, scoped to your granted extensions — Photos uses this to fetch all granted image types in one call. |
+| `POST /data/records`                       | Register a new shared record (typically after uploading bytes via presign — see below).                                                         |
+| `GET /data/records/:id`                    | Fetch a single record.                                                                                                                          |
+| `GET /data/records/:id/file-url`           | Get a short-lived URL to the underlying file bytes — embeddable in `<img>` etc.                                                                 |
+| `GET /data/records/:id/metadata/:category` | Read per-category metadata (EXIF, etc.).                                                                                                        |
+| `POST /data/records/:id/metadata`          | Write metadata (requires `metadataWrite: true` on the relevant `fileAccess` grant).                                                             |
+| `POST /files/presign`                      | Mint a presigned S3 PUT URL for large uploads. The canonical flow for files > a few MB.                                                         |
 
 Two flow patterns worth knowing:
 
@@ -187,15 +187,15 @@ Every shared-data write is scoped by access control to your declared extensions.
 
 The app-private namespace is at `/app-data/`:
 
-| Endpoint | Use |
-|---|---|
-| `GET /app-data/db/:table?col=val&…` | Query rows from one of your declared tables. Query params become equality filters. |
-| `POST /app-data/db/:table` `{ row: {...} }` | Insert a row. |
-| `PATCH /app-data/db/:table` `{ where, patch }` | Update matching rows. |
-| `DELETE /app-data/db/:table` `{ where }` | Delete matching rows. |
-| `PUT /app-data/files/:subKey` | Upload a blob (only when `files: true`). |
-| `GET /app-data/files/:subKey?expiresIn=` | Get a presigned URL for a blob. |
-| `DELETE /app-data/files/:subKey` | Delete a blob. |
+| Endpoint                                       | Use                                                                                |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `GET /app-data/db/:table?col=val&…`            | Query rows from one of your declared tables. Query params become equality filters. |
+| `POST /app-data/db/:table` `{ row: {...} }`    | Insert a row.                                                                      |
+| `PATCH /app-data/db/:table` `{ where, patch }` | Update matching rows.                                                              |
+| `DELETE /app-data/db/:table` `{ where }`       | Delete matching rows.                                                              |
+| `PUT /app-data/files/:subKey`                  | Upload a blob (only when `files: true`).                                           |
+| `GET /app-data/files/:subKey?expiresIn=`       | Get a presigned URL for a blob.                                                    |
+| `DELETE /app-data/files/:subKey`               | Delete a blob.                                                                     |
 
 Every `/app-data/` operation is scoped to your app's id by the data-server's `appSpecificFactory` — you address tables by their bare declared name (e.g. `image_enriched`), and the platform translates that to `<appId>_syncable_<table>` internally. You cannot read or write another app's app-specific data through this surface even with a valid HMAC.
 

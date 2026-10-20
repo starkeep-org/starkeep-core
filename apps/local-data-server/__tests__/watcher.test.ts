@@ -4,7 +4,16 @@
  * Drive identity on the shared-records plane. (Plan §3 "Watcher".)
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtemp, mkdir, rm, writeFile, appendFile, unlink, utimes, truncate } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  rm,
+  writeFile,
+  appendFile,
+  unlink,
+  utimes,
+  truncate,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
@@ -259,7 +268,9 @@ describe("live filesystem events", () => {
     // the tracking table, so a removal while the server was down was invisible.
     await writeFile(join(watchDir, "gone-while-down.txt"), "bytes-going-away");
     await eventually(async () => {
-      expect((await fileStatus(server, join(watchDir, "gone-while-down.txt"))).recordId).toBeTruthy();
+      expect(
+        (await fileStatus(server, join(watchDir, "gone-while-down.txt"))).recordId,
+      ).toBeTruthy();
     });
 
     await server.stopKeepData();

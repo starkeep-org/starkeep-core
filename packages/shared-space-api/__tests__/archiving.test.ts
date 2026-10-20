@@ -64,7 +64,10 @@ async function put(
   return r;
 }
 
-async function canonicalFor(original: DataRecord, over: { bytes?: boolean } = {}): Promise<DataRecord> {
+async function canonicalFor(
+  original: DataRecord,
+  over: { bytes?: boolean } = {},
+): Promise<DataRecord> {
   return put({
     type: "image/avif",
     parentId: original.id,
@@ -75,11 +78,18 @@ async function canonicalFor(original: DataRecord, over: { bytes?: boolean } = {}
   });
 }
 
-async function label(recordId: StarkeepId, appId: string, key: string, retract = false): Promise<void> {
+async function label(
+  recordId: StarkeepId,
+  appId: string,
+  key: string,
+  retract = false,
+): Promise<void> {
   if (retract) {
     await db.retractLabels([{ recordId, appId, key, value: "", hlc: clock.now() }]);
   } else {
-    await db.upsertLabels([{ recordId, appId, key, value: "", recordType: "image/jpeg", hlc: clock.now() }]);
+    await db.upsertLabels([
+      { recordId, appId, key, value: "", recordType: "image/jpeg", hlc: clock.now() },
+    ]);
   }
 }
 
@@ -89,7 +99,11 @@ describe("evaluateArchiving", () => {
   it("archives an archivable original whose canonical stand-in is in the cloud", async () => {
     const original = await put({ fidelity: 6000 });
     await canonicalFor(original);
-    expect(await evaluate(original.id)).toMatchObject({ decision: "archive", archivable: true, reasons: [] });
+    expect(await evaluate(original.id)).toMatchObject({
+      decision: "archive",
+      archivable: true,
+      reasons: [],
+    });
   });
 
   it("keeps an original with no canonical stand-in", async () => {
@@ -106,7 +120,11 @@ describe("evaluateArchiving", () => {
   });
 
   it("keeps a self-canonical original, an original below the floor, and one with no fidelity", async () => {
-    for (const over of [{ fidelity: 3000 }, { fidelity: 6000, sizeBytes: 1000 }, { fidelity: null }]) {
+    for (const over of [
+      { fidelity: 3000 },
+      { fidelity: 6000, sizeBytes: 1000 },
+      { fidelity: null },
+    ]) {
       const original = await put(over);
       const e = await evaluate(original.id);
       expect(e.decision).toBe("keep");
@@ -124,13 +142,23 @@ describe("evaluateArchiving", () => {
 
   it("keeps a video below the size floor even with a canonical stand-in", async () => {
     const original = await put({ type: "video/mp4", fidelity: 4800, sizeBytes: 1000 });
-    await put({ type: "video/webm", parentId: original.id, standInRole: "canonical", fidelity: 4800 });
+    await put({
+      type: "video/webm",
+      parentId: original.id,
+      standInRole: "canonical",
+      fidelity: 4800,
+    });
     expect((await evaluate(original.id)).reasons.join()).toMatch(/video below the size floor/);
   });
 
   it("archives a video above the floor at any fidelity", async () => {
     const original = await put({ type: "video/mp4", fidelity: 2000 });
-    await put({ type: "video/webm", parentId: original.id, standInRole: "canonical", fidelity: 2000 });
+    await put({
+      type: "video/webm",
+      parentId: original.id,
+      standInRole: "canonical",
+      fidelity: 2000,
+    });
     expect((await evaluate(original.id)).decision).toBe("archive");
   });
 
@@ -140,7 +168,11 @@ describe("evaluateArchiving", () => {
     await label(original.id, "photos", "do-not-archive");
     await label(original.id, "editor", "do-not-archive");
     const held = await evaluate(original.id);
-    expect(held).toMatchObject({ decision: "keep", archivable: true, heldBy: ["editor", "photos"] });
+    expect(held).toMatchObject({
+      decision: "keep",
+      archivable: true,
+      heldBy: ["editor", "photos"],
+    });
 
     await label(original.id, "photos", "do-not-archive", true);
     expect((await evaluate(original.id)).heldBy).toEqual(["editor"]);
@@ -196,9 +228,13 @@ describe("applyArchiveEvaluation", () => {
     await storage.setTags(original.objectStorageKey, { ...ARCHIVE_TAGS });
     await label(original.id, "photos", "do-not-archive");
     const e = await evaluate(original.id);
-    expect(await applyArchiveEvaluation(storage, e, { mayUntag: false, ...notArchived })).toBe("unchanged");
+    expect(await applyArchiveEvaluation(storage, e, { mayUntag: false, ...notArchived })).toBe(
+      "unchanged",
+    );
     expect(storage.tagsOf(original.objectStorageKey)).toEqual(ARCHIVE_TAGS);
-    expect(await applyArchiveEvaluation(storage, e, { mayUntag: true, ...notArchived })).toBe("untagged");
+    expect(await applyArchiveEvaluation(storage, e, { mayUntag: true, ...notArchived })).toBe(
+      "untagged",
+    );
     expect(storage.tagsOf(original.objectStorageKey)).toEqual({});
   });
 
@@ -294,7 +330,12 @@ describe("archiveTriggersFor", () => {
   it("turns canonical stand-ins, originals and do-not-archive labels into originals to re-decide", async () => {
     const original = await put({ fidelity: 6000 });
     const canonical = await canonicalFor(original);
-    const small = await put({ type: "image/avif", parentId: original.id, standInRole: "smaller", fidelity: 640 });
+    const small = await put({
+      type: "image/avif",
+      parentId: original.id,
+      standInRole: "smaller",
+      fidelity: 640,
+    });
     const other = await put({ fidelity: 6000 });
     const triggers = archiveTriggersFor(
       [canonical, small, other],
@@ -313,7 +354,10 @@ describe("archiveTriggersFor", () => {
       { originalId: original.id, mayUntag: true },
     ]);
     expect(
-      archiveTriggersFor([], [{ recordId: original.id, key: "do-not-archive", deletedAt: clock.now() }]),
+      archiveTriggersFor(
+        [],
+        [{ recordId: original.id, key: "do-not-archive", deletedAt: clock.now() }],
+      ),
     ).toEqual([{ originalId: original.id, mayUntag: false }]);
   });
 
@@ -327,11 +371,19 @@ describe("archiveTriggersFor", () => {
 
   it("ignores smaller stand-ins, derived records and other labels", async () => {
     const original = await put({ fidelity: 6000 });
-    const small = await put({ type: "image/avif", parentId: original.id, standInRole: "smaller", fidelity: 640 });
+    const small = await put({
+      type: "image/avif",
+      parentId: original.id,
+      standInRole: "smaller",
+      fidelity: 640,
+    });
     const poster = await put({ parentId: original.id });
-    expect(archiveTriggersFor([small, poster], [{ recordId: original.id, key: "faces", deletedAt: null }])).toEqual(
-      [],
-    );
+    expect(
+      archiveTriggersFor(
+        [small, poster],
+        [{ recordId: original.id, key: "faces", deletedAt: null }],
+      ),
+    ).toEqual([]);
   });
 });
 
@@ -404,19 +456,28 @@ describe("countBacklog", () => {
   it("counts originals missing a canonical stand-in across every page", async () => {
     for (let i = 0; i < 3; i++) await put({ fidelity: 6000 });
     await canonicalFor(await put({ fidelity: 6000 }));
-    expect(await countBacklog(db, all, "missing-canonical", STD)).toEqual({ count: 3, complete: true });
+    expect(await countBacklog(db, all, "missing-canonical", STD)).toEqual({
+      count: 3,
+      complete: true,
+    });
   });
 
   it("counts originals with no reported fidelity", async () => {
     await put({ fidelity: null });
     await put({ fidelity: null });
     await put({ fidelity: 6000 });
-    expect(await countBacklog(db, all, "missing-fidelity", STD)).toEqual({ count: 2, complete: true });
+    expect(await countBacklog(db, all, "missing-fidelity", STD)).toEqual({
+      count: 2,
+      complete: true,
+    });
   });
 
   it("stops at its limit and says the count is a lower bound", async () => {
     for (let i = 0; i < 3; i++) await put({ fidelity: 6000 });
-    const counted = await countBacklog(db, all, "missing-canonical", STD, { maxScanned: 2, pageSize: 1 });
+    const counted = await countBacklog(db, all, "missing-canonical", STD, {
+      maxScanned: 2,
+      pageSize: 1,
+    });
     expect(counted).toEqual({ count: 2, complete: false });
   });
 });

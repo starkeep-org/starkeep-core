@@ -6,7 +6,11 @@
 import { describe, expect, it } from "vitest";
 import { AUTH_CONFIG_ROUTE, fetchDeviceAuthConfig, parseDeviceAuthConfig } from "../src/index.js";
 
-const GOOD = { region: "us-east-2", userPoolId: "us-east-2_VCdt366lt", deviceClientId: "4ai1rbsjq376jp43kst5bdpbg" };
+const GOOD = {
+  region: "us-east-2",
+  userPoolId: "us-east-2_VCdt366lt",
+  deviceClientId: "4ai1rbsjq376jp43kst5bdpbg",
+};
 
 describe("parseDeviceAuthConfig", () => {
   it("reads a complete answer", () => {
@@ -46,7 +50,10 @@ describe("fetchDeviceAuthConfig", () => {
   });
 
   it("says when the cloud cannot answer", async () => {
-    const fetchImpl = (async () => new Response("nope", { status: 404 })) as unknown as typeof fetch;
-    await expect(fetchDeviceAuthConfig("https://d1.cloudfront.net", fetchImpl)).rejects.toThrow(/404/);
+    const fetchImpl = (async () =>
+      new Response("nope", { status: 404 })) as unknown as typeof fetch;
+    await expect(fetchDeviceAuthConfig("https://d1.cloudfront.net", fetchImpl)).rejects.toThrow(
+      /404/,
+    );
   });
 });

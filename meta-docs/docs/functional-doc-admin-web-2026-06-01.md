@@ -41,7 +41,7 @@ Cloud calls from admin-web happen through one of three routes: (1) directly from
 
 **Internal behavior.**
 
-- **Local persistence is `~/.starkeep/config.json`**, mediated by `app/api/config/route.ts`. On first read, if `appParentDirs` is empty, the route seeds it with a default of `~/starkeep-apps/`. `region` and `s3Region` are deliberately *not* persisted — they're derived from `userPoolId` on each read.
+- **Local persistence is `~/.starkeep/config.json`**, mediated by `app/api/config/route.ts`. On first read, if `appParentDirs` is empty, the route seeds it with a default of `~/starkeep-apps/`. `region` and `s3Region` are deliberately _not_ persisted — they're derived from `userPoolId` on each read.
 - **Cognito session lives in `localStorage`** (`src/lib/cognito-auth.ts`): id token, refresh token, and identity-pool IAM credentials. Tokens are refreshed inline on next fetch when expiry is detected.
 - **Cross-account AWS calls** assume a delegated role in the user's account via STS and then drive CloudFormation through `src/lib/cloud-client.ts`. Capabilities `CAPABILITY_IAM` and `CAPABILITY_NAMED_IAM` are passed unconditionally.
 - **Cost projection (`src/lib/cost-usage-report.ts`)** reads AWS CUR (Cost and Usage Report) S3 data via assumed identity-pool credentials and aggregates monthly to project spend.
@@ -101,7 +101,7 @@ No code in `admin-core/src/` makes AWS calls itself; it generates the strings an
 
 ## Cross-module behaviors
 
-**Cloud setup, end-to-end.** The user opens admin-web → the Cloud Setup Wizard renders → admin-web calls `admin-core.generateBootstrapTemplate()` to produce a CloudFormation template + a console-launch URL → the user opens that URL in the AWS console and launches the bootstrap stack themselves (cross-account: the stack runs in *the user's* AWS account) → the user copies the stack outputs back into the wizard → admin-web persists them in `~/.starkeep/config.json` → the wizard creates a Cognito user via `cognito-auth.ts` → user signs in (id token + refresh token + identity-pool IAM creds land in localStorage) → admin-web triggers the cloud-data-server install. The install runs through `admin-installer.installCloudDataServer`, which initializes the shared DSQL schema and provisions the foundational resources via Pulumi.
+**Cloud setup, end-to-end.** The user opens admin-web → the Cloud Setup Wizard renders → admin-web calls `admin-core.generateBootstrapTemplate()` to produce a CloudFormation template + a console-launch URL → the user opens that URL in the AWS console and launches the bootstrap stack themselves (cross-account: the stack runs in _the user's_ AWS account) → the user copies the stack outputs back into the wizard → admin-web persists them in `~/.starkeep/config.json` → the wizard creates a Cognito user via `cognito-auth.ts` → user signs in (id token + refresh token + identity-pool IAM creds land in localStorage) → admin-web triggers the cloud-data-server install. The install runs through `admin-installer.installCloudDataServer`, which initializes the shared DSQL schema and provisions the foundational resources via Pulumi.
 
 **App install, end-to-end.** Operator clicks Install on the Apps page → admin-web's API route spawns a pnpm CLI subprocess: `pnpm --filter @starkeep/admin-installer cli:install-app <appId>` → admin-web passes Cognito-issued credentials (the operator's session, having assumed the `admin-app` IAM role in their AWS account) through to the subprocess → the CLI runs `admin-installer.installApp` with the manifest; `admin-manifest.validateManifest` runs first; on success the orchestrator state machine runs each step, recording ledger entries so a retry skips completed work → on success the app row is registered in DSQL and the running app is reachable through API Gateway.
 
@@ -118,4 +118,3 @@ No code in `admin-core/src/` makes AWS calls itself; it generates the strings an
 # Part 2 — Review and evaluation
 
 > All review comments from the original draft were processed and fully resolved on 2026-06-01. Outcomes folded into the codebase (deletions of dead admin-providers and admin-shared packages, removal of vestigial `checkTypeConflicts` stub, corrected stale "admin-app Lambda" framing in `orchestrator.ts`) and into Part 1 above (admin-installer call-flow, admin-manifest validation accuracy). Two original findings turned out to be incorrect on re-reading the code (region-derivation already had explanatory comments; reserved-flag enforcement already happened at the manifest layer) and were dismissed with no action.
-

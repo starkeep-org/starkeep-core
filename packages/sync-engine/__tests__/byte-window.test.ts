@@ -83,7 +83,11 @@ describe("planByteWindow", () => {
 
   it("orders the opportunistic allotment by the caller's preference before size", () => {
     const plan = planByteWindow(
-      [item("head", "A", 1, 100), item("small-missing", "A", 2, 1), item("larger-available", "A", 3, 5)],
+      [
+        item("head", "A", 1, 100),
+        item("small-missing", "A", 2, 1),
+        item("larger-available", "A", 3, 5),
+      ],
       {
         headBytes: 1,
         opportunisticBytes: 100,

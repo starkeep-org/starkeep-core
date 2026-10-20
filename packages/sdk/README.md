@@ -13,9 +13,9 @@ artifact and does not use this package.
 import { createStarkeepSdk } from "@starkeep/sdk";
 
 const sdk = await createStarkeepSdk({
-  databaseAdapter: localDatabaseAdapter,   // e.g. SqliteDatabaseAdapter
+  databaseAdapter: localDatabaseAdapter, // e.g. SqliteDatabaseAdapter
   objectStorageAdapter: localObjectStorage, // e.g. FsObjectStorageAdapter
-  nodeId: "device-abc",                     // unique per replica; seeds the HLC clock
+  nodeId: "device-abc", // unique per replica; seeds the HLC clock
   // Optional:
   // syncStateStore,   // persists/seeds the HLC clock state across restarts
   // changeNotifier,   // inject to share one notifier with sibling components
@@ -74,32 +74,32 @@ await sdk.close();
 
 ### Factory
 
-| Function | Description |
-|---|---|
+| Function                     | Description                                                  |
+| ---------------------------- | ------------------------------------------------------------ |
 | `createStarkeepSdk(options)` | Async. Initializes the adapters and returns a `StarkeepSdk`. |
 
 ### `StarkeepSdk`
 
-| Member | Description |
-|---|---|
-| `data` | `DataOperations` — `putWithFile`, `putWithLocalFile`, `putWithExistingBlob`, `get`, `update`, `delete`, `query`, and per-category `putMetadata` / `getMetadata` / `getMetadataByIds` |
-| `index` | `IndexOperations` — `search(query)` over records, returning `{ items }` |
-| `api` | `ApiOperations` — `router`, `handleRequest`, `handleWebSocketConnect` for the shared-space API |
-| `changeNotifier` | `ChangeNotifier` — emits `local-change-recorded` on every write; the sync supervisor forwards its events onto the same channel |
-| `clock` | `HLCClock` — the clock backing this SDK, exposed so the supervisor can share it |
-| `close()` | Flush pending clock state and close the adapters |
+| Member           | Description                                                                                                                                                                          |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `data`           | `DataOperations` — `putWithFile`, `putWithLocalFile`, `putWithExistingBlob`, `get`, `update`, `delete`, `query`, and per-category `putMetadata` / `getMetadata` / `getMetadataByIds` |
+| `index`          | `IndexOperations` — `search(query)` over records, returning `{ items }`                                                                                                              |
+| `api`            | `ApiOperations` — `router`, `handleRequest`, `handleWebSocketConnect` for the shared-space API                                                                                       |
+| `changeNotifier` | `ChangeNotifier` — emits `local-change-recorded` on every write; the sync supervisor forwards its events onto the same channel                                                       |
+| `clock`          | `HLCClock` — the clock backing this SDK, exposed so the supervisor can share it                                                                                                      |
+| `close()`        | Flush pending clock state and close the adapters                                                                                                                                     |
 
 ### `StarkeepSdkOptions`
 
-| Option | Required | Description |
-|---|---|---|
-| `databaseAdapter` | Yes | Local database adapter |
-| `objectStorageAdapter` | Yes | Local object-storage adapter |
-| `nodeId` | Yes | Unique replica id; seeds the HLC clock |
-| `clock` | No | Inject a custom `HLCClock` instead of constructing one |
-| `syncStateStore` | No | Used only to seed and persist HLC clock state across restarts |
-| `changeNotifier` | No | Inject a shared notifier; one is created when omitted |
-| `getAppSpecific` | No | Factory for the app-scoped app-specific operations exposed on the API context |
+| Option                 | Required | Description                                                                   |
+| ---------------------- | -------- | ----------------------------------------------------------------------------- |
+| `databaseAdapter`      | Yes      | Local database adapter                                                        |
+| `objectStorageAdapter` | Yes      | Local object-storage adapter                                                  |
+| `nodeId`               | Yes      | Unique replica id; seeds the HLC clock                                        |
+| `clock`                | No       | Inject a custom `HLCClock` instead of constructing one                        |
+| `syncStateStore`       | No       | Used only to seed and persist HLC clock state across restarts                 |
+| `changeNotifier`       | No       | Inject a shared notifier; one is created when omitted                         |
+| `getAppSpecific`       | No       | Factory for the app-scoped app-specific operations exposed on the API context |
 
 ### Re-exported types
 

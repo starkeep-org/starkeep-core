@@ -53,10 +53,9 @@ describe("fake cloud responder", () => {
     expect(put.status).toBe(200);
     expect(await cloud.hasBlob(key)).toBe(true);
 
-    const head = await fetch(
-      `${cloud.url}/apps/starkeep-drive/files/${encodeURIComponent(key)}`,
-      { method: "HEAD" },
-    );
+    const head = await fetch(`${cloud.url}/apps/starkeep-drive/files/${encodeURIComponent(key)}`, {
+      method: "HEAD",
+    });
     expect(head.status).toBe(200);
 
     const presignGet = await fetch(
@@ -135,9 +134,13 @@ describe("fake cloud responder", () => {
   // would pass identically with the verification removed.
   describe("blob uploads are verified against the key", () => {
     const bytes = Buffer.from("content-addressed payload");
-    const hash = createHash("sha256").update(bytes as unknown as Uint8Array).digest("hex");
+    const hash = createHash("sha256")
+      .update(bytes as unknown as Uint8Array)
+      .digest("hex");
     const key = `shared/test-user/image/${hash.slice(0, 2)}/${hash}`;
-    const digest = createHash("sha256").update(bytes as unknown as Uint8Array).digest("base64");
+    const digest = createHash("sha256")
+      .update(bytes as unknown as Uint8Array)
+      .digest("base64");
 
     async function presign(): Promise<{ url: string; checksumSha256?: string }> {
       const res = await fetch(`${cloud.url}/apps/starkeep-drive/files/presign`, {
@@ -182,7 +185,9 @@ describe("fake cloud responder", () => {
       const { url } = await presign();
       const put = await fetch(url, { method: "PUT", body: bytes });
       expect(put.status).toBe(400);
-      expect(((await put.json()) as { error: string }).error).toMatch(/missing x-amz-checksum-sha256/);
+      expect(((await put.json()) as { error: string }).error).toMatch(
+        /missing x-amz-checksum-sha256/,
+      );
     });
   });
 });

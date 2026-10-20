@@ -23,7 +23,8 @@ const failing = () => {
 
 function memoryCache(initial?: unknown): DeploymentSettingsCache & { saved: unknown[] } {
   const saved: unknown[] = [];
-  let current: { document: unknown } | undefined = initial === undefined ? undefined : { document: initial };
+  let current: { document: unknown } | undefined =
+    initial === undefined ? undefined : { document: initial };
   return {
     saved,
     load: () => current,
@@ -55,7 +56,10 @@ describe("createLibrarySettings", () => {
   });
 
   it("is in the dark with a cloud until a read succeeds", async () => {
-    const settings = createLibrarySettings({ read: async () => failing(), cloudConfigured: () => true });
+    const settings = createLibrarySettings({
+      read: async () => failing(),
+      cloudConfigured: () => true,
+    });
     expect(settings.knowsLibraryValue()).toBe(false);
     await settings.refresh();
     expect(settings.knowsLibraryValue()).toBe(false);
@@ -63,7 +67,10 @@ describe("createLibrarySettings", () => {
   });
 
   it("knows the defaults without a cloud, read or not", () => {
-    const settings = createLibrarySettings({ read: async () => failing(), cloudConfigured: () => false });
+    const settings = createLibrarySettings({
+      read: async () => failing(),
+      cloudConfigured: () => false,
+    });
     expect(settings.knowsLibraryValue()).toBe(true);
     expect(settings.standards()).toEqual(STD);
   });

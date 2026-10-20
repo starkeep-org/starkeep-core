@@ -52,7 +52,9 @@ function ensureOwnerTable(db: RawDatabase): void {
 export function boundUserId(db: RawDatabase): string | null {
   ensureOwnerTable(db);
   const row = db
-    .prepare(qb.selectFrom(OWNER_TABLE).select("user_id").where("id", "=", sql.lit(0)).compile().sql)
+    .prepare(
+      qb.selectFrom(OWNER_TABLE).select("user_id").where("id", "=", sql.lit(0)).compile().sql,
+    )
     .get() as { user_id: string } | undefined;
   return row?.user_id ?? null;
 }
@@ -87,7 +89,10 @@ function coreKeyColumns(db: RawDatabase): LibraryKeyColumn[] {
     { table: "resident_keys", column: "record_id", primaryKey: false },
   ];
   const tables = db
-    .prepare(qb.selectFrom("sqlite_master").select("name").where("type", "=", sql.lit("table")).compile().sql)
+    .prepare(
+      qb.selectFrom("sqlite_master").select("name").where("type", "=", sql.lit("table")).compile()
+        .sql,
+    )
     .all() as Array<{ name: string }>;
   for (const { name } of tables) {
     if (name.endsWith("__starkeep_sync_records")) {
@@ -140,14 +145,20 @@ function namespaces(column: string, userId: string) {
  * column, a `local` row whose rewritten key already exists is a duplicate a
  * sweep found, and is dropped: the same key names the same object.
  */
-function rebindColumn(db: RawDatabase, { table, column, primaryKey }: LibraryKeyColumn, userId: string): number {
+function rebindColumn(
+  db: RawDatabase,
+  { table, column, primaryKey }: LibraryKeyColumn,
+  userId: string,
+): number {
   let changed = 0;
   for (const { local, rebound } of namespaces(column, userId)) {
     if (primaryKey) {
       const duplicates = qb
         .deleteFrom(table)
         .where(sql.ref(column), "like", local)
-        .where(sql<boolean>`${rebound} in (${qb.selectFrom(table).select(sql.ref(column).as("k"))})`)
+        .where(
+          sql<boolean>`${rebound} in (${qb.selectFrom(table).select(sql.ref(column).as("k"))})`,
+        )
         .compile();
       db.prepare(duplicates.sql).run(...duplicates.parameters);
     }
@@ -156,7 +167,9 @@ function rebindColumn(db: RawDatabase, { table, column, primaryKey }: LibraryKey
       .set({ [column]: rebound })
       .where(sql.ref(column), "like", local)
       .compile();
-    const result = db.prepare(update.sql).run(...update.parameters) as { changes?: number | bigint };
+    const result = db.prepare(update.sql).run(...update.parameters) as {
+      changes?: number | bigint;
+    };
     changed += Number(result.changes ?? 0);
   }
   return changed;
@@ -200,7 +213,9 @@ export function commitLibraryBinding(
   extraKeyColumns: readonly LibraryKeyColumn[] = [],
 ): number {
   checkLibraryBindable(db, userId);
-  const columns = [...coreKeyColumns(db), ...extraKeyColumns].filter(({ table }) => tableExists(db, table));
+  const columns = [...coreKeyColumns(db), ...extraKeyColumns].filter(({ table }) =>
+    tableExists(db, table),
+  );
   let rewritten = 0;
   db.exec("BEGIN");
   try {
@@ -209,7 +224,9 @@ export function commitLibraryBinding(
       qb
         .insertInto(OWNER_TABLE)
         .values({ id: sql.lit(0), user_id: sql.raw("?") })
-        .onConflict((oc) => oc.column("id").doUpdateSet((eb) => ({ user_id: eb.ref("excluded.user_id") })))
+        .onConflict((oc) =>
+          oc.column("id").doUpdateSet((eb) => ({ user_id: eb.ref("excluded.user_id") })),
+        )
         .compile().sql,
     ).run(userId);
     db.exec("COMMIT");

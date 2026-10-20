@@ -36,9 +36,7 @@ export function parseSdkTrace(trace: string): ParseResult {
 
   for (const raw of lines) {
     if (!raw.trim()) continue;
-    let record:
-      | { clientName?: string; commandName?: string; principal?: string }
-      | undefined;
+    let record: { clientName?: string; commandName?: string; principal?: string } | undefined;
     try {
       record = JSON.parse(raw);
     } catch {

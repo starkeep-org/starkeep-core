@@ -10,8 +10,7 @@
 // step to bake them into, so the property now holds by construction.
 export function GET(): Response {
   return Response.json({
-    localDataServerUrl:
-      process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://127.0.0.1:9820",
+    localDataServerUrl: process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://127.0.0.1:9820",
     driveUrl: process.env.STARKEEP_DRIVE_URL ?? "http://localhost:9830",
   });
 }

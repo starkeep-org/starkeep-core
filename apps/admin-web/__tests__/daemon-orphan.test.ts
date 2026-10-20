@@ -16,13 +16,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 import type { DaemonId } from "../src/lib/exec-commands";
 import { getFreePort } from "@starkeep/testkit";
-import {
-  eventually,
-  isAlive,
-  jsonRequest,
-  makeDataDir,
-  getRequest,
-} from "./helpers";
+import { eventually, isAlive, jsonRequest, makeDataDir, getRequest } from "./helpers";
 
 let daemonPOST: (req: Request) => Promise<Response>;
 let statusGET: (req: Request) => Promise<Response>;
@@ -140,10 +134,7 @@ describe("workspace daemon that replaced itself (stale pid file, successor on th
     launcherPid = await deadPid();
     mkdirSync(pidsDir, { recursive: true });
     writeFileSync(join(pidsDir, "drive.pid"), String(launcherPid));
-    writeFileSync(
-      join(pidsDir, "drive.meta.json"),
-      JSON.stringify({ pid: launcherPid, port }),
-    );
+    writeFileSync(join(pidsDir, "drive.meta.json"), JSON.stringify({ pid: launcherPid, port }));
   });
 
   it("status reports the successor's pid, not the launcher that exited", async () => {

@@ -105,7 +105,10 @@ describe("label ref wire form", () => {
 
 describe("planLabelWrites", () => {
   const base = {
-    recordTypes: new Map([["rec1", "image/jpeg"], ["rec2", "image/png"]]),
+    recordTypes: new Map([
+      ["rec1", "image/jpeg"],
+      ["rec2", "image/png"],
+    ]),
     declaredKeys: new Set(["ocr-available", "quality"]),
     canReadType: (t: string) => t === "image/jpeg",
   };

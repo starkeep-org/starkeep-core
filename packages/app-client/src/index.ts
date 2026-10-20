@@ -17,11 +17,7 @@ export {
   USER_TOKEN_HEADER,
   APP_SIG_MAX_SKEW_MS,
 } from "./sign";
-export {
-  type ProxyRequest,
-  type ProxyResponse,
-  proxyToDataServer,
-} from "./proxy";
+export { type ProxyRequest, type ProxyResponse, proxyToDataServer } from "./proxy";
 export {
   createDataProxyHandler,
   sessionAuth,
@@ -30,8 +26,4 @@ export {
   type ProxyEndUserAuth,
   type MinimalRequest,
 } from "./data-proxy";
-export {
-  type RuntimeConfig,
-  getRuntimeConfig,
-  createRuntimeConfigHandler,
-} from "./runtime-config";
+export { type RuntimeConfig, getRuntimeConfig, createRuntimeConfigHandler } from "./runtime-config";

@@ -42,8 +42,7 @@ async function insertBatch(
   const width = columns.length;
   const tuples = rows
     .map(
-      (_, r) =>
-        `(${Array.from({ length: width }, (_, c) => `$${r * width + c + 1}`).join(",")})`,
+      (_, r) => `(${Array.from({ length: width }, (_, c) => `$${r * width + c + 1}`).join(",")})`,
     )
     .join(",");
   const sql =
@@ -84,7 +83,17 @@ export async function seed(client: pg.Client): Promise<{ rowsA: number; rowsB: n
     batchA.push([rid, "alpha", "ocr-available", null, "image/jpeg", hlc(i), hlc(i), "nodeA", null]);
     if (batchA.length >= BATCH) await flushA();
     if (i < RARE_COUNT) {
-      batchA.push([rid, "alpha", "needs-review", null, "image/jpeg", hlc(i), hlc(i), "nodeA", null]);
+      batchA.push([
+        rid,
+        "alpha",
+        "needs-review",
+        null,
+        "image/jpeg",
+        hlc(i),
+        hlc(i),
+        "nodeA",
+        null,
+      ]);
       if (batchA.length >= BATCH) await flushA();
     }
     if (i < gammaCutoff) {

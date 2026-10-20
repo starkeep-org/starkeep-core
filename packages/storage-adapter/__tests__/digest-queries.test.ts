@@ -33,10 +33,7 @@ function bucket(nodeId: string, b: string, count: number): DigestBucket {
 
 /** The bucket a given wall-clock millisecond falls in, at the default width. */
 function bucketOf(wallTime: number, nodeId = "L"): string {
-  return serializeHLC({ wallTime, counter: 0, nodeId }).slice(
-    0,
-    DEFAULT_BUCKET_PREFIX_LENGTH,
-  );
+  return serializeHLC({ wallTime, counter: 0, nodeId }).slice(0, DEFAULT_BUCKET_PREFIX_LENGTH);
 }
 
 describe("mergeDigestBuckets", () => {
@@ -73,10 +70,7 @@ describe("mergeDigestBuckets", () => {
 
 describe("bucketsPeerIsMissing", () => {
   it("reports a bucket where the peer holds fewer rows", () => {
-    const missing = bucketsPeerIsMissing(
-      [bucket("L", "00001", 5)],
-      [bucket("L", "00001", 3)],
-    );
+    const missing = bucketsPeerIsMissing([bucket("L", "00001", 5)], [bucket("L", "00001", 3)]);
     expect(missing).toEqual([bucket("L", "00001", 5)]);
   });
 
@@ -89,29 +83,25 @@ describe("bucketsPeerIsMissing", () => {
     // The one-directionality. Swapping the arguments asks the *other*
     // question — "is my library whole?" — and answering it with this
     // comparison run one way would flag every row we have not pulled yet.
-    expect(
-      bucketsPeerIsMissing([bucket("L", "00001", 3)], [bucket("L", "00001", 5)]),
-    ).toEqual([]);
+    expect(bucketsPeerIsMissing([bucket("L", "00001", 3)], [bucket("L", "00001", 5)])).toEqual([]);
   });
 
   it("keeps authors separate", () => {
     // A peer that holds plenty from author C says nothing about what it holds
     // from author L, and counting across authors would hide a whole device.
-    expect(
-      bucketsPeerIsMissing([bucket("L", "00001", 3)], [bucket("C", "00001", 9)]),
-    ).toEqual([bucket("L", "00001", 3)]);
+    expect(bucketsPeerIsMissing([bucket("L", "00001", 3)], [bucket("C", "00001", 9)])).toEqual([
+      bucket("L", "00001", 3),
+    ]);
   });
 
   it("keeps buckets separate", () => {
-    expect(
-      bucketsPeerIsMissing([bucket("L", "00002", 3)], [bucket("L", "00001", 9)]),
-    ).toEqual([bucket("L", "00002", 3)]);
+    expect(bucketsPeerIsMissing([bucket("L", "00002", 3)], [bucket("L", "00001", 9)])).toEqual([
+      bucket("L", "00002", 3),
+    ]);
   });
 
   it("agrees when the counts agree", () => {
-    expect(
-      bucketsPeerIsMissing([bucket("L", "00001", 3)], [bucket("L", "00001", 3)]),
-    ).toEqual([]);
+    expect(bucketsPeerIsMissing([bucket("L", "00001", 3)], [bucket("L", "00001", 3)])).toEqual([]);
   });
 });
 

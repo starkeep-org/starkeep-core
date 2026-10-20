@@ -1,8 +1,4 @@
-import {
-  listTypes,
-  listCloudTypes,
-  DriveNotInstalledError,
-} from "../lib/drive-client";
+import { listTypes, listCloudTypes, DriveNotInstalledError } from "../lib/drive-client";
 
 export async function GET() {
   try {
@@ -37,9 +33,6 @@ export async function GET() {
     });
   } catch (err) {
     const status = err instanceof DriveNotInstalledError ? 503 : 502;
-    return Response.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status },
-    );
+    return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status });
   }
 }

@@ -28,7 +28,6 @@ import { createInProcessSyncTransport } from "../src/transports/in-process-trans
 import { buildSide } from "./sync-test-harness/side.js";
 import type { SyncStateStore, Watermarks } from "../src/types.js";
 
-
 type Side = Awaited<ReturnType<typeof buildSide>>;
 
 const MB = 1024 * 1024;
@@ -109,11 +108,7 @@ async function seedBlobless(side: Side): Promise<StarkeepId> {
 }
 
 /** A blob-carrying record attributed to a specific author. */
-async function seedAuthored(
-  side: Side,
-  nodeId: string,
-  wallTime: number,
-): Promise<StarkeepId> {
+async function seedAuthored(side: Side, nodeId: string, wallTime: number): Promise<StarkeepId> {
   const id = generateId() as StarkeepId;
   const key = `shared/image/${id}`;
   await side.storage.put(key, new Uint8Array(8));
@@ -737,9 +732,7 @@ describe("records sharing one object key", () => {
 
     const [first, second] = await Promise.all([a.sync(), b.sync()]);
 
-    expect(first.complete && second.complete, "neither may read the other as a failure").toBe(
-      true,
-    );
+    expect(first.complete && second.complete, "neither may read the other as a failure").toBe(true);
     expect(await cloud.db.get(id)).not.toBeNull();
     expect(await cloud.storage.has(key)).toBe(true);
     expect(puts, "each engine sends it once; nothing coordinates across them").toBe(2);
@@ -809,8 +802,8 @@ describe("sync() termination", () => {
 
     // The earliest record's file never uploads. Rows all ship, the other
     // files all go, and then every round is byte-identical.
-    const oldest = (await local.db.query({})).records.sort((a, b) =>
-      a.updatedAt.wallTime - b.updatedAt.wallTime,
+    const oldest = (await local.db.query({})).records.sort(
+      (a, b) => a.updatedAt.wallTime - b.updatedAt.wallTime,
     )[0]!;
     const realPutStream = cloud.storage.putStream.bind(cloud.storage);
     cloud.storage.putStream = async (key: string, ...rest: unknown[]) => {
@@ -1043,37 +1036,41 @@ describe("repair floor retirement", () => {
     expect(result.shipped).toBeLessThanOrEqual(8);
   });
 
-  it("retires only the authors whose repaired files all uploaded", { timeout: 30_000 }, async () => {
-    // Retirement is per author because failure is. One device's failed upload
-    // must not discard a repair armed for another's.
-    const { local, cloud } = await twoSides();
-    const aaa: StarkeepId[] = [];
-    const bbb: StarkeepId[] = [];
-    for (let i = 0; i < 3; i += 1) {
-      aaa.push(await seedAuthored(local, "aaa", 10 + i));
-      bbb.push(await seedAuthored(local, "bbb", 50 + i));
-    }
-    const syncState = createMemorySyncStateStore();
-    const engine = engineFor(local, cloud, syncState, { maxBytes: 100 * MB });
-    await engine.sync();
+  it(
+    "retires only the authors whose repaired files all uploaded",
+    { timeout: 30_000 },
+    async () => {
+      // Retirement is per author because failure is. One device's failed upload
+      // must not discard a repair armed for another's.
+      const { local, cloud } = await twoSides();
+      const aaa: StarkeepId[] = [];
+      const bbb: StarkeepId[] = [];
+      for (let i = 0; i < 3; i += 1) {
+        aaa.push(await seedAuthored(local, "aaa", 10 + i));
+        bbb.push(await seedAuthored(local, "bbb", 50 + i));
+      }
+      const syncState = createMemorySyncStateStore();
+      const engine = engineFor(local, cloud, syncState, { maxBytes: 100 * MB });
+      await engine.sync();
 
-    const aaaLostKey = (await local.db.get(aaa[1]!))!.objectStorageKey;
-    await loseFromMiddle(cloud, aaa[1]!);
-    await loseFromMiddle(cloud, bbb[1]!);
-    await engine.verify();
-    expect(Object.keys(await syncState.getRepairFloors()).sort()).toEqual(["aaa", "bbb"]);
+      const aaaLostKey = (await local.db.get(aaa[1]!))!.objectStorageKey;
+      await loseFromMiddle(cloud, aaa[1]!);
+      await loseFromMiddle(cloud, bbb[1]!);
+      await engine.verify();
+      expect(Object.keys(await syncState.getRepairFloors()).sort()).toEqual(["aaa", "bbb"]);
 
-    // Only aaa's re-ship fails.
-    const realPutStream = cloud.storage.putStream.bind(cloud.storage);
-    cloud.storage.putStream = async (key: string, ...rest: unknown[]) => {
-      if (key === aaaLostKey) throw new Error("[test] upload failure");
-      return (realPutStream as (...a: unknown[]) => Promise<void>)(key, ...rest);
-    };
-    await engine.sync();
+      // Only aaa's re-ship fails.
+      const realPutStream = cloud.storage.putStream.bind(cloud.storage);
+      cloud.storage.putStream = async (key: string, ...rest: unknown[]) => {
+        if (key === aaaLostKey) throw new Error("[test] upload failure");
+        return (realPutStream as (...a: unknown[]) => Promise<void>)(key, ...rest);
+      };
+      await engine.sync();
 
-    expect(Object.keys(await syncState.getRepairFloors())).toEqual(["aaa"]);
-    expect(await cloud.db.get(bbb[1]!)).not.toBeNull();
-  });
+      expect(Object.keys(await syncState.getRepairFloors())).toEqual(["aaa"]);
+      expect(await cloud.db.get(bbb[1]!)).not.toBeNull();
+    },
+  );
 });
 
 /**

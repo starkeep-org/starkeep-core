@@ -151,7 +151,10 @@ describe("POST sign-in", () => {
     stubCognito(
       () =>
         new Response(
-          JSON.stringify({ __type: "NotAuthorizedException", message: "Incorrect username or password." }),
+          JSON.stringify({
+            __type: "NotAuthorizedException",
+            message: "Incorrect username or password.",
+          }),
           { status: 400 },
         ),
     );
@@ -173,7 +176,9 @@ describe("POST sign-in", () => {
   });
 
   it("requires both fields", async () => {
-    expect((await routes.POST(req({ body: { email: "a@e.com" } }), ctx("sign-in"))).status).toBe(400);
+    expect((await routes.POST(req({ body: { email: "a@e.com" } }), ctx("sign-in"))).status).toBe(
+      400,
+    );
     expect((await routes.POST(req({ body: {} }), ctx("sign-in"))).status).toBe(400);
   });
 
@@ -226,7 +231,10 @@ describe("cross-origin", () => {
     process.env.STARKEEP_API_GATEWAY_URL = "https://cdn.example.net";
     try {
       const res = await routes.POST(
-        req({ body: { email: "a@example.com", password: "pw" }, origin: "https://cdn.example.net" }),
+        req({
+          body: { email: "a@example.com", password: "pw" },
+          origin: "https://cdn.example.net",
+        }),
         ctx("sign-in"),
       );
       expect(res.status).toBe(200);
@@ -241,7 +249,10 @@ describe("cross-origin", () => {
     process.env.STARKEEP_API_GATEWAY_URL = "https://cdn.example.net";
     try {
       const res = await routes.POST(
-        req({ body: { email: "a@example.com", password: "pw" }, origin: "https://evil.example.com" }),
+        req({
+          body: { email: "a@example.com", password: "pw" },
+          origin: "https://evil.example.com",
+        }),
         ctx("sign-in"),
       );
       expect(res.status).toBe(403);
@@ -257,7 +268,10 @@ describe("cross-origin", () => {
     process.env.STARKEEP_API_GATEWAY_URL = "not a url";
     try {
       const res = await routes.POST(
-        req({ body: { email: "a@example.com", password: "pw" }, origin: "https://evil.example.com" }),
+        req({
+          body: { email: "a@example.com", password: "pw" },
+          origin: "https://evil.example.com",
+        }),
         ctx("sign-in"),
       );
       expect(res.status).toBe(403);
@@ -278,7 +292,9 @@ describe("POST refresh", () => {
   });
 
   it("clears both cookies when the refresh token is spent", async () => {
-    stubCognito(() => new Response(JSON.stringify({ __type: "NotAuthorizedException" }), { status: 400 }));
+    stubCognito(
+      () => new Response(JSON.stringify({ __type: "NotAuthorizedException" }), { status: 400 }),
+    );
     const res = await routes.POST(req({ cookie: `${SESSION_COOKIE}=spent` }), ctx("refresh"));
     expect(res.status).toBe(401);
     expect(cookiesOf(res).every((c) => c.includes("Max-Age=0"))).toBe(true);

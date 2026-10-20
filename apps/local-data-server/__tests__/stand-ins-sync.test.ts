@@ -48,7 +48,12 @@ async function converge(maxRounds = 30): Promise<void> {
 
 beforeAll(async () => {
   cloud = await startFakeCloud();
-  const config = { apiGatewayUrl: cloud.url, pullIntervalMs: 600_000, pushDebounceMs: 50, syncMaxItems: 5 };
+  const config = {
+    apiGatewayUrl: cloud.url,
+    pullIntervalMs: 600_000,
+    pushDebounceMs: 50,
+    syncMaxItems: 5,
+  };
   serverA = await startLocalDataServer({ config });
   serverB = await startLocalDataServer({ config });
   driveA = await builtinAppCreds(serverA, "starkeep-drive");
@@ -67,7 +72,10 @@ async function record(app: InstalledApp, id: string): Promise<Record<string, unk
   return ((await res.json()) as { record: Record<string, unknown> }).record;
 }
 
-async function standInsOf(app: InstalledApp, parentId: string): Promise<Array<Record<string, unknown>>> {
+async function standInsOf(
+  app: InstalledApp,
+  parentId: string,
+): Promise<Array<Record<string, unknown>>> {
   const where = encodeURIComponent(JSON.stringify({ parent_id: parentId }));
   const res = await app.fetch(`/data/records?where=${where}&include=stand-ins`);
   return ((await res.json()) as { records: Array<Record<string, unknown>> }).records;

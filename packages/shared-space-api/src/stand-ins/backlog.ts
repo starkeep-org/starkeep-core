@@ -36,10 +36,7 @@ import type { DatabaseAdapter, Filter } from "@starkeep/storage-adapter";
 
 export type BacklogKind = "missing-canonical" | "missing-fidelity";
 
-export const BACKLOG_KINDS: readonly BacklogKind[] = [
-  "missing-canonical",
-  "missing-fidelity",
-];
+export const BACKLOG_KINDS: readonly BacklogKind[] = ["missing-canonical", "missing-fidelity"];
 
 export interface BacklogPage {
   readonly records: readonly DataRecord[];

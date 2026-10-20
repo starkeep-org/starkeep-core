@@ -18,7 +18,12 @@ import {
   type FakeCloud,
   type LocalDataServer,
 } from "@starkeep/testkit";
-import { builtinAppCreds, createRecordWithBytes, eventually, type InstalledApp } from "./helpers.js";
+import {
+  builtinAppCreds,
+  createRecordWithBytes,
+  eventually,
+  type InstalledApp,
+} from "./helpers.js";
 
 const EMAIL = "member@example.com";
 const PASSWORD = "Member-password-1";
@@ -37,7 +42,9 @@ async function status(server: LocalDataServer): Promise<Record<string, unknown>>
 }
 
 async function storedRefreshToken(server: LocalDataServer): Promise<string | null> {
-  const file = JSON.parse(await readFile(join(server.starkeepDir, "device-session.json"), "utf8")) as {
+  const file = JSON.parse(
+    await readFile(join(server.starkeepDir, "device-session.json"), "utf8"),
+  ) as {
     session: { refreshToken: string } | null;
   };
   return file.session?.refreshToken ?? null;
@@ -54,7 +61,11 @@ async function settle(app: InstalledApp): Promise<void> {
 }
 
 /** A machine that joined `cloud` by address, as a member's does: no pool ids, no key. */
-function joinedMachine(cloud: FakeCloud, extra: Record<string, unknown> = {}, env: Record<string, string> = {}) {
+function joinedMachine(
+  cloud: FakeCloud,
+  extra: Record<string, unknown> = {},
+  env: Record<string, string> = {},
+) {
   return startLocalDataServer({
     config: { apiGatewayUrl: cloud.url, pullIntervalMs: 600_000, pushDebounceMs: 50, ...extra },
     signIn: false,
@@ -97,22 +108,32 @@ describe("one machine's sign-in, from first sign-in to a session the pool ends",
     if (server) await rm(server.starkeepDir, { recursive: true, force: true });
   });
 
-  it("carries what was written before the first sign-in to the cloud, under the user's segment", { timeout: 30_000 }, async () => {
-    // Local-first: the person used the machine before signing in. Those
-    // records live under the `local` segment until the library binds.
-    const { record } = await createRecordWithBytes(drive, { bytes: "before-sign-in", fileName: "early.jpg" });
-    await settle(drive);
-    expect(await cloudIds(cloud)).not.toContain(record.id);
+  it(
+    "carries what was written before the first sign-in to the cloud, under the user's segment",
+    { timeout: 30_000 },
+    async () => {
+      // Local-first: the person used the machine before signing in. Those
+      // records live under the `local` segment until the library binds.
+      const { record } = await createRecordWithBytes(drive, {
+        bytes: "before-sign-in",
+        fileName: "early.jpg",
+      });
+      await settle(drive);
+      expect(await cloudIds(cloud)).not.toContain(record.id);
 
-    const res = await post(server, "/auth/login", { email: EMAIL, password: PASSWORD });
-    expect(res.status, JSON.stringify(res.body)).toBe(200);
+      const res = await post(server, "/auth/login", { email: EMAIL, password: PASSWORD });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
 
-    await eventually(async () => {
-      const synced = (await cloud.sharedRecords()).find((r) => r.id === record.id);
-      expect(synced, "the early record has not reached the cloud").toBeDefined();
-      expect(synced!.objectStorageKey).toMatch(new RegExp(`^shared/${FAKE_CLOUD_USER_ID}/`));
-    }, { timeoutMs: 20_000 });
-  });
+      await eventually(
+        async () => {
+          const synced = (await cloud.sharedRecords()).find((r) => r.id === record.id);
+          expect(synced, "the early record has not reached the cloud").toBeDefined();
+          expect(synced!.objectStorageKey).toMatch(new RegExp(`^shared/${FAKE_CLOUD_USER_ID}/`));
+        },
+        { timeoutMs: 20_000 },
+      );
+    },
+  );
 
   it("reads the cloud for the Drive UI with the device token alone", async () => {
     const res = await drive.fetch("/cloud/data/types");
@@ -132,49 +153,73 @@ describe("one machine's sign-in, from first sign-in to a session the pool ends",
     await eventually(() => expect(cloud.pool.revoked.has(before!)).toBe(true));
   });
 
-  it("stops syncing once signed out: a new record stays on the machine", { timeout: 30_000 }, async () => {
-    const res = await post(server, "/auth/sign-out", {});
-    expect(res.status).toBe(200);
+  it(
+    "stops syncing once signed out: a new record stays on the machine",
+    { timeout: 30_000 },
+    async () => {
+      const res = await post(server, "/auth/sign-out", {});
+      expect(res.status).toBe(200);
 
-    const { record } = await createRecordWithBytes(drive, { bytes: "while-signed-out", fileName: "later.jpg" });
-    whileSignedOut = record.id;
-    await settle(drive);
-    expect(await cloudIds(cloud)).not.toContain(whileSignedOut);
-  });
+      const { record } = await createRecordWithBytes(drive, {
+        bytes: "while-signed-out",
+        fileName: "later.jpg",
+      });
+      whileSignedOut = record.id;
+      await settle(drive);
+      expect(await cloudIds(cloud)).not.toContain(whileSignedOut);
+    },
+  );
 
-  it("resumes sync on the next sign-in, and carries what was written meanwhile", { timeout: 30_000 }, async () => {
-    const res = await post(server, "/auth/login", { email: EMAIL, password: PASSWORD });
-    expect(res.status, JSON.stringify(res.body)).toBe(200);
+  it(
+    "resumes sync on the next sign-in, and carries what was written meanwhile",
+    { timeout: 30_000 },
+    async () => {
+      const res = await post(server, "/auth/login", { email: EMAIL, password: PASSWORD });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
 
-    await eventually(async () => {
-      await drive.fetch("/sync/now", { method: "POST" });
-      expect(await cloudIds(cloud)).toContain(whileSignedOut);
-    }, { timeoutMs: 20_000 });
-  });
+      await eventually(
+        async () => {
+          await drive.fetch("/sync/now", { method: "POST" });
+          expect(await cloudIds(cloud)).toContain(whileSignedOut);
+        },
+        { timeoutMs: 20_000 },
+      );
+    },
+  );
 
-  it("shows signed out after a restart once the pool ended the session, and syncs nothing", { timeout: 60_000 }, async () => {
-    // An admin signed the person out everywhere, or disabled the account. The
-    // machine learns of it the next time it asks the pool for a token; a
-    // restart asks at once.
-    cloud.pool.signOutEverywhere(EMAIL);
-    await server.stopKeepData();
-    server = await startLocalDataServer({
-      starkeepDir: server.starkeepDir,
-      signIn: false,
-      env: { STARKEEP_COGNITO_ENDPOINT: cloud.cognitoEndpoint },
-    });
-    drive = await builtinAppCreds(server, "starkeep-drive");
+  it(
+    "shows signed out after a restart once the pool ended the session, and syncs nothing",
+    { timeout: 60_000 },
+    async () => {
+      // An admin signed the person out everywhere, or disabled the account. The
+      // machine learns of it the next time it asks the pool for a token; a
+      // restart asks at once.
+      cloud.pool.signOutEverywhere(EMAIL);
+      await server.stopKeepData();
+      server = await startLocalDataServer({
+        starkeepDir: server.starkeepDir,
+        signIn: false,
+        env: { STARKEEP_COGNITO_ENDPOINT: cloud.cognitoEndpoint },
+      });
+      drive = await builtinAppCreds(server, "starkeep-drive");
 
-    await eventually(async () => expect(await status(server)).toMatchObject({ state: "signed-out" }), {
-      timeoutMs: 20_000,
-    });
-    // The library stays bound to its user.
-    expect(await status(server)).toMatchObject({ libraryUserId: FAKE_CLOUD_USER_ID });
+      await eventually(
+        async () => expect(await status(server)).toMatchObject({ state: "signed-out" }),
+        {
+          timeoutMs: 20_000,
+        },
+      );
+      // The library stays bound to its user.
+      expect(await status(server)).toMatchObject({ libraryUserId: FAKE_CLOUD_USER_ID });
 
-    const { record } = await createRecordWithBytes(drive, { bytes: "after-pool-ended", fileName: "ended.jpg" });
-    await settle(drive);
-    expect(await cloudIds(cloud)).not.toContain(record.id);
-  });
+      const { record } = await createRecordWithBytes(drive, {
+        bytes: "after-pool-ended",
+        fileName: "ended.jpg",
+      });
+      await settle(drive);
+      expect(await cloudIds(cloud)).not.toContain(record.id);
+    },
+  );
 });
 
 describe("a signed-in machine that starts while the pool is out of reach", () => {
@@ -196,25 +241,29 @@ describe("a signed-in machine that starts while the pool is out of reach", () =>
     if (server) await rm(server.starkeepDir, { recursive: true, force: true });
   });
 
-  it("stays signed in and keeps its session, rather than signing itself out", { timeout: 60_000 }, async () => {
-    const token = await storedRefreshToken(server);
-    await server.stopKeepData();
-    // Nothing listens on port 9: every call to the pool fails to connect.
-    server = await startLocalDataServer({
-      starkeepDir: server.starkeepDir,
-      signIn: false,
-      env: { STARKEEP_COGNITO_ENDPOINT: "http://127.0.0.1:9/" },
-    });
+  it(
+    "stays signed in and keeps its session, rather than signing itself out",
+    { timeout: 60_000 },
+    async () => {
+      const token = await storedRefreshToken(server);
+      await server.stopKeepData();
+      // Nothing listens on port 9: every call to the pool fails to connect.
+      server = await startLocalDataServer({
+        starkeepDir: server.starkeepDir,
+        signIn: false,
+        env: { STARKEEP_COGNITO_ENDPOINT: "http://127.0.0.1:9/" },
+      });
 
-    await eventually(async () =>
-      expect(await status(server)).toMatchObject({
-        state: "signed-in",
-        email: EMAIL,
-        libraryUserId: FAKE_CLOUD_USER_ID,
-      }),
-    );
-    expect(await storedRefreshToken(server)).toBe(token);
-  });
+      await eventually(async () =>
+        expect(await status(server)).toMatchObject({
+          state: "signed-in",
+          email: EMAIL,
+          libraryUserId: FAKE_CLOUD_USER_ID,
+        }),
+      );
+      expect(await storedRefreshToken(server)).toBe(token);
+    },
+  );
 });
 
 describe("a machine that joined a different cloud than the one its config names", () => {
@@ -292,32 +341,45 @@ describe("a sign-out the pool did not hear", () => {
   });
 
   async function pendingOnDisk(): Promise<unknown> {
-    const file = JSON.parse(await readFile(join(server.starkeepDir, "device-session.json"), "utf8")) as {
+    const file = JSON.parse(
+      await readFile(join(server.starkeepDir, "device-session.json"), "utf8"),
+    ) as {
       pendingRevocation: unknown;
     };
     return file.pendingRevocation;
   }
 
   it("is finished by the next sign-in, so a second offline sign-out cannot overwrite it", async () => {
-    expect((await post(server, "/auth/login", { email: EMAIL, password: PASSWORD })).status).toBe(200);
+    expect((await post(server, "/auth/login", { email: EMAIL, password: PASSWORD })).status).toBe(
+      200,
+    );
     const first = await storedRefreshToken(server);
 
     cloud.pool.reachable = false;
-    expect((await post(server, "/auth/sign-out", {})).body).toMatchObject({ revocation: "pending" });
+    expect((await post(server, "/auth/sign-out", {})).body).toMatchObject({
+      revocation: "pending",
+    });
     // The waiting token names the pool that issued it.
     expect(await pendingOnDisk()).toEqual({
       refreshToken: first,
-      auth: expect.objectContaining({ deviceClientId: expect.any(String), userPoolId: expect.any(String) }),
+      auth: expect.objectContaining({
+        deviceClientId: expect.any(String),
+        userPoolId: expect.any(String),
+      }),
     });
 
     cloud.pool.reachable = true;
-    expect((await post(server, "/auth/login", { email: EMAIL, password: PASSWORD })).status).toBe(200);
+    expect((await post(server, "/auth/login", { email: EMAIL, password: PASSWORD })).status).toBe(
+      200,
+    );
     expect(cloud.pool.revoked.has(first!)).toBe(true);
     expect(await pendingOnDisk()).toBeNull();
 
     const second = await storedRefreshToken(server);
     cloud.pool.reachable = false;
-    expect((await post(server, "/auth/sign-out", {})).body).toMatchObject({ revocation: "pending" });
+    expect((await post(server, "/auth/sign-out", {})).body).toMatchObject({
+      revocation: "pending",
+    });
     expect(await pendingOnDisk()).toMatchObject({ refreshToken: second });
   });
 

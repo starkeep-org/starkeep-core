@@ -15,10 +15,7 @@ import {
   appSyncableApplierConformance,
   type ConformanceHarness,
 } from "@starkeep/storage-adapter/conformance";
-import type {
-  AppSyncableNamespace,
-  AppSyncableNamespaceStore,
-} from "@starkeep/shared-space-api";
+import type { AppSyncableNamespace, AppSyncableNamespaceStore } from "@starkeep/shared-space-api";
 import { SqliteAppSyncableApplier } from "../src/app-syncable/apply.js";
 import { appSyncableTableName } from "../src/app-syncable/namespace.js";
 
@@ -41,9 +38,7 @@ function makeHarness(): ConformanceHarness {
        node_id TEXT
      )`,
   );
-  db.exec(
-    `CREATE INDEX idx_${fullName}_node_watermark ON ${fullName} (node_id, updated_at)`,
-  );
+  db.exec(`CREATE INDEX idx_${fullName}_node_watermark ON ${fullName} (node_id, updated_at)`);
   db.exec(
     `CREATE TABLE ${compositeName} (
        tenant TEXT,

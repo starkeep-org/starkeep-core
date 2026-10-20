@@ -2,7 +2,7 @@
 
 `extractExif` (`photos/src/photos-lib/metadata/exif-reader.ts`) reads
 `parsed.Orientation` through `numberOrNull(...)`. But `exifr.parse()` with
-default options *translates* tag values: Orientation comes back as a string
+default options _translates_ tag values: Orientation comes back as a string
 like `"Horizontal (normal)"`, never a number. `numberOrNull` therefore always
 returns null — the `orientation` field is dead for every upload, on every
 path, regardless of the camera.

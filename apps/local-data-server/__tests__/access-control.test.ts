@@ -89,7 +89,10 @@ describe("read visibility", () => {
     expect(invisible.some((r) => r.id === created.record.id)).toBe(false);
 
     const typesRes = await pdfReader.fetch("/data/types");
-    const types = (await typesRes.json()) as { types: Array<{ record_type: string }>; total: number };
+    const types = (await typesRes.json()) as {
+      types: Array<{ record_type: string }>;
+      total: number;
+    };
     expect(types.types.some((t) => t.record_type === "image/jpeg")).toBe(false);
   });
 
@@ -161,7 +164,9 @@ describe("all-access identities", () => {
     const driveList = await listRecords(drive);
     expect(driveList.some((r) => r.id === fromImageApp.record.id)).toBe(true);
     expect((await drive.fetch(`/data/records/${fromImageApp.record.id}`)).status).toBe(200);
-    expect((await drive.fetch(`/data/records/${fromImageApp.record.id}/file-url`)).status).toBe(200);
+    expect((await drive.fetch(`/data/records/${fromImageApp.record.id}/file-url`)).status).toBe(
+      200,
+    );
   });
 });
 

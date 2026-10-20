@@ -38,7 +38,10 @@ export interface WireStandInSummary {
   readonly canonical_target: number | null;
   /** True when the live canonical stand-in was made for another threshold. */
   /** The library's advisory long edges, for video; null for images. */
-  readonly advisory_long_edges: { readonly canonical: number; readonly by_size: Readonly<Record<string, number>> } | null;
+  readonly advisory_long_edges: {
+    readonly canonical: number;
+    readonly by_size: Readonly<Record<string, number>>;
+  } | null;
   readonly sizes: readonly WireStandInSize[];
   /** Where the original's own bytes sit on the node that answered. */
   readonly original_placement: SizePlacement;
@@ -144,9 +147,14 @@ export async function resolveContentRead(
     case "not-standard":
       return fail(400, "NotAStandardSize", resolution.message);
     case "unknown-fidelity":
-      return fail(404, "FidelityUnknown", "nobody has reported this original's fidelity, so it has no sizes yet", {
-        stand_ins: await renderStandInSummary(summary),
-      });
+      return fail(
+        404,
+        "FidelityUnknown",
+        "nobody has reported this original's fidelity, so it has no sizes yet",
+        {
+          stand_ins: await renderStandInSummary(summary),
+        },
+      );
     case "not-produced":
       return fail(404, "SizeNotProduced", `no stand-in exists at ${resolution.fidelity} yet`, {
         fidelity: resolution.fidelity,

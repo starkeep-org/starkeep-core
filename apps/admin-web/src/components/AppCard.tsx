@@ -67,11 +67,7 @@ export function AppCard({ name, version, badges, description, primary, actions }
           <CardAction>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button
-                  size="icon-sm"
-                  variant="ghost"
-                  aria-label={`More actions for ${name}`}
-                >
+                <Button size="icon-sm" variant="ghost" aria-label={`More actions for ${name}`}>
                   <MoreHorizontalIcon />
                 </Button>
               </DropdownMenuTrigger>

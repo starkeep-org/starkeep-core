@@ -22,7 +22,11 @@ let machine: Record<string, unknown>;
 let signInAnswer: () => Response;
 
 const SIGNED_OUT = { cloudUrl: "https://d1.cloudfront.net", state: "signed-out", email: null };
-const SIGNED_IN = { cloudUrl: "https://d1.cloudfront.net", state: "signed-in", email: "sam@example.com" };
+const SIGNED_IN = {
+  cloudUrl: "https://d1.cloudfront.net",
+  state: "signed-in",
+  email: "sam@example.com",
+};
 
 beforeEach(() => {
   calls = [];
@@ -65,7 +69,11 @@ describe("a signed-out machine", () => {
     await user.type(screen.getByLabelText("Password"), "Sam-password-1");
     await user.click(screen.getByRole("button", { name: "Sign in to sync" }));
 
-    expect(await screen.findByText(/This machine syncs with https:\/\/d1.cloudfront.net as sam@example.com/)).toBeTruthy();
+    expect(
+      await screen.findByText(
+        /This machine syncs with https:\/\/d1.cloudfront.net as sam@example.com/,
+      ),
+    ).toBeTruthy();
     expect(calls.find((c) => c.url === "/api/this-machine/sign-in")!.body).toEqual({
       email: "sam@example.com",
       password: "Sam-password-1",
@@ -116,7 +124,8 @@ describe("a signed-out machine", () => {
   });
 
   it("says why a sign-in failed", async () => {
-    signInAnswer = () => Response.json({ error: "Incorrect username or password." }, { status: 401 });
+    signInAnswer = () =>
+      Response.json({ error: "Incorrect username or password." }, { status: 401 });
     const user = userEvent.setup();
     render(<ThisMachineSection />);
     await user.type(await screen.findByLabelText("Email"), "sam@example.com");
@@ -133,11 +142,17 @@ describe("a signed-in machine", () => {
     render(<ThisMachineSection />);
     await user.click(await screen.findByRole("button", { name: "Sign out" }));
     expect(await screen.findByRole("button", { name: "Sign in to sync" })).toBeTruthy();
-    expect(calls.some((c) => c.url === "/api/this-machine/sign-out" && c.method === "POST")).toBe(true);
+    expect(calls.some((c) => c.url === "/api/this-machine/sign-out" && c.method === "POST")).toBe(
+      true,
+    );
   });
 
   it("says when its library belongs to another account", async () => {
-    machine = { ...SIGNED_IN, state: "bound-elsewhere", message: "This library belongs to another account." };
+    machine = {
+      ...SIGNED_IN,
+      state: "bound-elsewhere",
+      message: "This library belongs to another account.",
+    };
     render(<ThisMachineSection />);
     expect(await screen.findByText("This library belongs to another account.")).toBeTruthy();
   });
@@ -151,7 +166,9 @@ describe("a machine with no cloud", () => {
     await user.type(await screen.findByLabelText("Cloud address"), "https://d1.cloudfront.net");
     await user.click(screen.getByRole("button", { name: "Join" }));
     expect(await screen.findByText(/Restarting the local data server/)).toBeTruthy();
-    expect(calls.find((c) => c.url === "/api/this-machine/cloud")!.body).toEqual({ url: "https://d1.cloudfront.net" });
+    expect(calls.find((c) => c.url === "/api/this-machine/cloud")!.body).toEqual({
+      url: "https://d1.cloudfront.net",
+    });
   });
 });
 
@@ -161,7 +178,9 @@ describe("the address other devices sign in with", () => {
   it("names the cloud's public address on the administering machine, not the gateway it syncs through", async () => {
     machine = { ...SIGNED_IN, cloudUrl: GATEWAY };
     render(<ThisMachineSection deviceAddress="https://d1.cloudfront.net" />);
-    expect(await screen.findByText(/This machine syncs with this cloud as sam@example.com/)).toBeTruthy();
+    expect(
+      await screen.findByText(/This machine syncs with this cloud as sam@example.com/),
+    ).toBeTruthy();
     expect(screen.getByText("https://d1.cloudfront.net")).toBeTruthy();
     expect(screen.queryByText(new RegExp(GATEWAY))).toBeNull();
   });
@@ -179,7 +198,9 @@ describe("the address other devices sign in with", () => {
   it("is not offered by a machine that joined someone else's cloud", async () => {
     machine = SIGNED_IN;
     render(<ThisMachineSection />);
-    expect(await screen.findByText(/This machine syncs with https:\/\/d1.cloudfront.net/)).toBeTruthy();
+    expect(
+      await screen.findByText(/This machine syncs with https:\/\/d1.cloudfront.net/),
+    ).toBeTruthy();
     expect(screen.queryByLabelText("Address for other devices")).toBeNull();
   });
 });

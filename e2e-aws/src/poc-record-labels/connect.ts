@@ -15,9 +15,7 @@ export const REGION = process.env.POC_DSQL_REGION ?? "us-east-2";
 export function clusterId(): string {
   const id = process.env.POC_DSQL_CLUSTER;
   if (!id) {
-    throw new Error(
-      "POC_DSQL_CLUSTER must name the disposable POC cluster (never a live one).",
-    );
+    throw new Error("POC_DSQL_CLUSTER must name the disposable POC cluster (never a live one).");
   }
   return id;
 }

@@ -1,7 +1,7 @@
 # Phase 2 — the Android app
 
 Companion to `media-implementation-plan.md` §Phase 2 (items 10–16). This is the working plan for
-that phase; the media plan remains authoritative for *what* is being built and why.
+that phase; the media plan remains authoritative for _what_ is being built and why.
 
 Item 10 (narrowing `getRawDatabase()` to an interface) is **done**. Everything below is open.
 
@@ -15,12 +15,12 @@ than assumed. Two held; one held with a caveat that changes the adapter's shape.
 ### op-sqlite can satisfy `RawDatabase` — but not through prepared statements
 
 ```ts
-executeSync: (query: string, params?: Scalar[]) => QueryResult   // synchronous, parameterised
-prepareStatement: (query: string) => PreparedStatement
-PreparedStatement = { bind, bindSync, execute: () => Promise<QueryResult> }  // execute is async only
+executeSync: (query: string, params?: Scalar[]) => QueryResult; // synchronous, parameterised
+prepareStatement: (query: string) => PreparedStatement;
+PreparedStatement = { bind, bindSync, execute: () => Promise<QueryResult> }; // execute is async only
 ```
 
-`executeSync` is genuinely synchronous *and* takes bind parameters, so the synchronous constraint
+`executeSync` is genuinely synchronous _and_ takes bind parameters, so the synchronous constraint
 `RawDatabase` imposes is satisfiable. But `PreparedStatement.execute()` is **async only**, so
 `prepare(sql)` cannot map onto a real prepared statement. The adapter implements `prepare` by
 capturing the SQL string and calling `executeSync(sql, params)` at `run`/`get`/`all` time.
@@ -28,7 +28,7 @@ capturing the SQL string and calling `executeSync(sql, params)` at `run`/`get`/`
 **What that costs:** no statement reuse, so SQLite re-parses per call. That is a performance
 property, not a correctness one — parameters are still bound rather than interpolated, so nothing
 about injection or type handling changes. Worth measuring on a 60k-row library before deciding it
-matters; worth *not* pre-optimising into an async interface, because async is the thing the
+matters; worth _not_ pre-optimising into an async interface, because async is the thing the
 change-log write ordering cannot tolerate (see `raw-database.ts`).
 
 **The synchronous requirement is the real risk of this phase.** `executeSync` blocks the JS thread.
@@ -40,12 +40,12 @@ during interaction — which the constrained-execution model below already requi
 
 `expo-file-system` 57's class-based API provides exactly the shapes the adapter needs:
 
-| Adapter needs | expo-file-system |
-|---|---|
-| `getStream(key)` | `File.readableStream(): ReadableStream<Uint8Array>` |
+| Adapter needs           | expo-file-system                                                     |
+| ----------------------- | -------------------------------------------------------------------- |
+| `getStream(key)`        | `File.readableStream(): ReadableStream<Uint8Array>`                  |
 | `getStream(key, range)` | `File.open(mode)` → `FileHandle` with `offset` + `readBytes(length)` |
-| `putStream(key, body)` | `File.writableStream(): WritableStream<Uint8Array>` |
-| `stat(key)` | `File.size`, `File.exists` |
+| `putStream(key, body)`  | `File.writableStream(): WritableStream<Uint8Array>`                  |
+| `stat(key)`             | `File.size`, `File.exists`                                           |
 
 This retroactively vindicates the item 2 decision to type the adapter in **web** `ReadableStream`
 rather than Node streams, on the argument that "the same adapter interface has to be implementable on
@@ -88,7 +88,7 @@ for mobile. `src/node.ts` says why: a second implementation "for mobile" is how 
 disagree about what they hold, and that failure is silent rather than loud.
 
 **`photos-ui` is not reused.** The media plan says so and it is right: it is React DOM with inline
-CSS strings, and React Native has neither. The *logic* in `photos-lib` — the ladder, variant
+CSS strings, and React Native has neither. The _logic_ in `photos-lib` — the ladder, variant
 selection, the import loop — is platform-free and is reused.
 
 ---
@@ -112,18 +112,18 @@ plugged into a laptop.
 
 ## 4. Order of work
 
-| # | Item | State |
-|---|---|---|
-| 11a | `RawDatabase` + `DatabaseAdapter` over op-sqlite | **Done** — and the real `SqliteDatabaseAdapter` runs through it unchanged |
-| 11b | `ObjectStorageAdapter` over expo-file-system | **Done** — ranged reads verified by sabotage |
-| 12 | Sync peer + residency | **Done** — a real exchange runs on the phone's adapters; a real budget elides |
-| 16 | Motion Photo XMP extraction | **Done** (parser) — capture path needs a device |
-| 14 | `WorkManager` job graph | **Policy done**; the binding needs a device |
-| 12b | Expo dev-client shell + optional Cognito sign-in | **Done** — bundles, opens without an account, signs in for sync, keeps the session across restarts; unrun on hardware |
-| 13a | `MediaStore` — reading the device's own camera roll | **Done via `expo-media-library`** — no hand-written module needed; unrun on hardware |
-| 13b | `ImageDecoder` / `MediaCodec` — decode and derivation | Open — needs a device, and native code `expo-media-library` does not cover |
-| 15a | Grid + viewer against the existing ladder logic | Open — a recent-media grid exists; the *library* grid needs the import loop and the `photos-lib` split |
-| 15b | Residency inspector + retention matrix | Open — reuses the census/projection work |
+| #   | Item                                                  | State                                                                                                                 |
+| --- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| 11a | `RawDatabase` + `DatabaseAdapter` over op-sqlite      | **Done** — and the real `SqliteDatabaseAdapter` runs through it unchanged                                             |
+| 11b | `ObjectStorageAdapter` over expo-file-system          | **Done** — ranged reads verified by sabotage                                                                          |
+| 12  | Sync peer + residency                                 | **Done** — a real exchange runs on the phone's adapters; a real budget elides                                         |
+| 16  | Motion Photo XMP extraction                           | **Done** (parser) — capture path needs a device                                                                       |
+| 14  | `WorkManager` job graph                               | **Policy done**; the binding needs a device                                                                           |
+| 12b | Expo dev-client shell + optional Cognito sign-in      | **Done** — bundles, opens without an account, signs in for sync, keeps the session across restarts; unrun on hardware |
+| 13a | `MediaStore` — reading the device's own camera roll   | **Done via `expo-media-library`** — no hand-written module needed; unrun on hardware                                  |
+| 13b | `ImageDecoder` / `MediaCodec` — decode and derivation | Open — needs a device, and native code `expo-media-library` does not cover                                            |
+| 15a | Grid + viewer against the existing ladder logic       | Open — a recent-media grid exists; the _library_ grid needs the import loop and the `photos-lib` split                |
+| 15b | Residency inspector + retention matrix                | Open — reuses the census/projection work                                                                              |
 
 Deliberately **not** in the order the media plan lists them. Items 13 and 14 are the ones that cannot
 be verified without a handset, so they come after the shell exists to host them — building native
@@ -189,7 +189,7 @@ against fakes. Six findings worth carrying forward:
 - **There is no sign-in gate, and there must not be one.** The app opens into
   the node; signing in is an action taken from inside it. The photos and videos
   on a handset are the user's, they are already there, and Android's permission
-  is *the* access control for them — a Cognito login in front of them would be
+  is _the_ access control for them — a Cognito login in front of them would be
   a second, weaker gate in front of a door the user already holds the key to,
   and one that fails shut when the network does. Sign-in buys exactly one
   thing: **sync**. A device with no session is a complete Starkeep node that
@@ -197,7 +197,7 @@ against fakes. Six findings worth carrying forward:
 
   This was got wrong twice, in the same direction both times, which is worth
   recording because the pull is clearly strong. First the whole app sat behind
-  a login. Then, with the login still in place, the session *refresh* sat in a
+  a login. Then, with the login still in place, the session _refresh_ sat in a
   `try`/`catch` whose `catch` cleared the stored token — so one launch without
   a connection signed the device out permanently, a revoked credential and a
   tunnel being the same event from inside a `catch`.
@@ -211,7 +211,7 @@ against fakes. Six findings worth carrying forward:
 
 - **The camera roll needed no native module.** `expo-media-library` 57 exposes
   a query builder whose `exeForMetadata()` returns everything the grid needs
-  except the URI — and on Android an asset id *is* its `content://` URI, so the
+  except the URI — and on Android an asset id _is_ its `content://` URI, so the
   per-asset resolve is a fallback rather than the path. Declared structurally in
   `src/media/device-library.ts` like every other adapter here, so the sort
   order, the field mapping and the permission states are Node tests. What still

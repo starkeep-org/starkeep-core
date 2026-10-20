@@ -172,9 +172,9 @@ describe("where", () => {
         { name: "value", type: "text", notNull: true, primaryKey: true },
       ],
     };
-    expect(() =>
-      parseQuery(labels, { where: JSON.stringify({ app_id: "photos" }) }),
-    ).toThrow(/requires "app_id" and "key"/);
+    expect(() => parseQuery(labels, { where: JSON.stringify({ app_id: "photos" }) })).toThrow(
+      /requires "app_id" and "key"/,
+    );
     expect(() =>
       parseQuery(labels, { where: JSON.stringify({ app_id: "photos", key: "person" }) }),
     ).not.toThrow();
@@ -389,10 +389,7 @@ describe("aggregate", () => {
   });
 
   it("refuses an output name that collides with a column", () => {
-    rejects(
-      { aggregate: JSON.stringify({ due: { fn: "count" } }) },
-      /collides with a column/,
-    );
+    rejects({ aggregate: JSON.stringify({ due: { fn: "count" } }) }, /collides with a column/);
   });
 
   it("lets order name a grouping column or an aggregate output, and nothing else", () => {
@@ -423,7 +420,6 @@ describe("aggregate", () => {
     );
   });
 });
-
 
 describe("the shared plane's own table descriptions", () => {
   const LABELS = sharedQuerySchema({ kind: "labels" });
@@ -468,9 +464,7 @@ describe("the shared plane's own table descriptions", () => {
       { order: "record_type.asc" },
       { select: "record_type" },
     ]) {
-      expect(() => parseQuery(IMAGE_METADATA, params)).toThrow(
-        /"record_type" is not a column/,
-      );
+      expect(() => parseQuery(IMAGE_METADATA, params)).toThrow(/"record_type" is not a column/);
     }
     expect(IMAGE_METADATA.columns.map((c) => c.name)).toContain("captured_at");
   });

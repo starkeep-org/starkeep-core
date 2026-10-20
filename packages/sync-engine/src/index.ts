@@ -90,11 +90,7 @@ export { createChangeNotifier } from "./change-notifier.js";
 export { advanceWatermark, mergeWatermarks, watermarkFor, selectUnseen } from "./watermarks.js";
 export { createFileSyncEngine } from "./file-sync-engine.js";
 export { createSyncEngine, blobCandidateForRecord } from "./sync-engine.js";
-export {
-  residencyOf,
-  type RecordResidency,
-  type RecordResidencyState,
-} from "./residency.js";
+export { residencyOf, type RecordResidency, type RecordResidencyState } from "./residency.js";
 export {
   createInProcessSyncTransport,
   createMemoryByteCoverageStore,
@@ -114,10 +110,7 @@ export {
   type HttpObjectStorageAdapterOptions,
   type UploadFile,
 } from "./transports/http-object-storage.js";
-export {
-  createHttpSyncHandler,
-  type HttpSyncServerOptions,
-} from "./transports/http-server.js";
+export { createHttpSyncHandler, type HttpSyncServerOptions } from "./transports/http-server.js";
 export { SyncError } from "./errors.js";
 export {
   sanitizeExchangeRequest,
@@ -169,8 +162,5 @@ export {
   type RetentionWindow,
 } from "./library-settings.js";
 export { createSqliteDeploymentSettingsCache } from "./deployment-settings-cache-sqlite.js";
-export {
-  advanceBytesWatermark,
-  clampToRows,
-} from "./file-rows.js";
+export { advanceBytesWatermark, clampToRows } from "./file-rows.js";
 export { planByteWindow, type ByteWindowPlan, type ByteWindowItem } from "./byte-window.js";

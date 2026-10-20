@@ -31,9 +31,7 @@ export async function GET() {
     appId: s.appId,
     manifest: s.manifest,
     sourceDir: s.appDir,
-    status: installedById
-      ? installedById.get(s.appId)?.status ?? "not_installed"
-      : "unknown",
+    status: installedById ? (installedById.get(s.appId)?.status ?? "not_installed") : "unknown",
   }));
 
   return Response.json({ apps, dataServerReachable: installedById !== null });

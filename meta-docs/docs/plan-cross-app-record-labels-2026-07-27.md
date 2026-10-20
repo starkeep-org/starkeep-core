@@ -47,13 +47,13 @@ app, set once rather than over time.
 So there is **one** mechanism. `shared.record_labels` is added, and `records.label` is
 removed (§9).
 
-| | `records.label` (removed) | `record_labels` (replacement) |
-|---|---|---|
-| Author | origin app only | any app with read access to the type |
-| Cardinality | 0 or 1 per record | many per record, many authors |
-| Mutability | write-once at creation | set, updated, retracted over time |
-| Namespacing | `<appId>/` string prefix, validated on write | `app_id` column, server-set (stronger) |
-| Filterable | not indexed — and in practice never read at all | indexed in both directions (§4) |
+|             | `records.label` (removed)                       | `record_labels` (replacement)          |
+| ----------- | ----------------------------------------------- | -------------------------------------- |
+| Author      | origin app only                                 | any app with read access to the type   |
+| Cardinality | 0 or 1 per record                               | many per record, many authors          |
+| Mutability  | write-once at creation                          | set, updated, retracted over time      |
+| Namespacing | `<appId>/` string prefix, validated on write    | `app_id` column, server-set (stronger) |
+| Filterable  | not indexed — and in practice never read at all | indexed in both directions (§4)        |
 
 ---
 
@@ -70,12 +70,12 @@ fails on three counts, all specific to how this system already works:
    the same row** — the only concurrent writers to a given label row are the same app on two
    devices, which is exactly the case HLC LWW already handles.
 
-   Measured in the §3a POC, and it bites at *any* granularity coarser than one row per key:
+   Measured in the §3a POC, and it bites at _any_ granularity coarser than one row per key:
    two concurrent transactions setting **two different keys on the same row** — the exact
    pattern a parallel worker fan-out produces — collide with
    `40001: change conflicts with another transaction (OC000)`, and one write is rejected.
-   The same two writes as separate rows both committed cleanly. (Control: two *different
-   apps* writing the same record never collide in either design, since `app_id` is in the
+   The same two writes as separate rows both committed cleanly. (Control: two _different
+   apps_ writing the same record never collide in either design, since `app_id` is in the
    primary key either way.)
 
 2. **Whole-record LWW would silently eat labels.** Records are conflict-resolved by
@@ -88,13 +88,13 @@ fails on three counts, all specific to how this system already works:
    entire record over the Drive channel and disturbs every peer's watermark. Label writes
    must **not** touch the record row (§8).
 
-*(An earlier draft listed a fourth reason: that the write-once invariant —
+_(An earlier draft listed a fourth reason: that the write-once invariant —
 `labelHasValidPrefix` plus "set at creation and never changed" — is load-bearing because it
 makes the label trustworthy as a filter. It is not load-bearing. A grep of `packages`,
 `apps`, and `starkeep-apps` finds **no reader anywhere that filters on `label`**: Photos
 writes `photos/thumbnail` in `resize-handler.ts:153` and `app/api/resize/route.ts:141`, both
 data servers echo it back, one e2e asserts it round-trips, and that is the whole lifecycle.
-There is no trustworthy-filter guarantee to protect. See §9.)*
+There is no trustworthy-filter guarantee to protect. See §9.)_
 
 ## 3. Why not the per-category metadata tables
 
@@ -117,7 +117,7 @@ classified" section splits user data in two, and puts an app's assertions about 
 **app-specific** data — its literal example is "captions on a photo." A label is also an
 app's assertion about a shared record, so on the current text an app author cannot tell why
 an OCR flag is shared data while a caption is not. The distinguishing property is
-*intended audience*: a caption is the app talking to itself, a label is the app talking to
+_intended audience_: a caption is the app talking to itself, a label is the app talking to
 other apps, and only the second earns a place in the shared plane (and the caps in §6 that
 come with it). That sentence belongs in the classification section, alongside the rewrite
 of the "Advisory interest labels" bullet that §9 forces anyway. Sequenced as step 8.
@@ -137,28 +137,28 @@ jsonb layout is rejected.** Three findings, in order of how much they mattered:
 1. **jsonb cannot be indexed on DSQL by any route.** B-tree on the column, `USING gin`
    (with or without `jsonb_path_ops`), and expression indexes on `((labels->>'k'))` are all
    rejected outright; only `INCLUDE (labels)` as a non-key column is accepted. Every jsonb
-   *operator* works fine — the machinery was never the problem — but a label filter has no
+   _operator_ works fine — the machinery was never the problem — but a label filter has no
    seek available and degrades to a scan. A covering index turns a table scan into an
    index-only scan, not a seek, so the cost still grows with the library:
 
    | Library size | row-per-key (seek) | jsonb + covering index (scan) |
-   |---|---|---|
-   | 20k records | **3.28 ms** | 100 ms |
-   | 60k records | **3.34 ms** | 269 ms |
-   | 120k records | **3.40 ms** | 518 ms |
+   | ------------ | ------------------ | ----------------------------- |
+   | 20k records  | **3.28 ms**        | 100 ms                        |
+   | 60k records  | **3.34 ms**        | 269 ms                        |
+   | 120k records | **3.40 ms**        | 518 ms                        |
 
    (DSQL-side `EXPLAIN ANALYZE`, median of 5, "first 50 records where `alpha` set the rare
    key.") Row-per-key is **flat**; jsonb is **linear** at ~4.3 µs/row scanned, so a 1M-photo
    library extrapolates to ~4.3 s per filter query — billed as DPU every time.
 
-2. **Selectivity is what makes jsonb unpredictable.** For a *common* key the two tie exactly
+2. **Selectivity is what makes jsonb unpredictable.** For a _common_ key the two tie exactly
    (37.9 vs 38.6 ms wall), because `LIMIT 50` is satisfied within the first ~64 rows
-   scanned. Only *rare* keys are pathological — and rare flags (`needs-review`, `duplicate`,
+   scanned. Only _rare_ keys are pathological — and rare flags (`needs-review`, `duplicate`,
    `failed`) are precisely the high-value ones. A design whose performance depends on how
    many records happen to match can't be reasoned about in advance.
 
 3. **The row-count saving that motivated jsonb is 0.08%** — 25,020 rows vs 25,000 on
-   identical data. It only materializes when one app puts many keys on the *same* record;
+   identical data. It only materializes when one app puts many keys on the _same_ record;
    in the common bulk case (one app labels 20k records with one key) both write exactly one
    row per record. The write-cost argument was close to nil.
 
@@ -182,26 +182,26 @@ was accepted on the first try, and the plan confirms it does the job it was adde
 reverse query comes back as an **`Index Only Scan`** with
 `Projections: value, record_id, record_type` and no `Storage Lookup` on the table at all.
 `record_type` really is served from the index, so the grant filter costs no heap access —
-it shows up as a `Filter:` on the index-only scan, which is filtering *within the scan*,
+it shows up as a `Filter:` on the index-only scan, which is filtering _within the scan_,
 not after fetching records. That is what §7's "pages come back full" rests on.
 
 **Q2 — `deleted_at IS NULL` is a scan key.** Answered by contrast rather than by reading
 plan text: two tables, identical data (20 live rows behind 20,000 tombstones on one key),
 differing only in whether `deleted_at` is a key column of the reverse index.
 
-| | `deleted_at` in the index | control (§4's fallback shape) |
-|---|---|---|
-| `Index Cond` | `app_id`, `key`, **`deleted_at IS NULL`** | `app_id`, `key` only |
-| index entries scanned | **20** | **20,040** |
-| DSQL execution time | **0.99 ms** | 30.2 ms |
-| tombstone handling | never entered the range | `Rows Removed by Filter: 952`, after a heap lookup |
+|                       | `deleted_at` in the index                 | control (§4's fallback shape)                      |
+| --------------------- | ----------------------------------------- | -------------------------------------------------- |
+| `Index Cond`          | `app_id`, `key`, **`deleted_at IS NULL`** | `app_id`, `key` only                               |
+| index entries scanned | **20**                                    | **20,040**                                         |
+| DSQL execution time   | **0.99 ms**                               | 30.2 ms                                            |
+| tombstone handling    | never entered the range                   | `Rows Removed by Filter: 952`, after a heap lookup |
 
 The control walks the entire tombstone pile and filters post-fetch; the proposed shape
 seeks straight to the live rows. So **the tombstone sweep in §10 stays a storage-cost
 question, not a latency remedy**, and §6's tombstone-accumulation caveat stays as written.
 
 One methodological note worth keeping, because it nearly produced the wrong answer:
-round-trip wall time is useless here. It swung 695 ms → 107 ms → 66 ms for the *same*
+round-trip wall time is useless here. It swung 695 ms → 107 ms → 66 ms for the _same_
 control query across three runs on cold vs warm cache — enough noise to swamp a 30× real
 difference. The decisive metrics are DSQL-side: index entries actually scanned, and the
 engine's own `Execution Time`. §3a used the same metric for the same reason.
@@ -228,7 +228,7 @@ shared.record_labels
 ```
 
 Note there is no `appId/purpose` string here. `app_id` is a **column**, not a prefix. That
-is the whole anti-squatting story: there is no way to *express* another app's namespace, so
+is the whole anti-squatting story: there is no way to _express_ another app's namespace, so
 there is nothing to validate. The `<appId>/<key>` string form survives only as the wire and
 UI rendering (`alpha/ocr-available`), parsed on the way in and reassembled on the way out.
 This is strictly stronger than today's `labelHasValidPrefix` string check.
@@ -238,7 +238,7 @@ grant. Without this column every label read is a join back to `shared.records`, 
 the reverse path ("which records has `alpha` labeled X"), where the join is over an unbounded
 set. `records.type` is immutable (`readonly type` on `BaseRecord`, declared at creation), so
 the denormalization can never go stale. This is the same trade already made for `node_id`.
-The column also rides *inside* the reverse index (below), which is what turns the grant check
+The column also rides _inside_ the reverse index (below), which is what turns the grant check
 from a post-fetch filter into an index condition.
 
 ### Indexes
@@ -253,7 +253,7 @@ Three, and a fourth should be resisted — see the transaction-limit discussion 
    see below.
 3. **`(node_id, updated_at)`** — sync watermark, mirroring `idx_records_node_watermark`.
 
-**`value` is in the reverse index from day one.** Filtering across labels is the *primary*
+**`value` is in the reverse index from day one.** Filtering across labels is the _primary_
 access pattern — it's the thing that replaces "ask app A about every file" — so
 `alpha/quality = 'high'` needs to be a seek, not a filter over every record `alpha` ever
 labelled. That second shape is exactly the linear-scan trap §3a disqualified jsonb for.
@@ -266,7 +266,7 @@ a tombstone, not a hard delete (§10), and DSQL has no partial indexes — so wi
 every retracted row stays in the reverse index forever and every query seeks past rows it
 will discard, with no janitor in the design to collect them (§6). B-tree nulls sort together,
 so pinning `deleted_at IS NULL` cuts a contiguous live-only range and tombstones sort out of
-the way entirely. Position matters: third, *before* `value`, is what makes the live range
+the way entirely. Position matters: third, _before_ `value`, is what makes the live range
 contiguous rather than interleaved.
 
 **`record_type` is an `INCLUDE` payload, so the grant filter costs no heap access.** The
@@ -297,14 +297,14 @@ nullable for exactly this, and **no additional index is required**: `(app_id, ke
 deleted_at)` is a leftmost prefix of the reverse index, and every reverse query pins all
 three (`deleted_at IS NULL` is always applied — nobody queries for retracted labels), so a
 query that omits `value` is a range seek on that prefix, not a scan. For a key that is
-*always* flag-only the live range degenerates to `record_id` order exactly — `value` is a
+_always_ flag-only the live range degenerates to `record_id` order exactly — `value` is a
 constant within it and costs nothing.
 
 There is one consequence that is easy to miss, and it bites pagination rather than the seek:
 
 - **When `value` is pinned** (`WHERE app_id=? AND key=? AND deleted_at IS NULL AND value=?`),
   the index's residual order is `record_id`, so a `record_id` cursor is index-aligned.
-- **When `value` is omitted** and the key carries *varied* values, the range is ordered by
+- **When `value` is omitted** and the key carries _varied_ values, the range is ordered by
   `(value, record_id)`. `record_id` is therefore **not** monotonic across the range, and a
   bare `record_id > cursor` predicate would silently skip and repeat rows.
 
@@ -339,7 +339,7 @@ This is deliberately less than atomic, for three reasons:
    its own `withOccRetry` transaction on DSQL. Over HTTP it isn't even one request, since
    metadata is a separate endpoint (`POST /data/records/:id/metadata`); Photos creates the
    record at `resize-handler.ts:139` and posts metadata at `:164`. Folding labels into the
-   create request is therefore a small *improvement* on the established pattern, not a
+   create request is therefore a small _improvement_ on the established pattern, not a
    departure from it. **That docstring is wrong and must be fixed** (§12 step 0) — it would
    mislead exactly this kind of decision.
 2. **Real atomicity would be new machinery.** `transaction()` exists on both adapters and
@@ -356,7 +356,7 @@ The clincher is that this tolerance is already load-bearing: a record can arrive
 without its dimensions today, and nothing breaks.
 
 Note the interaction with positive filtering (§9): under a positive filter an unlabelled
-record is *excluded*, so the window shows up as a photo that hasn't appeared yet rather
+record is _excluded_, so the window shows up as a photo that hasn't appeared yet rather
 than a thumbnail that shouldn't be there. Both are transient; neither is fixable by a
 transaction.
 
@@ -382,6 +382,7 @@ transaction.
    read grant is write-inert does not, and nothing in the doc currently says a read-granted
    app can create rows in `shared.record_labels`. That edit is step 8; it is not optional
    bookkeeping, because the confinement story is the doc's central claim.
+
 3. **Delete/retract is scoped by PK**, and the PK contains `app_id`, so an app can only
    retract its own labels. No extra check needed beyond the server-set `app_id`.
 4. **Reads are gated by the record's type only.** Per your constraint: any app that can read
@@ -401,17 +402,17 @@ transaction.
 ## 6. Limits
 
 You're right that limits are the thing that keeps this from becoming a smuggled data plane.
-There are three levers, and the *key-cardinality* one matters more than the byte ones.
+There are three levers, and the _key-cardinality_ one matters more than the byte ones.
 
 ### Caps
 
-| Limit | Value | Why |
-|---|---|---|
-| `key` length | ≤ 64 chars, `[a-z0-9][a-z0-9._-]{0,63}` | keys are identifiers, not content |
-| **distinct keys per app** | **≤ 64, declared in the app manifest** | the only cap that needs enforcing — see below |
-| `value` length | ≤ 128 bytes UTF-8, or null | enough for an enum, id, count, or ISO timestamp; not enough for prose |
-| labels per `(record, app)` | *(no separate cap — implied)* | an app with ≤ 64 declared keys cannot put more than 64 labels on one record |
-| labels per record, all apps | **no cap** | a cross-app cap is a DoS one app can inflict on another |
+| Limit                       | Value                                   | Why                                                                         |
+| --------------------------- | --------------------------------------- | --------------------------------------------------------------------------- |
+| `key` length                | ≤ 64 chars, `[a-z0-9][a-z0-9._-]{0,63}` | keys are identifiers, not content                                           |
+| **distinct keys per app**   | **≤ 64, declared in the app manifest**  | the only cap that needs enforcing — see below                               |
+| `value` length              | ≤ 128 bytes UTF-8, or null              | enough for an enum, id, count, or ISO timestamp; not enough for prose       |
+| labels per `(record, app)`  | _(no separate cap — implied)_           | an app with ≤ 64 declared keys cannot put more than 64 labels on one record |
+| labels per record, all apps | **no cap**                              | a cross-app cap is a DoS one app can inflict on another                     |
 
 **One cap, not three.** The per-`(record, app)` limit an earlier draft proposed is redundant
 once distinct keys per app are capped: an app that may declare 64 keys cannot exceed 64
@@ -419,7 +420,7 @@ labels on a single record even trying. So there is one number and one enforcemen
 with no second check on the write path.
 
 **The key-cardinality cap is the one that actually enforces the intent.** Byte caps alone
-don't stop an app from using *keys* as data — writing `alpha/ocr-<first-40-chars-of-text>`
+don't stop an app from using _keys_ as data — writing `alpha/ocr-<first-40-chars-of-text>`
 as a flag-only label smuggles 64 bytes per row with an unbounded key space and poisons the
 reverse index. Capping an app to a fixed set of distinct keys forces keys to be **schema**,
 which is what a label is. **Keys are declared in the app manifest**, the installer registers
@@ -438,7 +439,7 @@ registry follows `shared.access_grants` exactly, which already solves this probl
 - **`shared.app_label_keys`** — `(app_id, key)` primary key, plus a `description` text
   column carried from the manifest so the enumeration is self-explaining. Written by the
   installer, `GRANT SELECT … TO PUBLIC` and `GRANT INSERT, UPDATE, DELETE … TO
-  "<installer>"`, mirroring `dsql-schema-init.ts:206-210`. The local side mirrors it in
+"<installer>"`, mirroring `dsql-schema-init.ts:206-210`. The local side mirrors it in
   `local/registry.ts` the same way the local grant rows already do.
 - **`GET /data/label-keys[?app=<appId>]`** on both data servers — the read path that makes
   the table reachable from app code rather than only from a DB session. Unfiltered by the
@@ -459,14 +460,14 @@ The caps are as much a spend control as an abuse control (see the DPU note below
 the per-app key cap from 32 to 64, and dropping the per-record cap of 8, multiplies the
 worst case by 8×:
 
-| | at 64 keys/app |
-|---|---|
-| worst case per app per record | ~16 KiB (64 × (64-byte key + 128-byte value + ~60 row overhead)) |
-| at 10 installed apps | ~160 KiB per record |
-| records per 3,000-row transaction, fully saturated | 46 |
-| 100k records fully labelled | 6.4M rows, ~19M index entries across 3 indexes |
+|                                                    | at 64 keys/app                                                   |
+| -------------------------------------------------- | ---------------------------------------------------------------- |
+| worst case per app per record                      | ~16 KiB (64 × (64-byte key + 128-byte value + ~60 row overhead)) |
+| at 10 installed apps                               | ~160 KiB per record                                              |
+| records per 3,000-row transaction, fully saturated | 46                                                               |
+| 100k records fully labelled                        | 6.4M rows, ~19M index entries across 3 indexes                   |
 
-None of that is a correctness problem — 160 KiB of labels sits against records whose *bytes*
+None of that is a correctness problem — 160 KiB of labels sits against records whose _bytes_
 are megabytes, and the saturated cases are pathological rather than expected. It is the
 number to look at if label spend ever shows up in the bill.
 
@@ -481,12 +482,12 @@ pointer into the shared data model (§9a).
 Numbers below are from AWS's published DSQL quotas, spot-checked against the live cluster
 in the §3a POC.
 
-- **3,000 rows modified per transaction, and secondary-index entries do *not* count
+- **3,000 rows modified per transaction, and secondary-index entries do _not_ count
   against it.** Verified directly: a 3,000-row insert into the two-secondary-index label
   table succeeded; 3,001 failed with `54000: transaction row limit exceeded`. So a
   bulk-labeling job (an app that just indexed 40,000 photos) batches at **3,000 labels per
-  transaction**, and adding an index does not shrink the batch. *(An earlier draft of this
-  doc claimed index entries counted, and budgeted ~500/txn — that was wrong.)* Chunking
+  transaction**, and adding an index does not shrink the batch. _(An earlier draft of this
+  doc claimed index entries counted, and budgeted ~500/txn — that was wrong.)_ Chunking
   must still be resumable: there is no cross-batch atomicity.
 - **10 MiB of modified data per write transaction.** At ~250 bytes/row, 3,000 label rows
   is ~0.75 MiB, so the row limit binds first — the byte limit is not a practical concern
@@ -569,7 +570,7 @@ An earlier draft of this section accepted under-filled pages as the contract, be
 records were fetched: a caller asking for 50 could get 3, having paid heap access for 47
 rows it wasn't allowed to see. Carrying `record_type` and `deleted_at` in the index (§4) is
 what removes that. Both conditions are now evaluated during the index scan, so the executor
-keeps scanning until it has a full `limit` of rows that are live *and* readable, and never
+keeps scanning until it has a full `limit` of rows that are live _and_ readable, and never
 materializes the rest. On the two dimensions that used to short pages, pages are full.
 
 One case survives, and it is why the contract does not change: §10's **orphan** — a label
@@ -582,7 +583,7 @@ row from a page. It is rare by construction, but "rare" is not "never", so:
 
 This stays in both the API docs and the SDK docstring. The failure mode if it goes
 undocumented is an app that stops on its first short page and silently misses matches —
-and it would now be a *rare, load-dependent* bug rather than an obvious one, which is worse.
+and it would now be a _rare, load-dependent_ bug rather than an obvious one, which is worse.
 Worth an explicit test: a reverse query over records of two types where the caller can read
 only one, asserting both that pages come back full and that paging to exhaustion finds every
 readable match.
@@ -594,7 +595,7 @@ bare array with a `limit`.
 
 The reason is the SDK, not the query. `data.query()` today returns `Promise<DataRecord[]>`
 with no pagination at all. That is a latent problem for `query()`. It would be a
-*designed-in* one for `findByLabel`, whose entire purpose is matching many records, and
+_designed-in_ one for `findByLabel`, whose entire purpose is matching many records, and
 retrofitting a cursor into an SDK method that shipped returning an array is a breaking
 change for every app that adopted it. The plumbing is nearly free: the cursor exists at the
 adapter layer (`id > cursor`, `query-builder.ts:67-69` in both adapters) and the
@@ -649,11 +650,11 @@ rather than `(recordId, keys[])`, so retraction mirrors the write instead of bei
 argument convention to remember.
 
 `null` is a first-class value on the write side — `setLabels(id, { "needs-review": null })`
-sets a bare flag. On the read side `sel.value` omitted means *presence* (any value, flags
+sets a bare flag. On the read side `sel.value` omitted means _presence_ (any value, flags
 included) and `sel.value` supplied means exact match, mirroring `?label=` / `&labelValue=`.
 
 > **Correction found during implementation.** Point 1 below is **wrong about this
-> codebase**: `packages/sdk` has *no* app identity. `StarkeepSdkOptions` carries no
+> codebase**: `packages/sdk` has _no_ app identity. `StarkeepSdkOptions` carries no
 > `appId`, and every write that needs one already takes it explicitly — that is what
 > `CreateDataRecordInput.originAppId` is. The SDK is a **per-node** facility used by the
 > local-data-server; apps reach the data plane over HTTP via `app-client`'s `signedFetch`,
@@ -662,10 +663,10 @@ included) and `sel.value` supplied means exact match, mirroring `?label=` / `&la
 >
 > The guarantee itself is not lost, it just lands where it was always actually enforced:
 > **both data servers set `app_id` from the authenticated subject and ignore the request
-> body**, which is what the cloud test "binds app_id from the authenticated subject" pins.
-> The SDK sits *below* that trust boundary, exactly as `query()` does no grant filtering
+> body**, which is what the cloud test "binds app*id from the authenticated subject" pins.
+> The SDK sits \_below* that trust boundary, exactly as `query()` does no grant filtering
 > there either. Point 3 (manifest-key validation at the call site) moves for the same
-> reason — the SDK cannot read `shared.app_label_keys`; it validates key and value *shape*
+> reason — the SDK cannot read `shared.app_label_keys`; it validates key and value _shape_
 > only, and the servers reject undeclared keys. Points 2 and 4 hold as written, and 4 —
 > `setLabels` owning the chunking — was always the valuable one.
 
@@ -686,11 +687,11 @@ Four things this buys that the HTTP surface alone cannot:
 ### What a batch actually costs
 
 §3a's carried-over finding — a whole batch in one multi-row `ON CONFLICT` statement — is
-true of the *write*, and it is easy to read it as the whole cost. It isn't. Every label
+true of the _write_, and it is easy to read it as the whole cost. It isn't. Every label
 write needs `record_type` (§4), which comes from `shared.records`, so a batch is really:
 
 1. one `SELECT id, type FROM shared.records WHERE id IN (…)` over the batch's record ids,
-2. a `canRead` check per *distinct type* returned (a handful, not per row),
+2. a `canRead` check per _distinct type_ returned (a handful, not per row),
 3. the one multi-row upsert.
 
 The `SELECT` in (1) is very likely the dominant cost of a bulk labelling job, and it is a
@@ -726,7 +727,7 @@ Labels are shared data, so they ride the **Drive channel** with records, under
   re-ship is harmless) but it can make a watermark overstate coverage and silently drop a
   label. This deserves a dedicated test case in the sync harness.
 - **Orphan labels are fine and must stay fine.** A label can arrive before its record. Since
-  there's no FK and readers reach labels *from* records, an orphan is simply invisible until
+  there's no FK and readers reach labels _from_ records, an orphan is simply invisible until
   its record lands. So: validate record existence on the **API** write path (we need
   `record_type` anyway), and never validate it on the **sync apply** path.
 - **The reverse case — record before label — is also expected**, and is why §4a declines to
@@ -767,7 +768,7 @@ again:
   PK-prefix seek with an `IN`-list — one batched query, exactly the shape `?include=metadata`
   already uses.
 - **Exclusion filters are the answer to a question we should stop asking.** An anti-join
-  ("images *without* label X") executes inside DSQL as one query rather than N client round
+  ("images _without_ label X") executes inside DSQL as one query rather than N client round
   trips, so it isn't disastrous, but it does pay LIMIT amplification: filling a 50-row page
   needs `50/(1 − matched share)` candidate rows scanned plus a probe each. At Photos' one
   thumbnail per original that's ~2× rows touched, forever, and DSQL bills DPU on rows read.
@@ -781,7 +782,7 @@ again:
   The one property that inverts, and must be stated in the API docs: an anti-filter is
   **safe by default** (unlabelled ⇒ included) while a positive filter is **unsafe by
   default** (unlabelled ⇒ excluded). `photos/original` only works as a filter if Photos
-  labels everything it uploads, and images written by a *different* app will not carry it.
+  labels everything it uploads, and images written by a _different_ app will not carry it.
   That is a coverage obligation on the labelling app, and the failure mode is silently
   hidden records — worth an explicit warning wherever `findByLabel` is documented.
 
@@ -807,7 +808,7 @@ of the duplication. Removing the column dissolves it: the new thing is just **la
   (`infra/src/resize-handler.ts:153`, `app/api/resize/route.ts:141`), and the e2e assertions
   at `photos/e2e/photos-app.spec.ts:115-187` move to the label surface.
 - Adapter and server tests that exercise the column: `storage-aurora-dsql/__tests__/serialization.test.ts:50-58`,
-  `storage-sqlite/__tests__/adapter.test.ts:66-73` and `:168-182` (the label *filter* test —
+  `storage-sqlite/__tests__/adapter.test.ts:66-73` and `:168-182` (the label _filter_ test —
   note it is the only thing in the tree that ever filtered on `label`), and
   `cloud-data-server/__tests__/routes-db.test.ts:276-310` (round-trip and squatting-rejection).
   The squatting test has no successor and is deleted rather than ported: `app_id` is
@@ -826,13 +827,13 @@ The same "keep the records table pure" instinct suggests replacing `parent_id` w
 It shouldn't be, for three reasons that do **not** apply to `label`:
 
 1. **It is a link to another record, not an assertion about one.** The label PK is
-   `(record_id, app_id, key)` — single-valued *per app*. `photos/parent = <id>` therefore
+   `(record_id, app_id, key)` — single-valued _per app_. `photos/parent = <id>` therefore
    gives every app its own opinion about a record's parent, where today there is exactly one
    parent systemwide. That single-valuedness is load-bearing: the `(parentId, contentHash)`
    dedup of derived children on the write path depends on it
    (`local-data-server/server.ts:1287-1290`, `api-handler.ts:984-987`).
 2. **It breaks the invariant the table rests on.** `app_id` is server-set from the
-   authenticated caller (§5.1) — that is what makes namespace squatting *unrepresentable*
+   authenticated caller (§5.1) — that is what makes namespace squatting _unrepresentable_
    rather than merely rejected. Parenthood isn't the origin app's opinion, so keeping it
    single-valued needs a `starkeep/` platform namespace no app may write: a second write path
    into the label table, and the one clean rule acquires an exception.
@@ -846,7 +847,7 @@ It shouldn't be, for three reasons that do **not** apply to `label`:
 for crops, while Photos' grid at `photo-thumbnail.tsx:18` reads `parentId !== null` as "this
 is a thumbnail." **A crop therefore renders in the grid as if it were its source's
 thumbnail — a live bug today**, independent of this plan. The missing piece is not that the
-link belongs elsewhere; it is that the *edge has no type*.
+link belongs elsewhere; it is that the _edge has no type_.
 
 The clean fix uses labels without moving the link: **keep `parent_id` as the edge and let a
 label type it** — `photos/thumbnail-of`, `photos/crop-of` as flag-only keys on the child.
@@ -869,7 +870,7 @@ none of the three problems above. Sequenced as step 11 below, after a real consu
 - **App uninstalled, or upgraded with a key removed** → the `shared.app_label_keys` rows go
   away (uninstall) or shrink (upgrade), while the label rows themselves survive per the
   bullet above. So **live label rows can reference an undeclared key**, and that is the
-  intended steady state, not a corruption: the registry gates the *write* path only.
+  intended steady state, not a corruption: the registry gates the _write_ path only.
   Concretely — reads and reverse queries return those rows normally; new writes to the
   undeclared key are rejected; retraction of an existing row is **allowed** (it is scoped by
   PK, §5.3, and refusing it would strand rows the app can no longer clean up); reinstalling
@@ -884,14 +885,14 @@ none of the three problems above. Sequenced as step 11 below, after a real consu
   `alpha/ocr-available` on record X stays true as long as X exists — an assertion is bound
   to a content-addressed thing, not to a mutable slot. This is what makes third-party
   assertions safe to trust at all, and it is worth stating because it is an invariant labels
-  *depend on* rather than one they establish; anything that later makes record content
+  _depend on_ rather than one they establish; anything that later makes record content
   mutable in place has to revisit this section.
 - **Orphan sweep** — labels whose record is gone (a delete that raced a sync). Not urgent,
   and not worth a janitor until we see it happen; note it and move on. Orphans are the one
   thing that can still short a reverse-query page (§7), which is why the page-to-exhaustion
   contract survives the index change.
 - **Tombstone sweep** — retracted rows, which accumulate without bound since retraction never
-  hard-deletes. Deliberately *not* needed for latency: `deleted_at` in the reverse index (§4)
+  hard-deletes. Deliberately _not_ needed for latency: `deleted_at` in the reverse index (§4)
   keeps them out of every query's range — measured, not assumed (§3b). It is a storage-cost
   question, not a performance one.
 
@@ -901,15 +902,15 @@ none of the three problems above. Sequenced as step 11 below, after a real consu
 
 All seven open questions from the first draft were settled in review.
 
-| # | Question | Decision |
-|---|---|---|
-| 1 | Naming — two mechanisms, or one? | **One.** `records.label` is removed and the new thing is just *labels*; the `annotations`/`tags` naming problem existed only because of the duplication (§9). |
-| 2 | `read` grant or a new `annotate` level? | **`read` suffices.** Reading a type justifies writes into the app's own namespace on it. Neither a third grant level nor a `labelWrite` manifest flag alongside `metadataWrite` is worth the machinery; `data-roles-and-permissions.md` gets updated instead (§5.2). |
-| 3 | Manifest-declared keys or a runtime counter? | **Manifest**, and **discoverability is the reason** — not consent, which isn't owed for writes into an app's own namespace. That makes cross-app readability of the registry load-bearing rather than incidental (§6). |
-| 4 | `value` in the reverse index on day one? | **Yes.** Filtering is a primary access pattern, and the POC shows what the alternative costs. The full index grew in the second review to `(app_id, key, deleted_at, value, record_id) INCLUDE (record_type)` (§4). |
-| 5 | Do labels reach the SDK? | **Yes** — four methods, with chunking owned by `setLabels` at every size rather than split into a separate bulk call (§7). |
-| 6 | Are the numbers right? | **64 keys per app**, 64-byte keys, 128-byte values, and the redundant per-record cap dropped (§6). Still not derived from a measured workload. |
-| 7 | Cursor pagination from day one? | **Yes**, and the reason is the SDK: retrofitting a cursor into a shipped array-returning method breaks every adopter (§7). |
+| #   | Question                                     | Decision                                                                                                                                                                                                                                                             |
+| --- | -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Naming — two mechanisms, or one?             | **One.** `records.label` is removed and the new thing is just _labels_; the `annotations`/`tags` naming problem existed only because of the duplication (§9).                                                                                                        |
+| 2   | `read` grant or a new `annotate` level?      | **`read` suffices.** Reading a type justifies writes into the app's own namespace on it. Neither a third grant level nor a `labelWrite` manifest flag alongside `metadataWrite` is worth the machinery; `data-roles-and-permissions.md` gets updated instead (§5.2). |
+| 3   | Manifest-declared keys or a runtime counter? | **Manifest**, and **discoverability is the reason** — not consent, which isn't owed for writes into an app's own namespace. That makes cross-app readability of the registry load-bearing rather than incidental (§6).                                               |
+| 4   | `value` in the reverse index on day one?     | **Yes.** Filtering is a primary access pattern, and the POC shows what the alternative costs. The full index grew in the second review to `(app_id, key, deleted_at, value, record_id) INCLUDE (record_type)` (§4).                                                  |
+| 5   | Do labels reach the SDK?                     | **Yes** — four methods, with chunking owned by `setLabels` at every size rather than split into a separate bulk call (§7).                                                                                                                                           |
+| 6   | Are the numbers right?                       | **64 keys per app**, 64-byte keys, 128-byte values, and the redundant per-record cap dropped (§6). Still not derived from a measured workload.                                                                                                                       |
+| 7   | Cursor pagination from day one?              | **Yes**, and the reason is the SDK: retrofitting a cursor into a shipped array-returning method breaks every adopter (§7).                                                                                                                                           |
 
 Four further decisions came out of the same review, recorded above rather than here:
 `parent_id` **stays** (§9a); record+label writes share a request but **not** a transaction
@@ -930,7 +931,7 @@ The gaps, each now owned by a section: undeclared-key rows surviving uninstall a
 edits, with retraction staying legal for them (§10); doc updates given a step of their own
 (§3, §5.2, step 8); labels' place in `system-design.md`'s two-way data classification (§3);
 per-app sync channels dropping inbound labels (§8); and record-byte immutability named as an
-invariant labels *depend on* (§10).
+invariant labels _depend on_ (§10).
 
 **Two of those gaps then turned out to be one index shape.** The first-pass answers — accept
 under-filled reverse pages as the API contract, accept tombstones accumulating in the scanned
@@ -960,7 +961,7 @@ positive filtering (§9) removes the anti-join from the design entirely, so the 
 wouldn't change anything. Noted here so a future reader doesn't mistake the gap for an
 oversight.
 
-This is now the *only* deliberate gap. The reverse index's two DSQL assumptions — `INCLUDE`
+This is now the _only_ deliberate gap. The reverse index's two DSQL assumptions — `INCLUDE`
 acceptance and `IS NULL` as a scan key — were also unmeasured when first written down, but
 they were not left that way: step 0c measured both and both held (§3b), because unlike the
 anti-join their answers would have changed the design (§4).
@@ -979,12 +980,12 @@ and its own tests green, per the CLAUDE.md "fully hooked up" rule.
    claims the metadata row is written "atomically with the records-table row"; `sdk.ts:126-133`
    writes it in a second, separate transaction. Independent of everything below, and worth
    doing first because §4a's design rests on knowing what the existing pattern actually is.
-0b. **Give the local-data-server the cursor it's missing** (§7): accept `cursor`, return
+   0b. **Give the local-data-server the cursor it's missing** (§7): accept `cursor`, return
    `nextCursor`, and drop the `updatedAt desc` sort so the endpoint matches the cloud
    handler and the adapter's `id > cursor` predicate. A pre-existing gap, not label work —
    **its own commit**, and a prerequisite for `findByLabel` paginating identically on both
    servers.
-0c. **Verify the reverse index shape on the POC** (§4), before any of the code below assumes
+   0c. **Verify the reverse index shape on the POC** (§4), before any of the code below assumes
    it. **Done — both answers yes; see §3b.** `reverse-index.ts` + `verify-index.ts` in
    `e2e-aws/src/poc-record-labels/` answer it against a real cluster: DSQL accepts
    `INCLUDE (record_type)` on a regular b-tree, and plans `deleted_at IS NULL` as a **scan
@@ -995,11 +996,11 @@ and its own tests green, per the CLAUDE.md "fully hooked up" rule.
    (§9) — `labelHasValidPrefix` has no successor; the `app_id` column replaces it.
 2. **Both tables' DDL and the manifest schema**, in `dsql-schema-init.ts` (async indexes,
    per-statement, PG GRANTs) and `storage-sqlite/src/schema/bootstrap.ts`:
-   `shared.record_labels` (§4) *and* the `shared.app_label_keys` registry with its
+   `shared.record_labels` (§4) _and_ the `shared.app_label_keys` registry with its
    PUBLIC select grant (§6), plus the manifest field, its validator, and installer
    registration in both `dsql-ddl.ts` and `local/registry.ts`. Then the adapter methods:
    get-by-record-ids, find-by-label (cursor-paginated), upsert, tombstone.
-   *The registry moved here from a late step deliberately* — the write path in step 3 needs
+   _The registry moved here from a late step deliberately_ — the write path in step 3 needs
    it, and deferring it means writing key-cap enforcement twice (a runtime counter, then the
    registry lookup that replaces it).
 3. Write + read endpoints in the local-data-server: grant checks, declared-key rejection,

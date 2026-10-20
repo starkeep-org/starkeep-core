@@ -31,9 +31,7 @@ export async function ensurePulumiPassphrase(opts: {
   const name = `/${opts.stackPrefix}/pulumi/passphrase`;
 
   try {
-    await ssm.send(
-      new GetParameterCommand({ Name: name, WithDecryption: true }),
-    );
+    await ssm.send(new GetParameterCommand({ Name: name, WithDecryption: true }));
     return "already-exists";
   } catch (err) {
     if (!(err instanceof ParameterNotFound)) throw err;

@@ -116,10 +116,17 @@ async function userExists(
 }
 
 /** Add the test admin to both groups. Adding a member again is a no-op. */
-async function joinBothGroups(client: CognitoIdentityProviderClient, userPoolId: string): Promise<void> {
+async function joinBothGroups(
+  client: CognitoIdentityProviderClient,
+  userPoolId: string,
+): Promise<void> {
   for (const group of ["starkeep-admins", "starkeep-users"]) {
     await client.send(
-      new AdminAddUserToGroupCommand({ UserPoolId: userPoolId, Username: TEST_ADMIN_EMAIL, GroupName: group }),
+      new AdminAddUserToGroupCommand({
+        UserPoolId: userPoolId,
+        Username: TEST_ADMIN_EMAIL,
+        GroupName: group,
+      }),
     );
   }
 }

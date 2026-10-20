@@ -47,9 +47,7 @@ async function ensureKey() {
   return signingKey;
 }
 
-export async function mintTestUserToken(
-  over: Record<string, unknown> = {},
-): Promise<string> {
+export async function mintTestUserToken(over: Record<string, unknown> = {}): Promise<string> {
   const key = await ensureKey();
   const header = Buffer.from(JSON.stringify({ alg: "RS256", kid: key.jwk.kid })).toString(
     "base64url",

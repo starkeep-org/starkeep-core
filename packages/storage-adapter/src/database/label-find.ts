@@ -28,12 +28,7 @@
  */
 
 import { decodePageToken } from "./app-page-token.js";
-import type {
-  OrderTerm,
-  ParsedQueryResult,
-  RowQuery,
-  WhereClause,
-} from "./app-query-types.js";
+import type { OrderTerm, ParsedQueryResult, RowQuery, WhereClause } from "./app-query-types.js";
 import { rowToLabel, type LabelRow } from "./label-row.js";
 import { sharedQuerySchema, type SharedQueryTarget } from "./shared-query-schemas.js";
 import type { FindByLabelQuery, FindByLabelResult } from "./types.js";

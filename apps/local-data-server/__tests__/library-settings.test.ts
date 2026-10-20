@@ -24,7 +24,12 @@ let serverA: LocalDataServer;
 let serverB: LocalDataServer;
 let driveA: InstalledApp;
 let driveB: InstalledApp;
-const cloudConfig = () => ({ apiGatewayUrl: cloud.url, pullIntervalMs: 600_000, pushDebounceMs: 50, syncMaxItems: 5 });
+const cloudConfig = () => ({
+  apiGatewayUrl: cloud.url,
+  pullIntervalMs: 600_000,
+  pushDebounceMs: 50,
+  syncMaxItems: 5,
+});
 
 async function syncNow(app: InstalledApp): Promise<{ applied: number; shipped: number }> {
   const res = await app.fetch("/sync/now", { method: "POST" });
@@ -108,7 +113,10 @@ describe("the deployment's settings on a node with a cloud", () => {
 
   it("carry a value set in the cloud to every node, which then stamps with it", async () => {
     cloud.setDeploymentSettings({
-      standIns: { image: { canonicalThreshold: 6000 }, video: { advisoryLongEdges: { bySize: { "2000": 960 } } } },
+      standIns: {
+        image: { canonicalThreshold: 6000 },
+        video: { advisoryLongEdges: { bySize: { "2000": 960 } } },
+      },
     });
     await refresh(serverA);
     await refresh(serverB);
@@ -116,7 +124,10 @@ describe("the deployment's settings on a node with a cloud", () => {
       const view = await settingsOf(server);
       expect(view).toMatchObject({ set: true, knowsLibraryValue: true, problems: [] });
       expect(view.current.image.canonicalThreshold).toBe(6000);
-      expect(view.current.video.advisoryLongEdges).toEqual({ canonical: 1920, bySize: { 2000: 960 } });
+      expect(view.current.video.advisoryLongEdges).toEqual({
+        canonical: 1920,
+        bySize: { 2000: 960 },
+      });
     }
     const { body } = await registerWithBytes(driveB, {
       type: "image/jpeg",
@@ -128,7 +139,9 @@ describe("the deployment's settings on a node with a cloud", () => {
   });
 
   it("leave an original stamped earlier as it was", async () => {
-    const where = encodeURIComponent(JSON.stringify({ original_filename: "before-any-setting.jpg" }));
+    const where = encodeURIComponent(
+      JSON.stringify({ original_filename: "before-any-setting.jpg" }),
+    );
     const res = await driveA.fetch(`/data/records?where=${where}`);
     const [earlier] = ((await res.json()) as { records: Array<Record<string, unknown>> }).records;
     expect(earlier!.canonical_threshold).toBe(4272);
@@ -198,7 +211,11 @@ describe("the deployment's settings on a node with a cloud", () => {
       // Once the route answers, the node knows the value too.
       cloud.failures.deploymentSettings = false;
       await refresh(serverC);
-      expect(await settingsOf(serverC)).toMatchObject({ set: true, knowsLibraryValue: true, problems: [] });
+      expect(await settingsOf(serverC)).toMatchObject({
+        set: true,
+        knowsLibraryValue: true,
+        problems: [],
+      });
     } finally {
       cloud.failures.deploymentSettings = false;
       await serverC.stop();
@@ -228,7 +245,9 @@ describe("the deployment's settings on a node with no cloud", () => {
 
   it("keep a value in this machine's config and stamp with it, keeping what the change left out", async () => {
     expect((await putSettings(solo, { trash: { retentionDays: 90 } })).status).toBe(200);
-    expect((await putSettings(solo, { standIns: { image: { canonicalThreshold: 6000 } } })).status).toBe(200);
+    expect(
+      (await putSettings(solo, { standIns: { image: { canonicalThreshold: 6000 } } })).status,
+    ).toBe(200);
     const view = await settingsOf(solo);
     expect(view).toMatchObject({ set: true, knowsLibraryValue: true });
     expect(view.current.image.canonicalThreshold).toBe(6000);

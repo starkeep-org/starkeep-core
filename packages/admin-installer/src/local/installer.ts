@@ -1,9 +1,6 @@
 import type { RawDatabase } from "@starkeep/storage-adapter";
 import { randomBytes } from "node:crypto";
-import {
-  validateManifest,
-  type AppManifest,
-} from "@starkeep/admin-manifest";
+import { validateManifest, type AppManifest } from "@starkeep/admin-manifest";
 import {
   appRegistryRow,
   clearStepLedger,
@@ -35,7 +32,10 @@ export interface InstallLocalResult {
 }
 
 export class LocalInstallError extends Error {
-  constructor(message: string, readonly cause?: unknown) {
+  constructor(
+    message: string,
+    readonly cause?: unknown,
+  ) {
     super(message);
     this.name = "LocalInstallError";
   }
@@ -146,20 +146,34 @@ export function installLocal(db: RawDatabase, rawManifest: unknown): InstallLoca
     alwaysRun,
   );
 
-  runStep(db, appId, "install", "register_syncable_namespace", done, () => {
-    // Column types travel with the registry row for the same reason they do on
-    // the DSQL side: the query parser validates a filter value against its
-    // column, and it runs in the data server, which never sees a manifest.
-    const declaredTables = syncable.tables.map((t) => appSyncableTableInfo(t.name, t.columns));
-    const tables = syncable.files
-      ? [...declaredTables, FILE_RECORDS_TABLE_INFO]
-      : declaredTables;
-    upsertAppSyncableNamespace(db, appId, tables, syncable.files);
-  }, alwaysRun);
+  runStep(
+    db,
+    appId,
+    "install",
+    "register_syncable_namespace",
+    done,
+    () => {
+      // Column types travel with the registry row for the same reason they do on
+      // the DSQL side: the query parser validates a filter value against its
+      // column, and it runs in the data server, which never sees a manifest.
+      const declaredTables = syncable.tables.map((t) => appSyncableTableInfo(t.name, t.columns));
+      const tables = syncable.files ? [...declaredTables, FILE_RECORDS_TABLE_INFO] : declaredTables;
+      upsertAppSyncableNamespace(db, appId, tables, syncable.files);
+    },
+    alwaysRun,
+  );
 
-  runStep(db, appId, "install", "mark_active", done, () => {
-    setAppStatus(db, appId, "active");
-  }, alwaysRun);
+  runStep(
+    db,
+    appId,
+    "install",
+    "mark_active",
+    done,
+    () => {
+      setAppStatus(db, appId, "active");
+    },
+    alwaysRun,
+  );
 
   return { appId, hmacSecret };
 }

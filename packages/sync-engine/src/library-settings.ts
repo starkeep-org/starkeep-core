@@ -169,7 +169,9 @@ export function createLibrarySettings(options: LibrarySettingsOptions): LibraryS
     try {
       document = await read();
     } catch (err) {
-      problems = [`reading the deployment's settings failed: ${err instanceof Error ? err.message : String(err)}`];
+      problems = [
+        `reading the deployment's settings failed: ${err instanceof Error ? err.message : String(err)}`,
+      ];
       return problems;
     }
     problems = accept(document);
@@ -199,11 +201,16 @@ export function createLibrarySettings(options: LibrarySettingsOptions): LibraryS
     async acquireRetentionWindow() {
       const failed = await load();
       if (failed.length > 0 || loaded === null) {
-        return { known: false, problems: failed.length > 0 ? failed : ["the deployment's settings are unreadable"] };
+        return {
+          known: false,
+          problems: failed.length > 0 ? failed : ["the deployment's settings are unreadable"],
+        };
       }
       return {
         known: true,
-        days: loaded.settings ? retentionDaysFromSettings(loaded.settings) : DEFAULT_TRASH_RETENTION_DAYS,
+        days: loaded.settings
+          ? retentionDaysFromSettings(loaded.settings)
+          : DEFAULT_TRASH_RETENTION_DAYS,
       };
     },
   };

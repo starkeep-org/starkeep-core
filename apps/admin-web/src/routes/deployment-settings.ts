@@ -22,7 +22,11 @@ import {
   type AwsCredentials,
 } from "@starkeep/admin-installer/app-creds";
 import { localDataServerUrl } from "../lib/runtime-config";
-import { managerCredentials, readStarkeepConfig, type StarkeepConfig } from "../lib/manager-credentials";
+import {
+  managerCredentials,
+  readStarkeepConfig,
+  type StarkeepConfig,
+} from "../lib/manager-credentials";
 import type { STSCredentials } from "../lib/cognito-auth";
 
 interface ChangeBody {
@@ -85,7 +89,12 @@ export async function PUT(req: Request): Promise<Response> {
 
   let awsCreds: AwsCredentials;
   try {
-    awsCreds = await managerCredentials(config, credentials, region, "starkeep-deployment-settings");
+    awsCreds = await managerCredentials(
+      config,
+      credentials,
+      region,
+      "starkeep-deployment-settings",
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[api/deployment-settings] Manager hop failed", message);
@@ -94,14 +103,22 @@ export async function PUT(req: Request): Promise<Response> {
 
   let result;
   try {
-    result = await changeDeploymentSettingsParameter({ stackPrefix, change: body.change ?? {}, region, awsCreds });
+    result = await changeDeploymentSettingsParameter({
+      stackPrefix,
+      change: body.change ?? {},
+      region,
+      awsCreds,
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("[api/deployment-settings] write failed", message);
     return Response.json({ error: message }, { status: 500 });
   }
   if (!result.ok) {
-    return Response.json({ error: "the settings are not valid", problems: result.problems }, { status: 422 });
+    return Response.json(
+      { error: "the settings are not valid", problems: result.problems },
+      { status: 422 },
+    );
   }
 
   // This machine reads the new value now rather than within a minute. A

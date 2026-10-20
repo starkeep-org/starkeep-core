@@ -40,24 +40,25 @@ function record(over: Partial<CreateDataRecordInput> & { hash: string }): DataRe
 const PARENT = "01ORIGINAL0000000000000000" as StarkeepId;
 const OTHER_PARENT = "01ORIGINAL0000000000000001" as StarkeepId;
 
-const engines: Array<[string, () => Promise<{ db: DatabaseAdapter; close: () => Promise<void> }>]> = [
+const engines: Array<[string, () => Promise<{ db: DatabaseAdapter; close: () => Promise<void> }>]> =
   [
-    "sqlite",
-    async () => {
-      const db = new SqliteDatabaseAdapter({ path: ":memory:", driver: nodeSqliteDriver });
-      await db.init();
-      return { db, close: () => db.close() };
-    },
-  ],
-  [
-    "mock",
-    async () => {
-      const db = new MockDatabaseAdapter();
-      await db.init();
-      return { db, close: () => db.close() };
-    },
-  ],
-];
+    [
+      "sqlite",
+      async () => {
+        const db = new SqliteDatabaseAdapter({ path: ":memory:", driver: nodeSqliteDriver });
+        await db.init();
+        return { db, close: () => db.close() };
+      },
+    ],
+    [
+      "mock",
+      async () => {
+        const db = new MockDatabaseAdapter();
+        await db.init();
+        return { db, close: () => db.close() };
+      },
+    ],
+  ];
 
 for (const [engine, open] of engines) {
   describe(`stand-in slot index (${engine})`, () => {
@@ -82,8 +83,12 @@ for (const [engine, open] of engines) {
     }
 
     it("refuses a second live canonical stand-in for one original", async () => {
-      await db.put(record({ hash: "a", parentId: PARENT, standInRole: "canonical", fidelity: 4272 }));
-      await rejects(record({ hash: "b", parentId: PARENT, standInRole: "canonical", fidelity: 4272 }));
+      await db.put(
+        record({ hash: "a", parentId: PARENT, standInRole: "canonical", fidelity: 4272 }),
+      );
+      await rejects(
+        record({ hash: "b", parentId: PARENT, standInRole: "canonical", fidelity: 4272 }),
+      );
     });
 
     it("refuses a second live stand-in at one size", async () => {
@@ -94,16 +99,29 @@ for (const [engine, open] of engines) {
     it("keeps different sizes and different originals apart", async () => {
       await db.put(record({ hash: "a", parentId: PARENT, standInRole: "smaller", fidelity: 640 }));
       await db.put(record({ hash: "b", parentId: PARENT, standInRole: "smaller", fidelity: 320 }));
-      await db.put(record({ hash: "c", parentId: OTHER_PARENT, standInRole: "smaller", fidelity: 640 }));
-      await db.put(record({ hash: "d", parentId: PARENT, standInRole: "canonical", fidelity: 4272 }));
-      await db.put(record({ hash: "e", parentId: OTHER_PARENT, standInRole: "canonical", fidelity: 4272 }));
+      await db.put(
+        record({ hash: "c", parentId: OTHER_PARENT, standInRole: "smaller", fidelity: 640 }),
+      );
+      await db.put(
+        record({ hash: "d", parentId: PARENT, standInRole: "canonical", fidelity: 4272 }),
+      );
+      await db.put(
+        record({ hash: "e", parentId: OTHER_PARENT, standInRole: "canonical", fidelity: 4272 }),
+      );
     });
 
     it("lets a tombstone free its slot, through delete and through a tombstoned put", async () => {
-      const first = record({ hash: "a", parentId: PARENT, standInRole: "canonical", fidelity: 4272 });
+      const first = record({
+        hash: "a",
+        parentId: PARENT,
+        standInRole: "canonical",
+        fidelity: 4272,
+      });
       await db.put(first);
       await db.delete(first.id, clock.now());
-      await db.put(record({ hash: "b", parentId: PARENT, standInRole: "canonical", fidelity: 4272 }));
+      await db.put(
+        record({ hash: "b", parentId: PARENT, standInRole: "canonical", fidelity: 4272 }),
+      );
 
       const small = record({ hash: "c", parentId: PARENT, standInRole: "smaller", fidelity: 640 });
       await db.put(small);
@@ -135,8 +153,12 @@ for (const [engine, open] of engines) {
     it("filters on the role and the fidelity", async () => {
       await db.put(record({ hash: "o", type: "image/jpeg", fidelity: 6000 }));
       await db.put(record({ hash: "a", parentId: PARENT, standInRole: "smaller", fidelity: 640 }));
-      await db.put(record({ hash: "b", parentId: PARENT, standInRole: "canonical", fidelity: 4272 }));
-      const standIns = await db.query({ filters: [{ field: "standInRole", operator: "isNotNull" }] });
+      await db.put(
+        record({ hash: "b", parentId: PARENT, standInRole: "canonical", fidelity: 4272 }),
+      );
+      const standIns = await db.query({
+        filters: [{ field: "standInRole", operator: "isNotNull" }],
+      });
       expect(standIns.records.map((r) => r.fidelity).sort()).toEqual([4272, 640]);
       const originals = await db.query({ filters: [{ field: "standInRole", operator: "isNull" }] });
       expect(originals.records.map((r) => r.fidelity)).toEqual([6000]);

@@ -302,7 +302,9 @@ export function deviceWriteRefusal(method: string, subPath: string, body: Buffer
     return touchesPlatform ? refusal : null;
   }
   const key = (parsed as { key?: unknown }).key;
-  return typeof key === "string" && categoryFromSharedObjectKey(key) === PLATFORM_CATEGORY ? refusal : null;
+  return typeof key === "string" && categoryFromSharedObjectKey(key) === PLATFORM_CATEGORY
+    ? refusal
+    : null;
 }
 
 /**
@@ -335,7 +337,8 @@ export function exchangeKeyRefusal(
   for (const entry of body.appSyncableRows ?? []) {
     if (entry.table !== FILE_RECORDS_TABLE) continue;
     for (const key of [entry.row?.["id"], entry.row?.["object_storage_key"], entry.where?.["id"]]) {
-      if (foreign(key)) return `A pushed file row names ${String(key)}, which is not under this user's segment`;
+      if (foreign(key))
+        return `A pushed file row names ${String(key)}, which is not under this user's segment`;
     }
   }
   return null;
@@ -433,17 +436,11 @@ export function validateAppHmac(
   hmacSecret: string,
 ): { ok: true } | { ok: false; status: number; message: string } {
   const headerAppId =
-    headers["x-starkeep-app-id"]
-    ?? headers["X-Starkeep-App-Id"]
-    ?? headers["X-STARKEEP-APP-ID"];
+    headers["x-starkeep-app-id"] ?? headers["X-Starkeep-App-Id"] ?? headers["X-STARKEEP-APP-ID"];
   const headerSig =
-    headers["x-starkeep-app-sig"]
-    ?? headers["X-Starkeep-App-Sig"]
-    ?? headers["X-STARKEEP-APP-SIG"];
+    headers["x-starkeep-app-sig"] ?? headers["X-Starkeep-App-Sig"] ?? headers["X-STARKEEP-APP-SIG"];
   const headerTs =
-    headers["x-starkeep-app-ts"]
-    ?? headers["X-Starkeep-App-Ts"]
-    ?? headers["X-STARKEEP-APP-TS"];
+    headers["x-starkeep-app-ts"] ?? headers["X-Starkeep-App-Ts"] ?? headers["X-STARKEEP-APP-TS"];
   if (!headerAppId || !headerSig || !headerTs) {
     return { ok: false, status: 401, message: "Missing X-Starkeep-App-{Id,Sig,Ts} headers" };
   }
@@ -461,11 +458,19 @@ export function validateAppHmac(
     "utf8",
   );
   const expected = createHmac("sha256", hmacSecret)
-    .update(Buffer.concat([prefix as unknown as Uint8Array, signedBody as unknown as Uint8Array]) as unknown as Uint8Array)
+    .update(
+      Buffer.concat([
+        prefix as unknown as Uint8Array,
+        signedBody as unknown as Uint8Array,
+      ]) as unknown as Uint8Array,
+    )
     .digest("hex");
   if (
-    expected.length !== headerSig.length
-    || !timingSafeEqual(Buffer.from(expected, "utf8") as unknown as Uint8Array, Buffer.from(headerSig, "utf8") as unknown as Uint8Array)
+    expected.length !== headerSig.length ||
+    !timingSafeEqual(
+      Buffer.from(expected, "utf8") as unknown as Uint8Array,
+      Buffer.from(headerSig, "utf8") as unknown as Uint8Array,
+    )
   ) {
     return { ok: false, status: 401, message: "Invalid signature" };
   }
@@ -482,7 +487,11 @@ export function validateAppHmac(
  * which reaches no user's objects: the health check and the S3-event path,
  * which write only database rows.
  */
-async function getAppCreds(appId: string, accountId: string, userId: string | null): Promise<CachedCreds> {
+async function getAppCreds(
+  appId: string,
+  accountId: string,
+  userId: string | null,
+): Promise<CachedCreds> {
   const cacheKey = `${appId}\u0000${userId ?? ""}`;
   const cached = credentialCache.get(cacheKey);
   if (cached && cached.expiresAt - Date.now() > CRED_REFRESH_BUFFER_MS) {
@@ -501,12 +510,14 @@ async function getAppCreds(appId: string, accountId: string, userId: string | nu
   // permits sts:AssumeRole on ${prefix}-app-*, and every per-app role's
   // trust policy lists the CDS role as a principal. No Manager involvement.
   const sts = new STSClient({ region });
-  const appResult = await sts.send(new AssumeRoleCommand({
-    RoleArn: appRoleArn,
-    RoleSessionName: `lambda-app-${appId}-${Date.now()}`,
-    DurationSeconds: 900,
-    ...(userId !== null ? { Tags: [{ Key: SESSION_USER_TAG, Value: userId }] } : {}),
-  }));
+  const appResult = await sts.send(
+    new AssumeRoleCommand({
+      RoleArn: appRoleArn,
+      RoleSessionName: `lambda-app-${appId}-${Date.now()}`,
+      DurationSeconds: 900,
+      ...(userId !== null ? { Tags: [{ Key: SESSION_USER_TAG, Value: userId }] } : {}),
+    }),
+  );
   const ac = appResult.Credentials;
   if (!ac?.AccessKeyId || !ac.SecretAccessKey || !ac.SessionToken || !ac.Expiration) {
     throw new Error(`Failed to assume app role for ${appId}`);
@@ -675,9 +686,7 @@ class AppDsqlClientFactory implements DatabaseClientFactory {
 // app-syncable source all call createClient on the factory makeAdapters
 // returns), so swapping the factory here is sufficient to fake DSQL entirely.
 let databaseClientFactoryOverride: DatabaseClientFactory | null = null;
-export function __setDatabaseClientFactoryForTests(
-  factory: DatabaseClientFactory | null,
-): void {
+export function __setDatabaseClientFactoryForTests(factory: DatabaseClientFactory | null): void {
   databaseClientFactoryOverride = factory;
 }
 
@@ -763,7 +772,11 @@ async function checkAppHealth(appId: string, creds: CachedCreds) {
     await client.end().catch(() => {});
   }
   const storageHealthy = await makeStorage(creds).healthCheck();
-  return { status: dbHealthy && storageHealthy ? "ok" : "degraded", db: dbHealthy, storage: storageHealthy };
+  return {
+    status: dbHealthy && storageHealthy ? "ok" : "degraded",
+    db: dbHealthy,
+    storage: storageHealthy,
+  };
 }
 
 // Per-Lambda-instance nodeId. The HLC clock requires nodeId to be unique
@@ -989,7 +1002,8 @@ export function parseObjectKey(
       /^shared\/([A-Za-z0-9_-]+)\/([a-z0-9_-]+)\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/,
     );
     if (!m) return { ok: false, status: 400, message: "Invalid shared key" };
-    if (m[1] !== subject.userId) return { ok: false, status: 403, message: "Forbidden (another user's key)" };
+    if (m[1] !== subject.userId)
+      return { ok: false, status: 403, message: "Forbidden (another user's key)" };
     const category = m[2]!;
     const allowed =
       mode === "read" ? canReadCategory(grants, category) : canWriteCategory(grants, category);
@@ -1216,13 +1230,21 @@ async function loadLabelsForPage(
 ): Promise<Map<StarkeepId, RecordLabel[]>> {
   if (records.length === 0) return new Map();
   const wanted = labelApps
-    ? new Set(labelApps.split(",").map((s) => s.trim()).filter(Boolean))
+    ? new Set(
+        labelApps
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
+      )
     : null;
   const byId = await db.getLabelsByRecordIds(records.map((r) => r.id));
   if (!wanted) return byId;
   const filtered = new Map<StarkeepId, RecordLabel[]>();
   for (const [id, labels] of byId) {
-    filtered.set(id, labels.filter((l) => wanted.has(l.appId)));
+    filtered.set(
+      id,
+      labels.filter((l) => wanted.has(l.appId)),
+    );
   }
   return filtered;
 }
@@ -1413,7 +1435,9 @@ async function runArchiveTriggers(
   try {
     storage = await platformStorage();
   } catch (err) {
-    console.warn(`[archive] no platform storage for ${triggers.length} original(s): ${(err as Error).message}`);
+    console.warn(
+      `[archive] no platform storage for ${triggers.length} original(s): ${(err as Error).message}`,
+    );
     return;
   }
   const isArchived = async (key: string): Promise<boolean> => {
@@ -1434,7 +1458,9 @@ async function runArchiveTriggers(
       });
       if (action !== "unchanged") console.log(`[archive] ${action} ${trigger.originalId}`);
     } catch (err) {
-      console.warn(`[archive] could not re-decide ${trigger.originalId}: ${(err as Error).message}`);
+      console.warn(
+        `[archive] could not re-decide ${trigger.originalId}: ${(err as Error).message}`,
+      );
     }
   }
 }
@@ -1631,7 +1657,12 @@ async function runSharedQuery(db: DatabaseAdapter, build: () => SharedQueryPlan)
  * metadata-less "other" category, are skipped.
  */
 async function loadMetadataForPage(
-  db: { getMetadataByIds: (category: string, ids: StarkeepId[]) => Promise<Map<StarkeepId, MetadataRow>> },
+  db: {
+    getMetadataByIds: (
+      category: string,
+      ids: StarkeepId[],
+    ) => Promise<Map<StarkeepId, MetadataRow>>;
+  },
   grants: AccessGrants,
   records: DataRecord[],
 ): Promise<Map<StarkeepId, MetadataRow>> {
@@ -1879,16 +1910,14 @@ export async function handleS3Availability(
       }
       const db = await dbFor(userId);
 
-      const expiry =
-        record.glacierEventData?.restoreEventData?.lifecycleRestorationExpiryTime;
+      const expiry = record.glacierEventData?.restoreEventData?.lifecycleRestorationExpiryTime;
       const observation = observationFor({
         kind,
         objectStorageKey,
         observedAtMs,
         ...(record.lifecycleEventData?.transitionEventData?.destinationStorageClass
           ? {
-              storageClass:
-                record.lifecycleEventData.transitionEventData.destinationStorageClass,
+              storageClass: record.lifecycleEventData.transitionEventData.destinationStorageClass,
             }
           : {}),
         ...(expiry ? { restoredUntilMs: Date.parse(expiry) } : {}),
@@ -1961,9 +1990,7 @@ async function ingestInventoryReport(
   // The snapshot's own time, not now. A report generated hours ago must not
   // overwrite an event that happened since, and the newer-wins rule can only
   // apply that if the snapshot time travels with the observations.
-  const snapshotAtMs = manifest.creationTimestamp
-    ? Number(manifest.creationTimestamp)
-    : Date.now();
+  const snapshotAtMs = manifest.creationTimestamp ? Number(manifest.creationTimestamp) : Date.now();
 
   // The column order is declared per-report rather than fixed, so it is read
   // from the manifest instead of assumed. Assuming it is how a schema change
@@ -1991,7 +2018,9 @@ async function ingestInventoryReport(
         // Inventory URL-encodes keys, and ours contain slashes.
         objectStorageKey: decodeURIComponent(rawKey),
         storageClass: cells[classIndex] ?? "STANDARD",
-        ...(tierIndex >= 0 && cells[tierIndex] ? { intelligentTieringAccessTier: cells[tierIndex]! } : {}),
+        ...(tierIndex >= 0 && cells[tierIndex]
+          ? { intelligentTieringAccessTier: cells[tierIndex]! }
+          : {}),
       });
     }
   }
@@ -2114,11 +2143,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // already the role that may write it, and the Lambda's own execution role
     // deliberately has no data-plane access of its own.
     // Untagged: the path writes database rows and touches no object.
-    const creds = await getAppCreds(
-      DRIVE_APP_ID,
-      getAccountId(context.invokedFunctionArn),
-      null,
-    );
+    const creds = await getAppCreds(DRIVE_APP_ID, getAccountId(context.invokedFunctionArn), null);
     // One adapter per user the batch names: an availability row belongs to
     // the user whose key it describes.
     const dbs = new Map<string, Promise<AuroraDsqlDatabaseAdapter>>();
@@ -2172,7 +2197,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     if (method === "GET" && rawPath === AUTH_CONFIG_ROUTE) {
       const pool = devicePoolConfig();
       if (!pool) return clientErr("Device sign-in is not set up on this cloud", 503);
-      return ok({ region: pool.region, userPoolId: pool.userPoolId, deviceClientId: pool.userPoolClientId });
+      return ok({
+        region: pool.region,
+        userPoolId: pool.userPoolId,
+        deviceClientId: pool.userPoolClientId,
+      });
     }
 
     // All other routes require /apps/{appId}/...
@@ -2186,9 +2215,9 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // trust without a signature would let any cross-app caller use another
     // app's role-power simply by changing the URL.
     const bodyBytes = event.body
-      ? (event.isBase64Encoded
+      ? event.isBase64Encoded
         ? Buffer.from(event.body, "base64")
-        : Buffer.from(event.body, "utf8"))
+        : Buffer.from(event.body, "utf8")
       : Buffer.alloc(0);
     const normalizedHeaders: Record<string, string | undefined> = {};
     for (const [key, value] of Object.entries(event.headers ?? {})) {
@@ -2266,10 +2295,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         // outside costs an afternoon. Everything here is already known to the
         // caller; the secret and the signature are not logged.
         console.warn(
-          `[auth] app HMAC rejected: ${hmacCheck.message} `
-          + `appId=${appId} method=${method} subPath=${subPath} `
-          + `bodyBytes=${bodyBytes.length} `
-          + `tsSkewMs=${Date.now() - Number(normalizedHeaders["x-starkeep-app-ts"])}`,
+          `[auth] app HMAC rejected: ${hmacCheck.message} ` +
+            `appId=${appId} method=${method} subPath=${subPath} ` +
+            `bodyBytes=${bodyBytes.length} ` +
+            `tsSkewMs=${Date.now() - Number(normalizedHeaders["x-starkeep-app-ts"])}`,
         );
         return clientErr(hmacCheck.message, hmacCheck.status);
       }
@@ -2352,7 +2381,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // Every database read and write below is this user's alone: the adapter,
     // the app-syncable source and the byte watermark all compile through a
     // compiler scoped to the subject's user.
-    const { db, storage, clientFactory, auroraEndpoint, region } = makeAdapters(appId, creds, subject.userId);
+    const { db, storage, clientFactory, auroraEndpoint, region } = makeAdapters(
+      appId,
+      creds,
+      subject.userId,
+    );
     // Storage as Starkeep Drive, for the platform's own acts on shared blobs —
     // archiving. Built only when an event needs it, and reused within the
     // request.
@@ -2360,7 +2393,9 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     const platformStorage = (): Promise<ObjectStorageAdapter> =>
       appId === DRIVE_APP_ID
         ? Promise.resolve(storage)
-        : (platformStoragePromise ??= getAppCreds(DRIVE_APP_ID, accountId, subject.userId).then(makeStorage));
+        : (platformStoragePromise ??= getAppCreds(DRIVE_APP_ID, accountId, subject.userId).then(
+            makeStorage,
+          ));
 
     await db.init();
     toClose.push(() => db.close());
@@ -2396,16 +2431,17 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // Memoized, so a request that does both reads once.
     let librarySettingsRead: Promise<RetentionWindow> | null = null;
     const readLibrarySettings = (): Promise<RetentionWindow> =>
-      (librarySettingsRead ??= cloudLibrarySettings
-        .acquireRetentionWindow()
-        .then((window) => {
-          // A stamping path keeps the last value and carries on, so the reason
-          // is logged here rather than left to the one caller that acts on it.
-          if (!window.known) {
-            console.warn("[settings] the library's settings are unreadable:", window.problems.join("; "));
-          }
-          return window;
-        }));
+      (librarySettingsRead ??= cloudLibrarySettings.acquireRetentionWindow().then((window) => {
+        // A stamping path keeps the last value and carries on, so the reason
+        // is logged here rather than left to the one caller that acts on it.
+        if (!window.known) {
+          console.warn(
+            "[settings] the library's settings are unreadable:",
+            window.problems.join("; "),
+          );
+        }
+        return window;
+      }));
 
     const query = event.queryStringParameters ?? {};
 
@@ -2413,12 +2449,15 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // per-app channel, not Drive) and /app-data/*. Build at most once; both
     // call sites share the same DSQL connection. The source's pg client gets
     // closed via toClose in the finally below.
-    let appSyncableSource:
-      | Awaited<ReturnType<typeof buildAppSyncableSource>>
-      | null = null;
+    let appSyncableSource: Awaited<ReturnType<typeof buildAppSyncableSource>> | null = null;
     async function getAppSyncableSource() {
       if (!appSyncableSource) {
-        appSyncableSource = await buildAppSyncableSource(clientFactory, auroraEndpoint, region, subject.userId);
+        appSyncableSource = await buildAppSyncableSource(
+          clientFactory,
+          auroraEndpoint,
+          region,
+          subject.userId,
+        );
         toClose.push(() => appSyncableSource!.client.end());
       }
       return appSyncableSource;
@@ -2582,14 +2621,13 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         const labelsById = plan.includeLabels
           ? await loadLabelsForPage(db, labelled, labelApps)
           : null;
-        const candidatesById =
-          variantLabel
-            ? await signCandidatesForPage(
-                subject,
-                grants,
-                await loadVariantCandidatesForPage(db, labelled, variantLabel),
-              )
-            : null;
+        const candidatesById = variantLabel
+          ? await signCandidatesForPage(
+              subject,
+              grants,
+              await loadVariantCandidatesForPage(db, labelled, variantLabel),
+            )
+          : null;
         const availabilityById = await loadAvailabilityForPage(db, labelled);
         const standInsById = await standInSummariesForPage(
           db,
@@ -2602,10 +2640,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           records: labelled.map((r) =>
             recordToResponse(
               r,
-              metaById ? metaById.get(r.id) ?? null : undefined,
-              labelsById ? labelsById.get(r.id) ?? [] : undefined,
+              metaById ? (metaById.get(r.id) ?? null) : undefined,
+              labelsById ? (labelsById.get(r.id) ?? []) : undefined,
               availabilityById.get(r.id) ?? DEFAULT_AVAILABILITY,
-              candidatesById ? candidatesById.get(r.id) ?? [] : undefined,
+              candidatesById ? (candidatesById.get(r.id) ?? []) : undefined,
               standInsById.get(r.id),
             ),
           ),
@@ -2627,14 +2665,13 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const labelsById = plan.includeLabels
         ? await loadLabelsForPage(db, records, labelApps)
         : null;
-      const candidatesById =
-        variantLabel
-          ? await signCandidatesForPage(
-              subject,
-              grants,
-              await loadVariantCandidatesForPage(db, records, variantLabel),
-            )
-          : null;
+      const candidatesById = variantLabel
+        ? await signCandidatesForPage(
+            subject,
+            grants,
+            await loadVariantCandidatesForPage(db, records, variantLabel),
+          )
+        : null;
       const availabilityById = await loadAvailabilityForPage(db, records);
       const standInsById = await standInSummariesForPage(
         db,
@@ -2647,10 +2684,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         records: records.map((r) =>
           recordToResponse(
             r,
-            metadataById ? metadataById.get(r.id) ?? null : undefined,
-            labelsById ? labelsById.get(r.id) ?? [] : undefined,
+            metadataById ? (metadataById.get(r.id) ?? null) : undefined,
+            labelsById ? (labelsById.get(r.id) ?? []) : undefined,
             availabilityById.get(r.id) ?? DEFAULT_AVAILABILITY,
-            candidatesById ? candidatesById.get(r.id) ?? [] : undefined,
+            candidatesById ? (candidatesById.get(r.id) ?? []) : undefined,
             standInsById.get(r.id),
           ),
         ),
@@ -2701,9 +2738,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // what makes squatting another app's namespace unrepresentable rather
     // than merely rejected.
     if (method === "POST" && subPath === "/data/labels") {
-      const rawBody = event.isBase64Encoded && event.body
-        ? Buffer.from(event.body, "base64").toString("utf8")
-        : (event.body ?? "{}");
+      const rawBody =
+        event.isBase64Encoded && event.body
+          ? Buffer.from(event.body, "base64").toString("utf8")
+          : (event.body ?? "{}");
       const body = JSON.parse(rawBody) as {
         labels?: Array<{ recordId?: string; key?: string; value?: string }>;
       };
@@ -2729,7 +2767,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       await runArchiveTriggers(
         db,
         platformStorage,
-        archiveTriggersFor([], plan.writes.map((w) => ({ ...w, deletedAt: null }))),
+        archiveTriggersFor(
+          [],
+          plan.writes.map((w) => ({ ...w, deletedAt: null })),
+        ),
       );
       return ok({ written: plan.writes.length });
     }
@@ -2744,9 +2785,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // a plain add no longer overwrites — "set the count to 4" written as an add
     // leaves `count=3` beside it.
     if (method === "POST" && subPath === "/data/labels/values") {
-      const rawBody = event.isBase64Encoded && event.body
-        ? Buffer.from(event.body, "base64").toString("utf8")
-        : (event.body ?? "{}");
+      const rawBody =
+        event.isBase64Encoded && event.body
+          ? Buffer.from(event.body, "base64").toString("utf8")
+          : (event.body ?? "{}");
       const body = JSON.parse(rawBody) as {
         labels?: Array<{ recordId?: string; key?: string; values?: unknown }>;
       };
@@ -2763,10 +2805,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             e.values.some((v) => typeof v !== "string"),
         )
       ) {
-        return clientErr(
-          "each entry needs a recordId, a key, and a values array of strings",
-          400,
-        );
+        return clientErr("each entry needs a recordId, a key, and a values array of strings", 400);
       }
       const normalized = entries.map((e) => ({
         recordId: e.recordId as StarkeepId,
@@ -2794,9 +2833,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         grantClient,
         grants,
         appId,
-        sets.flatMap((e) =>
-          e.values.map((value) => ({ recordId: e.recordId, key: e.key, value })),
-        ),
+        sets.flatMap((e) => e.values.map((value) => ({ recordId: e.recordId, key: e.key, value }))),
       );
       if (!plan.ok) return clientErr(plan.error, plan.status);
 
@@ -2844,9 +2881,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // An omitted `value` retracts **every** value of that key on that record;
     // `value: ""` retracts the bare flag alone.
     if (method === "POST" && subPath === "/data/labels/retract") {
-      const rawBody = event.isBase64Encoded && event.body
-        ? Buffer.from(event.body, "base64").toString("utf8")
-        : (event.body ?? "{}");
+      const rawBody =
+        event.isBase64Encoded && event.body
+          ? Buffer.from(event.body, "base64").toString("utf8")
+          : (event.body ?? "{}");
       const body = JSON.parse(rawBody) as {
         labels?: Array<{ recordId?: string; key?: string; value?: string }>;
       };
@@ -2870,7 +2908,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       await runArchiveTriggers(
         db,
         platformStorage,
-        archiveTriggersFor([], plan.writes.map((r) => ({ ...r, deletedAt: hlc }))),
+        archiveTriggersFor(
+          [],
+          plan.writes.map((r) => ({ ...r, deletedAt: hlc })),
+        ),
       );
       return ok({ retracted: plan.writes.length });
     }
@@ -2884,9 +2925,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // The caller PUTs the bytes to S3 via a presigned URL first (see POST
     // /files/presign), then registers the record by content-addressed key.
     if (method === "POST" && subPath === "/data/records") {
-      const rawBody = event.isBase64Encoded && event.body
-        ? Buffer.from(event.body, "base64").toString("utf8")
-        : (event.body ?? "{}");
+      const rawBody =
+        event.isBase64Encoded && event.body
+          ? Buffer.from(event.body, "base64").toString("utf8")
+          : (event.body ?? "{}");
       const body = JSON.parse(rawBody) as {
         type?: string;
         fileName?: string;
@@ -2915,7 +2957,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (!/^[a-f0-9]{64}$/.test(body.contentHash)) {
         return clientErr("contentHash must be a 64-character lowercase hex sha256", 400);
       }
-      if (typeof body.sizeBytes !== "number" || !Number.isFinite(body.sizeBytes) || body.sizeBytes < 0) {
+      if (
+        typeof body.sizeBytes !== "number" ||
+        !Number.isFinite(body.sizeBytes) ||
+        body.sizeBytes < 0
+      ) {
         return clientErr("sizeBytes is required and must be a non-negative number", 400);
       }
       // Optional inline metadata, checked **before** anything is written so a
@@ -3230,11 +3276,13 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const fileCategory = typeCategory(typeId);
       if (!canWriteCategory(grants, fileCategory)) return clientErr("Forbidden", 403);
       const headers = event.headers ?? {};
-      const contentTypeHeader = headers["content-type"] ?? headers["Content-Type"] ?? "application/octet-stream";
+      const contentTypeHeader =
+        headers["content-type"] ?? headers["Content-Type"] ?? "application/octet-stream";
       const mimeType = contentTypeHeader.split(";")[0]!.trim();
-      const fileBuffer = event.isBase64Encoded && event.body
-        ? Buffer.from(event.body, "base64")
-        : Buffer.from(event.body ?? "", "binary");
+      const fileBuffer =
+        event.isBase64Encoded && event.body
+          ? Buffer.from(event.body, "base64")
+          : Buffer.from(event.body ?? "", "binary");
       if (fileBuffer.length === 0) return clientErr("Request body must not be empty", 400);
       if (fileBuffer.length > 20_000_000) return clientErr("File too large (20 MB limit)", 413);
       const hex = createHash("sha256").update(fileBuffer).digest("hex");
@@ -3256,9 +3304,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // Body: { key, contentType? }. The local-data-server's HttpObjectStorageAdapter
     // uploads directly to S3 with the returned URL, bypassing API Gateway size limits.
     if (method === "POST" && subPath === "/files/presign") {
-      const rawBody = event.isBase64Encoded && event.body
-        ? Buffer.from(event.body, "base64").toString("utf8")
-        : (event.body ?? "{}");
+      const rawBody =
+        event.isBase64Encoded && event.body
+          ? Buffer.from(event.body, "base64").toString("utf8")
+          : (event.body ?? "{}");
       const body = JSON.parse(rawBody) as {
         key?: string;
         type?: string;
@@ -3270,7 +3319,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // the hash, so a caller may name the type and hash and let the broker
       // build it. An app then never needs to know which user it acts for.
       if (!body.key && body.type && body.contentHash) {
-        if (!isSha256Hex(body.contentHash)) return clientErr("contentHash must be a lowercase hex SHA-256", 400);
+        if (!isSha256Hex(body.contentHash))
+          return clientErr("contentHash must be a lowercase hex SHA-256", 400);
         body.key = dataRecordObjectKey(subject.userId, body.type, body.contentHash);
       }
       if (!body.key) return clientErr("key, or type and contentHash, is required", 400);
@@ -3415,9 +3465,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // local server; an arriving fidelity may complete an archiving condition.
     const fidelityMatch = subPath.match(/^\/data\/records\/([^/]+)\/fidelity$/);
     if (fidelityMatch && method === "POST") {
-      const rawBody = event.isBase64Encoded && event.body
-        ? Buffer.from(event.body, "base64").toString("utf8")
-        : (event.body ?? "{}");
+      const rawBody =
+        event.isBase64Encoded && event.body
+          ? Buffer.from(event.body, "base64").toString("utf8")
+          : (event.body ?? "{}");
       const body = JSON.parse(rawBody) as { fidelity?: unknown };
       const plan = await planFidelityReport(
         db,
@@ -3426,7 +3477,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         (type) => canRead(grants, type) && canWriteCategory(grants, typeCategory(type)),
       );
       if (!plan.ok) return ok(plan.body, plan.status);
-      if (plan.write !== null && plan.record.canonicalThreshold === null) await readLibrarySettings();
+      if (plan.write !== null && plan.record.canonicalThreshold === null)
+        await readLibrarySettings();
       const record =
         plan.write === null
           ? plan.record
@@ -3451,10 +3503,14 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     const metadataWriteMatch = subPath.match(/^\/data\/records\/([^/]+)\/metadata$/);
     if (metadataWriteMatch && method === "POST") {
       const recordId = decodeURIComponent(metadataWriteMatch[1]!) as StarkeepId;
-      const rawBody = event.isBase64Encoded && event.body
-        ? Buffer.from(event.body, "base64").toString("utf8")
-        : (event.body ?? "{}");
-      const { typeId, metadata } = JSON.parse(rawBody) as { typeId?: string; metadata?: Record<string, unknown> };
+      const rawBody =
+        event.isBase64Encoded && event.body
+          ? Buffer.from(event.body, "base64").toString("utf8")
+          : (event.body ?? "{}");
+      const { typeId, metadata } = JSON.parse(rawBody) as {
+        typeId?: string;
+        metadata?: Record<string, unknown>;
+      };
       if (!typeId) return clientErr("typeId is required", 400);
       if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
         return clientErr("metadata must be an object", 400);
@@ -3545,9 +3601,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     if (metadataQueryMatch && method === "GET") {
       const category = decodeURIComponent(metadataQueryMatch[1]!);
       if (!isCategoryId(category)) return clientErr(`"${category}" is not a category`, 400);
-      return runSharedQuery(db, () =>
-        planMetadataQuery(category, grants, query),
-      );
+      return runSharedQuery(db, () => planMetadataQuery(category, grants, query));
     }
 
     // GET /apps/{appId}/data/labels — the query grammar over
@@ -3573,9 +3627,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // ids are silently omitted from the response instead of failing the
     // whole batch.
     if (subPath === "/data/records/file-urls" && method === "POST") {
-      const rawBody = event.isBase64Encoded && event.body
-        ? Buffer.from(event.body, "base64").toString("utf8")
-        : (event.body ?? "{}");
+      const rawBody =
+        event.isBase64Encoded && event.body
+          ? Buffer.from(event.body, "base64").toString("utf8")
+          : (event.body ?? "{}");
       const body = JSON.parse(rawBody) as { ids?: unknown; expiresIn?: unknown };
       if (
         !Array.isArray(body.ids) ||
@@ -3614,7 +3669,12 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
               // Through the pre-sign revalidation chokepoint. A key whose
               // category the caller can't read (a route/data mismatch) is
               // silently omitted, matching this batch route's per-id semantics.
-              const signed = await signSharedCloudFrontUrl(subject, key, grants, requestedExpiresIn);
+              const signed = await signSharedCloudFrontUrl(
+                subject,
+                key,
+                grants,
+                requestedExpiresIn,
+              );
               if (!signed.ok) return;
               url = signed.url;
             } else {
@@ -3676,12 +3736,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       }
 
       const tier = body.tier === "Bulk" ? "Bulk" : "Standard";
-      const estimate = estimateRestore(
-        record.sizeBytes,
-        1,
-        tier,
-        RESTORED_COPY_RETENTION_DAYS,
-      );
+      const estimate = estimateRestore(record.sizeBytes, 1, tier, RESTORED_COPY_RETENTION_DAYS);
       if (body.confirm !== true) {
         return ok({ estimate, availability: current, confirmRequired: true });
       }
@@ -3816,7 +3871,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           ? outcome.original
           : await db.get(size.recordId as StarkeepId);
       if (!served || !served.objectStorageKey) {
-        return ok({ error: "NotFound", detail: "the record that answers this size has no file" }, 404);
+        return ok(
+          { error: "NotFound", detail: "the record that answers this size has no file" },
+          404,
+        );
       }
       // A self-canonical original can be the answer, and an original can be
       // archived; a stand-in never is. Refused the same way a file-url read
@@ -3830,12 +3888,18 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         Math.max(parseInt(query["expiresIn"] ?? "3600", 10) || 3600, 60),
         VARIANT_URL_TTL_SECONDS,
       );
-      const signed = await signSharedCloudFrontUrl(subject, served.objectStorageKey, grants, expiresIn);
+      const signed = await signSharedCloudFrontUrl(
+        subject,
+        served.objectStorageKey,
+        grants,
+        expiresIn,
+      );
       if (!signed.ok) return clientErr(signed.message, signed.status);
       return ok({
         record_id: served.id,
         type: served.type,
-        mime_type: served.mimeType ?? STAND_IN_MIME_TYPES[served.type] ?? "application/octet-stream",
+        mime_type:
+          served.mimeType ?? STAND_IN_MIME_TYPES[served.type] ?? "application/octet-stream",
         fidelity: size.fidelity,
         role: size.role,
         size_bytes: served.sizeBytes,
@@ -3866,10 +3930,22 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (key.startsWith("shared/")) {
         const signed = await signSharedCloudFrontUrl(subject, key, grants, expiresIn);
         if (!signed.ok) return clientErr(signed.message, signed.status);
-        return ok({ url: signed.url, source: "remote", mimeType: record.mimeType, sizeBytes: record.sizeBytes, expiresIn });
+        return ok({
+          url: signed.url,
+          source: "remote",
+          mimeType: record.mimeType,
+          sizeBytes: record.sizeBytes,
+          expiresIn,
+        });
       }
       const url = await storage.getSignedUrl!(key, { expiresIn });
-      return ok({ url, source: "remote", mimeType: record.mimeType, sizeBytes: record.sizeBytes, expiresIn });
+      return ok({
+        url,
+        source: "remote",
+        mimeType: record.mimeType,
+        sizeBytes: record.sizeBytes,
+        expiresIn,
+      });
     }
 
     // GET|PUT|DELETE /apps/{appId}/data/records/:id
@@ -3897,8 +3973,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         return ok({
           record: recordToResponse(
             record,
-            detailMeta ? detailMeta.get(record.id) ?? null : undefined,
-            detailLabels ? detailLabels.get(record.id) ?? [] : undefined,
+            detailMeta ? (detailMeta.get(record.id) ?? null) : undefined,
+            detailLabels ? (detailLabels.get(record.id) ?? []) : undefined,
             detailAvailability.get(record.id) ?? DEFAULT_AVAILABILITY,
             undefined,
             detailStandIns.get(record.id),
@@ -3912,7 +3988,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         // out of scope; the PUT endpoint accepts only originalFilename and
         // parentId for now.
         const body = event.body
-          ? (JSON.parse(event.body) as { originalFilename?: string | null; parentId?: string | null })
+          ? (JSON.parse(event.body) as {
+              originalFilename?: string | null;
+              parentId?: string | null;
+            })
           : null;
         if (!body) return clientErr("body is required", 400);
         // Read-modify-write: `version` is derived from the row we read, so the
@@ -3984,18 +4063,20 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         const table = decodeURIComponent(dbMatch[1]!);
         try {
           if (method === "POST") {
-            const raw = event.isBase64Encoded && event.body
-              ? Buffer.from(event.body, "base64").toString("utf8")
-              : (event.body ?? "{}");
+            const raw =
+              event.isBase64Encoded && event.body
+                ? Buffer.from(event.body, "base64").toString("utf8")
+                : (event.body ?? "{}");
             const body = JSON.parse(raw) as { row?: Record<string, unknown> };
             if (!body.row) return clientErr("row is required", 400);
             await view.insertRow(table, body.row);
             return ok({ ok: true });
           }
           if (method === "PATCH") {
-            const raw = event.isBase64Encoded && event.body
-              ? Buffer.from(event.body, "base64").toString("utf8")
-              : (event.body ?? "{}");
+            const raw =
+              event.isBase64Encoded && event.body
+                ? Buffer.from(event.body, "base64").toString("utf8")
+                : (event.body ?? "{}");
             const body = JSON.parse(raw) as {
               where?: Record<string, unknown>;
               patch?: Record<string, unknown>;
@@ -4007,9 +4088,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             return ok({ changes });
           }
           if (method === "DELETE") {
-            const raw = event.isBase64Encoded && event.body
-              ? Buffer.from(event.body, "base64").toString("utf8")
-              : (event.body ?? "{}");
+            const raw =
+              event.isBase64Encoded && event.body
+                ? Buffer.from(event.body, "base64").toString("utf8")
+                : (event.body ?? "{}");
             const body = JSON.parse(raw) as { where?: Record<string, unknown> };
             if (!body.where) return clientErr("where is required", 400);
             const changes = await view.deleteRow(table, body.where);
@@ -4043,10 +4125,15 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // server-side from appId + subKey so the client never sees the scheme.
       if (subPath === "/app-data/files/presign" && method === "POST") {
         try {
-          const raw = event.isBase64Encoded && event.body
-            ? Buffer.from(event.body, "base64").toString("utf8")
-            : (event.body ?? "{}");
-          const body = JSON.parse(raw) as { subKey?: string; contentType?: string; contentHash?: string };
+          const raw =
+            event.isBase64Encoded && event.body
+              ? Buffer.from(event.body, "base64").toString("utf8")
+              : (event.body ?? "{}");
+          const body = JSON.parse(raw) as {
+            subKey?: string;
+            contentType?: string;
+            contentHash?: string;
+          };
           if (!body.subKey) return clientErr("subKey is required", 400);
           // statFile enforces filesEnabled + the per-app key prefix; we only
           // use it here to surface a clear manifest error before signing.
@@ -4080,9 +4167,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (fileRecordMatch && method === "POST") {
         const subKey = decodeURIComponent(fileRecordMatch[1]!);
         try {
-          const raw = event.isBase64Encoded && event.body
-            ? Buffer.from(event.body, "base64").toString("utf8")
-            : (event.body ?? "{}");
+          const raw =
+            event.isBase64Encoded && event.body
+              ? Buffer.from(event.body, "base64").toString("utf8")
+              : (event.body ?? "{}");
           const body = JSON.parse(raw) as {
             contentHash?: string;
             mimeType?: string;
@@ -4124,9 +4212,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // inside a partial result would make it unfindable.
       if (subPath === "/app-data/file-urls" && method === "POST") {
         try {
-          const raw = event.isBase64Encoded && event.body
-            ? Buffer.from(event.body, "base64").toString("utf8")
-            : (event.body ?? "{}");
+          const raw =
+            event.isBase64Encoded && event.body
+              ? Buffer.from(event.body, "base64").toString("utf8")
+              : (event.body ?? "{}");
           const body = JSON.parse(raw) as { subKeys?: unknown; expiresIn?: unknown };
           if (
             !Array.isArray(body.subKeys) ||
@@ -4149,9 +4238,12 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           for (const subKey of new Set(body.subKeys as string[])) {
             const stat = await view.statFile(subKey);
             if (!stat) continue;
-            urls[subKey] = await storage.getSignedUrl(appSyncableObjectKey(appId, subject.userId, subKey), {
-              expiresIn,
-            });
+            urls[subKey] = await storage.getSignedUrl(
+              appSyncableObjectKey(appId, subject.userId, subKey),
+              {
+                expiresIn,
+              },
+            );
           }
           return ok({ urls, expiresIn });
         } catch (err) {
@@ -4175,9 +4267,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             const stat = await view.statFile(subKey);
             if (!stat) return clientErr("File not found", 404);
             const requested = parseInt(query["expiresIn"] ?? "3600", 10);
-            const expiresIn = clampPresignExpiresIn(
-              Number.isFinite(requested) ? requested : 3600,
-            );
+            const expiresIn = clampPresignExpiresIn(Number.isFinite(requested) ? requested : 3600);
             const objectKey = appSyncableObjectKey(appId, subject.userId, subKey);
             const url = await storage.getSignedUrl(objectKey, { expiresIn });
             return ok({ url, expiresIn });
@@ -4200,9 +4290,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // identity; PG GRANTs gate which types this channel can write. No
     // originAppId-grouping (deprecated under the exchange protocol).
     if (method === "POST" && subPath === "/sync/exchange") {
-      const rawBody = event.isBase64Encoded && event.body
-        ? Buffer.from(event.body, "base64").toString("utf8")
-        : (event.body ?? "{}");
+      const rawBody =
+        event.isBase64Encoded && event.body
+          ? Buffer.from(event.body, "base64").toString("utf8")
+          : (event.body ?? "{}");
       // Signed, but not therefore well-formed. The budgets in this body reach
       // a `LIMIT ?` and the digest width reaches `substr(updated_at, 1, N)`,
       // so a peer on an older build or a field that drifted type used to come
@@ -4262,8 +4353,17 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           // stamped under a fresh cloud clock, so this exchange's reply
           // carries the stamp back.
           onApplied: async ({ records, labels }) => {
-            const stamped = await stampUnstampedOriginals(db, records, cloudLibrarySettings.standards(), clock);
-            await runArchiveTriggers(db, async () => storage, archiveTriggersFor([...records, ...stamped], labels));
+            const stamped = await stampUnstampedOriginals(
+              db,
+              records,
+              cloudLibrarySettings.standards(),
+              clock,
+            );
+            await runArchiveTriggers(
+              db,
+              async () => storage,
+              archiveTriggersFor([...records, ...stamped], labels),
+            );
           },
         });
       } else {
@@ -4277,8 +4377,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         // on permission failures.
         const scopedNamespaces = {
           get: (id: string) => (id === appId ? source.namespaces.get(id) : null),
-          list: () =>
-            source.namespaces.list().filter((ns) => ns.appId === appId),
+          list: () => source.namespaces.list().filter((ns) => ns.appId === appId),
         };
         transport = createInProcessSyncTransport({
           databaseAdapter: db,

@@ -119,7 +119,10 @@ export async function freeUpSpaceOn(
  * passed through it. One existence check per record in the stand-in
  * categories — a pass a person starts, not one that runs on a timer.
  */
-async function eligible(deps: FreeUpSpaceDeps, scope: FreeUpSpaceRequest["scope"]): Promise<Candidate[]> {
+async function eligible(
+  deps: FreeUpSpaceDeps,
+  scope: FreeUpSpaceRequest["scope"],
+): Promise<Candidate[]> {
   // Only a file a stand-in can replace is ever removable, so only types with
   // stand-in standards are worth enumerating.
   const types = TYPES.map((t) => t.id).filter((id) => standardsFor(id, deps.standards) !== null);
@@ -244,7 +247,11 @@ async function addStandInClauses(
         ? await databaseAdapter.get(record.parentId)
         : null;
   if (!original || original.deletedAt || !isStandInOriginal(original)) {
-    return { ok: false, reason: "record-missing", detail: "the original this file belongs to is gone" };
+    return {
+      ok: false,
+      reason: "record-missing",
+      detail: "the original this file belongs to is gone",
+    };
   }
 
   toProve.set(original.id, original);

@@ -21,11 +21,11 @@ is the bulk of this plan.
 ## Trust model decision (already made)
 
 **Style B:** each cloud-installed app has its own per-app credential.
-That credential identifies the *app*, not any end user. The photos app's
+That credential identifies the _app_, not any end user. The photos app's
 Lambda fetches it at startup and signs every outbound call to the cloud
 data server with it. The cloud data server verifies the signature.
 
-We do *not* forward the end-user's JWT down to the data server. Apps are
+We do _not_ forward the end-user's JWT down to the data server. Apps are
 the trust principals at the data plane; end-user identity is the app's
 business.
 
@@ -66,6 +66,7 @@ Look for the install path that exercises `iam.ts` and the per-app role
 trust policy; the secret creation goes alongside.
 
 **IAM scoping:**
+
 - Per-app role gets `secretsmanager:GetSecretValue` on its own secret
   only (`Resource: arn:...:secret:${stackPrefix}/app-creds/${appId}-*`).
 - Cloud-data-server Lambda role gets read on `${stackPrefix}/app-creds/*`
@@ -81,20 +82,20 @@ teardown handles non-CFN resources, the same pattern applies here.
 Two changes to `cloud-data-server/src/api-handler.ts`:
 
 a. **Fetch the expected secret for the path's appId.** Add a cached
-   loader (per warm-Lambda-instance, TTL ~5 min) keyed by `appId` that
-   reads from Secrets Manager via the CDS Lambda's role. Cache shape
-   mirrors `credentialCache` already in the file (line 75).
+loader (per warm-Lambda-instance, TTL ~5 min) keyed by `appId` that
+reads from Secrets Manager via the CDS Lambda's role. Cache shape
+mirrors `credentialCache` already in the file (line 75).
 
 b. **HMAC verification before any per-app work.** Add `validateAppHmac`
-   inline, before the `getAppCreds(appId, ...)` call at handler line
-   ~387. Reuse the exact wire format `signedFetch` uses
-   (`packages/app-client/src/sign.ts`): inputs are `appId` and raw body
-   bytes; HMAC-SHA256 over `${appId}:` ++ body; header pair
-   `X-Starkeep-App-Id` + `X-Starkeep-App-Sig`. For GET/HEAD the body is
-   the empty string (also in sign.ts).
+inline, before the `getAppCreds(appId, ...)` call at handler line
+~387. Reuse the exact wire format `signedFetch` uses
+(`packages/app-client/src/sign.ts`): inputs are `appId` and raw body
+bytes; HMAC-SHA256 over `${appId}:` ++ body; header pair
+`X-Starkeep-App-Id` + `X-Starkeep-App-Sig`. For GET/HEAD the body is
+the empty string (also in sign.ts).
 
-   On failure return 401. The header's `X-Starkeep-App-Id` must match
-   the appId parsed from the URL path; reject if not.
+On failure return 401. The header's `X-Starkeep-App-Id` must match
+the appId parsed from the URL path; reject if not.
 
 Apply the verifier to **all** `/apps/{appId}/...` routes, including
 the pre-existing `/data/*` and `/sync/exchange`. They've been operating
@@ -109,21 +110,21 @@ Two changes in `packages/app-client/`:
 
 a. **`credentials.ts` — cloud mode.** Add an env-driven branch:
 
-   - If `STARKEEP_APP_CLIENT_MODE=cloud`:
-     - Read `STARKEEP_CLOUD_DATA_BASE` (e.g.
-       `https://abc123.execute-api.us-east-1.amazonaws.com`).
-     - Read the secret from Secrets Manager using the app's own IAM
-       role (the Lambda exec role for the cloud-served app), name
-       `${STACK_PREFIX}/app-creds/${appId}`. Cache per process.
-     - Return `{ appId, hmacSecret, dataServerUrl:
-       \`${base}/apps/${appId}\` }`.
-   - Else (local): existing filesystem path unchanged.
+- If `STARKEEP_APP_CLIENT_MODE=cloud`:
+  - Read `STARKEEP_CLOUD_DATA_BASE` (e.g.
+    `https://abc123.execute-api.us-east-1.amazonaws.com`).
+  - Read the secret from Secrets Manager using the app's own IAM
+    role (the Lambda exec role for the cloud-served app), name
+    `${STACK_PREFIX}/app-creds/${appId}`. Cache per process.
+  - Return `{ appId, hmacSecret, dataServerUrl:
+\`${base}/apps/${appId}\` }`.
+- Else (local): existing filesystem path unchanged.
 
-   New runtime dep: `@aws-sdk/client-secrets-manager` (only loaded
-   under cloud mode — guard the import).
+New runtime dep: `@aws-sdk/client-secrets-manager` (only loaded
+under cloud mode — guard the import).
 
 b. **`sign.ts` — no change needed.** The HMAC handshake is the same in
-   both modes. `signedFetch` keeps working.
+both modes. `signedFetch` keeps working.
 
 Captions route stays unchanged.
 
@@ -139,7 +140,7 @@ Two paths — pick one as part of step 2:
   per-app credentials locally (they live in the same
   `~/.starkeep/app-creds/${appId}.json` files), so it can sign with the
   same secret the cloud verifier expects. Cleanest end-state.
-- **Keep both verifiers temporarily.** Accept either a valid HMAC *or*
+- **Keep both verifiers temporarily.** Accept either a valid HMAC _or_
   a valid Bearer JWT during a transition. Simpler to ship, leaves
   cleanup debt.
 
@@ -165,7 +166,7 @@ the supervisor and the cloud handler will agree.
 1. Step 1 (installer + Secrets Manager). Verify by hand that an
    install creates a readable secret with the right IAM grants.
 2. Step 3b first (no, sign.ts unchanged) — skip.
-3. Step 3a (`credentials.ts` cloud mode), so a cloud Lambda *can*
+3. Step 3a (`credentials.ts` cloud mode), so a cloud Lambda _can_
    sign calls, even though nothing is verifying yet.
 4. Step 2 (verifier in CDS), including the sync supervisor HMAC
    migration.

@@ -177,13 +177,20 @@ export function isCanonicalTimestamp(value: unknown): value is string {
  */
 export function pgColumnType(t: LogicalColumnType): string {
   switch (t) {
-    case "integer": return "integer";
-    case "bigint": return "bigint";
-    case "real": return "double precision";
-    case "text": return "text";
-    case "blob": return "bytea";
-    case "timestamp": return "timestamp";
-    case "boolean": return "boolean";
+    case "integer":
+      return "integer";
+    case "bigint":
+      return "bigint";
+    case "real":
+      return "double precision";
+    case "text":
+      return "text";
+    case "blob":
+      return "bytea";
+    case "timestamp":
+      return "timestamp";
+    case "boolean":
+      return "boolean";
   }
 }
 
@@ -191,13 +198,20 @@ export function pgColumnType(t: LogicalColumnType): string {
  *  a boolean type, so both ride the affinity that already holds their values. */
 export function sqliteColumnType(t: LogicalColumnType): string {
   switch (t) {
-    case "integer": return "INTEGER";
-    case "bigint": return "INTEGER";
-    case "real": return "REAL";
-    case "text": return "TEXT";
-    case "blob": return "BLOB";
-    case "timestamp": return "TEXT";
-    case "boolean": return "INTEGER";
+    case "integer":
+      return "INTEGER";
+    case "bigint":
+      return "INTEGER";
+    case "real":
+      return "REAL";
+    case "text":
+      return "TEXT";
+    case "blob":
+      return "BLOB";
+    case "timestamp":
+      return "TEXT";
+    case "boolean":
+      return "INTEGER";
   }
 }
 
@@ -366,18 +380,58 @@ const MODEL3D_METADATA_COLUMNS: CoreTypeMetadataColumn[] = [
 ];
 
 export const CATEGORIES: readonly CategoryDef[] = [
-  { id: "image", description: "Raster and vector still images. Bytes in object storage; metadata holds dimensions, capture time, EXIF, orientation.", metadataColumns: IMAGE_METADATA_COLUMNS },
-  { id: "video", description: "Moving-picture containers.", metadataColumns: VIDEO_METADATA_COLUMNS },
+  {
+    id: "image",
+    description:
+      "Raster and vector still images. Bytes in object storage; metadata holds dimensions, capture time, EXIF, orientation.",
+    metadataColumns: IMAGE_METADATA_COLUMNS,
+  },
+  {
+    id: "video",
+    description: "Moving-picture containers.",
+    metadataColumns: VIDEO_METADATA_COLUMNS,
+  },
   { id: "audio", description: "Sound-only containers.", metadataColumns: AUDIO_METADATA_COLUMNS },
-  { id: "document", description: "Office-suite and structured documents meant for human reading (incl. markdown, html, spreadsheets).", metadataColumns: DOCUMENT_METADATA_COLUMNS },
-  { id: "text", description: "Plain-text formats: prose, config, structured serialization.", metadataColumns: TEXT_METADATA_COLUMNS },
-  { id: "code", description: "Programming-language source files.", metadataColumns: CODE_METADATA_COLUMNS },
+  {
+    id: "document",
+    description:
+      "Office-suite and structured documents meant for human reading (incl. markdown, html, spreadsheets).",
+    metadataColumns: DOCUMENT_METADATA_COLUMNS,
+  },
+  {
+    id: "text",
+    description: "Plain-text formats: prose, config, structured serialization.",
+    metadataColumns: TEXT_METADATA_COLUMNS,
+  },
+  {
+    id: "code",
+    description: "Programming-language source files.",
+    metadataColumns: CODE_METADATA_COLUMNS,
+  },
   { id: "font", description: "Typeface files.", metadataColumns: FONT_METADATA_COLUMNS },
   { id: "archive", description: "Compressed bundles.", metadataColumns: ARCHIVE_METADATA_COLUMNS },
-  { id: "data", description: "Tabular / columnar / embedded-DB data files.", metadataColumns: DATA_METADATA_COLUMNS },
-  { id: "model3d", description: "3D meshes and scenes.", metadataColumns: MODEL3D_METADATA_COLUMNS },
-  { id: "starkeep", description: "The platform's own files, such as the library's settings. Drive-only; no metadata table; no installable-app grants; no file extension maps here.", metadataColumns: [] },
-  { id: "other", description: "Terminal catch-all for unmapped or extension-less files. Drive-only; no metadata table; no installable-app grants.", metadataColumns: [] },
+  {
+    id: "data",
+    description: "Tabular / columnar / embedded-DB data files.",
+    metadataColumns: DATA_METADATA_COLUMNS,
+  },
+  {
+    id: "model3d",
+    description: "3D meshes and scenes.",
+    metadataColumns: MODEL3D_METADATA_COLUMNS,
+  },
+  {
+    id: "starkeep",
+    description:
+      "The platform's own files, such as the library's settings. Drive-only; no metadata table; no installable-app grants; no file extension maps here.",
+    metadataColumns: [],
+  },
+  {
+    id: "other",
+    description:
+      "Terminal catch-all for unmapped or extension-less files. Drive-only; no metadata table; no installable-app grants.",
+    metadataColumns: [],
+  },
 ];
 
 /**
@@ -619,7 +673,11 @@ export const SETTINGS_TYPE_ID = "starkeep/settings";
  * category.
  */
 export const TYPES: readonly StarkeepTypeDef[] = [
-  ...TYPE_SPECS.map((s) => ({ id: `${s.category}/${s.format}`, category: s.category, format: s.format })),
+  ...TYPE_SPECS.map((s) => ({
+    id: `${s.category}/${s.format}`,
+    category: s.category,
+    format: s.format,
+  })),
   { id: SETTINGS_TYPE_ID, category: "starkeep" as Category, format: "settings" },
   { id: OTHER_TYPE_ID, category: "other" as Category, format: "other" },
 ];
@@ -648,7 +706,8 @@ export const CATEGORY_IDS: readonly Category[] = CATEGORIES.map((c) => c.id);
  * Drive-only `starkeep` and `other`. Drive's all-access (`fileAccessAll`)
  * covers both, via its `shared/*` IAM ceiling.
  */
-export const APP_GRANTABLE_CATEGORIES: readonly Category[] = CATEGORY_IDS.filter(isGrantableCategory);
+export const APP_GRANTABLE_CATEGORIES: readonly Category[] =
+  CATEGORY_IDS.filter(isGrantableCategory);
 
 /** True if `id` is a registered canonical Starkeep type. */
 export function isKnownType(id: string): boolean {

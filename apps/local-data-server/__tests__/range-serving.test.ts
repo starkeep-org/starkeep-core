@@ -63,8 +63,7 @@ afterAll(async () => {
   await server.stop();
 });
 
-const get = (range?: string) =>
-  fetch(fileUrl, range ? { headers: { Range: range } } : undefined);
+const get = (range?: string) => fetch(fileUrl, range ? { headers: { Range: range } } : undefined);
 
 describe("serving bytes without a range", () => {
   it("returns the whole object and advertises that ranges are possible", async () => {

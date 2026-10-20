@@ -93,12 +93,7 @@ export interface ProbeReport {
 }
 
 /** Paths under an app's mount that the broker owns and no app may claim. */
-const DATA_MOUNT_PROBES = [
-  "/data/records",
-  "/files/probe",
-  "/sync/exchange",
-  "/app-data/db/probe",
-];
+const DATA_MOUNT_PROBES = ["/data/records", "/files/probe", "/sync/exchange", "/app-data/db/probe"];
 
 async function probe(url: string, fetchImpl: typeof fetch): Promise<ProbeResult> {
   try {
@@ -277,7 +272,7 @@ export function formatProbeReport(report: ProbeReport): string {
   if (report.trailingSlashPaths.some((r) => isRefusal(r.status) && !warned.has(r.url))) {
     lines.push("");
     lines.push(
-      "  A path marked \"refused in this spelling only\" answers without the trailing\n" +
+      '  A path marked "refused in this spelling only" answers without the trailing\n' +
         "  slash. The route table holds one spelling per path and the gateway refuses\n" +
         "  to register the other, so only the app root is canonicalized in front of it.\n" +
         "  A browser navigating to one of these still reaches sign-in.",

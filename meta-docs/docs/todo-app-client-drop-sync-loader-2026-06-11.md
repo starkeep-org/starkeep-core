@@ -16,7 +16,7 @@ been migrated to the async loader.
 **The sync form is not useful in practice.** Every existing caller is
 inside an `async` Next.js route handler, so `await`-ing the loader
 costs nothing functionally. There is no caller today that genuinely
-*needs* synchronous credential resolution.
+_needs_ synchronous credential resolution.
 
 ## Fix shape
 

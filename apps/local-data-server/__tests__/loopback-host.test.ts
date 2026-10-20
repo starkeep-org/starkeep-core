@@ -11,13 +11,24 @@ import { hostnameOf, isLoopbackHost } from "../loopback-host.js";
 
 describe("isLoopbackHost", () => {
   it("accepts this machine's loopback names, with or without a port", () => {
-    for (const host of ["localhost", "localhost:4000", "127.0.0.1:4000", "[::1]:4000", "LOCALHOST:4000"]) {
+    for (const host of [
+      "localhost",
+      "localhost:4000",
+      "127.0.0.1:4000",
+      "[::1]:4000",
+      "LOCALHOST:4000",
+    ]) {
       expect(isLoopbackHost(host), host).toBe(true);
     }
   });
 
   it("refuses any other name, including one that starts like a loopback name", () => {
-    for (const host of ["attacker.example:4000", "localhost.attacker.example", "127.0.0.1.nip.io:4000", "192.168.1.5:4000"]) {
+    for (const host of [
+      "attacker.example:4000",
+      "localhost.attacker.example",
+      "127.0.0.1.nip.io:4000",
+      "192.168.1.5:4000",
+    ]) {
       expect(isLoopbackHost(host), host).toBe(false);
     }
   });
@@ -46,10 +57,13 @@ describe("the server's Host check", () => {
   /** A GET with a chosen Host header, which `fetch` will not send. */
   function getWithHost(path: string, host: string): Promise<number> {
     return new Promise((resolve, reject) => {
-      const req = request({ host: "127.0.0.1", port: server.port, path, headers: { Host: host } }, (res) => {
-        res.resume();
-        resolve(res.statusCode ?? 0);
-      });
+      const req = request(
+        { host: "127.0.0.1", port: server.port, path, headers: { Host: host } },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        },
+      );
       req.on("error", reject);
       req.end();
     });

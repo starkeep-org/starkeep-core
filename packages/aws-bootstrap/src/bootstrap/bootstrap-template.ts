@@ -36,19 +36,11 @@ export const MAX_STACK_PREFIX_LENGTH = 16;
  *   2. \${StackPrefix}-manager-role   — pure-delegation role for install/uninstall
  *   3. Permissions boundary managed policy for Manager-minted per-app roles
  */
-export function generateBootstrapTemplate(
-  input: GenerateBootstrapTemplateInput = {},
-): string {
+export function generateBootstrapTemplate(input: GenerateBootstrapTemplateInput = {}): string {
   const stackPrefix = input.stackPrefix ?? "starkeep";
 
-  const adminAppPolicyYaml = renderStatementsYaml(
-    adminAppPolicyStatements(stackPrefix),
-    14,
-  );
-  const managerPolicyYaml = renderStatementsYaml(
-    managerPolicyStatements(stackPrefix),
-    14,
-  );
+  const adminAppPolicyYaml = renderStatementsYaml(adminAppPolicyStatements(stackPrefix), 14);
+  const managerPolicyYaml = renderStatementsYaml(managerPolicyStatements(stackPrefix), 14);
   const boundaryPolicyYaml = renderStatementsYaml(
     appPermissionsBoundaryStatements(stackPrefix),
     10,

@@ -154,10 +154,7 @@ async function build(options: {
   const localObjectStorage = new MockObjectStorageAdapter();
   await databaseAdapter.init();
   await localObjectStorage.init();
-  const localDb = registryDb([
-    { appId: DRIVE_APP_ID },
-    ...options.apps,
-  ]);
+  const localDb = registryDb([{ appId: DRIVE_APP_ID }, ...options.apps]);
   const listInstalledApps = (): AppRegistryEntry[] =>
     (options.installed ? options.installed() : options.apps).map((a) => ({
       appId: a.appId,
@@ -281,18 +278,17 @@ describe("rescan() dropping an app during its drain", () => {
     let installed = [{ appId: "aaa-app" }, { appId: "bbb-app" }];
     try {
       supervisor = await build({
-        apps: [
-          { appId: "aaa-app" },
-          { appId: "bbb-app" },
-        ],
+        apps: [{ appId: "aaa-app" }, { appId: "bbb-app" }],
         installed: () => installed,
         exchangeIntervalMs: 5,
         cloudUrl: `http://127.0.0.1:${port}`,
       });
       supervisor.start();
       await new Promise((r) => setTimeout(r, 80));
-      expect(forApp("bbb-app"), "the dropped app must be busy for this to mean anything")
-        .toBeGreaterThan(0);
+      expect(
+        forApp("bbb-app"),
+        "the dropped app must be busy for this to mean anything",
+      ).toBeGreaterThan(0);
 
       // Uninstall, the way a registry-change handler does it.
       installed = [{ appId: "aaa-app" }];
@@ -338,12 +334,22 @@ describe("the credential on outbound sync", () => {
    * be correct while nothing calls it.
    */
   async function captureRequests() {
-    const seen: Array<{ method: string; url: string; headers: Record<string, string | string[] | undefined>; body: Buffer }> = [];
+    const seen: Array<{
+      method: string;
+      url: string;
+      headers: Record<string, string | string[] | undefined>;
+      body: Buffer;
+    }> = [];
     const server = createServer((req, res) => {
       const chunks: Buffer[] = [];
       req.on("data", (c: Buffer) => chunks.push(c));
       req.on("end", () => {
-        seen.push({ method: req.method ?? "GET", url: req.url ?? "/", headers: { ...req.headers }, body: Buffer.concat(chunks) });
+        seen.push({
+          method: req.method ?? "GET",
+          url: req.url ?? "/",
+          headers: { ...req.headers },
+          body: Buffer.concat(chunks),
+        });
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "nope" }));
       });
@@ -383,5 +389,4 @@ describe("the credential on outbound sync", () => {
       await cap.close();
     }
   }, 20_000);
-
 });

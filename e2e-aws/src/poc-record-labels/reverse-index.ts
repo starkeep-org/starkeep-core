@@ -200,9 +200,7 @@ export async function seedChurn(client: pg.Client): Promise<{ live: number; dead
   const cols =
     "record_id, app_id, key, value, record_type, created_at, updated_at, node_id, deleted_at";
 
-  const existing = await client.query(
-    `SELECT count(*)::int AS n FROM ${SCHEMA}.labels_final`,
-  );
+  const existing = await client.query(`SELECT count(*)::int AS n FROM ${SCHEMA}.labels_final`);
   if ((existing.rows[0] as { n: number }).n > 0) {
     console.log("  · churn data already seeded — skipping");
   } else {
@@ -228,22 +226,44 @@ export async function seedChurn(client: pg.Client): Promise<{ live: number; dead
       // conveniently clustered at the front of the table's physical order.
       for (let i = 0; i < TOMBSTONE_COUNT; i++) {
         batch.push([
-          rid(i), "alpha", "churned", null, "image/jpeg", hlc(i), hlc(i), "nodeA", hlc(i),
+          rid(i),
+          "alpha",
+          "churned",
+          null,
+          "image/jpeg",
+          hlc(i),
+          hlc(i),
+          "nodeA",
+          hlc(i),
         ]);
         if (batch.length >= BATCH) await flush();
       }
       for (let i = 0; i < LIVE_COUNT; i++) {
         batch.push([
-          rid(TOMBSTONE_COUNT + i), "alpha", "churned", null, "image/jpeg",
-          hlc(i), hlc(i), "nodeA", null,
+          rid(TOMBSTONE_COUNT + i),
+          "alpha",
+          "churned",
+          null,
+          "image/jpeg",
+          hlc(i),
+          hlc(i),
+          "nodeA",
+          null,
         ]);
         if (batch.length >= BATCH) await flush();
       }
       // A valued key too, so the `value`-pinned seek is measurable on real data.
       for (let i = 0; i < LIVE_COUNT; i++) {
         batch.push([
-          rid(TOMBSTONE_COUNT + i), "alpha", "quality", i % 2 === 0 ? "high" : "low",
-          "image/jpeg", hlc(i), hlc(i), "nodeA", null,
+          rid(TOMBSTONE_COUNT + i),
+          "alpha",
+          "quality",
+          i % 2 === 0 ? "high" : "low",
+          "image/jpeg",
+          hlc(i),
+          hlc(i),
+          "nodeA",
+          null,
         ]);
         if (batch.length >= BATCH) await flush();
       }

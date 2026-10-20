@@ -68,7 +68,7 @@ function regionFromUserPoolId(userPoolId: string): string {
   if (parts.length < 2 || !parts[0]) {
     throw new Error(
       `userPoolId "${userPoolId}" is not in the expected format <region>_<id>. ` +
-      `Region is derived from userPoolId, so this prevents the uninstaller from running.`,
+        `Region is derived from userPoolId, so this prevents the uninstaller from running.`,
     );
   }
   return parts[0];
@@ -252,14 +252,14 @@ if (config.accountId) {
 const managerRoleArn =
   config.managerRoleArn ?? `arn:aws:iam::${accountId}:role/${stackPrefix}-manager-role`;
 const permissionsBoundaryArn =
-  config.permissionsBoundaryArn
-  ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-app-permissions-boundary`;
+  config.permissionsBoundaryArn ??
+  `arn:aws:iam::${accountId}:policy/${stackPrefix}-app-permissions-boundary`;
 const foundationalPermissionsBoundaryArn =
-  config.foundationalPermissionsBoundaryArn
-  ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-foundational-permissions-boundary`;
+  config.foundationalPermissionsBoundaryArn ??
+  `arn:aws:iam::${accountId}:policy/${stackPrefix}-foundational-permissions-boundary`;
 const userDataOwnerPermissionsBoundaryArn =
-  config.userDataOwnerPermissionsBoundaryArn
-  ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-user-data-owner-permissions-boundary`;
+  config.userDataOwnerPermissionsBoundaryArn ??
+  `arn:aws:iam::${accountId}:policy/${stackPrefix}-user-data-owner-permissions-boundary`;
 const pulumiStateBucket =
   config.pulumiStateBucket ?? `${stackPrefix}-pulumi-state-${accountId}-${region}`;
 
@@ -285,7 +285,13 @@ if (!nonInteractive) {
 // install-ddl/install-infra roles. Skipped if the previous install never
 // recorded its outputs (e.g. it failed before reaching this step), since we
 // can't issue the per-app uninstall without the foundational infra coordinates.
-if (config.apiGatewayId && config.authorizerId && config.s3Bucket && config.auroraEndpoint && config.apiGatewayExecutionArn) {
+if (
+  config.apiGatewayId &&
+  config.authorizerId &&
+  config.s3Bucket &&
+  config.auroraEndpoint &&
+  config.apiGatewayExecutionArn
+) {
   const installDdlRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-ddl-role`;
   const installInfraRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-infra-role`;
   const artifactsBucket = `${stackPrefix}-artifacts-${accountId}-${region}`;

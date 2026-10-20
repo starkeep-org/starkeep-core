@@ -28,11 +28,7 @@
 import { readFileSync } from "node:fs";
 import { parseTfTrace, type CapturedCall } from "./parse-tf-trace";
 import { parseSdkTrace, looksLikeSdkTrace } from "./parse-sdk-trace";
-import {
-  simulateCalls,
-  simulateExpectedCalls,
-  principalMatchesRole,
-} from "./simulate";
+import { simulateCalls, simulateExpectedCalls, principalMatchesRole } from "./simulate";
 import { buildContext, listContexts } from "./contexts";
 
 function usage(): never {
@@ -144,7 +140,9 @@ async function main() {
       // Surface these so they aren't silently dropped, but don't fail.
       console.log(`\n  Simulator-engine errors (not policy denials):`);
       for (const o of expectedEngineErrors) {
-        console.log(`    ${o.expected.action}  (${o.expected.resource})  — ${o.errorMessage ?? ""}`);
+        console.log(
+          `    ${o.expected.action}  (${o.expected.resource})  — ${o.errorMessage ?? ""}`,
+        );
       }
     }
   }

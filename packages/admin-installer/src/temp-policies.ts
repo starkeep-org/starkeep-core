@@ -324,10 +324,7 @@ export function buildTempUninstallInfraPolicy(
       {
         Sid: "TempUninstallInfraLogs",
         Effect: "Allow",
-        Action: [
-          "logs:DeleteLogGroup",
-          "logs:ListTagsForResource",
-        ],
+        Action: ["logs:DeleteLogGroup", "logs:ListTagsForResource"],
         Resource: `arn:aws:logs:*:${accountId}:log-group:/aws/lambda/${stackPrefix}-app-${appId}-*`,
       },
       {
@@ -361,11 +358,7 @@ export function buildTempUninstallInfraPolicy(
         // policy above), not `/v2/*`.
         Sid: "TempUninstallInfraApiGatewayLegacy",
         Effect: "Allow",
-        Action: [
-          "apigateway:GET",
-          "apigateway:DELETE",
-          "apigateway:UntagResource",
-        ],
+        Action: ["apigateway:GET", "apigateway:DELETE", "apigateway:UntagResource"],
         Resource: [
           "arn:aws:apigateway:*::/apis",
           "arn:aws:apigateway:*::/apis/*",
@@ -505,9 +498,7 @@ export function buildTempInstallCloudDataServerPolicy(
           "s3:PutInventoryConfiguration",
           "s3:ListBucket",
         ],
-        Resource: [
-          `arn:aws:s3:::${stackPrefix}-files-*`,
-        ],
+        Resource: [`arn:aws:s3:::${stackPrefix}-files-*`],
       },
       {
         Sid: "TempInstallS3FilesObjects",
@@ -894,9 +885,7 @@ export function buildRuntimePolicy(
     s3SharedResources.push(`arn:aws:s3:::${stackPrefix}-files-*/shared/${user}/*`);
   } else {
     for (const category of categories) {
-      s3SharedResources.push(
-        `arn:aws:s3:::${stackPrefix}-files-*/shared/${user}/${category}/*`,
-      );
+      s3SharedResources.push(`arn:aws:s3:::${stackPrefix}-files-*/shared/${user}/${category}/*`);
     }
   }
   const noUser = { Null: { "aws:PrincipalTag/starkeep:userId": "true" } };

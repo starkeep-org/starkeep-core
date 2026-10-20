@@ -5,11 +5,7 @@ import {
   type DriveRecord,
 } from "../lib/drive-client";
 
-export type SyncStatus =
-  | "local-only"
-  | "synced"
-  | "modified-locally"
-  | "cloud-only";
+export type SyncStatus = "local-only" | "synced" | "modified-locally" | "cloud-only";
 
 export interface MergedRecord extends Partial<DriveRecord> {
   id: string;
@@ -69,9 +65,6 @@ export async function GET(req: Request) {
     });
   } catch (err) {
     const status = err instanceof DriveNotInstalledError ? 503 : 502;
-    return Response.json(
-      { error: err instanceof Error ? err.message : String(err) },
-      { status },
-    );
+    return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status });
   }
 }

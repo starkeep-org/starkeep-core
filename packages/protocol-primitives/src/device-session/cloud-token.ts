@@ -111,9 +111,9 @@ export function createCloudTokenSource(options: CloudTokenSourceOptions): CloudT
         return null;
       }
       if (
-        cached
-        && cached.refreshToken === stored.refreshToken
-        && cached.expiresAtMs - now() > REFRESH_MARGIN_MS
+        cached &&
+        cached.refreshToken === stored.refreshToken &&
+        cached.expiresAtMs - now() > REFRESH_MARGIN_MS
       ) {
         return cached.idToken;
       }

@@ -21,8 +21,6 @@
 export const ACTION_OCCASIONAL =
   "bg-green-100 text-green-900 hover:bg-green-200 [a]:hover:bg-green-200 dark:bg-green-900 dark:text-green-100 dark:hover:bg-green-800";
 
-export const ACTION_START =
-  "bg-green-600 text-white hover:bg-green-700 [a]:hover:bg-green-700";
+export const ACTION_START = "bg-green-600 text-white hover:bg-green-700 [a]:hover:bg-green-700";
 
-export const ACTION_OPEN =
-  "bg-blue-600 text-white hover:bg-blue-700 [a]:hover:bg-blue-700";
+export const ACTION_OPEN = "bg-blue-600 text-white hover:bg-blue-700 [a]:hover:bg-blue-700";

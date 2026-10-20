@@ -6,7 +6,15 @@
  * re-drive.
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, statSync, existsSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  statSync,
+  existsSync,
+} from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -210,9 +218,7 @@ describe("install", () => {
       config,
       registryCredentials,
     });
-    expect(result.appRoleArn).toBe(
-      "arn:aws:iam::111122223333:role/starkeep-app-photos-role",
-    );
+    expect(result.appRoleArn).toBe("arn:aws:iam::111122223333:role/starkeep-app-photos-role");
     expect(result.receipt).toEqual({ outputs: {} });
     expect(doneSteps("install")).toEqual(INSTALL_STEPS_WITH_COMPUTE);
     // every done is preceded by its pending
@@ -408,7 +414,13 @@ describe("install", () => {
     seedLocalRegistry("starkeep-drive", "b".repeat(64));
     await installApp({
       appId: "starkeep-drive",
-      manifest: { ...photosManifest, infraRequirements: { ...photosManifest.infraRequirements, compute: { enabled: false, handlers: [] } } },
+      manifest: {
+        ...photosManifest,
+        infraRequirements: {
+          ...photosManifest.infraRequirements,
+          compute: { enabled: false, handlers: [] },
+        },
+      },
       version: "0.1.0",
       config,
       registryCredentials,
@@ -498,9 +510,10 @@ describe("HMAC secret (registry → SSM) provisioning", () => {
     expect(vi.mocked(putAppCredsParameter)).toHaveBeenCalledWith(
       expect.objectContaining({ hmacSecret: PHOTOS_REGISTRY_SECRET }),
     );
-    const written = JSON.parse(
-      readFileSync(join(dataDir, "app-creds", "photos.json"), "utf8"),
-    ) as { hmacSecret: string; dataServerUrl: string };
+    const written = JSON.parse(readFileSync(join(dataDir, "app-creds", "photos.json"), "utf8")) as {
+      hmacSecret: string;
+      dataServerUrl: string;
+    };
     expect(written.hmacSecret).toBe(PHOTOS_REGISTRY_SECRET);
     expect(written.dataServerUrl).toBe("http://127.0.0.1:9999");
   });

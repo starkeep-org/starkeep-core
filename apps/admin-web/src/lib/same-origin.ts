@@ -94,5 +94,8 @@ export function fromOwnPage(req: Request): boolean {
 
 /** The answer a route gives a request {@link fromOwnPage} refuses. */
 export function crossSiteRefusal(): Response {
-  return Response.json({ error: "This request must come from admin-web's own page." }, { status: 403 });
+  return Response.json(
+    { error: "This request must come from admin-web's own page." },
+    { status: 403 },
+  );
 }

@@ -36,9 +36,7 @@ describe("S1 — presence × operation (SR)", () => {
 
     // The cloud-originated record reaches local.
     expect(await w.recordExists("local", preexistingCloudId)).toBe(true);
-    expect(await w.blobExists("local", w.objectKey(preexistingCloudId))).toBe(
-      true,
-    );
+    expect(await w.blobExists("local", w.objectKey(preexistingCloudId))).toBe(true);
 
     // The local-originated new record reaches cloud.
     const localId = w.subjectIds[1]!;
@@ -64,9 +62,7 @@ describe("S1 — presence × operation (SR)", () => {
     await w.exchange({ rounds: 1 });
 
     expect(await w.recordExists("cloud", preexistingLocalId)).toBe(true);
-    expect(await w.blobExists("cloud", w.objectKey(preexistingLocalId))).toBe(
-      true,
-    );
+    expect(await w.blobExists("cloud", w.objectKey(preexistingLocalId))).toBe(true);
     const cloudId = w.subjectIds[1]!;
     expect(await w.recordExists("local", cloudId)).toBe(true);
   });

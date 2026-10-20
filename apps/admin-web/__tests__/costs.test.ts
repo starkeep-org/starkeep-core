@@ -11,11 +11,7 @@
  */
 import { gzipSync } from "node:zlib";
 import { mockClient } from "aws-sdk-client-mock";
-import {
-  GetObjectCommand,
-  ListObjectsV2Command,
-  S3Client,
-} from "@aws-sdk/client-s3";
+import { GetObjectCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { jsonRequest, makeDataDir } from "./helpers";
@@ -64,7 +60,10 @@ function bodyOf(bytes: Uint8Array) {
 }
 
 function textBody(text: string) {
-  return { transformToString: async () => text, transformToByteArray: async () => new Uint8Array() };
+  return {
+    transformToString: async () => text,
+    transformToByteArray: async () => new Uint8Array(),
+  };
 }
 
 function stubReport(rows: Array<[string, string, string]>): void {

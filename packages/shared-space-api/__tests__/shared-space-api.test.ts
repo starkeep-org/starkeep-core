@@ -1,9 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createHLCClock } from "@starkeep/protocol-primitives";
-import {
-  MockDatabaseAdapter,
-  MockObjectStorageAdapter,
-} from "@starkeep/storage-adapter";
+import { MockDatabaseAdapter, MockObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { createApiRouter } from "../src/api-router.js";
 import { createSharedSpaceApi } from "../src/shared-space-api.js";
 import { parseQueryParams } from "../src/helpers/query-params.js";
@@ -24,24 +21,14 @@ describe("createApiRouter", () => {
 
     router.register(endpoint);
 
-    const resolved = router.resolve(
-      "@starkeep/notes",
-      "v1",
-      "albums/list",
-      "GET",
-    );
+    const resolved = router.resolve("@starkeep/notes", "v1", "albums/list", "GET");
     expect(resolved).toBe(endpoint);
   });
 
   it("should return undefined for unregistered route", () => {
     const router = createApiRouter();
 
-    const resolved = router.resolve(
-      "@starkeep/notes",
-      "v1",
-      "nonexistent",
-      "GET",
-    );
+    const resolved = router.resolve("@starkeep/notes", "v1", "nonexistent", "GET");
     expect(resolved).toBeUndefined();
   });
 
@@ -156,9 +143,7 @@ describe("createSharedSpaceApi", () => {
       subject: { subjectType: "user", subjectId: "u1" },
     };
 
-    await expect(api.handleRequest(request)).rejects.toThrow(
-      RouteNotFoundError,
-    );
+    await expect(api.handleRequest(request)).rejects.toThrow(RouteNotFoundError);
   });
 
   it("should return 400 for invalid route format", async () => {

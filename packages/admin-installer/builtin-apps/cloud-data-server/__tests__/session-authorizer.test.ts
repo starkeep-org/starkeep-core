@@ -89,9 +89,7 @@ beforeEach(async () => {
   process.env.AWS_REGION = REGION;
   process.env.STARKEEP_USER_POOL_ID = POOL;
   process.env.STARKEEP_USER_POOL_CLIENT_ID = CLIENT;
-  fetchMock = vi.fn(
-    async () => new Response(JSON.stringify({ keys: [key.jwk] }), { status: 200 }),
-  );
+  fetchMock = vi.fn(async () => new Response(JSON.stringify({ keys: [key.jwk] }), { status: 200 }));
   vi.stubGlobal("fetch", fetchMock);
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -148,7 +146,10 @@ describe("refuses", () => {
     // cloud app session must not accept it, so the device client's tokens
     // never reach an app's compute as a session.
     process.env.STARKEEP_DEVICE_USER_POOL_CLIENT_ID = "device-client";
-    const token = await signJwt(key, claims({ aud: "device-client", "cognito:groups": ["starkeep-users"] }));
+    const token = await signJwt(
+      key,
+      claims({ aud: "device-client", "cognito:groups": ["starkeep-users"] }),
+    );
     expect((await handler(event(`sk_token=${token}`))).isAuthorized).toBe(false);
   });
 

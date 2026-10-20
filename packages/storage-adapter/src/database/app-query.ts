@@ -196,9 +196,7 @@ function applyPageToken(qb: Qb, query: RowQuery): Qb {
         // The token sits in the null bucket. Whether anything is after it
         // depends on which end the nulls are at: with nulls last nothing is,
         // and with nulls first every non-null value is.
-        return term.nulls === "first"
-          ? sql<boolean>`${ref} is not null`
-          : sql<boolean>`1 = 0`;
+        return term.nulls === "first" ? sql<boolean>`${ref} is not null` : sql<boolean>`1 = 0`;
       }
       return term.nulls === "first"
         ? sql<boolean>`(${ref} is not null and ${ref} ${sql.raw(op)} ${key.value})`
@@ -335,10 +333,7 @@ export function buildAppAggregateQuery(
   // `count(*)` there would be a second expression free to disagree with the
   // first.
   for (const term of query.order) {
-    qb = qb.orderBy(
-      sql.ref(term.column),
-      term.direction,
-    ) as Qb;
+    qb = qb.orderBy(sql.ref(term.column), term.direction) as Qb;
   }
   // One row past the limit, which is what distinguishes a full page from a
   // complete result. Every predicate is now applied by the engine, so a fetched

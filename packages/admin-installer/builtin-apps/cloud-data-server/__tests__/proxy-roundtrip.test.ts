@@ -28,7 +28,11 @@ interface CapturedRequest {
 }
 
 /** Run a request through the proxy and capture what it sent on the wire. */
-async function signViaProxy(method: string, path: string, body?: Buffer | string): Promise<CapturedRequest> {
+async function signViaProxy(
+  method: string,
+  path: string,
+  body?: Buffer | string,
+): Promise<CapturedRequest> {
   let captured: CapturedRequest | null = null;
   const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
     captured = {

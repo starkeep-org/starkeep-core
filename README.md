@@ -38,7 +38,7 @@ For the full picture of the parts and how data moves between them, see [`system-
 ## Prerequisites
 
 - **Node.js 22+**
-- **pnpm 10.20** 
+- **pnpm 10.20**
 
 ---
 
@@ -122,7 +122,7 @@ You'll need to update the temp password.
 
 The cloud data server enables cloud backup and sync, and is the only service in the cloud that touches shared data — every app request runs under the calling app's assumed identity.
 
-With the Cloud Data Server installed, sync starts working automatically. Open the Drive app to see the sync status of files you've added locally. 
+With the Cloud Data Server installed, sync starts working automatically. Open the Drive app to see the sync status of files you've added locally.
 
 ### 6. Install the Photos example app to the cloud
 
@@ -142,9 +142,9 @@ Once cloud config and Cognito credentials are present, the local data-server syn
 
 Three tiers:
 
-1. `pnpm test`      — unit tests (turbo), fast, run by default
-2. `pnpm test:e2e`  — local Playwright e2e (see [`e2e/README.md`](e2e/README.md)); requires `pnpm exec playwright install chromium` once
-3. `pnpm test:aws`  — cloud e2e against real AWS; inert unless `STARKEEP_AWS_TESTS=1`. ~15 min, real account + (trivial) cost. See [`e2e-aws/README.md`](e2e-aws/README.md) for the full environment contract.
+1. `pnpm test` — unit tests (turbo), fast, run by default
+2. `pnpm test:e2e` — local Playwright e2e (see [`e2e/README.md`](e2e/README.md)); requires `pnpm exec playwright install chromium` once
+3. `pnpm test:aws` — cloud e2e against real AWS; inert unless `STARKEEP_AWS_TESTS=1`. ~15 min, real account + (trivial) cost. See [`e2e-aws/README.md`](e2e-aws/README.md) for the full environment contract.
 
 ## Security
 
@@ -174,4 +174,4 @@ starkeep-core/
   e2e/  e2e-aws/         Platform end-to-end suites (local Playwright / real AWS)
 ```
 
-First-party *apps* (e.g. Photos) live in the sibling [`starkeep-apps/`](../starkeep-apps) checkout. They install through the same path a third-party app would — there is no privileged wiring against `starkeep-core`.
+First-party _apps_ (e.g. Photos) live in the sibling [`starkeep-apps/`](../starkeep-apps) checkout. They install through the same path a third-party app would — there is no privileged wiring against `starkeep-core`.

@@ -108,7 +108,15 @@ describe("the stand-in section", () => {
               requestedBytes: 10 * 1024 ** 3,
               freedBytes: 2 * 1024 ** 3,
               removed: [{ recordId: "a", sizeBytes: 2 * 1024 ** 3, kind: "original" }],
-              refused: [{ recordId: "b", sizeBytes: 1024, kind: "original", reason: "not-durable", detail: "" }],
+              refused: [
+                {
+                  recordId: "b",
+                  sizeBytes: 1024,
+                  kind: "original",
+                  reason: "not-durable",
+                  detail: "",
+                },
+              ],
               eligibleBytes: 3 * 1024 ** 3,
               dryRun,
               cloudReachable: true,
@@ -155,7 +163,9 @@ describe("the stand-in section", () => {
   it("offers the standard sizes and the canonical size", async () => {
     render(<StandInsSection />);
     const image = await screen.findByLabelText("Ceiling for Photos");
-    const options = within(image).getAllByRole("option").map((o) => o.textContent);
+    const options = within(image)
+      .getAllByRole("option")
+      .map((o) => o.textContent);
     expect(options).toEqual([
       "none — on demand only",
       "320 px",
@@ -165,11 +175,11 @@ describe("the stand-in section", () => {
       "4272 px (canonical)",
     ]);
     const video = screen.getByLabelText("Ceiling for Videos");
-    expect(within(video).getAllByRole("option").map((o) => o.textContent)).toEqual([
-      "none — on demand only",
-      "2000 kbps",
-      "4800 kbps (canonical)",
-    ]);
+    expect(
+      within(video)
+        .getAllByRole("option")
+        .map((o) => o.textContent),
+    ).toEqual(["none — on demand only", "2000 kbps", "4800 kbps (canonical)"]);
   });
 
   it("offers a ceiling for photos and videos only, and saves what is shown", async () => {
@@ -253,10 +263,13 @@ describe("the stand-in section", () => {
     const panel = await freeUpSpacePanel();
     await user.click(panel.getByRole("button", { name: "Estimate" }));
     await panel.findByRole("status");
-    await user.selectOptions(screen.getByLabelText("What to remove"), "originals-and-above-ceiling");
-    expect((panel.getByRole("button", { name: "Free up space" }) as HTMLButtonElement).disabled).toBe(
-      true,
+    await user.selectOptions(
+      screen.getByLabelText("What to remove"),
+      "originals-and-above-ceiling",
     );
+    expect(
+      (panel.getByRole("button", { name: "Free up space" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
   });
 
   it("says so when there is no cloud to prove anything against", async () => {
@@ -288,7 +301,10 @@ describe("the stand-in section", () => {
     vi.stubGlobal(
       "fetch",
       stubFetch({
-        "GET /api/residency/stand-ins": () => ({ status: 503, body: { offline: true, error: "down" } }),
+        "GET /api/residency/stand-ins": () => ({
+          status: 503,
+          body: { offline: true, error: "down" },
+        }),
       }),
     );
     render(<StandInsSection />);
@@ -332,7 +348,9 @@ describe("the stand-in section", () => {
               refused: [],
               // The read says which of its ways of failing happened, so the
               // operator sees whether to wait for bytes or to fix a file.
-              retentionProblems: ["reading the deployment's settings failed: the cloud answered 503"],
+              retentionProblems: [
+                "reading the deployment's settings failed: the cloud answered 503",
+              ],
             }),
           }),
         }),
@@ -407,9 +425,7 @@ describe("the stand-in section", () => {
       render(<StandInsSection />);
       const verify = await panel("Check sync integrity");
       await user.click(verify.getByRole("button", { name: "Check now" }));
-      expect((await verify.findByRole("status")).textContent).toMatch(
-        /did not answer the check/,
-      );
+      expect((await verify.findByRole("status")).textContent).toMatch(/did not answer the check/);
     });
 
     it("says so when no channel is running", async () => {

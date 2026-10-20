@@ -76,10 +76,7 @@ export function validateManifest(raw: unknown): ValidationResult {
   // All-access is reserved to Starkeep Drive (the User-Data-Owner). It is the
   // only grant that reaches the `other` catch-all; installable apps enumerate
   // types instead.
-  if (
-    manifest.infraRequirements.fileAccessAll &&
-    manifest.id !== FILE_ACCESS_ALL_APP_ID
-  ) {
+  if (manifest.infraRequirements.fileAccessAll && manifest.id !== FILE_ACCESS_ALL_APP_ID) {
     errors.push(
       `infraRequirements.fileAccessAll may only be true for the "${FILE_ACCESS_ALL_APP_ID}" app (got "${manifest.id}")`,
     );
@@ -89,9 +86,7 @@ export function validateManifest(raw: unknown): ValidationResult {
     manifest.infraRequirements.compute.enabled &&
     manifest.infraRequirements.compute.handlers.length === 0
   ) {
-    errors.push(
-      "infraRequirements.compute.enabled is true but no handlers are declared",
-    );
+    errors.push("infraRequirements.compute.enabled is true but no handlers are declared");
   }
 
   if (manifest.infraRequirements.brokerPower && manifest.id !== "cloud-data-server") {
@@ -203,9 +198,7 @@ export function validateManifest(raw: unknown): ValidationResult {
           `infraRequirements.compute.handlers["${handler.name}"].publicPaths: "${publicPath}" ` +
             `is a wildcard over the whole handler. It derives the route "ANY /{proxy+}" with no ` +
             `authorizer, so EVERY path under /apps/${manifest.id}/ becomes anonymous — ` +
-            (gated.length > 0
-              ? `including ${gated.join(", ")}, which this handler gates — `
-              : ``) +
+            (gated.length > 0 ? `including ${gated.join(", ")}, which this handler gates — ` : ``) +
             `including any data proxy, upload route, or admin route the bundle mounts. List the ` +
             `paths that are meant to be anonymous instead (e.g. ["/", "/_immutable/*", ` +
             `"/sign-in", "/api/session/*"]).`,
@@ -292,4 +285,3 @@ export function validateManifest(raw: unknown): ValidationResult {
     impliedCategories: [...impliedCategories],
   };
 }
-

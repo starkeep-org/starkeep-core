@@ -284,9 +284,7 @@ export async function getAppCredsParameter(opts: {
   const ssm = makeSsmClient(opts.region, opts.awsCreds);
   const name = appCredsParameterName(opts.stackPrefix, opts.appId);
   try {
-    const result = await ssm.send(
-      new GetParameterCommand({ Name: name, WithDecryption: true }),
-    );
+    const result = await ssm.send(new GetParameterCommand({ Name: name, WithDecryption: true }));
     const raw = result.Parameter?.Value;
     if (!raw) return null;
     const parsed = JSON.parse(raw) as { appId?: string; hmacSecret?: string };

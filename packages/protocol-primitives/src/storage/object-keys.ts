@@ -92,7 +92,8 @@ export function userIdFromObjectKey(key: string): string | null {
   const segments = key.split("/");
   let candidate: string | undefined;
   if (segments[0] === "shared" && segments.length >= 3) candidate = segments[1];
-  else if (segments[0] === "apps" && segments.length >= 4 && segments[3] === "syncable") candidate = segments[2];
+  else if (segments[0] === "apps" && segments.length >= 4 && segments[3] === "syncable")
+    candidate = segments[2];
   return candidate !== undefined && USER_SEGMENT_PATTERN.test(candidate) ? candidate : null;
 }
 
@@ -143,11 +144,15 @@ export function appSyncableObjectKey(appId: string, userId: string, subKey: stri
   const prefix = appSyncableObjectPrefix(appId, userId);
   const relative = subKey.startsWith(prefix) ? subKey.slice(prefix.length) : subKey;
   if (relative.startsWith("/")) {
-    throw new Error(`appSyncableObjectKey: subKey must not start with "/" (got ${JSON.stringify(subKey)})`);
+    throw new Error(
+      `appSyncableObjectKey: subKey must not start with "/" (got ${JSON.stringify(subKey)})`,
+    );
   }
   const segments = relative.split("/");
   if (segments.some((s) => s === "..")) {
-    throw new Error(`appSyncableObjectKey: subKey must not contain ".." (got ${JSON.stringify(subKey)})`);
+    throw new Error(
+      `appSyncableObjectKey: subKey must not contain ".." (got ${JSON.stringify(subKey)})`,
+    );
   }
   return `${prefix}${relative}`;
 }

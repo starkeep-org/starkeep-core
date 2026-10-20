@@ -19,10 +19,7 @@
 import { describe, it, expect } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { createHLCClock } from "@starkeep/protocol-primitives";
-import {
-  MockDatabaseAdapter,
-  MockObjectStorageAdapter,
-} from "@starkeep/storage-adapter";
+import { MockDatabaseAdapter, MockObjectStorageAdapter } from "@starkeep/storage-adapter";
 // Source, not `dist/` — the same relative-import convention `sync-supervisor.ts`
 // uses. Both of these were changed by the fix under test, and a stale build
 // would let these cases pass against the behaviour they exist to rule out.

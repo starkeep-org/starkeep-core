@@ -25,6 +25,7 @@ Registered record types and their record counts are available at `GET /data/type
 The data-server can watch local directories and automatically index new files as records. When a file is added to a watched directory, the data-server creates a record for it and runs any applicable metadata generators (e.g., extracting EXIF data from a photo).
 
 Watches are managed via the API:
+
 - `GET /watches` — list active watches
 - `POST /watches` — add a new watch (directory path, target record type, recursive flag)
 - `DELETE /watches/{id}` — remove a watch
@@ -48,6 +49,7 @@ The current configuration is readable at `GET /config` and updatable at `PATCH /
 ### Sync
 
 When cloud credentials and configuration are available, the data-server syncs automatically:
+
 - **Pull** — fetches remote changes on a configurable interval (default: every 30 seconds)
 - **Push** — sends local changes to the cloud shortly after they occur (default: 500ms debounce)
 
@@ -65,18 +67,18 @@ Recognised keys: `nodeId` (generated once, never change), `pullIntervalMs` (defa
 
 Only three env vars are recognised — none of them runtime settings, which belong in the config file:
 
-| Environment Variable | Default | Description |
-|---|---|---|
-| `STARKEEP_PORT` | `9820` | HTTP port |
-| `STARKEEP_DIR` | `~/.starkeep` | Root directory for local data (chicken-and-egg with the config file's own location) |
-| `STARKEEP_EXIT_WITH_PID` | unset | Exit once this pid is gone. For supervisors that can't hold a parent link — a `PATCH /config` restart detaches the replacement, so whoever started the server loses its handle. Set by the test harness; leave unset in normal use, where the daemon should outlive its launcher. |
+| Environment Variable     | Default       | Description                                                                                                                                                                                                                                                                       |
+| ------------------------ | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `STARKEEP_PORT`          | `9820`        | HTTP port                                                                                                                                                                                                                                                                         |
+| `STARKEEP_DIR`           | `~/.starkeep` | Root directory for local data (chicken-and-egg with the config file's own location)                                                                                                                                                                                               |
+| `STARKEEP_EXIT_WITH_PID` | unset         | Exit once this pid is gone. For supervisors that can't hold a parent link — a `PATCH /config` restart detaches the replacement, so whoever started the server loses its handle. Set by the test harness; leave unset in normal use, where the daemon should outlive its launcher. |
 
 ## Local Storage
 
-| Path | Contents |
-|---|---|
-| `~/.starkeep/data.db` | SQLite database (all records and metadata) |
-| `~/.starkeep/objects/` | File attachments |
-| `~/.starkeep/auth.json` | Cognito tokens |
-| `~/.starkeep/watches.json` | File watch configuration |
-| `~/.starkeep/cloud-credentials.json` | STS credentials for cloud access |
+| Path                                 | Contents                                   |
+| ------------------------------------ | ------------------------------------------ |
+| `~/.starkeep/data.db`                | SQLite database (all records and metadata) |
+| `~/.starkeep/objects/`               | File attachments                           |
+| `~/.starkeep/auth.json`              | Cognito tokens                             |
+| `~/.starkeep/watches.json`           | File watch configuration                   |
+| `~/.starkeep/cloud-credentials.json` | STS credentials for cloud access           |

@@ -23,7 +23,8 @@ export function parseDeviceAuthConfig(value: unknown): DeviceAuthConfig | null {
   const { region, userPoolId, deviceClientId } = v;
   if (typeof region !== "string" || !/^[a-z]{2}(-[a-z]+)+-\d$/.test(region)) return null;
   if (typeof userPoolId !== "string" || !userPoolId.startsWith(`${region}_`)) return null;
-  if (typeof deviceClientId !== "string" || !/^[A-Za-z0-9]{1,128}$/.test(deviceClientId)) return null;
+  if (typeof deviceClientId !== "string" || !/^[A-Za-z0-9]{1,128}$/.test(deviceClientId))
+    return null;
   return { region, userPoolId, deviceClientId };
 }
 

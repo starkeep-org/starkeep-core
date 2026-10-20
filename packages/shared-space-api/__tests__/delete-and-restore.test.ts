@@ -235,9 +235,12 @@ describe("applyRecordRestore", () => {
     const restored = await restore(original.id);
 
     expect(restored[0]!.id).toBe(original.id);
-    expect(restored.map((r) => r.id).slice(1).sort()).toEqual(
-      [canonical.id, smaller.id, poster.id].sort(),
-    );
+    expect(
+      restored
+        .map((r) => r.id)
+        .slice(1)
+        .sort(),
+    ).toEqual([canonical.id, smaller.id, poster.id].sort());
     for (const r of [original, canonical, smaller, poster]) {
       expect((await db.get(r.id as StarkeepId))!.deletedAt).toBeNull();
     }
@@ -278,7 +281,13 @@ describe("applyRecordRestore", () => {
     await label(original, "favourite");
     await label(original, "hidden");
     await db.retractLabels([
-      { recordId: original.id as StarkeepId, appId: "photos", key: "hidden", value: "", hlc: clock.now() },
+      {
+        recordId: original.id as StarkeepId,
+        appId: "photos",
+        key: "hidden",
+        value: "",
+        hlc: clock.now(),
+      },
     ]);
     expect(await liveLabelKeys(original)).toEqual(["favourite"]);
 

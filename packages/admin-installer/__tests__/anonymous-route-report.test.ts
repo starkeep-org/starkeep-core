@@ -95,7 +95,7 @@ describe("formatAnonymousRouteReport", () => {
   });
 });
 
-describe("formatAnonymousRouteReport under auth: \"session\"", () => {
+describe('formatAnonymousRouteReport under auth: "session"', () => {
   function sessionManifest(publicPaths: string[]) {
     return appManifestSchema.parse({
       id: "memo",

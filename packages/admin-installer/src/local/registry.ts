@@ -2,7 +2,11 @@ import type { RawDatabase } from "@starkeep/storage-adapter";
 import { sql, type CompiledQuery } from "kysely";
 import type { AppManifest, FileAccess, LabelKey, SyncableTable } from "@starkeep/admin-manifest";
 import { appSyncableTableName, sqliteCompiler as k } from "@starkeep/storage-sqlite";
-import { FILE_RECORDS_TABLE, FILE_RECORDS_COLUMNS, syncableIndexName } from "@starkeep/shared-space-api";
+import {
+  FILE_RECORDS_TABLE,
+  FILE_RECORDS_COLUMNS,
+  syncableIndexName,
+} from "@starkeep/shared-space-api";
 import { sqliteColumnType } from "@starkeep/protocol-primitives";
 
 export type Operation = "install" | "uninstall";
@@ -235,11 +239,7 @@ export function deleteAppRegistry(db: RawDatabase, appId: string): void {
  * no rows — the local data-server grants Drive all-access by app id (it cannot
  * enumerate `other/*` types). Mirrors the cloud `runAppInstallDdl` rule.
  */
-export function insertAccessGrants(
-  db: RawDatabase,
-  appId: string,
-  fileAccess: FileAccess[],
-): void {
+export function insertAccessGrants(db: RawDatabase, appId: string, fileAccess: FileAccess[]): void {
   for (const entry of fileAccess) {
     for (const type of entry.types) {
       run(
@@ -278,11 +278,7 @@ export function deleteAccessGrants(db: RawDatabase, appId: string): void {
  * — see `deleteAppLabelKeys` for why an undeclared key with live rows is the
  * intended steady state rather than corruption.
  */
-export function insertAppLabelKeys(
-  db: RawDatabase,
-  appId: string,
-  labelKeys: LabelKey[],
-): void {
+export function insertAppLabelKeys(db: RawDatabase, appId: string, labelKeys: LabelKey[]): void {
   for (const entry of labelKeys) {
     run(
       db,
@@ -355,9 +351,7 @@ function createSyncableTable(
   columns: SyncableColumnDef[],
   indexes: readonly { columns: string[] }[] = [],
 ): void {
-  let tb = k.schema
-    .createTable(fullName)
-    .ifNotExists();
+  let tb = k.schema.createTable(fullName).ifNotExists();
   for (const c of columns) {
     tb = tb.addColumn(c.name, sql.raw(c.type), (col) => {
       const withNull = c.notNull || c.primaryKey ? col.notNull() : col;
@@ -449,10 +443,7 @@ export function createAppSyncableTables(
  * syncable tables (plus the standard updated_at/deleted_at HLC columns) so
  * the LWW applier can treat it uniformly.
  */
-export function createReservedFileRecordsTable(
-  db: RawDatabase,
-  appId: string,
-): void {
+export function createReservedFileRecordsTable(db: RawDatabase, appId: string): void {
   createSyncableTable(
     db,
     appSyncableTableName(appId, FILE_RECORDS_TABLE),
@@ -468,11 +459,7 @@ export function createReservedFileRecordsTable(
   );
 }
 
-export function dropAppSyncableTables(
-  db: RawDatabase,
-  appId: string,
-  tableNames: string[],
-): void {
+export function dropAppSyncableTables(db: RawDatabase, appId: string, tableNames: string[]): void {
   for (const name of tableNames) {
     const fullName = appSyncableTableName(appId, name);
     db.exec(k.schema.dropTable(fullName).ifExists().compile().sql);

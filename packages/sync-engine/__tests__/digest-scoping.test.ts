@@ -438,9 +438,7 @@ describe("every verify() refusal", () => {
     return { engine, syncState };
   }
 
-  const causes: Array<
-    [string, Parameters<typeof refusalFrom>[0]]
-  > = [
+  const causes: Array<[string, Parameters<typeof refusalFrom>[0]]> = [
     [
       "a peer that sends no digest at all",
       ({ transport }) => ({

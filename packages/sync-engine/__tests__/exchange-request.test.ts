@@ -80,9 +80,9 @@ describe("shapes that cannot be read are refused", () => {
   });
 
   it("rejects a watermark value that is not an HLC, naming the author", () => {
-    expect(() =>
-      sanitizeExchangeRequest({ watermarks: { L: "5:0:L" } }),
-    ).toThrow(/watermarks\[L\]/);
+    expect(() => sanitizeExchangeRequest({ watermarks: { L: "5:0:L" } })).toThrow(
+      /watermarks\[L\]/,
+    );
     expect(() =>
       sanitizeExchangeRequest({ watermarks: { L: { wallTime: 5, counter: 1 } } }),
     ).toThrow(/watermarks\[L\]/);
@@ -101,9 +101,9 @@ describe("shapes that cannot be read are refused", () => {
 
   it("rejects a payload field that is not an array", () => {
     for (const field of ["records", "labels", "appSyncableRows"]) {
-      expect(() =>
-        sanitizeExchangeRequest({ watermarks: {}, [field]: { id: "x" } }),
-      ).toThrow(new RegExp(`"${field}" must be an array`));
+      expect(() => sanitizeExchangeRequest({ watermarks: {}, [field]: { id: "x" } })).toThrow(
+        new RegExp(`"${field}" must be an array`),
+      );
     }
   });
 
@@ -114,17 +114,16 @@ describe("shapes that cannot be read are refused", () => {
   });
 
   it("rejects a non-boolean requestDigest", () => {
-    expect(() =>
-      sanitizeExchangeRequest({ watermarks: {}, requestDigest: "yes" }),
-    ).toThrow(/"requestDigest" must be a boolean/);
+    expect(() => sanitizeExchangeRequest({ watermarks: {}, requestDigest: "yes" })).toThrow(
+      /"requestDigest" must be a boolean/,
+    );
   });
 });
 
 describe("digestPrefixLength is dropped rather than refused", () => {
   it("keeps a width in range", () => {
     expect(
-      sanitizeExchangeRequest({ watermarks: {}, digestPrefixLength: 5 })
-        .digestPrefixLength,
+      sanitizeExchangeRequest({ watermarks: {}, digestPrefixLength: 5 }).digestPrefixLength,
     ).toBe(5);
   });
 
@@ -134,8 +133,7 @@ describe("digestPrefixLength is dropped rather than refused", () => {
     // itself one layer up — there is nothing an error would add.
     for (const value of ["x", 0, -3, 99, 5.5, {}, null]) {
       expect(
-        sanitizeExchangeRequest({ watermarks: {}, digestPrefixLength: value })
-          .digestPrefixLength,
+        sanitizeExchangeRequest({ watermarks: {}, digestPrefixLength: value }).digestPrefixLength,
       ).toBeUndefined();
     }
   });

@@ -3,7 +3,7 @@
 **Companion to** [`media-implementation-plan.md`](./media-implementation-plan.md). Item numbers here are
 that document's item numbers. **Status:** living — updated as each item lands, not written at the end.
 
-This doc says *how we know each item works*. It is organized by work item, and each item carries three
+This doc says _how we know each item works_. It is organized by work item, and each item carries three
 things:
 
 - **Automated** — what is covered by tests in the repo, and where they live.
@@ -19,7 +19,7 @@ every entry under **Gaps** must say why.
 
 **Test the property, not the implementation.** The residency, durability and archive-gate items all
 have the shape "this must never happen" (never evict a last copy, never implicitly thaw, never
-archive an incomplete ladder). Those get tests that assert the *negative* directly, because a test
+archive an incomplete ladder). Those get tests that assert the _negative_ directly, because a test
 that only checks the happy path passes just as well when the guard is deleted.
 
 **Anything that can destroy data gets an adversarial test.** Three places qualify: the eviction pass
@@ -27,8 +27,8 @@ that only checks the happy path passes just as well when the guard is deleted.
 at least one case that would delete a wanted object if the guard were removed, and assert it doesn't.
 
 **Numbers from §2 of the plan are provisional.** No test may assert a specific class maximum (400,
-1280, 2560, 4272) as a *literal*, because those integers are the visual test's output (item 9b) and
-will change. Tests assert *relationships* — a rendition never upscales, classes form a contiguous
+1280, 2560, 4272) as a _literal_, because those integers are the visual test's output (item 9b) and
+will change. Tests assert _relationships_ — a rendition never upscales, classes form a contiguous
 prefix, resolution picks the smallest ≥ target — and read the maxima from the ladder definition.
 
 **Consumers must not name size classes.** A grep-level test asserting no size-class string literal
@@ -41,7 +41,7 @@ failure it prevents is "a client hard-codes `image-screen`" and that is invisibl
 
 **This table is an index, not the record.** Each per-item **Gaps** section below is authoritative
 for detail and reasoning; this exists so nobody has to read the whole document to find out what is
-open. When a gap closes, strike it here *and* in its section.
+open. When a gap closes, strike it here _and_ in its section.
 
 Severity is about the consequence of shipping with it, not the effort to close it:
 
@@ -50,48 +50,48 @@ Severity is about the consequence of shipping with it, not the effort to close i
 - **Deferred** — knowingly incomplete, with a named item that closes it. Safe meanwhile.
 - **Accepted** — will not be closed here; the reason is recorded.
 
-| Severity | Gap | Item | What closes it |
-|---|---|---|---|
-| ~~Blocking~~ | ~~`RestoreObject` is never called.~~ **Closed (item 19)** — the endpoint issues it, and a test asserts the SDK call rather than the recorded state. | 5b | — |
-| ~~Blocking~~ | ~~Nothing maintains `availability`.~~ **Closed (item 19b)** — notifications *and* the daily Inventory reconcile. | 5b | — |
-| **Blocking** | Multipart uploads are unverified above the part threshold in the buffered `put()` path; the streamed path verifies, the convenience method does not. | 1b-i / 2 | An `e2e-aws` test plus routing all large writes through `putStream` |
-| **Blocking** | The attempt ledger has no storage, so the never-retry-undecodable guarantee is built, tested, and **inert** — a sweeper would re-fail on every HEIC daily. | 7 | A node-local (non-syncable) table |
-| **Deferred** | No cloud derivation sweeper is scheduled. Decision logic exists and is tested. | 7 | Scheduled Lambda |
-| ~~Deferred~~ | ~~Nothing produces a video yet.~~ **Closed** by items 26/27. | 28 | — |
-| **Deferred** | The video player is not visually verified, and no test drives a real `<video>` element. | 28 | Human review (same class as 9b) |
-| **Deferred** | The admin-web Storage page has not been visually reviewed, and no test drives the page itself (only the route beneath it). | 34 | Human review (same class as 9b) |
-| ~~Blocking~~ | ~~`unsupported` decided by regex over an error message.~~ **Closed** — typed `UndecodableError` decided at the point of failure; the old fixture was a string no decoder produces, so every real HEIC was retried forever while the test passed. | 7/24 | — |
-| ~~Blocking~~ | ~~The DNG parser has never seen a real camera file.~~ **Closed** — a real RICOH GR IV DNG, which found a bug no synthetic fixture could: the raw mosaic is JPEG-compressed too, and larger than any preview. | 30 | — |
-| **Deferred** | Nothing reads Apple's content identifier, so Live Photo pairing only ever reaches `filename` confidence in practice. | 31 | A QuickTime/maker-note reader |
-| **Deferred** | CR3 is ISO-BMFF, not TIFF, so preview extraction finds nothing in it and reports it undecodable. | 30 | A CR3 container parser |
-| **Accepted** | HEIC decode is macOS-only; a Linux container leaves such records ladder-incomplete and therefore unarchived. | 32 | — (measure via item 15) |
-| ~~Blocking~~ | ~~No UI is wired to the retention projection.~~ **Closed** — `/residency/projection` plus the admin-web Storage page, showing selected-vs-projected per row with capped/grows/pinned annotations. | 34 | — |
-| ~~Deferred~~ | ~~The matrix is read-only and label rules are unbuilt.~~ **Closed** — dry-run projection endpoint, validated save, and a rule editor. | 34 | — |
-| ~~Blocking~~ | ~~`validateRetentionPolicy` existed and no write path called it,~~ so `PATCH /config` would save a zero budget. **Closed** — `PUT /residency/policy` validates and refuses. | 34 | — |
-| ~~Blocking~~ | ~~Nothing produces a `SizeClassCensus`.~~ **Closed** — `apps/local-data-server/census.ts`, one pass over records (not the resident set, which would only count what is already local). | 34/15 | — |
-| ~~Deferred~~ | ~~`BackfillStore` has only an in-memory test double.~~ **Closed** — node-local SQLite ledger keyed by record id. | 8 | — |
-| **Deferred** | Backfill is **built but never run** — correctly gated on item 9b. | 8 | Item 9b |
-| ~~Blocking~~ | ~~Nothing calls `deriveVideoLadder`.~~ **Closed** — `deriveAndPublishVideo` wires probe → facts → derive → publish → gate; the import loop now discovers video and no longer buffers whole files. | 26/27 | — |
-| **Deferred** | Skim parameters (8x / 20s / 2fps) are an untested hypothesis; may be better as animated AVIF. | 27 | Measurement against real clips |
-| **Deferred** | VP9/WebM transcoding is written but never exercised by a test. | 27 | A fixture asserting the webm path |
-| **Accepted** | Derivation output is buffered in memory. Bounded by the ladder (720p @ 1.5 Mbps); revisit if 1080p opt-in ships. | 27 | — |
-| **Deferred** | No test proves video is routed to the `shared/*` (S3) behaviour rather than the gateway. Serving it through the chunked gateway origin makes CloudFront return whole objects and silently kills seeking. | 28 | An `e2e-aws` 206-through-CloudFront assertion |
-| ~~Deferred~~ | ~~No lifecycle rule exists.~~ **Closed (item 18)** — one tag-filtered rule requiring both tags, above a ~1 MB floor. | 4/5 | — |
-| ~~Deferred~~ | ~~Nothing declares `archive` intent.~~ **Closed (item 17)** — Photos declares it for originals; renditions stay `instant`. | 4/5 | — |
-| ~~Deferred~~ | ~~`absent` is never written for objects that never existed.~~ **Closed** — the reconcile reports stored keys the inventory does not list. | 5b | — |
-| ~~Deferred~~ | ~~The local data server does not report `availability`.~~ **Closed** — reports `absent` for an elided record, which a client otherwise renders as a broken image. | 5b | — |
-| **Deferred** | No eviction pass is scheduled; `runEviction` is reachable and uncalled. | 1b | Item 15/34 (residency inspector) |
-| **Deferred** | `protectedLocally` is never set, so the durability predicate is the only thing between eviction and a last copy. | 1b | Item 7's derivation-input tracking |
-| **Deferred** | `recencyAtMs` is always null from the sync engine, so `recent-only` behaves as `all`. | 1b | Host decider supplying capture time |
-| **Deferred** | Only one rung is produced by the resize path in practice until every ingest route uses `deriveStillLadder`. | 6/7 | Item 7 completion |
-| ~~Deferred~~ | ~~ThumbHash and perceptual hash are not computed.~~ **Closed** (items 9 and 22) — both computed during derivation. | 4/21 | — |
-| **Deferred** | Video derivation is not wired; the ladder helpers are tested and uncalled. | 6 | Item 27 |
-| **Deferred** | Renditions do not sync before originals. **The plan's claim that this is a scheduling change is wrong** — it needs blob transfer decoupled from the metadata prefix rule. | 7 | A protocol change, not yet scoped |
-| ~~Deferred~~ | ~~No test asserts consumers never name a size class.~~ **Closed (item 9)** — a grep test over `src`/`app`/`infra` with a small reviewed allowlist, verified to fire on an injected violation. | 6 | — |
-| **Accepted** | Every number in the ladder is unverified. The largest open item in the plan; gates backfill. | 6 | Item 9b — human judgement, cannot be automated |
-| **Accepted** | Buckets created before item 0 can never get Object Lock. | 0 | Nothing — AWS design |
-| **Accepted** | A permanently corrupt source retries forever with a warning rather than escalating. | 2 | Surfacing it in the residency inspector |
-| **Accepted** | Restore estimates are unvalidated against a real bill. | 5b | Item 35 (CUR) |
+| Severity     | Gap                                                                                                                                                                                                                                              | Item     | What closes it                                                      |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------- | ------------------------------------------------------------------- |
+| ~~Blocking~~ | ~~`RestoreObject` is never called.~~ **Closed (item 19)** — the endpoint issues it, and a test asserts the SDK call rather than the recorded state.                                                                                              | 5b       | —                                                                   |
+| ~~Blocking~~ | ~~Nothing maintains `availability`.~~ **Closed (item 19b)** — notifications _and_ the daily Inventory reconcile.                                                                                                                                 | 5b       | —                                                                   |
+| **Blocking** | Multipart uploads are unverified above the part threshold in the buffered `put()` path; the streamed path verifies, the convenience method does not.                                                                                             | 1b-i / 2 | An `e2e-aws` test plus routing all large writes through `putStream` |
+| **Blocking** | The attempt ledger has no storage, so the never-retry-undecodable guarantee is built, tested, and **inert** — a sweeper would re-fail on every HEIC daily.                                                                                       | 7        | A node-local (non-syncable) table                                   |
+| **Deferred** | No cloud derivation sweeper is scheduled. Decision logic exists and is tested.                                                                                                                                                                   | 7        | Scheduled Lambda                                                    |
+| ~~Deferred~~ | ~~Nothing produces a video yet.~~ **Closed** by items 26/27.                                                                                                                                                                                     | 28       | —                                                                   |
+| **Deferred** | The video player is not visually verified, and no test drives a real `<video>` element.                                                                                                                                                          | 28       | Human review (same class as 9b)                                     |
+| **Deferred** | The admin-web Storage page has not been visually reviewed, and no test drives the page itself (only the route beneath it).                                                                                                                       | 34       | Human review (same class as 9b)                                     |
+| ~~Blocking~~ | ~~`unsupported` decided by regex over an error message.~~ **Closed** — typed `UndecodableError` decided at the point of failure; the old fixture was a string no decoder produces, so every real HEIC was retried forever while the test passed. | 7/24     | —                                                                   |
+| ~~Blocking~~ | ~~The DNG parser has never seen a real camera file.~~ **Closed** — a real RICOH GR IV DNG, which found a bug no synthetic fixture could: the raw mosaic is JPEG-compressed too, and larger than any preview.                                     | 30       | —                                                                   |
+| **Deferred** | Nothing reads Apple's content identifier, so Live Photo pairing only ever reaches `filename` confidence in practice.                                                                                                                             | 31       | A QuickTime/maker-note reader                                       |
+| **Deferred** | CR3 is ISO-BMFF, not TIFF, so preview extraction finds nothing in it and reports it undecodable.                                                                                                                                                 | 30       | A CR3 container parser                                              |
+| **Accepted** | HEIC decode is macOS-only; a Linux container leaves such records ladder-incomplete and therefore unarchived.                                                                                                                                     | 32       | — (measure via item 15)                                             |
+| ~~Blocking~~ | ~~No UI is wired to the retention projection.~~ **Closed** — `/residency/projection` plus the admin-web Storage page, showing selected-vs-projected per row with capped/grows/pinned annotations.                                                | 34       | —                                                                   |
+| ~~Deferred~~ | ~~The matrix is read-only and label rules are unbuilt.~~ **Closed** — dry-run projection endpoint, validated save, and a rule editor.                                                                                                            | 34       | —                                                                   |
+| ~~Blocking~~ | ~~`validateRetentionPolicy` existed and no write path called it,~~ so `PATCH /config` would save a zero budget. **Closed** — `PUT /residency/policy` validates and refuses.                                                                      | 34       | —                                                                   |
+| ~~Blocking~~ | ~~Nothing produces a `SizeClassCensus`.~~ **Closed** — `apps/local-data-server/census.ts`, one pass over records (not the resident set, which would only count what is already local).                                                           | 34/15    | —                                                                   |
+| ~~Deferred~~ | ~~`BackfillStore` has only an in-memory test double.~~ **Closed** — node-local SQLite ledger keyed by record id.                                                                                                                                 | 8        | —                                                                   |
+| **Deferred** | Backfill is **built but never run** — correctly gated on item 9b.                                                                                                                                                                                | 8        | Item 9b                                                             |
+| ~~Blocking~~ | ~~Nothing calls `deriveVideoLadder`.~~ **Closed** — `deriveAndPublishVideo` wires probe → facts → derive → publish → gate; the import loop now discovers video and no longer buffers whole files.                                                | 26/27    | —                                                                   |
+| **Deferred** | Skim parameters (8x / 20s / 2fps) are an untested hypothesis; may be better as animated AVIF.                                                                                                                                                    | 27       | Measurement against real clips                                      |
+| **Deferred** | VP9/WebM transcoding is written but never exercised by a test.                                                                                                                                                                                   | 27       | A fixture asserting the webm path                                   |
+| **Accepted** | Derivation output is buffered in memory. Bounded by the ladder (720p @ 1.5 Mbps); revisit if 1080p opt-in ships.                                                                                                                                 | 27       | —                                                                   |
+| **Deferred** | No test proves video is routed to the `shared/*` (S3) behaviour rather than the gateway. Serving it through the chunked gateway origin makes CloudFront return whole objects and silently kills seeking.                                         | 28       | An `e2e-aws` 206-through-CloudFront assertion                       |
+| ~~Deferred~~ | ~~No lifecycle rule exists.~~ **Closed (item 18)** — one tag-filtered rule requiring both tags, above a ~1 MB floor.                                                                                                                             | 4/5      | —                                                                   |
+| ~~Deferred~~ | ~~Nothing declares `archive` intent.~~ **Closed (item 17)** — Photos declares it for originals; renditions stay `instant`.                                                                                                                       | 4/5      | —                                                                   |
+| ~~Deferred~~ | ~~`absent` is never written for objects that never existed.~~ **Closed** — the reconcile reports stored keys the inventory does not list.                                                                                                        | 5b       | —                                                                   |
+| ~~Deferred~~ | ~~The local data server does not report `availability`.~~ **Closed** — reports `absent` for an elided record, which a client otherwise renders as a broken image.                                                                                | 5b       | —                                                                   |
+| **Deferred** | No eviction pass is scheduled; `runEviction` is reachable and uncalled.                                                                                                                                                                          | 1b       | Item 15/34 (residency inspector)                                    |
+| **Deferred** | `protectedLocally` is never set, so the durability predicate is the only thing between eviction and a last copy.                                                                                                                                 | 1b       | Item 7's derivation-input tracking                                  |
+| **Deferred** | `recencyAtMs` is always null from the sync engine, so `recent-only` behaves as `all`.                                                                                                                                                            | 1b       | Host decider supplying capture time                                 |
+| **Deferred** | Only one rung is produced by the resize path in practice until every ingest route uses `deriveStillLadder`.                                                                                                                                      | 6/7      | Item 7 completion                                                   |
+| ~~Deferred~~ | ~~ThumbHash and perceptual hash are not computed.~~ **Closed** (items 9 and 22) — both computed during derivation.                                                                                                                               | 4/21     | —                                                                   |
+| **Deferred** | Video derivation is not wired; the ladder helpers are tested and uncalled.                                                                                                                                                                       | 6        | Item 27                                                             |
+| **Deferred** | Renditions do not sync before originals. **The plan's claim that this is a scheduling change is wrong** — it needs blob transfer decoupled from the metadata prefix rule.                                                                        | 7        | A protocol change, not yet scoped                                   |
+| ~~Deferred~~ | ~~No test asserts consumers never name a size class.~~ **Closed (item 9)** — a grep test over `src`/`app`/`infra` with a small reviewed allowlist, verified to fire on an injected violation.                                                    | 6        | —                                                                   |
+| **Accepted** | Every number in the ladder is unverified. The largest open item in the plan; gates backfill.                                                                                                                                                     | 6        | Item 9b — human judgement, cannot be automated                      |
+| **Accepted** | Buckets created before item 0 can never get Object Lock.                                                                                                                                                                                         | 0        | Nothing — AWS design                                                |
+| **Accepted** | A permanently corrupt source retries forever with a warning rather than escalating.                                                                                                                                                              | 2        | Surfacing it in the residency inspector                             |
+| **Accepted** | Restore estimates are unvalidated against a real bill.                                                                                                                                                                                           | 5b       | Item 35 (CUR)                                                       |
 
 Test-coverage gaps that are not behavioural risks — no end-to-end variant resolution through a
 running server, no route-level test of the local server's filters, `MAX_CHILDREN_PER_PAGE`
@@ -109,11 +109,11 @@ than "this does not work".
 **Automated** — `packages/admin-installer/__tests__/cloud-data-server-hardening.test.ts`, under
 Pulumi's runtime mocks (no cloud, no engine):
 
-| Test | Asserts |
-|---|---|
-| `enables Object Lock on the files bucket` | `objectLockEnabled === true` for a real install |
-| `configures no bucket-level default retention` | **zero** `BucketObjectLockConfigurationV2` resources exist |
-| `leaves Object Lock off so the bucket can be torn down` | ephemeral installs get neither the flag nor a config |
+| Test                                                    | Asserts                                                    |
+| ------------------------------------------------------- | ---------------------------------------------------------- |
+| `enables Object Lock on the files bucket`               | `objectLockEnabled === true` for a real install            |
+| `configures no bucket-level default retention`          | **zero** `BucketObjectLockConfigurationV2` resources exist |
+| `leaves Object Lock off so the bucket can be torn down` | ephemeral installs get neither the flag nor a config       |
 
 The second and third matter more than the first. A bucket-level default retention would make every
 object written under it permanently undeletable and rendition supersession impossible, and it is the
@@ -129,7 +129,7 @@ cloud-data-server temp-install policy (AWS requires it alongside `CreateBucket` 
 `ObjectLockEnabled: Enabled` and **no `Rule`**. Nothing in the mocked test suite proves AWS accepted
 the flag; only a real install does.
 
-**Gaps** — buckets created *before* this item cannot be retrofitted, by AWS's design. Any existing
+**Gaps** — buckets created _before_ this item cannot be retrofitted, by AWS's design. Any existing
 install is permanently without Object Lock and no test can detect or fix that. This is the accepted
 consequence the item's ordering exists to minimize, not a defect.
 
@@ -143,22 +143,22 @@ Two separable properties, tested separately because they fail separately.
 
 #### (a) The broker decides what may be written at a content-addressed key
 
-The uploader has no say. Because record keys *are* the SHA-256, the presign
+The uploader has no say. Because record keys _are_ the SHA-256, the presign
 endpoint derives the expected checksum from the key and binds it into the
 signature; S3 then rejects a mismatched body rather than storing it.
 
 **Automated**
 
-| Test | Where | Asserts |
-|---|---|---|
-| `derives the checksum from the key and returns it` | `cloud-data-server/__tests__/routes-db.test.ts` | pinned value is the key's hash, and `x-amz-checksum-sha256` appears in the signed URL — advertising it beside the URL without signing it would let an uploader drop the header |
-| `ignores a caller-supplied checksum in favour of the key's` | same | a body-supplied checksum is not honoured; honouring it would reduce the guarantee to "the uploader verified its own bytes", which is no guarantee |
-| `pins nothing for a non-content-addressed key` (in the app-data presign test) | same | app-syncable subKeys are stable names, not hashes — inventing a pin would reject every legitimate rewrite |
-| `contentHashFromDataRecordObjectKey` rejection table | `protocol-primitives/__tests__/object-keys.test.ts` | shard/hash disagreement, wrong namespace, uppercase, wrong segment count all return `null` — each is a way a non-Starkeep key could otherwise dictate the pin |
-| `sha256HexToBase64` throws on malformed input | `storage-adapter/__tests__/checksum.test.ts` | a silently-wrong conversion would defeat exactly the verification it provides, so it must throw rather than produce a plausible string |
-| fake-cloud blob-upload trio | `testkit/__tests__/fake-cloud.test.ts` | matching body accepted; mismatched body **400s and stores nothing**; missing header **refused** |
+| Test                                                                          | Where                                               | Asserts                                                                                                                                                                        |
+| ----------------------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `derives the checksum from the key and returns it`                            | `cloud-data-server/__tests__/routes-db.test.ts`     | pinned value is the key's hash, and `x-amz-checksum-sha256` appears in the signed URL — advertising it beside the URL without signing it would let an uploader drop the header |
+| `ignores a caller-supplied checksum in favour of the key's`                   | same                                                | a body-supplied checksum is not honoured; honouring it would reduce the guarantee to "the uploader verified its own bytes", which is no guarantee                              |
+| `pins nothing for a non-content-addressed key` (in the app-data presign test) | same                                                | app-syncable subKeys are stable names, not hashes — inventing a pin would reject every legitimate rewrite                                                                      |
+| `contentHashFromDataRecordObjectKey` rejection table                          | `protocol-primitives/__tests__/object-keys.test.ts` | shard/hash disagreement, wrong namespace, uppercase, wrong segment count all return `null` — each is a way a non-Starkeep key could otherwise dictate the pin                  |
+| `sha256HexToBase64` throws on malformed input                                 | `storage-adapter/__tests__/checksum.test.ts`        | a silently-wrong conversion would defeat exactly the verification it provides, so it must throw rather than produce a plausible string                                         |
+| fake-cloud blob-upload trio                                                   | `testkit/__tests__/fake-cloud.test.ts`              | matching body accepted; mismatched body **400s and stores nothing**; missing header **refused**                                                                                |
 
-The fake cloud's `/__blob/` stand-in was made to *enforce* the checksum, and the
+The fake cloud's `/__blob/` stand-in was made to _enforce_ the checksum, and the
 `MockObjectStorageAdapter` likewise rejects a mismatched body. This is the load-bearing
 part: without it, every test of this path would pass identically with the verification
 deleted.
@@ -169,7 +169,7 @@ deleted.
   (`checking-object-integrity-upload`), **not assumed** — this closes the plan's open item 7.
   SHA-256 is **composite-only** for multipart; full-object multipart checksums exist but are
   CRC-only (CRC64NVME/CRC32/CRC32C), because only CRCs linearize from part checksums. So a
-  whole-object SHA-256 pin is *not available* for multipart, and passing one fails the upload
+  whole-object SHA-256 pin is _not available_ for multipart, and passing one fails the upload
   rather than verifying it. The mechanism that does work is **per-part**: each `UploadPart`
   carries its own `ChecksumSHA256` and S3 rejects a bad part, with the composite attesting the
   assembly; the uploader must additionally verify the whole-object hash as it streams and abort
@@ -191,14 +191,14 @@ other copy of some bytes, must use `stat()` and read `availability` / `checksumS
 
 **Automated**
 
-| Test | Where | Asserts |
-|---|---|---|
-| `distinguishes an archived object from an absent one` | `storage-adapter/__tests__/mock-object-storage-adapter.test.ts` | `has()` says `true` **and** `stat()` says `archived` for the same key — the exact confusion the widening exists to end |
-| `reports a restore in flight` | same | `restoring` is its own state, not "archived" and not "readable" |
-| `reports null when no checksum was supplied` | same | unknown ≠ verified; a store that hashed bytes at read time would answer a different question |
-| `reports an unknown checksum rather than synthesizing one` | `storage-fs/__tests__/adapter.test.ts` | a local filesystem verifies nothing at write time and must say so — the durability predicate keys on this distinction before it deletes anything |
-| `follows a symlink to report the target's size` | same | symlinked keys are how the watcher avoids duplicating watched files |
-| `sha256Base64ToHex` returns null for a composite | `storage-adapter/__tests__/checksum.test.ts` | a multipart composite must never be compared against a `contentHash` as though it were one |
+| Test                                                       | Where                                                           | Asserts                                                                                                                                          |
+| ---------------------------------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `distinguishes an archived object from an absent one`      | `storage-adapter/__tests__/mock-object-storage-adapter.test.ts` | `has()` says `true` **and** `stat()` says `archived` for the same key — the exact confusion the widening exists to end                           |
+| `reports a restore in flight`                              | same                                                            | `restoring` is its own state, not "archived" and not "readable"                                                                                  |
+| `reports null when no checksum was supplied`               | same                                                            | unknown ≠ verified; a store that hashed bytes at read time would answer a different question                                                     |
+| `reports an unknown checksum rather than synthesizing one` | `storage-fs/__tests__/adapter.test.ts`                          | a local filesystem verifies nothing at write time and must say so — the durability predicate keys on this distinction before it deletes anything |
+| `follows a symlink to report the target's size`            | same                                                            | symlinked keys are how the watcher avoids duplicating watched files                                                                              |
+| `sha256Base64ToHex` returns null for a composite           | `storage-adapter/__tests__/checksum.test.ts`                    | a multipart composite must never be compared against a `contentHash` as though it were one                                                       |
 
 `MockObjectStorageAdapter.setAvailability()` exists solely so tests can produce an object
 that **exists and cannot be read** — there is no other way to get one in-process, and the
@@ -227,18 +227,18 @@ Before this, those were the same event — a blobless record held the watermark 
 re-shipped it forever — which is why "I have the metadata and I don't want the bytes" was
 inexpressible and both a phone node and any archive tier were blocked.
 
-`sync-engine/__tests__/residency-exchange.test.ts` asserts both halves *against each other* in
+`sync-engine/__tests__/residency-exchange.test.ts` asserts both halves _against each other_ in
 one test (`holds the watermark on failure and advances it on decline`), because each alone
 passes under an implementation that gets the other backwards.
 
-| Test | Asserts |
-|---|---|
-| `applies the metadata and skips the bytes` | record present, blob absent, `elided` counted |
-| `advances the watermark, so the peer stops re-shipping it` | round two ships nothing and the decider is not consulted again |
-| `counts the decline separately from an applied record` | a node quietly declining everything must not look identical to a healthy one |
-| `does not credit byte accounting for bytes that never arrived` | accounting follows bytes, not intent |
-| `does not report an arrival when the transfer fails` | a flaky link must not let a node convince itself it is full of things it doesn't have |
-| `residencyOf` group | `staged` vs `elided` vs `resident` vs `tombstoned` vs `absent`; elided-ness **re-evaluated, not stored**, so raising a budget makes a record staged again with no migration |
+| Test                                                           | Asserts                                                                                                                                                                     |
+| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `applies the metadata and skips the bytes`                     | record present, blob absent, `elided` counted                                                                                                                               |
+| `advances the watermark, so the peer stops re-shipping it`     | round two ships nothing and the decider is not consulted again                                                                                                              |
+| `counts the decline separately from an applied record`         | a node quietly declining everything must not look identical to a healthy one                                                                                                |
+| `does not credit byte accounting for bytes that never arrived` | accounting follows bytes, not intent                                                                                                                                        |
+| `does not report an arrival when the transfer fails`           | a flaky link must not let a node convince itself it is full of things it doesn't have                                                                                       |
+| `residencyOf` group                                            | `staged` vs `elided` vs `resident` vs `tombstoned` vs `absent`; elided-ness **re-evaluated, not stored**, so raising a budget makes a record staged again with no migration |
 
 #### The decision (`residency-policy.test.ts`, 19 tests)
 
@@ -262,15 +262,15 @@ names would encode the opposite of the design property: the platform must never 
 Per the cross-cutting principle, this is the suite where **every "kept" case would delete a
 wanted object if its guard were removed**:
 
-| Guard | Test |
-|---|---|
-| Nothing evicted without a confirmed replica elsewhere | `refuses to evict anything not confirmed elsewhere` — and reports `shortfall`, rather than claiming a success it didn't achieve |
-| No content hash → no way to tell a correct replica from an object merely occupying the key | `refuses when there is no content hash to verify a replica against` |
-| Durable ≠ readable | `refuses to drop the last instantly-readable copy` (an archived copy is durable and twelve hours away) |
-| A failing probe is not evidence of presence *or* absence | `treats a failing probe as no evidence at all` |
-| Corruption reaches a human | `surfaces suspected corruption` — a checksum disagreement is evidence a copy is wrong, not merely a reason to skip |
-| Unverified ≠ verified | `does not count a present-but-unverified replica by default`; counting it requires an explicit opt-in |
-| The operator's reduction request is answered honestly | `refuses outright when no peer is available to confirm anything` — quietly degrading into "keep everything" would look like it worked |
+| Guard                                                                                      | Test                                                                                                                                  |
+| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Nothing evicted without a confirmed replica elsewhere                                      | `refuses to evict anything not confirmed elsewhere` — and reports `shortfall`, rather than claiming a success it didn't achieve       |
+| No content hash → no way to tell a correct replica from an object merely occupying the key | `refuses when there is no content hash to verify a replica against`                                                                   |
+| Durable ≠ readable                                                                         | `refuses to drop the last instantly-readable copy` (an archived copy is durable and twelve hours away)                                |
+| A failing probe is not evidence of presence _or_ absence                                   | `treats a failing probe as no evidence at all`                                                                                        |
+| Corruption reaches a human                                                                 | `surfaces suspected corruption` — a checksum disagreement is evidence a copy is wrong, not merely a reason to skip                    |
+| Unverified ≠ verified                                                                      | `does not count a present-but-unverified replica by default`; counting it requires an explicit opt-in                                 |
+| The operator's reduction request is answered honestly                                      | `refuses outright when no peer is available to confirm anything` — quietly degrading into "keep everything" would look like it worked |
 
 Plus the mechanics: hysteresis (nothing below the high-water mark; frees to the low mark and
 **not far past it**); bytes deleted and index row forgotten together; re-derivable blobs
@@ -326,12 +326,12 @@ sync at all — not slowly, at all. `ObjectStorageAdapter` gains `getStream` / `
 **web `ReadableStream`** (not Node streams, so the same interface stays implementable on React
 Native and in a browser for Phase 2), and `transferFile` uses them.
 
-| Test | Where | Asserts |
-|---|---|---|
-| `never calls the buffered get/put` | `sync-engine/__tests__/streamed-transfer.test.ts` | counts calls to `get`/`put` and requires **zero** — this is how we know the streaming path is the real one and not a wrapper around the old behaviour |
-| `round-trips a streamed write and read` | `storage-fs/__tests__/adapter.test.ts` | multi-chunk source, so the write path is exercised as a stream rather than a single enqueue that happens to look like one |
-| `short-circuits when the destination already holds the key` | streamed-transfer | no stream is opened at all |
-| `does not leave the key marked in-flight after a failure` | streamed-transfer | a leaked in-flight marker would make every retry return false without attempting anything, and the record would be stuck forever |
+| Test                                                        | Where                                             | Asserts                                                                                                                                               |
+| ----------------------------------------------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `never calls the buffered get/put`                          | `sync-engine/__tests__/streamed-transfer.test.ts` | counts calls to `get`/`put` and requires **zero** — this is how we know the streaming path is the real one and not a wrapper around the old behaviour |
+| `round-trips a streamed write and read`                     | `storage-fs/__tests__/adapter.test.ts`            | multi-chunk source, so the write path is exercised as a stream rather than a single enqueue that happens to look like one                             |
+| `short-circuits when the destination already holds the key` | streamed-transfer                                 | no stream is opened at all                                                                                                                            |
+| `does not leave the key marked in-flight after a failure`   | streamed-transfer                                 | a leaked in-flight marker would make every retry return false without attempting anything, and the record would be stuck forever                      |
 
 #### (b) A corrupted transfer fails rather than landing — and this closes the item 1b-i gap
 
@@ -344,26 +344,26 @@ checksums are CRC-only). Both halves of the fix are now in:
   assembly.
 - **Whole object** — the writer hashes as the bytes go past and **errors the stream at
   end-of-input** on a mismatch. The ordering is the point: the digest is only final when the
-  stream ends, which is also when the upload wants to complete, so checking *after* the pipe
+  stream ends, which is also when the upload wants to complete, so checking _after_ the pipe
   resolves would mean the multipart upload has already completed and the bad object is stored.
   `verifyingStream` fails from inside `pull` at `done`, which makes the upload reject and abort.
 
-| Guard | Test |
-|---|---|
-| A corrupt transfer stores nothing | `rejects a transfer whose bytes don't match the key, storing nothing` |
-| A truncated stream is caught | `catches a truncated stream` (`stream-verify.test.ts`) — what a dropped connection looks like, and what a length check alone would miss |
-| The failure is a stream *error*, not a return value | `errors the stream rather than closing it when the digest disagrees` — a consumer that finalizes on close would already have stored the object |
-| The FS write is atomic | `leaves nothing at the key when the digest disagrees`, `leaves no partial file behind either`, `does not clobber an existing object when the replacement fails` — writes go to a temp name and rename in, because a half-written file at the real key looks exactly like a complete one to `has()`, which is how a corrupt object becomes something the durability predicate counts as a replica |
-| Records with no derivable hash still transfer | `transfers unverified when no hash is derivable` — `fileHash` falls back to the object key when a record has no `contentHash`, and a key is not a hash; failing those every round would break records predating content hashing |
-| A content-addressed key alone is enough | `still recovers the hash from a content-addressed key alone` |
-| The multipart upload is aborted, not abandoned | code-level: `upload.abort()` in the catch, so a failed upload doesn't linger as billable orphaned parts (S3 charges for them and there is no lifecycle rule to reap them) |
+| Guard                                               | Test                                                                                                                                                                                                                                                                                                                                                                                             |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| A corrupt transfer stores nothing                   | `rejects a transfer whose bytes don't match the key, storing nothing`                                                                                                                                                                                                                                                                                                                            |
+| A truncated stream is caught                        | `catches a truncated stream` (`stream-verify.test.ts`) — what a dropped connection looks like, and what a length check alone would miss                                                                                                                                                                                                                                                          |
+| The failure is a stream _error_, not a return value | `errors the stream rather than closing it when the digest disagrees` — a consumer that finalizes on close would already have stored the object                                                                                                                                                                                                                                                   |
+| The FS write is atomic                              | `leaves nothing at the key when the digest disagrees`, `leaves no partial file behind either`, `does not clobber an existing object when the replacement fails` — writes go to a temp name and rename in, because a half-written file at the real key looks exactly like a complete one to `has()`, which is how a corrupt object becomes something the durability predicate counts as a replica |
+| Records with no derivable hash still transfer       | `transfers unverified when no hash is derivable` — `fileHash` falls back to the object key when a record has no `contentHash`, and a key is not a hash; failing those every round would break records predating content hashing                                                                                                                                                                  |
+| A content-addressed key alone is enough             | `still recovers the hash from a content-addressed key alone`                                                                                                                                                                                                                                                                                                                                     |
+| The multipart upload is aborted, not abandoned      | code-level: `upload.abort()` in the catch, so a failed upload doesn't linger as billable orphaned parts (S3 charges for them and there is no lifecycle rule to reap them)                                                                                                                                                                                                                        |
 
 **Bugs found while doing this**
 
 - **A leaked source stream on a failed write.** `transferFile` abandoned the source stream when
   `putStream` threw, keeping the underlying HTTP response open. Since a failed transfer is
   retried every round, leaked responses accumulate until the connection pool starves — which
-  surfaces much later as *unrelated* requests hanging. Now explicitly cancelled on both the
+  surfaces much later as _unrelated_ requests hanging. Now explicitly cancelled on both the
   transfer path and inside the HTTP adapter.
 - **A test fixture with a made-up content hash.** `residency-exchange.test.ts` used
   `"d".repeat(64)` as the hash of bytes `[4,5,6]`. Once transfers were verified, the transfer
@@ -398,26 +398,26 @@ performance fix that is also a correctness fix.
 
 **Automated**
 
-| Test | Where | Asserts |
-|---|---|---|
-| `returns records that carry no such label` | `storage-sqlite/__tests__/exclude-label.test.ts` | the basic exclusion |
-| `excludes regardless of the label's value` | same | negation is over the key, not a value — see below |
-| `returns a record exactly once when it holds many other labels` | same | a `LEFT JOIN … IS NULL` would multiply the row before the null test, so a record with three face labels would come back three times |
-| `does not exclude on a tombstoned label` | same | a retracted rendition label means the record is no longer a rendition; treating the dead row as live would hide it from the grid **permanently**, with nothing to un-hide it |
-| `is scoped to the naming app` | same | namespaces exist so two apps can use one key name; excluding on the key alone would let one app's vocabulary hide another's records |
-| `combines with ordinary column filters` | same | "children of X that are not renditions" |
-| `emits a correlated NOT EXISTS` / `ignores tombstoned label rows` / `does not join` | `storage-aurora-dsql/__tests__/query-builder.test.ts` | the same three properties at the SQL level for the cloud dialect — an *uncorrelated* subquery would exclude every record as soon as any record carried the label |
-| `pushes parentId into the query rather than filtering after it` | `cloud-data-server/__tests__/routes-db.test.ts` | the constraint reaches SQL, so pages come back full and the cursor is honest |
-| `treats parentId=none as a null-parent filter` | same | sentinel rather than an empty value, which would be indistinguishable from a caller that built the query string from an undefined variable |
-| `rejects a malformed notLabel rather than ignoring it` | same | silently ignoring it returns renditions mixed into the grid, which **looks like the filter working** on a small library |
-| `combines parentId with a label filter` | same | "a thumbnail *of this record*" is one lookup, not a label scan plus a client-side parent check |
-| `parentId filtering` group | `storage-sqlite/__tests__/exclude-label.test.ts` | `eq` selects one record's children; `isNull` selects top-level records |
+| Test                                                                                | Where                                                 | Asserts                                                                                                                                                                      |
+| ----------------------------------------------------------------------------------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `returns records that carry no such label`                                          | `storage-sqlite/__tests__/exclude-label.test.ts`      | the basic exclusion                                                                                                                                                          |
+| `excludes regardless of the label's value`                                          | same                                                  | negation is over the key, not a value — see below                                                                                                                            |
+| `returns a record exactly once when it holds many other labels`                     | same                                                  | a `LEFT JOIN … IS NULL` would multiply the row before the null test, so a record with three face labels would come back three times                                          |
+| `does not exclude on a tombstoned label`                                            | same                                                  | a retracted rendition label means the record is no longer a rendition; treating the dead row as live would hide it from the grid **permanently**, with nothing to un-hide it |
+| `is scoped to the naming app`                                                       | same                                                  | namespaces exist so two apps can use one key name; excluding on the key alone would let one app's vocabulary hide another's records                                          |
+| `combines with ordinary column filters`                                             | same                                                  | "children of X that are not renditions"                                                                                                                                      |
+| `emits a correlated NOT EXISTS` / `ignores tombstoned label rows` / `does not join` | `storage-aurora-dsql/__tests__/query-builder.test.ts` | the same three properties at the SQL level for the cloud dialect — an _uncorrelated_ subquery would exclude every record as soon as any record carried the label             |
+| `pushes parentId into the query rather than filtering after it`                     | `cloud-data-server/__tests__/routes-db.test.ts`       | the constraint reaches SQL, so pages come back full and the cursor is honest                                                                                                 |
+| `treats parentId=none as a null-parent filter`                                      | same                                                  | sentinel rather than an empty value, which would be indistinguishable from a caller that built the query string from an undefined variable                                   |
+| `rejects a malformed notLabel rather than ignoring it`                              | same                                                  | silently ignoring it returns renditions mixed into the grid, which **looks like the filter working** on a small library                                                      |
+| `combines parentId with a label filter`                                             | same                                                  | "a thumbnail _of this record_" is one lookup, not a label scan plus a client-side parent check                                                                               |
+| `parentId filtering` group                                                          | `storage-sqlite/__tests__/exclude-label.test.ts`      | `eq` selects one record's children; `isNull` selects top-level records                                                                                                       |
 
 **Design notes worth keeping**
 
 - **`excludeLabel` has no value component, deliberately.** `?label=` distinguishes presence
   from a specific value because a positive query has a reason to. A negated one asking "not
-  carrying key K with value V" would silently *include* records carrying K with some other
+  carrying key K with value V" would silently _include_ records carrying K with some other
   value — the opposite of what it reads as.
 - **`include=labels` was added to the single-record GET** on both servers. Asking about one
   record is the cheapest possible form of "is this record a rendition"; without it the only way
@@ -447,11 +447,11 @@ only one), and the parameter contract at each server's edge.
 
 #### The rules (`protocol-primitives/__tests__/variants.test.ts`, 30 tests)
 
-| Rule | Tests |
-|---|---|
-| 1 — smallest at or above target | rounds **up** not down (500 px must not be served 400 and upscaled); picks the *smallest* qualifying rung, not merely a qualifying one (2560 for a 401 px request is ~40× the pixels — and under I-T a read promotes the object back to Frequent Access for 30 days) |
-| 2 — clamp to the largest that exists | lets a client request its full viewport without knowing whether this record has a rung that large |
-| 3 — **never the original** | asserted as an *absence*: no candidate set contains a parent, and `never returns something larger than its largest variant` sweeps a range of targets. Exceeding the ladder must be an explicit restore, the same guarantee the storage layer enforces by refusing to thaw on read |
+| Rule                                 | Tests                                                                                                                                                                                                                                                                              |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 — smallest at or above target      | rounds **up** not down (500 px must not be served 400 and upscaled); picks the _smallest_ qualifying rung, not merely a qualifying one (2560 for a 401 px request is ~40× the pixels — and under I-T a read promotes the object back to Frequent Access for 30 days)               |
+| 2 — clamp to the largest that exists | lets a client request its full viewport without knowing whether this record has a rung that large                                                                                                                                                                                  |
+| 3 — **never the original**           | asserted as an _absence_: no candidate set contains a parent, and `never returns something larger than its largest variant` sweeps a range of targets. Exceeding the ladder must be an explicit restore, the same guarantee the storage layer enforces by refusing to thaw on read |
 
 Also: long edge of a **portrait** variant is its height, not its width; unmeasured variants are
 excluded rather than guessed at (and an all-unmeasured record resolves to `null`); zero and
@@ -468,16 +468,16 @@ tells you a size. It does not — classes are per-record maxima.
 
 #### The gathering (`storage-sqlite/__tests__/variant-queries.test.ts`, 12 tests)
 
-Every case here is one where a naive version silently resolves to the *wrong child*:
+Every case here is one where a naive version silently resolves to the _wrong child_:
 
-| Test | Would otherwise serve |
-|---|---|
+| Test                                                 | Would otherwise serve                                                                               |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | `ignores children that are not labelled as variants` | someone's **crop** when they asked for a 400 px tile — the bug reading `parent_id` alone always had |
-| `ignores a variant whose label has been retracted` | bytes the app has disowned |
-| `ignores a soft-deleted variant` | a deleted object |
-| `is scoped to the naming app` | another app's `rendition` key |
-| `keeps each record's variants to itself` | a different record's image |
-| `never resolves to the parent record itself` | the original — rule 3 at the gathering layer |
+| `ignores a variant whose label has been retracted`   | bytes the app has disowned                                                                          |
+| `ignores a soft-deleted variant`                     | a deleted object                                                                                    |
+| `is scoped to the naming app`                        | another app's `rendition` key                                                                       |
+| `keeps each record's variants to itself`             | a different record's image                                                                          |
+| `never resolves to the parent record itself`         | the original — rule 3 at the gathering layer                                                        |
 
 Plus: a record whose variants have no dimensions is omitted; a partially-measured record
 resolves from the measured ones; a whole page resolves in one pass.
@@ -535,11 +535,11 @@ the sync engine actually uses reaches it** — and if it handed back an S3 presi
 the sync path would quietly keep paying origin egress with no edge caching and nothing would
 look wrong.
 
-| Test | Asserts |
-|---|---|
-| `signs shared bytes through CloudFront, not S3` | URL carries the CF domain and `Signature=`, and **not** `X-Amz-Signature` — asserting the absence is what distinguishes the two |
-| `leaves app-syncable bytes on S3 presign` | CloudFront never serves `apps/*`; routing them there would need a second origin and grant model for no benefit, since they are not shared data |
-| `404s a key with no object behind it` | existence is still checked before signing |
+| Test                                            | Asserts                                                                                                                                        |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `signs shared bytes through CloudFront, not S3` | URL carries the CF domain and `Signature=`, and **not** `X-Amz-Signature` — asserting the absence is what distinguishes the two                |
+| `leaves app-syncable bytes on S3 presign`       | CloudFront never serves `apps/*`; routing them there would need a second origin and grant model for no benefit, since they are not shared data |
+| `404s a key with no object behind it`           | existence is still checked before signing                                                                                                      |
 
 Uploads stay on presigned S3 PUT, unchanged — CloudFront is not the write path.
 
@@ -554,13 +554,13 @@ it can tolerate — and has no opinion about tiers. `retrieval-intent.test.ts` a
 rejection of `glacier`, `DEEP_ARCHIVE`, `standard`, `cool`: a caller reaching for a provider
 concept has escaped the abstraction and is refused rather than accommodated.
 
-| Property | Test |
-|---|---|
-| Default is `instant` | `defaults to instant when the caller says nothing` — a write that forgot to think about retrieval must not become something that takes 12 hours to read |
-| `instant` carries **no tag at all** | `gives an instant write no tag at all` — an untagged object is *structurally* ineligible for the archive lifecycle rule, a stronger guarantee than one depending on a rule reading a value the right way round |
+| Property                                 | Test                                                                                                                                                                                                                                                                                                                                                                     |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Default is `instant`                     | `defaults to instant when the caller says nothing` — a write that forgot to think about retrieval must not become something that takes 12 hours to read                                                                                                                                                                                                                  |
+| `instant` carries **no tag at all**      | `gives an instant write no tag at all` — an untagged object is _structurally_ ineligible for the archive lifecycle rule, a stronger guarantee than one depending on a rule reading a value the right way round                                                                                                                                                           |
 | Both intents land in Intelligent-Tiering | `writes both intents to Intelligent-Tiering, gating the freeze elsewhere` — `archive` is **not** written straight to Deep Archive, because the transition is gated on ladder completeness and a hold period, neither known at write time. Freezing on write would freeze originals whose ladder does not exist yet — exactly when the original is the only readable copy |
-| Class and tags are **signed** | `binds the storage class and tags into the signature` — an unsigned header is one the uploader can drop, letting it pick its own tier and tag its way into (or out of) a rule it was never granted |
-| A typo is refused | `refuses an unrecognized intent rather than defaulting` — defaulting `"archve"` is silently wrong in both directions: `instant` costs money quietly, `archive` imposes a 48-hour thaw nobody asked for |
+| Class and tags are **signed**            | `binds the storage class and tags into the signature` — an unsigned header is one the uploader can drop, letting it pick its own tier and tag its way into (or out of) a rule it was never granted                                                                                                                                                                       |
+| A typo is refused                        | `refuses an unrecognized intent rather than defaulting` — defaulting `"archve"` is silently wrong in both directions: `instant` costs money quietly, `archive` imposes a 48-hour thaw nobody asked for                                                                                                                                                                   |
 
 **The tag strings are defined once**, in `protocol-primitives`, because they are written by the
 presign path and read by the bucket lifecycle rule — different packages. A drift is silent both
@@ -587,8 +587,8 @@ their ladder is complete (the only readable copy behind a 48-hour thaw).
 The guarantee: **a read never restores implicitly.** Without it a future slideshow feature
 would thaw an entire archive one image at a time — each thaw costing money and twelve hours,
 with nothing in the call path looking wrong. That is the property the plan means by "safe by
-construction rather than by convention", and every test below is either *the caller is told
-before trying* or *the caller is refused rather than silently committed*.
+construction rather than by convention", and every test below is either _the caller is told
+before trying_ or _the caller is refused rather than silently committed_.
 
 #### Availability is maintained, not computed
 
@@ -598,35 +598,35 @@ read once per page, keyed by **object key rather than record id** — keys are c
 so two records legitimately share one object and readability is a property of the object. Per-record
 rows could disagree about one blob.
 
-| Test | Asserts |
-|---|---|
-| `reports instant for an object nothing has moved` | absence of a row means the default |
-| `assumes instant for an object nothing has reported on` (unit) | the direction is deliberate: being wrong this way costs a recoverable 409 that self-corrects; defaulting to `archived` would be safe in the other direction and useless, since every record would look unreadable until proven otherwise |
-| `reports archived, with the tier and the wait, on the listing itself` | unreadability is known **before anything is attempted**, on the listing the client already fetched — not discovered as a stalled image |
-| `treats only instant as readable now` (unit) | `restoring`, `archived` and `absent` are all "not now", and `absent` is distinct from `archived` — collapsing them would send a client to a restore endpoint with nothing to restore |
+| Test                                                                  | Asserts                                                                                                                                                                                                                                  |
+| --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `reports instant for an object nothing has moved`                     | absence of a row means the default                                                                                                                                                                                                       |
+| `assumes instant for an object nothing has reported on` (unit)        | the direction is deliberate: being wrong this way costs a recoverable 409 that self-corrects; defaulting to `archived` would be safe in the other direction and useless, since every record would look unreadable until proven otherwise |
+| `reports archived, with the tier and the wait, on the listing itself` | unreadability is known **before anything is attempted**, on the listing the client already fetched — not discovered as a stalled image                                                                                                   |
+| `treats only instant as readable now` (unit)                          | `restoring`, `archived` and `absent` are all "not now", and `absent` is distinct from `archived` — collapsing them would send a client to a restore endpoint with nothing to restore                                                     |
 
 #### Reads refuse
 
-| Test | Asserts |
-|---|---|
-| `refuses a file-url for archived bytes with 409, and does not restore` | the 409 carries tier and expected latency, **and no availability row is written** — a read must not have side effects, least of all billable ones |
-| `409s a read of bytes already being restored rather than queueing another` | `ObjectRestoring` is its own answer |
+| Test                                                                       | Asserts                                                                                                                                           |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `refuses a file-url for archived bytes with 409, and does not restore`     | the 409 carries tier and expected latency, **and no availability row is written** — a read must not have side effects, least of all billable ones |
+| `409s a read of bytes already being restored rather than queueing another` | `ObjectRestoring` is its own answer                                                                                                               |
 
 #### Restoring is a decision, not a discovery
 
 Two-step by design: without `confirm`, the endpoint returns an estimate and does nothing. A
-single-step endpoint would make the cost and the wait something a caller learns *after*
+single-step endpoint would make the cost and the wait something a caller learns _after_
 committing to them.
 
-| Test | Asserts |
-|---|---|
-| `returns an estimate and does nothing without confirmation` | estimate present, **zero writes** |
-| `issues the restore only on explicit confirmation` | exactly one write |
-| `defaults to the fast tier and lets a caller opt into the cheap one` | Standard (12 h) by default — the difference to Bulk is hundredths of a cent and 36 hours, so Bulk earns its wait only in batch |
-| `reports an already-readable record without restoring it` | two clients racing on one archived record is ordinary, not an error |
-| `does not queue a second restore for bytes already thawing` | idempotent under retry |
-| `403s a caller with no read grant on the type` | a **read** grant is enough to ask — requiring write would leave a read-only app able to see a record is archived and unable to act |
-| `makes Bulk much cheaper and much slower` (unit) | the trade in one number: 4× the wait to save under $2 on 100 GB |
+| Test                                                                 | Asserts                                                                                                                            |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `returns an estimate and does nothing without confirmation`          | estimate present, **zero writes**                                                                                                  |
+| `issues the restore only on explicit confirmation`                   | exactly one write                                                                                                                  |
+| `defaults to the fast tier and lets a caller opt into the cheap one` | Standard (12 h) by default — the difference to Bulk is hundredths of a cent and 36 hours, so Bulk earns its wait only in batch     |
+| `reports an already-readable record without restoring it`            | two clients racing on one archived record is ordinary, not an error                                                                |
+| `does not queue a second restore for bytes already thawing`          | idempotent under retry                                                                                                             |
+| `403s a caller with no read grant on the type`                       | a **read** grant is enough to ask — requiring write would leave a read-only app able to see a record is archived and unable to act |
+| `makes Bulk much cheaper and much slower` (unit)                     | the trade in one number: 4× the wait to save under $2 on 100 GB                                                                    |
 
 Rate limiting counts **live `restoring` rows** rather than keeping a ledger, so a restart cannot
 forget what is in flight and the window closes on its own as restores complete. Both a count and
@@ -648,7 +648,7 @@ read as zero.
 - **Nothing maintains availability yet.** No S3 Event Notification handler, no Inventory
   reconcile — that is item 19b. Today the only writer is the restore endpoint itself, so in a
   real deployment every record reads `instant` until item 19b lands. The plumbing, the API shape
-  and the refusals are all real; the *input* is not.
+  and the refusals are all real; the _input_ is not.
 - **`RestoreObject` is never actually called.** The endpoint records `restoring` and returns the
   estimate, but does not yet issue the S3 request — item 19 (request → poll → notify → serve).
   So a confirmed restore currently marks state and thaws nothing. **This is the most misleading
@@ -671,22 +671,22 @@ read as zero.
 Drive-only and **ungrantable to installable apps** — so ProRAW files synced fine and no app could
 ever be granted them. Photos simply could not see them.
 
-| Test | Asserts |
-|---|---|
-| `maps every raw extension to a real image type, not the catch-all` | dng, cr2, cr3, nef, arw, raf, orf, rw2 |
-| `makes them grantable to installable apps` | the actual fix — the category is in `APP_GRANTABLE_CATEGORIES`, which `other` is not |
-| `registers each maker's format separately` | not one shared `image/raw`: the embedded-preview layout derivation reads differs per vendor, so a single type would leave nothing to branch on. Grants are per category, so `image` still covers all eight |
-| `routes them to the image metadata table` | they behave like any other image downstream |
+| Test                                                               | Asserts                                                                                                                                                                                                    |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `maps every raw extension to a real image type, not the catch-all` | dng, cr2, cr3, nef, arw, raf, orf, rw2                                                                                                                                                                     |
+| `makes them grantable to installable apps`                         | the actual fix — the category is in `APP_GRANTABLE_CATEGORIES`, which `other` is not                                                                                                                       |
+| `registers each maker's format separately`                         | not one shared `image/raw`: the embedded-preview layout derivation reads differs per vendor, so a single type would leave nothing to branch on. Grants are per category, so `image` still covers all eight |
+| `routes them to the image metadata table`                          | they behave like any other image downstream                                                                                                                                                                |
 
 `perceptual_hash` and `thumb_hash` are **metadata, not labels**, because they are deterministic
-from the bytes — a label is an app's *assertion*, and anyone re-deriving from the same file
+from the bytes — a label is an app's _assertion_, and anyone re-deriving from the same file
 reproduces these exactly. `thumb_hash` is on video too, so a grid mixing stills and clips has no
 hole where a placeholder should be. A test asserts `content_hash` stays on the record row:
 perceptual hash matches re-encodes and resizes, which is what makes it useful for import dedup and
 what makes it **unsafe as an identity** — a candidate-finder, never a decision.
 
 **Gaps** — the columns exist and nothing writes them yet: derivation computes neither hash (see
-item 7). The raw *types* are registered, but nothing can decode a raw file — deriving from the
+item 7). The raw _types_ are registered, but nothing can decode a raw file — deriving from the
 embedded preview is item 30. Recorded explicitly rather than left as an empty section, because a
 missing **Gaps** block is ambiguous between "none" and "nobody wrote them".
 
@@ -694,20 +694,20 @@ missing **Gaps** block is ambiguous between "none" and "nobody wrote them".
 
 **No test asserts a class maximum as a literal.** Those integers are the visual test's output
 (item 9b) and a test asserting `1280` would have to be edited by the same change that makes it
-wrong — exactly when nobody is thinking about whether it *should* be. Every test asserts a
+wrong — exactly when nobody is thinking about whether it _should_ be. Every test asserts a
 relationship or reads the number from the ladder itself.
 
-| Rule | Tests |
-|---|---|
-| **Rule 1** — never upscales | `emits min(original, class maximum)` swept over every class and a range of sources; `never emits a file larger than its source`. This is *why* a class name tells you nothing about a file's size, and therefore why resolution must be server-side |
-| **Rule 2** — generate when the original exceeds the next lower maximum | `adds a class exactly when the original passes the class below it` — asserts both sides of the boundary, since "no offset, no margin" is the actual specification |
-| Bottom rung unconditional | `always generates the bottom rung, however small` — so every record has an instantly-readable copy and the grid needs no fallback |
-| **Contiguous prefix** | `produces a contiguous prefix from the bottom, never a gap` — the property the ladder-complete gate and the derivation sweeper both read "top applicable class" off. Neither would be expressible if the set could have holes |
-| Own-top-of-ladder floor | `means every generated class is the same size as the original` — freezing such an original saves nothing |
+| Rule                                                                   | Tests                                                                                                                                                                                                                                               |
+| ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Rule 1** — never upscales                                            | `emits min(original, class maximum)` swept over every class and a range of sources; `never emits a file larger than its source`. This is _why_ a class name tells you nothing about a file's size, and therefore why resolution must be server-side |
+| **Rule 2** — generate when the original exceeds the next lower maximum | `adds a class exactly when the original passes the class below it` — asserts both sides of the boundary, since "no offset, no margin" is the actual specification                                                                                   |
+| Bottom rung unconditional                                              | `always generates the bottom rung, however small` — so every record has an instantly-readable copy and the grid needs no fallback                                                                                                                   |
+| **Contiguous prefix**                                                  | `produces a contiguous prefix from the bottom, never a gap` — the property the ladder-complete gate and the derivation sweeper both read "top applicable class" off. Neither would be expressible if the set could have holes                       |
+| Own-top-of-ladder floor                                                | `means every generated class is the same size as the original` — freezing such an original saves nothing                                                                                                                                            |
 
 Video adds two clauses, both tested: **bitrate is a second maximum** (either axis dropping is
 enough to transcode; neither dropping means don't), and **skim is exempt from the no-op clause**
-because it differs from its source in the *time* dimension — a 15-second clip has no smaller
+because it differs from its source in the _time_ dimension — a 15-second clip has no smaller
 resolution worth making but still benefits from a 2-second scrub. `video-poster-720p`'s maximum is
 asserted **equal to `video-720p`'s** rather than to a literal, because it is pinned to it: a poster
 sharper than the footage it hands off to degrades visibly at the transition into playback.
@@ -752,20 +752,20 @@ emitted **first**, because ingest runs AI off it and every routine model input i
 
 **Automated** — `photos/__tests__/derivation.test.ts` (18 tests). The encoding itself is not
 tested: that is sharp, and asserting sharp resizes is asserting sharp. What is tested is
-everything deciding *whether work happens*, where failures are silent.
+everything deciding _whether work happens_, where failures are silent.
 
-| Test | Guards against |
-|---|---|
+| Test                                                                         | Guards against                                                                                 |
+| ---------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | `is not complete while any applicable rung is absent` (swept over each rung) | an original archived with nothing readable in its place — the ladder-complete gate's predicate |
-| `does not demand rungs that do not apply to a small original` | every small photo permanently ineligible for archiving *and* permanently re-attempted |
-| `ignores classes it did not ask for` | a superseded rung awaiting the reaper reading as "incomplete" |
-| `cannot decode HEIC or raw` | the fallback silently appearing to cover a phone library, which is mostly HEIC |
-| `never retries a format this node cannot decode` | **the sweeper re-downloading and re-failing on every HEIC in the library, daily, forever** |
-| `does not back off a record whose bytes simply are not here` | backoff applied where the fix is a transfer, not another attempt |
-| `backs off further with each consecutive failure, up to a cap` | an unbounded backoff, which eventually means "never" |
-| `resets the count on any non-transient outcome` | a record that failed twice, succeeded, then failed again starting from an hour |
-| `retries a previously-complete record` | a stale `complete` blocking re-derivation after a respec or a reaped child |
-| `does not take over before the window elapses` | the cloud racing the originating node rather than backstopping it |
+| `does not demand rungs that do not apply to a small original`                | every small photo permanently ineligible for archiving _and_ permanently re-attempted          |
+| `ignores classes it did not ask for`                                         | a superseded rung awaiting the reaper reading as "incomplete"                                  |
+| `cannot decode HEIC or raw`                                                  | the fallback silently appearing to cover a phone library, which is mostly HEIC                 |
+| `never retries a format this node cannot decode`                             | **the sweeper re-downloading and re-failing on every HEIC in the library, daily, forever**     |
+| `does not back off a record whose bytes simply are not here`                 | backoff applied where the fix is a transfer, not another attempt                               |
+| `backs off further with each consecutive failure, up to a cap`               | an unbounded backoff, which eventually means "never"                                           |
+| `resets the count on any non-transient outcome`                              | a record that failed twice, succeeded, then failed again starting from an hour                 |
+| `retries a previously-complete record`                                       | a stale `complete` blocking re-derivation after a respec or a reaped child                     |
+| `does not take over before the window elapses`                               | the cloud racing the originating node rather than backstopping it                              |
 
 Both resize paths (Next route and cloud Lambda) now derive the whole ladder through the shared
 `publishRendition`, and the **"already has a thumbnail, stop" early return was removed** — with a
@@ -782,7 +782,7 @@ The plan says renditions-before-originals "is a scheduling change in the sync su
 protocol change." **That does not survive contact with the engine.**
 
 Blob pushes are gated on the metadata contiguous-prefix rule: within a node's stream, items ship in
-HLC order and a blob failure halts the rest. Renditions are *children*, so the original's record
+HLC order and a blob failure halts the rest. Renditions are _children_, so the original's record
 must exist first and therefore has the earlier HLC — its 40 MB blob is pushed before any 20 KB
 rendition. Reordering within a node bucket would break the prefix rule that the coverage watermark
 depends on, which is not a scheduling knob but the correctness argument for the whole exchange.
@@ -791,7 +791,7 @@ Achieving it properly needs blob transfer decoupled from the metadata prefix rul
 change. **Not attempted here**, and deliberately not faked with a partial version. The consequence
 is that on a slow uplink the library is browsable only after originals upload, not within seconds.
 The plan's own mitigation still holds: the archive gate makes the original wait, so nothing is
-*incorrect*, only slower than intended.
+_incorrect_, only slower than intended.
 
 **Gaps**
 
@@ -801,7 +801,7 @@ The plan's own mitigation still holds: the archive gate makes the original wait,
 - **The attempt ledger has no storage.** The types and transitions are complete and tested, but
   nothing persists a `DerivationAttempt` yet — so today the "never retry HEIC" guarantee is
   available and unused. It needs a node-local table, deliberately not syncable: an attempt is a
-  fact about *one node's* capabilities, and syncing it would let a phone's failure tell the laptop
+  fact about _one node's_ capabilities, and syncing it would let a phone's failure tell the laptop
   not to bother.
 - **ThumbHash and perceptual hash are not computed.** The columns exist (items 4/21); derivation
   does not populate them.
@@ -813,8 +813,8 @@ The plan's own mitigation still holds: the archive gate makes the original wait,
 
 ### Item 9 — grid and viewer serve from the ladder, by pixel size
 
-**What changed behaviourally:** the grid used to render *only records carrying the thumbnail
-label* — i.e. the renditions themselves — showing a placeholder for everything else. That
+**What changed behaviourally:** the grid used to render _only records carrying the thumbnail
+label_ — i.e. the renditions themselves — showing a placeholder for everything else. That
 inverted what a library is: a photo was unclickable until something was derived from it, and a
 fresh import was a grid of grey boxes. The grid now lists **originals** and displays a
 **rendition of** each, resolved server-side from a requested pixel size.
@@ -828,7 +828,7 @@ and the one constant naming the pre-ladder rung).
 This is worth more than any single behavioural test here, because the failure it prevents — a
 client hard-coding `image-screen` — is **invisible until a respec**. Everything renders, every
 test passes, right up until the maxima move and devices that update on their own schedule are
-asking for a rung that no longer means what it meant. The ladder's numbers are *expected* to be
+asking for a rung that no longer means what it meant. The ladder's numbers are _expected_ to be
 respecified, so this is not hypothetical.
 
 **Verified to fire**: injecting `const SNEAKY = "image-screen"` into the grid component makes it
@@ -847,23 +847,23 @@ The fixture uses the test app's own label key, `testapp/size-rung` — **not** `
 A platform that had quietly hard-coded Photos' vocabulary would still pass with the real key; with
 a meaningless one it cannot.
 
-| Test | Asserts |
-|---|---|
-| `returns a resolved variant per requested pixel size, with a URL` | keyed by what was *asked for*; URL rides the listing so a grid needs no per-tile round trip |
-| `rounds up to the smallest rendition at or above the target` | 500 px is not served a 400 px image and upscaled |
+| Test                                                                    | Asserts                                                                                                                                                |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `returns a resolved variant per requested pixel size, with a URL`       | keyed by what was _asked for_; URL rides the listing so a grid needs no per-tile round trip                                                            |
+| `rounds up to the smallest rendition at or above the target`            | 500 px is not served a 400 px image and upscaled                                                                                                       |
 | `clamps to the largest rendition rather than reaching for the original` | **rule 3, observable from outside** — exceeding the ladder never resolves to the parent, which is what would make a zoom request thaw an archived file |
-| `excludes renditions from the listing itself` | otherwise a 60k library is 300k+ records and the client cannot tell how far to page |
-| `omits variants for a record that has none` | empty map and no rendition read the same way: show the placeholder |
-| `does not attach variants when they were not asked for` | the extra child query does not creep into every existing caller |
+| `excludes renditions from the listing itself`                           | otherwise a 60k library is 300k+ records and the client cannot tell how far to page                                                                    |
+| `omits variants for a record that has none`                             | empty map and no rendition read the same way: show the placeholder                                                                                     |
+| `does not attach variants when they were not asked for`                 | the extra child query does not creep into every existing caller                                                                                        |
 
 #### Client-side behaviour
 
-| Test | Asserts |
-|---|---|
-| `shows the rendition the server resolved for the tile size` | the original's own bytes are **never** fetched when a rendition exists — the entire economic argument for the ladder |
-| `does not fetch a large original's bytes just to fill a 180px tile` | a record mid-derivation shows its placeholder rather than pulling 40 MB for a thumbnail |
-| `serves a small original directly when it has no renditions yet` | below the floor the round trip is not worth waiting for |
-| `still asks for nothing until the tile is near the viewport` | lazy loading survived the rewrite |
+| Test                                                                | Asserts                                                                                                              |
+| ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `shows the rendition the server resolved for the tile size`         | the original's own bytes are **never** fetched when a rendition exists — the entire economic argument for the ladder |
+| `does not fetch a large original's bytes just to fill a 180px tile` | a record mid-derivation shows its placeholder rather than pulling 40 MB for a thumbnail                              |
+| `serves a small original directly when it has no renditions yet`    | below the floor the round trip is not worth waiting for                                                              |
+| `still asks for nothing until the tile is near the viewport`        | lazy loading survived the rewrite                                                                                    |
 
 ThumbHash is stage zero: computed during derivation from the bitmap already in hand, stored on the
 **parent** record (the grid lists originals, so a hash on a child would be one join from the thing
@@ -889,18 +889,18 @@ lives on the record rather than in object storage.
 #### The gate is split, and that is the whole design
 
 The **app** asserts its derived ladder is complete, because only it knows what a complete ladder
-*is* — the platform must never learn what `image-medium` means, and a platform-side check would
+_is_ — the platform must never learn what `image-medium` means, and a platform-side check would
 have to. The **platform** independently applies its own floors and refuses to tag if they fail.
 
 **Neither side alone can freeze anything**, and each test removes one side's contribution:
 
-| Test | Removes | Asserts |
-|---|---|---|
-| `refuses when the app does not assert a complete ladder` | the app's half | no tagging call is made at all |
-| `refuses a small object even when the app says the ladder is complete` | the platform's floor | an app that is *wrong* about its ladder still cannot archive a 200 KB file |
-| `refuses a record marked starkeep/no-cloud` | — | tagging a record with no cloud bytes would assert something about an object that should not exist |
-| `requires write access, not merely read` | — | this changes how an object is stored; a read-only app has no business making it slow for everyone else |
-| `does not itself transition anything` | — | tagged ≠ transitioned; the hold period is what buys a week to catch a derivation bug |
+| Test                                                                   | Removes              | Asserts                                                                                                |
+| ---------------------------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------ |
+| `refuses when the app does not assert a complete ladder`               | the app's half       | no tagging call is made at all                                                                         |
+| `refuses a small object even when the app says the ladder is complete` | the platform's floor | an app that is _wrong_ about its ladder still cannot archive a 200 KB file                             |
+| `refuses a record marked starkeep/no-cloud`                            | —                    | tagging a record with no cloud bytes would assert something about an object that should not exist      |
+| `requires write access, not merely read`                               | —                    | this changes how an object is stored; a read-only app has no business making it slow for everyone else |
+| `does not itself transition anything`                                  | —                    | tagged ≠ transitioned; the hold period is what buys a week to catch a derivation bug                   |
 
 #### One lifecycle rule, and the conjunction is the safety argument
 
@@ -909,16 +909,16 @@ An object transitions only when it carries **both** `starkeep:intent=archive` **
 renditions do not exist — exactly when the original is the only readable form — and ladder-only
 would freeze things nobody asked to be slow.
 
-Renditions are **never tagged**, so they are *structurally* ineligible. That is stronger than a
+Renditions are **never tagged**, so they are _structurally_ ineligible. That is stronger than a
 rule that has to read a value the right way round.
 
-| Test | Asserts |
-|---|---|
-| `creates exactly one lifecycle rule` | one rule, one transition — the plan's "**one** lifecycle rule" |
-| `requires BOTH the intent tag and the ladder-complete tag` | the conjunction |
-| `transitions only to Deep Archive, above the small-object floor` | ≥1 MB, because Deep Archive's 40 KB per-object overhead and 180-day minimum make a small frozen object **dearer *and* slower** — strictly worse on both axes |
-| `never configures Intelligent-Tiering's asynchronous archive tiers` | **asserted as an absence.** I-T's automatic tiers are all millisecond-latency; its async tiers are not, and an object in one exists and cannot be read. Enabling them would silently break `instant` for every rendition, with no code change anywhere to notice. The failure mode is somebody *adding* this resource later to save money |
-| `creates no lifecycle rule` (ephemeral) | a rule on a disposable bucket would transition objects teardown then has to thaw |
+| Test                                                                | Asserts                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `creates exactly one lifecycle rule`                                | one rule, one transition — the plan's "**one** lifecycle rule"                                                                                                                                                                                                                                                                            |
+| `requires BOTH the intent tag and the ladder-complete tag`          | the conjunction                                                                                                                                                                                                                                                                                                                           |
+| `transitions only to Deep Archive, above the small-object floor`    | ≥1 MB, because Deep Archive's 40 KB per-object overhead and 180-day minimum make a small frozen object **dearer _and_ slower** — strictly worse on both axes                                                                                                                                                                              |
+| `never configures Intelligent-Tiering's asynchronous archive tiers` | **asserted as an absence.** I-T's automatic tiers are all millisecond-latency; its async tiers are not, and an object in one exists and cannot be read. Enabling them would silently break `instant` for every rendition, with no code change anywhere to notice. The failure mode is somebody _adding_ this resource later to save money |
+| `creates no lifecycle rule` (ephemeral)                             | a rule on a disposable bucket would transition objects teardown then has to thaw                                                                                                                                                                                                                                                          |
 
 #### A guard fired that was worth having
 
@@ -929,7 +929,7 @@ The fix was a deliberate widening, not a formatting trim: the seventeen enumerat
 `s3:Get*` reads collapsed into one wildcard. What makes it sound is the statement's Resource —
 **bucket ARNs only, never `bucket/*`** — so object actions like `s3:GetObject` cannot match
 however the wildcard expands, including for actions AWS adds later. Writes stay enumerated,
-because the dangerous half of a boundary should be explicit. And this is the *ceiling*: the
+because the dangerous half of a boundary should be explicit. And this is the _ceiling_: the
 install-time temp policy still enumerates exactly what it needs, so nothing any identity actually
 holds got wider.
 
@@ -942,7 +942,7 @@ holds got wider.
   because the consequence of the rule being subtly wrong is either objects that never archive (a
   bill nobody notices) or objects that archive too early (the only readable copy behind a thaw).
 - **`archiveHoldDays` is not configurable end to end.** The program accepts it and defaults to 7;
-  no config surface sets it, and the plan calls it a *primary* user-facing setting.
+  no config surface sets it, and the plan calls it a _primary_ user-facing setting.
 - **The gate is called only from the resize paths.** A record whose ladder completes some other
   way — a backfill, a re-derivation — is never gated. A sweeper should call it; none exists.
 - **The two floors are only half implemented.** Object size and cloud exclusion are enforced; the
@@ -960,11 +960,11 @@ It previously recorded `restoring`, returned a correct estimate, enforced the ra
 **thawed nothing**. That is worse than not having the endpoint: it reports progress on a restore
 nobody started, and the object never becomes readable.
 
-| Test | Asserts |
-|---|---|
-| `actually asks S3 to thaw the object` | the **SDK call**, not the recorded state — asserting the state is what let the gap exist |
-| — same test | Standard tier, and a hold of more than a day so a print session does not re-thaw |
-| `does not ask S3 to thaw anything when only an estimate was requested` | the estimate step has no side effects |
+| Test                                                                   | Asserts                                                                                  |
+| ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `actually asks S3 to thaw the object`                                  | the **SDK call**, not the recorded state — asserting the state is what let the gap exist |
+| — same test                                                            | Standard tier, and a hold of more than a day so a print session does not re-thaw         |
+| `does not ask S3 to thaw anything when only an estimate was requested` | the estimate step has no side effects                                                    |
 
 `restoreObject` returns `"already-in-progress"` rather than throwing when S3 reports one, because
 that is the ordinary outcome of two clients asking at once — treating it as a failure would tempt
@@ -980,13 +980,13 @@ twelve-hour stall never fires. The field would be decoration.
 from moving it. `BucketNotification` + `lambda.Permission` are created in the Pulumi program and
 asserted:
 
-| Test | Asserts |
-|---|---|
-| `subscribes the Lambda to the events that change readability` | exactly transition / restore-completed / restore-expired |
-| `subscribes to restore expiry, not just restore completion` | the one most easily forgotten — without it an object reads as available **forever** after one restore, fine for a week and wrong for months |
-| `does not subscribe to object creation` | a new object is instant, which is already the default for a key with no row; subscribing would write a row per upload to record nothing |
-| `grants S3 permission to invoke the function, scoped to the bucket` | S3 cannot invoke without it, and the apply fails with an unhelpful message if the permission is created second |
-| `creates no bucket notification` (ephemeral) | — |
+| Test                                                                | Asserts                                                                                                                                     |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `subscribes the Lambda to the events that change readability`       | exactly transition / restore-completed / restore-expired                                                                                    |
+| `subscribes to restore expiry, not just restore completion`         | the one most easily forgotten — without it an object reads as available **forever** after one restore, fine for a week and wrong for months |
+| `does not subscribe to object creation`                             | a new object is instant, which is already the default for a key with no row; subscribing would write a row per upload to record nothing     |
+| `grants S3 permission to invoke the function, scoped to the bucket` | S3 cannot invoke without it, and the apply fails with an unhelpful message if the permission is created second                              |
+| `creates no bucket notification` (ephemeral)                        | —                                                                                                                                           |
 
 The mapping layer (`availability-events.ts`, 14 tests) is pure and provider-shaped-but-not-coupled:
 
@@ -1036,16 +1036,16 @@ Intelligent-Tiering access tier; it has **no restore-status field**. So the swee
   estimated ready time has passed. **That set is bounded by outstanding restores, not library
   size**, which is what keeps a daily check affordable.
 
-| Test | Asserts |
-|---|---|
-| `marks an object archived when the inventory says so and the store does not` | the backstop's actual job |
-| `sees through Intelligent-Tiering to its asynchronous access tier` | storage class alone would call it readable |
-| `does not overwrite an event newer than the snapshot` | a 03:00 report read at 05:00 must not revert a 04:00 transition — the snapshot's own time travels with the observations |
-| `leaves a live restored copy alone despite an archived storage class` | an inventory cannot see thaws; otherwise every reconcile marks a freshly-restored object unreadable *while the user is looking at it* |
-| `flags a restore whose estimated ready time has passed` | the only thing that ever unsticks a lost `ObjectRestore:Completed` |
-| `never marks a restoring key as vanished` | inventory silence about a restoring key is not evidence of deletion |
-| `reports an archived object that was expected to stay readable` | **reported, never silently corrected** — nothing can un-archive it, and the interesting question is which rule put it there |
-| `writes nothing for an unknown key that is readable anyway` | instant is the default; writing it says nothing |
+| Test                                                                         | Asserts                                                                                                                               |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `marks an object archived when the inventory says so and the store does not` | the backstop's actual job                                                                                                             |
+| `sees through Intelligent-Tiering to its asynchronous access tier`           | storage class alone would call it readable                                                                                            |
+| `does not overwrite an event newer than the snapshot`                        | a 03:00 report read at 05:00 must not revert a 04:00 transition — the snapshot's own time travels with the observations               |
+| `leaves a live restored copy alone despite an archived storage class`        | an inventory cannot see thaws; otherwise every reconcile marks a freshly-restored object unreadable _while the user is looking at it_ |
+| `flags a restore whose estimated ready time has passed`                      | the only thing that ever unsticks a lost `ObjectRestore:Completed`                                                                    |
+| `never marks a restoring key as vanished`                                    | inventory silence about a restoring key is not evidence of deletion                                                                   |
+| `reports an archived object that was expected to stay readable`              | **reported, never silently corrected** — nothing can un-archive it, and the interesting question is which rule put it there           |
+| `writes nothing for an unknown key that is readable anyway`                  | instant is the default; writing it says nothing                                                                                       |
 
 **The ingestion is wired, not just written.** `aws.s3.Inventory` produces a daily CSV; a second
 notification subscription triggers on the manifest landing. Keyed on **`manifest.checksum`
@@ -1102,7 +1102,7 @@ Two real constraints fell out of the same docs:
   of the range.** So video bytes must be served from the `shared/*` behaviour (S3 origin, real
   `Content-Length`) and never through the gateway origin, which streams chunked. Seeking would
   silently degrade to full downloads — a performance cliff with no error anywhere.
-- Range on a compressed object is expressed in *compressed* offsets. Not a live problem (CloudFront
+- Range on a compressed object is expressed in _compressed_ offsets. Not a live problem (CloudFront
   does not compress video MIME types) but it is why `compress: true` and ranges coexisting is worth
   knowing about rather than assuming.
 
@@ -1120,16 +1120,16 @@ boundary to get wrong — and the failure mode of an exclusive type here is sile
 byte of every file rather than failing loudly.
 
 **Tests.** Nine parser cases and eight end-to-end cases through a running server. The parser cases
-are the ones that fail *quietly*:
+are the ones that fail _quietly_:
 
 - **A suffix range (`bytes=-500`) means the LAST 500 bytes, not the first.** Read as a prefix it
   returns real bytes from the wrong end of the file under a status code asserting they are right.
-- An oversized suffix is *satisfiable* per RFC 7233 and means the whole file — rejecting it would
+- An oversized suffix is _satisfiable_ per RFC 7233 and means the whole file — rejecting it would
   break "give me the last 10 MB" of a 2 MB file.
 - Ends that overrun are clamped (browsers routinely ask for a fixed chunk past EOF); starts past the
   end are 416 **with the real length**, not clamped, since clamping would serve the last byte to a
   client that asked for something nonexistent.
-- Malformed and multi-range requests fall back to the whole object, which is always a *correct*
+- Malformed and multi-range requests fall back to the whole object, which is always a _correct_
   response — it is what a server without range support does.
 
 The e2e cases assert **bytes, not just status**: a 206 carrying the wrong slice is worse than a 200,
@@ -1154,7 +1154,7 @@ pulling the whole file — and under Intelligent-Tiering a read promotes an obje
 Access for 30 days, so speculative full reads quietly undo the tiering that makes storage cheap.
 
 **Wiring the player surfaced a real hole in variant resolution.** A video's children include a
-poster *and* a transcode **at the same long edge** — `video-poster-720p` and `video-720p` are both
+poster _and_ a transcode **at the same long edge** — `video-poster-720p` and `video-720p` are both
 1280 — and resolution orders by long edge, breaking ties on id. Asking for 1280 could therefore hand
 back either. The client had no way to tell: the variant entry was `{url, width, height}` with no
 type. Painting a tile from whatever came back eventually puts an MP4 in an `<img>`; playing it puts
@@ -1171,7 +1171,7 @@ octet-stream a perfectly good MP4 simply refuses to play, with nothing in the co
 Variant URLs now carry the variant's own type.
 
 `playbackSrc` returning `null` is a real answer meaning "show the poster, do not offer play". A clip
-whose transcode has not been derived is *not ready*, not broken — and falling back to the original
+whose transcode has not been derived is _not ready_, not broken — and falling back to the original
 would be worse than useless, since it is the large file the transcode exists to avoid streaming.
 
 #### Gaps
@@ -1202,7 +1202,7 @@ that ffmpeg is still not installed.
 #### Three real bugs, all found by tests that nearly did not run
 
 **1. The suite was silently skipping everything.** `hasFfmpeg` was set in `beforeAll` and read when
-choosing `it` versus `it.skip` — but that choice is made during *collection*, which happens before
+choosing `it` versus `it.skip` — but that choice is made during _collection_, which happens before
 any hook runs. Every ffmpeg test skipped and the file reported green. Now resolved with a top-level
 `await`, plus a `STARKEEP_REQUIRE_FFMPEG=1` guard that turns "ffmpeg is missing" into a failure
 wherever the coverage is supposed to be real. **A suite that reports green while testing nothing is
@@ -1214,7 +1214,7 @@ is encoded landscape plus a display matrix, the instinct is to bake the rotation
 an explicit transpose rotates a second time and turns a correctly-tagged portrait clip into a
 landscape rendition of sideways footage. Verified directly rather than reasoned about — a frame from
 a 640x480 clip carrying a 90° matrix comes out 480x640 with no filter and 640x480 under
-`-noautorotate`. `transposeFilter` is now a *named no-op with a test pinning it*, because "obviously
+`-noautorotate`. `transposeFilter` is now a _named no-op with a test pinning it_, because "obviously
 we must transpose" is a change someone will otherwise make again.
 
 The rotation is still parsed and stored: consumers doing their own decoding need it, and the ladder
@@ -1238,7 +1238,7 @@ first frame.
   which then gets written to the database as a real-looking value. `0/0` is ffprobe for "unknown"
   and must become `null`, not `NaN`.
 - **Capture time** prefers `com.apple.quicktime.creationdate` over the generic `creation_time`,
-  because on a re-muxed clip the latter is the *re-mux* time — which sorts a decade-old holiday
+  because on a re-muxed clip the latter is the _re-mux_ time — which sorts a decade-old holiday
   video into last Tuesday.
 - **No bitrate declared means unbounded, not zero.** Zero reads as "already below every ceiling" and
   suppresses every transcode — failing in the direction that silently ships no renditions.
@@ -1246,7 +1246,7 @@ first frame.
   dimension is a hard H.264 error under yuv420p, not a rounding warning.
 - **The poster is not frame zero.** Real footage often opens black — fade-in, exposure ramp — and a
   grid of uniformly black video tiles looks broken in a way that is entirely self-inflicted. A tenth
-  in, capped at one second so a long clip's poster still shows what the clip is *of*.
+  in, capped at one second so a long clip's poster still shows what the clip is _of_.
 - **Partial success is reported, not discarded.** A failed transcode must not throw away a poster
   that already succeeded, or the grid gets a hole for a thumbnail that was sitting right there.
 - **The moov atom is at the front** of produced video — verified load-bearing (without faststart
@@ -1322,7 +1322,7 @@ reproduce a failure, so it passed while the real thing looped. **A fixture that 
 production fails is not evidence of anything.** The fixture is now libvips' real message, verbatim.
 
 Classification now happens at the point of failure and is carried in the type
-(`UndecodableError`). An error message is the *presentation* of a failure, not its classification —
+(`UndecodableError`). An error message is the _presentation_ of a failure, not its classification —
 upstream libraries reword them between minor versions, and each rewording silently flips a terminal
 outcome into an infinite retry. Anything unrecognised stays **retryable**, because guessing
 "terminal" abandons files a retry would have imported, silently and permanently.
@@ -1350,12 +1350,12 @@ means never archived**. The cost is storage, not a photo nobody can open.
 
 Decoding raw means demosaicing, white balance and a tone curve — colour science whose output would
 not match what the camera showed the photographer. Every DNG already carries a JPEG the camera
-rendered itself. A DNG is a TIFF, so this walks the IFD chain *and* the SubIFDs and returns the
+rendered itself. A DNG is a TIFF, so this walks the IFD chain _and_ the SubIFDs and returns the
 largest JPEG by pixel area.
 
 **Largest, not first.** Cameras write a 160×120 thumbnail beside the full-resolution render; taking
 the first would build an entire ladder from the thumbnail — every rung produced, every one useless,
-nothing in the output resembling an error. Following only the IFD chain *or* only the SubIFDs has the
+nothing in the output resembling an error. Following only the IFD chain _or_ only the SubIFDs has the
 same effect, since the full-size preview usually lives in a SubIFD.
 
 A byte scan for `FFD8…FFD9` would be shorter and is wrong: the marker pair occurs inside raw sensor
@@ -1388,7 +1388,7 @@ something else, where the user will never look for it. So:
 
 - ~~**Never verified against real camera files.**~~ **Closed, and it found a bug.** A real RICOH
   GR IV DNG showed that the raw sensor mosaic is stored with `Compression = 7` — lossless JPEG,
-  the same value a preview uses — and is *larger* than any preview, so "largest JPEG by area"
+  the same value a preview uses — and is _larger_ than any preview, so "largest JPEG by area"
   selected the raw every time:
 
   ```
@@ -1398,12 +1398,13 @@ something else, where the user will never look for it. So:
 
   The result was 14-bit lossless JPEG no ordinary decoder opens ("Unsupported JPEG data precision
   14"), and at 28 MB of a 30 MB file it discarded the whole point of reading a preview.
-  **`PhotometricInterpretation` is the discriminator** — it says what the pixels *are*, where
+  **`PhotometricInterpretation` is the discriminator** — it says what the pixels _are_, where
   compression only says how they were coded. `BitsPerSample` is not usable as a second check: it is
   an array of three shorts, so it lives behind an offset and reads as garbage inline (470, 32690).
 
   This is the clearest vindication of the plan's instruction to verify against real files first —
   every synthetic fixture agreed with the bug.
+
 - **No content-identifier reader.** `pairingFacts` is a dependency nothing implements, so pairing
   currently reaches only `filename` confidence in practice. The authoritative signal is available in
   the QuickTime metadata and the HEIC maker note; reading it is unwritten work.
@@ -1425,12 +1426,12 @@ both create records, deleting either has to decide whether the bytes may go — 
 cannot compute cheaply and must never get wrong. Collapsing at registration is what unblocks it:
 after this, "delete the record, delete the object" is sound.
 
-| Test | Asserts |
-|---|---|
-| `dedups a byte-identical top-level record, not just a derived child` | idempotent (200 + existing record), **no insert issued** |
-| `does not collapse a top-level record into a child with the same bytes` | the lookup is scoped by parent — the same bytes may legitimately be a standalone photo *and* a rendition of something else, and those are different records sharing storage |
+| Test                                                                    | Asserts                                                                                                                                                                     |
+| ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dedups a byte-identical top-level record, not just a derived child`    | idempotent (200 + existing record), **no insert issued**                                                                                                                    |
+| `does not collapse a top-level record into a child with the same bytes` | the lookup is scoped by parent — the same bytes may legitimately be a standalone photo _and_ a rendition of something else, and those are different records sharing storage |
 
-**A performance trap was avoided here.** The dedup query now runs on *every* registration, and the
+**A performance trap was avoided here.** The dedup query now runs on _every_ registration, and the
 existing `(original_filename, content_hash)` unique index cannot serve it — its leading column is
 the filename, so a hash-only lookup would scan the table once per write. New indexes lead with
 `content_hash` on both backends. Unconditional is what makes this an invariant rather than a hope,
@@ -1438,15 +1439,15 @@ and it is only affordable because of the index.
 
 #### Item 22 — three tiers, and only one of them acts
 
-**Nothing here deletes anything.** A duplicate is something *not imported*, which leaves the library
+**Nothing here deletes anything.** A duplicate is something _not imported_, which leaves the library
 as it was — the reversible outcome. Deleting on a match would make a false positive permanent, and a
 false positive here is somebody's photo.
 
-| Tier | Acts? | Why |
-|---|---|---|
-| `identical` (content hash) | **skip** | the same file, definitionally — no threshold to get wrong |
-| `same-capture` (timestamp + UID, else make/model + dimensions) | report | **a burst shares all of it** |
-| `similar` (perceptual hash) | report | catches re-encodes; also catches things that merely resemble each other |
+| Tier                                                           | Acts?    | Why                                                                     |
+| -------------------------------------------------------------- | -------- | ----------------------------------------------------------------------- |
+| `identical` (content hash)                                     | **skip** | the same file, definitionally — no threshold to get wrong               |
+| `same-capture` (timestamp + UID, else make/model + dimensions) | report   | **a burst shares all of it**                                            |
+| `similar` (perceptual hash)                                    | report   | catches re-encodes; also catches things that merely resemble each other |
 
 The adversarial cases are the point of the test file, not an afterthought:
 
@@ -1454,7 +1455,7 @@ The adversarial cases are the point of the test file, not an afterthought:
   second share a capture second, a camera and dimensions, and every one is a photo somebody chose
   to keep.
 - `does not match two screenshots against each other` — screenshots, exports and anything through a
-  messaging app have no EXIF, and a *partial* fingerprint would match every one against every other.
+  messaging app have no EXIF, and a _partial_ fingerprint would match every one against every other.
   `captureFingerprint` returns `null` rather than something partial.
 - `reports maximum distance for malformed input rather than throwing` — one bad stored hash must not
   abort an import scan, and 64 is the safe direction: maximally different never causes a false
@@ -1500,18 +1501,18 @@ the authoritative check is the one the library actually enforces rather than a s
 implementation that can disagree with it. Tiers 2 and 3 fetch their candidate set **once per run**
 rather than once per file: still linear in library size, but paid once.
 
-| Test | Asserts |
-|---|---|
-| `does not re-register anything already imported` | the point of resumption |
-| `recognises a file that moved between runs` | the hash is the identity precisely so an operator who reorganised the folder does not re-import everything |
-| `retries a file that failed transiently` | `failed` is not terminal |
-| `never retries a file this build cannot decode` | **counts attempts across two runs** — without this, every subsequent run spends itself re-failing on the same unreadable files, which on a large import is indistinguishable from the tool being broken |
-| `treats byte-identical files as one item` | two copies in one folder are one object |
-| `records a server-side dedup as skipped, not imported` | tier 1's answer comes from the server |
-| `imports the file and reports the similarity, rather than skipping` | **tiers 2/3 run after the import, never instead of it** — the finding is a note for a human, not a reason to have withheld somebody's photo |
-| `stops at the per-run cap and reports that it did` / `finishes the rest on the next run` | pacing, because an import competes with the derivation it triggers |
-| `skips dotfiles and dot-directories` | `.thumbnails` and `.DS_Store` are noise |
-| `includes camera raw` | the reason item 29 registered those types |
+| Test                                                                                     | Asserts                                                                                                                                                                                                 |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `does not re-register anything already imported`                                         | the point of resumption                                                                                                                                                                                 |
+| `recognises a file that moved between runs`                                              | the hash is the identity precisely so an operator who reorganised the folder does not re-import everything                                                                                              |
+| `retries a file that failed transiently`                                                 | `failed` is not terminal                                                                                                                                                                                |
+| `never retries a file this build cannot decode`                                          | **counts attempts across two runs** — without this, every subsequent run spends itself re-failing on the same unreadable files, which on a large import is indistinguishable from the tool being broken |
+| `treats byte-identical files as one item`                                                | two copies in one folder are one object                                                                                                                                                                 |
+| `records a server-side dedup as skipped, not imported`                                   | tier 1's answer comes from the server                                                                                                                                                                   |
+| `imports the file and reports the similarity, rather than skipping`                      | **tiers 2/3 run after the import, never instead of it** — the finding is a note for a human, not a reason to have withheld somebody's photo                                                             |
+| `stops at the per-run cap and reports that it did` / `finishes the rest on the next run` | pacing, because an import competes with the derivation it triggers                                                                                                                                      |
+| `skips dotfiles and dot-directories`                                                     | `.thumbnails` and `.DS_Store` are noise                                                                                                                                                                 |
+| `includes camera raw`                                                                    | the reason item 29 registered those types                                                                                                                                                               |
 
 `computePerceptualHash` is now called during derivation, written alongside ThumbHash in one metadata
 request — both are derived deterministically from the same decode, and two writes for one record
@@ -1531,7 +1532,7 @@ would be two round trips for nothing.
   a transient one by a regex over the thrown text, which is brittle — a reworded error silently
   becomes retry-forever. A typed error from the derivation path would be better.
 
-*(Sections for items 9b, 8 and onward are appended as each lands.)*
+_(Sections for items 9b, 8 and onward are appended as each lands.)_
 
 ---
 
@@ -1585,7 +1586,7 @@ Other decisions the tests pin:
 
 ### Item 34 — projecting the retention matrix
 
-The matrix is edited *before* it takes effect, so the projection answers "what happens if I do this"
+The matrix is edited _before_ it takes effect, so the projection answers "what happens if I do this"
 while the operator is deciding. A UI reporting current usage would answer a different question.
 
 Numbers come from a **census**, not from an average size times a record count: rendition sizes are
@@ -1594,8 +1595,8 @@ identical counts.
 
 **Every rounding decision leans toward over-estimating**, because an operator told a row costs more
 buys a bigger disk, while one told it costs less runs out of space and evicts what they asked to
-keep. An unmeasured cutoff rounds *up* to the next measured point rather than interpolating
-(interpolation is a guess presented as a measurement); the opened-recently working set is *added* to
+keep. An unmeasured cutoff rounds _up_ to the next measured point rather than interpolating
+(interpolation is a guess presented as a measurement); the opened-recently working set is _added_ to
 the recency window rather than unioned, since the census cannot say how much they overlap.
 
 **`on-demand-only` was the case worth getting right, and the compiler caught that it was missing.**
@@ -1625,11 +1626,11 @@ allowed to know what one means.
 
 Two things the schema forced:
 
-- **The class-label join must be a LEFT join.** A record with no rendition label is an *original* —
+- **The class-label join must be a LEFT join.** A record with no rendition label is an _original_ —
   the single largest class in any library, and precisely what the matrix exists to budget for. An
   inner join silently drops them.
 - **Recency comes from `captured_at` alone.** `created_at` holds a serialized HLC, not a date, so
-  reading it as a timestamp yields a number that is meaningless *and plausible*. A NULL result is the
+  reading it as a timestamp yields a number that is meaningless _and plausible_. A NULL result is the
   correct "unknown", which counts toward every cutoff — the same rule residency follows, because an
   unknown date is not evidence of age and **missing metadata must not become deleted bytes**.
 
@@ -1653,8 +1654,8 @@ a cap is legitimate rather than a bug).
 
 - ~~**The matrix is read-only.**~~ **Closed.** `POST /residency/projection` dry-runs a candidate
   policy so each edit shows its effect without saving; `PUT /residency/policy` validates and
-  refuses. That closed a real gap — `validateRetentionPolicy` existed and *nothing on the write
-  path called it*, so `PATCH /config` would happily save a zero budget, which the code documents as
+  refuses. That closed a real gap — `validateRetentionPolicy` existed and _nothing on the write
+  path called it_, so `PATCH /config` would happily save a zero budget, which the code documents as
   reading like a limit and behaving as a prohibition.
 
   The dry run projects invalid policies too, deliberately: an operator mid-edit has an invalid
@@ -1667,6 +1668,7 @@ a cap is legitimate rather than a bug).
   `constraints` rather than as a negative pin so the existing §6.1 order enforces it. A rule with an
   empty-string value is rejected (it would match only labels whose value is literally empty, which
   nothing writes), as is a pin shadowed by an exclude on the same selector.
+
 - **The Storage page has not been visually reviewed.** Same class as item 9b — layout and legibility
   are human judgement.
 - **No test drives the page**, only the route beneath it.
@@ -1680,7 +1682,7 @@ the honest headline and shapes everything below.
 ### What was verified before designing against it
 
 Three package APIs were checked rather than assumed, and one held with a caveat that shaped the code.
-`op-sqlite`'s `executeSync(query, params?)` is genuinely synchronous *and* parameterised, but
+`op-sqlite`'s `executeSync(query, params?)` is genuinely synchronous _and_ parameterised, but
 `PreparedStatement.execute()` is **async only** — so `prepare()` captures SQL and re-issues it rather
 than compiling once. That costs statement reuse and nothing about correctness; making the interface
 async instead would break the ordering the contiguous-prefix watermark depends on.
@@ -1704,7 +1706,7 @@ implement it one day.
 
 The media plan says the phone peer is "the only honest consumer of `Elided`". Every residency test
 before this ran against fixtures or a laptop that wanted everything — so the logic was exercised
-while the *situation* it was designed for never occurred.
+while the _situation_ it was designed for never occurred.
 
 The new tests give a node a budget genuinely smaller than its library and assert **both directions**:
 some bytes declined, and some kept. Either alone passes on a broken node — the first on one that
@@ -1753,8 +1755,8 @@ Item 14's graph encodes decisions that all work fine on a dev handset on a desk:
 Recorded here rather than silently fixed, because each is a real signal about a test's
 assumptions.
 
-| Test | Symptom | Assessment |
-|---|---|---|
+| Test                                                                                                                   | Symptom                                                                                     | Assessment                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `local-data-server/__tests__/sync-over-wire.test.ts` → `drains more than one page of records with the small pageLimit` | Failed intermittently under full-monorepo parallel load (`expected 1 to be greater than 1`) | **Fixed.** The cause was real, not merely timing: creating a record nudges a background exchange on a 50 ms debounce, and `transferFile` returns `false` for a key whose transfer is already in flight. So a `/sync/now` round can truthfully report "nothing shipped" while a concurrent background round is mid-transfer — and `converge()`, which stops on one quiet round, reads that as done. The test now drains to the **actual end state** (every record present on B) and asserts the pagination property as an entailment (per-round cap ≤ PAGE_LIMIT, and more than PAGE_LIMIT records arrived) rather than counting rounds. Green 3/3 in isolation and under full parallel load. |
 
 ---
@@ -1763,11 +1765,11 @@ assumptions.
 
 These are listed once here rather than repeated per item.
 
-| Hole | Why it stays open |
-|---|---|
-| Rendition quality levels | Item 9b is explicitly a human judgement on the operator's own hard cases. SSIM/VMAF can bracket the search; nothing can decide it. |
-| On-device derivation throughput | Needs a real handset (item 2 of the plan's open items). Phase 2 answers it; no CI machine's timing generalizes to a mid-range Android. |
-| AVIF encode cost on-device | Same. 3–10× JPEG CPU is a claim to measure, not to assert in a test. |
-| Dedup tiers 2–3 false-positive rate | Needs a real Takeout export. Ships report-only until calibrated, which is itself the mitigation. |
-| Multipart checksum semantics | Must be confirmed against current S3 docs and a real multipart upload, not assumed from the SDK's types. |
-| Account-level loss | Named residual risk in the plan; cross-account replication is out of scope. |
+| Hole                                | Why it stays open                                                                                                                      |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Rendition quality levels            | Item 9b is explicitly a human judgement on the operator's own hard cases. SSIM/VMAF can bracket the search; nothing can decide it.     |
+| On-device derivation throughput     | Needs a real handset (item 2 of the plan's open items). Phase 2 answers it; no CI machine's timing generalizes to a mid-range Android. |
+| AVIF encode cost on-device          | Same. 3–10× JPEG CPU is a claim to measure, not to assert in a test.                                                                   |
+| Dedup tiers 2–3 false-positive rate | Needs a real Takeout export. Ships report-only until calibrated, which is itself the mitigation.                                       |
+| Multipart checksum semantics        | Must be confirmed against current S3 docs and a real multipart upload, not assumed from the SDK's types.                               |
+| Account-level loss                  | Named residual risk in the plan; cross-account replication is out of scope.                                                            |

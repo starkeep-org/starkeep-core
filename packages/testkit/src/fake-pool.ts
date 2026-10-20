@@ -35,7 +35,11 @@ interface IssuedRefresh {
 }
 
 export interface FakePool {
-  addUser(email: string, password: string, options?: { sub?: string; temporary?: boolean; groups?: string[] }): void;
+  addUser(
+    email: string,
+    password: string,
+    options?: { sub?: string; temporary?: boolean; groups?: string[] },
+  ): void;
   /** End every sign-in of a user, as `AdminUserGlobalSignOut` does. */
   signOutEverywhere(email: string): void;
   /** Refresh tokens a device revoked with `RevokeToken`. */
@@ -125,7 +129,10 @@ export function createFakePool(): FakePool {
       if (!header || !payload || !signature) return null;
       const expected = Buffer.from(sign(`${header}.${payload}`));
       const actual = Buffer.from(signature);
-      if (expected.length !== actual.length || !timingSafeEqual(expected as unknown as Uint8Array, actual as unknown as Uint8Array)) {
+      if (
+        expected.length !== actual.length ||
+        !timingSafeEqual(expected as unknown as Uint8Array, actual as unknown as Uint8Array)
+      ) {
         return null;
       }
       const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as {
@@ -142,31 +149,55 @@ export function createFakePool(): FakePool {
     },
 
     handle(target, body) {
-      if (!this.reachable) return { status: 503, body: { __type: "ServiceUnavailable", message: "Out of reach" } };
+      if (!this.reachable)
+        return { status: 503, body: { __type: "ServiceUnavailable", message: "Out of reach" } };
       if (body["ClientId"] !== FAKE_DEVICE_CLIENT_ID) {
-        return { status: 400, body: { __type: "ResourceNotFoundException", message: "User pool client does not exist." } };
+        return {
+          status: 400,
+          body: {
+            __type: "ResourceNotFoundException",
+            message: "User pool client does not exist.",
+          },
+        };
       }
       if (target === "InitiateAuth" && body["AuthFlow"] === "USER_PASSWORD_AUTH") {
         const params = body["AuthParameters"] as { USERNAME?: string; PASSWORD?: string };
         const email = params.USERNAME ?? "";
         const user = users.get(email);
-        if (!user || user.password !== params.PASSWORD) return notAuthorized("Incorrect username or password.");
+        if (!user || user.password !== params.PASSWORD)
+          return notAuthorized("Incorrect username or password.");
         if (user.temporary) {
           const session = `session-${randomUUID()}`;
           sessions.set(session, email);
-          return { status: 200, body: { ChallengeName: "NEW_PASSWORD_REQUIRED", Session: session } };
+          return {
+            status: 200,
+            body: { ChallengeName: "NEW_PASSWORD_REQUIRED", Session: session },
+          };
         }
         signInCounts.set(email, (signInCounts.get(email) ?? 0) + 1);
         return { status: 200, body: issue(email, user) };
       }
-      if (target === "RespondToAuthChallenge" && body["ChallengeName"] === "NEW_PASSWORD_REQUIRED") {
+      if (
+        target === "RespondToAuthChallenge" &&
+        body["ChallengeName"] === "NEW_PASSWORD_REQUIRED"
+      ) {
         const session = String(body["Session"] ?? "");
         const email = sessions.get(session);
-        const responses = body["ChallengeResponses"] as { USERNAME?: string; NEW_PASSWORD?: string };
+        const responses = body["ChallengeResponses"] as {
+          USERNAME?: string;
+          NEW_PASSWORD?: string;
+        };
         const user = email ? users.get(email) : undefined;
-        if (!email || !user || responses.USERNAME !== email) return notAuthorized("Invalid session for the user.");
+        if (!email || !user || responses.USERNAME !== email)
+          return notAuthorized("Invalid session for the user.");
         if (!responses.NEW_PASSWORD || responses.NEW_PASSWORD.length < 8) {
-          return { status: 400, body: { __type: "InvalidPasswordException", message: "Password did not conform with policy: too short" } };
+          return {
+            status: 400,
+            body: {
+              __type: "InvalidPasswordException",
+              message: "Password did not conform with policy: too short",
+            },
+          };
         }
         sessions.delete(session);
         user.password = responses.NEW_PASSWORD;
@@ -178,14 +209,18 @@ export function createFakePool(): FakePool {
         const token = (body["AuthParameters"] as { REFRESH_TOKEN?: string }).REFRESH_TOKEN ?? "";
         const issued = refreshTokens.get(token);
         const user = issued ? users.get(issued.email) : undefined;
-        if (!issued || !user || revoked.has(token)) return notAuthorized("Refresh Token has been revoked");
+        if (!issued || !user || revoked.has(token))
+          return notAuthorized("Refresh Token has been revoked");
         return { status: 200, body: issue(issued.email, user, token) };
       }
       if (target === "RevokeToken") {
         revoked.add(String(body["Token"] ?? ""));
         return { status: 200, body: {} };
       }
-      return { status: 400, body: { __type: "InvalidParameterException", message: `fake pool cannot answer ${target}` } };
+      return {
+        status: 400,
+        body: { __type: "InvalidParameterException", message: `fake pool cannot answer ${target}` },
+      };
     },
   };
 }

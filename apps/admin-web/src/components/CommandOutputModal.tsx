@@ -1,10 +1,5 @@
 import { useEffect, useState } from "react";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { CommandOutput } from "./CommandOutput";
 import type { STSCredentials } from "../lib/cognito-auth";
@@ -18,7 +13,14 @@ interface Props {
   onSuccess?: () => void;
 }
 
-export function CommandOutputModal({ opened, onClose, commandId, credentials, title, onSuccess }: Props) {
+export function CommandOutputModal({
+  opened,
+  onClose,
+  commandId,
+  credentials,
+  title,
+  onSuccess,
+}: Props) {
   const [lines, setLines] = useState<string[]>([]);
   const [status, setStatus] = useState<"idle" | "running" | "success" | "failure">("idle");
 
@@ -71,12 +73,18 @@ export function CommandOutputModal({ opened, onClose, commandId, credentials, ti
                 setStatus("failure");
               }
             } else if (eventType === "error") {
-              try { setLines((l) => [...l, `Error: ${JSON.parse(data) as string}`]); }
-              catch { setLines((l) => [...l, `Error: ${data}`]); }
+              try {
+                setLines((l) => [...l, `Error: ${JSON.parse(data) as string}`]);
+              } catch {
+                setLines((l) => [...l, `Error: ${data}`]);
+              }
               setStatus("failure");
             } else if (data) {
-              try { setLines((l) => [...l, JSON.parse(data) as string]); }
-              catch { setLines((l) => [...l, data]); }
+              try {
+                setLines((l) => [...l, JSON.parse(data) as string]);
+              } catch {
+                setLines((l) => [...l, data]);
+              }
             }
           }
         }
@@ -89,11 +97,18 @@ export function CommandOutputModal({ opened, onClose, commandId, credentials, ti
     }
 
     run();
-    return () => { aborted = true; };
+    return () => {
+      aborted = true;
+    };
   }, [opened, commandId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <Dialog open={opened} onOpenChange={(open) => { if (!open && status !== "running") onClose(); }}>
+    <Dialog
+      open={opened}
+      onOpenChange={(open) => {
+        if (!open && status !== "running") onClose();
+      }}
+    >
       <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
@@ -101,7 +116,9 @@ export function CommandOutputModal({ opened, onClose, commandId, credentials, ti
         <CommandOutput lines={lines} status={status} />
         {status !== "running" && (
           <div className="flex justify-end">
-            <Button variant="outline" onClick={onClose}>Close</Button>
+            <Button variant="outline" onClick={onClose}>
+              Close
+            </Button>
           </div>
         )}
       </DialogContent>

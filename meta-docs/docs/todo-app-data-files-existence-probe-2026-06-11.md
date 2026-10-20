@@ -37,7 +37,7 @@ Add a `statFile(subKey)` method to `AppSpecificOperations`:
 - Existence checks in the broker GET and the local GET use `statFile`;
   `getFile` stays for callers that genuinely want bytes.
 
-Answering existence from the index is also the more *correct* contract:
+Answering existence from the index is also the more _correct_ contract:
 a file counts as present exactly when its index row is live, regardless
 of stray bytes left by a torn write.
 

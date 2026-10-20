@@ -37,7 +37,9 @@ function printProbes(probes: Probe[]): void {
 
 function printQueries(results: QueryResult[], showPlans: boolean): void {
   for (const r of results) {
-    console.log(`  ${r.what.padEnd(48)} ${r.medianMs.toFixed(1).padStart(9)} ms   (${r.rowCount} rows)`);
+    console.log(
+      `  ${r.what.padEnd(48)} ${r.medianMs.toFixed(1).padStart(9)} ms   (${r.rowCount} rows)`,
+    );
   }
   if (showPlans) {
     for (const r of results) {

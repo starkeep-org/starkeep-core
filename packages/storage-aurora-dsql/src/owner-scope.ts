@@ -70,7 +70,8 @@ const OWNED_SHARED_TABLES = new Set(["records", "record_labels", "object_availab
 
 /** Whether `schema.table` holds one user's rows. */
 export function isOwnedTable(schema: string | undefined, table: string): boolean {
-  if (schema === "shared") return OWNED_SHARED_TABLES.has(table) || /^record_[a-z0-9_]+_metadata$/.test(table);
+  if (schema === "shared")
+    return OWNED_SHARED_TABLES.has(table) || /^record_[a-z0-9_]+_metadata$/.test(table);
   return schema !== undefined && schema.startsWith("app_");
 }
 
@@ -88,7 +89,8 @@ function ownedSource(node: OperationNode): OwnedSource | null {
     const { schema, identifier } = node.node.table;
     if (!isOwnedTable(schema?.name, identifier.name)) return null;
     const alias = IdentifierNode.is(node.alias) ? node.alias.name : null;
-    if (alias === null) throw new Error("owner scope: an owned table aliased by something other than a name");
+    if (alias === null)
+      throw new Error("owner scope: an owned table aliased by something other than a name");
     return { qualifier: TableNode.create(alias) };
   }
   return null;
@@ -116,10 +118,17 @@ function qualifierName(qualifier: TableNode): string {
  * gaining the predicate twice. Anything weaker — under an `or`, or with
  * another value — does not count, so the predicate is added.
  */
-function holdsOwnerPredicate(node: OperationNode | undefined, qualifier: TableNode, userId: string): boolean {
+function holdsOwnerPredicate(
+  node: OperationNode | undefined,
+  qualifier: TableNode,
+  userId: string,
+): boolean {
   if (!node) return false;
   if (AndNode.is(node)) {
-    return holdsOwnerPredicate(node.left, qualifier, userId) || holdsOwnerPredicate(node.right, qualifier, userId);
+    return (
+      holdsOwnerPredicate(node.left, qualifier, userId) ||
+      holdsOwnerPredicate(node.right, qualifier, userId)
+    );
   }
   if (ParensNode.is(node)) return holdsOwnerPredicate(node.node, qualifier, userId);
   if (!BinaryOperationNode.is(node)) return false;
@@ -138,7 +147,9 @@ function holdsOwnerPredicate(node: OperationNode | undefined, qualifier: TableNo
 }
 
 function andWhere(where: WhereNode | undefined, predicate: OperationNode): WhereNode {
-  return where ? WhereNode.cloneWithOperation(where, "And", predicate) : WhereNode.create(predicate);
+  return where
+    ? WhereNode.cloneWithOperation(where, "And", predicate)
+    : WhereNode.create(predicate);
 }
 
 function isOwnerColumn(node: OperationNode): boolean {
@@ -170,7 +181,10 @@ class OwnerScopeTransformer extends OperationNodeTransformer {
     return { joins: scoped, wherePredicates };
   }
 
-  private scopeSources(sources: ReadonlyArray<OperationNode>, where: WhereNode | undefined): OperationNode[] {
+  private scopeSources(
+    sources: ReadonlyArray<OperationNode>,
+    where: WhereNode | undefined,
+  ): OperationNode[] {
     return sources.flatMap((node) => {
       const source = ownedSource(node);
       if (!source || holdsOwnerPredicate(where?.where, source.qualifier, this.userId)) return [];
@@ -178,17 +192,26 @@ class OwnerScopeTransformer extends OperationNodeTransformer {
     });
   }
 
-  protected override transformSelectQuery(node: SelectQueryNode, queryId?: QueryId): SelectQueryNode {
+  protected override transformSelectQuery(
+    node: SelectQueryNode,
+    queryId?: QueryId,
+  ): SelectQueryNode {
     const inner = super.transformSelectQuery(node, queryId);
     const { joins, wherePredicates } = this.scopeJoins(inner.joins);
     let where = inner.where;
-    for (const predicate of [...this.scopeSources(inner.from?.froms ?? [], inner.where), ...wherePredicates]) {
+    for (const predicate of [
+      ...this.scopeSources(inner.from?.froms ?? [], inner.where),
+      ...wherePredicates,
+    ]) {
       where = andWhere(where, predicate);
     }
     return { ...inner, ...(joins ? { joins } : {}), ...(where ? { where } : {}) };
   }
 
-  protected override transformUpdateQuery(node: UpdateQueryNode, queryId?: QueryId): UpdateQueryNode {
+  protected override transformUpdateQuery(
+    node: UpdateQueryNode,
+    queryId?: QueryId,
+  ): UpdateQueryNode {
     const inner = super.transformUpdateQuery(node, queryId);
     const { joins, wherePredicates } = this.scopeJoins(inner.joins);
     const targets = inner.table ? [inner.table] : [];
@@ -201,11 +224,21 @@ class OwnerScopeTransformer extends OperationNodeTransformer {
       where = andWhere(where, predicate);
     }
     const ownsTarget = targets.some((t) => ownedSource(t) !== null);
-    const updates = ownsTarget ? inner.updates?.filter((u) => !isOwnerColumn(u.column)) : inner.updates;
-    return { ...inner, ...(joins ? { joins } : {}), ...(where ? { where } : {}), ...(updates ? { updates } : {}) };
+    const updates = ownsTarget
+      ? inner.updates?.filter((u) => !isOwnerColumn(u.column))
+      : inner.updates;
+    return {
+      ...inner,
+      ...(joins ? { joins } : {}),
+      ...(where ? { where } : {}),
+      ...(updates ? { updates } : {}),
+    };
   }
 
-  protected override transformDeleteQuery(node: DeleteQueryNode, queryId?: QueryId): DeleteQueryNode {
+  protected override transformDeleteQuery(
+    node: DeleteQueryNode,
+    queryId?: QueryId,
+  ): DeleteQueryNode {
     const inner = super.transformDeleteQuery(node, queryId);
     const { joins, wherePredicates } = this.scopeJoins(inner.joins);
     let where = inner.where;
@@ -219,11 +252,16 @@ class OwnerScopeTransformer extends OperationNodeTransformer {
     return { ...inner, ...(joins ? { joins } : {}), ...(where ? { where } : {}) };
   }
 
-  protected override transformInsertQuery(node: InsertQueryNode, queryId?: QueryId): InsertQueryNode {
+  protected override transformInsertQuery(
+    node: InsertQueryNode,
+    queryId?: QueryId,
+  ): InsertQueryNode {
     const inner = super.transformInsertQuery(node, queryId);
     if (!inner.into || !ownedSource(inner.into)) return inner;
     if (!inner.columns || !inner.values || !ValuesNode.is(inner.values)) {
-      throw new Error("owner scope: an insert into an owned table must list its columns and values");
+      throw new Error(
+        "owner scope: an insert into an owned table must list its columns and values",
+      );
     }
     const at = inner.columns.findIndex(isOwnerColumn);
     const columns = at === -1 ? [...inner.columns, ColumnNode.create(OWNER_COLUMN)] : inner.columns;
@@ -242,7 +280,9 @@ class OwnerScopeTransformer extends OperationNodeTransformer {
     let onConflict = inner.onConflict;
     if (onConflict) {
       if (onConflict.constraint || onConflict.indexExpression) {
-        throw new Error("owner scope: an upsert into an owned table must name its conflict columns");
+        throw new Error(
+          "owner scope: an upsert into an owned table must name its conflict columns",
+        );
       }
       // A `do nothing` with no target conflicts on any key, which already
       // includes the owner.
@@ -306,7 +346,9 @@ export function assertOwnerScoped(text: string): void {
 }
 
 /** Strip the owner column from rows read back, so it never leaves the cloud. */
-export function withoutOwner<T extends Record<string, unknown>>(row: T): Omit<T, typeof OWNER_COLUMN> {
+export function withoutOwner<T extends Record<string, unknown>>(
+  row: T,
+): Omit<T, typeof OWNER_COLUMN> {
   if (!(OWNER_COLUMN in row)) return row;
   const { [OWNER_COLUMN]: _owner, ...rest } = row;
   return rest;

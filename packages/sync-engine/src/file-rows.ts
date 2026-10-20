@@ -14,7 +14,12 @@
  * result.
  */
 
-import { compareHLC, type AnyRecord, type HLCTimestamp, type StarkeepId } from "@starkeep/protocol-primitives";
+import {
+  compareHLC,
+  type AnyRecord,
+  type HLCTimestamp,
+  type StarkeepId,
+} from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter } from "@starkeep/storage-adapter";
 import type { BlobCandidate } from "./residency-policy.js";
 import { computeCeilings, type StreamTruncation } from "./round-cut.js";
@@ -280,10 +285,7 @@ export function manifestForAppRow(entry: AppSyncableRowEntry): FileSyncManifest 
   const mimeType = row["mime_type"];
   const sizeBytes = row["size_bytes"];
   return {
-    fileHash:
-      typeof contentHash === "string" && contentHash.length > 0
-        ? contentHash
-        : key,
+    fileHash: typeof contentHash === "string" && contentHash.length > 0 ? contentHash : key,
     objectStorageKey: key,
     sizeBytes: typeof sizeBytes === "number" ? sizeBytes : Number(sizeBytes) || 0,
     mimeType: typeof mimeType === "string" ? mimeType : undefined,

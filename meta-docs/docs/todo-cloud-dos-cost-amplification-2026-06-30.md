@@ -4,7 +4,7 @@ The shared API Gateway has **no rate limiting, throttling, usage quota, or WAF**
 and exposes internet-reachable unauthenticated surface: `GET /health`,
 `OPTIONS /{proxy+}`, and any app route declared `auth: "public"` (e.g. the Photos
 `static` handler). The HMAC-gated reserved routes (`/apps/{appId}/{data,files,sync,
-app-data}/*`) still do work *before* they can reject an unsigned caller — at
+app-data}/*`) still do work _before_ they can reject an unsigned caller — at
 minimum an SSM `GetParameter` to load the per-app secret (`loadAppHmacSecret`)
 plus the signature check — so even traffic that ultimately 401s is not free.
 
@@ -30,12 +30,12 @@ Scope / candidate mitigations (none committed):
   can 400/401 obvious junk before the per-app secret fetch, lowering the cost of
   hostile traffic on the HMAC-gated routes.
 - **Billing alarm / budget guardrail.** A CloudWatch billing alarm or AWS Budgets
-  action as a backstop so cost-amplification is at least *detected* quickly even
+  action as a backstop so cost-amplification is at least _detected_ quickly even
   before throttles are tuned.
 - **Front the gateway with WAF** (rate-based rules) if/when the public surface
   grows — heavier; probably not needed at single-operator scale.
 
-Note: this todo is the *availability/cost* axis only. The related **unbounded
+Note: this todo is the _availability/cost_ axis only. The related **unbounded
 storage growth** problem (tombstoned shared-record blobs and `parent_id` are
 never reclaimed) is its own concern, tracked in the cloud-side janitor / blob-GC
 todo (doc id 15) — keep them separate; the mitigations and the "safe to act"

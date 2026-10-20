@@ -81,7 +81,9 @@ function driveChannel(
 }
 
 /** Hooks that want every blob and report each decision to `onDecide`. */
-function wantEverything(onDecide: (candidate: BlobCandidate) => void | Promise<void>): ResidencyHooks {
+function wantEverything(
+  onDecide: (candidate: BlobCandidate) => void | Promise<void>,
+): ResidencyHooks {
   return {
     decide: async (candidate): Promise<ResidencyVerdict> => {
       await onDecide(candidate);
@@ -109,7 +111,9 @@ describe("inbound applies rows before blobs", () => {
       wantEverything(async () => {
         if (announcedAtFirstFetch !== null) return;
         announcedAtFirstFetch = events.flatMap((e) => e.recordIds);
-        rowsAtFirstFetch = (await Promise.all(ids.map((id) => local.db.get(id)))).filter(Boolean).length;
+        rowsAtFirstFetch = (await Promise.all(ids.map((id) => local.db.get(id)))).filter(
+          Boolean,
+        ).length;
       }),
     );
     engine.changeNotifier.subscribe((event) => events.push(event));
@@ -208,6 +212,8 @@ describe("inbound applies rows before blobs", () => {
     // The file still arrives, because the bytes watermark kept it owed.
     expect(second.landed).toBe(1);
     expect(await local.storage.has(`shared/test/photo/${id}`)).toBe(true);
-    expect((await syncState.getByteWatermarks())?.["C"]).toEqual((await cloud.db.get(id))!.updatedAt);
+    expect((await syncState.getByteWatermarks())?.["C"]).toEqual(
+      (await cloud.db.get(id))!.updatedAt,
+    );
   });
 });

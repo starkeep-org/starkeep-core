@@ -57,10 +57,7 @@ export function decodeLabelScanCursor(token: string): LabelScanCursor | null {
 }
 
 /** Is this row strictly after the cursor, in {@link compareLabelScanOrder}? */
-export function isAfterLabelScanCursor(
-  label: LabelScanCursor,
-  cursor: LabelScanCursor,
-): boolean {
+export function isAfterLabelScanCursor(label: LabelScanCursor, cursor: LabelScanCursor): boolean {
   if (label.recordId !== cursor.recordId) return label.recordId > cursor.recordId;
   if (label.appId !== cursor.appId) return label.appId > cursor.appId;
   if (label.key !== cursor.key) return label.key > cursor.key;

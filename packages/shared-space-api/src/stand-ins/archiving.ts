@@ -88,7 +88,8 @@ export async function evaluateArchiving(
 
   const original = await db.get(originalId);
   if (!original) return keep(["the original does not exist"]);
-  if (!isStandInOriginal(original)) return keep(["the record is not an original in a stand-in category"]);
+  if (!isStandInOriginal(original))
+    return keep(["the record is not an original in a stand-in category"]);
   if (!original.objectStorageKey) return keep(["the original has no file"]);
   const key = original.objectStorageKey;
 
@@ -120,11 +121,19 @@ export async function evaluateArchiving(
   const heldBy = new Set<string>();
   let archivable = true;
   for (const record of records) {
-    const verdict = await recordVerdict(db, storage, record, labelsById.get(record.id) ?? [], standards);
+    const verdict = await recordVerdict(
+      db,
+      storage,
+      record,
+      labelsById.get(record.id) ?? [],
+      standards,
+    );
     if (!verdict.archivable) archivable = false;
     for (const app of verdict.heldBy) heldBy.add(app);
     for (const reason of verdict.reasons) {
-      reasons.push(record.id === original.id ? reason : `${record.id} shares these bytes: ${reason}`);
+      reasons.push(
+        record.id === original.id ? reason : `${record.id} shares these bytes: ${reason}`,
+      );
     }
   }
 
@@ -154,7 +163,11 @@ async function recordVerdict(
 ): Promise<{ archivable: boolean; heldBy: string[]; reasons: string[] }> {
   const reasons: string[] = [];
   if (!isStandInOriginal(record)) {
-    return { archivable: false, heldBy: [], reasons: ["it is not an original in a stand-in category"] };
+    return {
+      archivable: false,
+      heldBy: [],
+      reasons: ["it is not an original in a stand-in category"],
+    };
   }
   const status = originalStatus(record, standards);
   const archivable = status === "archivable";
@@ -172,7 +185,8 @@ async function recordVerdict(
 
   const live = labels.filter((l) => !l.deletedAt);
   const heldBy = live.filter((l) => l.key === DO_NOT_ARCHIVE_LABEL_KEY).map((l) => l.appId);
-  if (heldBy.length > 0) reasons.push(`do-not-archive is held by ${[...new Set(heldBy)].sort().join(", ")}`);
+  if (heldBy.length > 0)
+    reasons.push(`do-not-archive is held by ${[...new Set(heldBy)].sort().join(", ")}`);
   if (live.some((l) => l.appId === PLATFORM_LABEL_APP_ID && l.key === NO_CLOUD_LABEL_KEY)) {
     reasons.push("it is marked starkeep/no-cloud, so the cloud holds no bytes to archive");
   }

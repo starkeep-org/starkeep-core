@@ -116,12 +116,7 @@ import {
   type DigestBucket,
 } from "@starkeep/storage-adapter";
 import { advanceWatermark } from "./watermarks.js";
-import {
-  computeCeilings,
-  cutRound,
-  type RoundItem,
-  type StreamTruncation,
-} from "./round-cut.js";
+import { computeCeilings, cutRound, type RoundItem, type StreamTruncation } from "./round-cut.js";
 import type { BlobCandidate, ResidencyVerdict } from "./residency-policy.js";
 import { planByteWindow } from "./byte-window.js";
 import {
@@ -212,7 +207,10 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
   // is enough.
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
   const maxItems = options.maxItems ?? DEFAULT_MAX_ITEMS;
-  const transferConcurrency = Math.max(1, options.transferConcurrency ?? DEFAULT_TRANSFER_CONCURRENCY);
+  const transferConcurrency = Math.max(
+    1,
+    options.transferConcurrency ?? DEFAULT_TRANSFER_CONCURRENCY,
+  );
 
   const changeNotifier = createChangeNotifier();
   const fileSyncEngine = createFileSyncEngine();
@@ -321,10 +319,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
    * bug on the scan the whole design rests on. Pay the reads.
    */
   async function hasOutboundBacklog(): Promise<OutboundBacklog> {
-    const peerWatermarks = applyRepairFloors(
-      await loadPeerWatermarks(),
-      await loadRepairFloors(),
-    );
+    const peerWatermarks = applyRepairFloors(await loadPeerWatermarks(), await loadRepairFloors());
     // `readable` exists because the two callers want opposite things from a
     // stream that would not read. `sync()` only needs to know whether to spend a
     // pull-first round, and guessing "no backlog" there costs nothing — the
@@ -353,9 +348,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           return { owed: true, readable: true };
         }
       } catch (err) {
-        console.warn(
-          `[sync] backlog check failed for shared records: ${(err as Error).message}`,
-        );
+        console.warn(`[sync] backlog check failed for shared records: ${(err as Error).message}`);
         readable = false;
       }
     }
@@ -493,7 +486,13 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     const owed: Classified[] = [];
     let failed = false;
     for (const row of scan.rows) {
-      const entry: Classified = { row, satisfied: false, elided: false, available: false, verdict: null };
+      const entry: Classified = {
+        row,
+        satisfied: false,
+        elided: false,
+        available: false,
+        verdict: null,
+      };
       if (!row.manifest || (await localHas(row.manifest.objectStorageKey))) {
         classified.push({ ...entry, satisfied: true });
         continue;
@@ -517,7 +516,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         }
       }
       const peer = peerBytes?.[row.hlc.nodeId];
-      const available = peerBytes === null || (peer !== undefined && compareHLC(row.hlc, peer) <= 0);
+      const available =
+        peerBytes === null || (peer !== undefined && compareHLC(row.hlc, peer) <= 0);
       const owedEntry: Classified = { ...entry, available };
       classified.push(owedEntry);
       owed.push(owedEntry);
@@ -556,7 +556,10 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     };
 
     // One transfer per key: content-addressed keys can be shared by two rows.
-    const byKey = groupByKey([...plan.head, ...plan.opportunistic], (c) => c.row.manifest!.objectStorageKey);
+    const byKey = groupByKey(
+      [...plan.head, ...plan.opportunistic],
+      (c) => c.row.manifest!.objectStorageKey,
+    );
     await forEachConcurrent([...byKey.values()], transferConcurrency, async (sharing) => {
       const first = sharing[0]!;
       const manifest = first.row.manifest!;
@@ -668,7 +671,9 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     } catch (err) {
       // An unread label might be the one that forbids the upload. Sending
       // nothing this round is the side that cannot leak.
-      console.warn(`[sync] could not read no-cloud labels; uploading nothing this round: ${(err as Error).message}`);
+      console.warn(
+        `[sync] could not read no-cloud labels; uploading nothing this round: ${(err as Error).message}`,
+      );
       return { ...EMPTY_FILE_PASS, failed: true };
     }
     const sendable = owed.filter((row) => row.recordId === null || !excluded.has(row.recordId));
@@ -696,7 +701,10 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         pendingAuthors.add(row.hlc.nodeId);
       }
     }
-    const byKey = groupByKey([...plan.head, ...plan.opportunistic], (row) => row.manifest!.objectStorageKey);
+    const byKey = groupByKey(
+      [...plan.head, ...plan.opportunistic],
+      (row) => row.manifest!.objectStorageKey,
+    );
     await forEachConcurrent([...byKey.values()], transferConcurrency, async (sharing) => {
       const first = sharing[0]!;
       const manifest = first.manifest!;
@@ -755,799 +763,769 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
   }
 
   async function exchange(options?: ExchangeOptions): Promise<ExchangeResult> {
-      // A pull-only round ships nothing and scans nothing outbound. It exists
-      // so a sync session can **pull before it pushes**: `peerWatermarks` is a
-      // cache of what the peer last said about itself, and after a round whose
-      // response was lost it is stale-low, so pushing against it re-ships items
-      // the peer already took.
-      //
-      // This is not an extra round trip to justify. The round still carries our
-      // own watermarks and still takes delivery of everything the peer has for
-      // us — it does the entire inbound half of the sync. The reason it has
-      // nothing to push is simply that we have not yet learned what the peer
-      // needs.
-      let push = options?.push ?? true;
-      const ownWatermarks = await loadOwnWatermarks();
-      // What we *advertise* is what the responder scans above, so an inbound
-      // repair is expressed by advertising less than we hold. Same trick as the
-      // outbound floors, same reason it has to be a separate map: `ownWatermarks`
-      // is recomputed from what lands every round and would swallow the
-      // correction immediately. Understating coverage is always safe — it costs
-      // a re-ship, and LWW makes the re-ship a no-op.
-      const advertisedWatermarks = applyRepairFloors(
-        ownWatermarks,
-        await loadInboundFloors(),
-      );
-      // Repair, when one is outstanding, is expressed by lowering the bound the
-      // scan already takes — not by a second scan and not by a branch. The
-      // scans below cannot tell a repair from an ordinary round.
-      let priorPeerWatermarks = await loadPeerWatermarks();
-      let priorPeerByteWatermarks = await loadPeerByteWatermarks();
+    // A pull-only round ships nothing and scans nothing outbound. It exists
+    // so a sync session can **pull before it pushes**: `peerWatermarks` is a
+    // cache of what the peer last said about itself, and after a round whose
+    // response was lost it is stale-low, so pushing against it re-ships items
+    // the peer already took.
+    //
+    // This is not an extra round trip to justify. The round still carries our
+    // own watermarks and still takes delivery of everything the peer has for
+    // us — it does the entire inbound half of the sync. The reason it has
+    // nothing to push is simply that we have not yet learned what the peer
+    // needs.
+    let push = options?.push ?? true;
+    const ownWatermarks = await loadOwnWatermarks();
+    // What we *advertise* is what the responder scans above, so an inbound
+    // repair is expressed by advertising less than we hold. Same trick as the
+    // outbound floors, same reason it has to be a separate map: `ownWatermarks`
+    // is recomputed from what lands every round and would swallow the
+    // correction immediately. Understating coverage is always safe — it costs
+    // a re-ship, and LWW makes the re-ship a no-op.
+    const advertisedWatermarks = applyRepairFloors(ownWatermarks, await loadInboundFloors());
+    // Repair, when one is outstanding, is expressed by lowering the bound the
+    // scan already takes — not by a second scan and not by a branch. The
+    // scans below cannot tell a repair from an ordinary round.
+    let priorPeerWatermarks = await loadPeerWatermarks();
+    let priorPeerByteWatermarks = await loadPeerByteWatermarks();
 
-      // Rows go ahead of their files only to a peer that reports which files it
-      // holds. A peer that cannot would accept rows whose uploads nothing then
-      // remembers: this node's scan starts above the peer's rows watermark, and
-      // the upload pass works from a bytes watermark the peer never sends. So
-      // the first push to a peer asks first, with an exchange that carries and
-      // returns no rows (`limit: 0`; see `verify()` for why that ships nothing).
-      // The answer is stored, so the question is asked once per peer.
-      let pushWithheld = false;
-      if (push && priorPeerByteWatermarks === null) {
-        const probe = await transport.exchange({ watermarks: advertisedWatermarks, limit: 0 });
-        if (probe.responderByteWatermarks) {
-          priorPeerByteWatermarks = probe.responderByteWatermarks;
-          await savePeerByteWatermarks(probe.responderByteWatermarks);
-          // The probe's coverage is fresher than the cache, by the reasoning
-          // behind the pull-first round.
-          priorPeerWatermarks =
-            probe.coverageComplete === false
-              ? mergeWatermarksUpward(priorPeerWatermarks, probe.responderWatermarks)
-              : probe.responderWatermarks;
-          if (syncState) await syncState.setPeerWatermarks(priorPeerWatermarks);
+    // Rows go ahead of their files only to a peer that reports which files it
+    // holds. A peer that cannot would accept rows whose uploads nothing then
+    // remembers: this node's scan starts above the peer's rows watermark, and
+    // the upload pass works from a bytes watermark the peer never sends. So
+    // the first push to a peer asks first, with an exchange that carries and
+    // returns no rows (`limit: 0`; see `verify()` for why that ships nothing).
+    // The answer is stored, so the question is asked once per peer.
+    let pushWithheld = false;
+    if (push && priorPeerByteWatermarks === null) {
+      const probe = await transport.exchange({ watermarks: advertisedWatermarks, limit: 0 });
+      if (probe.responderByteWatermarks) {
+        priorPeerByteWatermarks = probe.responderByteWatermarks;
+        await savePeerByteWatermarks(probe.responderByteWatermarks);
+        // The probe's coverage is fresher than the cache, by the reasoning
+        // behind the pull-first round.
+        priorPeerWatermarks =
+          probe.coverageComplete === false
+            ? mergeWatermarksUpward(priorPeerWatermarks, probe.responderWatermarks)
+            : probe.responderWatermarks;
+        if (syncState) await syncState.setPeerWatermarks(priorPeerWatermarks);
+      } else {
+        console.warn(
+          "[sync] peer does not report a bytes watermark; pushing nothing until it does. Deploy the current cloud data server.",
+        );
+        push = false;
+        pushWithheld = true;
+      }
+    }
+
+    const peerWatermarks = applyRepairFloors(priorPeerWatermarks, await loadRepairFloors());
+
+    // ---------------------------------------------------------------------
+    // Outbound: gather SR records and AR/AW rows the peer hasn't seen, then
+    // walk per nodeId in HLC order with a contiguous-prefix rule. Blobs
+    // (SR or AR) are pushed before their owning item is allowed to ship.
+    // ---------------------------------------------------------------------
+    //
+    // Every scan below is a **delta scan**: the per-nodeId watermark filter
+    // is pushed into the query, which seeks the `(node_id, updated_at)` index
+    // once per author instead of reading the table and discarding whatever
+    // the peer already has. That is what makes round N cost the same as round
+    // 1. The previous shape read every row every round, so a node that had
+    // shipped 30k of 60k records still read 30k rows to find the next 100.
+    //
+    // There is no cursor loop any more, and none is needed: every row that
+    // comes back is genuinely owed, so `limit` rows is a full page by
+    // construction. What gets left behind is not resumed from a token — the
+    // peer's watermark has not advanced past it, so the next round selects it
+    // again from the top. `hasMore` here therefore answers "should we run
+    // another round?", not "where do I continue from?".
+    let outboundHasMore = false;
+
+    // Every stream reports how far it got, per author. Those marks are the
+    // whole reason a shipment can be cut safely: the coverage watermark spans
+    // all of them, so an item may only ship once *every* stream can vouch
+    // that nothing older is still owed for its author. See `round-cut.ts`.
+    const truncations: StreamTruncation[] = [];
+    const candidates: RoundItem<OutboundItem>[] = [];
+    let unreadableStream = false;
+
+    // Only the Drive channel ships shared records. Per-app channels set
+    // syncSharedRecords=false and leave this empty — they carry only
+    // app-specific rows.
+    if (push && syncSharedRecords) {
+      // Caught for the same reason the app-table scan below is, and the
+      // absence of this was the other half of R5: an unreadable shared-record
+      // stream threw straight out of `exchange()` and out of `sync()`, so the
+      // Drive channel had no fail-safe path at all while every per-app channel
+      // did. A stream that would not read might hold rows older than anything
+      // else this round would ship, for any author — so the round ships
+      // nothing and asks to be retried, rather than shipping a prefix with a
+      // hole underneath it.
+      try {
+        const page = await localDatabaseAdapter.querySince(peerWatermarks, maxItems);
+        truncations.push(page.truncated);
+        for (const rec of page.rows) {
+          candidates.push({
+            value: { kind: "record", record: rec },
+            hlc: rec.updatedAt,
+            // Rows travel ahead of their files, so a row costs no byte
+            // budget: its upload is the upload pass's business, budgeted
+            // there. Charging rows for their files is what made a row wait
+            // behind every earlier file from its author.
+            bytes: 0,
+          });
+        }
+
+        // Labels are shared data too, so the same channel rule and the same
+        // delta scan apply. A label is a row, never a blob, so it costs no
+        // byte budget.
+        const labelPage = await localDatabaseAdapter.queryLabelsSince(peerWatermarks, maxItems);
+        truncations.push(labelPage.truncated);
+        for (const label of labelPage.rows) {
+          candidates.push({
+            value: { kind: "label", label },
+            hlc: label.updatedAt,
+            bytes: 0,
+          });
+        }
+      } catch (err) {
+        console.warn(`[sync] exchange scan failed for shared records: ${(err as Error).message}`);
+        unreadableStream = true;
+      }
+    }
+
+    // AR/AW scan. Every registered table is scanned every round, each with
+    // the full item budget rather than a share of a running total. A table
+    // skipped for lack of budget would be a stream that enumerated nothing,
+    // which forces every author's ceiling to "nothing safe" and shuts the
+    // round down entirely — a far worse outcome than reading a few hundred
+    // extra indexed rows. The cut below discards the surplus.
+    if (push && appSyncableSource) {
+      for (const ns of appSyncableSource.namespaces.list()) {
+        for (const tableInfo of ns.tables) {
+          try {
+            const page = await appSyncableSource.applier.scanSince(
+              ns.appId,
+              tableInfo.name,
+              peerWatermarks,
+              maxItems,
+            );
+            truncations.push(page.truncated);
+            for (const entry of page.rows) {
+              candidates.push({
+                value: { kind: "appRow", entry },
+                hlc: entry.timestamp,
+                bytes: 0,
+              });
+            }
+          } catch (err) {
+            console.warn(
+              `[sync] exchange scanSince failed for ${ns.appId}.${tableInfo.name}: ${(err as Error).message}`,
+            );
+            // A table we could not read might hold rows older than anything
+            // else this round would ship, for any author. Treating that as
+            // "nothing owed" is what opens a gap, so the round ships nothing
+            // and asks to be retried. It used to warn and carry on.
+            unreadableStream = true;
+          }
+        }
+      }
+    }
+
+    const cut = unreadableStream
+      ? { taken: [] as RoundItem<OutboundItem>[], hasMore: true }
+      : cutRound(candidates, computeCeilings(truncations), { maxBytes, maxItems });
+    if (cut.hasMore) outboundHasMore = true;
+
+    const cappedRecords: AnyRecord[] = [];
+    const cappedLabels: RecordLabel[] = [];
+    const cappedAppRows: AppSyncableRowEntry[] = [];
+    for (const item of cut.taken) {
+      if (item.value.kind === "record") cappedRecords.push(item.value.record);
+      else if (item.value.kind === "label") cappedLabels.push(item.value.label);
+      else cappedAppRows.push(item.value.entry);
+    }
+
+    const outboundByNode = groupOutboundByNodeId(cappedRecords, cappedLabels, cappedAppRows);
+
+    const outboundRecords: AnyRecord[] = [];
+    const outboundLabels: RecordLabel[] = [];
+    const outboundAppRows: AppSyncableRowEntry[] = [];
+
+    // Highest position actually shipped per author this round — what the
+    // repeat-shipment backstop compares against the peer's coverage.
+    const shippedHighWater: Record<string, HLCTimestamp> = {};
+    // Authors this node has stopped pushing this round.
+    const suppressedThisRound = new Set<string>();
+    for (const [nodeId, items] of outboundByNode) {
+      if (refusedAuthors.has(nodeId)) {
+        // Re-shipping this author has not worked for several drained syncs
+        // running, so stop. Continuing is not free — it is a full re-scan of
+        // that author's history every tick — and it is not achieving anything
+        // that the last three attempts did not also fail to achieve.
+        suppressedThisRound.add(nodeId);
+        continue;
+      }
+      // Every row ships. A row no longer waits for its file: the file is
+      // owed to the peer until the peer's bytes watermark passes it, and the
+      // upload pass after the exchange works from that watermark. See
+      // `SyncExchangeResponse.responderByteWatermarks`.
+      for (const item of items) {
+        if (item.kind === "record") {
+          outboundRecords.push(item.record);
+        } else if (item.kind === "label") {
+          outboundLabels.push(item.label);
         } else {
-          console.warn(
-            "[sync] peer does not report a bytes watermark; pushing nothing until it does. Deploy the current cloud data server.",
-          );
-          push = false;
-          pushWithheld = true;
+          outboundAppRows.push(item.entry);
+        }
+        const hlc = outboundItemHlc(item);
+        const seen = shippedHighWater[nodeId];
+        if (seen === undefined || compareHLC(hlc, seen) > 0) {
+          shippedHighWater[nodeId] = hlc;
         }
       }
-
-      const peerWatermarks = applyRepairFloors(
-        priorPeerWatermarks,
-        await loadRepairFloors(),
+    }
+    if (suppressedThisRound.size > 0) {
+      console.warn(
+        `[sync] not pushing ${suppressedThisRound.size} author(s) — repeatedly re-shipped without the peer's coverage advancing: ${[...suppressedThisRound].join(", ")}`,
       );
+    }
 
-      // ---------------------------------------------------------------------
-      // Outbound: gather SR records and AR/AW rows the peer hasn't seen, then
-      // walk per nodeId in HLC order with a contiguous-prefix rule. Blobs
-      // (SR or AR) are pushed before their owning item is allowed to ship.
-      // ---------------------------------------------------------------------
-      //
-      // Every scan below is a **delta scan**: the per-nodeId watermark filter
-      // is pushed into the query, which seeks the `(node_id, updated_at)` index
-      // once per author instead of reading the table and discarding whatever
-      // the peer already has. That is what makes round N cost the same as round
-      // 1. The previous shape read every row every round, so a node that had
-      // shipped 30k of 60k records still read 30k rows to find the next 100.
-      //
-      // There is no cursor loop any more, and none is needed: every row that
-      // comes back is genuinely owed, so `limit` rows is a full page by
-      // construction. What gets left behind is not resumed from a token — the
-      // peer's watermark has not advanced past it, so the next round selects it
-      // again from the top. `hasMore` here therefore answers "should we run
-      // another round?", not "where do I continue from?".
-      let outboundHasMore = false;
-
-      // Every stream reports how far it got, per author. Those marks are the
-      // whole reason a shipment can be cut safely: the coverage watermark spans
-      // all of them, so an item may only ship once *every* stream can vouch
-      // that nothing older is still owed for its author. See `round-cut.ts`.
-      const truncations: StreamTruncation[] = [];
-      const candidates: RoundItem<OutboundItem>[] = [];
-      let unreadableStream = false;
-
-      // Only the Drive channel ships shared records. Per-app channels set
-      // syncSharedRecords=false and leave this empty — they carry only
-      // app-specific rows.
-      if (push && syncSharedRecords) {
-        // Caught for the same reason the app-table scan below is, and the
-        // absence of this was the other half of R5: an unreadable shared-record
-        // stream threw straight out of `exchange()` and out of `sync()`, so the
-        // Drive channel had no fail-safe path at all while every per-app channel
-        // did. A stream that would not read might hold rows older than anything
-        // else this round would ship, for any author — so the round ships
-        // nothing and asks to be retried, rather than shipping a prefix with a
-        // hole underneath it.
-        try {
-          const page = await localDatabaseAdapter.querySince(peerWatermarks, maxItems);
-          truncations.push(page.truncated);
-          for (const rec of page.rows) {
-            candidates.push({
-              value: { kind: "record", record: rec },
-              hlc: rec.updatedAt,
-              // Rows travel ahead of their files, so a row costs no byte
-              // budget: its upload is the upload pass's business, budgeted
-              // there. Charging rows for their files is what made a row wait
-              // behind every earlier file from its author.
-              bytes: 0,
-            });
-          }
-
-          // Labels are shared data too, so the same channel rule and the same
-          // delta scan apply. A label is a row, never a blob, so it costs no
-          // byte budget.
-          const labelPage = await localDatabaseAdapter.queryLabelsSince(
-            peerWatermarks,
-            maxItems,
-          );
-          truncations.push(labelPage.truncated);
-          for (const label of labelPage.rows) {
-            candidates.push({
-              value: { kind: "label", label },
-              hlc: label.updatedAt,
-              bytes: 0,
-            });
-          }
-        } catch (err) {
-          console.warn(
-            `[sync] exchange scan failed for shared records: ${(err as Error).message}`,
-          );
-          unreadableStream = true;
+    // Attach each shipping record's metadata row, read once for the whole
+    // shipment rather than per record.
+    //
+    // Read here, after the cut and after the transfers, rather than at scan
+    // time: only the records that actually ship need a row, and a round whose
+    // uploads failed part-way would otherwise have paid for metadata it is
+    // not sending. A read failure is not allowed to fail the round — the
+    // record row is the thing that must move, and metadata that missed this
+    // round rides the next one.
+    let outboundItems: SyncRecordItem[] = outboundRecords;
+    if (outboundRecords.length > 0) {
+      try {
+        const metadataById = await loadMetadataForRecords(localDatabaseAdapter, outboundRecords);
+        if (metadataById.size > 0) {
+          outboundItems = outboundRecords.map((record) => {
+            const metadata = metadataById.get(record.id);
+            return metadata ? { ...record, metadata } : record;
+          });
         }
+      } catch (err) {
+        console.warn(`[sync] outbound metadata read failed: ${(err as Error).message}`);
       }
+    }
 
-      // AR/AW scan. Every registered table is scanned every round, each with
-      // the full item budget rather than a share of a running total. A table
-      // skipped for lack of budget would be a stream that enumerated nothing,
-      // which forces every author's ceiling to "nothing safe" and shuts the
-      // round down entirely — a far worse outcome than reading a few hundred
-      // extra indexed rows. The cut below discards the surplus.
-      if (push && appSyncableSource) {
-        for (const ns of appSyncableSource.namespaces.list()) {
-          for (const tableInfo of ns.tables) {
-            try {
-              const page = await appSyncableSource.applier.scanSince(
-                ns.appId,
-                tableInfo.name,
-                peerWatermarks,
-                maxItems,
+    const response = await transport.exchange({
+      watermarks: advertisedWatermarks,
+      records: outboundItems.length > 0 ? outboundItems : undefined,
+      labels: outboundLabels.length > 0 ? outboundLabels : undefined,
+      appSyncableRows: outboundAppRows.length > 0 ? outboundAppRows : undefined,
+      limit: maxItems,
+      maxBytes,
+    });
+
+    // Authors the responder stopped applying part-way through. Our shipment
+    // for them left this node fine and was then discarded, so it is a failure
+    // this side has no other way to see: the scans both report drained, every
+    // upload succeeded, and the round nonetheless landed nothing. Treated
+    // exactly like a failed upload from here on — it is the same event with
+    // the failure at the other end of the wire.
+    const haltedByPeer = new Set(response.haltedAuthors ?? []);
+    if (haltedByPeer.size > 0) {
+      console.warn(
+        `[sync] peer halted ${haltedByPeer.size} author(s) this round: ${[...haltedByPeer].join(", ")}`,
+      );
+    }
+
+    // ---------------------------------------------------------------------
+    // Inbound: apply rows per nodeId in HLC order, interleaving SR snapshots
+    // and AR/AW rows. The rows watermark advances past every row that
+    // applied; files follow in the download pass, which keeps its own
+    // watermark. peerWatermarks needs no per-item bookkeeping here: the
+    // responder reports its coverage in `responderWatermarks` (computed
+    // after applying our outbound), which replaces the whole map below.
+    // ---------------------------------------------------------------------
+    // A per-app channel (syncSharedRecords=false) must never apply shared
+    // records. The responder shouldn't ship them, but guard inbound too so
+    // the channel split holds even if a peer over-ships.
+    if (!syncSharedRecords && (response.records?.length ?? 0) > 0) {
+      console.warn(
+        `[sync] dropped ${response.records?.length ?? 0} shared record(s) received on a per-app channel (syncSharedRecords=false)`,
+      );
+    }
+    // Labels are shared data too, so the same guard applies. Without this
+    // the channel split would hold for records and silently not for
+    // labels — the kind of gap that gets left out because the responder
+    // "shouldn't" ship them.
+    if (!syncSharedRecords && (response.labels?.length ?? 0) > 0) {
+      console.warn(
+        `[sync] dropped ${response.labels?.length ?? 0} record label(s) received on a per-app channel (syncSharedRecords=false)`,
+      );
+    }
+    const inboundByNode = groupInboundByNodeId(
+      syncSharedRecords ? response.records : [],
+      syncSharedRecords ? (response.labels ?? []) : [],
+      response.appSyncableRows,
+    );
+    const appliedIds: StarkeepId[] = [];
+    const ownSafeAdvance = new Map<string, HLCTimestamp>();
+    let elidedCount = 0;
+
+    // Authors whose inbound run broke on a row that would not apply. It
+    // gates inbound-floor retirement: the floor is the only thing still
+    // asking the peer for the rows underneath the hole.
+    const inboundBrokeFor = new Set<string>();
+
+    // Rows first, every one of them, then files in their own pass.
+    //
+    // A row used to wait for its file, and for every earlier file from its
+    // author: a round carrying a 40 MB video kept every row behind it out of
+    // the database for the length of the download. A grid needs only the row
+    // to paint a placeholder, so rows apply and are announced at once. The
+    // rows watermark advances past every row that applied, stopping at the
+    // first that did not, and files are owed against the separate bytes
+    // watermark until they land. `brokenAt` holds that first failed row.
+    const brokenAt = new Map<string, number>();
+    const markBroken = (nodeId: string, index: number): void => {
+      const prior = brokenAt.get(nodeId);
+      if (prior === undefined || index < prior) brokenAt.set(nodeId, index);
+    };
+
+    for (const [nodeId, items] of inboundByNode) {
+      for (const [index, item] of items.entries()) {
+        if (item.kind === "record") {
+          // The passenger comes off before the row goes to `put`. Splitting
+          // here rather than letting the adapter ignore an unknown field
+          // keeps the two writes visibly separate — one is a snapshot under
+          // LWW, the other is a column merge that deliberately is not.
+          const { metadata: incomingMetadata, ...snapshot } = item.record;
+          const current = await localDatabaseAdapter.get(snapshot.id);
+          const rowAlreadyApplied =
+            current !== null && compareHLC(current.updatedAt, snapshot.updatedAt) >= 0;
+          // What this node holds for the record once the LWW comparison has
+          // had its say. The metadata cascade reads *this* rather than the
+          // incoming snapshot, because the two disagree whenever the snapshot
+          // lost: a losing tombstone leaves the record live, and a losing live
+          // row leaves it deleted. See the responder's copy.
+          const held = rowAlreadyApplied ? current! : snapshot;
+
+          // Everything that writes this record is inside one guard, and a
+          // failure inside it takes the record out of the round rather than
+          // the round out of the exchange.
+          //
+          // This is what `inboundBrokeFor` says it collects — "a blob that
+          // would not download, a row that would not apply" — and until now
+          // only the blob half was true. An unguarded throw here escapes
+          // `exchange()`, so no watermark advances, no other author's items
+          // are processed, the peer re-ships the same row next round and the
+          // failure repeats until someone reads a log: one row stops all sync
+          // for the app, in both directions, permanently.
+          //
+          // No cause is enumerated deliberately. The known one — two nodes
+          // minting different ids for one file — is gone, and the point of
+          // this guard is that the next unknown one costs a record instead of
+          // an app. Holding the watermark is what makes the loss temporary:
+          // the peer keeps offering the row, so a fix landing later applies
+          // it without anyone re-driving anything.
+          try {
+            if (!rowAlreadyApplied) {
+              clock.receive(snapshot.updatedAt);
+              // A stand-in from the cloud already won its slot there. A local
+              // stand-in holding the same slot lost, and is tombstoned before
+              // the winner lands — see `stand-in-slots.ts`.
+              if (!snapshot.deletedAt) {
+                const loser = await yieldSlotToIncoming(localDatabaseAdapter, snapshot, clock);
+                if (loser) appliedIds.push(loser.id);
+              }
+              await localDatabaseAdapter.put(snapshot);
+            }
+
+            // **Outside** the LWW guard, deliberately. An equal or older record
+            // row can still carry columns this node lacks — which is the common
+            // case, not the corner one, while peers converge onto this wire
+            // format — and the record's clock does not move when metadata is
+            // written, so a stale-looking row is no evidence about its
+            // metadata.
+            //
+            // A tombstone cascades instead: `applyRecordDelete` tombstones the
+            // metadata row, and a synced delete has to do the same or the
+            // record's dimensions outlive it on every peer but the one it was
+            // deleted on. Tombstoned rather than dropped since the delete became
+            // uniformly soft, which is what lets a restore bring the row back.
+            if (held.deletedAt) {
+              await deleteRecordMetadata(localDatabaseAdapter, held, held.deletedAt);
+            } else if (current?.deletedAt) {
+              // A restore arriving. The cascade mirrors the delete's, and it has
+              // to run whether or not a metadata passenger came with the row: a
+              // row whose columns are all null ships nothing, and a tombstoned
+              // metadata row nobody lifted is a restored photograph with no
+              // dimensions. Asked only of a record this node held as deleted, so
+              // the ordinary round pays nothing for it.
+              await restoreRecordMetadata(localDatabaseAdapter, held);
+            }
+            if (!held.deletedAt && incomingMetadata) {
+              const owedBack = await applyRecordMetadata(
+                localDatabaseAdapter,
+                snapshot,
+                incomingMetadata,
+                // Only worth asking when we already held the record: one we
+                // have never seen cannot have a metadata row to preserve.
+                { detectOwedBack: current !== null },
               );
-              truncations.push(page.truncated);
-              for (const entry of page.rows) {
-                candidates.push({
-                  value: { kind: "appRow", entry },
-                  hlc: entry.timestamp,
-                  bytes: 0,
+              // The peer is behind on this record and has no way to find out.
+              // A metadata write reaches sync only through the record's clock,
+              // so two nodes each writing a different column each bump the same
+              // record and one of those bumps loses the row's LWW — leaving the
+              // loser holding the better row with nothing to say so. Moving our
+              // clock re-ships the merged row.
+              //
+              // Not the unconditional bump the design rules out: this fires
+              // only while the snapshot names a strict subset of what we hold,
+              // and the reply to it names the union, against which the same
+              // test is false on both sides. See `applyRecordMetadata`.
+              if (owedBack) {
+                await localDatabaseAdapter.put({
+                  ...held,
+                  updatedAt: clock.now(),
                 });
               }
-            } catch (err) {
-              console.warn(
-                `[sync] exchange scanSince failed for ${ns.appId}.${tableInfo.name}: ${(err as Error).message}`,
-              );
-              // A table we could not read might hold rows older than anything
-              // else this round would ship, for any author. Treating that as
-              // "nothing owed" is what opens a gap, so the round ships nothing
-              // and asks to be retried. It used to warn and carry on.
-              unreadableStream = true;
             }
-          }
-        }
-      }
-
-      const cut = unreadableStream
-        ? { taken: [] as RoundItem<OutboundItem>[], hasMore: true }
-        : cutRound(candidates, computeCeilings(truncations), { maxBytes, maxItems });
-      if (cut.hasMore) outboundHasMore = true;
-
-      const cappedRecords: AnyRecord[] = [];
-      const cappedLabels: RecordLabel[] = [];
-      const cappedAppRows: AppSyncableRowEntry[] = [];
-      for (const item of cut.taken) {
-        if (item.value.kind === "record") cappedRecords.push(item.value.record);
-        else if (item.value.kind === "label") cappedLabels.push(item.value.label);
-        else cappedAppRows.push(item.value.entry);
-      }
-
-      const outboundByNode = groupOutboundByNodeId(
-        cappedRecords,
-        cappedLabels,
-        cappedAppRows,
-      );
-
-      const outboundRecords: AnyRecord[] = [];
-      const outboundLabels: RecordLabel[] = [];
-      const outboundAppRows: AppSyncableRowEntry[] = [];
-
-      // Highest position actually shipped per author this round — what the
-      // repeat-shipment backstop compares against the peer's coverage.
-      const shippedHighWater: Record<string, HLCTimestamp> = {};
-      // Authors this node has stopped pushing this round.
-      const suppressedThisRound = new Set<string>();
-      for (const [nodeId, items] of outboundByNode) {
-        if (refusedAuthors.has(nodeId)) {
-          // Re-shipping this author has not worked for several drained syncs
-          // running, so stop. Continuing is not free — it is a full re-scan of
-          // that author's history every tick — and it is not achieving anything
-          // that the last three attempts did not also fail to achieve.
-          suppressedThisRound.add(nodeId);
-          continue;
-        }
-        // Every row ships. A row no longer waits for its file: the file is
-        // owed to the peer until the peer's bytes watermark passes it, and the
-        // upload pass after the exchange works from that watermark. See
-        // `SyncExchangeResponse.responderByteWatermarks`.
-        for (const item of items) {
-          if (item.kind === "record") {
-            outboundRecords.push(item.record);
-          } else if (item.kind === "label") {
-            outboundLabels.push(item.label);
-          } else {
-            outboundAppRows.push(item.entry);
-          }
-          const hlc = outboundItemHlc(item);
-          const seen = shippedHighWater[nodeId];
-          if (seen === undefined || compareHLC(hlc, seen) > 0) {
-            shippedHighWater[nodeId] = hlc;
-          }
-        }
-      }
-      if (suppressedThisRound.size > 0) {
-        console.warn(
-          `[sync] not pushing ${suppressedThisRound.size} author(s) — repeatedly re-shipped without the peer's coverage advancing: ${[...suppressedThisRound].join(", ")}`,
-        );
-      }
-
-      // Attach each shipping record's metadata row, read once for the whole
-      // shipment rather than per record.
-      //
-      // Read here, after the cut and after the transfers, rather than at scan
-      // time: only the records that actually ship need a row, and a round whose
-      // uploads failed part-way would otherwise have paid for metadata it is
-      // not sending. A read failure is not allowed to fail the round — the
-      // record row is the thing that must move, and metadata that missed this
-      // round rides the next one.
-      let outboundItems: SyncRecordItem[] = outboundRecords;
-      if (outboundRecords.length > 0) {
-        try {
-          const metadataById = await loadMetadataForRecords(
-            localDatabaseAdapter,
-            outboundRecords,
-          );
-          if (metadataById.size > 0) {
-            outboundItems = outboundRecords.map((record) => {
-              const metadata = metadataById.get(record.id);
-              return metadata ? { ...record, metadata } : record;
-            });
-          }
-        } catch (err) {
-          console.warn(
-            `[sync] outbound metadata read failed: ${(err as Error).message}`,
-          );
-        }
-      }
-
-      const response = await transport.exchange({
-        watermarks: advertisedWatermarks,
-        records: outboundItems.length > 0 ? outboundItems : undefined,
-        labels: outboundLabels.length > 0 ? outboundLabels : undefined,
-        appSyncableRows: outboundAppRows.length > 0 ? outboundAppRows : undefined,
-        limit: maxItems,
-        maxBytes,
-      });
-
-      // Authors the responder stopped applying part-way through. Our shipment
-      // for them left this node fine and was then discarded, so it is a failure
-      // this side has no other way to see: the scans both report drained, every
-      // upload succeeded, and the round nonetheless landed nothing. Treated
-      // exactly like a failed upload from here on — it is the same event with
-      // the failure at the other end of the wire.
-      const haltedByPeer = new Set(response.haltedAuthors ?? []);
-      if (haltedByPeer.size > 0) {
-        console.warn(
-          `[sync] peer halted ${haltedByPeer.size} author(s) this round: ${[...haltedByPeer].join(", ")}`,
-        );
-      }
-
-      // ---------------------------------------------------------------------
-      // Inbound: apply rows per nodeId in HLC order, interleaving SR snapshots
-      // and AR/AW rows. The rows watermark advances past every row that
-      // applied; files follow in the download pass, which keeps its own
-      // watermark. peerWatermarks needs no per-item bookkeeping here: the
-      // responder reports its coverage in `responderWatermarks` (computed
-      // after applying our outbound), which replaces the whole map below.
-      // ---------------------------------------------------------------------
-      // A per-app channel (syncSharedRecords=false) must never apply shared
-      // records. The responder shouldn't ship them, but guard inbound too so
-      // the channel split holds even if a peer over-ships.
-      if (!syncSharedRecords && (response.records?.length ?? 0) > 0) {
-        console.warn(
-          `[sync] dropped ${response.records?.length ?? 0} shared record(s) received on a per-app channel (syncSharedRecords=false)`,
-        );
-      }
-      // Labels are shared data too, so the same guard applies. Without this
-      // the channel split would hold for records and silently not for
-      // labels — the kind of gap that gets left out because the responder
-      // "shouldn't" ship them.
-      if (!syncSharedRecords && (response.labels?.length ?? 0) > 0) {
-        console.warn(
-          `[sync] dropped ${response.labels?.length ?? 0} record label(s) received on a per-app channel (syncSharedRecords=false)`,
-        );
-      }
-      const inboundByNode = groupInboundByNodeId(
-        syncSharedRecords ? response.records : [],
-        syncSharedRecords ? (response.labels ?? []) : [],
-        response.appSyncableRows,
-      );
-      const appliedIds: StarkeepId[] = [];
-      const ownSafeAdvance = new Map<string, HLCTimestamp>();
-      let elidedCount = 0;
-
-      // Authors whose inbound run broke on a row that would not apply. It
-      // gates inbound-floor retirement: the floor is the only thing still
-      // asking the peer for the rows underneath the hole.
-      const inboundBrokeFor = new Set<string>();
-
-      // Rows first, every one of them, then files in their own pass.
-      //
-      // A row used to wait for its file, and for every earlier file from its
-      // author: a round carrying a 40 MB video kept every row behind it out of
-      // the database for the length of the download. A grid needs only the row
-      // to paint a placeholder, so rows apply and are announced at once. The
-      // rows watermark advances past every row that applied, stopping at the
-      // first that did not, and files are owed against the separate bytes
-      // watermark until they land. `brokenAt` holds that first failed row.
-      const brokenAt = new Map<string, number>();
-      const markBroken = (nodeId: string, index: number): void => {
-        const prior = brokenAt.get(nodeId);
-        if (prior === undefined || index < prior) brokenAt.set(nodeId, index);
-      };
-
-      for (const [nodeId, items] of inboundByNode) {
-        for (const [index, item] of items.entries()) {
-          if (item.kind === "record") {
-            // The passenger comes off before the row goes to `put`. Splitting
-            // here rather than letting the adapter ignore an unknown field
-            // keeps the two writes visibly separate — one is a snapshot under
-            // LWW, the other is a column merge that deliberately is not.
-            const { metadata: incomingMetadata, ...snapshot } = item.record;
-            const current = await localDatabaseAdapter.get(snapshot.id);
-            const rowAlreadyApplied =
-              current !== null &&
-              compareHLC(current.updatedAt, snapshot.updatedAt) >= 0;
-            // What this node holds for the record once the LWW comparison has
-            // had its say. The metadata cascade reads *this* rather than the
-            // incoming snapshot, because the two disagree whenever the snapshot
-            // lost: a losing tombstone leaves the record live, and a losing live
-            // row leaves it deleted. See the responder's copy.
-            const held = rowAlreadyApplied ? current! : snapshot;
-
-            // Everything that writes this record is inside one guard, and a
-            // failure inside it takes the record out of the round rather than
-            // the round out of the exchange.
-            //
-            // This is what `inboundBrokeFor` says it collects — "a blob that
-            // would not download, a row that would not apply" — and until now
-            // only the blob half was true. An unguarded throw here escapes
-            // `exchange()`, so no watermark advances, no other author's items
-            // are processed, the peer re-ships the same row next round and the
-            // failure repeats until someone reads a log: one row stops all sync
-            // for the app, in both directions, permanently.
-            //
-            // No cause is enumerated deliberately. The known one — two nodes
-            // minting different ids for one file — is gone, and the point of
-            // this guard is that the next unknown one costs a record instead of
-            // an app. Holding the watermark is what makes the loss temporary:
-            // the peer keeps offering the row, so a fix landing later applies
-            // it without anyone re-driving anything.
-            try {
-              if (!rowAlreadyApplied) {
-                clock.receive(snapshot.updatedAt);
-                // A stand-in from the cloud already won its slot there. A local
-                // stand-in holding the same slot lost, and is tombstoned before
-                // the winner lands — see `stand-in-slots.ts`.
-                if (!snapshot.deletedAt) {
-                  const loser = await yieldSlotToIncoming(localDatabaseAdapter, snapshot, clock);
-                  if (loser) appliedIds.push(loser.id);
-                }
-                await localDatabaseAdapter.put(snapshot);
-              }
-
-              // **Outside** the LWW guard, deliberately. An equal or older record
-              // row can still carry columns this node lacks — which is the common
-              // case, not the corner one, while peers converge onto this wire
-              // format — and the record's clock does not move when metadata is
-              // written, so a stale-looking row is no evidence about its
-              // metadata.
-              //
-              // A tombstone cascades instead: `applyRecordDelete` tombstones the
-              // metadata row, and a synced delete has to do the same or the
-              // record's dimensions outlive it on every peer but the one it was
-              // deleted on. Tombstoned rather than dropped since the delete became
-              // uniformly soft, which is what lets a restore bring the row back.
-              if (held.deletedAt) {
-                await deleteRecordMetadata(localDatabaseAdapter, held, held.deletedAt);
-              } else if (current?.deletedAt) {
-                // A restore arriving. The cascade mirrors the delete's, and it has
-                // to run whether or not a metadata passenger came with the row: a
-                // row whose columns are all null ships nothing, and a tombstoned
-                // metadata row nobody lifted is a restored photograph with no
-                // dimensions. Asked only of a record this node held as deleted, so
-                // the ordinary round pays nothing for it.
-                await restoreRecordMetadata(localDatabaseAdapter, held);
-              }
-              if (!held.deletedAt && incomingMetadata) {
-                const owedBack = await applyRecordMetadata(
-                  localDatabaseAdapter,
-                  snapshot,
-                  incomingMetadata,
-                  // Only worth asking when we already held the record: one we
-                  // have never seen cannot have a metadata row to preserve.
-                  { detectOwedBack: current !== null },
-                );
-                // The peer is behind on this record and has no way to find out.
-                // A metadata write reaches sync only through the record's clock,
-                // so two nodes each writing a different column each bump the same
-                // record and one of those bumps loses the row's LWW — leaving the
-                // loser holding the better row with nothing to say so. Moving our
-                // clock re-ships the merged row.
-                //
-                // Not the unconditional bump the design rules out: this fires
-                // only while the snapshot names a strict subset of what we hold,
-                // and the reply to it names the union, against which the same
-                // test is false on both sides. See `applyRecordMetadata`.
-                if (owedBack) {
-                  await localDatabaseAdapter.put({
-                    ...held,
-                    updatedAt: clock.now(),
-                  });
-                }
-              }
-            } catch (err) {
-              console.warn(
-                `[sync] record ${snapshot.id} from ${nodeId} would not apply: ${(err as Error).message}`,
-              );
-              markBroken(nodeId, index);
-              continue;
-            }
-
-            // Only announce a row newly applied this round. A file arriving
-            // later for a row the node already held announces itself when it
-            // lands.
-            if (!rowAlreadyApplied) appliedIds.push(snapshot.id);
-
-          } else if (item.kind === "label") {
-            const incoming = item.label;
-            // HLC LWW on the label's own row, which is the whole reason
-            // labels are a separate table: a record's whole-row LWW would
-            // otherwise let a concurrent metadata update eat a label.
-            //
-            // `value` is part of the row's identity, so each value of a
-            // set-valued key gets its own LWW domain. Looking up without it
-            // would compare an incoming `faces=Bob` against whichever row
-            // happened to be found — and drop it as stale.
-            const current = await localDatabaseAdapter.getLabel(
-              incoming.recordId,
-              incoming.appId,
-              incoming.key,
-              incoming.value,
+          } catch (err) {
+            console.warn(
+              `[sync] record ${snapshot.id} from ${nodeId} would not apply: ${(err as Error).message}`,
             );
-            if (
-              current === null ||
-              compareHLC(current.updatedAt, incoming.updatedAt) < 0
-            ) {
-              clock.receive(incoming.updatedAt);
-              // putLabel, not upsertLabels: this writes the snapshot verbatim
-              // including its tombstone, so an inbound retraction stays
-              // retracted instead of being revived.
-              await localDatabaseAdapter.putLabel(incoming);
-              // Surface the labelled record as changed. Nothing on the record
-              // row moved — a label write must never touch records.updated_at
-              // — but subscribers key on record ids.
-              appliedIds.push(incoming.recordId);
-            }
-            // No blob to pull, so a label can never fail the way a record
-            // with a missing blob can.
-          } else {
-            const entry = item.entry;
-            if (!appSyncableSource) {
-              // No applier configured — skip without advancing own watermark
-              // (we have no way to durably accept this row).
-              markBroken(nodeId, index);
-              continue;
-            }
-            clock.receive(entry.timestamp);
-            try {
-              await appSyncableSource.applier.apply(entry);
-            } catch (err) {
-              console.warn(
-                `[sync] appSyncableRow apply failed (app=${entry.appId} table=${entry.table}): ${(err as Error).message}`,
-              );
-              markBroken(nodeId, index);
-              continue;
-            }
+            markBroken(nodeId, index);
+            continue;
+          }
 
+          // Only announce a row newly applied this round. A file arriving
+          // later for a row the node already held announces itself when it
+          // lands.
+          if (!rowAlreadyApplied) appliedIds.push(snapshot.id);
+        } else if (item.kind === "label") {
+          const incoming = item.label;
+          // HLC LWW on the label's own row, which is the whole reason
+          // labels are a separate table: a record's whole-row LWW would
+          // otherwise let a concurrent metadata update eat a label.
+          //
+          // `value` is part of the row's identity, so each value of a
+          // set-valued key gets its own LWW domain. Looking up without it
+          // would compare an incoming `faces=Bob` against whichever row
+          // happened to be found — and drop it as stale.
+          const current = await localDatabaseAdapter.getLabel(
+            incoming.recordId,
+            incoming.appId,
+            incoming.key,
+            incoming.value,
+          );
+          if (current === null || compareHLC(current.updatedAt, incoming.updatedAt) < 0) {
+            clock.receive(incoming.updatedAt);
+            // putLabel, not upsertLabels: this writes the snapshot verbatim
+            // including its tombstone, so an inbound retraction stays
+            // retracted instead of being revived.
+            await localDatabaseAdapter.putLabel(incoming);
+            // Surface the labelled record as changed. Nothing on the record
+            // row moved — a label write must never touch records.updated_at
+            // — but subscribers key on record ids.
+            appliedIds.push(incoming.recordId);
+          }
+          // No blob to pull, so a label can never fail the way a record
+          // with a missing blob can.
+        } else {
+          const entry = item.entry;
+          if (!appSyncableSource) {
+            // No applier configured — skip without advancing own watermark
+            // (we have no way to durably accept this row).
+            markBroken(nodeId, index);
+            continue;
+          }
+          clock.receive(entry.timestamp);
+          try {
+            await appSyncableSource.applier.apply(entry);
+          } catch (err) {
+            console.warn(
+              `[sync] appSyncableRow apply failed (app=${entry.appId} table=${entry.table}): ${(err as Error).message}`,
+            );
+            markBroken(nodeId, index);
+            continue;
           }
         }
       }
+    }
 
-      // Every row is in. Say so now, before the first download, so a reader
-      // paints the round's placeholders while its bytes are still moving.
-      if (appliedIds.length > 0) {
-        changeNotifier.emit({
-          eventType: "local-data-synced",
-          recordIds: [...appliedIds],
-          timestamp: clock.now(),
-        });
+    // Every row is in. Say so now, before the first download, so a reader
+    // paints the round's placeholders while its bytes are still moving.
+    if (appliedIds.length > 0) {
+      changeNotifier.emit({
+        eventType: "local-data-synced",
+        recordIds: [...appliedIds],
+        timestamp: clock.now(),
+      });
+    }
+
+    // The peer's bytes watermark as of this response. Absent from a peer too
+    // old to track files, which keeps the previous value; `null` means no
+    // report has ever arrived, and every download is then expected to work.
+    const peerByteWatermarks = response.responderByteWatermarks ?? priorPeerByteWatermarks;
+
+    // Files after rows, downloads before uploads. Each pass spends its own
+    // byte budget, so a phone fetching stand-ins still uploads this round.
+    const download = await downloadOwedFiles(peerByteWatermarks, ownWatermarks);
+    const upload =
+      push && peerByteWatermarks !== null
+        ? await uploadOwedFiles(peerByteWatermarks)
+        : EMPTY_FILE_PASS;
+    if (response.responderByteWatermarks) {
+      await savePeerByteWatermarks(response.responderByteWatermarks);
+    } else if (push && (outboundRecords.length > 0 || outboundAppRows.length > 0)) {
+      console.warn(
+        "[sync] peer stopped reporting a bytes watermark after rows were shipped; their uploads continue from its last report",
+      );
+    }
+    elidedCount += download.elided;
+
+    for (const [nodeId, items] of inboundByNode) {
+      const stop = brokenAt.get(nodeId) ?? items.length;
+      if (brokenAt.has(nodeId)) inboundBrokeFor.add(nodeId);
+      if (stop > 0) ownSafeAdvance.set(nodeId, inboundItemHlc(items[stop - 1]!));
+    }
+
+    // ---------------------------------------------------------------------
+    // Persist updated watermarks.
+    // ---------------------------------------------------------------------
+    // Did this round change anything that survives it?
+    //
+    // Counting applied/shipped/elided is not enough to answer that. A repair
+    // round re-receives rows the peer already has, applies none of them —
+    // they are LWW no-ops — and still makes real progress by advancing its
+    // floor. Judging it by item counts would call it stalled and abandon the
+    // repair one roundful in. What matters is whether any persisted position
+    // moved, because if none did, the next request is byte-identical to this
+    // one and running it again cannot help.
+    //
+    // Rows the peer halted are not counted, and that is what keeps the loop
+    // from spinning. A shipment the responder discarded left our side looking
+    // busy — the rows went out, `shipped` is non-zero — while changing nothing
+    // anywhere; counting it as progress would make a peer whose apply fails
+    // persistently run every round of the budget re-sending the same row.
+    // Excluded here, the stall detector sees the round for what it is and
+    // `sync()` returns `complete: false, stalled: true`.
+    const acceptedOutbound =
+      outboundRecords.filter((r) => !haltedByPeer.has(r.updatedAt.nodeId)).length +
+      outboundLabels.filter((l) => !haltedByPeer.has(l.updatedAt.nodeId)).length +
+      outboundAppRows.filter((e) => !haltedByPeer.has(e.timestamp.nodeId)).length;
+    // File work counts when bytes moved or a bytes watermark did. A file
+    // offered again and found already there moves nothing, and counting it
+    // would keep a round loop running over files nobody can advance.
+    const peerBytesMoved =
+      response.responderByteWatermarks !== undefined &&
+      (priorPeerByteWatermarks === null ||
+        !sameWatermarks(priorPeerByteWatermarks, response.responderByteWatermarks));
+    let progressed =
+      appliedIds.length > 0 ||
+      acceptedOutbound > 0 ||
+      elidedCount > 0 ||
+      download.transferred > 0 ||
+      download.moved ||
+      upload.transferred > 0 ||
+      peerBytesMoved;
+
+    if (syncState) {
+      const nextOwnWatermarks: Watermarks = { ...ownWatermarks };
+      for (const hlc of ownSafeAdvance.values()) {
+        advanceWatermark(nextOwnWatermarks, hlc);
       }
+      if (!sameWatermarks(ownWatermarks, nextOwnWatermarks)) progressed = true;
+      await syncState.setWatermarks(nextOwnWatermarks);
 
-      // The peer's bytes watermark as of this response. Absent from a peer too
-      // old to track files, which keeps the previous value; `null` means no
-      // report has ever arrived, and every download is then expected to work.
-      const peerByteWatermarks = response.responderByteWatermarks ?? priorPeerByteWatermarks;
-
-      // Files after rows, downloads before uploads. Each pass spends its own
-      // byte budget, so a phone fetching stand-ins still uploads this round.
-      const download = await downloadOwedFiles(peerByteWatermarks, ownWatermarks);
-      const upload =
-        push && peerByteWatermarks !== null
-          ? await uploadOwedFiles(peerByteWatermarks)
-          : EMPTY_FILE_PASS;
-      if (response.responderByteWatermarks) {
-        await savePeerByteWatermarks(response.responderByteWatermarks);
-      } else if (push && (outboundRecords.length > 0 || outboundAppRows.length > 0)) {
-        console.warn(
-          "[sync] peer stopped reporting a bytes watermark after rows were shipped; their uploads continue from its last report",
-        );
-      }
-      elidedCount += download.elided;
-
-      for (const [nodeId, items] of inboundByNode) {
-        const stop = brokenAt.get(nodeId) ?? items.length;
-        if (brokenAt.has(nodeId)) inboundBrokeFor.add(nodeId);
-        if (stop > 0) ownSafeAdvance.set(nodeId, inboundItemHlc(items[stop - 1]!));
-      }
-
-      // ---------------------------------------------------------------------
-      // Persist updated watermarks.
-      // ---------------------------------------------------------------------
-      // Did this round change anything that survives it?
+      // Authoritative replace when the report is whole; merge upward when it
+      // is not.
       //
-      // Counting applied/shipped/elided is not enough to answer that. A repair
-      // round re-receives rows the peer already has, applies none of them —
-      // they are LWW no-ops — and still makes real progress by advancing its
-      // floor. Judging it by item counts would call it stalled and abandon the
-      // repair one roundful in. What matters is whether any persisted position
-      // moved, because if none did, the next request is byte-identical to this
-      // one and running it again cannot help.
+      // Replacing is what lets the map move *down* after peer-side loss, and
+      // that is the behaviour a re-ship depends on — it stays exactly as it
+      // was for `coverageComplete: true`, which is every ordinary round.
       //
-      // Rows the peer halted are not counted, and that is what keeps the loop
-      // from spinning. A shipment the responder discarded left our side looking
-      // busy — the rows went out, `shipped` is non-zero — while changing nothing
-      // anywhere; counting it as progress would make a peer whose apply fails
-      // persistently run every round of the budget re-sending the same row.
-      // Excluded here, the stall detector sees the round for what it is and
-      // `sync()` returns `complete: false, stalled: true`.
-      const acceptedOutbound =
-        outboundRecords.filter((r) => !haltedByPeer.has(r.updatedAt.nodeId)).length +
-        outboundLabels.filter((l) => !haltedByPeer.has(l.updatedAt.nodeId)).length +
-        outboundAppRows.filter((e) => !haltedByPeer.has(e.timestamp.nodeId)).length;
-      // File work counts when bytes moved or a bytes watermark did. A file
-      // offered again and found already there moves nothing, and counting it
-      // would keep a round loop running over files nobody can advance.
-      const peerBytesMoved =
-        response.responderByteWatermarks !== undefined &&
-        (priorPeerByteWatermarks === null ||
-          !sameWatermarks(priorPeerByteWatermarks, response.responderByteWatermarks));
-      let progressed =
-        appliedIds.length > 0 ||
-        acceptedOutbound > 0 ||
-        elidedCount > 0 ||
-        download.transferred > 0 ||
-        download.moved ||
-        upload.transferred > 0 ||
-        peerBytesMoved;
+      // `coverageComplete: false` says the responder could not read some scope
+      // of its own coverage, so the map is a lower bound rather than the
+      // truth. Replacing with a lower bound is what re-shipped the requester's
+      // whole library every tick: an omitted author became a floor of
+      // `undefined` and the next scan started from the beginning of that
+      // author's history. Taking `max(prior, reported)` instead can only fail
+      // in the harmless direction — an omitted table understates the union, it
+      // cannot invent coverage the peer does not have, and if the peer really
+      // has lost rows the *next* complete report lowers the map properly.
+      const nextPeerWatermarks =
+        response.coverageComplete === false
+          ? mergeWatermarksUpward(priorPeerWatermarks, response.responderWatermarks)
+          : response.responderWatermarks;
+      if (!sameWatermarks(priorPeerWatermarks, nextPeerWatermarks)) {
+        progressed = true;
+      }
+      await syncState.setPeerWatermarks(nextPeerWatermarks);
 
-      if (syncState) {
-        const nextOwnWatermarks: Watermarks = { ...ownWatermarks };
-        for (const hlc of ownSafeAdvance.values()) {
-          advanceWatermark(nextOwnWatermarks, hlc);
+      // Retire repair floors, per author, once a **pushing** round has
+      // drained the outbound side *and the peer kept that author's rows*.
+      //
+      // Not on the peer's coverage watermark: the floor sits *below* that
+      // watermark by construction — that is the whole point, since the hole
+      // is under it — so a watermark comparison reads as "already covered"
+      // from the very first round and retires the floor before it has
+      // re-shipped anything. Nor on a pull-only round, which ships nothing
+      // and so proves nothing. And not on an author with a file that failed
+      // to upload: rows ship ahead of their files, but a repaired range's
+      // files are offered again only while the floor lowers where the upload
+      // pass starts, so retiring early would abandon them.
+      //
+      // Nor on an author the *peer* dropped. A repair round whose rows shipped
+      // fine and were then discarded on arrival is the same event as a failed
+      // upload — the hole is still a hole — and only `haltedAuthors` says so,
+      // because every local signal reports a clean round.
+      // A floor that survives the round **advances to what this round
+      // actually shipped**, because a fixed mark cannot repair a hole bigger
+      // than one round.
+      //
+      // The floor is the bound the scan takes (`min(peerWatermarks, floor)`),
+      // so leaving it where it is makes every round select the same rows from
+      // the same starting point, cut them at the same budget, and ship the
+      // same prefix forever. `outboundHasMore` never goes false, the retirement
+      // below never fires, and the repair never gets past its first roundful —
+      // the exact failure the inbound floor's comment describes and solves by
+      // being a cursor. This is that same fix on the outbound side.
+      //
+      // `shippedHighWater` is the right mark rather than what the scan
+      // selected: it is computed from what left the building, so a shipment
+      // cut short is never credited with the part that never shipped. An
+      // author with nothing in it shipped nothing this round and its floor
+      // must not move.
+      if (push) {
+        const floors = await loadRepairFloors();
+        const next: Watermarks = {};
+        for (const [nodeId, floor] of Object.entries(floors)) {
+          // Halted: the hole may still be below what shipped. Neither
+          // advance nor retire.
+          if (haltedByPeer.has(nodeId)) {
+            next[nodeId] = floor;
+            continue;
+          }
+          // The floor also lowers where the upload pass starts, so it has to
+          // stay until the repaired range's files are accounted for too.
+          const filesDone =
+            !upload.failedAuthors?.has(nodeId) && !upload.pendingAuthors?.has(nodeId);
+          // How far each half of the repair has got. `null` means that half
+          // is done and holds the floor nowhere.
+          const shipped = shippedHighWater[nodeId];
+          const rowsTo = !outboundHasMore
+            ? null
+            : shipped !== undefined && compareHLC(shipped, floor) > 0
+              ? shipped
+              : floor;
+          const files = upload.accountedFor?.[nodeId];
+          const filesTo = filesDone
+            ? null
+            : files !== undefined && compareHLC(files, floor) > 0
+              ? files
+              : floor;
+          // Drained, and nothing was left behind: the repair is done.
+          if (rowsTo === null && filesTo === null) continue;
+          // No further than the slower half: a floor past an unsent row or an
+          // unsent file would stop the scan offering it.
+          const advanced =
+            rowsTo === null
+              ? filesTo!
+              : filesTo === null || compareHLC(rowsTo, filesTo) <= 0
+                ? rowsTo
+                : filesTo;
+          next[nodeId] = advanced;
         }
-        if (!sameWatermarks(ownWatermarks, nextOwnWatermarks)) progressed = true;
-        await syncState.setWatermarks(nextOwnWatermarks);
-
-        // Authoritative replace when the report is whole; merge upward when it
-        // is not.
-        //
-        // Replacing is what lets the map move *down* after peer-side loss, and
-        // that is the behaviour a re-ship depends on — it stays exactly as it
-        // was for `coverageComplete: true`, which is every ordinary round.
-        //
-        // `coverageComplete: false` says the responder could not read some scope
-        // of its own coverage, so the map is a lower bound rather than the
-        // truth. Replacing with a lower bound is what re-shipped the requester's
-        // whole library every tick: an omitted author became a floor of
-        // `undefined` and the next scan started from the beginning of that
-        // author's history. Taking `max(prior, reported)` instead can only fail
-        // in the harmless direction — an omitted table understates the union, it
-        // cannot invent coverage the peer does not have, and if the peer really
-        // has lost rows the *next* complete report lowers the map properly.
-        const nextPeerWatermarks =
-          response.coverageComplete === false
-            ? mergeWatermarksUpward(priorPeerWatermarks, response.responderWatermarks)
-            : response.responderWatermarks;
-        if (!sameWatermarks(priorPeerWatermarks, nextPeerWatermarks)) {
+        if (!sameWatermarks(floors, next)) {
           progressed = true;
-        }
-        await syncState.setPeerWatermarks(nextPeerWatermarks);
-
-        // Retire repair floors, per author, once a **pushing** round has
-        // drained the outbound side *and the peer kept that author's rows*.
-        //
-        // Not on the peer's coverage watermark: the floor sits *below* that
-        // watermark by construction — that is the whole point, since the hole
-        // is under it — so a watermark comparison reads as "already covered"
-        // from the very first round and retires the floor before it has
-        // re-shipped anything. Nor on a pull-only round, which ships nothing
-        // and so proves nothing. And not on an author with a file that failed
-        // to upload: rows ship ahead of their files, but a repaired range's
-        // files are offered again only while the floor lowers where the upload
-        // pass starts, so retiring early would abandon them.
-        //
-        // Nor on an author the *peer* dropped. A repair round whose rows shipped
-        // fine and were then discarded on arrival is the same event as a failed
-        // upload — the hole is still a hole — and only `haltedAuthors` says so,
-        // because every local signal reports a clean round.
-        // A floor that survives the round **advances to what this round
-        // actually shipped**, because a fixed mark cannot repair a hole bigger
-        // than one round.
-        //
-        // The floor is the bound the scan takes (`min(peerWatermarks, floor)`),
-        // so leaving it where it is makes every round select the same rows from
-        // the same starting point, cut them at the same budget, and ship the
-        // same prefix forever. `outboundHasMore` never goes false, the retirement
-        // below never fires, and the repair never gets past its first roundful —
-        // the exact failure the inbound floor's comment describes and solves by
-        // being a cursor. This is that same fix on the outbound side.
-        //
-        // `shippedHighWater` is the right mark rather than what the scan
-        // selected: it is computed from what left the building, so a shipment
-        // cut short is never credited with the part that never shipped. An
-        // author with nothing in it shipped nothing this round and its floor
-        // must not move.
-        if (push) {
-          const floors = await loadRepairFloors();
-          const next: Watermarks = {};
-          for (const [nodeId, floor] of Object.entries(floors)) {
-            // Halted: the hole may still be below what shipped. Neither
-            // advance nor retire.
-            if (haltedByPeer.has(nodeId)) {
-              next[nodeId] = floor;
-              continue;
-            }
-            // The floor also lowers where the upload pass starts, so it has to
-            // stay until the repaired range's files are accounted for too.
-            const filesDone =
-              !upload.failedAuthors?.has(nodeId) && !upload.pendingAuthors?.has(nodeId);
-            // How far each half of the repair has got. `null` means that half
-            // is done and holds the floor nowhere.
-            const shipped = shippedHighWater[nodeId];
-            const rowsTo = !outboundHasMore
-              ? null
-              : shipped !== undefined && compareHLC(shipped, floor) > 0
-                ? shipped
-                : floor;
-            const files = upload.accountedFor?.[nodeId];
-            const filesTo = filesDone
-              ? null
-              : files !== undefined && compareHLC(files, floor) > 0
-                ? files
-                : floor;
-            // Drained, and nothing was left behind: the repair is done.
-            if (rowsTo === null && filesTo === null) continue;
-            // No further than the slower half: a floor past an unsent row or an
-            // unsent file would stop the scan offering it.
-            const advanced =
-              rowsTo === null
-                ? filesTo!
-                : filesTo === null || compareHLC(rowsTo, filesTo) <= 0
-                  ? rowsTo
-                  : filesTo;
-            next[nodeId] = advanced;
-          }
-          if (!sameWatermarks(floors, next)) {
-            progressed = true;
-            await syncState.setRepairFloors(next);
-          }
-        }
-
-        // The inbound mirror, and it has to be a **cursor**, not a fixed mark.
-        //
-        // The floor is what we advertise, and what we advertise is what the
-        // responder scans above. Our own watermark cannot move it along: it is
-        // already above the hole (that is what made the hole invisible), so
-        // re-receiving rows underneath it advances nothing. Leave the floor
-        // where it is and every round asks for the same range, gets the same
-        // answer, and the repair never gets past its first roundful.
-        //
-        // So the floor climbs to wherever this round's contiguous run reached.
-        // `ownSafeAdvance` already stops at the first item that did not land,
-        // which is exactly where the next request should resume.
-        const inbound = await loadInboundFloors();
-        if (Object.keys(inbound).length > 0) {
-          const next: Watermarks = {};
-          for (const [nodeId, floor] of Object.entries(inbound)) {
-            // Retire only when the peer has nothing further and this author's
-            // run was unbroken — the one event meaning the gap is filled.
-            if (!response.hasMore && !inboundBrokeFor.has(nodeId)) continue;
-            const landed = ownSafeAdvance.get(nodeId);
-            next[nodeId] =
-              landed && compareHLC(landed, floor) > 0 ? landed : floor;
-          }
-          if (!sameWatermarks(inbound, next)) progressed = true;
-          await syncState.setInboundFloors(next);
+          await syncState.setRepairFloors(next);
         }
       }
 
-      return {
-        applied: appliedIds.length,
-        landed: download.transferred,
-        landedBytes: download.transferredBytes,
-        uploaded: upload.transferred,
-        uploadedBytes: upload.transferredBytes,
-        bytesHasMore: download.hasMore || upload.hasMore,
-        // All three streams, including labels. Counting two of the three made
-        // `shipped` unusable as a progress signal on a label-heavy round — the
-        // caller sees a frozen counter while the round is doing real work — and
-        // unusable as a stall detector, which is what `sync()` needs it for.
-        shipped:
-          outboundRecords.length + outboundLabels.length + outboundAppRows.length,
-        hasMore: response.hasMore,
-        outboundHasMore,
-        elided: elidedCount,
-        progressed,
-        // Something this round *selected* could not be moved — a row that
-        // would not apply, a file that would not transfer although the other
-        // end had it or this node held it — so work is stuck in one direction
-        // or the other. A file still on its way up from another node is not a
-        // failure and does not count.
-        //
-        // Kept separate from `outboundHasMore`, which describes only the scan
-        // and is therefore false in exactly this case: the scan fit the budget,
-        // the shipment did not survive. Without this the loop below reads a
-        // permanently failing upload as "both directions drained" and reports
-        // the sync complete with the record still not in the cloud.
-        //
-        // The third term is the peer's half of the same observation. A round
-        // whose rows the responder threw away drains both scans and fails no
-        // local transfer, so on the first two terms alone it reported a
-        // finished sync while nothing had ever landed — F2's silent success,
-        // reached from the other end of the wire.
-        //
-        // A suppressed author counts too. Nothing failed and nothing was
-        // selected-then-dropped, but rows this node holds are not reaching the
-        // peer and will not without intervention — reporting `complete: true`
-        // over that is the same silent success the other three terms exist to
-        // prevent.
-        blocked:
-          pushWithheld ||
-          download.failed ||
-          upload.failed ||
-          inboundBrokeFor.size > 0 ||
-          haltedByPeer.size > 0 ||
-          suppressedThisRound.size > 0,
-        shippedHighWater,
-        ...(suppressedThisRound.size > 0
-          ? { refusedAuthors: [...suppressedThisRound] }
-          : {}),
-        ...(response.coverageComplete === false
-          ? {
-              peerCoverageDegraded:
-                response.coverageDetail ??
-                "the peer could not report its own coverage for one or more scopes",
-            }
-          : {}),
-      };
+      // The inbound mirror, and it has to be a **cursor**, not a fixed mark.
+      //
+      // The floor is what we advertise, and what we advertise is what the
+      // responder scans above. Our own watermark cannot move it along: it is
+      // already above the hole (that is what made the hole invisible), so
+      // re-receiving rows underneath it advances nothing. Leave the floor
+      // where it is and every round asks for the same range, gets the same
+      // answer, and the repair never gets past its first roundful.
+      //
+      // So the floor climbs to wherever this round's contiguous run reached.
+      // `ownSafeAdvance` already stops at the first item that did not land,
+      // which is exactly where the next request should resume.
+      const inbound = await loadInboundFloors();
+      if (Object.keys(inbound).length > 0) {
+        const next: Watermarks = {};
+        for (const [nodeId, floor] of Object.entries(inbound)) {
+          // Retire only when the peer has nothing further and this author's
+          // run was unbroken — the one event meaning the gap is filled.
+          if (!response.hasMore && !inboundBrokeFor.has(nodeId)) continue;
+          const landed = ownSafeAdvance.get(nodeId);
+          next[nodeId] = landed && compareHLC(landed, floor) > 0 ? landed : floor;
+        }
+        if (!sameWatermarks(inbound, next)) progressed = true;
+        await syncState.setInboundFloors(next);
+      }
+    }
+
+    return {
+      applied: appliedIds.length,
+      landed: download.transferred,
+      landedBytes: download.transferredBytes,
+      uploaded: upload.transferred,
+      uploadedBytes: upload.transferredBytes,
+      bytesHasMore: download.hasMore || upload.hasMore,
+      // All three streams, including labels. Counting two of the three made
+      // `shipped` unusable as a progress signal on a label-heavy round — the
+      // caller sees a frozen counter while the round is doing real work — and
+      // unusable as a stall detector, which is what `sync()` needs it for.
+      shipped: outboundRecords.length + outboundLabels.length + outboundAppRows.length,
+      hasMore: response.hasMore,
+      outboundHasMore,
+      elided: elidedCount,
+      progressed,
+      // Something this round *selected* could not be moved — a row that
+      // would not apply, a file that would not transfer although the other
+      // end had it or this node held it — so work is stuck in one direction
+      // or the other. A file still on its way up from another node is not a
+      // failure and does not count.
+      //
+      // Kept separate from `outboundHasMore`, which describes only the scan
+      // and is therefore false in exactly this case: the scan fit the budget,
+      // the shipment did not survive. Without this the loop below reads a
+      // permanently failing upload as "both directions drained" and reports
+      // the sync complete with the record still not in the cloud.
+      //
+      // The third term is the peer's half of the same observation. A round
+      // whose rows the responder threw away drains both scans and fails no
+      // local transfer, so on the first two terms alone it reported a
+      // finished sync while nothing had ever landed — F2's silent success,
+      // reached from the other end of the wire.
+      //
+      // A suppressed author counts too. Nothing failed and nothing was
+      // selected-then-dropped, but rows this node holds are not reaching the
+      // peer and will not without intervention — reporting `complete: true`
+      // over that is the same silent success the other three terms exist to
+      // prevent.
+      blocked:
+        pushWithheld ||
+        download.failed ||
+        upload.failed ||
+        inboundBrokeFor.size > 0 ||
+        haltedByPeer.size > 0 ||
+        suppressedThisRound.size > 0,
+      shippedHighWater,
+      ...(suppressedThisRound.size > 0 ? { refusedAuthors: [...suppressedThisRound] } : {}),
+      ...(response.coverageComplete === false
+        ? {
+            peerCoverageDegraded:
+              response.coverageDetail ??
+              "the peer could not report its own coverage for one or more scopes",
+          }
+        : {}),
+    };
   }
 
   return {
@@ -1561,10 +1539,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
      *
      * The arrival is recorded exactly as a round's pull records one.
      */
-    async fetchBlob(
-      manifest: FileSyncManifest,
-      candidate?: BlobCandidate,
-    ): Promise<boolean> {
+    async fetchBlob(manifest: FileSyncManifest, candidate?: BlobCandidate): Promise<boolean> {
       // Never `decide`: this path answers a direct request and is not subject
       // to the policy.
       const forAccounting = candidate ?? candidateForManifest(manifest);
@@ -1758,12 +1733,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         // cloud and never will be. That is the value `/sync/now` hands back and
         // the one the phone's "Sync now" button reads, so it is the difference
         // between a silent success and "something could not transfer".
-        if (
-          !result.hasMore &&
-          !result.outboundHasMore &&
-          !result.bytesHasMore &&
-          !result.blocked
-        ) {
+        if (!result.hasMore && !result.outboundHasMore && !result.bytesHasMore && !result.blocked) {
           totals.complete = true;
           break;
         }
@@ -1878,10 +1848,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         // in progress, and the floor was re-armed on every press — resetting a
         // cursor that had been climbing. Two presses during a long repair meant
         // the repair never finished.
-        watermarks: applyRepairFloors(
-          await loadOwnWatermarks(),
-          await loadInboundFloors(),
-        ),
+        watermarks: applyRepairFloors(await loadOwnWatermarks(), await loadInboundFloors()),
         limit: 0,
         requestDigest: true,
         digestPrefixLength: DEFAULT_BUCKET_PREFIX_LENGTH,
@@ -1917,10 +1884,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         console.warn("[sync] local digest incomplete; skipping verification");
         return NOT_VERIFIED;
       }
-      if (
-        response.digestScopes !== undefined &&
-        !sameScopes(local.scopes, response.digestScopes)
-      ) {
+      if (response.digestScopes !== undefined && !sameScopes(local.scopes, response.digestScopes)) {
         // Same reasoning as the prefix-length check above, one level up: both
         // sides sum their *own* tables into shared buckets, so a table set that
         // differs — an app upgraded on one end, a table added — makes every

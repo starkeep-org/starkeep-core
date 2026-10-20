@@ -88,18 +88,18 @@ for what a real app's browser half looks like.
 
 ## The pieces, at a glance
 
-| Part | Required? | What it's for |
-| --- | --- | --- |
-| `starkeep.manifest.json` | **Required** | Declares identity, install targets, and the file/table access the app needs. |
-| `@starkeep/app-client` | **Required** | Request signing, the signing proxy, and the runtime-config handler. The only `@starkeep/*` package Photos needs at runtime. |
-| `@starkeep/admin-manifest` | Optional | The manifest schema + `validateManifest()` — useful in tests to catch manifest errors before install. |
-| Runtime-config route | **Required** | Tells the browser whether this build is paired with a cloud data server or the local one. |
-| Signing proxy route | **Required** | Server-side proxy that signs browser requests with the app's HMAC credential. Serves both surfaces, and carries the end-user decision (§4, §10). |
-| A data client | **Required** | The code that actually calls `/data/records`, `/files/presign`, etc. |
-| `appSpecificSyncable` tables/files | Optional | App-private rows and blobs that sync alongside shared records. |
-| `compute` handlers + `pnpm bundle` | Optional (cloud only) | Lambda handlers and the deployment-zip builder for a cloud install. |
-| Auth gate | Required in cloud | Gates the *UI* behind Cognito sign-in when talking to a remote data server. Cosmetic — enforcement is §10. |
-| Server-side end-user check | **Required in cloud** | Nothing upstream of your app checks who the end user is. See §10. |
+| Part                               | Required?             | What it's for                                                                                                                                    |
+| ---------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `starkeep.manifest.json`           | **Required**          | Declares identity, install targets, and the file/table access the app needs.                                                                     |
+| `@starkeep/app-client`             | **Required**          | Request signing, the signing proxy, and the runtime-config handler. The only `@starkeep/*` package Photos needs at runtime.                      |
+| `@starkeep/admin-manifest`         | Optional              | The manifest schema + `validateManifest()` — useful in tests to catch manifest errors before install.                                            |
+| Runtime-config route               | **Required**          | Tells the browser whether this build is paired with a cloud data server or the local one.                                                        |
+| Signing proxy route                | **Required**          | Server-side proxy that signs browser requests with the app's HMAC credential. Serves both surfaces, and carries the end-user decision (§4, §10). |
+| A data client                      | **Required**          | The code that actually calls `/data/records`, `/files/presign`, etc.                                                                             |
+| `appSpecificSyncable` tables/files | Optional              | App-private rows and blobs that sync alongside shared records.                                                                                   |
+| `compute` handlers + `pnpm bundle` | Optional (cloud only) | Lambda handlers and the deployment-zip builder for a cloud install.                                                                              |
+| Auth gate                          | Required in cloud     | Gates the _UI_ behind Cognito sign-in when talking to a remote data server. Cosmetic — enforcement is §10.                                       |
+| Server-side end-user check         | **Required in cloud** | Nothing upstream of your app checks who the end user is. See §10.                                                                                |
 
 ---
 
@@ -260,13 +260,14 @@ different granularities are in play, and it's easy to confuse them:
   those same full ids. A bare category like `"image"` is **not** a valid record
   type or grant key and won't match anything.
 - **Category-namespaced resources** — object-storage keys
-  (`shared/<category>/…`) — authorize at the *category* level. This is why
+  (`shared/<category>/…`) — authorize at the _category_ level. This is why
   `data-server-client.ts` passes the bare `"image"` as the object-key prefix
   while still creating the record with the full `image/jpeg` type. The bare
   value there is the **category**, not a record type.
 
   The category is a **ceiling**, not a gate. It says what an app could possibly
   reach; the per-type grant says what it may actually read.
+
 - **Per-category metadata now authorizes per type**, not per category.
   `GET /data/records/:id/metadata/:typeId` resolves the record and checks your
   grant against the record's own type; the `typeId` in the path decides nothing
@@ -275,13 +276,13 @@ different granularities are in play, and it's easy to confuse them:
   matters to your app, declare it.
 
 **A note on advisory labels.** If your app writes shared records that may not be
-of interest to *other* apps that read that same type, include a `label` on
+of interest to _other_ apps that read that same type, include a `label` on
 `POST /data/records` so those apps can easily filter them out. The convention is
 `<yourAppId>/<purpose>` — e.g. Photos tags each generated thumbnail
 `photos/thumbnail`, so a different image-declaring app can skip the thumbnails
 and show only the originals. Guidance:
 
-- Only label records that are genuinely lower-interest to *other* apps (derived,
+- Only label records that are genuinely lower-interest to _other_ apps (derived,
   auxiliary, machine-generated). A record the user would think of as their own
   content — an uploaded original, a user-made crop — should stay **unlabeled**
   (`null` label = general interest).
@@ -309,7 +310,7 @@ and show only the originals. Guidance:
 > the granularity note at the end of §5). The app itself calls nothing at startup
 > to grant access.
 
-**App-specific syncable data.**  Starkeep can sync app-specific data so it's available in the cloud and across devices. Declare it under `infraRequirements.appSpecificSyncable`:
+**App-specific syncable data.** Starkeep can sync app-specific data so it's available in the cloud and across devices. Declare it under `infraRequirements.appSpecificSyncable`:
 
 - `tables[]` — each becomes `<appId>_syncable_<name>` locally and syncs row-wise.
   `updated_at` / `deleted_at` are reserved by the sync runtime. Photos declares an
@@ -444,14 +445,14 @@ platform fills in (these feed `getRuntimeConfig()` from §3).
 
 **`auth: "public"` is wider than it looks, and the manifest makes you say so.**
 It removes the Cognito authorizer from the route, and a handler that owns a
-catch-all *is* the whole app — every server route your bundle mounts, including
+catch-all _is_ the whole app — every server route your bundle mounts, including
 the signing proxy from §4, becomes reachable by anyone on the internet. You
 usually still need it, because a browser navigating to a URL cannot send an
 `Authorization` header and your HTML shell has to be reachable for sign-in to
 render at all. Three things narrow it:
 
 - **`publicPaths`** — required whenever an anonymous route is a catch-all.
-  List the sub-paths the opt-out was actually *for*. The installer checks the
+  List the sub-paths the opt-out was actually _for_. The installer checks the
   list against your real route table and refuses the install if it names a path
   you do not serve, or one the gateway would route somewhere authenticated.
   The declaration does not enforce anything; it is what makes the decision
@@ -662,7 +663,7 @@ Things worth knowing before you design around them:
   different values is two rows, which is what makes `?labelValue=Alice` an
   indexed lookup instead of a substring scan over a packed `"Alice,Bob"`. The
   corollary is the one that bites: writing `face-count=4` over an existing
-  `face-count=3` leaves *both*, and the key then reads back as two answers with
+  `face-count=3` leaves _both_, and the key then reads back as two answers with
   nothing to say which is current. Use `/data/labels/values` whenever you mean
   "this is my current answer" — including for keys you think of as single-valued.
 - **Your `app_id` is never something you send.** The server takes it from your
@@ -676,16 +677,16 @@ Things worth knowing before you design around them:
   API, a count, a timestamp, a name. Never a sentence, and never a pointer into
   the shared data model. There is no null: a bare flag is the empty string, and
   the thing that carries meaning is the row existing at all.
-- **Page until `nextCursor` is null.** A short page does *not* mean the end of
+- **Page until `nextCursor` is null.** A short page does _not_ mean the end of
   the results; only a null cursor does. Stopping early silently misses matches,
   and only under load — which is worse than an obvious bug.
 - **Disagreement is fine.** `alpha/quality=high` and `gamma/quality=low` coexist
   as two rows. You decide whom to believe.
 
 > **Positive filters are unsafe by default — and that's still the right choice.**
-> Filtering *for* a label (`?label=photos/original`) only works if the labelling
-> app labels everything, and images written by a *different* app won't carry it.
-> The failure mode is silently hidden records. Filtering *against* one is safe by
+> Filtering _for_ a label (`?label=photos/original`) only works if the labelling
+> app labels everything, and images written by a _different_ app won't carry it.
+> The failure mode is silently hidden records. Filtering _against_ one is safe by
 > default (unlabelled ⇒ included) but pays a scan proportional to how much you're
 > excluding, forever. Prefer the positive filter and treat coverage as an
 > obligation on the labelling app — but know which way it fails.
@@ -738,14 +739,14 @@ Four rules govern both routes, and each of them is load-bearing:
    ordinary case rather than the exception.
 
 `GET /data/records?label=…` keeps its shape and is still the way to fetch the
-*records* a label selects. This route returns label rows, which is the
+_records_ a label selects. This route returns label rows, which is the
 different question: what values exist, how many carry each, and on which record
 ids.
 
 ### 9b. Querying records
 
 `GET /data/records` takes the same grammar, over the columns of the shared
-records table. It answers a *rendered record* rather than a row — a category, an
+records table. It answers a _rendered record_ rather than a row — a category, an
 availability, a stand-in summary, a hydrated metadata row — so `select` is
 the one parameter that does not apply to it, except as an aggregate's grouping
 list.
@@ -779,7 +780,7 @@ Five things about this route specifically:
    `nextCursor`. Hand back what you were given; its shape is the server's.
 3. **`captured_at` is an ordering key and not a column.** It lives in the
    per-category metadata table, and this route reads it through a join it builds
-   only to sort, so it can be named in `order` and nowhere else. To *filter* on
+   only to sort, so it can be named in `order` and nowhere else. To _filter_ on
    it, query `/data/metadata/image` and hydrate by id.
 4. **`created_at` and `updated_at` are serialized HLCs.** You can order by them
    and read them back; you cannot filter on them, because a sync-internal clock
@@ -856,7 +857,7 @@ app is doing the deleting, and from this feed if another app or the person did.
 an app to the cloud, and until 2026-08-23 it was written down only in a comment
 inside the installer's source.
 
-The platform authenticates *apps*, not people. Every request your server code
+The platform authenticates _apps_, not people. Every request your server code
 makes to the cloud data server carries an HMAC signature that says "this is
 Photos"; the data server checks that signature, assumes your app's role, and
 serves anything your manifest's grants allow. It does not know or ask which

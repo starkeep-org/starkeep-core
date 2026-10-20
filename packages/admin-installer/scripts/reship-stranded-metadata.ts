@@ -70,7 +70,6 @@ function loadStarkeepConfig() {
   };
 }
 
-
 async function assume(
   arn: string,
   creds: Creds,

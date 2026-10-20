@@ -11,10 +11,7 @@ import type {
   DigestBucket,
   ObjectStorageAdapter,
 } from "@starkeep/storage-adapter";
-import type {
-  BlobCandidate,
-  ResidencyVerdict,
-} from "./residency-policy.js";
+import type { BlobCandidate, ResidencyVerdict } from "./residency-policy.js";
 import type { StreamTruncation } from "./round-cut.js";
 
 /**
@@ -213,11 +210,7 @@ export interface ScanCapableApplier extends AppSyncableApplier {
    * library. Neither is fail-safe, which is why this is the one place in the
    * applier contract that is allowed to fail loudly.
    */
-  bucketDigest(
-    appId: string,
-    table: string,
-    prefixLength?: number,
-  ): Promise<DigestBucket[]>;
+  bucketDigest(appId: string, table: string, prefixLength?: number): Promise<DigestBucket[]>;
 }
 
 /**
@@ -931,10 +924,7 @@ export interface SyncEngine {
    *     next tick retries; this is the retry path a watermark that has already
    *     advanced cannot provide.
    */
-  acquireBlob(
-    manifest: FileSyncManifest,
-    candidate: BlobCandidate,
-  ): Promise<AcquireResult>;
+  acquireBlob(manifest: FileSyncManifest, candidate: BlobCandidate): Promise<AcquireResult>;
 
   readonly changeNotifier: ChangeNotifier;
 }

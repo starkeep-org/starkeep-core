@@ -33,7 +33,12 @@ describe("cross-site requests", () => {
   it("refuses a PATCH another site's page sends, and writes nothing", async () => {
     const before = existsSync(configPath) ? readFileSync(configPath, "utf-8") : null;
     const res = await PATCH(
-      jsonRequest("/api/config", { apiGatewayUrl: "https://evil.example" }, "PATCH", "https://evil.example"),
+      jsonRequest(
+        "/api/config",
+        { apiGatewayUrl: "https://evil.example" },
+        "PATCH",
+        "https://evil.example",
+      ),
     );
     expect(res.status).toBe(403);
     expect(existsSync(configPath) ? readFileSync(configPath, "utf-8") : null).toBe(before);

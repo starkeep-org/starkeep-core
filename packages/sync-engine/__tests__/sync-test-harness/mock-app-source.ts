@@ -100,10 +100,7 @@ function columnsFor(t: TableSpec): readonly AppSyncableColumnInfo[] {
  * this implementation and against the real SQLite one, so a divergence on any
  * question a caller depends on fails the build.
  */
-export function makeMockAppSource(
-  appId: string,
-  tables: readonly TableSpec[],
-): MockAppRowStore {
+export function makeMockAppSource(appId: string, tables: readonly TableSpec[]): MockAppRowStore {
   const rows = new Map<string, Record<string, unknown>>();
   const ns: AppSyncableNamespace = {
     appId,
@@ -124,11 +121,7 @@ export function makeMockAppSource(
     return tables.find((t) => t.name === table)?.pkColumns ?? [];
   }
 
-  function keyFor(
-    entryAppId: string,
-    table: string,
-    source: Record<string, unknown>,
-  ): string {
+  function keyFor(entryAppId: string, table: string, source: Record<string, unknown>): string {
     const pkColumns = pkColumnsFor(table);
     const pk =
       pkColumns.length === 0
@@ -138,10 +131,7 @@ export function makeMockAppSource(
   }
 
   /** Rows of one table, in insertion order. */
-  function tableRows(
-    scanAppId: string,
-    table: string,
-  ): Record<string, unknown>[] {
+  function tableRows(scanAppId: string, table: string): Record<string, unknown>[] {
     const prefix = `${scanAppId}::${table}::`;
     const out: Record<string, unknown>[] = [];
     for (const [key, row] of rows) {
@@ -165,9 +155,7 @@ export function makeMockAppSource(
     where: Record<string, unknown>,
   ): Record<string, unknown>[] {
     const cols = Object.keys(where);
-    return tableRows(scanAppId, table).filter((row) =>
-      cols.every((c) => row[c] === where[c]),
-    );
+    return tableRows(scanAppId, table).filter((row) => cols.every((c) => row[c] === where[c]));
   }
 
   const applier: AppSyncableApplier & ScanCapableApplier = {
@@ -217,9 +205,7 @@ export function makeMockAppSource(
 
       const pkColumns = pkColumnsFor(entry.table);
       const where = requireKeyedWhere(entry, "delete", pkColumns);
-      const ts =
-        (entry.row?.["updated_at"] as string | undefined) ??
-        serializeHLC(entry.timestamp);
+      const ts = (entry.row?.["updated_at"] as string | undefined) ?? serializeHLC(entry.timestamp);
       const found = matching(entry.appId, entry.table, where);
       if (found.length === 0 && entry.row !== undefined && pkColumns.length > 0) {
         // A tombstone for a row this store never held still has to land, or the
@@ -267,19 +253,14 @@ export function makeMockAppSource(
       // that one method and see the round react. Outside the try below for the
       // same reason they put it there — a watermark read that failed must not
       // become a scan that found nothing.
-      const scans = planNodeScans(
-        await this.getNodeWatermarks(scanAppId, table),
-        peerWatermarks,
-      );
+      const scans = planNodeScans(await this.getNodeWatermarks(scanAppId, table), peerWatermarks);
       const page = await collectSince<Record<string, unknown>>(
         scans,
         limit,
         async (scan, remaining) => {
           const bucket = byNode.get(scan.nodeId) ?? [];
           const above =
-            scan.since === null
-              ? bucket
-              : bucket.filter((r) => updatedAtOf(r) > scan.since!);
+            scan.since === null ? bucket : bucket.filter((r) => updatedAtOf(r) > scan.since!);
           // `limit + 1`, matching `buildScanSinceForNode` — the extra row is
           // how `collectSince` tells "that was everything" from "there is more".
           return above.slice(0, remaining + 1);

@@ -73,10 +73,10 @@ export async function POST(req: Request) {
   }
 
   if (!existsSync(CONFIG_PATH)) {
-    return new Response(
-      JSON.stringify({ error: `~/.starkeep/config.json not found` }),
-      { status: 400, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: `~/.starkeep/config.json not found` }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
   }
   const preConfig = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as StarkeepConfig;
 
@@ -119,7 +119,12 @@ export async function POST(req: Request) {
     key: "cloud-data-server",
     noun: "install",
     command: "pnpm",
-    args: ["--filter", "@starkeep/admin-installer", "cli:install-cloud-data-server", "--non-interactive"],
+    args: [
+      "--filter",
+      "@starkeep/admin-installer",
+      "cli:install-cloud-data-server",
+      "--non-interactive",
+    ],
     cwd: REPO_ROOT,
     env: spawnEnv,
     reattach: body.reattach === true,
@@ -152,7 +157,10 @@ export async function POST(req: Request) {
         };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        return { event: "error", data: { message: `Install completed but reading outputs failed: ${msg}` } };
+        return {
+          event: "error",
+          data: { message: `Install completed but reading outputs failed: ${msg}` },
+        };
       }
     },
   });

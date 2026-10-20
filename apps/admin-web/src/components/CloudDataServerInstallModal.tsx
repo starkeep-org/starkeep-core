@@ -1,10 +1,5 @@
 import { useEffect, useState } from "react";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { CommandOutput } from "./CommandOutput";
 import type { STSCredentials } from "../lib/cognito-auth";
@@ -55,7 +50,9 @@ export function CloudDataServerInstallModal({ opened, onClose, credentials, onSu
           try {
             const j = (await resp.json()) as { error?: string };
             if (j.error) errMsg = j.error;
-          } catch { /* not JSON */ }
+          } catch {
+            /* not JSON */
+          }
           setLines((l) => [...l, `Error: ${errMsg}`]);
           setStatus("failure");
           return;
@@ -90,12 +87,18 @@ export function CloudDataServerInstallModal({ opened, onClose, credentials, onSu
                 setStatus("failure");
               }
             } else if (eventType === "error") {
-              try { setLines((l) => [...l, `Error: ${JSON.parse(data) as string}`]); }
-              catch { setLines((l) => [...l, `Error: ${data}`]); }
+              try {
+                setLines((l) => [...l, `Error: ${JSON.parse(data) as string}`]);
+              } catch {
+                setLines((l) => [...l, `Error: ${data}`]);
+              }
               setStatus("failure");
             } else if (data) {
-              try { setLines((l) => [...l, JSON.parse(data) as string]); }
-              catch { setLines((l) => [...l, data]); }
+              try {
+                setLines((l) => [...l, JSON.parse(data) as string]);
+              } catch {
+                setLines((l) => [...l, data]);
+              }
             }
           }
         }
@@ -108,11 +111,18 @@ export function CloudDataServerInstallModal({ opened, onClose, credentials, onSu
     }
 
     run();
-    return () => { aborted = true; };
+    return () => {
+      aborted = true;
+    };
   }, [opened, credentials]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <Dialog open={opened} onOpenChange={(open) => { if (!open && status !== "running") onClose(); }}>
+    <Dialog
+      open={opened}
+      onOpenChange={(open) => {
+        if (!open && status !== "running") onClose();
+      }}
+    >
       <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>Install cloud-data-server</DialogTitle>
@@ -120,7 +130,9 @@ export function CloudDataServerInstallModal({ opened, onClose, credentials, onSu
         <CommandOutput lines={lines} status={status} />
         {status !== "running" && (
           <div className="flex justify-end">
-            <Button variant="outline" onClick={onClose}>Close</Button>
+            <Button variant="outline" onClick={onClose}>
+              Close
+            </Button>
           </div>
         )}
       </DialogContent>

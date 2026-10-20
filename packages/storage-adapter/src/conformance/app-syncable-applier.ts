@@ -55,15 +55,8 @@ export interface ConformanceApplier {
     hasMore: boolean;
     truncated: Record<string, HLCTimestamp | null>;
   }>;
-  getNodeWatermarks(
-    appId: string,
-    table: string,
-  ): Promise<Record<string, HLCTimestamp>>;
-  bucketDigest(
-    appId: string,
-    table: string,
-    prefixLength?: number,
-  ): Promise<DigestBucket[]>;
+  getNodeWatermarks(appId: string, table: string): Promise<Record<string, HLCTimestamp>>;
+  bucketDigest(appId: string, table: string, prefixLength?: number): Promise<DigestBucket[]>;
 }
 
 /**
@@ -133,10 +126,7 @@ function equalIds(actual: string[], expected: string[], what: string): void {
   if (a !== e) fail(`${what}: expected ${e}, got ${a}`);
 }
 
-async function expectRejection(
-  what: string,
-  body: () => Promise<void> | void,
-): Promise<void> {
+async function expectRejection(what: string, body: () => Promise<void> | void): Promise<void> {
   try {
     await body();
   } catch {
@@ -247,9 +237,7 @@ export const appSyncableApplierConformance: readonly ConformanceCase[] = [
         fail("scanned tombstone carries no `where` — it would match every row");
       }
       if (tombstone.where["id"] !== "r2") {
-        fail(
-          `scanned tombstone names the wrong row: ${JSON.stringify(tombstone.where)}`,
-        );
+        fail(`scanned tombstone names the wrong row: ${JSON.stringify(tombstone.where)}`);
       }
     },
   },
@@ -273,9 +261,7 @@ export const appSyncableApplierConformance: readonly ConformanceCase[] = [
       const peer = await h.peer();
       // Oldest first, the order the sync engine applies a round in.
       const ordered = [...page.rows].sort((a, b) =>
-        String(a.row?.["updated_at"] ?? "").localeCompare(
-          String(b.row?.["updated_at"] ?? ""),
-        ),
+        String(a.row?.["updated_at"] ?? "").localeCompare(String(b.row?.["updated_at"] ?? "")),
       );
       for (const entry of ordered) await peer.applier.apply(entry);
 
@@ -374,12 +360,7 @@ export const appSyncableApplierConformance: readonly ConformanceCase[] = [
     name: "skips rows the peer already reports holding",
     async run(h) {
       await seed(h, ["r1", "r2", "r3"]);
-      const page = await h.applier.scanSince(
-        h.appId,
-        h.table,
-        { [AUTHOR]: hlc(2) },
-        100,
-      );
+      const page = await h.applier.scanSince(h.appId, h.table, { [AUTHOR]: hlc(2) }, 100);
       equalIds(
         page.rows.map((e) => String(e.row?.["id"])).sort(),
         ["r3"],
@@ -638,9 +619,7 @@ export const appSyncableApplierConformance: readonly ConformanceCase[] = [
       const page = await h.applier.scanSince(h.appId, h.table, {}, 100);
       const peer = await h.peer();
       const ordered = [...page.rows].sort((a, b) =>
-        String(a.row?.["updated_at"] ?? "").localeCompare(
-          String(b.row?.["updated_at"] ?? ""),
-        ),
+        String(a.row?.["updated_at"] ?? "").localeCompare(String(b.row?.["updated_at"] ?? "")),
       );
       for (const entry of ordered) await peer.applier.apply(entry);
 

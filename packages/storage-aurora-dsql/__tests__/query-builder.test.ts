@@ -30,9 +30,7 @@ describe("buildPostgresQuery (compile-only, no database)", () => {
     // flag, because SQLite and Postgres disagree about where nulls sort, and a
     // trailing `id`, because a keyset cursor has to name exactly one row. See
     // `record-queries.ts`.
-    expect(text).toContain(
-      'order by ("updated_at" is null) asc, "updated_at" desc, "id" desc',
-    );
+    expect(text).toContain('order by ("updated_at" is null) asc, "updated_at" desc, "id" desc');
     expect(values).toEqual(["photos", 100]);
   });
 

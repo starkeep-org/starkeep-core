@@ -40,7 +40,9 @@ describe("the hash each presign declares", () => {
     const { adapter, presigns } = fakeCloud();
     const data = new TextEncoder().encode("an app's own file");
     await adapter.put("apps/notes/syncable/n1", data, { contentType: "text/plain" });
-    expect(presigns).toEqual([{ key: "apps/notes/syncable/n1", contentType: "text/plain", contentHash: hex(data) }]);
+    expect(presigns).toEqual([
+      { key: "apps/notes/syncable/n1", contentType: "text/plain", contentHash: hex(data) },
+    ]);
   });
 
   it("is the caller's, when a buffered upload names one", async () => {

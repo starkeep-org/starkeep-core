@@ -48,7 +48,9 @@ describe("contentHashFromDataRecordObjectKey", () => {
 describe("dataRecordObjectKey", () => {
   it("places data record blobs under shared/<userId>/<category>/<shard>/<hash>", () => {
     expect(dataRecordObjectKey(USER, "image/jpeg", hash)).toBe(`shared/${USER}/image/ab/${hash}`);
-    expect(dataRecordObjectKey(USER, "document/markdown", hash)).toBe(`shared/${USER}/document/ab/${hash}`);
+    expect(dataRecordObjectKey(USER, "document/markdown", hash)).toBe(
+      `shared/${USER}/document/ab/${hash}`,
+    );
   });
 
   it("buckets other-typed or malformed types under the user's other prefix", () => {
@@ -57,7 +59,9 @@ describe("dataRecordObjectKey", () => {
   });
 
   it("writes an unbound library's keys under the local segment", () => {
-    expect(dataRecordObjectKey(LOCAL_USER_SEGMENT, "image/jpeg", hash)).toBe(`shared/local/image/ab/${hash}`);
+    expect(dataRecordObjectKey(LOCAL_USER_SEGMENT, "image/jpeg", hash)).toBe(
+      `shared/local/image/ab/${hash}`,
+    );
   });
 
   it("refuses a user segment that is not one", () => {
@@ -72,7 +76,9 @@ describe("dataRecordObjectKey", () => {
 
 describe("appSyncableObjectKey", () => {
   it("prefixes a relative subKey with apps/<appId>/<userId>/syncable/", () => {
-    expect(appSyncableObjectKey("photos", USER, "style-graphic")).toBe(`apps/photos/${USER}/syncable/style-graphic`);
+    expect(appSyncableObjectKey("photos", USER, "style-graphic")).toBe(
+      `apps/photos/${USER}/syncable/style-graphic`,
+    );
     expect(appSyncableObjectPrefix("photos", USER)).toBe(`apps/photos/${USER}/syncable/`);
   });
 

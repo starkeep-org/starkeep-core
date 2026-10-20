@@ -71,7 +71,10 @@ async function growTo(client: pg.Client, from: number, target: number): Promise<
     });
     const tuples = (rows: unknown[][], width: number) =>
       rows
-        .map((_, r) => `(${Array.from({ length: width }, (_, c) => `$${r * width + c + 1}`).join(",")})`)
+        .map(
+          (_, r) =>
+            `(${Array.from({ length: width }, (_, c) => `$${r * width + c + 1}`).join(",")})`,
+        )
         .join(",");
     await client.query(
       `INSERT INTO ${SCHEMA}.labels_rows

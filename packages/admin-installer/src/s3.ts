@@ -92,11 +92,7 @@ export async function uploadAppBundle(
   );
 }
 
-async function deletePrefix(
-  s3: S3Client,
-  bucket: string,
-  prefix: string,
-): Promise<void> {
+async function deletePrefix(s3: S3Client, bucket: string, prefix: string): Promise<void> {
   let continuationToken: string | undefined;
   do {
     const list = await s3.send(

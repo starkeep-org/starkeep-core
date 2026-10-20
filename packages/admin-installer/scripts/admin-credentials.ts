@@ -37,7 +37,9 @@ export async function adminBaseCredentials(): Promise<BaseCredentials> {
     identityPoolId?: string;
   };
   if (!config.userPoolId || !config.userPoolClientId || !config.identityPoolId) {
-    throw new Error("~/.starkeep/config.json names no Cognito pool. Finish cloud setup in admin-web first.");
+    throw new Error(
+      "~/.starkeep/config.json names no Cognito pool. Finish cloud setup in admin-web first.",
+    );
   }
   const pool = {
     userPoolId: config.userPoolId,
@@ -50,7 +52,8 @@ export async function adminBaseCredentials(): Promise<BaseCredentials> {
   const idToken = await cognitoPasswordAuth(pool, email, password, async () => {
     console.log("\nThis account requires a new password (first sign-in).");
     const next = await prompt("New password: ", true);
-    if (next !== (await prompt("Confirm new password: ", true))) throw new Error("Passwords do not match.");
+    if (next !== (await prompt("Confirm new password: ", true)))
+      throw new Error("Passwords do not match.");
     return next;
   });
   return getIdentityPoolCredentials(pool, idToken);

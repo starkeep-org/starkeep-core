@@ -11,7 +11,15 @@
 
 import { QueryParseError, type QueryParams } from "./types.js";
 
-const RESERVED = ["where", "select", "aggregate", "order", "limit", "page_token", "include"] as const;
+const RESERVED = [
+  "where",
+  "select",
+  "aggregate",
+  "order",
+  "limit",
+  "page_token",
+  "include",
+] as const;
 
 /** Where a request's parameters come from, whatever transport carried them. */
 export type ParamSource = URLSearchParams | Record<string, string | undefined>;
@@ -25,9 +33,7 @@ export function entriesOf(source: ParamSource): Array<[string, string]> {
 
 /** One raw parameter, unparsed. */
 export function rawParam(source: ParamSource, name: string): string | undefined {
-  return source instanceof URLSearchParams
-    ? (source.get(name) ?? undefined)
-    : source[name];
+  return source instanceof URLSearchParams ? (source.get(name) ?? undefined) : source[name];
 }
 
 /**

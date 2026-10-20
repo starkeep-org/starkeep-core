@@ -192,24 +192,22 @@ const appComputeHandlerObjectSchema = z.object({
  * reach: `/_immutable/*` needs `/_immutable/*`, and its bare
  * probe form is what the check compares.
  */
-export const appComputeHandlerSchema = appComputeHandlerObjectSchema.superRefine(
-  (handler, ctx) => {
-    for (const entry of handler.staticAssetPaths) {
-      const probe = entry.endsWith("/*") ? `${entry.slice(0, -2)}/x` : entry;
-      if (handler.publicPaths.some((p) => publicPathCovers(p, probe))) continue;
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["staticAssetPaths"],
-        message:
-          `"${entry}" is served from disk by this handler's bundle but is not covered by ` +
-          `publicPaths. The static branch runs before the app's own gate, so this would be ` +
-          `an anonymous route the manifest never declared — and a route the gateway refuses ` +
-          `while the bundle stands ready to serve it. Declare it in publicPaths, or stop ` +
-          `serving it from disk.`,
-      });
-    }
-  },
-);
+export const appComputeHandlerSchema = appComputeHandlerObjectSchema.superRefine((handler, ctx) => {
+  for (const entry of handler.staticAssetPaths) {
+    const probe = entry.endsWith("/*") ? `${entry.slice(0, -2)}/x` : entry;
+    if (handler.publicPaths.some((p) => publicPathCovers(p, probe))) continue;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["staticAssetPaths"],
+      message:
+        `"${entry}" is served from disk by this handler's bundle but is not covered by ` +
+        `publicPaths. The static branch runs before the app's own gate, so this would be ` +
+        `an anonymous route the manifest never declared — and a route the gateway refuses ` +
+        `while the bundle stands ready to serve it. Declare it in publicPaths, or stop ` +
+        `serving it from disk.`,
+    });
+  }
+});
 
 const RESERVED_SYNC_COLUMNS = new Set(["updated_at", "deleted_at"]);
 
@@ -259,7 +257,10 @@ export const syncableTableColumnSchema = z
  * caller has asked and an expression is a third thing to validate.
  */
 export const syncableTableIndexSchema = z.object({
-  columns: z.array(z.string().regex(/^[a-z_][a-z0-9_]*$/)).min(1).max(8),
+  columns: z
+    .array(z.string().regex(/^[a-z_][a-z0-9_]*$/))
+    .min(1)
+    .max(8),
 });
 
 export const syncableTableSchema = z

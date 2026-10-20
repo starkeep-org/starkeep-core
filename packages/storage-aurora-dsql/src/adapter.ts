@@ -119,7 +119,6 @@ const LABELS: LabelDialect = {
   table: "shared.record_labels",
 };
 
-
 /**
  * One user's library in DSQL.
  *
@@ -202,11 +201,13 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
         .insertInto("shared.records")
         .values({ ...row })
         .onConflict((oc) =>
-          oc.column("id").doUpdateSet((eb) =>
-            Object.fromEntries(
-              updateColumns.map((column) => [column, eb.ref(`excluded.${column}`)]),
+          oc
+            .column("id")
+            .doUpdateSet((eb) =>
+              Object.fromEntries(
+                updateColumns.map((column) => [column, eb.ref(`excluded.${column}`)]),
+              ),
             ),
-          ),
         )
         .compile(),
     );
@@ -234,8 +235,8 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       this.qb
         .updateTable("shared.records")
         // A tombstone frees its stand-in slot, the same rule `standInSlot`
-      // applies on a full-row write.
-      .set({ deleted_at: ts, updated_at: ts, node_id: hlc.nodeId, stand_in_slot: null })
+        // applies on a full-row write.
+        .set({ deleted_at: ts, updated_at: ts, node_id: hlc.nodeId, stand_in_slot: null })
         .where("id", "=", id)
         .compile(),
     );
@@ -308,9 +309,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     });
   }
 
-  async bucketDigest(
-    prefixLength: number = DEFAULT_BUCKET_PREFIX_LENGTH,
-  ): Promise<DigestBucket[]> {
+  async bucketDigest(prefixLength: number = DEFAULT_BUCKET_PREFIX_LENGTH): Promise<DigestBucket[]> {
     return withOccRetry("bucketDigest", async () => {
       // Records and labels together: one channel, one coverage watermark, so a
       // digest over half of it would report agreement while a label was lost.
@@ -446,9 +445,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   // COMMIT of the savepoint), so it MUST be idempotent — any non-DB side effects
   // it performs will run on each attempt. Inner ops use the raw helpers so the
   // conflict is handled once, at this transaction boundary.
-  async transaction<T>(
-    callback: (transaction: Transaction) => Promise<T>,
-  ): Promise<T> {
+  async transaction<T>(callback: (transaction: Transaction) => Promise<T>): Promise<T> {
     return withOccRetry("transaction", async () => {
       await this.getClient().query("SAVEPOINT starkeep_transaction");
       try {
@@ -462,9 +459,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
         await this.getClient().query("RELEASE SAVEPOINT starkeep_transaction");
         return result;
       } catch (error) {
-        await this.getClient().query(
-          "ROLLBACK TO SAVEPOINT starkeep_transaction",
-        );
+        await this.getClient().query("ROLLBACK TO SAVEPOINT starkeep_transaction");
         await this.getClient().query("RELEASE SAVEPOINT starkeep_transaction");
         // Preserve OCC conflicts so withOccRetry can see and retry them;
         // wrap only genuine (non-retryable) failures as TransactionError.
@@ -488,11 +483,11 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
         .values(values)
         .onConflict((oc) =>
           updateColumns.length > 0
-            ? oc.column("record_id").doUpdateSet((eb) =>
-                Object.fromEntries(
-                  updateColumns.map((c) => [c, eb.ref(`excluded.${c}`)]),
-                ),
-              )
+            ? oc
+                .column("record_id")
+                .doUpdateSet((eb) =>
+                  Object.fromEntries(updateColumns.map((c) => [c, eb.ref(`excluded.${c}`)])),
+                )
             : oc.column("record_id").doNothing(),
         )
         .compile(),
@@ -533,9 +528,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   async deleteMetadata(typeId: string, recordId: StarkeepId): Promise<void> {
     await withOccRetry("deleteMetadata", async () => {
       const table = pgMetadataTableName(typeId);
-      await this.run(
-        this.qb.deleteFrom(table).where("record_id", "=", recordId).compile(),
-      );
+      await this.run(this.qb.deleteFrom(table).where("record_id", "=", recordId).compile());
     });
   }
 
@@ -632,9 +625,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     });
   }
 
-  async getLabelsByRecordIds(
-    recordIds: StarkeepId[],
-  ): Promise<Map<StarkeepId, RecordLabel[]>> {
+  async getLabelsByRecordIds(recordIds: StarkeepId[]): Promise<Map<StarkeepId, RecordLabel[]>> {
     if (recordIds.length === 0) return new Map();
     return withOccRetry("getLabelsByRecordIds", async () => {
       const result = await this.run(buildLabelsByRecordIds(this.qb, LABELS, recordIds));
@@ -680,9 +671,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     value: string,
   ): Promise<RecordLabel | null> {
     return withOccRetry("getLabel", async () => {
-      const result = await this.run(
-        buildGetLabel(this.qb, LABELS, recordId, appId, key, value),
-      );
+      const result = await this.run(buildGetLabel(this.qb, LABELS, recordId, appId, key, value));
       const row = result.rows[0] as unknown as LabelRow | undefined;
       return row ? rowToLabel(row) : null;
     });

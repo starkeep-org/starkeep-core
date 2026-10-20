@@ -13,7 +13,9 @@ import { createFileSyncEngine } from "../src/file-sync-engine.js";
 import type { FileSyncManifest } from "../src/types.js";
 
 const payload = Buffer.from("the bytes this key names");
-const hex = createHash("sha256").update(payload as unknown as Uint8Array).digest("hex");
+const hex = createHash("sha256")
+  .update(payload as unknown as Uint8Array)
+  .digest("hex");
 const key = `shared/image/${hex.slice(0, 2)}/${hex}`;
 
 const manifest: FileSyncManifest = {

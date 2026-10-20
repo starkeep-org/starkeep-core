@@ -131,21 +131,22 @@ if (config.accountId) {
 const managerRoleArn =
   config.managerRoleArn ?? `arn:aws:iam::${accountId}:role/${stackPrefix}-manager-role`;
 const permissionsBoundaryArn =
-  config.permissionsBoundaryArn
-  ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-app-permissions-boundary`;
+  config.permissionsBoundaryArn ??
+  `arn:aws:iam::${accountId}:policy/${stackPrefix}-app-permissions-boundary`;
 const foundationalPermissionsBoundaryArn =
-  config.foundationalPermissionsBoundaryArn
-  ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-foundational-permissions-boundary`;
+  config.foundationalPermissionsBoundaryArn ??
+  `arn:aws:iam::${accountId}:policy/${stackPrefix}-foundational-permissions-boundary`;
 const userDataOwnerPermissionsBoundaryArn =
-  config.userDataOwnerPermissionsBoundaryArn
-  ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-user-data-owner-permissions-boundary`;
+  config.userDataOwnerPermissionsBoundaryArn ??
+  `arn:aws:iam::${accountId}:policy/${stackPrefix}-user-data-owner-permissions-boundary`;
 const pulumiStateBucket =
   config.pulumiStateBucket ?? `${stackPrefix}-pulumi-state-${accountId}-${region}`;
 const installDdlRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-ddl-role`;
 const installInfraRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-install-infra-role`;
 const artifactsBucket = `${stackPrefix}-artifacts-${accountId}-${region}`;
 const apiGatewayExecutionArn =
-  config.apiGatewayExecutionArn ?? `arn:aws:execute-api:${region}:${accountId}:${config.apiGatewayId}`;
+  config.apiGatewayExecutionArn ??
+  `arn:aws:execute-api:${region}:${accountId}:${config.apiGatewayId}`;
 
 console.log("\nStarkeep Drive install");
 console.log(`  Region : ${region}`);

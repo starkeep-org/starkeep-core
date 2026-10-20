@@ -15,16 +15,10 @@ import type {
   SyncStateStore,
   Watermarks,
 } from "../../src/types.js";
-import {
-  buildKeyMatcher,
-  FailingObjectStorageAdapter,
-} from "./failure-injection.js";
+import { buildKeyMatcher, FailingObjectStorageAdapter } from "./failure-injection.js";
 import { FILE_RECORDS_TABLE } from "./mock-app-source.js";
 import { buildSide } from "./side.js";
-import {
-  applyWatermarkState,
-  seedInitialState,
-} from "./seeding.js";
+import { applyWatermarkState, seedInitialState } from "./seeding.js";
 import { driveOperation } from "./operations.js";
 import type {
   BlobTarget,
@@ -74,7 +68,6 @@ function resolveSpec(spec: CaseSpec): ResolvedSpec {
     nodeIds: spec.nodeIds ?? { local: "local", cloud: "cloud" },
   };
 }
-
 
 export async function setupCase(spec: CaseSpec): Promise<World> {
   const resolved = resolveSpec(spec);
@@ -132,8 +125,7 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
     const target = id ?? subjectIds[0];
     if (!target) throw new Error("[harness] no subject id available");
     const k = objectKeyById.get(target);
-    if (k === undefined)
-      throw new Error(`[harness] no object key tracked for ${target}`);
+    if (k === undefined) throw new Error(`[harness] no object key tracked for ${target}`);
     // Empty string is a valid value (AR no-blob convention).
     return k;
   }
@@ -156,18 +148,12 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
     return resolved.dt === "AR" ? FILE_RECORDS_TABLE : "test_rows";
   }
 
-  function lookupAppRow(
-    role: "local" | "cloud",
-    id: StarkeepId,
-  ): Record<string, unknown> | null {
+  function lookupAppRow(role: "local" | "cloud", id: StarkeepId): Record<string, unknown> | null {
     const key = `${resolved.appId}::${appRowTable()}::${id}`;
     return side(role).appRows.get(key) ?? null;
   }
 
-  async function recordExists(
-    role: "local" | "cloud",
-    id?: StarkeepId,
-  ): Promise<boolean> {
+  async function recordExists(role: "local" | "cloud", id?: StarkeepId): Promise<boolean> {
     const target = id ?? subjectIds[0];
     if (!target) return false;
     if (resolved.dt === "SR") {
@@ -176,10 +162,7 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
     return lookupAppRow(role, target) !== null;
   }
 
-  async function blobExists(
-    role: "local" | "cloud",
-    key?: string,
-  ): Promise<boolean> {
+  async function blobExists(role: "local" | "cloud", key?: string): Promise<boolean> {
     const resolved = key ?? objectKey();
     if (resolved === "") return false;
     return side(role).storage.has(resolved);
@@ -218,10 +201,7 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
     ) as AppSyncableRowEntry | null;
   }
 
-  async function residency(
-    role: "local" | "cloud",
-    id?: StarkeepId,
-  ): Promise<RecordResidency> {
+  async function residency(role: "local" | "cloud", id?: StarkeepId): Promise<RecordResidency> {
     const target = id ?? subjectIds[0];
     if (!target) return "absent";
 
@@ -231,21 +211,23 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
       // Reshape SR DataRecord into the FileRecordRow snake_case form
       // residencyOf expects. Only the state is of interest here — the harness
       // has no policy, so there is never a reason to report.
-      return (await residencyOf(
-        {
-          id: rec.id,
-          object_storage_key: rec.objectStorageKey,
-          content_hash: rec.contentHash,
-          mime_type: rec.mimeType ?? "application/octet-stream",
-          size_bytes: rec.sizeBytes,
-          original_filename: rec.originalFilename ?? null,
-          origin_app_id: rec.originAppId,
-          created_at: "",
-          updated_at: "",
-          deleted_at: rec.deletedAt ? "deleted" : null,
-        },
-        side(role).storage,
-      )).state;
+      return (
+        await residencyOf(
+          {
+            id: rec.id,
+            object_storage_key: rec.objectStorageKey,
+            content_hash: rec.contentHash,
+            mime_type: rec.mimeType ?? "application/octet-stream",
+            size_bytes: rec.sizeBytes,
+            original_filename: rec.originalFilename ?? null,
+            origin_app_id: rec.originAppId,
+            created_at: "",
+            updated_at: "",
+            deleted_at: rec.deletedAt ? "deleted" : null,
+          },
+          side(role).storage,
+        )
+      ).state;
     }
 
     if (resolved.dt === "AW") {
@@ -284,33 +266,25 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
       inject.kind === "fail-after-send-before-response" ||
       inject.kind === "partial-response-truncated"
     ) {
-      throw new Error(
-        `[harness] failure mode ${inject.kind} not implemented yet`,
-      );
+      throw new Error(`[harness] failure mode ${inject.kind} not implemented yet`);
     }
 
     const candidateKeys = subjectIds.map((id) => {
       const k = objectKeyById.get(id);
-      if (!k)
-        throw new Error(`[harness] no object key for subject ${id}`);
+      if (!k) throw new Error(`[harness] no object key for subject ${id}`);
       return k;
     });
 
     const target: BlobTarget = inject.target ?? "all";
-    const matcher = buildKeyMatcher(
-      target,
-      candidateKeys,
-      (id) => objectKeyById.get(id as StarkeepId),
+    const matcher = buildKeyMatcher(target, candidateKeys, (id) =>
+      objectKeyById.get(id as StarkeepId),
     );
 
     // Outbound blob upload happens against remote.storage; inbound download
     // happens against local.storage. The failing wrapper sits on `put`.
-    const storage =
-      inject.kind === "blob-upload-fails" ? cloud.storage : local.storage;
+    const storage = inject.kind === "blob-upload-fails" ? cloud.storage : local.storage;
     if (!(storage instanceof FailingObjectStorageAdapter)) {
-      throw new Error(
-        "[harness] expected FailingObjectStorageAdapter on injected side",
-      );
+      throw new Error("[harness] expected FailingObjectStorageAdapter on injected side");
     }
     storage.installRule({
       matches: matcher,
@@ -350,20 +324,13 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
         const r = await engine.exchange();
         results.push(r);
         const peerAfter = JSON.stringify(await syncState.getPeerWatermarks());
-        if (
-          !r.hasMore &&
-          r.applied === 0 &&
-          r.shipped === 0 &&
-          peerBefore === peerAfter
-        ) {
+        if (!r.hasMore && r.applied === 0 && r.shipped === 0 && peerBefore === peerAfter) {
           break;
         }
         i++;
       }
       if (i === cap) {
-        throw new Error(
-          "[harness] until-converged hit 100-round cap — likely divergence bug",
-        );
+        throw new Error("[harness] until-converged hit 100-round cap — likely divergence bug");
       }
     } else {
       for (let i = 0; i < opts.rounds; i++) {

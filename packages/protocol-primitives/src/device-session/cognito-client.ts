@@ -125,7 +125,10 @@ export function createCognitoClient(options: CognitoClientOptions): CognitoClien
       parsed = text ? (JSON.parse(text) as Record<string, unknown>) : {};
     } catch {
       // A proxy's HTML error page, say. Not Cognito's answer about anything.
-      throw new CognitoError("UnreadableResponse", `Cognito answered ${response.status} with no JSON`);
+      throw new CognitoError(
+        "UnreadableResponse",
+        `Cognito answered ${response.status} with no JSON`,
+      );
     }
 
     if (!response.ok) {

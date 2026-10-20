@@ -71,9 +71,7 @@ export function getAppSyncableNamespace(
     .select(["app_id", "tables_json", "files_enabled"])
     .where("app_id", "=", appId)
     .compile();
-  const row = db
-    .prepare(query.sql)
-    .get(...(query.parameters as string[])) as
+  const row = db.prepare(query.sql).get(...(query.parameters as string[])) as
     | { app_id: string; tables_json: string; files_enabled: number }
     | undefined;
   if (!row) return null;
@@ -85,9 +83,11 @@ export function listAppSyncableNamespaces(db: RawDatabase): AppSyncableNamespace
     .selectFrom("app_syncable_namespaces")
     .select(["app_id", "tables_json", "files_enabled"])
     .compile();
-  const rows = db
-    .prepare(query.sql)
-    .all() as Array<{ app_id: string; tables_json: string; files_enabled: number }>;
+  const rows = db.prepare(query.sql).all() as Array<{
+    app_id: string;
+    tables_json: string;
+    files_enabled: number;
+  }>;
   return rows.map(rowToNamespace);
 }
 

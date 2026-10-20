@@ -4,15 +4,10 @@
   "version": "0.1.0",
   "description": "Browse, organize, and caption your photo library.",
   "tier": "official",
-  "targets": [
-    "local",
-    "cloud"
-  ],
+  "targets": ["local", "cloud"],
   "localRun": {
     "command": "pnpm",
-    "args": [
-      "dev"
-    ],
+    "args": ["dev"],
     "portFlag": "-p"
   },
   "infraRequirements": {
@@ -116,19 +111,14 @@
           "handler": "infra/src/resize-handler.handler",
           "memoryMb": 512,
           "timeoutSeconds": 30,
-          "routes": [
-            "POST /api/resize"
-          ]
+          "routes": ["POST /api/resize"]
         },
         {
           "name": "static",
           "handler": "index.handler",
           "memoryMb": 256,
           "timeoutSeconds": 10,
-          "routes": [
-            "GET /",
-            "ANY /{proxy+}"
-          ],
+          "routes": ["GET /", "ANY /{proxy+}"],
           "auth": "session",
           "publicPaths": [
             "/",

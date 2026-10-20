@@ -23,10 +23,7 @@ import * as pulumi from "@pulumi/pulumi";
 import { foundationalPermissionsBoundaryStatements } from "@starkeep/aws-bootstrap";
 import { buildCloudDataServerProgram } from "../src/builtin-programs/cloud-data-server-program";
 import type { CloudDataServerProgramContext } from "../src/builtin-programs/cloud-data-server-program";
-import {
-  buildTempInstallCloudDataServerPolicy,
-  buildAppExecPolicy,
-} from "../src/temp-policies";
+import { buildTempInstallCloudDataServerPolicy, buildAppExecPolicy } from "../src/temp-policies";
 
 const STACK_PREFIX = "starkeep";
 const ACCOUNT_ID = "111122223333";
@@ -43,7 +40,10 @@ const created: CreatedResource[] = [];
 
 pulumi.runtime.setMocks(
   {
-    newResource(args: pulumi.runtime.MockResourceArgs): { id: string; state: Record<string, unknown> } {
+    newResource(args: pulumi.runtime.MockResourceArgs): {
+      id: string;
+      state: Record<string, unknown>;
+    } {
       created.push({ type: args.type, name: args.name, inputs: args.inputs });
       const extra: Record<string, unknown> = {};
       if (args.type.endsWith("apigatewayv2/api:Api")) {
@@ -52,7 +52,10 @@ pulumi.runtime.setMocks(
       if (args.type.endsWith("cloudfront/distribution:Distribution")) {
         extra.domainName = `${args.name}.cloudfront.net`;
       }
-      return { id: `${args.name}-id`, state: { ...args.inputs, arn: `arn:fake:${args.name}`, ...extra } };
+      return {
+        id: `${args.name}-id`,
+        state: { ...args.inputs, arn: `arn:fake:${args.name}`, ...extra },
+      };
     },
     call(args: pulumi.runtime.MockCallArgs) {
       return args.inputs;
@@ -92,7 +95,10 @@ const toArray = (x: string | string[] | undefined): string[] =>
 
 /** An IAM resource pattern (`*` is the only wildcard that matters here). */
 function matchesArn(pattern: string, arn: string): boolean {
-  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+  const escaped = pattern
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*")
+    .replace(/\?/g, ".");
   return new RegExp(`^${escaped}$`).test(arn);
 }
 
@@ -103,7 +109,8 @@ function resourcesFor(statements: Statement[], action: string): string[] {
     .flatMap((s) => toArray(s.Resource));
 }
 
-const parse = (json: string): Statement[] => (JSON.parse(json) as { Statement: Statement[] }).Statement;
+const parse = (json: string): Statement[] =>
+  (JSON.parse(json) as { Statement: Statement[] }).Statement;
 
 let lambdaNames: string[] = [];
 let logGroupNames: string[] = [];
@@ -213,7 +220,9 @@ describe("cloud-data-server resource names sit inside the policies that govern t
     const declared = new Set(created.map((r) => r.type.replace(/^aws:/, "")));
     for (const [type, verb] of Object.entries(createVerbByType)) {
       if (!declared.has(type)) continue;
-      expect(granted.has(verb), `program creates ${type} but the temp policy lacks ${verb}`).toBe(true);
+      expect(granted.has(verb), `program creates ${type} but the temp policy lacks ${verb}`).toBe(
+        true,
+      );
     }
   });
 
@@ -223,7 +232,8 @@ describe("cloud-data-server resource names sit inside the policies that govern t
     // install by name.
     const sweep = `${STACK_PREFIX}-app-${CDS_APP_ID}-`;
     for (const name of lambdaNames) expect(name.startsWith(sweep), name).toBe(true);
-    for (const name of logGroupNames) expect(name.startsWith(`/aws/lambda/${sweep}`), name).toBe(true);
+    for (const name of logGroupNames)
+      expect(name.startsWith(`/aws/lambda/${sweep}`), name).toBe(true);
   });
 
   it("tags the DSQL cluster with its stack prefix, the only thing that attributes it", () => {

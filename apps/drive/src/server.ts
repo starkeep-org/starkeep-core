@@ -26,7 +26,14 @@ import { join } from "node:path";
 import { getRequestListener } from "@hono/node-server";
 import { Hono } from "hono";
 import { api } from "./api";
-import { isFile, isServerPath, isClientRoute, resolveClientRequest, PKG_DIR, SHELL } from "./client-serving";
+import {
+  isFile,
+  isServerPath,
+  isClientRoute,
+  resolveClientRequest,
+  PKG_DIR,
+  SHELL,
+} from "./client-serving";
 
 export const DEFAULT_PORT = 9830;
 

@@ -64,7 +64,10 @@ describe("POST /data/records/file-urls", () => {
   });
 
   it("collapses duplicate ids into a single entry", async () => {
-    const { record } = await createRecordWithBytes(app, { bytes: "dup-bytes", fileName: "dup.jpg" });
+    const { record } = await createRecordWithBytes(app, {
+      bytes: "dup-bytes",
+      fileName: "dup.jpg",
+    });
     const res = await postBatch(app, { ids: [record.id, record.id, record.id] });
     expect(res.status).toBe(200);
     const body = (await res.json()) as BatchResponse;
@@ -73,7 +76,10 @@ describe("POST /data/records/file-urls", () => {
 
   it("omits records whose type the caller cannot read", async () => {
     const readOnly = await installApp(server, readOnlyAppManifest());
-    const { record } = await createRecordWithBytes(app, { bytes: "gated-bytes", fileName: "g.jpg" });
+    const { record } = await createRecordWithBytes(app, {
+      bytes: "gated-bytes",
+      fileName: "g.jpg",
+    });
 
     // readonly-app has pdf-only grants; the image record must be invisible.
     const res = await postBatch(readOnly, { ids: [record.id] });

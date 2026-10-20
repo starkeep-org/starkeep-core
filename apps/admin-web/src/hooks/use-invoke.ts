@@ -10,7 +10,8 @@ export function useInvoke<T>(fn: () => Promise<T>) {
   const refetch = useCallback(() => {
     setLoading(true);
     setError(null);
-    fnRef.current()
+    fnRef
+      .current()
       .then(setData)
       .catch((err) => setError(String(err)))
       .finally(() => setLoading(false));

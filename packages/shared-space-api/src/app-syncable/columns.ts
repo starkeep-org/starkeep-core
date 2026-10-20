@@ -33,9 +33,7 @@ export const SYSTEM_COLUMNS: readonly AppSyncableColumnInfo[] = [
 ];
 
 /** Names of {@link SYSTEM_COLUMNS}, for the parser's rules about them. */
-export const SYSTEM_COLUMN_NAMES: ReadonlySet<string> = new Set(
-  SYSTEM_COLUMNS.map((c) => c.name),
-);
+export const SYSTEM_COLUMN_NAMES: ReadonlySet<string> = new Set(SYSTEM_COLUMNS.map((c) => c.name));
 
 /**
  * The soft-delete column, which no caller may name in any clause.

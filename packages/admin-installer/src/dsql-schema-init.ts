@@ -21,7 +21,7 @@
  *      `CREATE ROLE` idempotent we do an explicit `SELECT FROM pg_roles`
  *      pre-check and conditionally issue the CREATE — see `ensureRole` below.
  *
-  *   3. FOREIGN KEY constraints (including `REFERENCES ... ON DELETE ...`)
+ *   3. FOREIGN KEY constraints (including `REFERENCES ... ON DELETE ...`)
  *      → SQLSTATE 0A000 "FOREIGN KEY constraint not supported". DSQL has no
  *      cross-row referential integrity. Cascade/SET NULL semantics that we
  *      relied on FK declarations for must be enforced in application code
@@ -73,7 +73,13 @@
 import pg from "pg";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
-import { CATEGORIES, pgMetadataDdl, metadataIndexDdls, hasMetadataTable, OWNER_COLUMN } from "@starkeep/protocol-primitives";
+import {
+  CATEGORIES,
+  pgMetadataDdl,
+  metadataIndexDdls,
+  hasMetadataTable,
+  OWNER_COLUMN,
+} from "@starkeep/protocol-primitives";
 
 export interface SchemaInitOptions {
   hostname: string;
@@ -143,10 +149,7 @@ async function ensureRole(
  * pre-check was a round trip per index and a race between the check and the
  * create; the guard is neither.
  */
-async function ensureIndex(
-  db: Kysely<Record<string, never>>,
-  createSql: string,
-): Promise<void> {
+async function ensureIndex(db: Kysely<Record<string, never>>, createSql: string): Promise<void> {
   if (!/\bIF NOT EXISTS\b/i.test(createSql)) {
     throw new Error(`ensureIndex requires an IF NOT EXISTS guard: ${createSql}`);
   }
@@ -157,9 +160,7 @@ async function ensureIndex(
  * Apply the full shared-schema DDL. Each statement runs in its own implicit
  * transaction — see the DSQL note at the top of this file.
  */
-export async function initializeSharedSchema(
-  opts: SchemaInitOptions,
-): Promise<void> {
+export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<void> {
   const installer = installerPgUser(opts.stackPrefix);
 
   const db = await makeDb(opts);
@@ -350,7 +351,10 @@ export async function initializeSharedSchema(
       .addColumn("ready_at_ms", "bigint")
       .addColumn("restored_until_ms", "bigint")
       .addColumn("observed_at_ms", "bigint", (c) => c.notNull())
-      .addPrimaryKeyConstraint("object_availability_pkey", [OWNER_COLUMN, "object_storage_key"] as never[])
+      .addPrimaryKeyConstraint("object_availability_pkey", [
+        OWNER_COLUMN,
+        "object_storage_key",
+      ] as never[])
       .execute();
 
     // Granted to PUBLIC for the same reason shared.record_labels is: every app
@@ -431,11 +435,7 @@ export async function initializeSharedSchema(
       .addColumn("status", "text", (c) => c.notNull())
       .addColumn("updated_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
       .addColumn("error", "text")
-      .addPrimaryKeyConstraint("app_install_steps_pkey", [
-        "app_id",
-        "operation",
-        "step",
-      ] as never[])
+      .addPrimaryKeyConstraint("app_install_steps_pkey", ["app_id", "operation", "step"] as never[])
       .execute();
     await sql
       .raw(`GRANT INSERT, UPDATE, DELETE, SELECT ON shared.app_install_steps TO "${installer}"`)
@@ -503,9 +503,7 @@ export async function initializeSharedSchema(
     // deleted_at)` and is dropped rather than left beside this one, because a
     // surviving copy would keep enforcing the narrower rule and reject exactly
     // the derived children this key exists to separate.
-    await sql
-      .raw(`DROP INDEX IF EXISTS shared.uq_records_filename_hash`)
-      .execute(db);
+    await sql.raw(`DROP INDEX IF EXISTS shared.uq_records_filename_hash`).execute(db);
     await ensureIndex(
       db,
       `CREATE UNIQUE INDEX ASYNC IF NOT EXISTS uq_records_parent_filename_hash
@@ -608,8 +606,7 @@ export async function initializeSharedSchema(
     //
     // Probe sys.iam_pg_role_mappings first — AWS IAM GRANT is not idempotent
     // in DSQL (re-granting an existing mapping errors).
-    const adminAppRoleArn =
-      `arn:aws:iam::${opts.accountId}:role/${opts.stackPrefix}-app-admin-role`;
+    const adminAppRoleArn = `arn:aws:iam::${opts.accountId}:role/${opts.stackPrefix}-app-admin-role`;
     const existingMapping = await sql<{ exists: boolean }>`
       SELECT EXISTS (
         SELECT 1 FROM sys.iam_pg_role_mappings
@@ -617,9 +614,7 @@ export async function initializeSharedSchema(
       ) AS exists
     `.execute(db);
     if (!existingMapping.rows[0]?.exists) {
-      await sql
-        .raw(`AWS IAM GRANT "${installer}" TO '${adminAppRoleArn}'`)
-        .execute(db);
+      await sql.raw(`AWS IAM GRANT "${installer}" TO '${adminAppRoleArn}'`).execute(db);
     }
   } finally {
     await db.destroy();

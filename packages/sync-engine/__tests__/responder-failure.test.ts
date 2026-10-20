@@ -29,18 +29,12 @@ import {
   type HLCClock,
   type HLCTimestamp,
 } from "@starkeep/protocol-primitives";
-import {
-  MockDatabaseAdapter,
-  MockObjectStorageAdapter,
-} from "@starkeep/storage-adapter";
+import { MockDatabaseAdapter, MockObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { createSyncEngine } from "../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../src/transports/in-process-transport.js";
 import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
 import { failingApplier } from "./sync-test-harness/failure-injection.js";
-import {
-  makeMockAppSource,
-  type MockAppRowStore,
-} from "./sync-test-harness/mock-app-source.js";
+import { makeMockAppSource, type MockAppRowStore } from "./sync-test-harness/mock-app-source.js";
 import type { AppSyncableRowEntry, SyncTransport } from "../src/types.js";
 
 let sharedTime = 1000;
@@ -64,7 +58,10 @@ function appSource(): MockAppRowStore {
   return makeMockAppSource("test-app", [{ name: "test_rows", pkColumns: ["id"] }]);
 }
 
-async function makeCloud(source: MockAppRowStore, failing: () => boolean | ((e: AppSyncableRowEntry) => boolean)) {
+async function makeCloud(
+  source: MockAppRowStore,
+  failing: () => boolean | ((e: AppSyncableRowEntry) => boolean),
+) {
   const db = new MockDatabaseAdapter();
   const storage = new MockObjectStorageAdapter();
   await db.init();

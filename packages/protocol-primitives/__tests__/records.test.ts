@@ -15,10 +15,7 @@ describe("createDataRecord", () => {
   };
 
   it("populates the file-backed record fields", () => {
-    const record = createDataRecord(
-      { ...baseInput, originalFilename: "sunset.jpg" },
-      clock,
-    );
+    const record = createDataRecord({ ...baseInput, originalFilename: "sunset.jpg" }, clock);
 
     expect(record.kind).toBe("data");
     expect(record.type).toBe("@test/photo");
@@ -43,15 +40,12 @@ describe("createDataRecord", () => {
     // not be: two calls describing one file are one record, which is what lets
     // two nodes produce it independently without colliding. Uniqueness is over
     // files rather than over calls. See `identifiers/content-id.ts`.
-    expect(createDataRecord(baseInput, clock).id).toBe(
+    expect(createDataRecord(baseInput, clock).id).toBe(createDataRecord(baseInput, clock).id);
+    expect(createDataRecord({ ...baseInput, originalFilename: "sunrise.jpg" }, clock).id).not.toBe(
       createDataRecord(baseInput, clock).id,
     );
-    expect(
-      createDataRecord({ ...baseInput, originalFilename: "sunrise.jpg" }, clock).id,
-    ).not.toBe(createDataRecord(baseInput, clock).id);
   });
 });
-
 
 // Note there is no successor to the old `labelHasValidPrefix` squatting test.
 // `appId` is a server-set column rather than a string prefix, so there is no

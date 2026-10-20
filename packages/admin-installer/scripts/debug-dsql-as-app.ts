@@ -51,14 +51,22 @@ function loadStarkeepConfig(): StarkeepConfig {
   return JSON.parse(readFileSync(path, "utf8")) as StarkeepConfig;
 }
 
-
-async function assume(arn: string, creds: Creds, sessionName: string, region: string): Promise<Creds> {
+async function assume(
+  arn: string,
+  creds: Creds,
+  sessionName: string,
+  region: string,
+): Promise<Creds> {
   const sts = new STSClient({ region, credentials: creds });
   const r = await sts.send(
     new AssumeRoleCommand({ RoleArn: arn, RoleSessionName: sessionName, DurationSeconds: 900 }),
   );
   const c = r.Credentials!;
-  return { accessKeyId: c.AccessKeyId!, secretAccessKey: c.SecretAccessKey!, sessionToken: c.SessionToken! };
+  return {
+    accessKeyId: c.AccessKeyId!,
+    secretAccessKey: c.SecretAccessKey!,
+    sessionToken: c.SessionToken!,
+  };
 }
 
 async function main(): Promise<void> {
@@ -114,7 +122,9 @@ async function main(): Promise<void> {
     console.error(`FAIL connecting as user=${pgUser}`);
     console.error(`  code:    ${e.code ?? "(none)"}`);
     console.error(`  message: ${e.message ?? "(none)"}`);
-    console.error(`  hint:    ${e.hint ?? "(none — typically means missing AWS IAM GRANT in DSQL)"}`);
+    console.error(
+      `  hint:    ${e.hint ?? "(none — typically means missing AWS IAM GRANT in DSQL)"}`,
+    );
     process.exit(1);
   }
 }

@@ -35,8 +35,7 @@ const sqliteCompiler = new Kysely<Record<string, Record<string, unknown>>>({
 
 const DRIVE_APP_ID = "starkeep-drive";
 const DATA_DB_PATH = dataDbPath();
-export const LDS_URL =
-  process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://127.0.0.1:9820";
+export const LDS_URL = process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://127.0.0.1:9820";
 
 /**
  * Read Drive's HMAC secret from the local-data-server's SQLite registry.
@@ -54,9 +53,9 @@ function readDriveSecret(): string | null {
       .where("app_id", "=", DRIVE_APP_ID)
       .where("status", "=", "active")
       .compile();
-    const row = db
-      .prepare(query.sql)
-      .get(...(query.parameters as string[])) as { hmac_secret: string } | undefined;
+    const row = db.prepare(query.sql).get(...(query.parameters as string[])) as
+      | { hmac_secret: string }
+      | undefined;
     return row?.hmac_secret ?? null;
   } catch {
     return null;
@@ -149,9 +148,7 @@ export async function listRecords(type?: string): Promise<DriveRecord[]> {
   // grammar answers both data planes, and a record type is an ordinary
   // equality over a column of `shared.records`.
   if (type) qs.set("where", JSON.stringify({ type }));
-  const { records } = await ldsGet<{ records: DriveRecord[] }>(
-    `/data/records?${qs.toString()}`,
-  );
+  const { records } = await ldsGet<{ records: DriveRecord[] }>(`/data/records?${qs.toString()}`);
   return records;
 }
 
@@ -187,9 +184,7 @@ export async function getTrashPolicy(): Promise<TrashPolicy> {
  */
 export async function listDeletedRecords(): Promise<DriveRecord[]> {
   const qs = new URLSearchParams({ limit: "1000", deleted: "only" });
-  const { records } = await ldsGet<{ records: DriveRecord[] }>(
-    `/data/records?${qs.toString()}`,
-  );
+  const { records } = await ldsGet<{ records: DriveRecord[] }>(`/data/records?${qs.toString()}`);
   return records;
 }
 
@@ -308,8 +303,6 @@ export async function listCloudRecords(type?: string): Promise<CloudRecord[]> {
 export type CloudTypeSummary = Pick<DriveTypeSummary, "record_type" | "count">;
 
 export async function listCloudTypes(): Promise<CloudTypeSummary[]> {
-  const { types } = await ldsGetCloud<{ types: CloudTypeSummary[] }>(
-    "/cloud/data/types",
-  );
+  const { types } = await ldsGetCloud<{ types: CloudTypeSummary[] }>("/cloud/data/types");
   return types;
 }

@@ -1,7 +1,4 @@
-import type {
-  AppSyncableNamespace,
-  AppSyncableNamespaceStore,
-} from "@starkeep/sync-engine";
+import type { AppSyncableNamespace, AppSyncableNamespaceStore } from "@starkeep/sync-engine";
 import { parseAppSyncableTables } from "@starkeep/sync-engine";
 import type { DatabaseClient } from "../types.js";
 import { compiler as qb } from "../query-builder.js";
@@ -30,9 +27,7 @@ export class DsqlAppSyncableNamespaceStore implements AppSyncableNamespaceStore 
 
   private getCache(): Map<string, AppSyncableNamespace> {
     if (!this.cache) {
-      throw new Error(
-        "DsqlAppSyncableNamespaceStore: load() must be called before get/list",
-      );
+      throw new Error("DsqlAppSyncableNamespaceStore: load() must be called before get/list");
     }
     return this.cache;
   }
@@ -45,10 +40,7 @@ export class DsqlAppSyncableNamespaceStore implements AppSyncableNamespaceStore 
     const result = await this.client.query(query.sql, [...query.parameters]);
     this.cache = new Map();
     for (const row of result.rows) {
-      const tables = parseAppSyncableTables(
-        row["app_id"] as string,
-        row["tables_json"] as string,
-      );
+      const tables = parseAppSyncableTables(row["app_id"] as string, row["tables_json"] as string);
       const ns: AppSyncableNamespace = {
         appId: row["app_id"] as string,
         tables,

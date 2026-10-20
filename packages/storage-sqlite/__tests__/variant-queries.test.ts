@@ -69,7 +69,11 @@ describe("loadVariantCandidatesForPage", () => {
   }
 
   const load = (ids: StarkeepId[]) =>
-    loadVariantCandidatesForPage(adapter, ids.map((id) => ({ id })), DERIVED);
+    loadVariantCandidatesForPage(
+      adapter,
+      ids.map((id) => ({ id })),
+      DERIVED,
+    );
   const idsOf = async (parent: StarkeepId) =>
     ((await load([parent])).get(parent) ?? []).map((c) => c.id).sort();
 
@@ -78,7 +82,12 @@ describe("loadVariantCandidatesForPage", () => {
     const child = await addVariant(parent, 1280, 720, "video-poster-720p");
     const out = await load([parent]);
     expect(out.get(parent)).toEqual([
-      expect.objectContaining({ id: child, labelValue: "video-poster-720p", width: 1280, height: 720 }),
+      expect.objectContaining({
+        id: child,
+        labelValue: "video-poster-720p",
+        width: 1280,
+        height: 720,
+      }),
     ]);
   });
 
@@ -110,7 +119,9 @@ describe("loadVariantCandidatesForPage", () => {
   it("ignores a child whose label has been retracted", async () => {
     const parent = await addRecord();
     const v = await addVariant(parent, 400, 300);
-    await adapter.retractLabels([{ recordId: v, appId: DERIVED.appId, key: DERIVED.key, hlc: clock.now() }]);
+    await adapter.retractLabels([
+      { recordId: v, appId: DERIVED.appId, key: DERIVED.key, hlc: clock.now() },
+    ]);
     expect(await idsOf(parent)).toEqual([]);
   });
 

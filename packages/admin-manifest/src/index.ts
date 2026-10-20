@@ -28,10 +28,7 @@ export {
   type PermissionEntry,
 } from "./schema.js";
 
-export {
-  validateManifest,
-  type ValidationResult,
-} from "./validate.js";
+export { validateManifest, type ValidationResult } from "./validate.js";
 
 export {
   type ResolvedRoute,

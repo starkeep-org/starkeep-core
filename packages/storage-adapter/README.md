@@ -33,47 +33,47 @@ const result = await objectStorage.get("photos/sunset.jpg");
 
 ### DatabaseAdapter Interface
 
-| Method | Description |
-|---|---|
-| `init()` | Initialize the adapter (create tables, connect) |
-| `close()` | Close connections and release resources |
-| `healthCheck()` | Returns `true` if the adapter is operational |
-| `put(record)` | Insert or upsert a record |
-| `get(identifier)` | Retrieve a record by id, or `null` |
-| `delete(identifier)` | Delete a record by id |
-| `query(query)` | Query records with filters, sorting, and pagination |
-| `batch(operations)` | Execute multiple put/delete operations atomically |
-| `transaction(callback)` | Run operations inside a transaction |
-| `runMigrations(migrations)` | Apply pending schema migrations |
+| Method                      | Description                                         |
+| --------------------------- | --------------------------------------------------- |
+| `init()`                    | Initialize the adapter (create tables, connect)     |
+| `close()`                   | Close connections and release resources             |
+| `healthCheck()`             | Returns `true` if the adapter is operational        |
+| `put(record)`               | Insert or upsert a record                           |
+| `get(identifier)`           | Retrieve a record by id, or `null`                  |
+| `delete(identifier)`        | Delete a record by id                               |
+| `query(query)`              | Query records with filters, sorting, and pagination |
+| `batch(operations)`         | Execute multiple put/delete operations atomically   |
+| `transaction(callback)`     | Run operations inside a transaction                 |
+| `runMigrations(migrations)` | Apply pending schema migrations                     |
 
 ### ObjectStorageAdapter Interface
 
-| Method | Description |
-|---|---|
-| `init()` | Initialize the adapter |
-| `close()` | Release resources |
-| `healthCheck()` | Returns `true` if the adapter is operational |
-| `put(key, data, options?)` | Store binary data with optional content type and metadata |
-| `get(key)` | Retrieve stored data, or `null` |
-| `delete(key)` | Remove an object by key |
-| `list(prefix, options?)` | List object keys matching a prefix with pagination |
-| `getSignedUrl?(key, options?)` | Generate a pre-signed URL (optional, adapter-dependent) |
+| Method                         | Description                                               |
+| ------------------------------ | --------------------------------------------------------- |
+| `init()`                       | Initialize the adapter                                    |
+| `close()`                      | Release resources                                         |
+| `healthCheck()`                | Returns `true` if the adapter is operational              |
+| `put(key, data, options?)`     | Store binary data with optional content type and metadata |
+| `get(key)`                     | Retrieve stored data, or `null`                           |
+| `delete(key)`                  | Remove an object by key                                   |
+| `list(prefix, options?)`       | List object keys matching a prefix with pagination        |
+| `getSignedUrl?(key, options?)` | Generate a pre-signed URL (optional, adapter-dependent)   |
 
 ### Mock Implementations
 
-| Export | Description |
-|---|---|
-| `MockDatabaseAdapter` | In-memory database adapter for testing |
+| Export                     | Description                                  |
+| -------------------------- | -------------------------------------------- |
+| `MockDatabaseAdapter`      | In-memory database adapter for testing       |
 | `MockObjectStorageAdapter` | In-memory object storage adapter for testing |
 
 ### Error Types
 
-| Export | Description |
-|---|---|
-| `StorageError` | General storage failure |
-| `ConnectionError` | Connection failure |
-| `TransactionError` | Transaction failure |
-| `MigrationError` | Migration failure |
+| Export                | Description                 |
+| --------------------- | --------------------------- |
+| `StorageError`        | General storage failure     |
+| `ConnectionError`     | Connection failure          |
+| `TransactionError`    | Transaction failure         |
+| `MigrationError`      | Migration failure           |
 | `ObjectNotFoundError` | Object not found in storage |
 
 ### Key Types

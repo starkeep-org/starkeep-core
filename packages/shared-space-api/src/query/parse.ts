@@ -326,10 +326,7 @@ function parseSelect(schema: QueryTableSchema, raw: string | undefined): string[
  * engine because the two engines derive it differently, and stated on every
  * term in the parsed value so nothing downstream has to remember the rule.
  */
-function parseOrder(
-  raw: string | undefined,
-  resolve: (column: string) => void,
-): OrderTerm[] {
+function parseOrder(raw: string | undefined, resolve: (column: string) => void): OrderTerm[] {
   if (raw === undefined || raw.trim() === "") return [];
   return splitList(raw).map((term) => {
     const parts = term.split(".");
@@ -425,9 +422,7 @@ function parseAggregate(schema: QueryTableSchema, raw: string): AggregateTerm[] 
     const column = aggregateColumn(schema, name, col);
     if (fn === "sum" || fn === "avg") {
       if (!isNumericColumn(column)) {
-        throw new QueryParseError(
-          `${fn} needs a numeric column; "${col}" is ${column.type}`,
-        );
+        throw new QueryParseError(`${fn} needs a numeric column; "${col}" is ${column.type}`);
       }
     } else if (!isOrderableColumn(column)) {
       throw new QueryParseError(`${fn} needs an orderable column; "${col}" is ${column.type}`);

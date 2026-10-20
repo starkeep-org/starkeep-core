@@ -4,10 +4,7 @@ export type { InstallerConfig, InstallInput, UninstallInput, InstallResult } fro
 export { runAppInstallDdl, runAppUninstallDdl } from "./dsql-ddl";
 export type { DsqlDdlOptions } from "./dsql-ddl";
 
-export {
-  initializeSharedSchema,
-  installerPgUser,
-} from "./dsql-schema-init";
+export { initializeSharedSchema, installerPgUser } from "./dsql-schema-init";
 export type { SchemaInitOptions } from "./dsql-schema-init";
 
 export {

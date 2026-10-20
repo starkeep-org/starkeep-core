@@ -14,7 +14,12 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
-import { installApp, testAppManifest, createRecordWithBytes, type InstalledApp } from "./helpers.js";
+import {
+  installApp,
+  testAppManifest,
+  createRecordWithBytes,
+  type InstalledApp,
+} from "./helpers.js";
 
 let server: LocalDataServer;
 let app: InstalledApp;

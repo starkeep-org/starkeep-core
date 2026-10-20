@@ -72,7 +72,10 @@ function uncoveredActions(policyJson: string, boundary: IamStatement[]): string[
 describe("temp/runtime policies are subsumed by their boundaries", () => {
   it("temp-install-ddl ⊆ install-ddl boundary", () => {
     expect(
-      uncoveredActions(buildTempInstallDdlPolicy(STACK_PREFIX), installDdlBoundaryStatements(STACK_PREFIX)),
+      uncoveredActions(
+        buildTempInstallDdlPolicy(STACK_PREFIX),
+        installDdlBoundaryStatements(STACK_PREFIX),
+      ),
     ).toEqual([]);
   });
 

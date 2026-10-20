@@ -185,7 +185,9 @@ export async function putAppFile(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      contentHash: createHash("sha256").update(body as unknown as Uint8Array).digest("hex"),
+      contentHash: createHash("sha256")
+        .update(body as unknown as Uint8Array)
+        .digest("hex"),
       mimeType,
       sizeBytes: body.length,
     }),
@@ -280,7 +282,15 @@ export function standInAppManifest(over: Record<string, unknown> = {}): Record<s
     infraRequirements: {
       fileAccess: [
         {
-          types: ["image/jpeg", "image/png", "image/avif", "video/mp4", "video/webm", "audio/flac", "audio/opus"],
+          types: [
+            "image/jpeg",
+            "image/png",
+            "image/avif",
+            "video/mp4",
+            "video/webm",
+            "audio/flac",
+            "audio/opus",
+          ],
           access: "readwrite",
           metadataWrite: true,
           rationale: "test",
@@ -304,7 +314,10 @@ export async function registerWithBytes(
     /** Pad the upload to this many bytes, for size-floor cases. */
     sizeBytes?: number;
   } & Record<string, unknown>,
-): Promise<{ status: number; body: Record<string, unknown> & { record?: { id: string; [k: string]: unknown } } }> {
+): Promise<{
+  status: number;
+  body: Record<string, unknown> & { record?: { id: string; [k: string]: unknown } };
+}> {
   const { type, bytes, contentType, sizeBytes: padTo, ...rest } = options;
   let payload = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes ?? `bytes-${Math.random()}`);
   if (padTo !== undefined && payload.length < padTo) {
@@ -317,7 +330,10 @@ export async function registerWithBytes(
     body: payload,
   });
   if (!upload.ok) throw new Error(`upload failed: ${upload.status} ${await upload.text()}`);
-  const { contentHash, sizeBytes } = (await upload.json()) as { contentHash: string; sizeBytes: number };
+  const { contentHash, sizeBytes } = (await upload.json()) as {
+    contentHash: string;
+    sizeBytes: number;
+  };
   const res = await app.fetch("/data/records", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

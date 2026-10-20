@@ -6,13 +6,13 @@ Scope: the `@starkeep/sync-engine` package (`packages/sync-engine`). This is the
 
 ## Overview
 
-The data-sync package is a single-purpose library that performs one **version-vector exchange round** between a local Starkeep node and a peer (the cloud data server in production; another in-process node in tests). Each round is symmetric in shape but asymmetric in role: the calling side is the *requester*; the peer is the *responder*. The requester ships data items the peer hasn't seen, receives data items it hasn't seen, transfers any associated blobs alongside the metadata, and persists two updated watermark vectors.
+The data-sync package is a single-purpose library that performs one **version-vector exchange round** between a local Starkeep node and a peer (the cloud data server in production; another in-process node in tests). Each round is symmetric in shape but asymmetric in role: the calling side is the _requester_; the peer is the _responder_. The requester ships data items the peer hasn't seen, receives data items it hasn't seen, transfers any associated blobs alongside the metadata, and persists two updated watermark vectors.
 
 Three things are fundamental to understanding everything else:
 
 1. **What kinds of data are synced** — shared data (always file-backed, no owning app) and app-specific data (owned by exactly one app, optionally file-backed). The two kinds are first-class citizens of the protocol, not implementation variants. See "Kinds of data" immediately below.
 2. **How "what to ship" is decided.** Each side stores a per-`nodeId` HLC vector — the watermark. Outbound: scan local rows whose `updated_at.nodeId`'s HLC exceeds the peer's last-known watermark for that node. Inbound: apply received rows whose HLC exceeds the local watermark. Conflict resolution is pure HLC last-write-wins; no rejection list, no OCC.
-3. **How partial failures don't corrupt the state.** A blob transfer can fail without invalidating the metadata that announced it. The engine separates "metadata applied" from "watermark advanced" and uses a *contiguous-prefix per nodeId* rule so a single blob failure halts watermark advance on that nodeId for the round, leaving the failed item to be retried next round — but doesn't block other nodeIds.
+3. **How partial failures don't corrupt the state.** A blob transfer can fail without invalidating the metadata that announced it. The engine separates "metadata applied" from "watermark advanced" and uses a _contiguous-prefix per nodeId_ rule so a single blob failure halts watermark advance on that nodeId for the round, leaving the failed item to be retried next round — but doesn't block other nodeIds.
 
 The package exposes one factory (`createSyncEngine`) producing a `SyncEngine` whose surface is essentially `exchange(): Promise<ExchangeResult>` plus a `changeNotifier` pub/sub. Two transports are provided (`in-process` and `http`); a matching HTTP server handler is provided for the responder side. A SQLite-backed `SyncStateStore` persists watermarks and HLC clock state.
 
@@ -26,7 +26,7 @@ Starkeep distinguishes two kinds of data, and the sync engine treats them as two
 
 Shared data is the Starkeep platform's content layer — records that any installed app can read or contribute to subject to permissions, with bytes (the "file") attached to every record. In this package, shared data appears as `AnyRecord` values flowing into and out of `localDatabaseAdapter.put/get/query`. Every shared record carries an `objectStorageKey` (and `contentHash`, `sizeBytes`, `mimeType`); the engine derives a blob manifest from those fields unconditionally for non-tombstoned shared records (`manifestForRecord`, `sync-engine.ts:469`). There is no "metadata-only" shared record at the protocol level.
 
-In the package code, in tests, and in the existing architecture-intent doc you'll see this stream called **SR** (for *shared record*). That's the shorthand; the concept is "shared, always-file-backed data."
+In the package code, in tests, and in the existing architecture-intent doc you'll see this stream called **SR** (for _shared record_). That's the shorthand; the concept is "shared, always-file-backed data."
 
 ### App-specific data
 
@@ -36,8 +36,8 @@ Each cloud-installed app declares its own tables (PK columns and table name) thr
 
 Whether an app's row carries a blob is a per-table property:
 
-- **File-backed app tables.** Each app may have rows in a reserved table named `_starkeep_sync_records` whose row shape includes `object_storage_key`, `content_hash`, `size_bytes`, `mime_type`, etc. (`FileRecordRow`, `types.ts:95`). For these rows, the engine derives a manifest from the row's columns (`manifestForAppRow`, `sync-engine.ts:485`) and transfers the blob alongside the metadata, the same way it does for shared data. Tombstones (`op === "delete"`) produce no manifest — blob retention on delete is a GC concern, not a sync concern. In code and tests this stream is called **AR** (for *app record with file*).
-- **Metadata-only app tables.** Any other table in the app's namespace is plain row data with no blob. `manifestForAppRow` returns `null` (`sync-engine.ts:486`) and the engine ships only the row. In code and tests this stream is called **AW** (for *app row, no file*).
+- **File-backed app tables.** Each app may have rows in a reserved table named `_starkeep_sync_records` whose row shape includes `object_storage_key`, `content_hash`, `size_bytes`, `mime_type`, etc. (`FileRecordRow`, `types.ts:95`). For these rows, the engine derives a manifest from the row's columns (`manifestForAppRow`, `sync-engine.ts:485`) and transfers the blob alongside the metadata, the same way it does for shared data. Tombstones (`op === "delete"`) produce no manifest — blob retention on delete is a GC concern, not a sync concern. In code and tests this stream is called **AR** (for _app record with file_).
+- **Metadata-only app tables.** Any other table in the app's namespace is plain row data with no blob. `manifestForAppRow` returns `null` (`sync-engine.ts:486`) and the engine ships only the row. In code and tests this stream is called **AW** (for _app row, no file_).
 
 The choice between the two is not the engine's call: an app decides which of its tables, if any, store files by using the reserved `_starkeep_sync_records` table for them. The engine recognizes the reserved name (it must — only that name triggers the blob-manifest path) but otherwise treats AR and AW identically on the wire.
 
@@ -45,7 +45,7 @@ The choice between the two is not the engine's call: an app decides which of its
 
 These two kinds of data drive almost every design choice in the package:
 
-- **Channel assignment.** Shared data and app-specific data ride on *separate* channels in the production deployment (see "Channel split" below). The engine doesn't multiplex them in a single channel; instead, the configuration option `syncSharedRecords` selects which one a given engine instance handles.
+- **Channel assignment.** Shared data and app-specific data ride on _separate_ channels in the production deployment (see "Channel split" below). The engine doesn't multiplex them in a single channel; instead, the configuration option `syncSharedRecords` selects which one a given engine instance handles.
 - **Wire types.** The exchange protocol carries two arrays, never one: `records?: AnyRecord[]` for shared data and `appSyncableRows?: AppSyncableRowEntry[]` for app-specific data (`types.ts:116`). They flow side-by-side in every request and every response.
 - **Source of truth on the local side.** Shared records are read via `DatabaseAdapter.query/get/put` against a single global table. App-specific rows are read and written via the caller-provided `AppSyncableApplier` + `AppSyncableNamespaceStore` pair, which knows about per-app schemas. The engine never assumes app-specific tables exist in the same DB as shared records — that wiring is the caller's choice.
 - **Blob carrying.** Shared data always implies blob handling. App-specific data implies blob handling only on the `_starkeep_sync_records` table. The contiguous-prefix rule and Staged-residency behavior apply uniformly to both whenever a blob is involved.
@@ -54,13 +54,13 @@ These two kinds of data drive almost every design choice in the package:
 
 The unit of work is `SyncEngine.exchange()`. One round walks four phases in order (`sync-engine.ts:74`):
 
-1. **Load state.** Read own watermarks (highest HLC the requester has *applied* per nodeId) and peer watermarks (highest HLC the requester has *successfully shipped* to the peer per nodeId) from `SyncStateStore`. With no store configured, both default to `{}`.
+1. **Load state.** Read own watermarks (highest HLC the requester has _applied_ per nodeId) and peer watermarks (highest HLC the requester has _successfully shipped_ to the peer per nodeId) from `SyncStateStore`. With no store configured, both default to `{}`.
 2. **Gather outbound candidates.** Cursor-scan two sources:
-   - *Shared data*: the local DB via `DatabaseAdapter.query`, filtering to records whose `updatedAt.nodeId` HLC is greater than `peerWatermarks[nodeId]`.
-   - *App-specific data*: each app namespace's tables via `ScanCapableApplier.scanSince`, with the same per-nodeId watermark filter applied inline.
-   Scans are cursor-paginated so rows past any single page remain reachable on later rounds.
-3. **Cap and ship.** The combined outbound set (shared + app-specific) is capped at `pageLimit` (default 1000) by globally-earliest-HLC. Items are then grouped per `nodeId` in HLC order. For each item: if it carries a blob (all shared-data items; app-specific items only from the file-backed reserved table), push the blob to remote storage *before* shipping the metadata; if the blob push fails, stop shipping for that nodeId for the rest of this round (the contiguous-prefix rule). Successfully-shipped items become the request payload to `transport.exchange(...)`.
-4. **Receive, apply, advance.** The response carries shared records and app-specific rows the peer believes the requester hasn't seen. Group these per `nodeId`, walk in HLC order, and for each item: apply the metadata (skipping if a local copy at-or-ahead already exists), pull the blob if any, and — only if the *whole* item landed — advance own watermark for that nodeId. Peer watermarks advance past every item received, since the peer demonstrably has each one it sent. Watermarks are persisted at the end of the round, and a `local-data-synced` change event is emitted naming the applied record IDs.
+   - _Shared data_: the local DB via `DatabaseAdapter.query`, filtering to records whose `updatedAt.nodeId` HLC is greater than `peerWatermarks[nodeId]`.
+   - _App-specific data_: each app namespace's tables via `ScanCapableApplier.scanSince`, with the same per-nodeId watermark filter applied inline.
+     Scans are cursor-paginated so rows past any single page remain reachable on later rounds.
+3. **Cap and ship.** The combined outbound set (shared + app-specific) is capped at `pageLimit` (default 1000) by globally-earliest-HLC. Items are then grouped per `nodeId` in HLC order. For each item: if it carries a blob (all shared-data items; app-specific items only from the file-backed reserved table), push the blob to remote storage _before_ shipping the metadata; if the blob push fails, stop shipping for that nodeId for the rest of this round (the contiguous-prefix rule). Successfully-shipped items become the request payload to `transport.exchange(...)`.
+4. **Receive, apply, advance.** The response carries shared records and app-specific rows the peer believes the requester hasn't seen. Group these per `nodeId`, walk in HLC order, and for each item: apply the metadata (skipping if a local copy at-or-ahead already exists), pull the blob if any, and — only if the _whole_ item landed — advance own watermark for that nodeId. Peer watermarks advance past every item received, since the peer demonstrably has each one it sent. Watermarks are persisted at the end of the round, and a `local-data-synced` change event is emitted naming the applied record IDs.
 
 `ExchangeResult` summarizes the round: `{ applied, shipped, hasMore }`. `hasMore` is honest about there being more to drain — callers (typically a supervisor) use it to schedule another round immediately rather than waiting on the next poll.
 
@@ -68,10 +68,10 @@ The unit of work is `SyncEngine.exchange()`. One round walks four phases in orde
 
 The watermark vector is the heart of the protocol. Two distinct vectors are kept:
 
-- **Own watermarks** — per `nodeId`, the highest HLC the requester has *durably accepted* from that node. Advanced only when both metadata and blob successfully land locally. Determines which inbound items the requester wants to receive on the next round (anything strictly greater).
-- **Peer watermarks** — per `nodeId`, the highest HLC the requester believes the *peer* has accepted from that node. Advanced past every item the requester ships *and* every item the peer ships (the peer cannot ship what it doesn't have). Determines which outbound items the requester needs to send on the next round.
+- **Own watermarks** — per `nodeId`, the highest HLC the requester has _durably accepted_ from that node. Advanced only when both metadata and blob successfully land locally. Determines which inbound items the requester wants to receive on the next round (anything strictly greater).
+- **Peer watermarks** — per `nodeId`, the highest HLC the requester believes the _peer_ has accepted from that node. Advanced past every item the requester ships _and_ every item the peer ships (the peer cannot ship what it doesn't have). Determines which outbound items the requester needs to send on the next round.
 
-One pair of vectors covers *both* kinds of data on a given channel — there is no separate "shared-data watermark" and "app-data watermark." HLC `nodeId` is the only axis. This is what makes the contiguous-prefix rule (below) able to halt a single nodeId across a mixed shared + app-specific payload uniformly.
+One pair of vectors covers _both_ kinds of data on a given channel — there is no separate "shared-data watermark" and "app-data watermark." HLC `nodeId` is the only axis. This is what makes the contiguous-prefix rule (below) able to halt a single nodeId across a mixed shared + app-specific payload uniformly.
 
 The helper module `watermarks.ts` provides the manipulators (`advanceWatermark`, `mergeWatermarks`, `selectUnseen`). The advance rule is "take the max per nodeId"; merging is the same operation.
 
@@ -85,7 +85,7 @@ Two properties fall out of this design:
 Each file-backed record — whether shared or app-specific — has one of four states on each side, derived from facts already on disk. There is no persisted `sync_status` column (`residency.ts`):
 
 - **Absent** — no row for this id.
-- **Staged** — row present, blob required by the row, blob not yet local. Watermark *deliberately behind* this record.
+- **Staged** — row present, blob required by the row, blob not yet local. Watermark _deliberately behind_ this record.
 - **Resident** — row present and blob present.
 - **Tombstoned** — `deleted_at` is set. Propagates like Resident; blob garbage collection is a separate concern (not handled here).
 
@@ -102,6 +102,7 @@ Each file-backed record — whether shared or app-specific — has one of four s
 `getFilesToPush` / `getFilesToPull` are higher-level "diff and list" helpers — present in the surface but not used by the main `exchange()` path, which derives manifests directly from the carrier (shared record or file-backed app row) being shipped (`manifestForRecord`, `manifestForAppRow`).
 
 A blob manifest is produced only when the carrier actually carries bytes:
+
 - **Shared records**: `objectStorageKey` set and `deletedAt` null — i.e. every live shared record.
 - **App-specific rows**: table is exactly `_starkeep_sync_records`, op is `insert`/`update`, and the row has a non-empty `object_storage_key`. Plain (AW) app rows never produce a manifest. Tombstones never produce a manifest.
 
@@ -109,8 +110,8 @@ A blob manifest is produced only when the carrier actually carries bytes:
 
 The `syncSharedRecords` option (`SyncEngineOptions.syncSharedRecords`, default `true`) is the switch that assigns this engine instance to one of the two data kinds. The intended deployment is:
 
-- **One always-on "Drive" channel** carries the *shared-data* stream. Configured with `syncSharedRecords: true` and *no* `appSyncableSource`. It is the only channel that syncs shared records — independent of which apps are cloud-installed. This is what makes shared-data sync behavior identical regardless of installed-app set.
-- **One channel per cloud-installed app** carries that app's *app-specific data* stream (both AR and AW for that one app). Configured with `syncSharedRecords: false` and an `appSyncableSource` bound to the app's namespace. It never carries shared data and never carries other apps' data.
+- **One always-on "Drive" channel** carries the _shared-data_ stream. Configured with `syncSharedRecords: true` and _no_ `appSyncableSource`. It is the only channel that syncs shared records — independent of which apps are cloud-installed. This is what makes shared-data sync behavior identical regardless of installed-app set.
+- **One channel per cloud-installed app** carries that app's _app-specific data_ stream (both AR and AW for that one app). Configured with `syncSharedRecords: false` and an `appSyncableSource` bound to the app's namespace. It never carries shared data and never carries other apps' data.
 
 The split is enforced on both sides. On the requester, `syncSharedRecords: false` zeroes out the shared-record outbound scan and guards inbound shared records (`sync-engine.ts:263`) so a misbehaving peer can't smuggle them in. On the responder (`in-process-transport.ts:68`), `syncSharedRecords: false` skips both apply and scan of shared records.
 
@@ -156,7 +157,7 @@ The exchange wire shape is intentionally small: `watermarks`, `records?` (shared
 `ChangeNotifier` (`change-notifier.ts`) is a synchronous in-memory pub/sub over `ChangeEvent`s. Three event types are declared (`types.ts`):
 
 - `remote-update-available` — emitted by callers (not by the engine itself in this package) when an out-of-band signal says new data is at the peer.
-- `local-data-synced` — emitted *by the engine* at the end of an `exchange()` round, naming the record IDs whose metadata was newly applied this round. Blob-retries on already-applied metadata are excluded (those aren't a user-visible data change).
+- `local-data-synced` — emitted _by the engine_ at the end of an `exchange()` round, naming the record IDs whose metadata was newly applied this round. Blob-retries on already-applied metadata are excluded (those aren't a user-visible data change).
 - `local-change-recorded` — emitted by callers when an app or shared-record write happens locally. The optional `originAppId` lets a sync supervisor nudge only the affected per-app channel; for shared-data writes, `originAppId` is left unset because shared data isn't owned by any app.
 
 The engine's responsibility ends at emitting `local-data-synced`. Subscribing, fan-out to UI, and supervisor scheduling all live in the calling environment.
@@ -165,7 +166,7 @@ The engine's responsibility ends at emitting `local-data-synced`. Subscribing, f
 
 `createSqliteSyncStateStore` is the only built-in `SyncStateStore`. It uses node's built-in `node:sqlite` via a passed-in `DatabaseSync`, stores three JSON blobs in a single `sync_state` table — `watermarks`, `peer_watermarks`, `hlc_clock` — and is created lazily (the table is `CREATE TABLE IF NOT EXISTS`). Callers wanting durability use it; callers happy with in-memory ephemeral state (tests) omit `syncState` and the engine treats both vectors as `{}`.
 
-The HLC clock state is *stored* but not *consumed* by the engine itself — the engine receives an already-constructed `HLCClock` and the persistence is the caller's bookkeeping for clock continuity across restarts.
+The HLC clock state is _stored_ but not _consumed_ by the engine itself — the engine receives an already-constructed `HLCClock` and the persistence is the caller's bookkeeping for clock continuity across restarts.
 
 ## Test harness
 
@@ -204,13 +205,13 @@ _(no remaining items)_
 
 - **No supervisor / scheduler in-package.** This is intentional given the topic's scope (the calling environment owns scheduling), but worth naming explicitly: callers must drive `exchange()` themselves on every channel (the Drive channel for shared data and one per cloud-installed app for app-specific data). There is no built-in "loop until `!hasMore`" helper, no exponential backoff on transient failure, no jittered poll. If two adjacent topics each grow their own ad-hoc supervisor, a tiny shared helper in this package (or a sibling) would prevent drift.
 
-- **No durable record-of-attempt for failed blobs.** The contiguous-prefix rule guarantees retry on the *next* round because the watermark stays behind the failed item — but nothing surfaces "this blob has failed N times" to ops. A persistently-failing blob (shared or app-specific) will be retried forever, silently logging `[sync] blob ... failed for ...` to console. There's no metric, no escalation, no quarantine. For a long-running production engine this is a real observability gap; whether to fill it here or upstream (supervisor) is a design call.
+- **No durable record-of-attempt for failed blobs.** The contiguous-prefix rule guarantees retry on the _next_ round because the watermark stays behind the failed item — but nothing surfaces "this blob has failed N times" to ops. A persistently-failing blob (shared or app-specific) will be retried forever, silently logging `[sync] blob ... failed for ...` to console. There's no metric, no escalation, no quarantine. For a long-running production engine this is a real observability gap; whether to fill it here or upstream (supervisor) is a design call.
 
 - **No back-pressure on the change notifier.** `emit` synchronously calls each listener. A slow listener (e.g. one that does an `await` inside the callback) silently blocks the end of `exchange()`. The type signature `ChangeListener = (event: ChangeEvent) => void` doesn't admit a Promise return, so the contract is "listeners must be cheap and synchronous" — but nothing enforces it. A misbehaving listener can delay watermark persistence (since the emit happens before return).
 
 ## Behavioral bugs
 
-- **`scanSince` is called with `zeroStr` instead of the peer's watermark.** Both `sync-engine.ts:143` (outbound) and `in-process-transport.ts:151` (responder) pass `serializeHLC(ZERO_HLC)` as the `sinceHlcStr` argument when scanning app-specific tables. The peer-watermark filter is then applied client-side inside the page loop. This makes the contract of `ScanCapableApplier.scanSince` — *"scan rows with `updated_at > sinceHlcStr` in HLC order"* — effectively unused as a push-down: the engine always asks for "everything from zero" and discards rows below the watermark in memory. The known-performance comment immediately above (`sync-engine.ts:91`) names exactly this issue, but the engine itself reinforces it by never threading a non-zero `sinceHlcStr`. The peer-watermark vector is per-nodeId (not a single floor), so it doesn't fit `sinceHlcStr` cleanly — but the current code makes the parameter dead. Either the parameter should be deleted from the contract (and the comment updated), or the engine should compute a usable floor (e.g. `min(peerWatermark)` across known nodeIds) and pass it.
+- **`scanSince` is called with `zeroStr` instead of the peer's watermark.** Both `sync-engine.ts:143` (outbound) and `in-process-transport.ts:151` (responder) pass `serializeHLC(ZERO_HLC)` as the `sinceHlcStr` argument when scanning app-specific tables. The peer-watermark filter is then applied client-side inside the page loop. This makes the contract of `ScanCapableApplier.scanSince` — _"scan rows with `updated_at > sinceHlcStr` in HLC order"_ — effectively unused as a push-down: the engine always asks for "everything from zero" and discards rows below the watermark in memory. The known-performance comment immediately above (`sync-engine.ts:91`) names exactly this issue, but the engine itself reinforces it by never threading a non-zero `sinceHlcStr`. The peer-watermark vector is per-nodeId (not a single floor), so it doesn't fit `sinceHlcStr` cleanly — but the current code makes the parameter dead. Either the parameter should be deleted from the contract (and the comment updated), or the engine should compute a usable floor (e.g. `min(peerWatermark)` across known nodeIds) and pass it.
 
 - **`hasMore` on the responder uses a slightly fuzzy approximation.** `in-process-transport.ts:182` derives `hasMore` from `overflowed || records.length + appSyncableRows.length >= limit`. The shared-data side is precise (`overflowed` is set when the shared scan tripped the limit), but the app-specific side's contribution to `hasMore` is "we hit the cap while collecting" — not "there are still rows past the cursor." If the app-row scan exactly hits the limit but happens to have no rows past the cursor, `hasMore` is `true` and the caller schedules an extra useless round. The cost is one wasted exchange; not a correctness bug, just inefficient under specific boundary conditions.
 

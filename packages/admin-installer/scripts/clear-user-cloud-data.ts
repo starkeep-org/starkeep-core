@@ -50,7 +50,10 @@ if (!args.includes("--user") || !userId || !/^[0-9a-f-]{36}$/.test(userId)) {
 }
 
 const config = JSON.parse(
-  readFileSync(join(process.env.STARKEEP_DIR ?? join(homedir(), ".starkeep"), "config.json"), "utf8"),
+  readFileSync(
+    join(process.env.STARKEEP_DIR ?? join(homedir(), ".starkeep"), "config.json"),
+    "utf8",
+  ),
 ) as { auroraEndpoint: string; s3Bucket: string; userPoolId: string; region?: string };
 const region = config.region ?? "us-east-2";
 
@@ -62,7 +65,11 @@ async function s3Keys(s3: S3Client, prefix: string): Promise<string[]> {
   let token: string | undefined;
   do {
     const page = await s3.send(
-      new ListObjectsV2Command({ Bucket: config.s3Bucket, Prefix: prefix, ContinuationToken: token }),
+      new ListObjectsV2Command({
+        Bucket: config.s3Bucket,
+        Prefix: prefix,
+        ContinuationToken: token,
+      }),
     );
     for (const o of page.Contents ?? []) if (o.Key) keys.push(o.Key);
     token = page.NextContinuationToken;
@@ -120,7 +127,10 @@ async function main(): Promise<void> {
 
   const tables: { table: string; rows: number }[] = [];
   if (!appsOnly) {
-    const password = await new DsqlSigner({ hostname: config.auroraEndpoint, region }).getDbConnectAdminAuthToken();
+    const password = await new DsqlSigner({
+      hostname: config.auroraEndpoint,
+      region,
+    }).getDbConnectAdminAuthToken();
     const client = new pg.Client({
       host: config.auroraEndpoint,
       port: 5432,
@@ -139,13 +149,18 @@ async function main(): Promise<void> {
         )
       ).rows.map((r) => r.t as string);
       for (const table of owned) {
-        const n = await client.query(`SELECT count(*)::int AS n FROM ${table} WHERE user_id = $1`, [userId]);
+        const n = await client.query(`SELECT count(*)::int AS n FROM ${table} WHERE user_id = $1`, [
+          userId,
+        ]);
         const rows = n.rows[0]?.n as number;
         if (rows > 0) tables.push({ table, rows });
       }
       for (const { table, rows } of tables) console.log(`DSQL ${table}: ${rows} rows`);
       const tooBig = tables.find((t) => t.rows > DSQL_ROW_LIMIT);
-      if (tooBig) throw new Error(`${tooBig.table} holds ${tooBig.rows} rows, above DSQL's ${DSQL_ROW_LIMIT} per transaction`);
+      if (tooBig)
+        throw new Error(
+          `${tooBig.table} holds ${tooBig.rows} rows, above DSQL's ${DSQL_ROW_LIMIT} per transaction`,
+        );
 
       if (!APPLY) {
         console.log("\nDry run. Pass --yes to delete.");
@@ -168,11 +183,15 @@ async function main(): Promise<void> {
 
   if (shared.length > 0) {
     const refused = await deleteKeys(s3, shared);
-    console.log(`deleted ${shared.length - refused} of ${shared.length} objects under shared/${userId}/`);
+    console.log(
+      `deleted ${shared.length - refused} of ${shared.length} objects under shared/${userId}/`,
+    );
   }
   for (const [app, keys] of apps) {
     const refused = await deleteKeys(s3, keys);
-    console.log(`deleted ${keys.length - refused} of ${keys.length} objects under apps/${app}/${userId}/`);
+    console.log(
+      `deleted ${keys.length - refused} of ${keys.length} objects under apps/${app}/${userId}/`,
+    );
     if (refused > 0) {
       console.log(`  Rerun with --apps-only ${app} as a principal tagged starkeep:appId=${app}.`);
     }

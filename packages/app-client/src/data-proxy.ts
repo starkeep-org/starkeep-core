@@ -13,7 +13,9 @@ export interface MinimalRequest {
   arrayBuffer(): Promise<ArrayBuffer>;
 }
 
-export interface DataProxyParams { path?: string[] }
+export interface DataProxyParams {
+  path?: string[];
+}
 
 /**
  * Whether a valid end user must be present before this proxy will sign
@@ -165,10 +167,7 @@ export function createDataProxyHandler(opts: DataProxyOptions) {
     const path = `/${segments.join("/")}${url.search}`;
 
     const method = req.method.toUpperCase();
-    const body =
-      method === "GET" || method === "HEAD"
-        ? undefined
-        : await readBody(req);
+    const body = method === "GET" || method === "HEAD" ? undefined : await readBody(req);
 
     const headersRecord: Record<string, string> = {};
     const ct = req.headers.get("content-type");

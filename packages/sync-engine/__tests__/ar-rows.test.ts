@@ -65,9 +65,7 @@ describe("AR — app-record rows", () => {
     await w.exchange({ rounds: 1 });
     const cloudRow = await w.getAppRow("cloud");
     expect(cloudRow?.timestamp).toEqual(localRow!.timestamp);
-    expect(cloudRow?.row?.["content_hash"]).toBe(
-      localRow!.row?.["content_hash"],
-    );
+    expect(cloudRow?.row?.["content_hash"]).toBe(localRow!.row?.["content_hash"]);
   });
 
   it("S1-019: AR C-update on both-diverged — LWW: cloud's later update wins", async () => {
@@ -81,9 +79,7 @@ describe("AR — app-record rows", () => {
     await w.exchange({ rounds: 1 });
     const localRow = await w.getAppRow("local");
     expect(localRow?.timestamp).toEqual(cloudRow!.timestamp);
-    expect(localRow?.row?.["content_hash"]).toBe(
-      cloudRow!.row?.["content_hash"],
-    );
+    expect(localRow?.row?.["content_hash"]).toBe(cloudRow!.row?.["content_hash"]);
   });
 
   it("S1-020: AR L-soft-delete on both-same — cloud receives tombstone (app namespace)", async () => {

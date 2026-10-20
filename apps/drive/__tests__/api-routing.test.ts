@@ -76,8 +76,8 @@ describe("every declared route reaches its handler", () => {
       .filter((r) => r.path !== "/api/*")
       .map((r) => `${r.method} ${r.path}`)
       .sort();
-    const declared = ROUTES.map(([method, path]) =>
-      `${method} ${path.replace("/rec-1/", "/:id/")}`,
+    const declared = ROUTES.map(
+      ([method, path]) => `${method} ${path.replace("/rec-1/", "/:id/")}`,
     ).sort();
     expect(mounted).toEqual(declared);
   });

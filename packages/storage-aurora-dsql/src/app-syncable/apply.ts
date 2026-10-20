@@ -41,9 +41,7 @@ import { fromPgRows, pgConvertersFor, withAggregateOutputs } from "../pg-timesta
  * Deletes are soft: `deleted_at` and `updated_at` are set rather than removing
  * the row so that tombstones propagate to other clients via pull.
  */
-export class DsqlAppSyncableApplier
-  implements AppSyncableApplier, ScanCapableApplier
-{
+export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableApplier {
   private readonly qb: PostgresCompiler;
 
   constructor(
@@ -177,7 +175,7 @@ export class DsqlAppSyncableApplier
   ): Promise<void> {
     const where = requireKeyedWhere(entry, "delete", pkColumns);
     const whereCols = Object.keys(where);
-    const ts = entry.row?.["updated_at"] as string ?? serializeHLC(entry.timestamp);
+    const ts = (entry.row?.["updated_at"] as string) ?? serializeHLC(entry.timestamp);
 
     // A tombstone that arrived over sync carries the whole row, and it has to
     // land even on a node that never held the row it retracts. As an UPDATE
@@ -219,9 +217,7 @@ export class DsqlAppSyncableApplier
       query = query.where(c, "=", where[c]);
     }
     // LWW guard: tombstone only rows the incoming timestamp supersedes.
-    query = query.where((eb) =>
-      eb.or([eb("updated_at", "is", null), eb("updated_at", "<", ts)]),
-    );
+    query = query.where((eb) => eb.or([eb("updated_at", "is", null), eb("updated_at", "<", ts)]));
     await this.run(query.compile());
   }
 
@@ -321,10 +317,7 @@ export class DsqlAppSyncableApplier
    * every author complete" — the exact silent-loss shape `scanSince`'s own catch
    * was written to prevent, reached one frame earlier.
    */
-  async getNodeWatermarks(
-    appId: string,
-    table: string,
-  ): Promise<Record<string, HLCTimestamp>> {
+  async getNodeWatermarks(appId: string, table: string): Promise<Record<string, HLCTimestamp>> {
     const schemaTable = `app_${appId.replace(/-/g, "_")}.${table}`;
     let result: { rows: Record<string, unknown>[] };
     try {

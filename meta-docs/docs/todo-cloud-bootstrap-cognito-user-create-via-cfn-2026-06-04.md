@@ -6,7 +6,7 @@ Today the bootstrap wizard splits user creation across three manual steps:
 
 - **Step 1** collects `region` + `stackPrefix`, generates a CloudFormation template, and links to the CFN console.
 - **Step 2** asks the user to copy the stack outputs (UserPoolId / UserPoolClientId / IdentityPoolId).
-- **Step 3** sends the user *back* to the AWS console — the Cognito Users page — to click "Create user" and type their email so Cognito will email them a temporary password.
+- **Step 3** sends the user _back_ to the AWS console — the Cognito Users page — to click "Create user" and type their email so Cognito will email them a temporary password.
 - **Step 4** signs in with that email + temp password and runs the `NEW_PASSWORD_REQUIRED` challenge.
 
 Step 3 is the only step that exists purely because the bootstrap template doesn't create the admin's Cognito user itself. CloudFormation can do this in the same stack via `AWS::Cognito::UserPoolUser`, which (when `DesiredDeliveryMediums: [EMAIL]` is set and no password is supplied) drives Cognito's existing admin-invite flow — the same flow Step 3 triggers manually today. The `InviteMessageTemplate` already configured on `UserPool` (`bootstrap-template.ts:85-89`) is what mails the temp password; that piece doesn't change.
@@ -37,7 +37,7 @@ Terminology note: the user described Step 3 as "creating their iam user". There 
         - Name: email
           Value: !Ref AdminEmail
         - Name: email_verified
-          Value: 'true'
+          Value: "true"
   ```
   No `MessageAction` is set — the default behavior on create is to send the invitation email using the `InviteMessageTemplate` already declared on `UserPool` (`{####}` = temp password, `{username}` = email). No `TemporaryPassword` is set, so Cognito generates one. This matches exactly what the manual Step-3 path does today, just driven by the stack.
 - Add `AdminEmail` to `Outputs` (purely so Step 4 can pre-fill the sign-in form if the user navigates fresh; nice-to-have, not load-bearing).
@@ -51,7 +51,7 @@ Terminology note: the user described Step 3 as "creating their iam user". There 
   - Add an `email` state and a third input above the existing Region / Stack-prefix inputs. Validate with a basic email regex; `canContinue` requires all three.
   - Add `validateEmail(v)` next to the existing `validateUserPoolId` / `validateUserPoolClientId` validators (lines 83-93).
   - Pass `adminEmail` into `generateBootstrapTemplate({ stackPrefix, adminEmail })` (line 168) so the downloaded YAML's parameter default is correct.
-  - Pass `{ stackName: \`\${stackPrefix}-bootstrap\`, params: { StackPrefix: stackPrefix, AdminEmail: email } }` to `getCloudFormationCreateStackUrl` (line 245).
+  - Pass `{ stackName: \`\${stackPrefix}-bootstrap\`, params: { StackPrefix: stackPrefix, AdminEmail: email } }`to`getCloudFormationCreateStackUrl` (line 245).
   - Lift the captured email into the wizard's state so Step 4 can pre-fill it. The wizard already lifts `stackPrefix` via `onContinue`; extend that callback signature to `(stackPrefix, adminEmail) => void` and persist `adminEmail` to cloud-config alongside `stackPrefix` via the existing `patchCloudConfig` plumbing.
 - Top-level `STEPS` array (lines 67-73): remove the `{ id: 3, label: "Create user" }` entry. Renumber the remaining steps (4 → 3, 5 → 4). Update the `StepId` union (line 65) and any `currentStep`/`completedSteps` usages.
 - `Step3CreateUser` (lines 382-428): delete the component and its wiring in the wizard's step switch.

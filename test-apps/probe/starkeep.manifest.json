@@ -4,24 +4,16 @@
   "version": "0.1.0",
   "description": "Platform test fixture: the smallest app that exercises every surface the platform offers an app.",
   "tier": "official",
-  "targets": [
-    "local",
-    "cloud"
-  ],
+  "targets": ["local", "cloud"],
   "localRun": {
     "command": "node",
-    "args": [
-      "run-local.mjs"
-    ],
+    "args": ["run-local.mjs"],
     "portFlag": "--port"
   },
   "infraRequirements": {
     "fileAccess": [
       {
-        "types": [
-          "image/png",
-          "image/jpeg"
-        ],
+        "types": ["image/png", "image/jpeg"],
         "access": "readwrite",
         "metadataWrite": true,
         "rationale": "The fixture creates, reads and derives raster images so the platform's shared-record, blob and metadata paths all have a caller. PNG and JPEG only: the fixture asserts platform behavior, and a wider grant would test the grant list rather than the platform."
@@ -70,29 +62,17 @@
           "handler": "api-handler.handler",
           "memoryMb": 256,
           "timeoutSeconds": 30,
-          "routes": [
-            "POST /api/echo"
-          ]
+          "routes": ["POST /api/echo"]
         },
         {
           "name": "static",
           "handler": "static-handler.handler",
           "memoryMb": 256,
           "timeoutSeconds": 10,
-          "routes": [
-            "GET /",
-            "ANY /{proxy+}"
-          ],
+          "routes": ["GET /", "ANY /{proxy+}"],
           "auth": "session",
-          "publicPaths": [
-            "/",
-            "/_immutable/*",
-            "/sign-in",
-            "/api/session/*"
-          ],
-          "staticAssetPaths": [
-            "/_immutable/*"
-          ],
+          "publicPaths": ["/", "/_immutable/*", "/sign-in", "/api/session/*"],
+          "staticAssetPaths": ["/_immutable/*"],
           "env": {
             "STARKEEP_API_GATEWAY_URL": "",
             "STARKEEP_USER_POOL_ID": "",

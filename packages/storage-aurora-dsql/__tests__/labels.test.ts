@@ -86,7 +86,8 @@ const LABELS_UPDATE = /update "shared"\."record_labels"/;
  * The reverse query, which is a parsed query over the labels schema now — so it
  * carries the ordering-key aliases the grammar's compiler selects.
  */
-const LABELS_SELECT = /select \*, "value" as "__ok0", "record_id" as "__ok1" from "shared"\."record_labels"/;
+const LABELS_SELECT =
+  /select \*, "value" as "__ok0", "record_id" as "__ok1" from "shared"\."record_labels"/;
 /** The sync-facing selects — `getLabel` and `queryLabels` — which project the
  *  bare row and so no longer share a shape with the reverse query. */
 const LABELS_ROW_SELECT = /select \* from "shared"\."record_labels"/;
@@ -255,10 +256,7 @@ describe("the sync-facing surface", () => {
   it("queryLabels pages by primary key and hands back a scan cursor", async () => {
     client.responses.push({
       match: LABELS_ROW_SELECT,
-      rows: [
-        labelRow({ record_id: "rec1" }),
-        labelRow({ record_id: "rec2" }),
-      ],
+      rows: [labelRow({ record_id: "rec1" }), labelRow({ record_id: "rec2" })],
     });
     const page = await adapter.queryLabels({ limit: 1 });
     expect(page.labels.map((l) => l.recordId)).toEqual(["rec1"]);

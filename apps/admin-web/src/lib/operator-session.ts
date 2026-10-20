@@ -34,7 +34,12 @@ export async function operatorSession(): Promise<OperatorSession> {
   await writeCloudCredentials(credentials);
   await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
 
-  return { credentials, stackPrefix: cfg.stackPrefix, region: cfg.region, userSub: subOf(tokens.idToken) };
+  return {
+    credentials,
+    stackPrefix: cfg.stackPrefix,
+    region: cfg.region,
+    userSub: subOf(tokens.idToken),
+  };
 }
 
 /**

@@ -12,12 +12,7 @@
  */
 
 import { runSimulation, type RunSimulationResults } from "@cloud-copilot/iam-simulate";
-import {
-  buildContext,
-  expectedCallsFor,
-  type ContextInput,
-  type ExpectedCall,
-} from "./contexts";
+import { buildContext, expectedCallsFor, type ContextInput, type ExpectedCall } from "./contexts";
 import type { CapturedCall } from "./parse-tf-trace";
 
 export type Verdict = "Allowed" | "ExplicitlyDenied" | "ImplicitlyDenied" | "Error";
@@ -120,10 +115,7 @@ export async function simulateExpectedCalls(
  * True iff `principalArn` (an assumed-role session ARN like
  * `arn:aws:sts::123:assumed-role/Foo/sess`) names role `roleName`.
  */
-export function principalMatchesRole(
-  principalArn: string | undefined,
-  roleName: string,
-): boolean {
+export function principalMatchesRole(principalArn: string | undefined, roleName: string): boolean {
   if (!principalArn) return false;
   const m = /:assumed-role\/([^/]+)\//.exec(principalArn);
   return m?.[1] === roleName;

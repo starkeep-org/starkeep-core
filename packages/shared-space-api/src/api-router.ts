@@ -1,12 +1,7 @@
 import type { ApiRouter, ApiEndpointDefinition } from "./types.js";
 import { ApiError } from "./errors.js";
 
-function buildRouteKey(
-  namespace: string,
-  version: string,
-  path: string,
-  method: string,
-): string {
+function buildRouteKey(namespace: string, version: string, path: string, method: string): string {
   return `${method.toUpperCase()}:${namespace}:${version}/${path}`;
 }
 

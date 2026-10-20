@@ -106,11 +106,7 @@ export interface HttpObjectStorageAdapterOptions {
    * HMAC-signs the request for the cloud verifier; mirrors the shape
    * `@starkeep/app-client/sign.ts` emits (method/path/ts bound).
    */
-  readonly signRequest?: (
-    method: string,
-    path: string,
-    body: string,
-  ) => Record<string, string>;
+  readonly signRequest?: (method: string, path: string, body: string) => Record<string, string>;
   /**
    * Send a file's bytes to a URL without reading them into JS.
    *
@@ -214,10 +210,9 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
 
   async healthCheck(): Promise<boolean> {
     try {
-      const response = await this.fetchImpl(
-        `${this.apiBase()}/health`,
-        { headers: this.headers("GET", "/health", "") },
-      );
+      const response = await this.fetchImpl(`${this.apiBase()}/health`, {
+        headers: this.headers("GET", "/health", ""),
+      });
       return response.ok;
     } catch {
       return false;
@@ -238,7 +233,11 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     // own hash and the server derives it; an app-syncable key does not, and
     // the server pins what the uploader declares, so every object S3 stores
     // carries a whole-object SHA-256.
-    const presignBody = JSON.stringify({ key, contentType, ...(contentHash ? { contentHash } : {}) });
+    const presignBody = JSON.stringify({
+      key,
+      contentType,
+      ...(contentHash ? { contentHash } : {}),
+    });
     const presignRes = await this.fetchImpl(`${this.apiBase()}/files/presign`, {
       method: "POST",
       headers: this.headers("POST", "/files/presign", presignBody, {
@@ -249,7 +248,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     if (!presignRes.ok) {
       throw new Error(`presign PUT ${key} failed: ${presignRes.status} ${presignRes.statusText}`);
     }
-    return await presignRes.json() as PresignResponse;
+    return (await presignRes.json()) as PresignResponse;
   }
 
   /**
@@ -298,7 +297,6 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
         `S3 PUT ${key} from ${fileUri} failed: ${result.status}${detail ? ` — ${detail}` : ""}`,
       );
     }
-
   }
 
   async put(key: string, data: Uint8Array, options?: PutOptions): Promise<void> {
@@ -329,9 +327,10 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
       body: data as BodyInit,
     });
     if (!s3Res.ok) {
-      throw new Error(`S3 PUT ${key} failed: ${s3Res.status} ${s3Res.statusText}${await s3ErrorDetail(s3Res)}`);
+      throw new Error(
+        `S3 PUT ${key} failed: ${s3Res.status} ${s3Res.statusText}${await s3ErrorDetail(s3Res)}`,
+      );
     }
-
   }
 
   // There is no confirm step, and the absence is deliberate.
@@ -364,7 +363,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     if (!presignRes.ok) {
       throw new Error(`presign GET ${key} failed: ${presignRes.status} ${presignRes.statusText}`);
     }
-    const { url } = await presignRes.json() as { url: string };
+    const { url } = (await presignRes.json()) as { url: string };
 
     // Download directly from S3.
     const s3Res = await this.fetchImpl(url);
@@ -392,7 +391,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     if (!presignRes.ok) {
       throw new Error(`presign GET ${key} failed: ${presignRes.status} ${presignRes.statusText}`);
     }
-    const { url } = await presignRes.json() as { url: string };
+    const { url } = (await presignRes.json()) as { url: string };
 
     // The Range rides on the fetch, not the presign: the signature covers the
     // URL, and a presigned URL is deliberately reusable across ranges.
@@ -466,9 +465,10 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     }
     if (!s3Res.ok) {
       await verified.cancel().catch(() => {});
-      throw new Error(`S3 PUT ${key} failed: ${s3Res.status} ${s3Res.statusText}${await s3ErrorDetail(s3Res)}`);
+      throw new Error(
+        `S3 PUT ${key} failed: ${s3Res.status} ${s3Res.statusText}${await s3ErrorDetail(s3Res)}`,
+      );
     }
-
   }
 
   /**
@@ -509,7 +509,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     if (!response.ok) {
       throw new Error(`stat ${key} failed: ${response.status} ${response.statusText}`);
     }
-    const facts = await response.json() as {
+    const facts = (await response.json()) as {
       sizeBytes: number;
       checksumSha256: string | null;
       storageClass: string | null;
@@ -570,8 +570,6 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     // missing feature: a caller reconciling against storage would conclude
     // every object under it had been lost. Nothing in the sync path lists
     // today; whatever does first should fail here loudly and get a route.
-    throw new Error(
-      "HttpObjectStorageAdapter cannot list: no listing route exists behind /files",
-    );
+    throw new Error("HttpObjectStorageAdapter cannot list: no listing route exists behind /files");
   }
 }

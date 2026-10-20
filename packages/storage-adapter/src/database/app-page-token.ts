@@ -11,7 +11,12 @@
  * parsed one would be depending on a decision this file is free to change.
  */
 
-import { QueryParseError, type OrderTerm, type PageToken, type QueryValue } from "./app-query-types.js";
+import {
+  QueryParseError,
+  type OrderTerm,
+  type PageToken,
+  type QueryValue,
+} from "./app-query-types.js";
 
 /**
  * A stable name for one ordering.

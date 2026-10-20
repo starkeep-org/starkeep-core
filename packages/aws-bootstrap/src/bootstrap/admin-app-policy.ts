@@ -86,9 +86,7 @@ export function adminAppPolicyStatements(stackPrefix: string): IamStatement[] {
       Sid: "AdminAppLogWrites",
       Effect: "Allow",
       Action: ["logs:CreateLogStream", "logs:PutLogEvents"],
-      Resource: SUB(
-        `arn:aws:logs:*:*:log-group:/aws/lambda/${stackPrefix}-app-admin-*`,
-      ),
+      Resource: SUB(`arn:aws:logs:*:*:log-group:/aws/lambda/${stackPrefix}-app-admin-*`),
     },
     // The admin-installer creates /pulumi/passphrase as a SecureString on
     // first cloud-data-server install (CloudFormation can't create
@@ -99,9 +97,7 @@ export function adminAppPolicyStatements(stackPrefix: string): IamStatement[] {
       Sid: "AdminAppEnsurePulumiPassphrase",
       Effect: "Allow",
       Action: ["ssm:GetParameter", "ssm:PutParameter", "ssm:AddTagsToResource"],
-      Resource: SUB(
-        `arn:aws:ssm:*:*:parameter/${stackPrefix}/pulumi/passphrase`,
-      ),
+      Resource: SUB(`arn:aws:ssm:*:*:parameter/${stackPrefix}/pulumi/passphrase`),
     },
     {
       Sid: "AdminAppPulumiPassphraseKms",

@@ -41,9 +41,9 @@ This is the most important thing the manifest gets right or wrong, because it dr
 
 Practical consequences worth being explicit about, because they're easy to get backwards:
 
-- File bytes exist on both planes, but they are not the same thing. Shared-data files are always present (every shared record has bytes); the `appSpecificSyncable.files` flag is about *app-specific* file blobs only, and is a meaningful opt-in — an app that only needs row state can leave it off.
-- Derived bytes an app produces from shared data (thumbnails, transcodes) are *shared* records authored by the app, not app-specific data. They go into `shared_records` with a parent linkage, not into the app's private namespace.
-- A category-scoped `fileAccess` grant only confers rights on the *shared* plane. The app does not need any grant to read or write its own app-specific tables and files — those are unconditionally available to the app that declared them.
+- File bytes exist on both planes, but they are not the same thing. Shared-data files are always present (every shared record has bytes); the `appSpecificSyncable.files` flag is about _app-specific_ file blobs only, and is a meaningful opt-in — an app that only needs row state can leave it off.
+- Derived bytes an app produces from shared data (thumbnails, transcodes) are _shared_ records authored by the app, not app-specific data. They go into `shared_records` with a parent linkage, not into the app's private namespace.
+- A category-scoped `fileAccess` grant only confers rights on the _shared_ plane. The app does not need any grant to read or write its own app-specific tables and files — those are unconditionally available to the app that declared them.
 
 The shared-data and app-specific-data topics each have their own functional doc that goes into the storage, indexing, and sync details; this section only documents what the local-app manifest commits to about each.
 
@@ -85,7 +85,7 @@ If `appRegistryRow` already shows `status='active'`, `installLocal` returns the 
 
 ### Built-in apps
 
-Two apps are installed by the local-data-server at startup, by the same `installLocal` primitive: the **local watcher** (the FS-scanning ingester) and **Starkeep Drive** (the user-data-owner identity). These have synthesized manifests written inline in `apps/local-data-server/server.ts` rather than loaded from disk. From the registry/grants/sync perspective they are indistinguishable from third-party installs; they simply skip the admin-web approval flow because the operator's installing the data-server *is* the consent. Drive is the only app permitted to set `fileAccessAll: true`.
+Two apps are installed by the local-data-server at startup, by the same `installLocal` primitive: the **local watcher** (the FS-scanning ingester) and **Starkeep Drive** (the user-data-owner identity). These have synthesized manifests written inline in `apps/local-data-server/server.ts` rather than loaded from disk. From the registry/grants/sync perspective they are indistinguishable from third-party installs; they simply skip the admin-web approval flow because the operator's installing the data-server _is_ the consent. Drive is the only app permitted to set `fileAccessAll: true`.
 
 ## Process lifecycle (start / stop)
 
@@ -111,7 +111,7 @@ Workspace daemons follow the same pattern but with a fixed port (when known) and
 
 ### Status
 
-`GET /api/exec/daemon/status?id=<id>` reads the PID file and, when a port is recorded in the meta file, prefers a **TCP probe** of `127.0.0.1:<port>` (with an IPv6 fallback) over `process.kill(pid, 0)`. This matters because pnpm dev acts as a launcher whose process may exit once the real server takes over; the launcher's PID can be dead while the app is happily serving on the port. The route only deletes the PID and meta files when both the port probe failed *and* the recorded PID is dead — preventing a transient startup window from prematurely garbage-collecting the bookkeeping.
+`GET /api/exec/daemon/status?id=<id>` reads the PID file and, when a port is recorded in the meta file, prefers a **TCP probe** of `127.0.0.1:<port>` (with an IPv6 fallback) over `process.kill(pid, 0)`. This matters because pnpm dev acts as a launcher whose process may exit once the real server takes over; the launcher's PID can be dead while the app is happily serving on the port. The route only deletes the PID and meta files when both the port probe failed _and_ the recorded PID is dead — preventing a transient startup window from prematurely garbage-collecting the bookkeeping.
 
 ### Stopping
 
@@ -136,7 +136,7 @@ The local-data-server's handler invokes `uninstallLocal(db, appId, { deleteFiles
 
 The step ledger is then cleared so a subsequent reinstall starts from a clean slate.
 
-**What survives uninstall.** Shared records — the file-records and shared-data rows the app produced or stamped — are intentionally left in place. These belong to the data, not to the app: another app (or a reinstall of the same app) can keep using them. This mirrors the cloud-side uninstall design. The app's *app-specific* syncable tables, however, are dropped — those are app-private by definition.
+**What survives uninstall.** Shared records — the file-records and shared-data rows the app produced or stamped — are intentionally left in place. These belong to the data, not to the app: another app (or a reinstall of the same app) can keep using them. This mirrors the cloud-side uninstall design. The app's _app-specific_ syncable tables, however, are dropped — those are app-private by definition.
 
 If the registry row is already missing on entry, `uninstallLocal` just clears the step ledger and returns — a previous failed-mid-install can be "uninstalled" cleanly even though there's nothing in the registry.
 
@@ -149,14 +149,14 @@ Photos (`starkeep-apps/photos`) is the only non-built-in app currently shipped. 
 - **The `files: true` flag**: opts the app into the framework-reserved `_starkeep_sync_records` table, so file-bytes sync is wired up alongside the row tables.
 - **Cloud-tier compute** — present in the manifest purely to describe the cloud deployment shape; the local-app path neither reads nor reacts to it. The two declared Lambda handlers (a `resize` API and a static handler) and the route table exist for the cloud installer's API Gateway wiring; locally, `pnpm dev` runs Next.js in dev mode and serves everything in-process. Included here only to flag that the manifest is dual-purpose and that the local lifecycle ignores half of it.
 
-The per-app daemon config in `APP_DAEMONS["photos"]` invokes `pnpm dev -p <port>` from the `photos/` cwd. The choice of *not* using a `--` separator before `-p` is deliberate: pnpm with `--` would pass the separator through verbatim to Next, which would then misinterpret `--` as a positional argument. The comment in the source records this as a discovered constraint.
+The per-app daemon config in `APP_DAEMONS["photos"]` invokes `pnpm dev -p <port>` from the `photos/` cwd. The choice of _not_ using a `--` separator before `-p` is deliberate: pnpm with `--` would pass the separator through verbatim to Next, which would then misinterpret `--` as a positional argument. The comment in the source records this as a discovered constraint.
 
 Photos has no special handling anywhere in the installer or daemon code — it goes through the exact same `installLocal` and `APP_DAEMONS` paths any third-party app would.
 
 ## Open questions
 
 - **No documented relationship between the daemon port and `STARKEEP_API_GATEWAY_URL`-style env vars.** The Photos manifest declares cloud env vars in `compute.handlers[].env` that get filled in at cloud-install time. Locally, the equivalents (data-server URL, HMAC secret) are read from `.starkeep-local.json`. It is not clear from the code whether any local app today needs anything from a runtime-config endpoint analogous to the cloud handlers' `env` block, or if the local path is always content with the secret file alone.
-- **Workspace daemons in `APP_DAEMONS` versus `DAEMON_COMMANDS`.** `drive` is registered as a *workspace* daemon — fixed pnpm filter, fixed port — even though Drive is itself installed via `installLocal` at boot, so by the broader system's definition it is "an app". The split appears to be pragmatic (Drive lives in `apps/drive`, not `starkeep-apps/`), but it means the admin UI's per-app start/stop control for Drive uses a code path different from the per-app control for Photos. Whether that's intentional or vestigial is unclear from the code.
+- **Workspace daemons in `APP_DAEMONS` versus `DAEMON_COMMANDS`.** `drive` is registered as a _workspace_ daemon — fixed pnpm filter, fixed port — even though Drive is itself installed via `installLocal` at boot, so by the broader system's definition it is "an app". The split appears to be pragmatic (Drive lives in `apps/drive`, not `starkeep-apps/`), but it means the admin UI's per-app start/stop control for Drive uses a code path different from the per-app control for Photos. Whether that's intentional or vestigial is unclear from the code.
 
 ---
 
@@ -165,20 +165,24 @@ Photos has no special handling anywhere in the installer or daemon code — it g
 ## Behavior inconsistent with purpose
 
 - **Uninstall does not stop a running app process.** `POST /api/apps/uninstall` removes the registry row and HMAC secret file but does not signal the app's dev server (if any). Any in-flight or post-uninstall request from that process to the local-data-server will then fail authentication — a confusing state from the user's perspective. The two endpoints exist; the uninstall route could (and arguably should) call the stop path for the same `appId` before forwarding the DELETE.
+
   > **Resolved (2026-06-02): Address now (code).** Uninstall route now calls `stopById(appId)` before forwarding DELETE. Best-effort — no-PID-file is fine.
 
 - **The `appSpecificSyncable.files` flag is vestigial and should be removed.** All shared records are now file-backed, so the framework-reserved `_starkeep_sync_records` table is needed for every app — there is no longer a meaningful "files-off" case. The installer still gates `createReservedFileRecordsTable` and the namespace's `filesEnabled` on the manifest flag, and uninstall mirrors that gate when deciding whether to call `deleteFilesPrefix`. The flag should become unconditional (or, equivalently, treated as always-true) and dropped from the manifest schema; until then, an app that omits or sets `files: false` ends up half-installed relative to current data-plane assumptions.
-  > **Resolved (2026-06-02): Dismiss — original critique was incorrect.** The `files` flag is about *app-specific* syncable data, not shared data. Shared data is always file-backed (so the critique conflated the two); app-specific data can legitimately be row-only, and the flag is a meaningful opt-in. The flag stays.
+
+  > **Resolved (2026-06-02): Dismiss — original critique was incorrect.** The `files` flag is about _app-specific_ syncable data, not shared data. Shared data is always file-backed (so the critique conflated the two); app-specific data can legitimately be row-only, and the flag is a meaningful opt-in. The flag stays.
 
 - **The `/api/apps/install` route accepts an `approved` flag but cannot verify what the user was actually shown.** The approval gate is structurally just a boolean: the route does not see, hash, or otherwise commit to the manifest the user reviewed. If the manifest on disk changes between display and POST, the user will have approved a different document than what gets written to the registry. The window is narrow but the check is purely positional, not cryptographic.
   > **Deferred (2026-06-02).** Real issue, narrow window; revisit when the UI gains a richer manifest-review surface.
 
 ## Missing behaviors
 
-- **No "reinstall to refresh HMAC".** The installer's idempotency guarantees that re-running install on an active app returns the same secret, which is useful, but there is no exposed way to *rotate* the HMAC secret for an installed app. If a secret leaks, the only path today is uninstall+reinstall, which drops the app-specific syncable tables and forces a re-sync from the cloud peer. A `rotate-hmac` operation would be a small addition (mint a new secret, update `shared_app_registry`, rewrite `.starkeep-local.json`) and would not need to touch the step ledger at all.
+- **No "reinstall to refresh HMAC".** The installer's idempotency guarantees that re-running install on an active app returns the same secret, which is useful, but there is no exposed way to _rotate_ the HMAC secret for an installed app. If a secret leaks, the only path today is uninstall+reinstall, which drops the app-specific syncable tables and forces a re-sync from the cloud peer. A `rotate-hmac` operation would be a small addition (mint a new secret, update `shared_app_registry`, rewrite `.starkeep-local.json`) and would not need to touch the step ledger at all.
+
   > **Deferred (2026-06-02).** Real gap; not pressing in dev.
 
 - **No port reuse hint across restarts.** Every start call allocates a fresh port via bind-to-0, so the URL changes whenever an app is restarted. For a user who has bookmarked, say, `http://localhost:54321/`, restarting Photos sends them to a new port with no indication. A "prefer last-bound port" heuristic stored in the meta file would smooth this without removing the no-collision property (fall back to bind-to-0 if the preferred port is taken).
+
   > **Deferred (2026-06-02).** UX nice-to-have; revisit after the manifest-driven `localRun` rollout settles.
 
 - **No visibility into install failures past the ledger.** `shared_app_install_steps` records which step failed and the error message, but there is no admin-web endpoint to read it back. A failed install via the UI surfaces only the immediate HTTP error; the operator cannot inspect or clear partial state without dropping into the SQLite DB. A "GET /api/apps/:appId/install-status" or similar would close this loop and make the ledger pattern actually visible.
@@ -187,12 +191,15 @@ Photos has no special handling anywhere in the installer or daemon code — it g
 ## Behavioral bugs
 
 - **`stopById` race when no PID file exists and the port resolves to the wrong process.** The fallback path runs `lsof -ti tcp:<port>` and SIGTERMs whichever PID is bound there. If the recorded port has been reclaimed by another process (admin-web crashed before unlinking files; the OS re-issued the port), the stop endpoint will happily kill an unrelated process. There is no check that the discovered PID belongs to a pnpm/Next.js descendant. The probability is low locally but the failure mode is severe.
+
   > **Resolved (2026-06-02): Address now (code).** Port-fallback in `stopById` now reads the discovered PID's command line via `ps -o command=` and refuses to signal anything that doesn't match `(pnpm|node|next|vite|npm)`. Returns a 404 with an explanatory message instead.
 
 - **`findOpenPort` races between `close()` and child `bind()`.** The comment in the source acknowledges this. In practice it's rare, but two near-simultaneous starts could be handed the same port — the first child binds, the second's pnpm dev errors out, and the user sees a started-then-instantly-dead daemon. There's no retry on the spawn-side EADDRINUSE.
+
   > **Deferred (2026-06-02).** Rare in single-operator local-dev use; revisit if it surfaces.
 
 - **`delete_syncable_files` swallows synchronous errors after logging.** If `deleteFilesPrefix` throws synchronously, the step records itself as `done` (because `runStep` only catches via its own try, and the inner try/catch swallows the throw). The step ledger therefore claims success while the files are still on disk. This is benign for re-runs (the next uninstall attempts to re-delete a non-existent prefix and succeeds), but it does mean the ledger is not a reliable record of what was actually cleaned up. The async fire-and-forget path has the same property by design.
+
   > **Deferred (2026-06-02).** Real issue; revisit alongside a broader decision on ledger semantics for best-effort steps.
 
 - **`/api/apps/install` does not validate that `<appId>` matches the manifest's `id` field.** It reads the manifest at `<parent-dir>/<appId>/starkeep.manifest.json` and forwards it; if the directory and the manifest `id` disagree, the installer will install under `manifest.id` while admin-web writes `.starkeep-local.json` under the directory `appId`. The two will not match. The installer's own validation catches manifest shape problems but not directory-vs-id drift.
@@ -215,7 +222,7 @@ Photos has no special handling anywhere in the installer or daemon code — it g
 
 - **Item:** Behavior inconsistent with purpose — `appSpecificSyncable.files` flag is vestigial.
 - **Outcome:** Dismiss — original critique was incorrect.
-- **Note:** The flag governs *app-specific* syncable data, not shared. Shared data is always file-backed; app-specific data may legitimately be row-only. Initial removal edits were reverted; manifest schema comment now states the distinction explicitly.
+- **Note:** The flag governs _app-specific_ syncable data, not shared. Shared data is always file-backed; app-specific data may legitimately be row-only. Initial removal edits were reverted; manifest schema comment now states the distinction explicitly.
 
 - **Item:** Behavior inconsistent with purpose — install `approved` flag not bound to manifest contents.
 - **Outcome:** Defer.

@@ -36,24 +36,24 @@ const singleItem = await unifiedIndex.getWithMetadata(recordId);
 
 ### Factory
 
-| Function | Description |
-|---|---|
-| `createUnifiedIndex(options)` | Creates a `UnifiedIndex` over a `DatabaseAdapter`. |
+| Function                            | Description                                                        |
+| ----------------------------------- | ------------------------------------------------------------------ |
+| `createUnifiedIndex(options)`       | Creates a `UnifiedIndex` over a `DatabaseAdapter`.                 |
 | `planQuery(query, databaseAdapter)` | Translates an `IndexQuery` into a planned `Query` for the adapter. |
 
 ### `UnifiedIndex`
 
-| Method | Description |
-|---|---|
-| `search(query)` | Query data records with type filter, date range, and pagination. |
+| Method                      | Description                                                                                                      |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `search(query)`             | Query data records with type filter, date range, and pagination.                                                 |
 | `getWithMetadata(recordId)` | Retrieve a single data record by id. Returns `{ dataRecord }` — no metadata is joined in today's implementation. |
 
 ### Key Types
 
-| Type | Description |
-|---|---|
-| `IndexQuery` | `{ types?, dateRange?, limit?, cursor? }`. |
-| `IndexItem` | `{ dataRecord }`. |
+| Type          | Description                                                        |
+| ------------- | ------------------------------------------------------------------ |
+| `IndexQuery`  | `{ types?, dateRange?, limit?, cursor? }`.                         |
+| `IndexItem`   | `{ dataRecord }`.                                                  |
 | `IndexResult` | Paginated search result with `items`, `nextCursor`, and `hasMore`. |
 
 ## Testing

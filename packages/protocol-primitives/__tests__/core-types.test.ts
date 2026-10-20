@@ -175,8 +175,9 @@ describe("derived-from-bytes metadata columns (media plan items 4 / 21)", () => 
 
 describe("checkMetadataValues", () => {
   it("accepts a canonical timestamp", () => {
-    expect(checkMetadataValues("image", { captured_at: "2026-09-01T12:34:56.789Z" }))
-      .toEqual({ ok: true });
+    expect(checkMetadataValues("image", { captured_at: "2026-09-01T12:34:56.789Z" })).toEqual({
+      ok: true,
+    });
   });
 
   it("accepts null, which means the value was never derived", () => {

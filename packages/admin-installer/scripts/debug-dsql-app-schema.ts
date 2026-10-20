@@ -31,11 +31,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
-import {
-  IAMClient,
-  PutRolePolicyCommand,
-  DeleteRolePolicyCommand,
-} from "@aws-sdk/client-iam";
+import { IAMClient, PutRolePolicyCommand, DeleteRolePolicyCommand } from "@aws-sdk/client-iam";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
 import { adminBaseCredentials } from "./admin-credentials";
@@ -58,7 +54,6 @@ function loadStarkeepConfig(): StarkeepConfig {
   const path = join(process.env.STARKEEP_DIR ?? join(homedir(), ".starkeep"), "config.json");
   return JSON.parse(readFileSync(path, "utf8")) as StarkeepConfig;
 }
-
 
 async function assume(
   arn: string,
@@ -129,7 +124,12 @@ async function report(client: pg.Client, only: string | undefined): Promise<void
   }
 
   console.log("\n=== install-step ledger (decides whether a redeploy runs the DDL) ===");
-  const steps = await client.query<{ app_id: string; step: string; status: string; updated_at: string }>(
+  const steps = await client.query<{
+    app_id: string;
+    step: string;
+    status: string;
+    updated_at: string;
+  }>(
     `SELECT app_id, step, status, updated_at::text AS updated_at
        FROM shared.app_install_steps
       WHERE step IN ('run_dsql_ddl', 'attach_temp_install_ddl_policy')
@@ -137,7 +137,9 @@ async function report(client: pg.Client, only: string | undefined): Promise<void
   );
   for (const r of steps.rows) {
     if (only && r.app_id !== only) continue;
-    console.log(`  ${r.app_id.padEnd(18)} ${r.step.padEnd(34)} ${r.status.padEnd(8)} ${r.updated_at}`);
+    console.log(
+      `  ${r.app_id.padEnd(18)} ${r.step.padEnd(34)} ${r.status.padEnd(8)} ${r.updated_at}`,
+    );
   }
 
   for (const { nspname } of schemas.rows) {
@@ -163,9 +165,7 @@ async function report(client: pg.Client, only: string | undefined): Promise<void
         [nspname, table_name],
       );
       const shape = cols.rows.map((c) => `${c.data_type}×${c.n}`).join("  ");
-      console.log(
-        `  ${table_name.padEnd(26)} rows=${String(count.rows[0].n).padEnd(7)} ${shape}`,
-      );
+      console.log(`  ${table_name.padEnd(26)} rows=${String(count.rows[0].n).padEnd(7)} ${shape}`);
     }
   }
 }

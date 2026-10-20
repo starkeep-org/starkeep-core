@@ -119,7 +119,11 @@ function formatCount(backlog: BacklogCount): string {
  * the saved value when a hand-edited config holds some other number — so the
  * select shows what is in force rather than a blank.
  */
-function choicesFor(standard: readonly number[], canonical: number, current: number | null): number[] {
+function choicesFor(
+  standard: readonly number[],
+  canonical: number,
+  current: number | null,
+): number[] {
   const sizes = new Set([...standard, canonical]);
   if (current !== null) sizes.add(current);
   return [...sizes].sort((a, b) => a - b);
@@ -200,8 +204,8 @@ export function StandInsSection() {
       <section className="space-y-3">
         <h3 className="text-sm font-medium">Sync-down ceilings</h3>
         <p className="text-sm text-muted-foreground">
-          This machine receives every size up to its ceiling for the whole library. Larger sizes
-          and originals above the ceiling arrive only when something opens them.
+          This machine receives every size up to its ceiling for the whole library. Larger sizes and
+          originals above the ceiling arrive only when something opens them.
         </p>
         <table className="w-full text-sm">
           <thead>
@@ -287,8 +291,8 @@ export function StandInsSection() {
       <section className="space-y-2">
         <h3 className="text-sm font-medium">Backlog</h3>
         <p className="text-sm text-muted-foreground">
-          Originals waiting on an app. Until an app makes the canonical stand-in, an original
-          stays out of deep archive, so its storage cost does not drop.
+          Originals waiting on an app. Until an app makes the canonical stand-in, an original stays
+          out of deep archive, so its storage cost does not drop.
         </p>
         <ul className="text-sm">
           <li>
@@ -350,9 +354,9 @@ function KeepOriginals({ initial, toDownload }: { initial: boolean; toDownload: 
     <section className="space-y-3">
       <h3 className="text-sm font-medium">Keep originals here</h3>
       <p className="text-sm text-muted-foreground">
-        Turn this on for a machine that should hold every original, such as a backup machine.
-        This machine then receives every original, and &quot;Free up space&quot; leaves them.
-        Larger stand-ins still follow the ceilings.
+        Turn this on for a machine that should hold every original, such as a backup machine. This
+        machine then receives every original, and &quot;Free up space&quot; leaves them. Larger
+        stand-ins still follow the ceilings.
       </p>
       <label className="flex items-center gap-2 text-sm">
         <input
@@ -372,7 +376,11 @@ function KeepOriginals({ initial, toDownload }: { initial: boolean; toDownload: 
       )}
       {error && <p className="text-sm text-destructive">{error}</p>}
       <div className="flex items-center gap-3">
-        <Button size="sm" disabled={keep === saved || status === "saving"} onClick={() => void save()}>
+        <Button
+          size="sm"
+          disabled={keep === saved || status === "saving"}
+          onClick={() => void save()}
+        >
           {status === "saving" ? "Saving…" : "Save"}
         </Button>
         {status === "saved" && (
@@ -438,9 +446,9 @@ function FreeUpSpace() {
     <section className="space-y-3" aria-label="Free up space">
       <h3 className="text-sm font-medium">Free up space</h3>
       <p className="text-sm text-muted-foreground">
-        Removes files from this machine, largest first, only after proving the cloud holds the
-        file, its original and the original&apos;s canonical stand-in. Nothing else removes a photo
-        or video.
+        Removes files from this machine, largest first, only after proving the cloud holds the file,
+        its original and the original&apos;s canonical stand-in. Nothing else removes a photo or
+        video.
       </p>
       <div className="flex flex-wrap items-center gap-2 text-sm">
         <label className="flex items-center gap-2">
@@ -471,7 +479,12 @@ function FreeUpSpace() {
           <option value="originals">originals</option>
           <option value="originals-and-above-ceiling">originals and sizes above the ceiling</option>
         </select>
-        <Button size="sm" variant="outline" disabled={!valid || busy} onClick={() => void run(true)}>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={!valid || busy}
+          onClick={() => void run(true)}
+        >
           Estimate
         </Button>
         <Button size="sm" disabled={!estimate || busy} onClick={() => void run(false)}>
@@ -561,7 +574,9 @@ function Reaper() {
 function TrashWindow() {
   const [days, setDays] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
-  const [status, setStatus] = useState<"loading" | "ready" | "offline" | "saving" | "saved">("loading");
+  const [status, setStatus] = useState<"loading" | "ready" | "offline" | "saving" | "saved">(
+    "loading",
+  );
   const [problems, setProblems] = useState<string[]>([]);
 
   useEffect(() => {

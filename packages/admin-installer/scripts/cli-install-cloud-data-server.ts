@@ -163,14 +163,14 @@ if (config.accountId) {
 const managerRoleArn =
   config.managerRoleArn ?? `arn:aws:iam::${accountId}:role/${stackPrefix}-manager-role`;
 const permissionsBoundaryArn =
-  config.permissionsBoundaryArn
-  ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-app-permissions-boundary`;
+  config.permissionsBoundaryArn ??
+  `arn:aws:iam::${accountId}:policy/${stackPrefix}-app-permissions-boundary`;
 const foundationalPermissionsBoundaryArn =
-  config.foundationalPermissionsBoundaryArn
-  ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-foundational-permissions-boundary`;
+  config.foundationalPermissionsBoundaryArn ??
+  `arn:aws:iam::${accountId}:policy/${stackPrefix}-foundational-permissions-boundary`;
 const userDataOwnerPermissionsBoundaryArn =
-  config.userDataOwnerPermissionsBoundaryArn
-  ?? `arn:aws:iam::${accountId}:policy/${stackPrefix}-user-data-owner-permissions-boundary`;
+  config.userDataOwnerPermissionsBoundaryArn ??
+  `arn:aws:iam::${accountId}:policy/${stackPrefix}-user-data-owner-permissions-boundary`;
 const pulumiStateBucket =
   config.pulumiStateBucket ?? `${stackPrefix}-pulumi-state-${accountId}-${region}`;
 
@@ -224,7 +224,9 @@ const outputs = await installCloudDataServer({
   // inherited process.env of admin-web's real-install spawn. See
   // isEphemeralInstall.
   ephemeral: isEphemeralInstall(flags),
-  ...(config.deploymentSettings !== undefined ? { deploymentSettings: config.deploymentSettings } : {}),
+  ...(config.deploymentSettings !== undefined
+    ? { deploymentSettings: config.deploymentSettings }
+    : {}),
 }).catch(exitOnInstallFailure);
 
 // There is no separate cloud sync identity to install here: shared-record sync

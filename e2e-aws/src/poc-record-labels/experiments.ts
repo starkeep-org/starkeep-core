@@ -159,9 +159,7 @@ export interface QueryResult {
 async function explain(client: pg.Client, sql: string, params: unknown[]): Promise<string> {
   const res = await tryQuery(client, `EXPLAIN ANALYZE ${sql}`, params);
   if (!res.ok) return `(EXPLAIN unavailable: ${res.message})`;
-  return (res.rows as Record<string, string>[])
-    .map((r) => Object.values(r)[0])
-    .join("\n");
+  return (res.rows as Record<string, string>[]).map((r) => Object.values(r)[0]).join("\n");
 }
 
 /**
@@ -221,7 +219,12 @@ export async function e3ReverseLookup(client: pg.Client): Promise<QueryResult[]>
       const res = await client.query(q.sql, q.params as never);
       rowCount = res.rows.length;
     });
-    out.push({ what: q.what, medianMs: ms, rowCount, plan: await explain(client, q.sql, q.params) });
+    out.push({
+      what: q.what,
+      medianMs: ms,
+      rowCount,
+      plan: await explain(client, q.sql, q.params),
+    });
   }
   return out;
 }
@@ -256,7 +259,12 @@ export async function e4ForwardLookup(client: pg.Client): Promise<QueryResult[]>
       const res = await client.query(q.sql, q.params as never);
       rowCount = res.rows.length;
     });
-    out.push({ what: q.what, medianMs: ms, rowCount, plan: await explain(client, q.sql, q.params) });
+    out.push({
+      what: q.what,
+      medianMs: ms,
+      rowCount,
+      plan: await explain(client, q.sql, q.params),
+    });
   }
   return out;
 }
@@ -430,7 +438,9 @@ export async function e6TransactionLimits(client: pg.Client): Promise<Probe[]> {
     const rows = mk(n, offset);
     const width = 9;
     const tuples = rows
-      .map((_, r) => `(${Array.from({ length: width }, (_, c) => `$${r * width + c + 1}`).join(",")})`)
+      .map(
+        (_, r) => `(${Array.from({ length: width }, (_, c) => `$${r * width + c + 1}`).join(",")})`,
+      )
       .join(",");
     return tryQuery(
       client,
@@ -456,7 +466,9 @@ export async function e6TransactionLimits(client: pg.Client): Promise<Probe[]> {
   out.push({
     what: "3,001-row INSERT (expected to exceed the limit)",
     ok: at3001.ok,
-    detail: at3001.ok ? "accepted (limit is higher than documented?)" : `${at3001.code}: ${at3001.message}`,
+    detail: at3001.ok
+      ? "accepted (limit is higher than documented?)"
+      : `${at3001.code}: ${at3001.message}`,
   });
 
   await tryQuery(client, `DELETE FROM ${SCHEMA}.labels_rows WHERE key = 'bulk-key'`);

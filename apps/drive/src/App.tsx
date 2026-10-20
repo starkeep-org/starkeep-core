@@ -188,9 +188,9 @@ export function App() {
       <h1>Starkeep Drive</h1>
       <p className="subtitle">
         Everything you own across all your apps — including data from apps that aren&apos;t
-        cloud-installed. Each row shows whether it lives only on this device, only in the
-        cloud, or is synced to both. The Trash lists what you have deleted, when each item goes
-        for good, and lets you put one back.
+        cloud-installed. Each row shows whether it lives only on this device, only in the cloud, or
+        is synced to both. The Trash lists what you have deleted, when each item goes for good, and
+        lets you put one back.
       </p>
 
       {cloud && !cloud.available && (
@@ -240,12 +240,7 @@ export function App() {
       {!error && loading && <div className="notice">Loading…</div>}
 
       {view === "trash" && !error && !loading && (
-        <TrashView
-          records={trash}
-          policy={policy}
-          restoring={restoring}
-          onRestore={restore}
-        />
+        <TrashView records={trash} policy={policy} restoring={restoring} onRestore={restore} />
       )}
 
       {view === "library" && !error && !loading && records.length === 0 && (

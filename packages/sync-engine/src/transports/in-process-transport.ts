@@ -41,17 +41,8 @@ import {
   type FileRow,
   type FileRowSources,
 } from "../file-rows.js";
-import {
-  computeCeilings,
-  cutRound,
-  type RoundItem,
-  type StreamTruncation,
-} from "../round-cut.js";
-import {
-  DEFAULT_RESPONDER_MAX_ITEMS,
-  DEFAULT_RESPONDER_MAX_BYTES,
-} from "../exchange-request.js";
-
+import { computeCeilings, cutRound, type RoundItem, type StreamTruncation } from "../round-cut.js";
+import { DEFAULT_RESPONDER_MAX_ITEMS, DEFAULT_RESPONDER_MAX_BYTES } from "../exchange-request.js";
 
 /** One row eligible to ship back, tagged with which stream it came from. */
 type OutboundRow =
@@ -156,9 +147,7 @@ export interface InProcessTransportOptions {
  *
  * Conflict resolution is pure HLC LWW — no rejected[], no OCC.
  */
-export function createInProcessSyncTransport(
-  options: InProcessTransportOptions,
-): SyncTransport {
+export function createInProcessSyncTransport(options: InProcessTransportOptions): SyncTransport {
   const {
     databaseAdapter,
     clock,
@@ -239,7 +228,9 @@ export function createInProcessSyncTransport(
               if (await options.objectStorage.has(key)) return true;
               return declinesBlob ? await declinesBlob(key) : false;
             } catch (err) {
-              console.warn(`[sync] could not check ${key} for the bytes watermark: ${(err as Error).message}`);
+              console.warn(
+                `[sync] could not check ${key} for the bytes watermark: ${(err as Error).message}`,
+              );
               return false;
             }
           }),
@@ -256,7 +247,9 @@ export function createInProcessSyncTransport(
 
     const next = advanceBytesWatermark(
       from,
-      [...byAuthor.values()].flat().map((entry) => ({ hlc: entry.row.hlc, satisfied: entry.satisfied })),
+      [...byAuthor.values()]
+        .flat()
+        .map((entry) => ({ hlc: entry.row.hlc, satisfied: entry.satisfied })),
       scan.ceilings,
     );
     if (!sameWatermarkMaps(next, stored)) {
@@ -265,7 +258,9 @@ export function createInProcessSyncTransport(
       } catch (err) {
         // The report below is still true; only the next exchange's starting
         // point is lost, and that exchange walks again from the stored value.
-        console.warn(`[sync] could not save this side's bytes watermark: ${(err as Error).message}`);
+        console.warn(
+          `[sync] could not save this side's bytes watermark: ${(err as Error).message}`,
+        );
       }
     }
     if (onFilesHeld) {
@@ -283,7 +278,9 @@ export function createInProcessSyncTransport(
         try {
           await onFilesHeld([...new Set(passed.map((row) => row.recordId!))]);
         } catch (err) {
-          console.warn(`[sync] the files-held hook failed for ${passed.length} record(s): ${(err as Error).message}`);
+          console.warn(
+            `[sync] the files-held hook failed for ${passed.length} record(s): ${(err as Error).message}`,
+          );
         }
       }
     }
@@ -722,11 +719,7 @@ export function createInProcessSyncTransport(
                 try {
                   buckets.push(
                     ...scopeDigestBuckets(
-                      await scanCapable.bucketDigest(
-                        ns.appId,
-                        tableInfo.name,
-                        prefixLength,
-                      ),
+                      await scanCapable.bucketDigest(ns.appId, tableInfo.name, prefixLength),
                       scope,
                     ),
                   );

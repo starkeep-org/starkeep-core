@@ -72,7 +72,9 @@ describe("the deleted feed", () => {
   it("answers live records by default, and tombstones only when asked", async () => {
     const live = await createRecordWithBytes(app, { bytes: "feed-live", fileName: "live.jpg" });
     const gone = await createRecordWithBytes(app, { bytes: "feed-gone", fileName: "gone.jpg" });
-    expect((await app.fetch(`/data/records/${gone.record.id}`, { method: "DELETE" })).status).toBe(200);
+    expect((await app.fetch(`/data/records/${gone.record.id}`, { method: "DELETE" })).status).toBe(
+      200,
+    );
 
     const ids = (rows: TrashedRecord[]) => rows.map((r) => r.id);
     // The default is unchanged, which is what keeps every caller that has never
@@ -165,7 +167,10 @@ describe("restore", () => {
   });
 
   it("refuses a record that is not deleted", async () => {
-    const created = await createRecordWithBytes(app, { bytes: "still-live", fileName: "live2.jpg" });
+    const created = await createRecordWithBytes(app, {
+      bytes: "still-live",
+      fileName: "live2.jpg",
+    });
     const res = await app.fetch(`/data/records/${created.record.id}/restore`, { method: "POST" });
     expect(res.status).toBe(409);
     expect(((await res.json()) as { error: string }).error).toBe("NotDeleted");
@@ -181,7 +186,10 @@ describe("restore", () => {
 
 describe("the reaper", () => {
   it("reclaims nothing inside the window, and says what it looked at", async () => {
-    const created = await createRecordWithBytes(app, { bytes: "fresh-delete", fileName: "fresh.jpg" });
+    const created = await createRecordWithBytes(app, {
+      bytes: "fresh-delete",
+      fileName: "fresh.jpg",
+    });
     await app.fetch(`/data/records/${created.record.id}`, { method: "DELETE" });
 
     const { status, body } = await reap();
@@ -191,7 +199,9 @@ describe("the reaper", () => {
     // The bytes are still here, which is what makes a restore inside the window pure
     // row work — shown by restoring and reading them, since `file-url` answers 404
     // for a tombstone whatever its bytes are doing.
-    expect((await app.fetch(`/data/records/${created.record.id}/restore`, { method: "POST" })).status).toBe(200);
+    expect(
+      (await app.fetch(`/data/records/${created.record.id}/restore`, { method: "POST" })).status,
+    ).toBe(200);
     const url = await drive.fetch(`/data/records/${created.record.id}/file-url`);
     expect(url.status).toBe(200);
   });

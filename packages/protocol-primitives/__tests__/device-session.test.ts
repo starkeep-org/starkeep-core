@@ -109,7 +109,11 @@ describe("refreshing a stored session", () => {
     await seed();
     const session = (await loadStoredSession(store))!;
 
-    await refreshSession(clientThat(async () => tokens("a@example.com")), store, session);
+    await refreshSession(
+      clientThat(async () => tokens("a@example.com")),
+      store,
+      session,
+    );
 
     expect(await store.read()).toEqual({ refreshToken: "r1", email: "a@example.com" });
   });
@@ -175,7 +179,9 @@ describe("refreshing a stored session", () => {
 
     const outcome = await refreshSession(
       clientThat(() =>
-        Promise.reject(new CognitoError("NotAuthorizedException", "Refresh Token has expired", 400)),
+        Promise.reject(
+          new CognitoError("NotAuthorizedException", "Refresh Token has expired", 400),
+        ),
       ),
       store,
       session,
@@ -225,7 +231,11 @@ describe("sessionFromTokens", () => {
 
 describe("signing out", () => {
   const notRefreshing = () => Promise.reject(new Error("not used"));
-  const live = (refreshToken: string): ActiveSession => ({ email: "a@example.com", refreshToken, tokens: null });
+  const live = (refreshToken: string): ActiveSession => ({
+    email: "a@example.com",
+    refreshToken,
+    tokens: null,
+  });
   const AUTH = { region: "us-east-2", userPoolId: "us-east-2_Pool1", deviceClientId: "client1" };
   const pending = (refreshToken: string) => ({ refreshToken, auth: AUTH });
 
@@ -244,7 +254,9 @@ describe("signing out", () => {
   });
 
   it("signs out locally without a network, and keeps the token to revoke later", async () => {
-    const client = clientThat(notRefreshing, () => Promise.reject(new TypeError("Network request failed")));
+    const client = clientThat(notRefreshing, () =>
+      Promise.reject(new TypeError("Network request failed")),
+    );
     const store = await storeWith({ refreshToken: "r1", email: "a@example.com" }).seed();
 
     expect(await signOut(() => client, store, live("r1"), AUTH)).toBe("pending");

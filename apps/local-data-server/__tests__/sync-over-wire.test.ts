@@ -53,7 +53,11 @@ function createGenericRecord(
   app: InstalledApp,
   options: Parameters<typeof createRecordWithBytes>[1] = {},
 ): ReturnType<typeof createRecordWithBytes> {
-  return createRecordWithBytes(app, { type: "document/pdf", contentType: "application/pdf", ...options });
+  return createRecordWithBytes(app, {
+    type: "document/pdf",
+    contentType: "application/pdf",
+    ...options,
+  });
 }
 
 let cloud: FakeCloud;
@@ -87,8 +91,7 @@ async function converge(maxRounds = 30): Promise<void> {
   for (let i = 0; i < maxRounds; i++) {
     const a = await syncNow(driveA);
     const b = await syncNow(driveB);
-    const still =
-      a.applied === 0 && a.shipped === 0 && b.applied === 0 && b.shipped === 0;
+    const still = a.applied === 0 && a.shipped === 0 && b.applied === 0 && b.shipped === 0;
     if (!still) {
       quiet = 0;
       continue;
@@ -157,33 +160,37 @@ afterAll(async () => {
 });
 
 describe("shared records across the wire", () => {
-  it("a record created on A arrives on B with its blob resident, kicking B's /events", { timeout: 30_000 }, async () => {
-    const sseB = openSse(`${serverB.url}/events`);
-    try {
-      const { record } = await createGenericRecord(driveA, {
-        bytes: "wire-bytes-1",
-        fileName: "wire-1.jpg",
-      });
-      await converge();
+  it(
+    "a record created on A arrives on B with its blob resident, kicking B's /events",
+    { timeout: 30_000 },
+    async () => {
+      const sseB = openSse(`${serverB.url}/events`);
+      try {
+        const { record } = await createGenericRecord(driveA, {
+          bytes: "wire-bytes-1",
+          fileName: "wire-1.jpg",
+        });
+        await converge();
 
-      const onB = await listRecords(driveB);
-      const arrived = onB.find((r) => r.id === record.id);
-      expect(arrived).toBeDefined();
-      expect(arrived!.original_filename).toBe("wire-1.jpg");
+        const onB = await listRecords(driveB);
+        const arrived = onB.find((r) => r.id === record.id);
+        expect(arrived).toBeDefined();
+        expect(arrived!.original_filename).toBe("wire-1.jpg");
 
-      // Blob is resident on B, served from B's own object store.
-      expect(await fetchBytes(driveB, record.id)).toBe("wire-bytes-1");
+        // Blob is resident on B, served from B's own object store.
+        expect(await fetchBytes(driveB, record.id)).toBe("wire-bytes-1");
 
-      // The sync-applied remote change kicked B's SSE stream with an empty
-      // payload (the deferred half of the /events contract).
-      await eventually(() => {
-        expect(sseB.dataEvents.length).toBeGreaterThan(0);
-      });
-      expect(sseB.dataEvents.every((d) => d === "")).toBe(true);
-    } finally {
-      await sseB.close();
-    }
-  });
+        // The sync-applied remote change kicked B's SSE stream with an empty
+        // payload (the deferred half of the /events contract).
+        await eventually(() => {
+          expect(sseB.dataEvents.length).toBeGreaterThan(0);
+        });
+        expect(sseB.dataEvents.every((d) => d === "")).toBe(true);
+      } finally {
+        await sseB.close();
+      }
+    },
+  );
 
   it("a watched file deleted on A evicts there and never reaches B", async () => {
     // The data-loss path this replaces: the watcher used to map a disk removal onto
@@ -233,55 +240,59 @@ describe("shared records across the wire", () => {
     }
   });
 
-  it("a watched file's record deleted on B is excluded on A, and comes back when B restores it", { timeout: 30_000 }, async () => {
-    // The watcher's resurrection guard runs on a filesystem event or a scan, and a
-    // delete on B changes nothing on A's disk — so without the recheck the round
-    // drives, A's watch status read `synced` for a record the library had deleted,
-    // and an excluded path whose record B later restored stayed excluded for ever.
-    const watchDir = await mkdtemp(join(tmpdir(), "starkeep-wire-remote-delete-"));
-    const filePath = join(watchDir, "deleted-on-b.txt");
-    try {
-      await writeFile(filePath, "bytes-deleted-from-another-node");
-      const watchRes = await fetch(`${serverA.url}/watches`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ directoryPath: watchDir }),
-      });
-      expect(watchRes.status).toBe(200);
+  it(
+    "a watched file's record deleted on B is excluded on A, and comes back when B restores it",
+    { timeout: 30_000 },
+    async () => {
+      // The watcher's resurrection guard runs on a filesystem event or a scan, and a
+      // delete on B changes nothing on A's disk — so without the recheck the round
+      // drives, A's watch status read `synced` for a record the library had deleted,
+      // and an excluded path whose record B later restored stayed excluded for ever.
+      const watchDir = await mkdtemp(join(tmpdir(), "starkeep-wire-remote-delete-"));
+      const filePath = join(watchDir, "deleted-on-b.txt");
+      try {
+        await writeFile(filePath, "bytes-deleted-from-another-node");
+        const watchRes = await fetch(`${serverA.url}/watches`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ directoryPath: watchDir }),
+        });
+        expect(watchRes.status).toBe(200);
 
-      await converge();
-      const onB = await listRecords(driveB);
-      const arrived = onB.find((r) => r.original_filename === "deleted-on-b.txt");
-      expect(arrived).toBeDefined();
+        await converge();
+        const onB = await listRecords(driveB);
+        const arrived = onB.find((r) => r.original_filename === "deleted-on-b.txt");
+        expect(arrived).toBeDefined();
 
-      const deleteRes = await driveB.fetch(`/data/records/${arrived!.id}`, { method: "DELETE" });
-      expect(deleteRes.status).toBe(200);
-      await converge();
+        const deleteRes = await driveB.fetch(`/data/records/${arrived!.id}`, { method: "DELETE" });
+        expect(deleteRes.status).toBe(200);
+        await converge();
 
-      await eventually(async () => {
-        const watch = await watchOn(serverA, watchDir);
-        expect(watch.excluded).toContain(filePath);
-      });
-      // The file itself is untouched. Excluding a path is the library's opinion
-      // about the record, and never a removal from the person's folder.
-      expect(await readFile(filePath, "utf8")).toBe("bytes-deleted-from-another-node");
+        await eventually(async () => {
+          const watch = await watchOn(serverA, watchDir);
+          expect(watch.excluded).toContain(filePath);
+        });
+        // The file itself is untouched. Excluding a path is the library's opinion
+        // about the record, and never a removal from the person's folder.
+        expect(await readFile(filePath, "utf8")).toBe("bytes-deleted-from-another-node");
 
-      const restoreRes = await driveB.fetch(`/data/records/${arrived!.id}/restore`, {
-        method: "POST",
-      });
-      expect(restoreRes.status).toBe(200);
-      await converge();
+        const restoreRes = await driveB.fetch(`/data/records/${arrived!.id}/restore`, {
+          method: "POST",
+        });
+        expect(restoreRes.status).toBe(200);
+        await converge();
 
-      await eventually(async () => {
-        const watch = await watchOn(serverA, watchDir);
-        expect(watch.excluded).toEqual([]);
-      });
-      // Live on both sides again, and readable on A from the file that never left.
-      expect(await fetchBytes(driveA, arrived!.id)).toBe("bytes-deleted-from-another-node");
-    } finally {
-      await rm(watchDir, { recursive: true, force: true });
-    }
-  });
+        await eventually(async () => {
+          const watch = await watchOn(serverA, watchDir);
+          expect(watch.excluded).toEqual([]);
+        });
+        // Live on both sides again, and readable on A from the file that never left.
+        expect(await fetchBytes(driveA, arrived!.id)).toBe("bytes-deleted-from-another-node");
+      } finally {
+        await rm(watchDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("drains more than one round of records with the small item cap", async () => {
     const count = PAGE_LIMIT * 2 + 2;
@@ -380,20 +391,24 @@ describe("two nodes producing the same file", () => {
     expect(await fetchBytes(driveB, onA.id)).toBe(bytes);
   });
 
-  it("keeps sync working afterwards, which is what the wedge took away", { timeout: 30_000 }, async () => {
-    // The collision's cost was never the one record — it was that every later
-    // round died at the same place. A record created after the collision has to
-    // still cross the wire.
-    const { record } = await createGenericRecord(driveA, {
-      bytes: "after-the-collision",
-      fileName: "after-collision.jpg",
-    });
-    await converge();
+  it(
+    "keeps sync working afterwards, which is what the wedge took away",
+    { timeout: 30_000 },
+    async () => {
+      // The collision's cost was never the one record — it was that every later
+      // round died at the same place. A record created after the collision has to
+      // still cross the wire.
+      const { record } = await createGenericRecord(driveA, {
+        bytes: "after-the-collision",
+        fileName: "after-collision.jpg",
+      });
+      await converge();
 
-    const arrived = (await listRecords(driveB)).find((r) => r.id === record.id);
-    expect(arrived).toBeDefined();
-    expect(await fetchBytes(driveB, record.id)).toBe("after-the-collision");
-  });
+      const arrived = (await listRecords(driveB)).find((r) => r.id === record.id);
+      expect(arrived).toBeDefined();
+      expect(await fetchBytes(driveB, record.id)).toBe("after-the-collision");
+    },
+  );
 
   /**
    * The other half of the same decision, and the reason `parent_id` is in the
@@ -446,7 +461,10 @@ describe("two nodes producing the same file", () => {
       [copyOne, fromOne],
       [copyTwo, fromTwo],
     ] as const) {
-      const children = await listRecords(driveA, `?where=${encodeURIComponent(JSON.stringify({ parent_id: parent.id }))}`);
+      const children = await listRecords(
+        driveA,
+        `?where=${encodeURIComponent(JSON.stringify({ parent_id: parent.id }))}`,
+      );
       expect(children.map((r) => r.id)).toEqual([child.id]);
     }
 
@@ -456,7 +474,10 @@ describe("two nodes producing the same file", () => {
       [copyOne, fromOne],
       [copyTwo, fromTwo],
     ] as const) {
-      const children = await listRecords(driveB, `?where=${encodeURIComponent(JSON.stringify({ parent_id: parent.id }))}`);
+      const children = await listRecords(
+        driveB,
+        `?where=${encodeURIComponent(JSON.stringify({ parent_id: parent.id }))}`,
+      );
       expect(children.map((r) => r.id)).toEqual([child.id]);
       expect(await fetchBytes(driveB, child.id)).toBe(derivedBytes);
     }
@@ -469,34 +490,41 @@ describe("two nodes producing the same file", () => {
    * than shipping derived bytes is the design — and the child ids agree only
    * because the parent id does.
    */
-  it("still converges when two nodes derive one rendition from one parent", { timeout: 30_000 }, async () => {
-    const { record: parent } = await createGenericRecord(driveA, {
-      bytes: "the-shared-original",
-      fileName: "shared-original.jpg",
-    });
-    await converge();
+  it(
+    "still converges when two nodes derive one rendition from one parent",
+    { timeout: 30_000 },
+    async () => {
+      const { record: parent } = await createGenericRecord(driveA, {
+        bytes: "the-shared-original",
+        fileName: "shared-original.jpg",
+      });
+      await converge();
 
-    const derived = "the-same-rendition";
-    const derivedName = "thumb_shared-original.jpg";
-    const { record: onA } = await createGenericRecord(driveA, {
-      bytes: derived,
-      fileName: derivedName,
-      parentId: parent.id,
-    });
-    const { record: onB } = await createGenericRecord(driveB, {
-      bytes: derived,
-      fileName: derivedName,
-      parentId: parent.id,
-    });
-    expect(onB.id).toBe(onA.id);
+      const derived = "the-same-rendition";
+      const derivedName = "thumb_shared-original.jpg";
+      const { record: onA } = await createGenericRecord(driveA, {
+        bytes: derived,
+        fileName: derivedName,
+        parentId: parent.id,
+      });
+      const { record: onB } = await createGenericRecord(driveB, {
+        bytes: derived,
+        fileName: derivedName,
+        parentId: parent.id,
+      });
+      expect(onB.id).toBe(onA.id);
 
-    await converge();
-    for (const node of [driveA, driveB]) {
-      const children = await listRecords(node, `?where=${encodeURIComponent(JSON.stringify({ parent_id: parent.id }))}`);
-      expect(children.map((r) => r.id)).toEqual([onA.id]);
-      expect(await fetchBytes(node, onA.id)).toBe(derived);
-    }
-  });
+      await converge();
+      for (const node of [driveA, driveB]) {
+        const children = await listRecords(
+          node,
+          `?where=${encodeURIComponent(JSON.stringify({ parent_id: parent.id }))}`,
+        );
+        expect(children.map((r) => r.id)).toEqual([onA.id]);
+        expect(await fetchBytes(node, onA.id)).toBe(derived);
+      }
+    },
+  );
 });
 
 describe("app-specific rows across the wire", () => {
@@ -557,32 +585,38 @@ describe("app-specific files across the wire", () => {
     return bytes.text();
   }
 
-  it("a cover set on A uploads to the cloud and resolves on B with its bytes", { timeout: 30_000 }, async () => {
-    await putAppFile(filesA, "cover", "cover-from-A", "image/png");
+  it(
+    "a cover set on A uploads to the cloud and resolves on B with its bytes",
+    { timeout: 30_000 },
+    async () => {
+      await putAppFile(filesA, "cover", "cover-from-A", "image/png");
 
-    // Drained to the end state rather than trusting one quiet round.
-    // `converge()` stops when a round reports nothing applied and nothing
-    // shipped, and that is not the same as "finished": creating a file nudges a
-    // background exchange on a 50 ms debounce, and `transferFile` returns false
-    // for a key whose transfer is already in flight — so a `/sync/now` round can
-    // truthfully report quiet while the background round is mid-transfer.
-    await eventually(async () => {
-      await converge();
-      // Reached the cloud: the index row landed in the cloud-side app table.
-      const cloudKeys = cloud
-        .appRows("files-app", "_starkeep_sync_records")
-        .map((r) => r["object_storage_key"]);
-      expect(cloudKeys).toContain(`apps/files-app/${FAKE_CLOUD_USER_ID}/syncable/cover`);
-      // And the blob is resident in cloud storage.
-      expect(await cloud.hasBlob(`apps/files-app/${FAKE_CLOUD_USER_ID}/syncable/cover`)).toBe(true);
-    });
+      // Drained to the end state rather than trusting one quiet round.
+      // `converge()` stops when a round reports nothing applied and nothing
+      // shipped, and that is not the same as "finished": creating a file nudges a
+      // background exchange on a 50 ms debounce, and `transferFile` returns false
+      // for a key whose transfer is already in flight — so a `/sync/now` round can
+      // truthfully report quiet while the background round is mid-transfer.
+      await eventually(async () => {
+        await converge();
+        // Reached the cloud: the index row landed in the cloud-side app table.
+        const cloudKeys = cloud
+          .appRows("files-app", "_starkeep_sync_records")
+          .map((r) => r["object_storage_key"]);
+        expect(cloudKeys).toContain(`apps/files-app/${FAKE_CLOUD_USER_ID}/syncable/cover`);
+        // And the blob is resident in cloud storage.
+        expect(await cloud.hasBlob(`apps/files-app/${FAKE_CLOUD_USER_ID}/syncable/cover`)).toBe(
+          true,
+        );
+      });
 
-    // Came down to B: existence (index) + bytes (blob) both resident locally.
-    await eventually(async () => {
-      await converge();
-      expect(await coverBytes(filesB, "cover")).toBe("cover-from-A");
-    });
-  });
+      // Came down to B: existence (index) + bytes (blob) both resident locally.
+      await eventually(async () => {
+        await converge();
+        expect(await coverBytes(filesB, "cover")).toBe("cover-from-A");
+      });
+    },
+  );
 
   it("a cover set on the cloud syncs down to a local server", { timeout: 30_000 }, async () => {
     // Originates the write on the cloud side, as the cloud-served app would
@@ -664,59 +698,63 @@ describe("verification and repair across the wire", () => {
     return drive!.result!;
   }
 
-  it("finds a row lost from the middle of B's table and repairs it", { timeout: 60_000 }, async () => {
-    // The whole digest/repair mechanism has only ever run in-process. Over the
-    // wire it has three more places to fail than the engine tests can see: the
-    // digest has to survive JSON both ways, the peer has to be a responder that
-    // actually computes buckets rather than a harness, and the repair floor has
-    // to reach the SQLite state store and come back out on the next tick.
-    const created = [];
-    for (let i = 0; i < 3; i += 1) {
-      const { record } = await createGenericRecord(driveA, {
-        bytes: `verify-bytes-${i}`,
-        fileName: `verify-${i}.jpg`,
+  it(
+    "finds a row lost from the middle of B's table and repairs it",
+    { timeout: 60_000 },
+    async () => {
+      // The whole digest/repair mechanism has only ever run in-process. Over the
+      // wire it has three more places to fail than the engine tests can see: the
+      // digest has to survive JSON both ways, the peer has to be a responder that
+      // actually computes buckets rather than a harness, and the repair floor has
+      // to reach the SQLite state store and come back out on the next tick.
+      const created = [];
+      for (let i = 0; i < 3; i += 1) {
+        const { record } = await createGenericRecord(driveA, {
+          bytes: `verify-bytes-${i}`,
+          fileName: `verify-${i}.jpg`,
+        });
+        created.push(record);
+      }
+      await converge();
+      for (let i = 0; i < 3; i += 1) {
+        expect(await fetchBytes(driveB, created[i]!.id)).toBe(`verify-bytes-${i}`);
+      }
+
+      // Lose the middle row on B. Not the newest: B's coverage watermark is a
+      // MAX per author, so a loss underneath it leaves the watermark exactly
+      // where it was and the cloud goes on believing B holds the row.
+      const lost = created[1]!;
+      loseSharedRecord(serverB, lost.id);
+
+      // An ordinary round is blind to it, which is the finding the digest exists
+      // for rather than a quirk of this test.
+      const blind = await syncNow(driveB);
+      expect(blind.applied).toBe(0);
+      expect((await listRecords(driveB)).some((r) => r.id === lost.id)).toBe(false);
+
+      // The check sees it, in the direction that means "am I whole?".
+      const found = await verifyDrive(driveB);
+      expect(found.missingLocally).toBeGreaterThan(0);
+      expect(found.localRows).toBe(found.peerRows - 1);
+      // And it is not confused about which side lost something: the cloud is
+      // missing nothing, so the outbound repair trigger stays silent.
+      expect(found.divergentBuckets).toBe(0);
+
+      // The repair is armed, not performed — the ordinary scan carries it out on
+      // the next round, through the path every other test already exercises.
+      await eventually(async () => {
+        await syncNow(driveB);
+        expect(await fetchBytes(driveB, lost.id)).toBe("verify-bytes-1");
       });
-      created.push(record);
-    }
-    await converge();
-    for (let i = 0; i < 3; i += 1) {
-      expect(await fetchBytes(driveB, created[i]!.id)).toBe(`verify-bytes-${i}`);
-    }
 
-    // Lose the middle row on B. Not the newest: B's coverage watermark is a
-    // MAX per author, so a loss underneath it leaves the watermark exactly
-    // where it was and the cloud goes on believing B holds the row.
-    const lost = created[1]!;
-    loseSharedRecord(serverB, lost.id);
-
-    // An ordinary round is blind to it, which is the finding the digest exists
-    // for rather than a quirk of this test.
-    const blind = await syncNow(driveB);
-    expect(blind.applied).toBe(0);
-    expect((await listRecords(driveB)).some((r) => r.id === lost.id)).toBe(false);
-
-    // The check sees it, in the direction that means "am I whole?".
-    const found = await verifyDrive(driveB);
-    expect(found.missingLocally).toBeGreaterThan(0);
-    expect(found.localRows).toBe(found.peerRows - 1);
-    // And it is not confused about which side lost something: the cloud is
-    // missing nothing, so the outbound repair trigger stays silent.
-    expect(found.divergentBuckets).toBe(0);
-
-    // The repair is armed, not performed — the ordinary scan carries it out on
-    // the next round, through the path every other test already exercises.
-    await eventually(async () => {
-      await syncNow(driveB);
-      expect(await fetchBytes(driveB, lost.id)).toBe("verify-bytes-1");
-    });
-
-    // …and the follow-up check reports whole, so the floor retired rather than
-    // leaving the channel re-shipping that range forever.
-    const after = await verifyDrive(driveB);
-    expect(after.missingLocally).toBe(0);
-    expect(after.divergentBuckets).toBe(0);
-    expect(after.localRows).toBe(after.peerRows);
-  });
+      // …and the follow-up check reports whole, so the floor retired rather than
+      // leaving the channel re-shipping that range forever.
+      const after = await verifyDrive(driveB);
+      expect(after.missingLocally).toBe(0);
+      expect(after.divergentBuckets).toBe(0);
+      expect(after.localRows).toBe(after.peerRows);
+    },
+  );
 
   it("reports a healthy channel as whole, in both directions", async () => {
     await converge();
@@ -728,30 +766,34 @@ describe("verification and repair across the wire", () => {
 });
 
 describe("restart durability", () => {
-  it("B restarts mid-stream, restores watermarks, and converges without a re-ship storm", { timeout: 60_000 }, async () => {
-    await converge();
+  it(
+    "B restarts mid-stream, restores watermarks, and converges without a re-ship storm",
+    { timeout: 60_000 },
+    async () => {
+      await converge();
 
-    // Restart B on the same data dir and port.
-    const { starkeepDir, port } = serverB;
-    await serverB.stopKeepData();
-    serverB = await startLocalDataServer({ starkeepDir, port });
-    driveB = await builtinAppCreds(serverB, "starkeep-drive");
+      // Restart B on the same data dir and port.
+      const { starkeepDir, port } = serverB;
+      await serverB.stopKeepData();
+      serverB = await startLocalDataServer({ starkeepDir, port });
+      driveB = await builtinAppCreds(serverB, "starkeep-drive");
 
-    cloud.clearExchangeLog();
-    const quiet = await syncNow(driveB);
-    // Watermarks/HLC came back from the SQLite state store: nothing re-ships,
-    // nothing re-applies.
-    expect(quiet).toEqual({ applied: 0, shipped: 0, complete: true });
-    expect(
-      cloud.exchangeLog.filter((e) => e.appId === "starkeep-drive" && e.inRecords > 0),
-    ).toEqual([]);
+      cloud.clearExchangeLog();
+      const quiet = await syncNow(driveB);
+      // Watermarks/HLC came back from the SQLite state store: nothing re-ships,
+      // nothing re-applies.
+      expect(quiet).toEqual({ applied: 0, shipped: 0, complete: true });
+      expect(
+        cloud.exchangeLog.filter((e) => e.appId === "starkeep-drive" && e.inRecords > 0),
+      ).toEqual([]);
 
-    // And new writes still converge after the restart.
-    const { record } = await createGenericRecord(driveA, {
-      bytes: "post-restart-bytes",
-      fileName: "post-restart.jpg",
-    });
-    await converge();
-    expect(await fetchBytes(driveB, record.id)).toBe("post-restart-bytes");
-  });
+      // And new writes still converge after the restart.
+      const { record } = await createGenericRecord(driveA, {
+        bytes: "post-restart-bytes",
+        fileName: "post-restart.jpg",
+      });
+      await converge();
+      expect(await fetchBytes(driveB, record.id)).toBe("post-restart-bytes");
+    },
+  );
 });

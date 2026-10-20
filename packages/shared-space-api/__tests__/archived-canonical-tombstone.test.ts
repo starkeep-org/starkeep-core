@@ -57,8 +57,18 @@ async function record(over: {
 
 async function family(state: "archived" | "restoring" | "available" | null) {
   const original = await record({ fidelity: 6000, canonicalThreshold: 4272 });
-  const canonical = await record({ type: "image/avif", parentId: original.id, standInRole: "canonical", fidelity: 4272 });
-  const smaller = await record({ type: "image/avif", parentId: original.id, standInRole: "smaller", fidelity: 2560 });
+  const canonical = await record({
+    type: "image/avif",
+    parentId: original.id,
+    standInRole: "canonical",
+    fidelity: 4272,
+  });
+  const smaller = await record({
+    type: "image/avif",
+    parentId: original.id,
+    standInRole: "smaller",
+    fidelity: 2560,
+  });
   if (state) {
     await db.putAvailability({
       objectStorageKey: original.objectStorageKey!,
@@ -98,8 +108,12 @@ describe("keepCanonicalOfArchivedOriginal", () => {
   });
 
   it("lets it go when the original is readable, or has no availability row", async () => {
-    expect(await keepCanonicalOfArchivedOriginal(db, (await family("available")).canonical, {})).toBe(false);
-    expect(await keepCanonicalOfArchivedOriginal(db, (await family(null)).canonical, {})).toBe(false);
+    expect(
+      await keepCanonicalOfArchivedOriginal(db, (await family("available")).canonical, {}),
+    ).toBe(false);
+    expect(await keepCanonicalOfArchivedOriginal(db, (await family(null)).canonical, {})).toBe(
+      false,
+    );
   });
 
   it("lets it go when the original is already deleted", async () => {
@@ -118,6 +132,8 @@ describe("keepCanonicalOfArchivedOriginal", () => {
     const { original, smaller } = await family("archived");
     expect(await keepCanonicalOfArchivedOriginal(db, smaller, {})).toBe(false);
     expect(await keepCanonicalOfArchivedOriginal(db, original, {})).toBe(false);
-    expect(await keepCanonicalOfArchivedOriginal(db, await record({ type: "document/pdf" }), {})).toBe(false);
+    expect(
+      await keepCanonicalOfArchivedOriginal(db, await record({ type: "document/pdf" }), {}),
+    ).toBe(false);
   });
 });

@@ -161,9 +161,7 @@ describe("planFindByLabel", () => {
   it("omits the grant entirely for an all-access caller", () => {
     const plan = planFindByLabel({ appId: "alpha", key: "k" })!;
     expect(plan.serverWhere).toEqual([]);
-    expect(compiled(postgres, "pg", { appId: "alpha", key: "k" }).sql).not.toMatch(
-      /"record_type"/,
-    );
+    expect(compiled(postgres, "pg", { appId: "alpha", key: "k" }).sql).not.toMatch(/"record_type"/);
   });
 
   it("continues from a page token with the keyset chain over both keys", () => {

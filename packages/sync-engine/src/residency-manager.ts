@@ -20,11 +20,7 @@
  * nodes come to disagree about what they have.
  */
 
-import type {
-  DatabaseAdapter,
-  ObjectStorageAdapter,
-  RawDatabase,
-} from "@starkeep/storage-adapter";
+import type { DatabaseAdapter, ObjectStorageAdapter, RawDatabase } from "@starkeep/storage-adapter";
 import {
   ceilingPlacement,
   standardsFor,
@@ -37,11 +33,7 @@ import {
 import type { AcquisitionConsideration } from "./acquisition-scan.js";
 import type { ReplicaProbe } from "./durability.js";
 import { freeUpSpaceOn } from "./free-up-space.js";
-import {
-  decideResidency,
-  type BlobCandidate,
-  type ResidencyVerdict,
-} from "./residency-policy.js";
+import { decideResidency, type BlobCandidate, type ResidencyVerdict } from "./residency-policy.js";
 import {
   createSqliteResidentSetIndex,
   type ReconcileReport,
@@ -194,7 +186,6 @@ export interface ResidencyManager {
   setCeilings(next: SyncDownCeilings): void;
 }
 
-
 export function createResidencyManager(options: ResidencyManagerOptions): ResidencyManager {
   // Assigned to the object literal below, so "Free up space" and the watcher
   // share one departure path rather than two.
@@ -238,7 +229,9 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
 
   function groupOf(candidate: BlobCandidate): string {
     const category =
-      candidate.type === null ? null : standardsFor(candidate.type, currentStandards())?.category ?? null;
+      candidate.type === null
+        ? null
+        : (standardsFor(candidate.type, currentStandards())?.category ?? null);
     if (category === null || ceilingOf(candidate) === "keep") return KEPT_GROUP;
     return `${candidate.standInRole ? "stand-in" : "original"}:${category}`;
   }

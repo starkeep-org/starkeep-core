@@ -31,7 +31,10 @@ beforeEach(() => {
 describe("this machine's sign-in", () => {
   it("reads the sign-in from the daemon", async () => {
     reply = { status: 200, body: JSON.stringify({ state: "signed-in", email: "a@example.com" }) };
-    expect(await (await route.GET()).json()).toMatchObject({ state: "signed-in", email: "a@example.com" });
+    expect(await (await route.GET()).json()).toMatchObject({
+      state: "signed-in",
+      email: "a@example.com",
+    });
     expect(daemon.seen.map((r) => `${r.method} ${r.url}`)).toEqual(["GET /auth/status"]);
   });
 
@@ -66,7 +69,12 @@ describe("this machine's sign-in", () => {
     ["another site's page", "https://evil.example"],
     ["a request with no page at all", ""],
   ])("refuses a sign-in from %s, and reaches nothing", async (_name, origin) => {
-    const req = jsonRequest("/api/this-machine/sign-in", { email: "a@example.com", password: "x" }, "POST", origin);
+    const req = jsonRequest(
+      "/api/this-machine/sign-in",
+      { email: "a@example.com", password: "x" },
+      "POST",
+      origin,
+    );
     if (!origin) req.headers.delete("origin");
     const res = await route.POST_SIGN_IN(req);
     expect(res.status).toBe(403);
@@ -99,7 +107,9 @@ describe("this machine's sign-in", () => {
 
 describe("joining a cloud", () => {
   it("records the address as the daemon's cloud, without a trailing slash", async () => {
-    const res = await route.POST_CLOUD(jsonRequest("/api/this-machine/cloud", { url: " https://d1.cloudfront.net/ " }));
+    const res = await route.POST_CLOUD(
+      jsonRequest("/api/this-machine/cloud", { url: " https://d1.cloudfront.net/ " }),
+    );
     expect(res.status).toBe(200);
     const sent = daemon.seen.at(-1)!;
     expect(sent).toMatchObject({ method: "PATCH", url: "/config" });
@@ -108,18 +118,24 @@ describe("joining a cloud", () => {
 
   it("refuses a cloud address another site's page sends", async () => {
     const res = await route.POST_CLOUD(
-      jsonRequest("/api/this-machine/cloud", { url: "https://evil.example" }, "POST", "https://evil.example"),
+      jsonRequest(
+        "/api/this-machine/cloud",
+        { url: "https://evil.example" },
+        "POST",
+        "https://evil.example",
+      ),
     );
     expect(res.status).toBe(403);
     expect(daemon.seen).toEqual([]);
   });
 
-  it.each([["plain http", "http://d1.cloudfront.net"], ["not a URL", "d1"], ["nothing", ""]])(
-    "refuses %s, and changes nothing",
-    async (_name, url) => {
-      const res = await route.POST_CLOUD(jsonRequest("/api/this-machine/cloud", { url }));
-      expect(res.status).toBe(400);
-      expect(daemon.seen).toEqual([]);
-    },
-  );
+  it.each([
+    ["plain http", "http://d1.cloudfront.net"],
+    ["not a URL", "d1"],
+    ["nothing", ""],
+  ])("refuses %s, and changes nothing", async (_name, url) => {
+    const res = await route.POST_CLOUD(jsonRequest("/api/this-machine/cloud", { url }));
+    expect(res.status).toBe(400);
+    expect(daemon.seen).toEqual([]);
+  });
 });

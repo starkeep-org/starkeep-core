@@ -74,8 +74,7 @@ function refusingPutFor(db: DatabaseAdapter, id: StarkeepId): DatabaseAdapter {
           return (value as (r: AnyRecord) => unknown).call(target, record);
         };
       }
-      return (...args: unknown[]) =>
-        (value as (...a: unknown[]) => unknown).apply(target, args);
+      return (...args: unknown[]) => (value as (...a: unknown[]) => unknown).apply(target, args);
     },
   }) as DatabaseAdapter;
 }
@@ -148,9 +147,9 @@ describe("a shared-record apply that fails", () => {
 
     const transport = responderFor(cloud, refusingPutFor(cloud.db, early.id));
 
-    await expect(
-      transport.exchange({ watermarks: {}, records: [late, early] }),
-    ).rejects.toThrow(/injected put failure/);
+    await expect(transport.exchange({ watermarks: {}, records: [late, early] })).rejects.toThrow(
+      /injected put failure/,
+    );
   });
 
   it("applies an author's records in HLC order whatever the wire order, so a failure leaves nothing above it", async () => {
@@ -165,9 +164,7 @@ describe("a shared-record apply that fails", () => {
     const late = authoredRecord(local, "L", 20);
 
     const transport = responderFor(cloud, refusingPutFor(cloud.db, early.id));
-    await expect(
-      transport.exchange({ watermarks: {}, records: [late, early] }),
-    ).rejects.toThrow();
+    await expect(transport.exchange({ watermarks: {}, records: [late, early] })).rejects.toThrow();
 
     expect(await cloud.db.get(early.id), "the earlier row never landed").toBeNull();
     expect(await cloud.db.get(late.id), "nor did anything above it").toBeNull();
@@ -182,9 +179,7 @@ describe("a shared-record apply that fails", () => {
     const late = authoredRecord(local, "L", 20);
 
     const failing = responderFor(cloud, refusingPutFor(cloud.db, early.id));
-    await expect(
-      failing.exchange({ watermarks: {}, records: [late, early] }),
-    ).rejects.toThrow();
+    await expect(failing.exchange({ watermarks: {}, records: [late, early] })).rejects.toThrow();
 
     const retry = responderFor(cloud);
     const response = await retry.exchange({ watermarks: {}, records: [late, early] });

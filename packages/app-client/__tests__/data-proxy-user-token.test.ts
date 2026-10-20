@@ -75,7 +75,10 @@ function handlerWithSession() {
 
 describe("the proxy carries the end user upstream", () => {
   it("forwards the minted ID token beside the signature", async () => {
-    sessionMock.mintIdToken.mockResolvedValue({ token: "id-token-abc", claims: { sub: "u1", exp: 0 } });
+    sessionMock.mintIdToken.mockResolvedValue({
+      token: "id-token-abc",
+      claims: { sub: "u1", exp: 0 },
+    });
 
     const res = await handlerWithSession()(request(), ctx);
 

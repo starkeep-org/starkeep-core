@@ -88,9 +88,11 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
   const manifestPath = join(app.appDir, "starkeep.manifest.json");
   const appDeclaresFiles =
     existsSync(manifestPath) &&
-    (JSON.parse(readFileSync(manifestPath, "utf-8")) as {
-      infraRequirements?: { appSpecificSyncable?: { files?: boolean } };
-    }).infraRequirements?.appSpecificSyncable?.files === true;
+    (
+      JSON.parse(readFileSync(manifestPath, "utf-8")) as {
+        infraRequirements?: { appSpecificSyncable?: { files?: boolean } };
+      }
+    ).infraRequirements?.appSpecificSyncable?.files === true;
 
   // Shared journey state, filled in step order.
   let outputs: BootstrapOutputs;
@@ -262,7 +264,10 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
   async function writeRecord(
     target: LdsApp,
     options: { type: string; contentType: string; bytes: Buffer } & Record<string, unknown>,
-  ): Promise<{ status: number; body: { record?: { id: string }; deduped?: boolean; [k: string]: unknown } }> {
+  ): Promise<{
+    status: number;
+    body: { record?: { id: string }; deduped?: boolean; [k: string]: unknown };
+  }> {
     const { type, contentType, bytes, ...rest } = options;
     const upload = await target.fetch(`/data/files?type=${encodeURIComponent(type)}`, {
       method: "POST",
@@ -270,13 +275,26 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
       body: bytes,
     });
     expect(upload.status, await upload.clone().text()).toBe(200);
-    const { contentHash, sizeBytes } = (await upload.json()) as { contentHash: string; sizeBytes: number };
+    const { contentHash, sizeBytes } = (await upload.json()) as {
+      contentHash: string;
+      sizeBytes: number;
+    };
     const res = await target.fetch("/data/records", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type, contentType, contentHash, sizeBytes, fileName: `tier3-${contentHash.slice(0, 8)}`, ...rest }),
+      body: JSON.stringify({
+        type,
+        contentType,
+        contentHash,
+        sizeBytes,
+        fileName: `tier3-${contentHash.slice(0, 8)}`,
+        ...rest,
+      }),
     });
-    return { status: res.status, body: (await res.json()) as { record?: { id: string }; deduped?: boolean } };
+    return {
+      status: res.status,
+      body: (await res.json()) as { record?: { id: string }; deduped?: boolean },
+    };
   }
 
   /**
@@ -284,7 +302,10 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
    * status — the cloud answers 201, the local server 200 — so the body's
    * `deduped` flag is what says the record is new.
    */
-  function expectCreated(result: { status: number; body: { deduped?: unknown } }, message?: string): void {
+  function expectCreated(
+    result: { status: number; body: { deduped?: unknown } },
+    message?: string,
+  ): void {
     const detail = `${message ? `${message}: ` : ""}${JSON.stringify(result.body)}`;
     expect(result.status, detail).toBeLessThan(300);
     expect(result.body.deduped, detail).toBeFalsy();
@@ -302,7 +323,10 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
     const res = await target.fetch(`/data/records/${id}`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
-    const record = (body.record ?? body) as { objectStorageKey?: string; object_storage_key?: string };
+    const record = (body.record ?? body) as {
+      objectStorageKey?: string;
+      object_storage_key?: string;
+    };
     const key = record.objectStorageKey ?? record.object_storage_key;
     expect(key, JSON.stringify(body)).toBeTruthy();
     return key!;
@@ -310,7 +334,9 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
 
   /** The live canonical stand-ins of an original, as a data server lists them. */
   async function liveCanonicals(target: LdsApp, originalId: string): Promise<string[]> {
-    const where = encodeURIComponent(JSON.stringify({ parent_id: originalId, stand_in_role: "canonical" }));
+    const where = encodeURIComponent(
+      JSON.stringify({ parent_id: originalId, stand_in_role: "canonical" }),
+    );
     const res = await target.fetch(`/data/records?include=stand-ins&where=${where}`);
     expect(res.status, await res.clone().text()).toBe(200);
     const { records } = (await res.json()) as { records: Array<{ id: string }> };
@@ -318,12 +344,24 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
   }
 
   /** An archivable photograph: past the 1 MiB size floor, above the 4272 threshold. */
-  function archivableOriginal(): { type: string; contentType: string; bytes: Buffer; fidelity: number } {
-    return { type: "image/jpeg", contentType: "image/jpeg", bytes: randomBytes(1_200_000), fidelity: 6000 };
+  function archivableOriginal(): {
+    type: string;
+    contentType: string;
+    bytes: Buffer;
+    fidelity: number;
+  } {
+    return {
+      type: "image/jpeg",
+      contentType: "image/jpeg",
+      bytes: randomBytes(1_200_000),
+      fidelity: 6000,
+    };
   }
 
   /** A canonical stand-in for `parentId`, with fresh bytes. */
-  function canonicalFor(parentId: string): Record<string, unknown> & { type: string; contentType: string; bytes: Buffer } {
+  function canonicalFor(
+    parentId: string,
+  ): Record<string, unknown> & { type: string; contentType: string; bytes: Buffer } {
     return {
       type: "image/avif",
       contentType: "image/avif",
@@ -375,7 +413,11 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
   function localVersionOf(table: string, id: string): HLCTimestamp {
     const db = new DatabaseSync(join(paths.dataDir, "data.db"), { readOnly: true });
     try {
-      const query = sqliteCompiler.selectFrom(table).select("updated_at").where("id", "=", id).compile();
+      const query = sqliteCompiler
+        .selectFrom(table)
+        .select("updated_at")
+        .where("id", "=", id)
+        .compile();
       const row = db.prepare(query.sql).get(...(query.parameters as string[])) as
         | { updated_at?: string }
         | undefined;
@@ -927,7 +969,11 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
             bytes,
           });
           expectCreated(written, "the record whose bytes go missing");
-          const record = written.body.record as { id: string; object_storage_key: string; path: string | null };
+          const record = written.body.record as {
+            id: string;
+            object_storage_key: string;
+            path: string | null;
+          };
           id = record.id;
           key = record.object_storage_key;
           expect(record.path, JSON.stringify(record)).toBeTruthy();
@@ -943,7 +989,8 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
           async () => {
             await syncDesktop();
             const res = await cloudDrive.fetch(`/data/records/${id}`);
-            if (res.status !== 200) throw new Error(`row ${id} has not reached the cloud (${res.status})`);
+            if (res.status !== 200)
+              throw new Error(`row ${id} has not reached the cloud (${res.status})`);
           },
           { timeoutMs: 60_000, intervalMs: 2_000 },
         );
@@ -984,14 +1031,21 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ contentHash, mimeType: "application/octet-stream", sizeBytes: bytes.length }),
+              body: JSON.stringify({
+                contentHash,
+                mimeType: "application/octet-stream",
+                sizeBytes: bytes.length,
+              }),
             },
           );
           const registered = (await register.json()) as { key?: string };
           expect(register.status, JSON.stringify(registered)).toBe(200);
           const key = registered.key!;
           // The reserved table's row id is the file's object key.
-          const version = localVersionOf(appSyncableTableName(app.appId, "_starkeep_sync_records"), key);
+          const version = localVersionOf(
+            appSyncableTableName(app.appId, "_starkeep_sync_records"),
+            key,
+          );
 
           await eventually(
             async () => {
@@ -1661,7 +1715,10 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         await eventually(
           async () => {
             await syncDesktop();
-            expect(await objectTags(key)).toEqual({ "starkeep:intent": "archive", "starkeep:ladder": "complete" });
+            expect(await objectTags(key)).toEqual({
+              "starkeep:intent": "archive",
+              "starkeep:ladder": "complete",
+            });
           },
           { timeoutMs: 90_000, intervalMs: 3_000 },
         );
@@ -1673,7 +1730,9 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         const res = await drive.fetch("/data/labels", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ labels: [{ recordId: archivedOriginal.id, key: "do-not-archive" }] }),
+          body: JSON.stringify({
+            labels: [{ recordId: archivedOriginal.id, key: "do-not-archive" }],
+          }),
         });
         expect(res.status, await res.text()).toBeLessThan(300);
         await eventually(
@@ -1722,7 +1781,10 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
           perApp: Array<{ appId: string; lastError: string | null }>;
         };
         const driveEngine = status.perApp.find((e) => e.appId === "starkeep-drive");
-        expect(driveEngine?.lastError ?? null, "the collision must not wedge the Drive channel").toBeNull();
+        expect(
+          driveEngine?.lastError ?? null,
+          "the collision must not wedge the Drive channel",
+        ).toBeNull();
       });
 
       // "Free up space" deletes a person's local copy only after proving the
@@ -1765,7 +1827,9 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         ).toContain(id);
         expect(existsSync(onDisk), "a dry run removes nothing").toBe(true);
 
-        const report = (await (await free(false)).json()) as { removed: Array<{ recordId: string }> };
+        const report = (await (await free(false)).json()) as {
+          removed: Array<{ recordId: string }>;
+        };
         expect(report.removed.map((r) => r.recordId)).toContain(id);
         expect(existsSync(onDisk)).toBe(false);
 

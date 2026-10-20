@@ -217,7 +217,10 @@ describe("FsObjectStorageAdapter", () => {
         await adapter.putSymlink(`shared-${i}`, gone);
         await unlink(gone);
 
-        await Promise.all([adapter.putSymlink(`shared-${i}`, a), adapter.putSymlink(`shared-${i}`, b)]);
+        await Promise.all([
+          adapter.putSymlink(`shared-${i}`, a),
+          adapter.putSymlink(`shared-${i}`, b),
+        ]);
         expect((await adapter.get(`shared-${i}`))!.data.toString()).toBe("bytes");
       }
     });
@@ -225,7 +228,9 @@ describe("FsObjectStorageAdapter", () => {
 
   describe("streaming", () => {
     const payload = Buffer.from("streamed contents, not buffered");
-    const hex = createHash("sha256").update(payload as unknown as Uint8Array).digest("hex");
+    const hex = createHash("sha256")
+      .update(payload as unknown as Uint8Array)
+      .digest("hex");
 
     function source(data: Buffer): ReadableStream<Uint8Array> {
       return new ReadableStream<Uint8Array>({

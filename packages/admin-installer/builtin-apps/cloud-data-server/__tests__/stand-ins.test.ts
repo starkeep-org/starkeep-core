@@ -53,7 +53,8 @@ let settingsParam: DeploymentSettings | null | "fail" = null;
 
 /** How many times the cloud read the deployment-settings parameter. */
 const settingsReads = (): number =>
-  ssmMock.commandCalls(GetParameterCommand).filter((c) => c.args[0].input.Name === SETTINGS_PARAM).length;
+  ssmMock.commandCalls(GetParameterCommand).filter((c) => c.args[0].input.Name === SETTINGS_PARAM)
+    .length;
 
 type HandlerModule = typeof import("../src/api-handler.js");
 let handler: HandlerModule["handler"];
@@ -116,7 +117,12 @@ beforeEach(() => {
   s3Mock.on(HeadObjectCommand).resolves({});
 });
 
-function request(appId: string, method: string, subPath: string, query?: Record<string, string>): APIGatewayEvent {
+function request(
+  appId: string,
+  method: string,
+  subPath: string,
+  query?: Record<string, string>,
+): APIGatewayEvent {
   const headers = signRequest({ appId, hmacSecret: `secret-${appId}`, method, path: subPath });
   return {
     rawPath: `/apps/${appId}${subPath}`,
@@ -184,7 +190,8 @@ function standInBody(over: Record<string, unknown> = {}) {
 
 /** The column values of an insert, keyed by column name. */
 function inserted(q: LoggedQuery): Record<string, unknown> {
-  const columns = /insert into "shared"\."records" \(([^)]*)\)/.exec(q.text)![1]!
+  const columns = /insert into "shared"\."records" \(([^)]*)\)/
+    .exec(q.text)![1]!
     .split(",")
     .map((c) => c.trim().replace(/"/g, ""));
   return Object.fromEntries(columns.map((c, i) => [c, q.values[i]]));
@@ -220,16 +227,27 @@ describe("POST /data/records with a stand-in", () => {
     expect(res.statusCode).toBe(201);
     const inserts = db.calls(RECORDS_INSERT).map(inserted);
     expect(inserts.map((i) => i.id)).toEqual([PARENT_ID, expect.any(String)]);
-    expect(inserts[0]).toMatchObject({ fidelity: 5000, origin_app_id: "drive", version: 2, stand_in_slot: null });
+    expect(inserts[0]).toMatchObject({
+      fidelity: 5000,
+      origin_app_id: "drive",
+      version: 2,
+      stand_in_slot: null,
+    });
     expect(inserts[1]).toMatchObject({ stand_in_role: "smaller" });
   });
 
   it("returns the planner's refusal unchanged, writing nothing", async () => {
     const db = fakeDsqlWithGrants(GRANTS).on(GET_BY_ID, [parentRow()]).on(LIVE_STAND_IN, []);
     setDbFactory(db);
-    const res = await handler(post("si3", standInBody({ standIn: { role: "smaller", fidelity: 500 } })), context);
+    const res = await handler(
+      post("si3", standInBody({ standIn: { role: "smaller", fidelity: 500 } })),
+      context,
+    );
     expect(res.statusCode).toBe(400);
-    expect(JSON.parse(res.body)).toMatchObject({ error: "InvalidStandIn", code: "not-a-standard-size" });
+    expect(JSON.parse(res.body)).toMatchObject({
+      error: "InvalidStandIn",
+      code: "not-a-standard-size",
+    });
     expect(db.calls(RECORDS_INSERT)).toHaveLength(0);
   });
 
@@ -252,7 +270,10 @@ describe("POST /data/records with a stand-in", () => {
     setDbFactory(db);
     const res = await handler(post("si4", standInBody()), context);
     expect(res.statusCode).toBe(409);
-    expect(JSON.parse(res.body)).toMatchObject({ error: "StandInExists", existing: "01OCCUPANT0000000000000000" });
+    expect(JSON.parse(res.body)).toMatchObject({
+      error: "StandInExists",
+      existing: "01OCCUPANT0000000000000000",
+    });
     expect(db.calls(RECORDS_INSERT)).toHaveLength(0);
   });
 
@@ -275,29 +296,49 @@ describe("POST /data/records with a stand-in", () => {
       )
       .on(RECORDS_INSERT, () => {
         raced = true;
-        throw new Error('duplicate key value violates unique constraint "uq_records_stand_in_slot"');
+        throw new Error(
+          'duplicate key value violates unique constraint "uq_records_stand_in_slot"',
+        );
       });
     setDbFactory(db);
     const res = await handler(post("si5", standInBody()), context);
     expect(res.statusCode).toBe(409);
-    expect(JSON.parse(res.body)).toMatchObject({ error: "StandInExists", existing: "01WINNER000000000000000000" });
+    expect(JSON.parse(res.body)).toMatchObject({
+      error: "StandInExists",
+      existing: "01WINNER000000000000000000",
+    });
   });
 
   it("stores an original's own fidelity", async () => {
     const db = fakeDsqlWithGrants(GRANTS).on(RECORDS_INSERT, []);
     setDbFactory(db);
     const res = await handler(
-      post("si6", { type: "image/jpeg", contentType: "image/jpeg", contentHash: HASH, sizeBytes: 3, fidelity: 4000 }),
+      post("si6", {
+        type: "image/jpeg",
+        contentType: "image/jpeg",
+        contentHash: HASH,
+        sizeBytes: 3,
+        fidelity: 4000,
+      }),
       context,
     );
     expect(res.statusCode).toBe(201);
-    expect(inserted(db.calls(RECORDS_INSERT)[0]!)).toMatchObject({ fidelity: 4000, stand_in_role: null });
+    expect(inserted(db.calls(RECORDS_INSERT)[0]!)).toMatchObject({
+      fidelity: 4000,
+      stand_in_role: null,
+    });
   });
 
   it("refuses a fidelity on a record outside the stand-in categories", async () => {
     setDbFactory(fakeDsqlWithGrants([{ type_id: "document/pdf", access: "readwrite" }]));
     const res = await handler(
-      post("si7", { type: "document/pdf", contentType: "application/pdf", contentHash: HASH, sizeBytes: 3, fidelity: 4 }),
+      post("si7", {
+        type: "document/pdf",
+        contentType: "application/pdf",
+        contentHash: HASH,
+        sizeBytes: 3,
+        fidelity: 4,
+      }),
       context,
     );
     expect(res.statusCode).toBe(400);
@@ -336,11 +377,18 @@ describe("GET /data/records", () => {
     setDbFactory(db);
     const res = await handler(request("ls1", "GET", "/data/records"), context);
     expect(res.statusCode).toBe(200);
-    const page = db.calls(/select \* from "shared"\."records"/).find((q) => !STAND_INS_OF_PAGE.test(q.text))!;
+    const page = db
+      .calls(/select \* from "shared"\."records"/)
+      .find((q) => !STAND_INS_OF_PAGE.test(q.text))!;
     expect(page.text).toMatch(/"stand_in_role" is null/);
     const record = JSON.parse(res.body).records[0];
     expect(record.stand_ins.status).toBe("archivable");
-    expect(record.stand_ins.sizes.map((s: { fidelity: number; placement: string }) => [s.fidelity, s.placement])).toEqual([
+    expect(
+      record.stand_ins.sizes.map((s: { fidelity: number; placement: string }) => [
+        s.fidelity,
+        s.placement,
+      ]),
+    ).toEqual([
       [320, "missing"],
       [640, "cloud"],
       [1280, "missing"],
@@ -352,7 +400,10 @@ describe("GET /data/records", () => {
   it("drops the collapse for include=stand-ins", async () => {
     const db = fakeDsqlWithGrants(GRANTS).on(/select \* from "shared"\."records"/, [smallRow()]);
     setDbFactory(db);
-    const res = await handler(request("ls2", "GET", "/data/records", { include: "stand-ins" }), context);
+    const res = await handler(
+      request("ls2", "GET", "/data/records", { include: "stand-ins" }),
+      context,
+    );
     expect(res.statusCode).toBe(200);
     for (const q of db.calls(/select \* from "shared"\."records"/)) {
       expect(q.text).not.toMatch(/"stand_in_role" is null/);
@@ -364,12 +415,20 @@ describe("GET /data/records", () => {
       .on(STAND_INS_OF_PAGE, [smallRow()])
       .on(/select \* from "shared"\."records"/, [parentRow()]);
     setDbFactory(db);
-    const res = await handler(request("ls3", "GET", "/data/records", { include: "stand-in-urls" }), context);
+    const res = await handler(
+      request("ls3", "GET", "/data/records", { include: "stand-in-urls" }),
+      context,
+    );
     expect(res.statusCode).toBe(200);
-    const sizes = JSON.parse(res.body).records[0].stand_ins.sizes as Array<{ fidelity: number; url?: string }>;
+    const sizes = JSON.parse(res.body).records[0].stand_ins.sizes as Array<{
+      fidelity: number;
+      url?: string;
+    }>;
     // Existing sizes are signed against the platform distribution; missing
     // sizes have nothing to sign.
-    expect(sizes.find((s) => s.fidelity === 640)!.url).toMatch(/^https:\/\/d1234testcdn\.cloudfront\.net\/shared\/test-user\/image\//);
+    expect(sizes.find((s) => s.fidelity === 640)!.url).toMatch(
+      /^https:\/\/d1234testcdn\.cloudfront\.net\/shared\/test-user\/image\//,
+    );
     expect(sizes.find((s) => s.fidelity === 320)!.url).toBeUndefined();
   });
 });
@@ -386,7 +445,9 @@ describe("GET /data/records/:id/content-url", () => {
   });
 
   it("answers 404 with the summary for a size nobody produced", async () => {
-    setDbFactory(fakeDsqlWithGrants(GRANTS).on(GET_BY_ID, [parentRow()]).on(STAND_INS_OF_PAGE, [smallRow()]));
+    setDbFactory(
+      fakeDsqlWithGrants(GRANTS).on(GET_BY_ID, [parentRow()]).on(STAND_INS_OF_PAGE, [smallRow()]),
+    );
     const res = await handler(
       request("cu2", "GET", `/data/records/${PARENT_ID}/content-url`, { size: "1280" }),
       context,
@@ -397,7 +458,9 @@ describe("GET /data/records/:id/content-url", () => {
 
   it("refuses to read a record the caller cannot read", async () => {
     setDbFactory(
-      fakeDsqlWithGrants([{ type_id: "image/avif", access: "readwrite" }]).on(GET_BY_ID, [parentRow()]),
+      fakeDsqlWithGrants([{ type_id: "image/avif", access: "readwrite" }]).on(GET_BY_ID, [
+        parentRow(),
+      ]),
     );
     const res = await handler(
       request("cu3", "GET", `/data/records/${PARENT_ID}/content-url`, { size: "640" }),
@@ -481,7 +544,8 @@ describe("GET /data/records/:id/content-url, signed", () => {
 });
 
 describe("the platform's archiving decision", () => {
-  const SHARING = /from "shared"\."records" where "object_storage_key" = \$1 and "deleted_at" is null/;
+  const SHARING =
+    /from "shared"\."records" where "object_storage_key" = \$1 and "deleted_at" is null/;
   const LABELS_BY_IDS = /from "shared"\."record_labels" where "record_id" in/;
   const PARENT_KEY = parentRow()["object_storage_key"] as string;
 
@@ -522,16 +586,21 @@ describe("the platform's archiving decision", () => {
     // then arrive through a presigned PUT this handler never sees. The next
     // exchange's walk over the cloud's files is where the cloud learns of
     // them, and it re-decides there. Found by the tier-3 journey.
-    const recordStamp = serializeHLC({ wallTime: Date.UTC(2026, 0, 1), counter: 0, nodeId: "test" });
+    const recordStamp = serializeHLC({
+      wallTime: Date.UTC(2026, 0, 1),
+      counter: 0,
+      nodeId: "test",
+    });
     const db = fakeDsqlWithGrants(GRANTS)
       .on(GET_BY_ID, (q) => (q.values.includes(CANONICAL_ID) ? [canonicalRow()] : [parentRow()]))
       .on(LIVE_STAND_IN, [canonicalRow()])
       .on(SHARING, [parentRow()])
       .on(LABELS_BY_IDS, [])
       .on(/"app_starkeep_drive"\."_starkeep_byte_coverage"/, [])
-      .on(/select "node_id", max\("updated_at"\).*from "shared"\."records" (?:where "shared"\."records"\."user_id" = \$\d+ )?group by "node_id"/, [
-        { node_id: "test", max_updated_at: recordStamp },
-      ])
+      .on(
+        /select "node_id", max\("updated_at"\).*from "shared"\."records" (?:where "shared"\."records"\."user_id" = \$\d+ )?group by "node_id"/,
+        [{ node_id: "test", max_updated_at: recordStamp }],
+      )
       // The walk's scan above the stored bytes watermark, which is empty.
       .on(/select \* from "shared"\."records"/, [canonicalRow()]);
     setDbFactory(db);
@@ -675,7 +744,13 @@ describe("POST /data/records/:id/fidelity", () => {
       rawPath: `/apps/${appId}${path}`,
       requestContext: { http: { method: "POST" } },
       headers: {
-        ...signRequest({ appId, hmacSecret: `secret-${appId}`, method: "POST", path, body: bodyStr }),
+        ...signRequest({
+          appId,
+          hmacSecret: `secret-${appId}`,
+          method: "POST",
+          path,
+          body: bodyStr,
+        }),
         "X-Starkeep-User-Token": userToken,
       },
       body: bodyStr,
@@ -686,9 +761,13 @@ describe("POST /data/records/:id/fidelity", () => {
     const db = fakeDsqlWithGrants(GRANTS)
       // Unmeasured and unstamped: the report records both, so the cloud reads
       // the deployment's settings to know what to stamp with.
-      .on(GET_BY_ID, [parentRow({ fidelity: null, canonical_threshold: null, origin_app_id: "drive" })])
+      .on(GET_BY_ID, [
+        parentRow({ fidelity: null, canonical_threshold: null, origin_app_id: "drive" }),
+      ])
       .on(LIVE_STAND_IN, [])
-      .on(/from "shared"\."records" where "object_storage_key" = \$1 and "deleted_at" is null/, [parentRow()])
+      .on(/from "shared"\."records" where "object_storage_key" = \$1 and "deleted_at" is null/, [
+        parentRow(),
+      ])
       .on(/from "shared"\."record_labels" where "record_id" in/, [])
       .on(RECORDS_INSERT, []);
     setDbFactory(db);
@@ -735,7 +814,13 @@ describe("reading the deployment's settings", () => {
       rawPath: `/apps/${appId}${path}`,
       requestContext: { http: { method: "POST" } },
       headers: {
-        ...signRequest({ appId, hmacSecret: `secret-${appId}`, method: "POST", path, body: bodyStr }),
+        ...signRequest({
+          appId,
+          hmacSecret: `secret-${appId}`,
+          method: "POST",
+          path,
+          body: bodyStr,
+        }),
         "X-Starkeep-User-Token": userToken,
       },
       body: bodyStr,
@@ -777,7 +862,10 @@ describe("reading the deployment's settings", () => {
 
   it("reads them before a Drive exchange applies an unstamped original", async () => {
     const db = emptyStore();
-    const res = await handler(exchange({ watermarks: {}, records: [shippedOriginal(null)] }), context);
+    const res = await handler(
+      exchange({ watermarks: {}, records: [shippedOriginal(null)] }),
+      context,
+    );
     expect(res.statusCode, res.body).toBe(200);
     expect(settingsReads()).toBe(1);
     expect(db.calls(RECORDS_INSERT).length).toBeGreaterThan(0);
@@ -795,7 +883,13 @@ describe("reading the deployment's settings", () => {
   it("reads them for a record write that stamps, and skips them otherwise", async () => {
     emptyStore();
     await handler(
-      post("rs1", { type: "image/jpeg", contentType: "image/jpeg", contentHash: HASH, sizeBytes: 3, fidelity: 4000 }),
+      post("rs1", {
+        type: "image/jpeg",
+        contentType: "image/jpeg",
+        contentHash: HASH,
+        sizeBytes: 3,
+        fidelity: 4000,
+      }),
       context,
     );
     expect(settingsReads()).toBe(1);
@@ -803,7 +897,15 @@ describe("reading the deployment's settings", () => {
     ssmMock.resetHistory();
     resetSettingsCache();
     emptyStore();
-    await handler(post("rs2", { type: "image/jpeg", contentType: "image/jpeg", contentHash: HASH, sizeBytes: 3 }), context);
+    await handler(
+      post("rs2", {
+        type: "image/jpeg",
+        contentType: "image/jpeg",
+        contentHash: HASH,
+        sizeBytes: 3,
+      }),
+      context,
+    );
     expect(settingsReads()).toBe(0);
   });
 

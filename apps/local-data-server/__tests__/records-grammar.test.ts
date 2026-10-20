@@ -146,8 +146,7 @@ describe("the shapes production issues", () => {
   });
 
   it("photos library: a page of originals with metadata and labels", async () => {
-    const suffix =
-      `&include=metadata,labels&notLabel=${encodeURIComponent(RENDITION)}`;
+    const suffix = `&include=metadata,labels&notLabel=${encodeURIComponent(RENDITION)}`;
     const answer = (await body(`?limit=10${suffix}`)) as {
       records: { id: string }[];
       hasMore: boolean;
@@ -237,15 +236,14 @@ describe("what the grammar reaches that the parameter set never could", () => {
     };
     // The two renditions carry no capture time, so they sort into the null
     // bucket, which is last in both directions on purpose.
-    const withCapture = [...originals].sort((a, b) =>
-      a.capturedAt < b.capturedAt ? 1 : -1,
-    );
-    expect(records.slice(0, ORIGINAL_COUNT).map((r) => r.id)).toEqual(
-      withCapture.map((o) => o.id),
-    );
-    expect(records.slice(ORIGINAL_COUNT).map((r) => r.id).sort()).toEqual(
-      [...renditions].sort(),
-    );
+    const withCapture = [...originals].sort((a, b) => (a.capturedAt < b.capturedAt ? 1 : -1));
+    expect(records.slice(0, ORIGINAL_COUNT).map((r) => r.id)).toEqual(withCapture.map((o) => o.id));
+    expect(
+      records
+        .slice(ORIGINAL_COUNT)
+        .map((r) => r.id)
+        .sort(),
+    ).toEqual([...renditions].sort());
   });
 
   it("pages a capture-ordered library without losing or repeating a record", async () => {
@@ -282,9 +280,7 @@ describe("what the grammar reaches that the parameter set never could", () => {
     );
     expect(res.status).toBe(200);
     const { groups } = (await res.json()) as { groups: { type: string; n: number }[] };
-    expect(groups).toEqual([
-      { type: "image/jpeg", n: ORIGINAL_COUNT + renditions.length },
-    ]);
+    expect(groups).toEqual([{ type: "image/jpeg", n: ORIGINAL_COUNT + renditions.length }]);
   });
 });
 

@@ -137,7 +137,9 @@ describe("shared.record_labels", () => {
     // for three months. The guard replaces a `pg_indexes` round trip per index
     // and the race between checking and creating.
     const statements = await init();
-    const creates = statements.filter((s) => s.includes("CREATE INDEX ASYNC") || s.includes("CREATE UNIQUE INDEX ASYNC"));
+    const creates = statements.filter(
+      (s) => s.includes("CREATE INDEX ASYNC") || s.includes("CREATE UNIQUE INDEX ASYNC"),
+    );
     expect(creates.length).toBeGreaterThan(0);
     for (const create of creates) {
       expect(create).toMatch(/IF NOT EXISTS/i);
@@ -220,7 +222,9 @@ describe("every table in `shared` is granted to something", () => {
 describe("shared.records stand-in columns", () => {
   it("declares the role, the fidelity and the slot in CREATE TABLE", async () => {
     const create = find(await init(), 'create table if not exists "shared"."records"')!;
-    expect(create).toMatch(/"stand_in_role" text check \(stand_in_role IN \('canonical', 'smaller'\)\)/);
+    expect(create).toMatch(
+      /"stand_in_role" text check \(stand_in_role IN \('canonical', 'smaller'\)\)/,
+    );
     expect(create).toContain('"fidelity" integer');
     expect(create).toContain('"stand_in_slot" text');
   });
@@ -257,21 +261,27 @@ describe("every owned table leads with its owner", () => {
   const OWNED = ["shared.records", "shared.record_labels", "shared.object_availability"];
 
   it.each(OWNED)("%s has the owner column and leads its primary key with it", async (table) => {
-    const create = (await init()).find((s) => s.startsWith(`create table if not exists "${table.replace(".", '"."')}"`));
+    const create = (await init()).find((s) =>
+      s.startsWith(`create table if not exists "${table.replace(".", '"."')}"`),
+    );
     expect(create, table).toBeDefined();
     expect(create).toMatch(/"user_id" text not null/);
     expect(create).toMatch(/primary key \("user_id", /);
   });
 
   it("leads every metadata table's primary key with the owner", async () => {
-    const creates = (await init()).filter((s) => /CREATE TABLE IF NOT EXISTS shared\.record_\w+_metadata/.test(s));
+    const creates = (await init()).filter((s) =>
+      /CREATE TABLE IF NOT EXISTS shared\.record_\w+_metadata/.test(s),
+    );
     expect(creates.length).toBeGreaterThan(0);
     for (const create of creates) expect(create).toContain("PRIMARY KEY (user_id, record_id)");
   });
 
   it("leads every index on an owned table with the owner", async () => {
     const indexes = (await init()).filter(
-      (s) => /CREATE (UNIQUE )?INDEX/.test(s) && /ON shared\.(records|record_labels|object_availability|record_\w+_metadata)\b/.test(s),
+      (s) =>
+        /CREATE (UNIQUE )?INDEX/.test(s) &&
+        /ON shared\.(records|record_labels|object_availability|record_\w+_metadata)\b/.test(s),
     );
     expect(indexes.length).toBeGreaterThan(0);
     for (const index of indexes) expect(index, index).toMatch(/\((user_id|"user_id"),/);

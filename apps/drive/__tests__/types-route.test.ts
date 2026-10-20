@@ -97,7 +97,10 @@ describe("GET /api/types — the cloud half is best-effort", () => {
     listCloudTypes.mockRejectedValue(new Error("cloud not configured"));
 
     const res = await GET();
-    const body = (await res.json()) as { types: Chip[]; cloud: { available: boolean; error: string } };
+    const body = (await res.json()) as {
+      types: Chip[];
+      cloud: { available: boolean; error: string };
+    };
 
     expect(res.status).toBe(200);
     expect(body.types).toEqual([{ record_type: "image/png", count: 2 }]);

@@ -48,8 +48,16 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-const POOL_X: DeviceAuthConfig = { region: "us-east-2", userPoolId: "us-east-2_PoolX", deviceClientId: "clientX" };
-const POOL_Y: DeviceAuthConfig = { region: "us-west-2", userPoolId: "us-west-2_PoolY", deviceClientId: "clientY" };
+const POOL_X: DeviceAuthConfig = {
+  region: "us-east-2",
+  userPoolId: "us-east-2_PoolX",
+  deviceClientId: "clientX",
+};
+const POOL_Y: DeviceAuthConfig = {
+  region: "us-west-2",
+  userPoolId: "us-west-2_PoolY",
+  deviceClientId: "clientY",
+};
 
 /**
  * Pools that can each go out of reach. Each revokes only tokens it issued, as
@@ -57,7 +65,8 @@ const POOL_Y: DeviceAuthConfig = { region: "us-west-2", userPoolId: "us-west-2_P
  */
 function pools() {
   const state = new Map<string, { issued: Set<string>; revoked: string[]; online: boolean }>();
-  for (const auth of [POOL_X, POOL_Y]) state.set(auth.userPoolId, { issued: new Set(), revoked: [], online: true });
+  for (const auth of [POOL_X, POOL_Y])
+    state.set(auth.userPoolId, { issued: new Set(), revoked: [], online: true });
   const clientFor = (auth: DeviceAuthConfig): CognitoClient => {
     const pool = state.get(auth.userPoolId)!;
     return {
@@ -66,7 +75,8 @@ function pools() {
       refresh: () => Promise.reject(new Error("not used")),
       revoke: vi.fn(async (token: string) => {
         if (!pool.online) throw new TypeError("fetch failed");
-        if (!pool.issued.has(token)) throw new CognitoError("UnauthorizedException", "Invalid token", 400);
+        if (!pool.issued.has(token))
+          throw new CognitoError("UnauthorizedException", "Invalid token", 400);
         pool.revoked.push(token);
       }),
     };
@@ -162,8 +172,14 @@ describe("a refresh that overlaps a sign-out or a sign-in", () => {
       revoke: async () => undefined,
     };
 
-    const refreshing = refreshSession(client, store, { refreshToken: "r1", email: null, tokens: null });
-    expect(await signOut(() => client, store, { refreshToken: "r1", email: null }, POOL_X)).toBe("revoked");
+    const refreshing = refreshSession(client, store, {
+      refreshToken: "r1",
+      email: null,
+      tokens: null,
+    });
+    expect(await signOut(() => client, store, { refreshToken: "r1", email: null }, POOL_X)).toBe(
+      "revoked",
+    );
     pending.resolve(tokensFor("r1"));
     expect((await refreshing).kind).toBe("superseded");
 
@@ -183,9 +199,15 @@ describe("a refresh that overlaps a sign-out or a sign-in", () => {
       revoke: async () => undefined,
     };
 
-    const refreshing = refreshSession(client, store, { refreshToken: "old", email: "a@example.com", tokens: null });
+    const refreshing = refreshSession(client, store, {
+      refreshToken: "old",
+      email: "a@example.com",
+      tokens: null,
+    });
     await store.write({ refreshToken: "new", email: "a@example.com" });
-    pending.reject(new CognitoError("NotAuthorizedException", "Refresh Token has been revoked", 400));
+    pending.reject(
+      new CognitoError("NotAuthorizedException", "Refresh Token has been revoked", 400),
+    );
     expect((await refreshing).kind).toBe("superseded");
 
     expect(await store.read()).toEqual({ refreshToken: "new", email: "a@example.com" });
@@ -255,9 +277,12 @@ describe("the channel fetch with a Request object", () => {
     const channel = "https://cloud.example/apps/starkeep-drive";
     const wrapped = withUserToken(fetchImpl, channel, { current: async () => "id-token" });
 
-    await wrapped(new Request(`${channel}/data/types`, { headers: { "X-Starkeep-Trace": "from-request" } }), {
-      headers: { "X-Starkeep-Trace": "from-init" },
-    });
+    await wrapped(
+      new Request(`${channel}/data/types`, { headers: { "X-Starkeep-Trace": "from-request" } }),
+      {
+        headers: { "X-Starkeep-Trace": "from-init" },
+      },
+    );
 
     expect(seen[0]!.get("X-Starkeep-Trace")).toBe("from-init");
   });

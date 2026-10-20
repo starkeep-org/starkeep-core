@@ -112,7 +112,9 @@ describe("putStream", () => {
   it("refuses an unknown-length stream that hashes to something other than expected, sending nothing", async () => {
     const { adapter, sent } = recording();
     await expect(
-      adapter.putStream("shared/image/dd/s", stream(bytes(100)), { expectedSha256Hex: "0".repeat(64) }),
+      adapter.putStream("shared/image/dd/s", stream(bytes(100)), {
+        expectedSha256Hex: "0".repeat(64),
+      }),
     ).rejects.toThrow(/hash to/);
     expect(sent).toEqual([]);
   });
@@ -120,7 +122,9 @@ describe("putStream", () => {
   it("refuses more than one request can carry, before sending", async () => {
     const { adapter, sent } = recording();
     await expect(
-      adapter.putStream("shared/video/ee/t", stream(bytes(10)), { sizeBytes: MAX_SINGLE_PUT_BYTES + 1 }),
+      adapter.putStream("shared/video/ee/t", stream(bytes(10)), {
+        sizeBytes: MAX_SINGLE_PUT_BYTES + 1,
+      }),
     ).rejects.toThrow(/at most/);
     expect(sent).toEqual([]);
   });

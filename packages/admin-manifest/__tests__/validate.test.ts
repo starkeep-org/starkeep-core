@@ -69,9 +69,7 @@ describe("photos fixture (full real manifest)", () => {
 
 describe("id-bound privilege flags", () => {
   it("rejects fileAccessAll for any id except starkeep-drive", () => {
-    const result = validateManifest(
-      minimal({ infraRequirements: { fileAccessAll: true } }),
-    );
+    const result = validateManifest(minimal({ infraRequirements: { fileAccessAll: true } }));
     expect(result.valid).toBe(false);
     expect(result.manifest).toBeNull();
     expect(result.errors.some((e) => e.includes("fileAccessAll"))).toBe(true);
@@ -79,23 +77,29 @@ describe("id-bound privilege flags", () => {
 
   it("accepts fileAccessAll for starkeep-drive", () => {
     const result = validateManifest(
-      minimal({ id: "starkeep-drive", tier: "official", infraRequirements: { fileAccessAll: true } }),
+      minimal({
+        id: "starkeep-drive",
+        tier: "official",
+        infraRequirements: { fileAccessAll: true },
+      }),
     );
     expect(result.errors).toEqual([]);
     expect(result.valid).toBe(true);
   });
 
   it("rejects brokerPower for any id except cloud-data-server", () => {
-    const result = validateManifest(
-      minimal({ infraRequirements: { brokerPower: true } }),
-    );
+    const result = validateManifest(minimal({ infraRequirements: { brokerPower: true } }));
     expect(result.valid).toBe(false);
     expect(result.errors.some((e) => e.includes("brokerPower"))).toBe(true);
   });
 
   it("accepts brokerPower for cloud-data-server", () => {
     const result = validateManifest(
-      minimal({ id: "cloud-data-server", tier: "official", infraRequirements: { brokerPower: true } }),
+      minimal({
+        id: "cloud-data-server",
+        tier: "official",
+        infraRequirements: { brokerPower: true },
+      }),
     );
     expect(result.errors).toEqual([]);
     expect(result.valid).toBe(true);
@@ -475,7 +479,7 @@ describe("anonymous routes and publicPaths", () => {
       withHandlers([staticHandler({ auth: "public", routes: ["GET /", "ANY /{proxy+}"] })]),
     );
     expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.includes("is a catch-all with auth \"public\""))).toBe(true);
+    expect(result.errors.some((e) => e.includes('is a catch-all with auth "public"'))).toBe(true);
   });
 
   it("accepts the same catch-all once the intended public subpaths are declared", () => {
@@ -506,7 +510,9 @@ describe("anonymous routes and publicPaths", () => {
       withHandlers([staticHandler({ routes: ["GET /", "ANY /{proxy+}"], publicPaths: ["/"] })]),
     );
     expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.includes("no route on this handler is anonymous"))).toBe(true);
+    expect(result.errors.some((e) => e.includes("no route on this handler is anonymous"))).toBe(
+      true,
+    );
   });
 
   it("rejects a publicPath the handler does not serve", () => {
@@ -532,10 +538,14 @@ describe("anonymous routes and publicPaths", () => {
       ]),
     );
     expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.includes("requires\nauthentication") || e.includes("requires authentication"))).toBe(true);
+    expect(
+      result.errors.some(
+        (e) => e.includes("requires\nauthentication") || e.includes("requires authentication"),
+      ),
+    ).toBe(true);
   });
 
-  it("accepts auth \"session\" with the paths sign-in needs", () => {
+  it('accepts auth "session" with the paths sign-in needs', () => {
     const result = validateManifest(
       withHandlers([
         staticHandler({
@@ -549,7 +559,7 @@ describe("anonymous routes and publicPaths", () => {
     expect(result.valid).toBe(true);
   });
 
-  it("refuses auth \"session\" with no publicPaths, because nobody could sign in", () => {
+  it('refuses auth "session" with no publicPaths, because nobody could sign in', () => {
     // Not a security failure but a total one: the gate would refuse the very
     // page it redirects to.
     const result = validateManifest(
@@ -611,7 +621,11 @@ describe("anonymous routes and publicPaths", () => {
   it("rejects a duplicate publicPaths entry", () => {
     const result = validateManifest(
       withHandlers([
-        staticHandler({ auth: "public", routes: ["GET /", "ANY /{proxy+}"], publicPaths: ["/", "/"] }),
+        staticHandler({
+          auth: "public",
+          routes: ["GET /", "ANY /{proxy+}"],
+          publicPaths: ["/", "/"],
+        }),
       ]),
     );
     expect(result.valid).toBe(false);
@@ -621,7 +635,11 @@ describe("anonymous routes and publicPaths", () => {
   it("rejects a relative publicPaths entry at the schema level", () => {
     const result = validateManifest(
       withHandlers([
-        staticHandler({ auth: "public", routes: ["GET /", "ANY /{proxy+}"], publicPaths: ["_immutable/*"] }),
+        staticHandler({
+          auth: "public",
+          routes: ["GET /", "ANY /{proxy+}"],
+          publicPaths: ["_immutable/*"],
+        }),
       ]),
     );
     expect(result.valid).toBe(false);
@@ -634,7 +652,7 @@ describe("anonymous routes and publicPaths", () => {
     // counting them would make it circular. A wildcard entry therefore went
     // unchecked and would un-gate the app's whole surface.
 
-    it("refuses \"/*\" on a session handler, where it un-gates everything", () => {
+    it('refuses "/*" on a session handler, where it un-gates everything', () => {
       const result = validateManifest(
         withHandlers([
           staticHandler({
@@ -655,7 +673,11 @@ describe("anonymous routes and publicPaths", () => {
         withHandlers([
           staticHandler({
             auth: "session",
-            routes: ["GET /", "ANY /{proxy+}", { route: "ANY /api/local-data/{proxy+}", auth: "jwt" }],
+            routes: [
+              "GET /",
+              "ANY /{proxy+}",
+              { route: "ANY /api/local-data/{proxy+}", auth: "jwt" },
+            ],
             publicPaths: ["/*"],
           }),
         ]),
@@ -668,7 +690,11 @@ describe("anonymous routes and publicPaths", () => {
     it("refuses it on a public handler too", () => {
       const result = validateManifest(
         withHandlers([
-          staticHandler({ auth: "public", routes: ["GET /", "ANY /{proxy+}"], publicPaths: ["/*"] }),
+          staticHandler({
+            auth: "public",
+            routes: ["GET /", "ANY /{proxy+}"],
+            publicPaths: ["/*"],
+          }),
         ]),
       );
       expect(result.valid).toBe(false);

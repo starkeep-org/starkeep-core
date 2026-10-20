@@ -2,7 +2,11 @@ import { fetchMtdCostsByService } from "../lib/cost-usage-report";
 import type { STSCredentials } from "../lib/cognito-auth";
 
 export async function POST(req: Request) {
-  const body = await req.json() as { credentials: STSCredentials; stackPrefix: string; region: string };
+  const body = (await req.json()) as {
+    credentials: STSCredentials;
+    stackPrefix: string;
+    region: string;
+  };
   const { credentials, stackPrefix, region } = body;
 
   try {

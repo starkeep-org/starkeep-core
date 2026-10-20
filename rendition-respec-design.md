@@ -27,15 +27,15 @@ that cannot be retrofitted.** Compliance-mode retention cannot be shortened or r
 including the account root. If renditions are written under a 1-year default retention, a superseded
 `image-medium` is undeletable and billable until it expires. §5.6 already named this consequence
 ("'nothing is ever deleted' stops being a policy and becomes a fact enforced against the user"); it
-did not anticipate that renditions would ever *want* deleting.
+did not anticipate that renditions would ever _want_ deleting.
 
 **Fix: make Object Lock retention the third thing the intent decides, alongside storage class and
 tag.** This slots directly into §5.1's existing two-intent structure:
 
-| Intent | Storage class | Tag | Object Lock retention |
-|---|---|---|---|
-| `instant` | `INTELLIGENT_TIERING` | none | **none** |
-| `archive` | (lifecycle to Deep Archive) | `starkeep:intent=archive` | 1 year |
+| Intent    | Storage class               | Tag                       | Object Lock retention |
+| --------- | --------------------------- | ------------------------- | --------------------- |
+| `instant` | `INTELLIGENT_TIERING`       | none                      | **none**              |
+| `archive` | (lifecycle to Deep Archive) | `starkeep:intent=archive` | 1 year                |
 
 Set no bucket-level default retention; apply retention explicitly on `archive` PUTs only. The
 asymmetry is justified by the threat model rather than by convenience: §5.6 protects against an
@@ -49,8 +49,8 @@ undeletable. It belongs in Phase 0a next to the bucket flag, not in Phase 3 with
 storage-class work.
 
 **(b) §0's "Append-only. Nothing is ever deleted" needs a scoped amendment,** not a reversal:
-*originals and user-created records are append-only; renditions are reproducible cache and may be
-superseded and reaped.* Nothing else in the plan depends on renditions being permanent — the Glacier
+_originals and user-created records are append-only; renditions are reproducible cache and may be
+superseded and reaped._ Nothing else in the plan depends on renditions being permanent — the Glacier
 minimum-duration argument is about originals, and the cost model does not assume it.
 
 One consequence to price in: **Intelligent-Tiering carries a 30-day minimum storage duration**
@@ -68,10 +68,10 @@ want for safety reasons anyway.
 Deriving from `image-large` (3840) always works but is not the cheapest correct choice. To rebuild
 `image-medium` at 1440:
 
-| Source | Downscale | Bytes read per record |
-|---|---|---|
-| `image-large` 3840 | 2.7× | ~800 KB |
-| `image-screen` 2560 | 1.8× | ~350 KB |
+| Source              | Downscale | Bytes read per record |
+| ------------------- | --------- | --------------------- |
+| `image-large` 3840  | 2.7×      | ~800 KB               |
+| `image-screen` 2560 | 1.8×      | ~350 KB               |
 
 Both are one generation deep from the original, and both downscale by enough that the source's
 encode artifacts are low-pass filtered away. `image-screen` reads 2.3× fewer bytes and — under
@@ -82,7 +82,7 @@ actual cost of this operation (§4 below).
 Below 1.5× the downscale stops hiding the source's artifacts and generational loss becomes visible;
 that threshold is a §3.4 question, not a known quantity.
 
-**When several classes change at once, derive all of them from the highest *unchanged* class, in one
+**When several classes change at once, derive all of them from the highest _unchanged_ class, in one
 pass.** Rebuilding `image-medium` from a freshly-rebuilt `image-screen` would make it generation 3.
 If `image-screen` and `image-medium` both move, both come from `image-large`.
 
@@ -105,7 +105,7 @@ touching the archive. The residual limit is narrower than it was and cannot be r
 
 - **The top applicable class still cannot be rebuilt from anything but the original.** For a record
   above 4,272 px that means `image-large` itself; for a 2,000 px original it means `image-screen` at
-  2,000. Changing a class *maximum* only affects records whose original exceeds it, so raising
+  2,000. Changing a class _maximum_ only affects records whose original exceeds it, so raising
   `image-large` from 4272 later would need a thaw for exactly the >4,272 px population and nothing
   else.
 - **The near-boundary case from §3.1.1 is the weak spot.** A 1,300 px original has `image-medium` at
@@ -126,16 +126,16 @@ type-specific metadata of exactly the same kind as `width`/`height`, so a versio
 redundant state.** Checked against the registry as it stands
 (`packages/protocol-primitives/src/types/core-types.ts`):
 
-| Spec component | Where it already lives | Byte-derived? |
-|---|---|---|
-| long edge | `width` / `height` in `IMAGE_METADATA_COLUMNS` and `VIDEO_METADATA_COLUMNS` | yes |
-| codec | the record's own `type` — `image/avif` vs `image/webp` vs `image/jpeg` are distinct registry entries | yes |
-| video bitrate | `bitrate` in `VIDEO_METADATA_COLUMNS` | yes |
-| video frame rate | `frame_rate` in `VIDEO_METADATA_COLUMNS` | yes |
-| **still quality level** | **nowhere** | **no** |
+| Spec component          | Where it already lives                                                                               | Byte-derived? |
+| ----------------------- | ---------------------------------------------------------------------------------------------------- | ------------- |
+| long edge               | `width` / `height` in `IMAGE_METADATA_COLUMNS` and `VIDEO_METADATA_COLUMNS`                          | yes           |
+| codec                   | the record's own `type` — `image/avif` vs `image/webp` vs `image/jpeg` are distinct registry entries | yes           |
+| video bitrate           | `bitrate` in `VIDEO_METADATA_COLUMNS`                                                                | yes           |
+| video frame rate        | `frame_rate` in `VIDEO_METADATA_COLUMNS`                                                             | yes           |
+| **still quality level** | **nowhere**                                                                                          | **no**        |
 
 **For video the argument is airtight.** `video-720p` is specified as "720p H.264 ~1.5 Mbps, full
-framerate", and `width`, `height`, `video_codec`, `bitrate` and `frame_rate` are *all* existing
+framerate", and `width`, `height`, `video_codec`, `bitrate` and `frame_rate` are _all_ existing
 columns. Every component of the spec is already recorded, already byte-derived, and already
 queryable. There is nothing a version label would add. The same holds for `video-skim` once its
 parameters are fixed (§3.3) — frame rate and dimensions are columns; the speed factor is recoverable
@@ -178,12 +178,12 @@ image record awaiting the reaper. "The `image-medium` of record X" stays one ind
 
 Rebuilding one class across the library, at Model B (60k stills):
 
-| | Re-derive from renditions | Restore originals from Deep Archive |
-|---|---|---|
-| Bytes read | 21 GB (`image-screen`) | 500 GB |
-| Direct charge | ~$0.40 (I-T promotion to FA for 30 days) | $1.25 bulk retrieval + ~$2.45 staging |
-| Wall clock | minutes to hours | **48 hours before the first byte** |
-| Decoder needed | AVIF — works in stock sharp today | HEIC/DNG — **blocked on §8.1's custom libvips** |
+|                | Re-derive from renditions                | Restore originals from Deep Archive             |
+| -------------- | ---------------------------------------- | ----------------------------------------------- |
+| Bytes read     | 21 GB (`image-screen`)                   | 500 GB                                          |
+| Direct charge  | ~$0.40 (I-T promotion to FA for 30 days) | $1.25 bulk retrieval + ~$2.45 staging           |
+| Wall clock     | minutes to hours                         | **48 hours before the first byte**              |
+| Decoder needed | AVIF — works in stock sharp today        | HEIC/DNG — **blocked on §8.1's custom libvips** |
 
 At Model C the gap widens sharply, because re-derivation scales with rendition bytes (136 GB of
 `image-large`) while a thaw scales with original bytes (2 TB): roughly $2.60 against ~$15.
@@ -195,7 +195,7 @@ $3.70 is not what justifies building this. Three other things do:
    expires; a multi-hour re-derivation job that outlives its restore window is a genuinely unpleasant
    failure mode, and it does not exist on the rendition path.
 2. **The codec problem disappears.** The cloud cannot decode HEIC or DNG until §8.1's custom libvips
-   build lands (§4.2 is explicit that this makes the cloud a poor fallback for *initial* derivation).
+   build lands (§4.2 is explicit that this makes the cloud a poor fallback for _initial_ derivation).
    Renditions are AVIF, which stock sharp handles — so **re-derivation in the cloud works today, on
    the operator's primary capture format, with no new build.** That is a strictly better position
    than initial derivation is in.
@@ -207,12 +207,12 @@ Whether a respec pass runs locally, in the cloud, or on both is genuinely a late
 nothing in this design depends on it. Two primitives do have to be settled, and both are cheap:
 
 - **A node may only derive from bytes it holds** (§4.1, unchanged). So the source rule is "the
-  smallest applicable class ≥1.5× the target *that this node holds*", and a node with no local
+  smallest applicable class ≥1.5× the target _that this node holds_", and a node with no local
   source simply skips the record. That is the same shape as §7.1's `Elided` — declining is a
   legitimate state, not a failure — so residency policy (§7.2) decides which nodes can participate
   without anything else needing to know.
 - **A respec pass must have a single owner.** This is §4.2's reasoning applied unchanged: two nodes
-  that both re-derive the same record produce *two* replacement records, because AVIF encoders are
+  that both re-derive the same record produce _two_ replacement records, because AVIF encoders are
   not bit-identical across platforms and the outputs are therefore different content-addressed keys.
   §4.2 solved this with "one actor, therefore no lease and no coordination protocol", and the same
   answer works here.
@@ -252,8 +252,8 @@ rebuilt without a thaw. This is rule 3 of §3.1.1 restated for the deletion path
 
 ## 6. What to build now
 
-§3.4 has not been run, so the *first* setting of these numbers still happens before backfill
-(§10 item 9b gates item 8). This machinery is for a *second* change, which is speculative. Per
+§3.4 has not been run, so the _first_ setting of these numbers still happens before backfill
+(§10 item 9b gates item 8). This machinery is for a _second_ change, which is speculative. Per
 `CLAUDE.md`, that argues for designing it and not building it.
 
 Three things are worth doing now anyway, because they are cheap now and expensive or impossible
@@ -267,12 +267,12 @@ later:
    listed here because it is what makes everything else in this note work — without a
    native-resolution top class per record there is no re-derivation source and the whole approach
    falls back to thawing.
-3. **Add three cases to §3.4's visual test**, since the sample is being encoded anyway: *(a)* a class
+3. **Add three cases to §3.4's visual test**, since the sample is being encoded anyway: _(a)_ a class
    derived from the original versus the same class derived from `image-screen`/`image-large`, to
    establish whether generation-2 renditions are acceptable and where the safe downscale ratio sits —
    if they are not, this entire approach fails and it is much better to know before backfill;
-   *(b)* the low-ratio case specifically — rebuilding `image-screen` from a ~3,000 px master, which
-   §2 flags as the weakest point of the master-rung scheme; *(c)* the mixed-library question, i.e.
+   _(b)_ the low-ratio case specifically — rebuilding `image-screen` from a ~3,000 px master, which
+   §2 flags as the weakest point of the master-rung scheme; _(c)_ the mixed-library question, i.e.
    whether an old and a new `image-screen` are distinguishable side by side, which decides whether
    lazy re-derivation is acceptable.
 

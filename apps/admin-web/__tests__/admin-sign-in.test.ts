@@ -8,14 +8,18 @@ import { getIdentityPoolCredentials, groupsOfIdToken, NOT_AN_ADMIN } from "../sr
 const token = (claims: Record<string, unknown>) =>
   `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
 
-const CONFIG = { region: "us-east-2", userPoolId: "us-east-2_P", userPoolClientId: "c", identityPoolId: "us-east-2:id" };
+const CONFIG = {
+  region: "us-east-2",
+  userPoolId: "us-east-2_P",
+  userPoolClientId: "c",
+  identityPoolId: "us-east-2:id",
+};
 
 describe("groupsOfIdToken", () => {
   it("reads the groups claim, and none from a token without one", () => {
-    expect(groupsOfIdToken(token({ "cognito:groups": ["starkeep-users", "starkeep-admins"] }))).toEqual([
-      "starkeep-users",
-      "starkeep-admins",
-    ]);
+    expect(
+      groupsOfIdToken(token({ "cognito:groups": ["starkeep-users", "starkeep-admins"] })),
+    ).toEqual(["starkeep-users", "starkeep-admins"]);
     expect(groupsOfIdToken(token({ sub: "x" }))).toEqual([]);
     expect(groupsOfIdToken("not a token")).toEqual([]);
   });

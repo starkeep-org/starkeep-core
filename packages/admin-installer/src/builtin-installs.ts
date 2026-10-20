@@ -21,18 +21,12 @@ import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { S3Client, DeleteBucketCommand } from "@aws-sdk/client-s3";
-import {
-  CloudWatchLogsClient,
-  DeleteLogGroupCommand,
-} from "@aws-sdk/client-cloudwatch-logs";
+import { CloudWatchLogsClient, DeleteLogGroupCommand } from "@aws-sdk/client-cloudwatch-logs";
 import {
   CostAndUsageReportServiceClient,
   DeleteReportDefinitionCommand,
 } from "@aws-sdk/client-cost-and-usage-report-service";
-import {
-  LambdaClient,
-  DeleteFunctionCommand,
-} from "@aws-sdk/client-lambda";
+import { LambdaClient, DeleteFunctionCommand } from "@aws-sdk/client-lambda";
 import { roleChain, type AwsCredentials } from "./session";
 import {
   appRoleExists,
@@ -45,11 +39,11 @@ import { pulumiUpInline, pulumiDestroyInline } from "./compute-stack";
 import { initializeSharedSchema } from "./dsql-schema-init";
 import { buildCloudDataServerProgram } from "./builtin-programs/cloud-data-server-program";
 import { putCloudFrontSigningParameter, putDeploymentSettingsParameter } from "./app-creds";
-import { checkDeploymentSettings, serializeDeploymentSettings } from "@starkeep/protocol-primitives";
 import {
-  logAppRoleSnapshot,
-  logCallerIdentity,
-} from "./iam-diagnostics";
+  checkDeploymentSettings,
+  serializeDeploymentSettings,
+} from "@starkeep/protocol-primitives";
+import { logAppRoleSnapshot, logCallerIdentity } from "./iam-diagnostics";
 import { USER_DATA_OWNER_APP_ID, assertCloudInstallableAppId } from "./iam";
 import { installApp, uninstallApp, type InstallerConfig } from "./orchestrator";
 import { appManifestSchema } from "@starkeep/admin-manifest";
@@ -331,17 +325,12 @@ export async function installCloudDataServer(
     try {
       await logAppRoleSnapshot(roleName, managerCreds);
     } catch (err) {
-      console.warn(
-        `[diag] snapshot failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      console.warn(`[diag] snapshot failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     // Step 3: Role-chain to the app session so subsequent calls use the
     // freshly-broadened permissions.
-    const appCreds: AwsCredentials = await roleChain([
-      config.managerRoleArn,
-      appRoleArn,
-    ]);
+    const appCreds: AwsCredentials = await roleChain([config.managerRoleArn, appRoleArn]);
     await logCallerIdentity("app session", appCreds);
 
     // Step 4: Pulumi up — creates DSQL, files bucket, Lambda, API Gateway.

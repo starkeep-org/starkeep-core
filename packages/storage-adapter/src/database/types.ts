@@ -198,7 +198,6 @@ export interface Transaction {
   query(query: Query): Promise<QueryResult>;
 }
 
-
 /**
  * One stored availability observation for an object.
  *

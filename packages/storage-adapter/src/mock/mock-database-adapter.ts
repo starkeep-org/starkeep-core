@@ -147,9 +147,7 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     peerWatermarks: Record<string, HLCTimestamp>,
     limit: number,
   ): Promise<SincePage<DataRecord>> {
-    const owed = Array.from(this.store.values()).filter((r) =>
-      isOwed(r.updatedAt, peerWatermarks),
-    );
+    const owed = Array.from(this.store.values()).filter((r) => isOwed(r.updatedAt, peerWatermarks));
     return pageByNode<DataRecord>(owed, (r) => r.updatedAt, limit);
   }
 
@@ -164,9 +162,7 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
   }
 
   /** In-memory reference fold for the bucketed digest. */
-  async bucketDigest(
-    prefixLength: number = DEFAULT_BUCKET_PREFIX_LENGTH,
-  ): Promise<DigestBucket[]> {
+  async bucketDigest(prefixLength: number = DEFAULT_BUCKET_PREFIX_LENGTH): Promise<DigestBucket[]> {
     const buckets: DigestBucket[] = [];
     const rows = [
       ...Array.from(this.store.values()).map((r) => r.updatedAt),
@@ -205,21 +201,32 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
           // answer differently.
           const value = isHlcTimestamp(raw) ? serializeHLC(raw) : raw;
           switch (filter.operator) {
-            case "eq": return value === filter.value;
-            case "neq": return value !== filter.value;
-            case "gt": return (value as never) > (filter.value as never);
-            case "gte": return (value as never) >= (filter.value as never);
-            case "lt": return (value as never) < (filter.value as never);
-            case "lte": return (value as never) <= (filter.value as never);
-            case "in": return (filter.value as unknown[]).includes(value);
-            case "like": return typeof value === "string" && value.includes(filter.value as string);
+            case "eq":
+              return value === filter.value;
+            case "neq":
+              return value !== filter.value;
+            case "gt":
+              return (value as never) > (filter.value as never);
+            case "gte":
+              return (value as never) >= (filter.value as never);
+            case "lt":
+              return (value as never) < (filter.value as never);
+            case "lte":
+              return (value as never) <= (filter.value as never);
+            case "in":
+              return (filter.value as unknown[]).includes(value);
+            case "like":
+              return typeof value === "string" && value.includes(filter.value as string);
             // Soft deletion is expressed as `deletedAt isNull` by every caller
             // that means "live records only". Falling through to `true` here
             // made the mock return tombstoned records, so anything tested
             // against it — the whole SDK suite — was blind to deletion.
-            case "isNull": return value === null || value === undefined;
-            case "isNotNull": return value !== null && value !== undefined;
-            default: return true;
+            case "isNull":
+              return value === null || value === undefined;
+            case "isNotNull":
+              return value !== null && value !== undefined;
+            default:
+              return true;
           }
         });
       }
@@ -401,9 +408,10 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     const scope = options.softDeleted ?? "exclude";
     const tombstoned = (row: Record<string, unknown>): boolean =>
       row["deleted_at"] !== null && row["deleted_at"] !== undefined;
-    const selected = !sharedQueryExcludesSoftDeleted(target) || scope === "include"
-      ? rows
-      : rows.filter((row) => (scope === "only" ? tombstoned(row) : !tombstoned(row)));
+    const selected =
+      !sharedQueryExcludesSoftDeleted(target) || scope === "include"
+        ? rows
+        : rows.filter((row) => (scope === "only" ? tombstoned(row) : !tombstoned(row)));
     return runInMemoryQuery(selected, query, { serverWhere: options.serverWhere });
   }
 
@@ -529,11 +537,7 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     this.setMetadataTombstone(typeId, recordId, null);
   }
 
-  private setMetadataTombstone(
-    typeId: string,
-    recordId: StarkeepId,
-    value: string | null,
-  ): void {
+  private setMetadataTombstone(typeId: string, recordId: StarkeepId, value: string | null): void {
     const table = this.metadataTable(typeId);
     const row = table.get(recordId);
     if (!row) return;
@@ -612,9 +616,7 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     }
   }
 
-  async getLabelsByRecordIds(
-    recordIds: StarkeepId[],
-  ): Promise<Map<StarkeepId, RecordLabel[]>> {
+  async getLabelsByRecordIds(recordIds: StarkeepId[]): Promise<Map<StarkeepId, RecordLabel[]>> {
     const wanted = new Set<string>(recordIds);
     const result = new Map<StarkeepId, RecordLabel[]>();
     for (const label of this.labels.values()) {
@@ -806,11 +808,7 @@ function isOwed(hlc: HLCTimestamp, peerWatermarks: Record<string, HLCTimestamp>)
  * whole bucket and simply takes the run entire — the same outcome, reached
  * without the extra queries.
  */
-function pageByNode<T>(
-  items: T[],
-  hlcOf: (item: T) => HLCTimestamp,
-  limit: number,
-): SincePage<T> {
+function pageByNode<T>(items: T[], hlcOf: (item: T) => HLCTimestamp, limit: number): SincePage<T> {
   const byNode = new Map<string, T[]>();
   for (const item of items) {
     const nodeId = hlcOf(item).nodeId;

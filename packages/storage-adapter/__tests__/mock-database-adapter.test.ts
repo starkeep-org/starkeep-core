@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { createHLCClock, createDataRecord, createStarkeepId, type CreateDataRecordInput } from "@starkeep/protocol-primitives";
+import {
+  createHLCClock,
+  createDataRecord,
+  createStarkeepId,
+  type CreateDataRecordInput,
+} from "@starkeep/protocol-primitives";
 import { MockDatabaseAdapter } from "../src/mock/mock-database-adapter.js";
 
 function baseInput(over: Partial<CreateDataRecordInput> = {}): CreateDataRecordInput {

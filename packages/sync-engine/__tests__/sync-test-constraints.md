@@ -4,8 +4,9 @@ Compatibility predicates between dimensions from `sync-test-dimensions.md`.
 Used to prune the Cartesian product before enumeration.
 
 Notation:
+
 - `P(x)` = predicate true for value `x`
-- Each section lists *only* the constraints; any combination not excluded is allowed.
+- Each section lists _only_ the constraints; any combination not excluded is allowed.
 - "Side" = `cloud` or `local`.
 
 ---
@@ -14,25 +15,25 @@ Notation:
 
 Operations are `{side}-{verb}` where verb ∈ {`insert`, `update`, `soft-delete`}; the side performing the action must hold (or not hold) the record accordingly. Applies uniformly to all three data types.
 
-| Verb | Required presence on the acting side |
-|---|---|
-| `insert` | acting side does NOT have the record (presence ∈ `neither` or `<other-side>-only`) |
-| `update` | acting side HAS the record (presence includes the acting side) |
-| `soft-delete` | acting side HAS the record |
-| `concurrent-update-both-sides` | both sides have the record (`both-same` or `both-diverged`) |
+| Verb                           | Required presence on the acting side                                               |
+| ------------------------------ | ---------------------------------------------------------------------------------- |
+| `insert`                       | acting side does NOT have the record (presence ∈ `neither` or `<other-side>-only`) |
+| `update`                       | acting side HAS the record (presence includes the acting side)                     |
+| `soft-delete`                  | acting side HAS the record                                                         |
+| `concurrent-update-both-sides` | both sides have the record (`both-same` or `both-diverged`)                        |
 
 Rationale: you cannot update or delete a record that does not exist on the side
 performing the action; you cannot insert one that already exists there.
 
 ## C2. Tombstone state requires compatible initial presence
 
-| Tombstone state | Required initial presence |
-|---|---|
-| `not-deleted` | any |
-| `cloud-deleted` | `cloud-only`, `both-same`, or `both-diverged` |
-| `local-deleted` | `local-only`, `both-same`, or `both-diverged` |
-| `both-deleted` | `both-same` or `both-diverged` |
-| `conflict-deleted-vs-updated` | `both-same` or `both-diverged` |
+| Tombstone state               | Required initial presence                     |
+| ----------------------------- | --------------------------------------------- |
+| `not-deleted`                 | any                                           |
+| `cloud-deleted`               | `cloud-only`, `both-same`, or `both-diverged` |
+| `local-deleted`               | `local-only`, `both-same`, or `both-diverged` |
+| `both-deleted`                | `both-same` or `both-diverged`                |
+| `conflict-deleted-vs-updated` | `both-same` or `both-diverged`                |
 
 Rationale: a `deletedAt` on a side requires the record to exist on that side.
 
@@ -47,11 +48,11 @@ Forbidden pairs (the operation cannot meaningfully drive a state already in this
 
 ## C4. Data type constrains blob state
 
-| Data type | Allowed blob states |
-|---|---|
+| Data type       | Allowed blob states                                                                                                              |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | `shared-record` | `cloud-has-blob`, `local-has-blob`, `both-have-blob`, `blob-key-present-but-missing` (blob is mandatory — `no-blob` is excluded) |
-| `app-record` | all five blob states allowed (apps may choose per record whether it has a blob; blob lives in the app-specific S3 namespace) |
-| `app-row` | `no-blob` only |
+| `app-record`    | all five blob states allowed (apps may choose per record whether it has a blob; blob lives in the app-specific S3 namespace)     |
+| `app-row`       | `no-blob` only                                                                                                                   |
 
 Rationale: shared-records are file-backed by definition (blob mandatory in the
 shared S3 namespace). App-records may be file-backed or metadata-only at the
@@ -66,25 +67,25 @@ All three data types accept the full operation grammar (`{local|cloud}-{insert|u
 
 A blob can only exist on a side where the record exists.
 
-| Blob state | Required initial presence |
-|---|---|
-| `no-blob` | any (and required for DT=`app-row`) |
-| `cloud-has-blob` | `cloud-only`, `both-same`, or `both-diverged` |
-| `local-has-blob` | `local-only`, `both-same`, or `both-diverged` |
-| `both-have-blob` | `both-same` or `both-diverged` |
+| Blob state         | Required initial presence                                                                                                       |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| `no-blob`          | any (and required for DT=`app-row`)                                                                                             |
+| `cloud-has-blob`   | `cloud-only`, `both-same`, or `both-diverged`                                                                                   |
+| `local-has-blob`   | `local-only`, `both-same`, or `both-diverged`                                                                                   |
+| `both-have-blob`   | `both-same` or `both-diverged`                                                                                                  |
 | `neither-has-blob` | any presence where the record exists on at least one side (i.e. not `neither`); represents both-Staged for blob-bearing records |
 
 ## C7. Failure mode requires compatible operation / blob state
 
-| Failure mode | Required context |
-|---|---|
-| `no-failure` | any |
-| `fail-before-request` | exchange count ≥ `one-round` |
-| `fail-after-send-before-response` | exchange count ≥ `one-round`; operation produces *some* outbound payload (i.e. not `zero-rounds`) |
-| `blob-upload-fails` | the side initiating exchange has a blob the counterparty lacks (`local-has-blob` for local→cloud push, `cloud-has-blob` for cloud→local push) AND data type carries a blob (`shared-record`, or `app-record` with a non-`no-blob` state) |
-| `blob-upload-fails-middle` | requires batch shape `multi-homogeneous` or `multi-mixed-nodes`; same blob preconditions as above |
-| `blob-download-fails` | counterparty has a blob this side lacks; data type carries a blob (`shared-record`, or `app-record` with a non-`no-blob` state) |
-| `partial-response-truncated` | requires batch shape `exceeds-page-limit` *or* multi-record state where the server can legitimately set `hasMore` |
+| Failure mode                      | Required context                                                                                                                                                                                                                         |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `no-failure`                      | any                                                                                                                                                                                                                                      |
+| `fail-before-request`             | exchange count ≥ `one-round`                                                                                                                                                                                                             |
+| `fail-after-send-before-response` | exchange count ≥ `one-round`; operation produces _some_ outbound payload (i.e. not `zero-rounds`)                                                                                                                                        |
+| `blob-upload-fails`               | the side initiating exchange has a blob the counterparty lacks (`local-has-blob` for local→cloud push, `cloud-has-blob` for cloud→local push) AND data type carries a blob (`shared-record`, or `app-record` with a non-`no-blob` state) |
+| `blob-upload-fails-middle`        | requires batch shape `multi-homogeneous` or `multi-mixed-nodes`; same blob preconditions as above                                                                                                                                        |
+| `blob-download-fails`             | counterparty has a blob this side lacks; data type carries a blob (`shared-record`, or `app-record` with a non-`no-blob` state)                                                                                                          |
+| `partial-response-truncated`      | requires batch shape `exceeds-page-limit` _or_ multi-record state where the server can legitimately set `hasMore`                                                                                                                        |
 
 ## C8. Exchange count interacts with failure mode and recovery
 
@@ -109,7 +110,7 @@ A blob can only exist on a side where the record exists.
 
 ## C11. Concurrent operation has its own shape
 
-`concurrent-update-both-sides` is the only operation that mutates state on *both* sides between exchanges. It implicitly requires:
+`concurrent-update-both-sides` is the only operation that mutates state on _both_ sides between exchanges. It implicitly requires:
 
 - initial presence ∈ {`both-same`, `both-diverged`}
 - tombstone state ∈ {`not-deleted`, `conflict-deleted-vs-updated`} (the latter when one "update" is a delete)

@@ -30,14 +30,12 @@ afterAll(async () => {
 });
 
 /** The persisted clock state, or null when shutdown never wrote one. */
-function persistedClockState(
-  starkeepDir: string,
-): { wallTime: number; counter: number } | null {
+function persistedClockState(starkeepDir: string): { wallTime: number; counter: number } | null {
   const db = new DatabaseSync(join(starkeepDir, "data.db"), { readOnly: true });
   try {
-    const row = db
-      .prepare("SELECT value_json FROM sync_state WHERE key = ?")
-      .get("hlc_clock") as { value_json: string } | undefined;
+    const row = db.prepare("SELECT value_json FROM sync_state WHERE key = ?").get("hlc_clock") as
+      | { value_json: string }
+      | undefined;
     return row ? (JSON.parse(row.value_json) as { wallTime: number; counter: number }) : null;
   } finally {
     db.close();

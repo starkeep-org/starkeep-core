@@ -60,11 +60,7 @@ describe("computeCeilings", () => {
 
 describe("cutRound", () => {
   it("ships everything when nothing is bounded", () => {
-    const result = cutRound(
-      [item("a", 2), item("a", 1), item("b", 5)],
-      new Map(),
-      budget(10),
-    );
+    const result = cutRound([item("a", 2), item("a", 1), item("b", 5)], new Map(), budget(10));
     // Sorted by HLC, because a later item shipping ahead of an earlier one is
     // exactly the gap the watermark cannot express.
     expect(taken(result)).toEqual(["a@1", "a@2", "b@5"]);
@@ -82,11 +78,7 @@ describe("cutRound", () => {
   });
 
   it("ships nothing for an author under a null ceiling", () => {
-    const result = cutRound(
-      [item("a", 1), item("b", 5)],
-      new Map([["a", null]]),
-      budget(10),
-    );
+    const result = cutRound([item("a", 1), item("b", 5)], new Map([["a", null]]), budget(10));
     expect(taken(result)).toEqual(["b@5"]);
     expect(result.hasMore).toBe(true);
   });
@@ -101,11 +93,10 @@ describe("cutRound", () => {
   });
 
   it("spends the byte budget in HLC order and stops", () => {
-    const result = cutRound(
-      [item("a", 1, 400), item("a", 2, 400), item("a", 3, 400)],
-      new Map(),
-      { maxItems: 10, maxBytes: 1000 },
-    );
+    const result = cutRound([item("a", 1, 400), item("a", 2, 400), item("a", 3, 400)], new Map(), {
+      maxItems: 10,
+      maxBytes: 1000,
+    });
     expect(taken(result)).toEqual(["a@1", "a@2"]);
     expect(result.hasMore).toBe(true);
   });
@@ -113,11 +104,10 @@ describe("cutRound", () => {
   it("charges nothing for items carrying no blob", () => {
     // What lets one pair of budgets serve a photo channel and a caption channel
     // without a per-app knob.
-    const result = cutRound(
-      [item("a", 1, 0), item("a", 2, 0), item("a", 3, 0)],
-      new Map(),
-      { maxItems: 10, maxBytes: 1 },
-    );
+    const result = cutRound([item("a", 1, 0), item("a", 2, 0), item("a", 3, 0)], new Map(), {
+      maxItems: 10,
+      maxBytes: 1,
+    });
     expect(taken(result)).toHaveLength(3);
     expect(result.hasMore).toBe(false);
   });
@@ -132,21 +122,16 @@ describe("cutRound", () => {
   });
 
   it("does not let an oversized first item drag the rest of the round with it", () => {
-    const result = cutRound(
-      [item("a", 1, 10_000), item("a", 2, 1)],
-      new Map(),
-      { maxItems: 10, maxBytes: 100 },
-    );
+    const result = cutRound([item("a", 1, 10_000), item("a", 2, 1)], new Map(), {
+      maxItems: 10,
+      maxBytes: 100,
+    });
     expect(taken(result)).toEqual(["a@1"]);
     expect(result.hasMore).toBe(true);
   });
 
   it("honours the item cap independently of bytes", () => {
-    const result = cutRound(
-      [item("a", 1), item("a", 2), item("a", 3)],
-      new Map(),
-      budget(2),
-    );
+    const result = cutRound([item("a", 1), item("a", 2), item("a", 3)], new Map(), budget(2));
     expect(taken(result)).toEqual(["a@1", "a@2"]);
     expect(result.hasMore).toBe(true);
   });
@@ -199,11 +184,7 @@ describe("cutRound treats one author's timestamp as indivisible", () => {
   it("holds a whole timestamp back rather than shipping part of it", () => {
     // An item budget of 3 lands mid-pair. Taking the third item would advance
     // the peer past a timestamp whose fourth item was never sent.
-    const result = cutRound(
-      [...pair("a", 10), ...pair("a", 20)],
-      new Map(),
-      budget(3),
-    );
+    const result = cutRound([...pair("a", 10), ...pair("a", 20)], new Map(), budget(3));
     expect(taken(result)).toEqual(["a@10:record", "a@10:label"]);
     expect(result.hasMore).toBe(true);
   });
@@ -228,11 +209,7 @@ describe("cutRound treats one author's timestamp as indivisible", () => {
   it("does not group equal wall times belonging to different authors", () => {
     // Watermarks are per author, so `b`'s row at the same instant is not part
     // of `a`'s timestamp and may be cut away from it freely.
-    const result = cutRound(
-      [...pair("a", 10), item("b", 10)],
-      new Map(),
-      budget(2),
-    );
+    const result = cutRound([...pair("a", 10), item("b", 10)], new Map(), budget(2));
     expect(taken(result)).toEqual(["a@10:record", "a@10:label"]);
   });
 });

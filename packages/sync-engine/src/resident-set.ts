@@ -97,10 +97,7 @@ export interface ReconcileReport {
  * means let go — so a caller cannot state them inconsistently with the call it is
  * making.
  */
-export type ResidentArrival = Omit<
-  ResidentEntry,
-  "resident" | "heldEver" | "wanted" | "released"
->;
+export type ResidentArrival = Omit<ResidentEntry, "resident" | "heldEver" | "wanted" | "released">;
 
 export interface ResidentSetIndex {
   /** Record that bytes are here. Idempotent on `objectStorageKey`. */
@@ -307,11 +304,8 @@ export function createSqliteResidentSetIndex(options: {
     qb.selectFrom(TABLE).selectAll().where("object_storage_key", "=", sql.raw("?")).compile().sql,
   );
   const residentKeysStmt = db.prepare(
-    qb
-      .selectFrom(TABLE)
-      .select(["object_storage_key"])
-      .where("resident", "=", sql.lit(1))
-      .compile().sql,
+    qb.selectFrom(TABLE).select(["object_storage_key"]).where("resident", "=", sql.lit(1)).compile()
+      .sql,
   );
   const usageByGroupStmt = db.prepare(
     qb

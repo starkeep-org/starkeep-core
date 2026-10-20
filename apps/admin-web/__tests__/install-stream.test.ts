@@ -435,13 +435,18 @@ describe("a run that outlives admin-web", () => {
     const again = await restartedDrive({ reattach: true, resumeFrom: seen.id });
     const stream = readSse(again);
     expect(spawnedChildren()).toHaveLength(1);
-    expect(JSON.parse((await stream.next())!.data)).toBe("[Reconnected to in-progress Drive install]");
+    expect(JSON.parse((await stream.next())!.data)).toBe(
+      "[Reconnected to in-progress Drive install]",
+    );
 
     child.say("Deploying…\n");
     child.exit(0);
     const events = await stream.rest();
     // The line from the restart's gap arrives, and nothing the browser already had.
-    expect(lines(events)).toEqual(["Policy changed — waiting 60s for IAM propagation", "Deploying…"]);
+    expect(lines(events)).toEqual([
+      "Policy changed — waiting 60s for IAM propagation",
+      "Deploying…",
+    ]);
     expect(events.at(-1)).toEqual({ event: "done", data: "{}" });
   });
 
@@ -454,7 +459,9 @@ describe("a run that outlives admin-web", () => {
     child.say("two\nthree\n");
     child.exit(0);
 
-    const events = await readSse(await restartedDrive({ reattach: true, resumeFrom: seen.id })).rest();
+    const events = await readSse(
+      await restartedDrive({ reattach: true, resumeFrom: seen.id }),
+    ).rest();
     expect(lines(events)).toEqual(["[The Drive install ended while disconnected]", "two", "three"]);
     expect(events.at(-1)).toEqual({ event: "done", data: "{}" });
   });

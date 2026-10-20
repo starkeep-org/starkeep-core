@@ -22,11 +22,7 @@ describe("the browser target", () => {
       optimizeDeps?: { esbuildOptions?: { target?: string } };
       build?: { target?: string };
     };
-    const targets = [
-      c.esbuild?.target,
-      c.optimizeDeps?.esbuildOptions?.target,
-      c.build?.target,
-    ];
+    const targets = [c.esbuild?.target, c.optimizeDeps?.esbuildOptions?.target, c.build?.target];
     expect(targets.every(Boolean), "every esbuild pass needs an explicit target").toBe(true);
     expect(new Set(targets).size, `targets disagree: ${targets.join(", ")}`).toBe(1);
   });

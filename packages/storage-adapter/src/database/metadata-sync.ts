@@ -155,8 +155,7 @@ export async function applyRecordMetadata(
     const held = await db.getMetadata(category, record.id);
     if (held !== null) {
       const local = toWireColumns(category, held);
-      owedBack =
-        local !== null && Object.keys(local).some((name) => !(name in columns));
+      owedBack = local !== null && Object.keys(local).some((name) => !(name in columns));
     }
   }
 

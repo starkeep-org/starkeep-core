@@ -67,9 +67,11 @@ function createAppTable(db: RawDatabase): void {
 }
 
 function rowIds(db: RawDatabase): string[] {
-  return (db.prepare(`SELECT id FROM ${FULL_NAME} ORDER BY id`).all() as Array<{
-    id: string;
-  }>).map((r) => r.id);
+  return (
+    db.prepare(`SELECT id FROM ${FULL_NAME} ORDER BY id`).all() as Array<{
+      id: string;
+    }>
+  ).map((r) => r.id);
 }
 
 describe("a repair floor across a restart", () => {
@@ -86,9 +88,7 @@ describe("a repair floor across a restart", () => {
     createAppTable(raw);
     for (let i = 0; i < rowCount; i += 1) {
       raw
-        .prepare(
-          `INSERT INTO ${FULL_NAME} (id, payload, updated_at, node_id) VALUES (?, ?, ?, ?)`,
-        )
+        .prepare(`INSERT INTO ${FULL_NAME} (id, payload, updated_at, node_id) VALUES (?, ?, ?, ?)`)
         .run(
           `r${i}`,
           `payload-${i}`,
@@ -126,11 +126,7 @@ describe("a repair floor across a restart", () => {
     const raw = localAdapter.getRawDatabase();
     createAppTable(raw);
 
-    const syncState = createPerAppSyncStateStore(
-      raw,
-      createSqliteSyncStateStore({ db: raw }),
-      APP,
-    );
+    const syncState = createPerAppSyncStateStore(raw, createSqliteSyncStateStore({ db: raw }), APP);
     const sharedRecords = new MockDatabaseAdapter();
     const storage = new MockObjectStorageAdapter();
     await sharedRecords.init();

@@ -53,9 +53,7 @@ function execMs(plan: string): number | null {
  * to shrink.
  */
 function scannedRows(plan: string): number | null {
-  const counts = [...plan.matchAll(/B-Tree Scan[^\n]*actual rows=(\d+)/g)].map((m) =>
-    Number(m[1]),
-  );
+  const counts = [...plan.matchAll(/B-Tree Scan[^\n]*actual rows=(\d+)/g)].map((m) => Number(m[1]));
   return counts.length > 0 ? Math.max(...counts) : null;
 }
 
@@ -104,8 +102,7 @@ async function main(): Promise<void> {
 
   const finalScanned = scannedRows(final.plan);
   const ctlScanned = scannedRows(ctl.plan);
-  const isScanKey =
-    finalScanned !== null && ctlScanned !== null && ctlScanned > finalScanned * 10;
+  const isScanKey = finalScanned !== null && ctlScanned !== null && ctlScanned > finalScanned * 10;
   console.log(
     isScanKey
       ? "\n  → SCAN KEY. `deleted_at IS NULL` appears in the Index Cond and the scan\n" +

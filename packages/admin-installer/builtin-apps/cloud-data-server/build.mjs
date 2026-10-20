@@ -24,11 +24,7 @@
  */
 
 import { execSync } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  rmSync,
-} from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";

@@ -32,7 +32,9 @@ beforeEach(async () => {
   await db.init();
 });
 
-async function put(over: Partial<Parameters<typeof createDataRecord>[0]> & { hash: string }): Promise<DataRecord> {
+async function put(
+  over: Partial<Parameters<typeof createDataRecord>[0]> & { hash: string },
+): Promise<DataRecord> {
   const { hash, ...rest } = over;
   const r = createDataRecord(
     {
@@ -59,7 +61,12 @@ describe("planStandInWrite", () => {
       STD,
       true,
     );
-    expect(plan).toMatchObject({ ok: true, role: "smaller", fidelity: 640, recordParentFidelity: null });
+    expect(plan).toMatchObject({
+      ok: true,
+      role: "smaller",
+      fidelity: 640,
+      recordParentFidelity: null,
+    });
   });
 
   it("passes the reported parent fidelity through for the caller to record", async () => {
@@ -67,7 +74,12 @@ describe("planStandInWrite", () => {
     const plan = await planStandInWrite(
       db,
       grants,
-      { type: "image/avif", parentId: parent.id, standIn: { role: "smaller", fidelity: 640 }, parentFidelity: 5000 },
+      {
+        type: "image/avif",
+        parentId: parent.id,
+        standIn: { role: "smaller", fidelity: 640 },
+        parentFidelity: 5000,
+      },
       STD,
       true,
     );
@@ -75,7 +87,13 @@ describe("planStandInWrite", () => {
   });
 
   it("refuses a malformed standIn field", async () => {
-    const plan = await planStandInWrite(db, grants, { type: "image/avif", parentId: "x", standIn: "canonical" }, STD, true);
+    const plan = await planStandInWrite(
+      db,
+      grants,
+      { type: "image/avif", parentId: "x", standIn: "canonical" },
+      STD,
+      true,
+    );
     expect(plan).toMatchObject({ ok: false, status: 400, body: { code: "invalid-stand-in" } });
   });
 
@@ -107,7 +125,11 @@ describe("planStandInWrite", () => {
       STD,
       true,
     );
-    expect(plan).toMatchObject({ ok: false, status: 409, body: { error: "StandInExists", existing: occupant.id } });
+    expect(plan).toMatchObject({
+      ok: false,
+      status: 409,
+      body: { error: "StandInExists", existing: occupant.id },
+    });
   });
 
   it("names the occupant of a taken canonical slot", async () => {
@@ -131,7 +153,13 @@ describe("planStandInWrite", () => {
 
   it("measures a smaller stand-in against the existing canonical stand-in", async () => {
     const parent = await put({ hash: "o", fidelity: 6000 });
-    await put({ hash: "c", type: "image/avif", parentId: parent.id, standInRole: "canonical", fidelity: 2000 });
+    await put({
+      hash: "c",
+      type: "image/avif",
+      parentId: parent.id,
+      standInRole: "canonical",
+      fidelity: 2000,
+    });
     const plan = await planStandInWrite(
       db,
       grants,
@@ -144,7 +172,13 @@ describe("planStandInWrite", () => {
 
   it("ignores a tombstoned occupant", async () => {
     const parent = await put({ hash: "o", fidelity: 6000 });
-    const gone = await put({ hash: "s", type: "image/avif", parentId: parent.id, standInRole: "smaller", fidelity: 640 });
+    const gone = await put({
+      hash: "s",
+      type: "image/avif",
+      parentId: parent.id,
+      standInRole: "smaller",
+      fidelity: 640,
+    });
     await db.delete(gone.id, clock.now());
     const plan = await planStandInWrite(
       db,
@@ -172,13 +206,28 @@ describe("the canonical slot", () => {
     // because the original's stamp never moves, so the caller reuses it rather
     // than producing another.
     const parent = await put({ hash: "o", fidelity: 6000, canonicalThreshold: 4272 });
-    const current = await put({ hash: "c", type: "image/avif", parentId: parent.id, standInRole: "canonical", fidelity: 4272 });
+    const current = await put({
+      hash: "c",
+      type: "image/avif",
+      parentId: parent.id,
+      standInRole: "canonical",
+      fidelity: 4272,
+    });
     const plan = await canonicalWrite(parent.id, 4272);
-    expect(plan).toMatchObject({ ok: false, status: 409, body: { error: "StandInExists", existing: current.id } });
+    expect(plan).toMatchObject({
+      ok: false,
+      status: 409,
+      body: { error: "StandInExists", existing: current.id },
+    });
   });
 
   it("marks the original self-canonical for a canonical stand-in no smaller than it", async () => {
-    const parent = await put({ hash: "o", type: "video/mp4", fidelity: 3000, canonicalThreshold: 4800 });
+    const parent = await put({
+      hash: "o",
+      type: "video/mp4",
+      fidelity: 3000,
+      canonicalThreshold: 4800,
+    });
     const videoGrants = buildAccessGrants(
       [
         { typeId: "video/mp4", access: "readwrite", metadataWrite: true },
@@ -201,18 +250,31 @@ describe("the canonical slot", () => {
     expect(plan).toMatchObject({ ok: true, selfCanonical: true });
     if (!plan.ok) return;
     const marked = await markSelfCanonical(db, plan, clock);
-    expect(marked).toMatchObject({ selfCanonical: true, fidelity: 3000, version: parent.version + 1 });
+    expect(marked).toMatchObject({
+      selfCanonical: true,
+      fidelity: 3000,
+      version: parent.version + 1,
+    });
     expect((await db.get(parent.id))!.selfCanonical).toBe(true);
 
     // From now on the original takes no canonical stand-in at all.
     const again = await planStandInWrite(
       db,
       videoGrants,
-      { type: "video/webm", parentId: parent.id, standIn: { role: "canonical", fidelity: 3000 }, sizeBytes: 10 },
+      {
+        type: "video/webm",
+        parentId: parent.id,
+        standIn: { role: "canonical", fidelity: 3000 },
+        sizeBytes: 10,
+      },
       STD,
       true,
     );
-    expect(again).toMatchObject({ ok: false, status: 409, body: { code: "original-takes-no-canonical" } });
+    expect(again).toMatchObject({
+      ok: false,
+      status: 409,
+      body: { code: "original-takes-no-canonical" },
+    });
   });
 
   it("stamps a parent whose fidelity it records with the library's value", async () => {
@@ -220,7 +282,12 @@ describe("the canonical slot", () => {
     const known = await planStandInWrite(
       db,
       grants,
-      { type: "image/avif", parentId: parent.id, standIn: { role: "smaller", fidelity: 640 }, parentFidelity: 6000 },
+      {
+        type: "image/avif",
+        parentId: parent.id,
+        standIn: { role: "smaller", fidelity: 640 },
+        parentFidelity: 6000,
+      },
       STD,
       true,
     );
@@ -236,7 +303,12 @@ describe("the canonical slot", () => {
     const plan = await planStandInWrite(
       db,
       grants,
-      { type: "image/avif", parentId: parent.id, standIn: { role: "smaller", fidelity: 640 }, parentFidelity: 6000 },
+      {
+        type: "image/avif",
+        parentId: parent.id,
+        standIn: { role: "smaller", fidelity: 640 },
+        parentFidelity: 6000,
+      },
       STD,
       false,
     );
@@ -246,9 +318,9 @@ describe("the canonical slot", () => {
       body: { code: "parent-awaits-stamp" },
       recordFidelityFirst: { fidelity: 6000 },
     });
-    expect((plan as { recordFidelityFirst: { parent: { id: string } } }).recordFidelityFirst.parent.id).toBe(
-      parent.id,
-    );
+    expect(
+      (plan as { recordFidelityFirst: { parent: { id: string } } }).recordFidelityFirst.parent.id,
+    ).toBe(parent.id);
   });
 
   it("accepts a canonical stand-in for an unstamped parent once the same write stamps it", async () => {
@@ -273,7 +345,9 @@ describe("the canonical slot", () => {
 
 describe("planOriginalFidelity and reconcileReportedFidelity", () => {
   it("passes an absent fidelity as null", () => {
-    expect(planOriginalFidelity({ type: "image/jpeg", parentId: null, fidelity: undefined })).toEqual({
+    expect(
+      planOriginalFidelity({ type: "image/jpeg", parentId: null, fidelity: undefined }),
+    ).toEqual({
       ok: true,
       fidelity: null,
     });
@@ -286,7 +360,10 @@ describe("planOriginalFidelity and reconcileReportedFidelity", () => {
   });
 
   it("refuses a disagreeing fidelity", () => {
-    expect(reconcileReportedFidelity({ fidelity: 3000 }, 3001)).toMatchObject({ ok: false, status: 409 });
+    expect(reconcileReportedFidelity({ fidelity: 3000 }, 3001)).toMatchObject({
+      ok: false,
+      status: 409,
+    });
   });
 });
 
@@ -310,12 +387,20 @@ describe("awaitsStamp and stampUnstampedOriginals", () => {
   it("picks out the live originals that carry a fidelity and no stamp", async () => {
     const waiting = await put({ hash: "w", fidelity: 6000 });
     expect(awaitsStamp(waiting)).toBe(true);
-    expect(awaitsStamp(await put({ hash: "s", fidelity: 6000, canonicalThreshold: 4272 }))).toBe(false);
+    expect(awaitsStamp(await put({ hash: "s", fidelity: 6000, canonicalThreshold: 4272 }))).toBe(
+      false,
+    );
     expect(awaitsStamp(await put({ hash: "u" }))).toBe(false);
     expect(awaitsStamp(await put({ hash: "d", type: "document/pdf", fidelity: null }))).toBe(false);
     expect(
       awaitsStamp(
-        await put({ hash: "si", type: "image/avif", parentId: waiting.id, standInRole: "smaller", fidelity: 640 }),
+        await put({
+          hash: "si",
+          type: "image/avif",
+          parentId: waiting.id,
+          standInRole: "smaller",
+          fidelity: 640,
+        }),
       ),
     ).toBe(false);
     expect(awaitsStamp({ ...waiting, deletedAt: clock.now() })).toBe(false);
@@ -341,7 +426,10 @@ describe("awaitsStamp and stampUnstampedOriginals", () => {
     });
     expect(await db.get(video.id)).toMatchObject({ canonicalThreshold: 4800 });
     // Already stamped: left exactly as it was, whatever the library says now.
-    expect(await db.get(already.id)).toMatchObject({ canonicalThreshold: 2560, version: already.version });
+    expect(await db.get(already.id)).toMatchObject({
+      canonicalThreshold: 2560,
+      version: already.version,
+    });
     expect(stamped[0]!.updatedAt.wallTime >= waiting.updatedAt.wallTime).toBe(true);
   });
 

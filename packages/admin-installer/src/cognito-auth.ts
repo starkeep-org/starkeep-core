@@ -107,10 +107,7 @@ export async function cognitoPasswordAuthTokens(
   throw new Error(`Unexpected Cognito challenge: ${initResponse.ChallengeName}`);
 }
 
-function tokensFromAuthResult(result: {
-  IdToken?: string;
-  RefreshToken?: string;
-}): CognitoTokens {
+function tokensFromAuthResult(result: { IdToken?: string; RefreshToken?: string }): CognitoTokens {
   if (!result.IdToken) throw new Error("No ID token returned from Cognito");
   if (!result.RefreshToken) throw new Error("No refresh token returned from Cognito");
   return { idToken: result.IdToken, refreshToken: result.RefreshToken };

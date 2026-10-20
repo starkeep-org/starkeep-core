@@ -62,14 +62,18 @@ describe("GET /api/records — the sync-status merge", () => {
   it("marks a record the cloud has never seen local-only", async () => {
     listRecords.mockResolvedValue([local("a")]);
 
-    expect(await rows(await call())).toEqual([expect.objectContaining({ id: "a", sync_status: "local-only" })]);
+    expect(await rows(await call())).toEqual([
+      expect.objectContaining({ id: "a", sync_status: "local-only" }),
+    ]);
   });
 
   it("marks a record at the same version on both sides synced", async () => {
     listRecords.mockResolvedValue([local("a", { version: 3 })]);
     listCloudRecords.mockResolvedValue([local("a", { version: 3 })]);
 
-    expect(await rows(await call())).toEqual([expect.objectContaining({ id: "a", sync_status: "synced" })]);
+    expect(await rows(await call())).toEqual([
+      expect.objectContaining({ id: "a", sync_status: "synced" }),
+    ]);
   });
 
   it("marks a record whose local version has advanced modified-locally", async () => {
@@ -138,7 +142,10 @@ describe("GET /api/records — the cloud half is best-effort", () => {
     listCloudRecords.mockRejectedValue(new Error("not signed in"));
 
     const res = await call();
-    const body = (await res.json()) as { records: Row[]; cloud: { available: boolean; error: string } };
+    const body = (await res.json()) as {
+      records: Row[];
+      cloud: { available: boolean; error: string };
+    };
 
     expect(res.status).toBe(200);
     expect(body.records.map((r) => r.id)).toEqual(["a"]);

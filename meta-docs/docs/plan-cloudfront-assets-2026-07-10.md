@@ -196,8 +196,8 @@ pass-through in front. Two documentation-level notes to make when implementing:
 
 The roles doc's core principle is **layered nested ceilings** (line 40): IAM (category-
 granular), PG GRANTs, and the application-layer type-granular check each bound the
-others' failures. Today's read path inherits that: the handler presigns S3 URLs *under
-the assumed per-app role's credentials*, so even if the application-layer grant check
+others' failures. Today's read path inherits that: the handler presigns S3 URLs _under
+the assumed per-app role's credentials_, so even if the application-layer grant check
 had a bug, the per-app permissions boundary (category-scoped S3 prefixes,
 data-roles-and-permissions.md:64,118-120) caps what a presigned URL can reference.
 
@@ -208,7 +208,7 @@ S3 ceiling. This is a real regression of the layering principle, mitigated and a
 as follows:
 
 **Threat model, including malicious apps (clarified 2026-07-11):** "application-layer
-bug" here means a bug in the *platform's* authorization code (cloud-data-server), and
+bug" here means a bug in the _platform's_ authorization code (cloud-data-server), and
 the adversary it matters against includes a malicious app — one that declares narrow
 manifest grants but tries to read all shared data. The signing private key never
 touches app code (SSM read is granted only to the cloud-data-server Lambda role), so a
@@ -217,7 +217,7 @@ endpoints, which check the caller's install-time grants (per-type on the record-
 routes; per-category on the raw-key route via `parseObjectKey`, since raw keys only
 encode the category). Malice alone therefore exfiltrates nothing beyond the app's
 declared grants — which is the exposure accepted at install time under any signing
-mechanism. What Part B changes is the *payoff of a platform authz bug* for such an
+mechanism. What Part B changes is the _payoff of a platform authz bug_ for such an
 app: today an exploited bug is IAM-capped at the caller's granted categories; after
 Part B it reaches anything under `shared/*`. The app-layer check becomes the sole
 per-request line of defense for shared reads, which motivates the pre-sign
@@ -227,7 +227,7 @@ revalidation chokepoint below.
   the distribution cannot serve `apps/*` (private app data) or any other prefix no
   matter what gets signed, because no behavior routes there and OAC only opens the
   bucket to the distribution. The worst case of an application-layer bug is therefore a
-  cross-type leak *within shared data* — data every installed app could already be
+  cross-type leak _within shared data_ — data every installed app could already be
   granted by manifest — not exposure of private app files or other buckets.
 - The write path is untouched and remains fully IAM-bounded (per-app presigned PUTs
   under category-scoped prefixes).
@@ -264,7 +264,7 @@ revalidation chokepoint below.
 paragraph to data-roles-and-permissions.md's read-path section stating that shared file
 bytes are served via CloudFront signed URLs; that the signing ceiling is the `shared/*`
 behavior scope (structural) plus the application-layer grant check (type-granular);
-and that the per-app IAM ceiling no longer applies to shared *reads* (it still applies
+and that the per-app IAM ceiling no longer applies to shared _reads_ (it still applies
 to writes and to app-data files).
 
 ### Key-pair lifecycle (settled)

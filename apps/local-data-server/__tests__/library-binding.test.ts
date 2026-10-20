@@ -37,7 +37,10 @@ let segment: string;
 
 beforeEach(async () => {
   const root = await mkdtemp(join(tmpdir(), "bind-"));
-  const adapter = new SqliteDatabaseAdapter({ path: join(root, "data.db"), driver: nodeSqliteDriver });
+  const adapter = new SqliteDatabaseAdapter({
+    path: join(root, "data.db"),
+    driver: nodeSqliteDriver,
+  });
   await adapter.init();
   const objectsDir = join(root, "objects");
   const objects = new FsObjectStorageAdapter({ basePath: objectsDir });
@@ -59,25 +62,37 @@ beforeEach(async () => {
 /** Write a Memo-style app file under the current segment: bytes and index row. */
 async function putAppFile(name: string): Promise<string> {
   const key = `apps/memo/${segment}/syncable/media/${name}`;
-  await mkdir(join(lib.objectsDir, "apps", "memo", segment, "syncable", "media"), { recursive: true });
+  await mkdir(join(lib.objectsDir, "apps", "memo", segment, "syncable", "media"), {
+    recursive: true,
+  });
   await writeFile(join(lib.objectsDir, key), name);
   lib.db.prepare(`INSERT INTO ${FILE_INDEX} (id, object_storage_key) VALUES (?, ?)`).run(key, key);
   return key;
 }
 
 function indexKeys(): string[] {
-  return (lib.db.prepare(`SELECT id FROM ${FILE_INDEX} ORDER BY id`).all() as Array<{ id: string }>).map((r) => r.id);
+  return (
+    lib.db.prepare(`SELECT id FROM ${FILE_INDEX} ORDER BY id`).all() as Array<{ id: string }>
+  ).map((r) => r.id);
 }
 
 describe("bindLibrary", () => {
   it("starts unbound, writing under the local segment", async () => {
     expect(boundUserId(lib.db)).toBeNull();
-    const record = await lib.sdk.data.putWithFile({ type: "image/jpeg", originAppId: "test" }, Buffer.from("a"), "image/jpeg");
+    const record = await lib.sdk.data.putWithFile(
+      { type: "image/jpeg", originAppId: "test" },
+      Buffer.from("a"),
+      "image/jpeg",
+    );
     expect(record.objectStorageKey).toMatch(/^shared\/local\/image\//);
   });
 
   it("moves shared and app files to the user's segment and rewrites every stored key", async () => {
-    const record = await lib.sdk.data.putWithFile({ type: "image/jpeg", originAppId: "test" }, Buffer.from("a"), "image/jpeg");
+    const record = await lib.sdk.data.putWithFile(
+      { type: "image/jpeg", originAppId: "test" },
+      Buffer.from("a"),
+      "image/jpeg",
+    );
     const appKey = await putAppFile("one.mp3");
 
     const report = bindLibrary(lib.db, lib.objectsDir, USER);
@@ -86,11 +101,15 @@ describe("bindLibrary", () => {
     expect(report).toMatchObject({ userId: USER, movedDirs: 2 });
     expect(boundUserId(lib.db)).toBe(USER);
     const rebound = await lib.sdk.data.get(record.id);
-    expect(rebound!.objectStorageKey).toBe(record.objectStorageKey!.replace("shared/local/", `shared/${USER}/`));
+    expect(rebound!.objectStorageKey).toBe(
+      record.objectStorageKey!.replace("shared/local/", `shared/${USER}/`),
+    );
     expect(existsSync(join(lib.objectsDir, rebound!.objectStorageKey!))).toBe(true);
     expect(existsSync(join(lib.objectsDir, "shared", LOCAL_USER_SEGMENT))).toBe(false);
     expect(indexKeys()).toEqual([appKey.replace("/local/", `/${USER}/`)]);
-    expect(existsSync(join(lib.objectsDir, "apps", "memo", USER, "syncable", "media", "one.mp3"))).toBe(true);
+    expect(
+      existsSync(join(lib.objectsDir, "apps", "memo", USER, "syncable", "media", "one.mp3")),
+    ).toBe(true);
   });
 
   it("sweeps a write that landed under local after binding", async () => {
@@ -107,7 +126,9 @@ describe("bindLibrary", () => {
       `apps/memo/${USER}/syncable/media/early.mp3`,
       `apps/memo/${USER}/syncable/media/late.mp3`,
     ]);
-    expect(existsSync(join(lib.objectsDir, "apps", "memo", USER, "syncable", "media", "late.mp3"))).toBe(true);
+    expect(
+      existsSync(join(lib.objectsDir, "apps", "memo", USER, "syncable", "media", "late.mp3")),
+    ).toBe(true);
     expect(existsSync(join(lib.objectsDir, "apps", "memo", LOCAL_USER_SEGMENT))).toBe(false);
   });
 
@@ -127,7 +148,9 @@ describe("bindLibrary", () => {
     segment = LOCAL_USER_SEGMENT;
     const key = await putAppFile("kept.mp3");
 
-    expect(() => bindLibrary(lib.db, lib.objectsDir, "another-user")).toThrow(LibraryBoundElsewhereError);
+    expect(() => bindLibrary(lib.db, lib.objectsDir, "another-user")).toThrow(
+      LibraryBoundElsewhereError,
+    );
     expect(boundUserId(lib.db)).toBe(USER);
     expect(indexKeys()).toEqual([key]);
   });

@@ -15,9 +15,7 @@ describe("isRetryableDsqlConflict", () => {
 
   it("matches conflict messages when no code is present", () => {
     expect(
-      isRetryableDsqlConflict(
-        occError({ message: "change conflicts with another transaction" }),
-      ),
+      isRetryableDsqlConflict(occError({ message: "change conflicts with another transaction" })),
     ).toBe(true);
     expect(
       isRetryableDsqlConflict(
