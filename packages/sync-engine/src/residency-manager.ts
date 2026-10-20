@@ -196,8 +196,8 @@ export interface ResidencyManager {
 
 
 export function createResidencyManager(options: ResidencyManagerOptions): ResidencyManager {
-  // eslint-disable-next-line prefer-const -- assigned to the object literal below,
-  // so "Free up space" and the watcher share one departure path rather than two.
+  // Assigned to the object literal below, so "Free up space" and the watcher
+  // share one departure path rather than two.
   let manager: ResidencyManager;
   const {
     localDb,

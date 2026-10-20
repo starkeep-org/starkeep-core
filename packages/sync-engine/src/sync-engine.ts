@@ -129,8 +129,6 @@ import {
   blobCandidateForRecord,
   cloudExcludedRecords,
   FILE_RECORDS_TABLE,
-  manifestForAppRow,
-  manifestForRecord,
   scanFileRows,
   type FileRow,
   type FileRowSources,
@@ -2064,19 +2062,6 @@ type InboundItem =
   | { kind: "label"; label: RecordLabel }
   | { kind: "appRow"; entry: AppSyncableRowEntry };
 
-/** A blob the row pass queued for the blob pass, and where its item sits. */
-interface PendingInboundBlob {
-  readonly manifest: FileSyncManifest;
-  readonly candidate: BlobCandidate | null;
-  /** What a failure log names the item by. */
-  readonly itemId: string;
-  /** The record to announce when the bytes land; null for an app row. */
-  readonly recordId: StarkeepId | null;
-  readonly nodeId: string;
-  /** The item's position in its author's HLC-ordered run. */
-  readonly index: number;
-}
-
 /**
  * The shortest gap between two "these blobs landed" events in one round.
  *
@@ -2096,14 +2081,6 @@ function inboundItemHlc(item: InboundItem): HLCTimestamp {
   if (item.kind === "record") return item.record.updatedAt;
   if (item.kind === "label") return item.label.updatedAt;
   return item.entry.timestamp;
-}
-
-function outboundItemId(item: OutboundItem): string {
-  if (item.kind === "record") return item.record.id;
-  if (item.kind === "label") {
-    return `${item.label.recordId}.${item.label.appId}.${item.label.key}`;
-  }
-  return `${item.entry.appId}.${item.entry.table}`;
 }
 
 /**
@@ -2181,13 +2158,6 @@ async function forEachConcurrent<T>(
     }
   });
   await Promise.all(runners);
-}
-
-function outboundManifest(item: OutboundItem): FileSyncManifest | null {
-  if (item.kind === "record") return manifestForRecord(item.record);
-  // A label is a row, never a blob — it has nothing to transfer.
-  if (item.kind === "label") return null;
-  return manifestForAppRow(item.entry);
 }
 
 /**
