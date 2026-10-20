@@ -6,6 +6,7 @@
     "postinstall": "turbo run build",
     "build": "turbo run build",
     "test": "turbo run test",
+    "test:integration": "turbo run test:integration",
     "test:e2e": "turbo run test:e2e",
     "test:aws": "turbo run test:aws",
     "typecheck": "turbo run typecheck",

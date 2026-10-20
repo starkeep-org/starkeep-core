@@ -12,7 +12,8 @@
     "cli": "tsx cli.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint *.ts",
-    "test": "vitest run"
+    "test": "vitest run --project unit",
+    "test:integration": "vitest run --project integration"
   },
   "dependencies": {
     "@aws-sdk/client-cognito-identity": "^3.700.0",
