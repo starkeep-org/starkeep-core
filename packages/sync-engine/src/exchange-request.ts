@@ -145,11 +145,7 @@ export function sanitizeExchangeRequest(
  * A budget as a whole number within `[0, max]`, or `undefined` when the caller
  * did not ask for one (which means "use the responder's default", not "zero").
  */
-function clampBudget(
-  value: unknown,
-  field: string,
-  max: number,
-): number | undefined {
+function clampBudget(value: unknown, field: string, max: number): number | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new InvalidExchangeRequest(`"${field}" must be a finite number`);
@@ -223,9 +219,7 @@ export function sanitizeWatermarkMap(
       // planned around, and an older peer that filled the field carelessly is
       // asking for this author's rows either way. Rejecting would refuse a
       // request whose intent is unambiguous.
-      console.warn(
-        `[sync] ${field}["${nodeId}"] carries nodeId "${author}"; using the map key`,
-      );
+      console.warn(`[sync] ${field}["${nodeId}"] carries nodeId "${author}"; using the map key`);
     }
     out[nodeId] = { wallTime, counter, nodeId };
   }

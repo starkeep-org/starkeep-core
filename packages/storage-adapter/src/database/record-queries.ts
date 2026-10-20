@@ -188,7 +188,11 @@ export function orderingFor(query: Query): {
  * do with capture-time ordering. Keeping the common shape byte-identical is
  * what lets this change be about the cursor and nothing else.
  */
-function columnRef(dialect: RecordDialect, column: string, qualified: boolean): RawBuilder<unknown> {
+function columnRef(
+  dialect: RecordDialect,
+  column: string,
+  qualified: boolean,
+): RawBuilder<unknown> {
   return sql.ref(qualified ? `${dialect.records}.${column}` : column);
 }
 
@@ -229,12 +233,7 @@ export function orderValueAlias(index: number): string {
  */
 type Qb = SelectQueryBuilder<RecordDb, string, unknown>;
 
-function applyFilters(
-  qb: Qb,
-  dialect: RecordDialect,
-  query: Query,
-  qualified: boolean,
-): Qb {
+function applyFilters(qb: Qb, dialect: RecordDialect, query: Query, qualified: boolean): Qb {
   let out = qb;
 
   if (query.type) {
@@ -244,17 +243,38 @@ function applyFilters(
   for (const filter of query.filters ?? []) {
     const col = columnRef(dialect, mapField(filter.field), qualified);
     switch (filter.operator) {
-      case "eq": out = out.where(col, "=", filter.value) as Qb; break;
-      case "neq": out = out.where(col, "!=", filter.value) as Qb; break;
-      case "gt": out = out.where(col, ">", filter.value) as Qb; break;
-      case "gte": out = out.where(col, ">=", filter.value) as Qb; break;
-      case "lt": out = out.where(col, "<", filter.value) as Qb; break;
-      case "lte": out = out.where(col, "<=", filter.value) as Qb; break;
-      case "in": out = out.where(col, "in", filter.value as unknown[]) as Qb; break;
-      case "like": out = out.where(col, "like", `%${filter.value}%`) as Qb; break;
-      case "isNull": out = out.where(col, "is", null) as Qb; break;
-      case "isNotNull": out = out.where(col, "is not", null) as Qb; break;
-      default: break;
+      case "eq":
+        out = out.where(col, "=", filter.value) as Qb;
+        break;
+      case "neq":
+        out = out.where(col, "!=", filter.value) as Qb;
+        break;
+      case "gt":
+        out = out.where(col, ">", filter.value) as Qb;
+        break;
+      case "gte":
+        out = out.where(col, ">=", filter.value) as Qb;
+        break;
+      case "lt":
+        out = out.where(col, "<", filter.value) as Qb;
+        break;
+      case "lte":
+        out = out.where(col, "<=", filter.value) as Qb;
+        break;
+      case "in":
+        out = out.where(col, "in", filter.value as unknown[]) as Qb;
+        break;
+      case "like":
+        out = out.where(col, "like", `%${filter.value}%`) as Qb;
+        break;
+      case "isNull":
+        out = out.where(col, "is", null) as Qb;
+        break;
+      case "isNotNull":
+        out = out.where(col, "is not", null) as Qb;
+        break;
+      default:
+        break;
     }
   }
 
@@ -319,8 +339,16 @@ function applyOrderJoins(qb: Qb, dialect: RecordDialect, keys: readonly OrderKey
     leftJoin(table: string, k1: string, k2: string): Qb;
   };
   return joinable
-    .leftJoin(`${dialect.metadataTable("image")} as __om_image`, "__om_image.record_id", `${dialect.records}.id`)
-    .leftJoin(`${dialect.metadataTable("video")} as __om_video`, "__om_video.record_id", `${dialect.records}.id`);
+    .leftJoin(
+      `${dialect.metadataTable("image")} as __om_image`,
+      "__om_image.record_id",
+      `${dialect.records}.id`,
+    )
+    .leftJoin(
+      `${dialect.metadataTable("video")} as __om_video`,
+      "__om_video.record_id",
+      `${dialect.records}.id`,
+    );
 }
 
 function applyOrderBy(
@@ -396,9 +424,7 @@ function applyCursor(
       terms.push(prefix.length === 0 ? after(i) : eb.and([...prefix, after(i)]));
     }
     const allEqual = keys.map((_, i) => equal(i));
-    terms.push(
-      eb.and([...allEqual, sql<boolean>`${idExpr} ${sql.raw(idOp)} ${cursor.id}`]),
-    );
+    terms.push(eb.and([...allEqual, sql<boolean>`${idExpr} ${sql.raw(idOp)} ${cursor.id}`]));
     return eb.or(terms);
   }) as Qb;
 }
@@ -419,9 +445,11 @@ export function buildRecordSelect(
   // `selectAll(table)` under a join, plain `selectAll()` without one. The two
   // are equivalent when there is one table, and the plain form is the SQL every
   // existing caller already emits.
-  let qb = (qualified
-    ? k.selectFrom(dialect.records as never).selectAll(dialect.records as never)
-    : k.selectFrom(dialect.records as never).selectAll()) as Qb;
+  let qb = (
+    qualified
+      ? k.selectFrom(dialect.records as never).selectAll(dialect.records as never)
+      : k.selectFrom(dialect.records as never).selectAll()
+  ) as Qb;
 
   qb = applyOrderJoins(qb, dialect, ordering.keys);
 
@@ -430,9 +458,7 @@ export function buildRecordSelect(
   // `capturedAt` resolved to. `rowToRecord` reads named columns, so the extra
   // ones are inert.
   ordering.keys.forEach((key, index) => {
-    qb = qb.select(
-      orderExpression(dialect, key.field, qualified).as(orderValueAlias(index)),
-    ) as Qb;
+    qb = qb.select(orderExpression(dialect, key.field, qualified).as(orderValueAlias(index))) as Qb;
   });
 
   qb = applyFilters(qb, dialect, query, qualified);
@@ -473,9 +499,7 @@ export function buildRecordCount(
   dialect: RecordDialect,
   query: Query,
 ): CompiledQuery {
-  let qb = k
-    .selectFrom(dialect.records as never)
-    .select(sql<number>`count(*)`.as("total")) as Qb;
+  let qb = k.selectFrom(dialect.records as never).select(sql<number>`count(*)`.as("total")) as Qb;
   qb = applyFilters(qb, dialect, query, false);
   return qb.compile();
 }
@@ -511,10 +535,7 @@ export function buildRecordTypeCounts(
  * cursor carries is the value the database actually ordered on — not a second
  * computation of it that could disagree.
  */
-export function cursorKeysFrom(
-  row: Record<string, unknown>,
-  keyCount: number,
-): QueryCursorKey[] {
+export function cursorKeysFrom(row: Record<string, unknown>, keyCount: number): QueryCursorKey[] {
   const keys: QueryCursorKey[] = [];
   for (let i = 0; i < keyCount; i += 1) {
     const raw = row[orderValueAlias(i)];

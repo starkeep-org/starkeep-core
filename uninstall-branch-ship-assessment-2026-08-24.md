@@ -14,12 +14,12 @@ at the pre-rebase commit and the update will need a force-push.
 
 ## Verification after the rebase
 
-| Check | Result |
-| --- | --- |
+| Check                                                   | Result                                       |
+| ------------------------------------------------------- | -------------------------------------------- |
 | `apps/local-data-server` `__tests__/admin-apps.test.ts` | 12 passed, including the 4 new preview cases |
-| `apps/admin-web` `__tests__/apps-uninstall.test.ts` | 4 passed, including the 2 new preview cases |
-| `pnpm typecheck` (workspace) | fails in `@starkeep/sync-engine` |
-| `eslint` on the changed files | clean |
+| `apps/admin-web` `__tests__/apps-uninstall.test.ts`     | 4 passed, including the 2 new preview cases  |
+| `pnpm typecheck` (workspace)                            | fails in `@starkeep/sync-engine`             |
+| `eslint` on the changed files                           | clean                                        |
 
 The typecheck failure is not this branch's. It is three errors in
 `packages/sync-engine/__tests__/eviction.test.ts:34` and
@@ -96,12 +96,12 @@ what the loopback bind is documented as relying on.
 Per `CLAUDE.md`, this branch touches a privileged operation, so the table is the
 deliverable.
 
-| Capability | Where it lives | Least-authenticated reachable caller |
-| --- | --- | --- |
-| Reads and returns the user's app-specific record content and filenames | `apps/local-data-server/uninstall-preview.ts`, served at `GET /admin/apps/:appId/uninstall-preview` | any web page the operator has open, via `ACAO: *` with no `Origin` check (browser PNA permitting); otherwise any process on the machine |
-| Same, proxied | `apps/admin-web/app/api/apps/[appId]/uninstall-preview/route.ts` | any process on the machine that can reach the admin-web port |
-| Drops the app's syncable tables and `rm -rf`s its syncable filespace, and syncs the teardown to peers | `DELETE /admin/apps/:appId` on the local-data-server | any web page the operator has open — `OPTIONS` is answered `204` with `Access-Control-Allow-Methods` including `DELETE` and `ACAO: *`, so the preflight passes (browser PNA permitting) |
-| `DROP SCHEMA app_<appId> CASCADE` plus wipe of the app's S3 prefix | `packages/admin-installer/src/dsql-ddl.ts:474`, `orchestrator.ts:444` | anyone who can run the CLI with valid admin AWS credentials, with no destructive confirmation and none at all under `--non-interactive` |
+| Capability                                                                                            | Where it lives                                                                                      | Least-authenticated reachable caller                                                                                                                                                    |
+| ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Reads and returns the user's app-specific record content and filenames                                | `apps/local-data-server/uninstall-preview.ts`, served at `GET /admin/apps/:appId/uninstall-preview` | any web page the operator has open, via `ACAO: *` with no `Origin` check (browser PNA permitting); otherwise any process on the machine                                                 |
+| Same, proxied                                                                                         | `apps/admin-web/app/api/apps/[appId]/uninstall-preview/route.ts`                                    | any process on the machine that can reach the admin-web port                                                                                                                            |
+| Drops the app's syncable tables and `rm -rf`s its syncable filespace, and syncs the teardown to peers | `DELETE /admin/apps/:appId` on the local-data-server                                                | any web page the operator has open — `OPTIONS` is answered `204` with `Access-Control-Allow-Methods` including `DELETE` and `ACAO: *`, so the preflight passes (browser PNA permitting) |
+| `DROP SCHEMA app_<appId> CASCADE` plus wipe of the app's S3 prefix                                    | `packages/admin-installer/src/dsql-ddl.ts:474`, `orchestrator.ts:444`                               | anyone who can run the CLI with valid admin AWS credentials, with no destructive confirmation and none at all under `--non-interactive`                                                 |
 
 Rows three and four are pre-existing and are not this branch's doing. Row three
 is worth writing down anyway, because it is the destructive counterpart of the

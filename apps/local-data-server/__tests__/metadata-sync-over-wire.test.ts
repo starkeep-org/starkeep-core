@@ -120,63 +120,55 @@ describe("metadata across the wire", () => {
     },
   );
 
-  it(
-    "carries metadata written after the record already synced",
-    { timeout: 30_000 },
-    async () => {
-      const { record } = await createRecordWithBytes(photosA, {
-        bytes: "wire-metadata-later",
-        fileName: "later.jpg",
-      });
-      // The record crosses first, with no metadata — exactly the interleaving
-      // that used to strand a rendition in the cloud without its dimensions.
-      await converge();
-      expect(cloudMetadata(record.id)).toBeNull();
+  it("carries metadata written after the record already synced", { timeout: 30_000 }, async () => {
+    const { record } = await createRecordWithBytes(photosA, {
+      bytes: "wire-metadata-later",
+      fileName: "later.jpg",
+    });
+    // The record crosses first, with no metadata — exactly the interleaving
+    // that used to strand a rendition in the cloud without its dimensions.
+    await converge();
+    expect(cloudMetadata(record.id)).toBeNull();
 
-      const write = await photosA.fetch(`/data/records/${record.id}/metadata`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ typeId: "image/jpeg", metadata: { width: 1280, height: 960 } }),
-      });
-      expect(write.status).toBe(200);
+    const write = await photosA.fetch(`/data/records/${record.id}/metadata`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ typeId: "image/jpeg", metadata: { width: 1280, height: 960 } }),
+    });
+    expect(write.status).toBe(200);
 
-      await converge();
+    await converge();
 
-      // The clock bump on the metadata write is the only reason this round
-      // selects the record at all.
-      expect(cloudMetadata(record.id)).toMatchObject({ width: 1280, height: 960 });
-      expect(await metadataOn(driveB, record.id)).toMatchObject({ width: 1280 });
-    },
-  );
+    // The clock bump on the metadata write is the only reason this round
+    // selects the record at all.
+    expect(cloudMetadata(record.id)).toMatchObject({ width: 1280, height: 960 });
+    expect(await metadataOn(driveB, record.id)).toMatchObject({ width: 1280 });
+  });
 
-  it(
-    "leaves columns a peer holds and this node does not",
-    { timeout: 30_000 },
-    async () => {
-      const { record } = await createRecordWithBytes(photosA, {
-        bytes: "wire-metadata-partial",
-        fileName: "partial.jpg",
-        metadata: { width: 800, height: 600 },
-      });
-      await converge();
+  it("leaves columns a peer holds and this node does not", { timeout: 30_000 }, async () => {
+    const { record } = await createRecordWithBytes(photosA, {
+      bytes: "wire-metadata-partial",
+      fileName: "partial.jpg",
+      metadata: { width: 800, height: 600 },
+    });
+    await converge();
 
-      // A second, narrower write naming only the ThumbHash. Null columns never
-      // go on the wire, so this cannot erase the dimensions anywhere.
-      const write = await photosA.fetch(`/data/records/${record.id}/metadata`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ typeId: "image/jpeg", metadata: { thumb_hash: "TH" } }),
-      });
-      expect(write.status).toBe(200);
-      await converge();
+    // A second, narrower write naming only the ThumbHash. Null columns never
+    // go on the wire, so this cannot erase the dimensions anywhere.
+    const write = await photosA.fetch(`/data/records/${record.id}/metadata`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ typeId: "image/jpeg", metadata: { thumb_hash: "TH" } }),
+    });
+    expect(write.status).toBe(200);
+    await converge();
 
-      expect(cloudMetadata(record.id)).toMatchObject({
-        width: 800,
-        height: 600,
-        thumb_hash: "TH",
-      });
-    },
-  );
+    expect(cloudMetadata(record.id)).toMatchObject({
+      width: 800,
+      height: 600,
+      thumb_hash: "TH",
+    });
+  });
 
   it(
     "re-writing metadata recovers a record the cloud already holds without it",
@@ -193,9 +185,9 @@ describe("metadata across the wire", () => {
       // Stand in for an install that synced before metadata rode the wire: the
       // cloud holds the record at the same `updated_at` as A and no metadata
       // row, so no ordinary round will ever select it again.
-      cloud.db.prepare(`DELETE FROM shared_record_image_metadata WHERE record_id = ?`).run(
-        record.id,
-      );
+      cloud.db
+        .prepare(`DELETE FROM shared_record_image_metadata WHERE record_id = ?`)
+        .run(record.id);
       expect(cloudMetadata(record.id)).toBeNull();
       await converge();
       expect(cloudMetadata(record.id)).toBeNull();

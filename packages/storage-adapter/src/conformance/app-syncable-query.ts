@@ -231,7 +231,11 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
     name: "equality matches, and equality against null means IS NULL",
     async run(h) {
       await seedQueryRows(h);
-      equal((await rows(h, { where: [{ column: "n", predicate: { op: "eq", value: 3 } }] })).ids, ["r1"], "n = 3");
+      equal(
+        (await rows(h, { where: [{ column: "n", predicate: { op: "eq", value: 3 } }] })).ids,
+        ["r1"],
+        "n = 3",
+      );
       // `= NULL` is never true in SQL, so a caller writing `{"name": null}`
       // would otherwise get an empty page rather than the row that is null.
       equal(
@@ -249,7 +253,8 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
       // `name <> 'alpha'` excludes nulls on both engines, and a caller asking
       // for "not alpha" means every row that is not alpha — r3 included.
       equal(
-        (await rows(h, { where: [{ column: "name", predicate: { op: "ne", value: "alpha" } }] })).ids,
+        (await rows(h, { where: [{ column: "name", predicate: { op: "ne", value: "alpha" } }] }))
+          .ids,
         ["r2", "r3", "r4", "r5"],
         "name <> alpha",
       );
@@ -265,12 +270,22 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
     name: "ordered comparison over every orderable type",
     async run(h) {
       await seedQueryRows(h);
-      equal((await rows(h, { where: [{ column: "n", predicate: { op: "gte", value: 3 } }] })).ids, ["r1", "r4"], "n >= 3");
-      equal((await rows(h, { where: [{ column: "r", predicate: { op: "lt", value: 2.5 } }] })).ids, ["r1"], "r < 2.5");
       equal(
-        (await rows(h, {
-          where: [{ column: "ts", predicate: { op: "lte", value: "2026-09-03T00:00:00.000Z" } }],
-        })).ids,
+        (await rows(h, { where: [{ column: "n", predicate: { op: "gte", value: 3 } }] })).ids,
+        ["r1", "r4"],
+        "n >= 3",
+      );
+      equal(
+        (await rows(h, { where: [{ column: "r", predicate: { op: "lt", value: 2.5 } }] })).ids,
+        ["r1"],
+        "r < 2.5",
+      );
+      equal(
+        (
+          await rows(h, {
+            where: [{ column: "ts", predicate: { op: "lte", value: "2026-09-03T00:00:00.000Z" } }],
+          })
+        ).ids,
         ["r1", "r4"],
         "ts <= 2026-09-03",
       );
@@ -278,7 +293,8 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
       // comparison; this is the case that would break if a writer emitted a
       // different spelling.
       equal(
-        (await rows(h, { where: [{ column: "name", predicate: { op: "gt", value: "alphabet" } }] })).ids,
+        (await rows(h, { where: [{ column: "name", predicate: { op: "gt", value: "alphabet" } }] }))
+          .ids,
         ["r5"],
         "name > alphabet",
       );
@@ -290,7 +306,11 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
     async run(h) {
       await seedQueryRows(h);
       equal(
-        (await rows(h, { where: [{ column: "id", predicate: { op: "in", values: ["r1", "r4", "nope"] } }] })).ids,
+        (
+          await rows(h, {
+            where: [{ column: "id", predicate: { op: "in", values: ["r1", "r4", "nope"] } }],
+          })
+        ).ids,
         ["r1", "r4"],
         "id in list",
       );
@@ -307,9 +327,13 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
     async run(h) {
       await seedQueryRows(h);
       equal(
-        (await rows(h, {
-          where: [{ column: "name", predicate: { op: "prefix", lower: "alpha", upper: "alphb" } }],
-        })).ids,
+        (
+          await rows(h, {
+            where: [
+              { column: "name", predicate: { op: "prefix", lower: "alpha", upper: "alphb" } },
+            ],
+          })
+        ).ids,
         ["r1", "r2"],
         "name prefix alpha",
       );
@@ -317,16 +341,20 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
       // case-insensitive for ASCII by default and Postgres's is not, so
       // `LIKE 'beta%'` matches BETA locally and nothing in the cloud.
       equal(
-        (await rows(h, {
-          where: [{ column: "name", predicate: { op: "prefix", lower: "beta", upper: "betb" } }],
-        })).ids,
+        (
+          await rows(h, {
+            where: [{ column: "name", predicate: { op: "prefix", lower: "beta", upper: "betb" } }],
+          })
+        ).ids,
         [],
         "name prefix beta does not match BETA",
       );
       equal(
-        (await rows(h, {
-          where: [{ column: "name", predicate: { op: "prefix", lower: "BETA", upper: "BETB" } }],
-        })).ids,
+        (
+          await rows(h, {
+            where: [{ column: "name", predicate: { op: "prefix", lower: "BETA", upper: "BETB" } }],
+          })
+        ).ids,
         ["r4"],
         "name prefix BETA",
       );
@@ -338,8 +366,11 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
     async run(h) {
       await seedQueryRows(h);
       equal(
-        (await rows(h, { where: [{ column: "name", predicate: { op: "like", pattern: "alpha%" } }] }))
-          .ids,
+        (
+          await rows(h, {
+            where: [{ column: "name", predicate: { op: "like", pattern: "alpha%" } }],
+          })
+        ).ids,
         ["r1", "r2"],
         "anchored pattern",
       );
@@ -353,20 +384,25 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
       );
       // `_` is exactly one character, so it matches `alpha` and not `alphabet`.
       equal(
-        (await rows(h, { where: [{ column: "name", predicate: { op: "like", pattern: "alph_" } }] }))
-          .ids,
+        (
+          await rows(h, {
+            where: [{ column: "name", predicate: { op: "like", pattern: "alph_" } }],
+          })
+        ).ids,
         ["r1"],
         "single-character wildcard",
       );
       // `LIKE` against NULL is unknown, so a null column value is a non-match
       // rather than an error.
       equal(
-        (await rows(h, {
-          where: [
-            { column: "id", predicate: { op: "in", values: ["r3", "r5"] } },
-            { column: "name", predicate: { op: "like", pattern: "%a%" } },
-          ],
-        })).ids,
+        (
+          await rows(h, {
+            where: [
+              { column: "id", predicate: { op: "in", values: ["r3", "r5"] } },
+              { column: "name", predicate: { op: "like", pattern: "%a%" } },
+            ],
+          })
+        ).ids,
         ["r5"],
         "like over a null column value",
       );
@@ -383,14 +419,20 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
       // nothing in the cloud — one query, two answers, which is the whole thing
       // the grammar exists to prevent.
       equal(
-        (await rows(h, { where: [{ column: "name", predicate: { op: "like", pattern: "beta%" } }] }))
-          .ids,
+        (
+          await rows(h, {
+            where: [{ column: "name", predicate: { op: "like", pattern: "beta%" } }],
+          })
+        ).ids,
         [],
         "lowercase pattern does not match BETA",
       );
       equal(
-        (await rows(h, { where: [{ column: "name", predicate: { op: "like", pattern: "BETA%" } }] }))
-          .ids,
+        (
+          await rows(h, {
+            where: [{ column: "name", predicate: { op: "like", pattern: "BETA%" } }],
+          })
+        ).ids,
         ["r4"],
         "exact-case pattern matches BETA",
       );
@@ -425,8 +467,11 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
 
       // Unescaped, both wildcards do their usual job and the pattern matches.
       equal(
-        (await rows(h, { where: [{ column: "name", predicate: { op: "like", pattern: "100%_off" } }] }))
-          .ids,
+        (
+          await rows(h, {
+            where: [{ column: "name", predicate: { op: "like", pattern: "100%_off" } }],
+          })
+        ).ids,
         ["r6"],
         "unescaped wildcards match",
       );
@@ -434,9 +479,11 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
       // hold, so the same pattern still matches and proves the escape reached
       // the engine rather than being dropped.
       equal(
-        (await rows(h, {
-          where: [{ column: "name", predicate: { op: "like", pattern: "100\\%\\_off" } }],
-        })).ids,
+        (
+          await rows(h, {
+            where: [{ column: "name", predicate: { op: "like", pattern: "100\\%\\_off" } }],
+          })
+        ).ids,
         ["r6"],
         "escaped wildcards match the literal characters",
       );
@@ -444,9 +491,11 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
       // holds, while `alpha%` matches two. An engine that ignored the escape
       // clause would return r1 and r2 here.
       equal(
-        (await rows(h, {
-          where: [{ column: "name", predicate: { op: "like", pattern: "alpha\\%" } }],
-        })).ids,
+        (
+          await rows(h, {
+            where: [{ column: "name", predicate: { op: "like", pattern: "alpha\\%" } }],
+          })
+        ).ids,
         [],
         "escaped % is a literal and matches nothing",
       );
@@ -459,7 +508,10 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
       await seedQueryRows(h);
       const { result } = await rows(h, {
         select: ["id"],
-        order: [{ column: "n", direction: "asc", nulls: "last" }, { column: "id", direction: "asc", nulls: "last" }],
+        order: [
+          { column: "n", direction: "asc", nulls: "last" },
+          { column: "id", direction: "asc", nulls: "last" },
+        ],
         limit: 1,
       });
       // The ordering column rode back under a reserved alias so the page token
@@ -476,16 +528,26 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
       // SQLite sorts nulls first, Postgres sorts them last, so neither default
       // is the answer — the grammar states it on every key.
       equal(
-        (await rows(h, {
-          order: [{ column: "n", direction: "asc", nulls: "last" }, { column: "id", direction: "asc", nulls: "last" }],
-        })).ids,
+        (
+          await rows(h, {
+            order: [
+              { column: "n", direction: "asc", nulls: "last" },
+              { column: "id", direction: "asc", nulls: "last" },
+            ],
+          })
+        ).ids,
         ["r2", "r5", "r1", "r4", "r3"],
         "nulls last",
       );
       equal(
-        (await rows(h, {
-          order: [{ column: "n", direction: "asc", nulls: "first" }, { column: "id", direction: "asc", nulls: "last" }],
-        })).ids,
+        (
+          await rows(h, {
+            order: [
+              { column: "n", direction: "asc", nulls: "first" },
+              { column: "id", direction: "asc", nulls: "last" },
+            ],
+          })
+        ).ids,
         ["r3", "r2", "r5", "r1", "r4"],
         "nulls first",
       );
@@ -664,9 +726,13 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
       // this ever reads `1` on one side and `true` on the other, the same
       // logical row has two wire forms and the peer that receives the wrong one
       // cannot bind it.
-      const { result } = await rows(h, { where: [{ column: "id", predicate: { op: "eq", value: "r3" } }] });
+      const { result } = await rows(h, {
+        where: [{ column: "id", predicate: { op: "eq", value: "r3" } }],
+      });
       equal(result.rows[0]!["flag"], true, "true reads back as true");
-      const off = await rows(h, { where: [{ column: "id", predicate: { op: "eq", value: "r1" } }] });
+      const off = await rows(h, {
+        where: [{ column: "id", predicate: { op: "eq", value: "r1" } }],
+      });
       equal(off.result.rows[0]!["flag"], false, "false reads back as false");
 
       // Each of the three ways the grammar lets a caller name a flag. `lt`,
@@ -721,7 +787,11 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
       });
       // Ordered by the output alias rather than by a repeat of `count(*)`,
       // which would be a second expression free to disagree with the first.
-      equal(result.map((g) => Number(g["n"])), [3, 2], "groups by size, descending");
+      equal(
+        result.map((g) => Number(g["n"])),
+        [3, 2],
+        "groups by size, descending",
+      );
     },
   },
 
@@ -766,7 +836,8 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
       } catch {
         rejected = true;
       }
-      if (!rejected) fail("a query with the soft-delete predicate on a table without the column should fail");
+      if (!rejected)
+        fail("a query with the soft-delete predicate on a table without the column should fail");
     },
   },
 
@@ -796,7 +867,9 @@ export const appSyncableQueryConformance: readonly QueryConformanceCase[] = [
           deleted_at: null,
         },
       });
-      const { result } = await rows(h, { where: [{ column: "id", predicate: { op: "eq", value: "r-precision" } }] });
+      const { result } = await rows(h, {
+        where: [{ column: "id", predicate: { op: "eq", value: "r-precision" } }],
+      });
       equal(result.rows[0]?.["r"], precise, "real round-trips at float8");
     },
   },

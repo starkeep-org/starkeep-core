@@ -8,14 +8,8 @@ import {
   type HLCTimestamp,
   type StarkeepId,
 } from "@starkeep/protocol-primitives";
-import {
-  advanceWatermark,
-} from "../../src/watermarks.js";
-import type {
-  AppSyncableRowEntry,
-  SyncStateStore,
-  Watermarks,
-} from "../../src/types.js";
+import { advanceWatermark } from "../../src/watermarks.js";
+import type { AppSyncableRowEntry, SyncStateStore, Watermarks } from "../../src/types.js";
 import { FILE_RECORDS_TABLE } from "./mock-app-source.js";
 import type { ResolvedSpec, Side } from "./types.js";
 
@@ -51,18 +45,12 @@ export async function seedInitialState(
   }
   // Multi-record variants — SR only for now.
   if (spec.dt !== "SR") {
-    throw new Error(
-      `[harness] multi-record seeding for dt=${spec.dt} not implemented yet`,
-    );
+    throw new Error(`[harness] multi-record seeding for dt=${spec.dt} not implemented yet`);
   }
   return seedSrMulti(local, cloud, spec);
 }
 
-async function seedSrSingle(
-  local: Side,
-  cloud: Side,
-  spec: ResolvedSpec,
-): Promise<SeededState> {
+async function seedSrSingle(local: Side, cloud: Side, spec: ResolvedSpec): Promise<SeededState> {
   const id = generateId() as StarkeepId;
   const objectKey = `shared/test/photo/${id}`;
   const baseInput = {
@@ -121,19 +109,14 @@ async function seedSrSingle(
 
       // Cloud writes at T₂ > T₁ with different content.
       const rCloud = recordWithId(
-        createDataRecord(
-          { ...baseInput, contentHash: "sha256:cloud" },
-          cloud.clock,
-        ),
+        createDataRecord({ ...baseInput, contentHash: "sha256:cloud" }, cloud.clock),
         id,
       );
       await cloud.db.put(rCloud);
       cloudHlc = rCloud.updatedAt;
       hlcByCloud.set(id, rCloud.updatedAt);
       winnerHlc =
-        compareHLC(rCloud.updatedAt, rLocal.updatedAt) > 0
-          ? rCloud.updatedAt
-          : rLocal.updatedAt;
+        compareHLC(rCloud.updatedAt, rLocal.updatedAt) > 0 ? rCloud.updatedAt : rLocal.updatedAt;
       break;
     }
   }
@@ -184,11 +167,7 @@ function recordWithId(record: DataRecord, id: StarkeepId): DataRecord {
  * Tomb states (`bd`, etc.) and `cdu` aren't applied here — the multi-record
  * candidates that need them haven't surfaced yet; revisit when they do.
  */
-async function seedSrMulti(
-  local: Side,
-  cloud: Side,
-  spec: ResolvedSpec,
-): Promise<SeededState> {
+async function seedSrMulti(local: Side, cloud: Side, spec: ResolvedSpec): Promise<SeededState> {
   const subjectIds: StarkeepId[] = [];
   const objectKeyById = new Map<StarkeepId, string>();
   const hlcByLocal = new Map<StarkeepId, HLCTimestamp>();
@@ -208,10 +187,8 @@ async function seedSrMulti(
     );
   }
 
-  const onLocal =
-    spec.presence === "local-only" || spec.presence === "both-same";
-  const onCloud =
-    spec.presence === "cloud-only" || spec.presence === "both-same";
+  const onLocal = spec.presence === "local-only" || spec.presence === "both-same";
+  const onCloud = spec.presence === "cloud-only" || spec.presence === "both-same";
 
   function originatingSideFor(i: number): Side {
     if (spec.batch === "multi-mixed-nodes") {
@@ -298,11 +275,7 @@ function arRow(
   };
 }
 
-async function seedArSingle(
-  local: Side,
-  cloud: Side,
-  spec: ResolvedSpec,
-): Promise<SeededState> {
+async function seedArSingle(local: Side, cloud: Side, spec: ResolvedSpec): Promise<SeededState> {
   const id = generateId() as StarkeepId;
   // For blob=nb, store an empty object_storage_key so manifestForAppRow
   // returns null and the engine ships the metadata without a blob attempt
@@ -314,11 +287,7 @@ async function seedArSingle(
   let cloudHlc: HLCTimestamp | undefined;
   let winnerHlc: HLCTimestamp | undefined;
 
-  async function applyAr(
-    side: Side,
-    hlc: HLCTimestamp,
-    contentHash: string,
-  ): Promise<void> {
+  async function applyAr(side: Side, hlc: HLCTimestamp, contentHash: string): Promise<void> {
     const entry: AppSyncableRowEntry = {
       timestamp: hlc,
       appId: spec.appId,
@@ -439,8 +408,7 @@ async function applyArTombState(
   const tomb = spec.tomb;
   if (tomb === "nd") return;
 
-  const objectKey =
-    spec.blob === "nb" ? "" : `app/${spec.appId}/${id}`;
+  const objectKey = spec.blob === "nb" ? "" : `app/${spec.appId}/${id}`;
 
   async function tombstoneAr(side: Side, hlc: HLCTimestamp): Promise<void> {
     const hlcStr = serializeHLC(hlc);
@@ -487,11 +455,7 @@ async function applyArTombState(
   }
 }
 
-async function seedAwSingle(
-  local: Side,
-  cloud: Side,
-  spec: ResolvedSpec,
-): Promise<SeededState> {
+async function seedAwSingle(local: Side, cloud: Side, spec: ResolvedSpec): Promise<SeededState> {
   const id = generateId() as StarkeepId;
   const hlcByLocal = new Map<StarkeepId, HLCTimestamp>();
   const hlcByCloud = new Map<StarkeepId, HLCTimestamp>();

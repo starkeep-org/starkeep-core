@@ -148,7 +148,11 @@ export const DEFAULT_STAND_IN_STANDARDS: StandInStandards = {
     category: "image",
     fidelityAxis: "long-edge-px",
     allowedTypes: ["image/avif"],
-    minimumQuality: { setting: "AVIF quality (libavif / sharp scale)", value: 60, higherIsBetter: true },
+    minimumQuality: {
+      setting: "AVIF quality (libavif / sharp scale)",
+      value: 60,
+      higherIsBetter: true,
+    },
     // The size Photos calls `image-large`: a 4K television, a retina laptop
     // at fullscreen, zoom and print preview.
     canonicalThreshold: 4272,
@@ -279,7 +283,9 @@ export function ceilingChoices(
  * for any real screen or archive, narrow enough that a typo cannot make every
  * original self-canonical or every stand-in huge. Provisional.
  */
-export const CANONICAL_THRESHOLD_RANGES: Readonly<Record<StandInCategory, { min: number; max: number }>> = {
+export const CANONICAL_THRESHOLD_RANGES: Readonly<
+  Record<StandInCategory, { min: number; max: number }>
+> = {
   image: { min: 1280, max: 16384 },
   video: { min: 1000, max: 50000 },
 };
@@ -308,7 +314,9 @@ export function validateStandInStandards(standards: StandInStandards): string[] 
     if (!isPositiveInteger(s.canonicalThreshold)) {
       problems.push(`${category}: canonicalThreshold must be a positive integer`);
     } else if (s.canonicalThreshold < range.min || s.canonicalThreshold > range.max) {
-      problems.push(`${category}: the canonical threshold must be from ${range.min} to ${range.max}`);
+      problems.push(
+        `${category}: the canonical threshold must be from ${range.min} to ${range.max}`,
+      );
     }
     if (s.allowedTypes.length === 0) problems.push(`${category}: no allowed stand-in types`);
     for (const type of s.allowedTypes) {
@@ -318,14 +326,17 @@ export function validateStandInStandards(standards: StandInStandards): string[] 
     }
     let previous = 0;
     for (const size of s.standardSizes) {
-      if (!isPositiveInteger(size)) problems.push(`${category}: standard size ${size} is not a positive integer`);
+      if (!isPositiveInteger(size))
+        problems.push(`${category}: standard size ${size} is not a positive integer`);
       if (size <= previous) problems.push(`${category}: standard sizes must ascend`);
       previous = size;
     }
     if (s.advisoryLongEdges) {
       const edges = s.advisoryLongEdges;
       const inRange = (edge: unknown) =>
-        isPositiveInteger(edge) && edge >= ADVISORY_LONG_EDGE_RANGE.min && edge <= ADVISORY_LONG_EDGE_RANGE.max;
+        isPositiveInteger(edge) &&
+        edge >= ADVISORY_LONG_EDGE_RANGE.min &&
+        edge <= ADVISORY_LONG_EDGE_RANGE.max;
       const rangeText = `from ${ADVISORY_LONG_EDGE_RANGE.min} to ${ADVISORY_LONG_EDGE_RANGE.max} pixels`;
       if (!inRange(edges.canonical)) {
         problems.push(`${category}: the canonical advisory long edge must be ${rangeText}`);

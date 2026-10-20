@@ -1,11 +1,6 @@
-import {
-  S3Client,
-  ListObjectsV2Command,
-  GetObjectCommand,
-} from "@aws-sdk/client-s3";
+import { S3Client, ListObjectsV2Command, GetObjectCommand } from "@aws-sdk/client-s3";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import type { STSCredentials } from "./cognito-auth";
-
 
 export interface ServiceCost {
   service: string;
@@ -20,7 +15,13 @@ const SERVICE_LABELS: Record<string, string> = {
 
 const KNOWN_SERVICES = new Set(Object.keys(SERVICE_LABELS));
 
-const SKIP_LINE_ITEM_TYPES = new Set(["Tax", "Credit", "Refund", "RIFee", "SavingsPlanRecurringFee"]);
+const SKIP_LINE_ITEM_TYPES = new Set([
+  "Tax",
+  "Credit",
+  "Refund",
+  "RIFee",
+  "SavingsPlanRecurringFee",
+]);
 
 function makeS3Client(creds: STSCredentials, region: string): S3Client {
   return new S3Client({
@@ -157,16 +158,16 @@ export async function fetchMtdCostsByService(
   const s3 = makeS3Client(creds, region);
   const prefix = billingPeriodPrefix(reportName);
 
-  const listed = await s3.send(
-    new ListObjectsV2Command({ Bucket: billingBucket, Prefix: prefix }),
-  );
+  const listed = await s3.send(new ListObjectsV2Command({ Bucket: billingBucket, Prefix: prefix }));
   if (!listed.Contents?.length) return null;
 
   // Find manifest file.
   const manifestKey = listed.Contents.find((o) => o.Key?.endsWith("-Manifest.json"))?.Key;
   if (!manifestKey) return null;
 
-  const manifestObj = await s3.send(new GetObjectCommand({ Bucket: billingBucket, Key: manifestKey }));
+  const manifestObj = await s3.send(
+    new GetObjectCommand({ Bucket: billingBucket, Key: manifestKey }),
+  );
   const manifestText = await manifestObj.Body!.transformToString();
   const manifest = JSON.parse(manifestText) as { reportKeys?: string[] };
   const reportKeys = manifest.reportKeys ?? [];

@@ -10,13 +10,13 @@ final state on both sides. Scope: 1 local node + 1 cloud node only.
 
 Where a record exists before any operation:
 
-| Label | Cloud has it | Local has it |
-|---|---|---|
-| `cloud-only` | yes | no |
-| `local-only` | no | yes |
-| `both-same` | yes (identical) | yes (identical) |
+| Label           | Cloud has it                | Local has it                |
+| --------------- | --------------------------- | --------------------------- |
+| `cloud-only`    | yes                         | no                          |
+| `local-only`    | no                          | yes                         |
+| `both-same`     | yes (identical)             | yes (identical)             |
 | `both-diverged` | yes (different `updatedAt`) | yes (different `updatedAt`) |
-| `neither` | no | no |
+| `neither`       | no                          | no                          |
 
 ## Dimension 2: Tombstone state
 

@@ -166,9 +166,11 @@ export function buildLabelSnapshotUpsert(
     .insertInto(dialect.table)
     .values({ ...row })
     .onConflict((oc) =>
-      oc.columns([...PK_COLUMNS]).doUpdateSet((eb) =>
-        Object.fromEntries(updateColumns.map((c) => [c, eb.ref(`excluded.${c}`)])),
-      ),
+      oc
+        .columns([...PK_COLUMNS])
+        .doUpdateSet((eb) =>
+          Object.fromEntries(updateColumns.map((c) => [c, eb.ref(`excluded.${c}`)])),
+        ),
     )
     .compile();
 }
@@ -352,10 +354,7 @@ export function buildQueryLabels(
  * suffix, so a lexicographic MAX equals the HLC MAX. Backed by
  * `(node_id, updated_at)`.
  */
-export function buildLabelNodeWatermarks(
-  k: Kysely<LabelDb>,
-  dialect: LabelDialect,
-): CompiledQuery {
+export function buildLabelNodeWatermarks(k: Kysely<LabelDb>, dialect: LabelDialect): CompiledQuery {
   return k
     .selectFrom(dialect.table)
     .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])

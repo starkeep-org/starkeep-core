@@ -8,7 +8,7 @@ rejected, the cost model, and the verification of current behaviour — lives in
 [`media-storage-and-transfer-plan.md`](./media-storage-and-transfer-plan.md), referenced below as
 "the design doc" with section numbers. **This doc says what to build; that one says why.**
 
-Where they disagree, assume this doc is a bad distillation and the design doc is right — *unless* the
+Where they disagree, assume this doc is a bad distillation and the design doc is right — _unless_ the
 design doc carries a dated **Superseded** or **Refined** note pointing here, which marks a decision
 genuinely changed after the split. Two exist so far, both in design-doc §6: consumers request pixel
 sizes rather than class names (§7.1 here), and AI has no capture-time exception (§7.2 here).
@@ -39,31 +39,31 @@ path, and a phone that can hold a 60k-item library in a bounded byte budget.
 
 > **Every long edge and quality level below is provisional.** They are reasoned from panel
 > resolutions and cost, not measured. The visual test (§7 of this doc, §3.4 of the design doc) is a
-> **gate on backfill** — do not backfill the library at unverified quality levels. The *structure* of
+> **gate on backfill** — do not backfill the library at unverified quality levels. The _structure_ of
 > the ladder is settled; the integers are the test's output.
 
 ### 2.1 Stills
 
-| Size class | Max long edge | Codec | Typical | Serves |
-|---|---|---|---|---|
-| *(ThumbHash)* | ~32 px equiv | inline in metadata | ~25 B | instant placeholder, zero requests |
-| `image-xsmall` | 128 px | AVIF q50 | ~3 KB | infinite canvas, dense contact-sheet grids, filmstrips |
-| `image-thumb` | 400 px | AVIF q50 | ~20 KB | grid tiles, list rows |
-| `image-medium` | 1280 px | AVIF q55 | ~110 KB | **all routine on-device AI**, fullscreen stage 1, share/export default |
-| `image-screen` | 2560 px | AVIF q55 | ~350 KB | phone fullscreen, laptop, AI re-crops of small subjects |
-| `image-large` | 4272 px | AVIF q60 | ~950 KB | 4K TV, laptop retina fullscreen, zoom, OCR, print preview |
-| `original` | native | as captured | 3–80 MB | print, export, editing, re-derivation |
+| Size class     | Max long edge | Codec              | Typical | Serves                                                                 |
+| -------------- | ------------- | ------------------ | ------- | ---------------------------------------------------------------------- |
+| _(ThumbHash)_  | ~32 px equiv  | inline in metadata | ~25 B   | instant placeholder, zero requests                                     |
+| `image-xsmall` | 128 px        | AVIF q50           | ~3 KB   | infinite canvas, dense contact-sheet grids, filmstrips                 |
+| `image-thumb`  | 400 px        | AVIF q50           | ~20 KB  | grid tiles, list rows                                                  |
+| `image-medium` | 1280 px       | AVIF q55           | ~110 KB | **all routine on-device AI**, fullscreen stage 1, share/export default |
+| `image-screen` | 2560 px       | AVIF q55           | ~350 KB | phone fullscreen, laptop, AI re-crops of small subjects                |
+| `image-large`  | 4272 px       | AVIF q60           | ~950 KB | 4K TV, laptop retina fullscreen, zoom, OCR, print preview              |
+| `original`     | native        | as captured        | 3–80 MB | print, export, editing, re-derivation                                  |
 
 ### 2.2 Video
 
-| Size class | Max spec | Typical (30 s) | Serves |
-|---|---|---|---|
-| `video-poster-thumb` | 400 px still, frame ~1 s | ~20 KB | grid tile |
-| `video-poster-720p` | 1280 px still | ~110 KB | larger-thumbnail UIs, pre-roll / paused state |
-| `video-skim` | 320 px, 1 s of every 10 s at source speed, out ≈ source ÷ 10 | ~100 KB | hover / long-press identification |
-| `video-720p` | 720p H.264 ~1.5 Mbps, full framerate | ~5.6 MB | inline playback |
-| `video-1080p` *(off by default)* | 1080p H.264 ~4 Mbps | ~15 MB | TV / large-screen playback |
-| `original` | as captured | 30 MB–6 GB | export, editing |
+| Size class                       | Max spec                                                     | Typical (30 s) | Serves                                        |
+| -------------------------------- | ------------------------------------------------------------ | -------------- | --------------------------------------------- |
+| `video-poster-thumb`             | 400 px still, frame ~1 s                                     | ~20 KB         | grid tile                                     |
+| `video-poster-720p`              | 1280 px still                                                | ~110 KB        | larger-thumbnail UIs, pre-roll / paused state |
+| `video-skim`                     | 320 px, 1 s of every 10 s at source speed, out ≈ source ÷ 10 | ~100 KB        | hover / long-press identification             |
+| `video-720p`                     | 720p H.264 ~1.5 Mbps, full framerate                         | ~5.6 MB        | inline playback                               |
+| `video-1080p` _(off by default)_ | 1080p H.264 ~4 Mbps                                          | ~15 MB         | TV / large-screen playback                    |
+| `original`                       | as captured                                                  | 30 MB–6 GB     | export, editing                               |
 
 `video-poster-720p`'s 1280 px maximum is pinned to `video-720p`'s, not chosen independently — a
 poster sharper than the footage it hands off to degrades visibly at the transition into playback.
@@ -79,18 +79,18 @@ upscales and never emits a file larger than its source.
 **Rule 2.** Generate a class when the original exceeds the **next lower class's** maximum. No offset,
 no margin. The bottom rung is always generated.
 
-| Class | Max | Generate when original exceeds |
-|---|---|---|
-| `image-xsmall` | 128 | *(always)* |
-| `image-thumb` | 400 | 128 |
-| `image-medium` | 1280 | 400 |
-| `image-screen` | 2560 | 1280 |
-| `image-large` | 4272 | 2560 |
-| `video-poster-thumb` | 400 px | *(always)* |
-| `video-poster-720p` | 1280 px | 400 px |
-| `video-skim` | 320 px, 1 s per 10 s | *(always — see below)* |
-| `video-720p` | 1280 px / ~1.5 Mbps | *(always, subject to the no-op clause)* |
-| `video-1080p` | 1920 px / ~4 Mbps | 1280 px |
+| Class                | Max                  | Generate when original exceeds          |
+| -------------------- | -------------------- | --------------------------------------- |
+| `image-xsmall`       | 128                  | _(always)_                              |
+| `image-thumb`        | 400                  | 128                                     |
+| `image-medium`       | 1280                 | 400                                     |
+| `image-screen`       | 2560                 | 1280                                    |
+| `image-large`        | 4272                 | 2560                                    |
+| `video-poster-thumb` | 400 px               | _(always)_                              |
+| `video-poster-720p`  | 1280 px              | 400 px                                  |
+| `video-skim`         | 320 px, 1 s per 10 s | _(always — see below)_                  |
+| `video-720p`         | 1280 px / ~1.5 Mbps  | _(always, subject to the no-op clause)_ |
+| `video-1080p`        | 1920 px / ~4 Mbps    | 1280 px                                 |
 
 **Video adds two clauses.** Bitrate is a second maximum (`min(source, class max)` on each axis
 independently). And **if both resolution and bitrate would be unchanged, do not transcode — use the
@@ -180,7 +180,7 @@ Changes required:
    O(library) scan the resize handler does today, and makes derivation state a cheap query.
 3. **Negated-label filter** (or an `originals-only` flag) so the grid can page originals server-side.
    Without it a 60k-item library is 300k+ records and paging is meaningless.
-3b. **Variant resolution by target long edge** — `variant=<labelKey>&variantLongEdge=<px>[,<px>…]` on
+   3b. **Variant resolution by target long edge** — `variant=<labelKey>&variantLongEdge=<px>[,<px>…]` on
    `/data/records`, returning the resolved child per target with its actual dimensions and signed URL
    (§7.1). Expressed generically over child records, a label key and the `width`/`height` columns, so
    the platform never learns what `image-medium` is. **This is what keeps size-class names out of every
@@ -203,10 +203,10 @@ Changes required:
 Apps declare an intent from a platform vocabulary that says nothing about AWS. The intent decides
 three things: storage class, tag, and Object Lock retention.
 
-| Intent | Meaning to the app | Storage class | Tag | Retention |
-|---|---|---|---|---|
-| `instant` *(default)* | readable now, at normal latency, whenever read | Intelligent-Tiering, automatic tiers only | none | **none, ever** |
-| `archive` | may be unavailable for up to 48 h when read | Glacier Deep Archive | `starkeep:intent=archive` | 1 year — **not applied until item 36** (§5.6) |
+| Intent                | Meaning to the app                             | Storage class                             | Tag                       | Retention                                     |
+| --------------------- | ---------------------------------------------- | ----------------------------------------- | ------------------------- | --------------------------------------------- |
+| `instant` _(default)_ | readable now, at normal latency, whenever read | Intelligent-Tiering, automatic tiers only | none                      | **none, ever**                                |
+| `archive`             | may be unavailable for up to 48 h when read    | Glacier Deep Archive                      | `starkeep:intent=archive` | 1 year — **not applied until item 36** (§5.6) |
 
 Photos maps **every rendition class → `instant`**, `original` → `archive`.
 
@@ -232,12 +232,12 @@ Presign path must allow three headers: `x-amz-storage-class`, `x-amz-tagging`,
 Returned by `/data/records` alongside everything else, by whichever data server was asked, about its
 own storage. The same record is `instant` on the laptop and `archived` in the cloud.
 
-| Value | Meaning |
-|---|---|
-| `instant` | readable now, at normal latency |
-| `restoring` | restore in flight; includes estimated ready-at |
-| `archived` | requires explicit restore; includes tier and expected latency |
-| `absent` | this node does not hold the bytes (an `Elided` record) |
+| Value       | Meaning                                                       |
+| ----------- | ------------------------------------------------------------- |
+| `instant`   | readable now, at normal latency                               |
+| `restoring` | restore in flight; includes estimated ready-at                |
+| `archived`  | requires explicit restore; includes tier and expected latency |
+| `absent`    | this node does not hold the bytes (an `Elided` record)        |
 
 Three rules:
 
@@ -254,13 +254,13 @@ Three rules:
 
 ### 5.3 The archive gate
 
-**Gate on verified durability, not on age.** When every *applicable* class for a record is confirmed
+**Gate on verified durability, not on age.** When every _applicable_ class for a record is confirmed
 present in the cloud, tag the original `starkeep:ladder=complete`. Until then it sits in I-T and is
 instantly readable — which is what makes the cloud derivation fallback thaw-free.
 
 **Then hold for `archiveHoldDays` (default 7) before transitioning.** This is a primary user-facing
 setting, not a safety margin: it buys a week to catch a derivation bug before the input is behind a
-48-hour thaw, *and* it is what people who edit recent originals will raise. Under I-T the whole range
+48-hour thaw, _and_ it is what people who edit recent originals will raise. Under I-T the whole range
 from a week to a year spans under $0.50/month at the operator's scale and flattens after 90 days.
 
 Transition cost is fixed and does not depend on how long you waited: $0.05/1,000 objects plus
@@ -292,10 +292,10 @@ stays uncovered and is a named residual risk.
 
 **This splits into two items that must be sequenced apart, and the split is the whole point:**
 
-| | When | Why |
-|---|---|---|
+|                                                                       | When                                | Why                                                                                            |
+| --------------------------------------------------------------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------- |
 | **The bucket flag** — `objectLockEnabled: true`, no default retention | **Item 0, before any real install** | Can only be set at bucket creation; missing it is unrecoverable without an AWS Support request |
-| **Applying compliance retention** to `archive`-intent PUTs | **Item 36, deliberately last** | Undeletable objects during development are a liability, not a protection |
+| **Applying compliance retention** to `archive`-intent PUTs            | **Item 36, deliberately last**      | Undeletable objects during development are a liability, not a protection                       |
 
 **An Object-Lock-enabled bucket with no retention configured behaves exactly like an ordinary
 bucket** — nothing becomes undeletable until a retain-until date is actually written on an object.
@@ -328,7 +328,7 @@ development-time exposure, not an oversight.
 
 ### 6.1 Residency — the platform unblocker
 
-Today a missing blob is a *failure*: the sync engine holds the watermark back so the record is
+Today a missing blob is a _failure_: the sync engine holds the watermark back so the record is
 re-shipped forever. There is no way to say "I have the metadata and I am intentionally not fetching
 the bytes." **This single behaviour blocks both a phone node and any archive tier.**
 
@@ -354,32 +354,32 @@ Inputs resolve in a fixed order, and the order matters because two of them pull 
 **There is no residency-class enum in the data model.** A node's policy is a table with one row per
 size class (including `original`):
 
-| Setting | Values |
-|---|---|
-| **keep** | all / recent-only / on-demand-only / never |
-| **recency window** | for *recent-only*: how far back, plus "anything opened in the last N days" |
-| **byte budget** | a cap on this row |
+| Setting            | Values                                                                     |
+| ------------------ | -------------------------------------------------------------------------- |
+| **keep**           | all / recent-only / on-demand-only / never                                 |
+| **recency window** | for _recent-only_: how far back, plus "anything opened in the last N days" |
+| **byte budget**    | a cap on this row                                                          |
 
 `Full`/`Library`/`Browse`-style presets may front this in the UI, but they **write** these settings
 rather than being stored.
 
 **Default budgets** — sized as working sets, not libraries:
 
-| Size class | Default | Roughly |
-|---|---|---|
-| `image-xsmall` | 0.25 GB | 80,000 tiles |
-| `image-thumb` | 1 GB | 50,000 tiles |
-| `image-medium` | 4 GB | 36,000 items |
-| `image-screen` | 2 GB | 6,000 items |
-| `image-large` | 1 GB | 1,100 items |
-| `video-poster-thumb` | 0.2 GB | 10,000 clips |
-| `video-poster-720p` | 0.3 GB | 2,700 clips |
-| `video-skim` | 0.5 GB | 6,500 clips |
-| `video-720p` | 4 GB | 700 clips of 30 s |
-| `video-1080p` | 1 GB | 65 clips of 30 s |
-| `original` (photo) | 2 GB | 600 HEIC, or 25 ProRAW |
-| `original` (video) | 3 GB | one or two 4K clips |
-| **Total** | **19 GB** | |
+| Size class           | Default   | Roughly                |
+| -------------------- | --------- | ---------------------- |
+| `image-xsmall`       | 0.25 GB   | 80,000 tiles           |
+| `image-thumb`        | 1 GB      | 50,000 tiles           |
+| `image-medium`       | 4 GB      | 36,000 items           |
+| `image-screen`       | 2 GB      | 6,000 items            |
+| `image-large`        | 1 GB      | 1,100 items            |
+| `video-poster-thumb` | 0.2 GB    | 10,000 clips           |
+| `video-poster-720p`  | 0.3 GB    | 2,700 clips            |
+| `video-skim`         | 0.5 GB    | 6,500 clips            |
+| `video-720p`         | 4 GB      | 700 clips of 30 s      |
+| `video-1080p`        | 1 GB      | 65 clips of 30 s       |
+| `original` (photo)   | 2 GB      | 600 HEIC, or 25 ProRAW |
+| `original` (video)   | 3 GB      | one or two 4K clips    |
+| **Total**            | **19 GB** |                        |
 
 **No row defaults to zero.** A zero budget makes the class unreachable offline and silently disables
 the recency rule, so re-opening yesterday's photo re-downloads it.
@@ -388,7 +388,7 @@ the recency rule, so re-opening yesterday's photo re-downloads it.
 pooled budget one silently starves the other depending on ingest order. Every other class gets the
 split for free from its name prefix.
 
-**Independent of all budgets: originals captured *here* are retained until confirmed durable
+**Independent of all budgets: originals captured _here_ are retained until confirmed durable
 elsewhere, and until every applicable class has been derived from them.** Capture never blocks.
 
 ### 6.3 Eviction
@@ -404,7 +404,7 @@ Three distinct mechanisms; only the first is covered by §6.1.
 Nothing enforces any of this today. Eviction needs three things that do not exist:
 
 **A persisted resident-set index with sizes, grouped by size class and media type.** `size_bytes` is
-already on `FileRecordRow`, so sizes are free — but residency is currently *derived* via a
+already on `FileRecordRow`, so sizes are free — but residency is currently _derived_ via a
 `localStorage.has()` probe per record, which is 300k+ probes once renditions exist. **This amends a
 stated design decision of the sync engine and should be adopted deliberately.**
 
@@ -415,7 +415,7 @@ restore state — and returning `true` for a Deep Archive object that cannot cur
 
 Fix, made cheap by content-addressing:
 
-- **Send `x-amz-checksum-sha256` on the presigned PUT.** The key already *is* the SHA-256, so S3
+- **Send `x-amz-checksum-sha256` on the presigned PUT.** The key already _is_ the SHA-256, so S3
   rejects any body that does not match rather than storing it. "S3 returned 200" becomes "S3 confirmed
   these bytes are the bytes this key names", with no extra request and no trust in the uploader.
 - **Widen `ObjectStorageAdapter.has()` from a boolean to the object facts `HeadObject` already
@@ -426,7 +426,7 @@ Fix, made cheap by content-addressing:
   for multipart — confirm against current S3 docs. This matters exactly for the largest and least
   replaceable objects.
 - **The coverage watermark may not stand in for this.** Watermarks are metadata coverage; `Elided`
-  makes that gap structural, because a peer advances its watermark *precisely because* it declined the
+  makes that gap structural, because a peer advances its watermark _precisely because_ it declined the
   blob. Evicting on watermark evidence means deleting a last copy on the word of a node that does not
   have it either.
 
@@ -450,10 +450,10 @@ evaluated per class so a full `video-720p` budget evicts video and does not touc
 
 ### 6.4 Per-record overrides — two axes
 
-| | Travels with | Enforced by |
-|---|---|---|
+|                                           | Travels with                                                   | Enforced by                                                                                                |
+| ----------------------------------------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | **Cloud exclusion** (`starkeep/no-cloud`) | the record, as a label — every node must honour it identically | `decideResidency`'s restrictive tier, **plus a server-side refusal of blob writes** for `no-cloud` records |
-| **Local pin** | nothing — node-local state beside the resident-set index | the eviction pass |
+| **Local pin**                             | nothing — node-local state beside the resident-set index       | the eviction pass                                                                                          |
 
 Conflating these is the expensive mistake available here: a pin shared as a label would let one
 device's preference silently rewrite every other device's cache policy.
@@ -465,7 +465,7 @@ an unpinned over-budget record on a phone.
 phone" is a rule over a label, and the label machinery exists.
 
 **`no-cloud` moves the single-copy risk to the device.** So "confirmed durable elsewhere" must be able
-to mean another *local* node, and the durability predicate must be a **replica count across nodes**
+to mean another _local_ node, and the durability predicate must be a **replica count across nodes**
 with a configured minimum — plus a visible warning wherever the control is exposed while the count
 sits at one.
 
@@ -509,7 +509,7 @@ GET /data/records?…&variant=photos/rendition&variantLongEdge=400,1280
 For each record it returns the resolved child per requested target: record id, object key, signed URL,
 actual `width`/`height`, and `type`. Several targets may be requested at once, which is what
 progressive presentation needs. The response carries actual dimensions, so a client that wants to
-reason about what it got can — it just never has to *ask* in those terms.
+reason about what it got can — it just never has to _ask_ in those terms.
 
 Two properties this preserves: the resolution rides the record list that was being fetched anyway
 (§5.5), so it costs no extra round trip; and any image-granted app gets the same resolution for free
@@ -517,15 +517,15 @@ rather than reimplementing the ladder.
 
 **What consumers actually request** — illustrative, not an API contract:
 
-| Consumer | Requests | Typically resolves to |
-|---|---|---|
-| Infinite canvas / contact sheet | tile size × device pixel ratio, when small | `image-xsmall` |
-| Grid tile | tile size × device pixel ratio | `image-thumb` |
-| Phone fullscreen | viewport long edge, progressively | `image-medium` → `image-screen` |
-| Laptop windowed | actual viewport long edge | `image-medium` or `image-screen` |
-| Laptop fullscreen / retina, 4K TV | actual viewport long edge | `image-large` |
-| Share / export | ~1600 px | `image-medium` — **must not restore an original** |
-| Zoom beyond the largest rendition, print, edit | — | explicit restore (async, notified) |
+| Consumer                                       | Requests                                   | Typically resolves to                             |
+| ---------------------------------------------- | ------------------------------------------ | ------------------------------------------------- |
+| Infinite canvas / contact sheet                | tile size × device pixel ratio, when small | `image-xsmall`                                    |
+| Grid tile                                      | tile size × device pixel ratio             | `image-thumb`                                     |
+| Phone fullscreen                               | viewport long edge, progressively          | `image-medium` → `image-screen`                   |
+| Laptop windowed                                | actual viewport long edge                  | `image-medium` or `image-screen`                  |
+| Laptop fullscreen / retina, 4K TV              | actual viewport long edge                  | `image-large`                                     |
+| Share / export                                 | ~1600 px                                   | `image-medium` — **must not restore an original** |
+| Zoom beyond the largest rendition, print, edit | —                                          | explicit restore (async, notified)                |
 
 **Progressive presentation:** ThumbHash (inline, zero requests) → tile-sized request on scroll into
 view → viewport-sized request on open → a larger request only if the viewport genuinely exceeds what
@@ -546,14 +546,14 @@ worth issuing on a phone at all.
 **All of it reads renditions, never originals — with no exception at capture time.** The routine path
 reads **`image-medium`**, on every device, at every point in a record's life.
 
-| Task | Model input | Reads |
-|---|---|---|
-| Face detection (SCRFD) | 640×640 letterbox | `image-medium` |
-| Face embedding (ArcFace) | 112×112 aligned crop | `image-medium` |
-| Small/distant faces | 112×112 | `image-screen` (re-crop when the box is < ~60 px in `image-medium`) |
-| Semantic embedding (SigLIP 2) | ~384×384 | `image-medium` |
-| Object detection (Objects365) | ~640×640 | `image-medium` |
-| OCR (future) | text-resolution | `image-large` |
+| Task                          | Model input          | Reads                                                               |
+| ----------------------------- | -------------------- | ------------------------------------------------------------------- |
+| Face detection (SCRFD)        | 640×640 letterbox    | `image-medium`                                                      |
+| Face embedding (ArcFace)      | 112×112 aligned crop | `image-medium`                                                      |
+| Small/distant faces           | 112×112              | `image-screen` (re-crop when the box is < ~60 px in `image-medium`) |
+| Semantic embedding (SigLIP 2) | ~384×384             | `image-medium`                                                      |
+| Object detection (Objects365) | ~640×640             | `image-medium`                                                      |
+| OCR (future)                  | text-resolution      | `image-large`                                                       |
 
 Every routine input is ≤640 px, so `image-screen` would ship and decode 4× the pixels the model
 consumes — ~7 GB vs ~21 GB across a 60k-item catch-up scan, and on a phone the decode half is battery.
@@ -568,7 +568,7 @@ inspection and is dropped:
   away most of what q55 cost in the first place. The difference against original→640 is marginal, and
   no model in the table is sensitive at that margin.
 - **It is actively more expensive.** Decoding a 48 MP ProRAW to produce a 640 px letterbox is ~50 MB
-  of I/O and a full-resolution decode for ~1 MB of useful pixels. That is the *same* argument that
+  of I/O and a full-resolution decode for ~1 MB of useful pixels. That is the _same_ argument that
   rules out `image-screen`, only more so — and on a phone the decode is battery.
 - **It splits the library across two input sources**, which is the real problem. Capture-time
   processing would embed from originals while catch-up processing on any other device embeds from
@@ -631,7 +631,7 @@ retention) must land in item 0.
   it one indexed query. Encoder quality is not recoverable from metadata; accept that gap — a
   quality-only respec re-derives that class unconditionally.
 - **Re-derive from the smallest applicable class ≥ ~1.5× the new target**, not from the largest. When
-  several classes change at once, derive all of them from the highest *unchanged* class in one pass.
+  several classes change at once, derive all of them from the highest _unchanged_ class in one pass.
 - **Two limits:** a record's top applicable class can only be rebuilt from the original; near-boundary
   records are poor sources.
 - **Supersession, not coexistence.** On registration, the old child's `photos/rendition` label is
@@ -648,7 +648,7 @@ retention) must land in item 0.
 
 ## 10. Configuration
 
-**Library profile** (one per library): **Cost-first** / **Balanced** *(default)* / **Everything
+**Library profile** (one per library): **Cost-first** / **Balanced** _(default)_ / **Everything
 instant** (originals never leave I-T; ~$1.90/mo more at 500 GB) / **Local-first** (cloud holds
 renditions only; `no-cloud` applied to originals by default — requires a NAS or desktop retaining
 originals, and the replica-count minimum is what keeps it from being a data-loss feature).
@@ -682,32 +682,32 @@ bucket-level default retention**. Trivial code, two irreversible properties: Obj
 enabled at bucket creation, and any object written under a bucket default is permanently undeletable.
 **Must land before anyone has a bucket worth protecting.**
 
-**This item does not make anything undeletable.** It only preserves the *option* — a bucket with the
+**This item does not make anything undeletable.** It only preserves the _option_ — a bucket with the
 flag set and no retention configured behaves identically to one without it. Actually writing
 compliance retention on originals is item 36, deferred to the end (§5.6), so nothing during
 development is protected against deletion.
 
 ### Phase 0 — platform unblockers (`starkeep-core`). Nothing else lands without these.
 
-1. Residency policy + `Elided`; separate *declined* from *failed* in watermark advance. Fetch-time
+1. Residency policy + `Elided`; separate _declined_ from _failed_ in watermark advance. Fetch-time
    decision only.
-1b. **Eviction, byte accounting, and the durability predicate** — persisted resident set grouped by
+   1b. **Eviction, byte accounting, and the durability predicate** — persisted resident set grouped by
    class and media type, per-class water marks, defined overage order. Larger than item 1, and the
    part the Android app actually exercises.
-1b-i. **Make upload success verifiable** — `x-amz-checksum-sha256` on the presigned PUT; widen
-   `has()` to return object facts. Prerequisite for eviction *and* for `availability`. Decide the
+   1b-i. **Make upload success verifiable** — `x-amz-checksum-sha256` on the presigned PUT; widen
+   `has()` to return object facts. Prerequisite for eviction _and_ for `availability`. Decide the
    multipart checksum story alongside item 2.
-1c. **Per-record overrides** — `no-cloud` as a record label in `decideResidency`'s restrictive tier;
+   1c. **Per-record overrides** — `no-cloud` as a record label in `decideResidency`'s restrictive tier;
    node-local pins; **cloud data server refuses blob writes for `no-cloud` records**.
 2. Streaming / multipart blob transfer.
 3. `parentId` and negated-label filters on `/data/records`; delete the O(library) scan in the resize
    handler.
-3b. **Variant resolution by target long edge** on `/data/records` (§7.1) — generic over child records,
+   3b. **Variant resolution by target long edge** on `/data/records` (§7.1) — generic over child records,
    a label key and `width`/`height`; returns the resolved child per requested target with its actual
    dimensions and signed URL. Gates item 9.
 4. Route sync downloads through CloudFront signed URLs.
 5. Allow `x-amz-storage-class`, `x-amz-tagging`, `x-amz-checksum-sha256` through the presign path.
-5b. **Retrieval intent + availability** — `instant`/`archive` accepted at write and mapped;
+   5b. **Retrieval intent + availability** — `instant`/`archive` accepted at write and mapped;
    `availability` on every record; archived reads return 409; explicit rate-limited restore endpoint.
 
 ### Phase 1 — the ladder (`starkeep-apps/photos`, small core changes)
@@ -715,10 +715,10 @@ development is protected against deletion.
 6. Ladder definition with max-size semantics; `photos/rendition=<class>` replacing the `thumbnail`
    flag; manifest update.
 7. On-device derivation at ingest; renditions-before-originals sync ordering.
-9. Grid and viewer serve from the ladder **by requesting pixel sizes, never class names** (§7.1, item
+8. Grid and viewer serve from the ladder **by requesting pixel sizes, never class names** (§7.1, item
    3b); remove the "only labelled thumbnails render" behaviour.
-9b. **Run the visual test (§8) and replace the provisional numbers with measured ones.** → gates 8.
-8. Backfill job for the existing library. **Blocked on 9b.**
+   9b. **Run the visual test (§8) and replace the provisional numbers with measured ones.** → gates 8.
+9. Backfill job for the existing library. **Blocked on 9b.**
 
 ### Phase 2 — the Android app. Depends on Phases 0 and 1.
 
@@ -738,7 +738,7 @@ scheduled that depends on the app being open.
 14. `WorkManager` job graph on the constrained model — no foreground service.
 15. Grid + viewer + **residency inspector** + the per-class retention and budget matrix.
 16. Motion Photo XMP extraction (`GCamera:MicroVideoOffset` / `Container:Directory`) — needed at
-    *capture* on Android, unlike iOS.
+    _capture_ on Android, unlike iOS.
 
 Deferred to later as optimization: foreground services, unrestricted WorkManager, direct filesystem
 access, `MediaCodec` batch pipelines. **Do not plan on reusing `photos-ui`** — it is React DOM with
@@ -746,12 +746,12 @@ inline CSS strings.
 
 ### Phase 3 — storage classes
 
-17. Declared intent at PUT; ladder-complete gate over *applicable* classes only; `archiveHoldDays`.
+17. Declared intent at PUT; ladder-complete gate over _applicable_ classes only; `archiveHoldDays`.
 18. **One** lifecycle rule: tag-filtered Deep Archive above the ~1 MB floor. Renditions need none.
     **Assert in the installer that no async-tier `IntelligentTieringConfiguration` is ever created.**
 19. Restore flow — request, poll, notify, serve, retain.
-19b. **Availability maintenance** — S3 Event Notifications plus a daily Inventory reconcile.
-19d. **Respec machinery** (§9) — staleness query, re-derivation source rule, label supersession,
+    19b. **Availability maintenance** — S3 Event Notifications plus a daily Inventory reconcile.
+    19d. **Respec machinery** (§9) — staleness query, re-derivation source rule, label supersession,
     refcounted reaper gated behind item 20 and a 30-day minimum age. Not built until there is a real
     respec to run.
 
@@ -769,8 +769,8 @@ Deliberately small; Takeout specifics wait until a real export has been inspecte
     thresholds, and a false positive silently discards a wanted photo.
 23. Delete `GoogleImportPanel` — a dead shell against an API Google withdrew in March 2025.
 24. Resumable, per-item, content-hash-keyed local folder import with its own tracking table.
-25. *(Deferred until a real Takeout export exists: sidecar parsing, filename de-mangling, pair
-    reassembly.)*
+25. _(Deferred until a real Takeout export exists: sidecar parsing, filename de-mangling, pair
+    reassembly.)_
 
 ### Phase 5 — video
 
@@ -790,7 +790,7 @@ Deliberately small; Takeout specifics wait until a real export has been inspecte
 31. Live Photo pairing at ingest (iOS capture gets it free from `PHAsset.mediaSubtypes`; imports do
     not). Pairing must happen at ingest, where sibling files arrive together.
 32. **HEIC decode for laptop backfill via the macOS platform decoder** (ImageIO / `sips` / a small
-    native binding) — *not* libvips.
+    native binding) — _not_ libvips.
 
 ### Phase 7 — iOS, configuration, measurement
 
@@ -800,7 +800,7 @@ Deliberately small; Takeout specifics wait until a real export has been inspecte
 35. Per-prefix cost breakdown off the already-bootstrapped CUR, so the cost model can be checked
     against a real bill rather than trusted.
 36. **Per-object compliance retention on `archive` intent only, never renditions, plus its
-    confirmation UX** *(was item 19c in Phase 3)*. Deliberately the last thing to land: compliance retention cannot be
+    confirmation UX** _(was item 19c in Phase 3)_. Deliberately the last thing to land: compliance retention cannot be
     shortened or removed by anyone, so every original written under it is undeletable and billable for
     a year, and a derivation or ingest bug that produces garbage originals during development becomes
     permanent. Turn it on when the pipeline is trusted, not before. **Still no bucket-level default
@@ -810,18 +810,18 @@ Deliberately small; Takeout specifics wait until a real export has been inspecte
 
 ## 12. Rejected and out of scope
 
-| | Status |
-|---|---|
-| **Custom libvips (libheif + libde265)** | **Rejected for now.** Exhaust the alternatives first: reliable on-device derivation, the macOS platform decoder for backfill (item 32), embedded-preview derivation. Reconsider only against a measured count of records left ladder-incomplete for want of a cloud decoder — which item 15's residency inspector produces. **Accepted consequence: the cloud derivation fallback does not cover HEIC or raw.** |
-| **Server-side fetch of a remote library** (Drive-hosted Takeout, Dropbox, generic URL) and streaming archive extraction | Deferred. Buys wall-clock only, and now costs more since the libvips build is rejected. Revisit only if home-upstream wall clock is a real problem in practice. |
-| **JXL** | Out of scope. sharp reports input and output both `false`; it is not a rendition format; no device in the capture set produces it. |
-| **On-demand arbitrary sizes** (`=w1024` style) | Rejected. Requires a resizer in the request path; the fixed ladder is a static CloudFront-cacheable object. |
-| **Peer catch-up derivation** | Rejected. It transfers an original specifically in order to derive from it, which is the one rule §3 does not bend. |
-| **A `needs-derivation` flag** | Rejected. Derivation state is a query. A shared mutable "somebody fix this" flag invites two nodes to derive and produce two children. |
-| **Named residency classes** (`Full`/`Library`/`Browse`) in the data model | Rejected. May be UI presets; nothing stores one and no behaviour is conditioned on one. |
-| **A `cool` intent → Glacier IR** | Not a default. Retained as a per-installation override for the very-many-small-items case that item 35 would surface. |
-| **A separate `work` rung for AI** | Not needed. `image-medium` covers it. |
-| **Cross-account replication / second provider** | Deferred. Account-level loss is a named, unmitigated residual risk. |
+|                                                                                                                         | Status                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Custom libvips (libheif + libde265)**                                                                                 | **Rejected for now.** Exhaust the alternatives first: reliable on-device derivation, the macOS platform decoder for backfill (item 32), embedded-preview derivation. Reconsider only against a measured count of records left ladder-incomplete for want of a cloud decoder — which item 15's residency inspector produces. **Accepted consequence: the cloud derivation fallback does not cover HEIC or raw.** |
+| **Server-side fetch of a remote library** (Drive-hosted Takeout, Dropbox, generic URL) and streaming archive extraction | Deferred. Buys wall-clock only, and now costs more since the libvips build is rejected. Revisit only if home-upstream wall clock is a real problem in practice.                                                                                                                                                                                                                                                 |
+| **JXL**                                                                                                                 | Out of scope. sharp reports input and output both `false`; it is not a rendition format; no device in the capture set produces it.                                                                                                                                                                                                                                                                              |
+| **On-demand arbitrary sizes** (`=w1024` style)                                                                          | Rejected. Requires a resizer in the request path; the fixed ladder is a static CloudFront-cacheable object.                                                                                                                                                                                                                                                                                                     |
+| **Peer catch-up derivation**                                                                                            | Rejected. It transfers an original specifically in order to derive from it, which is the one rule §3 does not bend.                                                                                                                                                                                                                                                                                             |
+| **A `needs-derivation` flag**                                                                                           | Rejected. Derivation state is a query. A shared mutable "somebody fix this" flag invites two nodes to derive and produce two children.                                                                                                                                                                                                                                                                          |
+| **Named residency classes** (`Full`/`Library`/`Browse`) in the data model                                               | Rejected. May be UI presets; nothing stores one and no behaviour is conditioned on one.                                                                                                                                                                                                                                                                                                                         |
+| **A `cool` intent → Glacier IR**                                                                                        | Not a default. Retained as a per-installation override for the very-many-small-items case that item 35 would surface.                                                                                                                                                                                                                                                                                           |
+| **A separate `work` rung for AI**                                                                                       | Not needed. `image-medium` covers it.                                                                                                                                                                                                                                                                                                                                                                           |
+| **Cross-account replication / second provider**                                                                         | Deferred. Account-level loss is a named, unmitigated residual risk.                                                                                                                                                                                                                                                                                                                                             |
 
 ---
 

@@ -32,11 +32,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
-import {
-  IAMClient,
-  PutRolePolicyCommand,
-  DeleteRolePolicyCommand,
-} from "@aws-sdk/client-iam";
+import { IAMClient, PutRolePolicyCommand, DeleteRolePolicyCommand } from "@aws-sdk/client-iam";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
 import { adminBaseCredentials } from "./admin-credentials";
@@ -72,55 +68,175 @@ interface Probe {
 const PROBES: Probe[] = [
   // --- POSIX regular expressions (Q4's request) --------------------------
   { group: "regex", what: "~ (POSIX match)", sql: `SELECT 'abc' ~ 'a.c'`, expect: "unknown" },
-  { group: "regex", what: "~* (case-insensitive)", sql: `SELECT 'abc' ~* 'A.C'`, expect: "unknown" },
+  {
+    group: "regex",
+    what: "~* (case-insensitive)",
+    sql: `SELECT 'abc' ~* 'A.C'`,
+    expect: "unknown",
+  },
   { group: "regex", what: "!~ (negated)", sql: `SELECT 'abc' !~ 'x.z'`, expect: "unknown" },
   { group: "regex", what: "!~* (negated, ci)", sql: `SELECT 'abc' !~* 'X.Z'`, expect: "unknown" },
-  { group: "regex", what: "regexp_like()", sql: `SELECT regexp_like('abc', 'a.c')`, expect: "unknown" },
-  { group: "regex", what: "regexp_match()", sql: `SELECT regexp_match('abc', '(a)(b)')`, expect: "unknown" },
-  { group: "regex", what: "regexp_replace()", sql: `SELECT regexp_replace('abc', 'b', 'X')`, expect: "unknown" },
-  { group: "regex", what: "regexp_split_to_array()", sql: `SELECT regexp_split_to_array('a,b', ',')`, expect: "unknown" },
-  { group: "regex", what: "substring(x from pattern)", sql: `SELECT substring('abc' from 'b')`, expect: "unknown" },
+  {
+    group: "regex",
+    what: "regexp_like()",
+    sql: `SELECT regexp_like('abc', 'a.c')`,
+    expect: "unknown",
+  },
+  {
+    group: "regex",
+    what: "regexp_match()",
+    sql: `SELECT regexp_match('abc', '(a)(b)')`,
+    expect: "unknown",
+  },
+  {
+    group: "regex",
+    what: "regexp_replace()",
+    sql: `SELECT regexp_replace('abc', 'b', 'X')`,
+    expect: "unknown",
+  },
+  {
+    group: "regex",
+    what: "regexp_split_to_array()",
+    sql: `SELECT regexp_split_to_array('a,b', ',')`,
+    expect: "unknown",
+  },
+  {
+    group: "regex",
+    what: "substring(x from pattern)",
+    sql: `SELECT substring('abc' from 'b')`,
+    expect: "unknown",
+  },
   // POSIX character classes are the part JavaScript's regex engine does not
   // have, so this probe is what decides whether one pattern language can span
   // both backends or only a documented subset can.
-  { group: "regex", what: "POSIX class [[:alpha:]]", sql: `SELECT 'abc' ~ '[[:alpha:]]+'`, expect: "unknown" },
+  {
+    group: "regex",
+    what: "POSIX class [[:alpha:]]",
+    sql: `SELECT 'abc' ~ '[[:alpha:]]+'`,
+    expect: "unknown",
+  },
 
   // --- Pattern matching short of regex ------------------------------------
   { group: "pattern", what: "LIKE", sql: `SELECT 'abc' LIKE 'a%'`, expect: "unknown" },
   { group: "pattern", what: "ILIKE", sql: `SELECT 'abc' ILIKE 'A%'`, expect: "unknown" },
   { group: "pattern", what: "SIMILAR TO", sql: `SELECT 'abc' SIMILAR TO 'a%'`, expect: "unknown" },
-  { group: "pattern", what: "starts_with()", sql: `SELECT starts_with('abc', 'a')`, expect: "unknown" },
+  {
+    group: "pattern",
+    what: "starts_with()",
+    sql: `SELECT starts_with('abc', 'a')`,
+    expect: "unknown",
+  },
   // The portable prefix predicate the plan would actually emit: a half-open
   // range, which is an index seek rather than a scan on both engines.
-  { group: "pattern", what: "range prefix (>= AND <)", sql: `SELECT 'abc' >= 'a' AND 'abc' < 'b'`, expect: "supported" },
+  {
+    group: "pattern",
+    what: "range prefix (>= AND <)",
+    sql: `SELECT 'abc' >= 'a' AND 'abc' < 'b'`,
+    expect: "supported",
+  },
 
   // --- Full-text search ----------------------------------------------------
   // tsvector and tsquery are absent from DSQL's supported-data-types page, so
   // these are expected to fail. Probing anyway: the page describes stored
   // column types, and an expression-only use might still resolve.
-  { group: "fts", what: "to_tsvector()", sql: `SELECT to_tsvector('english', 'a quick fox')`, expect: "unsupported" },
-  { group: "fts", what: "websearch_to_tsquery()", sql: `SELECT websearch_to_tsquery('english', 'fox')`, expect: "unsupported" },
-  { group: "fts", what: "@@ (tsvector match)", sql: `SELECT to_tsvector('a fox') @@ to_tsquery('fox')`, expect: "unsupported" },
+  {
+    group: "fts",
+    what: "to_tsvector()",
+    sql: `SELECT to_tsvector('english', 'a quick fox')`,
+    expect: "unsupported",
+  },
+  {
+    group: "fts",
+    what: "websearch_to_tsquery()",
+    sql: `SELECT websearch_to_tsquery('english', 'fox')`,
+    expect: "unsupported",
+  },
+  {
+    group: "fts",
+    what: "@@ (tsvector match)",
+    sql: `SELECT to_tsvector('a fox') @@ to_tsquery('fox')`,
+    expect: "unsupported",
+  },
   { group: "fts", what: "tsvector cast", sql: `SELECT 'a fox'::tsvector`, expect: "unsupported" },
   // The cast above succeeded on the first run, which contradicted the AWS
   // supported-data-types page. These separate the type from the linguistic
   // configuration: the parse and match machinery may exist while the dictionary
   // that `to_tsvector('english', ...)` needs does not.
   { group: "fts", what: "tsquery cast", sql: `SELECT 'fox'::tsquery`, expect: "unknown" },
-  { group: "fts", what: "@@ with no config", sql: `SELECT 'a fox'::tsvector @@ 'fox'::tsquery`, expect: "unknown" },
-  { group: "fts", what: "pg_typeof(tsvector)", sql: `SELECT pg_typeof('a fox'::tsvector)`, expect: "unknown" },
-  { group: "fts", what: "to_tsvector('simple')", sql: `SELECT to_tsvector('simple', 'a fox')`, expect: "unknown" },
-  { group: "fts", what: "plainto_tsquery('simple')", sql: `SELECT plainto_tsquery('simple', 'fox')`, expect: "unknown" },
-  { group: "fts", what: "available ts configs", sql: `SELECT coalesce(string_agg(cfgname, ','), '(none)') FROM pg_ts_config`, expect: "unknown" },
-  { group: "fts", what: "available ts dictionaries", sql: `SELECT count(*) FROM pg_ts_dict`, expect: "unknown" },
-  { group: "fts", what: "ts_rank()", sql: `SELECT ts_rank('a fox'::tsvector, 'fox'::tsquery)`, expect: "unknown" },
+  {
+    group: "fts",
+    what: "@@ with no config",
+    sql: `SELECT 'a fox'::tsvector @@ 'fox'::tsquery`,
+    expect: "unknown",
+  },
+  {
+    group: "fts",
+    what: "pg_typeof(tsvector)",
+    sql: `SELECT pg_typeof('a fox'::tsvector)`,
+    expect: "unknown",
+  },
+  {
+    group: "fts",
+    what: "to_tsvector('simple')",
+    sql: `SELECT to_tsvector('simple', 'a fox')`,
+    expect: "unknown",
+  },
+  {
+    group: "fts",
+    what: "plainto_tsquery('simple')",
+    sql: `SELECT plainto_tsquery('simple', 'fox')`,
+    expect: "unknown",
+  },
+  {
+    group: "fts",
+    what: "available ts configs",
+    sql: `SELECT coalesce(string_agg(cfgname, ','), '(none)') FROM pg_ts_config`,
+    expect: "unknown",
+  },
+  {
+    group: "fts",
+    what: "available ts dictionaries",
+    sql: `SELECT count(*) FROM pg_ts_dict`,
+    expect: "unknown",
+  },
+  {
+    group: "fts",
+    what: "ts_rank()",
+    sql: `SELECT ts_rank('a fox'::tsvector, 'fox'::tsquery)`,
+    expect: "unknown",
+  },
 
   // --- Aggregates the plan commits to (see the grammar section) -----------
-  { group: "aggregate", what: "count(DISTINCT x)", sql: `SELECT count(DISTINCT v) FROM (VALUES (1),(1),(2)) t(v)`, expect: "supported" },
-  { group: "aggregate", what: "avg(int) return type", sql: `SELECT avg(v), pg_typeof(avg(v)) FROM (VALUES (1),(2)) t(v)`, expect: "supported" },
-  { group: "aggregate", what: "avg(int)::double precision", sql: `SELECT avg(v)::double precision FROM (VALUES (1),(2)) t(v)`, expect: "supported" },
-  { group: "aggregate", what: "sum over zero rows", sql: `SELECT sum(v) FROM (VALUES (1)) t(v) WHERE false`, expect: "supported" },
-  { group: "aggregate", what: "bare column under GROUP BY", sql: `SELECT max(a), b FROM (VALUES (1,2)) t(a,b)`, expect: "unsupported" },
+  {
+    group: "aggregate",
+    what: "count(DISTINCT x)",
+    sql: `SELECT count(DISTINCT v) FROM (VALUES (1),(1),(2)) t(v)`,
+    expect: "supported",
+  },
+  {
+    group: "aggregate",
+    what: "avg(int) return type",
+    sql: `SELECT avg(v), pg_typeof(avg(v)) FROM (VALUES (1),(2)) t(v)`,
+    expect: "supported",
+  },
+  {
+    group: "aggregate",
+    what: "avg(int)::double precision",
+    sql: `SELECT avg(v)::double precision FROM (VALUES (1),(2)) t(v)`,
+    expect: "supported",
+  },
+  {
+    group: "aggregate",
+    what: "sum over zero rows",
+    sql: `SELECT sum(v) FROM (VALUES (1)) t(v) WHERE false`,
+    expect: "supported",
+  },
+  {
+    group: "aggregate",
+    what: "bare column under GROUP BY",
+    sql: `SELECT max(a), b FROM (VALUES (1,2)) t(a,b)`,
+    expect: "unsupported",
+  },
 ];
 
 function loadStarkeepConfig(): StarkeepConfig {
@@ -128,14 +244,22 @@ function loadStarkeepConfig(): StarkeepConfig {
   return JSON.parse(readFileSync(path, "utf8")) as StarkeepConfig;
 }
 
-
-async function assume(arn: string, creds: Creds, sessionName: string, region: string): Promise<Creds> {
+async function assume(
+  arn: string,
+  creds: Creds,
+  sessionName: string,
+  region: string,
+): Promise<Creds> {
   const sts = new STSClient({ region, credentials: creds });
   const r = await sts.send(
     new AssumeRoleCommand({ RoleArn: arn, RoleSessionName: sessionName, DurationSeconds: 900 }),
   );
   const c = r.Credentials!;
-  return { accessKeyId: c.AccessKeyId!, secretAccessKey: c.SecretAccessKey!, sessionToken: c.SessionToken! };
+  return {
+    accessKeyId: c.AccessKeyId!,
+    secretAccessKey: c.SecretAccessKey!,
+    sessionToken: c.SessionToken!,
+  };
 }
 
 async function connectAsAdminWithRetry(
@@ -276,23 +400,29 @@ async function runStorageProbes(client: pg.Client): Promise<ProbeResult[]> {
 
     // jsonb is a documented storage type, so this isolates the access method:
     // if GIN exists at all, it exists here.
-    await withTable("gin", "id int PRIMARY KEY, doc jsonb", "jsonb column", "supported", async (t) => {
-      await step(
-        "GIN index (access method exists?)",
-        `CREATE INDEX ASYNC idx_capprobe_gin_${process.pid} ON ${t} USING GIN (doc)`,
-        "unknown",
-      );
-      await step(
-        "GiST index (access method exists?)",
-        `CREATE INDEX ASYNC idx_capprobe_gist_${process.pid} ON ${t} USING GIST (doc)`,
-        "unknown",
-      );
-      await step(
-        "expression index on a text column",
-        `CREATE INDEX ASYNC idx_capprobe_expr_${process.pid} ON ${t} ((doc->>'k'))`,
-        "unknown",
-      );
-    });
+    await withTable(
+      "gin",
+      "id int PRIMARY KEY, doc jsonb",
+      "jsonb column",
+      "supported",
+      async (t) => {
+        await step(
+          "GIN index (access method exists?)",
+          `CREATE INDEX ASYNC idx_capprobe_gin_${process.pid} ON ${t} USING GIN (doc)`,
+          "unknown",
+        );
+        await step(
+          "GiST index (access method exists?)",
+          `CREATE INDEX ASYNC idx_capprobe_gist_${process.pid} ON ${t} USING GIST (doc)`,
+          "unknown",
+        );
+        await step(
+          "expression index on a text column",
+          `CREATE INDEX ASYNC idx_capprobe_expr_${process.pid} ON ${t} ((doc->>'k'))`,
+          "unknown",
+        );
+      },
+    );
 
     await step(
       "available index access methods",
@@ -402,7 +532,11 @@ async function runStorageProbes(client: pg.Client): Promise<ProbeResult[]> {
       "CHECK constraint in CREATE TABLE",
       "unknown",
       async (t) => {
-        await step("CHECK rejects an out-of-domain value", `INSERT INTO ${t} VALUES (1, 7)`, "unsupported");
+        await step(
+          "CHECK rejects an out-of-domain value",
+          `INSERT INTO ${t} VALUES (1, 7)`,
+          "unsupported",
+        );
         await step("CHECK admits 1", `INSERT INTO ${t} VALUES (2, 1)`, "supported");
         await step(
           "ALTER TABLE ADD CONSTRAINT ... CHECK (retrofit)",
@@ -441,7 +575,11 @@ async function main(): Promise<void> {
   });
 
   await iam.send(
-    new PutRolePolicyCommand({ RoleName: roleName, PolicyName: policyName, PolicyDocument: policyDoc }),
+    new PutRolePolicyCommand({
+      RoleName: roleName,
+      PolicyName: policyName,
+      PolicyDocument: policyDoc,
+    }),
   );
 
   let exitCode = 0;

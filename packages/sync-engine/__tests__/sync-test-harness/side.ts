@@ -1,13 +1,7 @@
 import { createHLCClock } from "@starkeep/protocol-primitives";
-import {
-  MockDatabaseAdapter,
-  MockObjectStorageAdapter,
-} from "@starkeep/storage-adapter";
+import { MockDatabaseAdapter, MockObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { FailingObjectStorageAdapter } from "./failure-injection.js";
-import {
-  FILE_RECORDS_TABLE,
-  makeMockAppSource,
-} from "./mock-app-source.js";
+import { FILE_RECORDS_TABLE, makeMockAppSource } from "./mock-app-source.js";
 import type { Side } from "./types.js";
 
 export interface BuildSideOptions {

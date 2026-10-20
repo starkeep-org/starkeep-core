@@ -28,10 +28,10 @@ import {
 ```ts
 interface ValidationResult {
   valid: boolean;
-  manifest: AppManifest | null;   // populated only when valid
+  manifest: AppManifest | null; // populated only when valid
   errors: string[];
   warnings: string[];
-  impliedCategories: string[];    // distinct categories implied by fileAccess extensions
+  impliedCategories: string[]; // distinct categories implied by fileAccess extensions
 }
 ```
 

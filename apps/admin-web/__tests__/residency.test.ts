@@ -40,7 +40,10 @@ afterAll(async () => {
 
 describe("/api/residency/stand-ins and /api/residency/free-up-space", () => {
   it("reads this node's ceilings from the daemon", async () => {
-    reply = { status: 200, body: JSON.stringify({ nodeKind: "desktop", ceilings: { image: 2560 } }) };
+    reply = {
+      status: 200,
+      body: JSON.stringify({ nodeKind: "desktop", ceilings: { image: 2560 } }),
+    };
     const res = await standIns.GET();
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ nodeKind: "desktop", ceilings: { image: 2560 } });
@@ -51,11 +54,17 @@ describe("/api/residency/stand-ins and /api/residency/free-up-space", () => {
     reply = { status: 200, body: JSON.stringify({ set: false }) };
     const read = await standIns.GET_LIBRARY_STANDARDS();
     expect(await read.json()).toEqual({ set: false });
-    expect(daemon.seen.at(-1)!).toMatchObject({ method: "GET", url: "/library/stand-in-standards" });
+    expect(daemon.seen.at(-1)!).toMatchObject({
+      method: "GET",
+      url: "/library/stand-in-standards",
+    });
   });
 
   it("saves ceilings verbatim and carries a refusal's status", async () => {
-    reply = { status: 422, body: JSON.stringify({ problems: ["image: a ceiling is a positive whole fidelity"] }) };
+    reply = {
+      status: 422,
+      body: JSON.stringify({ problems: ["image: a ceiling is a positive whole fidelity"] }),
+    };
     const res = await standIns.PUT(
       jsonRequest("/api/residency/stand-ins", { ceilings: { image: -1 } }, "PUT"),
     );

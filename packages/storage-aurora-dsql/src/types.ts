@@ -5,15 +5,10 @@ export interface AuroraDsqlDatabaseAdapterOptions {
 }
 
 export interface DatabaseClient {
-  query(
-    text: string,
-    values?: unknown[],
-  ): Promise<{ rows: Record<string, unknown>[] }>;
+  query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
   end(): Promise<void>;
 }
 
 export interface DatabaseClientFactory {
-  createClient(
-    options: AuroraDsqlDatabaseAdapterOptions,
-  ): Promise<DatabaseClient>;
+  createClient(options: AuroraDsqlDatabaseAdapterOptions): Promise<DatabaseClient>;
 }

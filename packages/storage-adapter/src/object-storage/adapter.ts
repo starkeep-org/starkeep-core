@@ -1,4 +1,14 @@
-import type { ByteRange, PutOptions, PutStreamOptions, GetResult, ListOptions, ListResult, ObjectFacts, SignedUrlOptions, SignedPutUrlOptions } from "./types.js";
+import type {
+  ByteRange,
+  PutOptions,
+  PutStreamOptions,
+  GetResult,
+  ListOptions,
+  ListResult,
+  ObjectFacts,
+  SignedUrlOptions,
+  SignedPutUrlOptions,
+} from "./types.js";
 
 export interface ObjectStorageAdapter {
   init(): Promise<void>;

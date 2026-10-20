@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { generateId, generateIdAt, isStarkeepId, createStarkeepId } from "../src/identifiers/index.js";
+import {
+  generateId,
+  generateIdAt,
+  isStarkeepId,
+  createStarkeepId,
+} from "../src/identifiers/index.js";
 
 describe("identifiers", () => {
   describe("generateId", () => {

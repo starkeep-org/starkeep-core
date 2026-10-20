@@ -71,7 +71,9 @@ export function createDsqlByteCoverageStore(
         const compiled = qb
           .insertInto(table)
           .values(entries.map(([nodeId, hlc]) => ({ node_id: nodeId, hlc: serializeHLC(hlc) })))
-          .onConflict((oc) => oc.column("node_id").doUpdateSet((eb) => ({ hlc: eb.ref("excluded.hlc") })))
+          .onConflict((oc) =>
+            oc.column("node_id").doUpdateSet((eb) => ({ hlc: eb.ref("excluded.hlc") })),
+          )
           .compile();
         await client.query(compiled.sql, [...compiled.parameters]);
       });

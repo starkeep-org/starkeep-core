@@ -1,9 +1,4 @@
-export {
-  parseQuery,
-  DEFAULT_LIMIT,
-  MAX_LIMIT,
-  MAX_IN_LIST,
-} from "./parse.js";
+export { parseQuery, DEFAULT_LIMIT, MAX_LIMIT, MAX_IN_LIST } from "./parse.js";
 export {
   appOrderSignature,
   encodePageToken,
@@ -11,11 +6,7 @@ export {
   pageTokenFrom,
 } from "@starkeep/storage-adapter";
 export { prefixUpperBound } from "./prefix.js";
-export {
-  planMetadataQuery,
-  planLabelQuery,
-  type SharedQueryPlan,
-} from "./shared-plan.js";
+export { planMetadataQuery, planLabelQuery, type SharedQueryPlan } from "./shared-plan.js";
 export {
   planRecordQuery,
   assertRecordParams,

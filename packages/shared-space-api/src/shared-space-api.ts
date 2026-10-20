@@ -31,9 +31,7 @@ function parseRoutePath(fullPath: string): {
   return { namespace, version, path };
 }
 
-export function createSharedSpaceApi(
-  options: SharedSpaceApiOptions,
-): SharedSpaceApi {
+export function createSharedSpaceApi(options: SharedSpaceApiOptions): SharedSpaceApi {
   const { databaseAdapter, objectStorageAdapter, clock, changeNotifier, getAppSpecific } = options;
   const router = createApiRouter();
 

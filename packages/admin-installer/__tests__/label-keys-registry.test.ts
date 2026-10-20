@@ -11,10 +11,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { initializeLocalSchema, sqliteCompiler as k } from "@starkeep/storage-sqlite";
-import {
-  insertAppLabelKeys,
-  deleteAppLabelKeys,
-} from "../src/local/registry.js";
+import { insertAppLabelKeys, deleteAppLabelKeys } from "../src/local/registry.js";
 
 describe("shared_app_label_keys registry", () => {
   let db: DatabaseSync;
@@ -59,9 +56,7 @@ describe("shared_app_label_keys registry", () => {
     insertAppLabelKeys(db, "gamma", [{ key: "quality", description: "Quality rating" }]);
 
     const all = db
-      .prepare(
-        k.selectFrom("shared_app_label_keys").select(["app_id", "key"]).compile().sql,
-      )
+      .prepare(k.selectFrom("shared_app_label_keys").select(["app_id", "key"]).compile().sql)
       .all() as Array<{ app_id: string; key: string }>;
     expect(all).toHaveLength(2);
     expect(new Set(all.map((r) => `${r.app_id}/${r.key}`))).toEqual(
@@ -72,9 +67,7 @@ describe("shared_app_label_keys registry", () => {
   it("is idempotent, and an upgrade updates a key's description in place", () => {
     insertAppLabelKeys(db, "alpha", [{ key: "ocr-available", description: "old wording" }]);
     insertAppLabelKeys(db, "alpha", [{ key: "ocr-available", description: "new wording" }]);
-    expect(declaredKeys("alpha")).toEqual([
-      { key: "ocr-available", description: "new wording" },
-    ]);
+    expect(declaredKeys("alpha")).toEqual([{ key: "ocr-available", description: "new wording" }]);
   });
 
   it("revokes a key an upgraded manifest no longer declares", () => {

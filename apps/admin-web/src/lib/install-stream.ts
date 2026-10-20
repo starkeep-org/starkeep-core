@@ -134,7 +134,10 @@ export function installStream(options: InstallStreamOptions): Response {
       };
 
       const begin = () => {
-        const child = startRun(options.key, options.command, options.args, { cwd: options.cwd, env: options.env });
+        const child = startRun(options.key, options.command, options.args, {
+          cwd: options.cwd,
+          env: options.env,
+        });
         child.on("error", (err) => {
           emitEvent("error", { message: err.message });
           close();

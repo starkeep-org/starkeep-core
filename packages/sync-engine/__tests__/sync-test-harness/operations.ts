@@ -71,9 +71,7 @@ async function driveSrOperation(
       if (!id) throw new Error("[harness] update op missing target id");
       const existing = await side.db.get(id);
       if (!existing)
-        throw new Error(
-          `[harness] SR update target ${id} not present on ${side.role}`,
-        );
+        throw new Error(`[harness] SR update target ${id} not present on ${side.role}`);
       const updated: DataRecord = {
         ...existing,
         updatedAt: side.clock.now(),
@@ -81,11 +79,9 @@ async function driveSrOperation(
       };
       await side.db.put(updated);
       if (op.withBlob) {
-        await side.storage.put(
-          existing.objectStorageKey,
-          op.newContent ?? NEW_BLOB_BYTES,
-          { contentType: existing.mimeType ?? undefined },
-        );
+        await side.storage.put(existing.objectStorageKey, op.newContent ?? NEW_BLOB_BYTES, {
+          contentType: existing.mimeType ?? undefined,
+        });
       }
       return {};
     }
@@ -134,8 +130,7 @@ async function driveArOperation(
     case "update": {
       const id = op.target ?? ctx.subjectIds[0];
       if (!id) throw new Error("[harness] AR update missing target id");
-      const objectKey =
-        ctx.objectKeyById.get(id) ?? `app/${spec.appId}/${id}`;
+      const objectKey = ctx.objectKeyById.get(id) ?? `app/${spec.appId}/${id}`;
       const hlc = side.clock.now();
       const entry = arEntry(id, objectKey, hlc, "insert", spec.appId, {
         contentHash: `sha256:${op.side}-updated`,
@@ -152,8 +147,7 @@ async function driveArOperation(
     case "soft-delete": {
       const id = op.target ?? ctx.subjectIds[0];
       if (!id) throw new Error("[harness] AR soft-delete missing target id");
-      const objectKey =
-        ctx.objectKeyById.get(id) ?? `app/${spec.appId}/${id}`;
+      const objectKey = ctx.objectKeyById.get(id) ?? `app/${spec.appId}/${id}`;
       const hlc = side.clock.now();
       const entry = arEntry(id, objectKey, hlc, "delete", spec.appId, {
         contentHash: "sha256:tombstone",

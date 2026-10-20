@@ -24,7 +24,7 @@ The review was organized by component, so "which routes are public" and "which
 code holds the app credential" were answered in separate passes and never
 joined. The failure was compositional, not observational. More careful reading
 would not have helped — the reading was already done. What was missing was a
-step whose *output shape* forces the composition.
+step whose _output shape_ forces the composition.
 
 See `postmortem-unauthenticated-cloud-apps-2026-08-23.md` §4 for the full
 account.
@@ -34,18 +34,18 @@ account.
 For each **credential, signing capability, or privileged operation** in the code
 under review — an HMAC secret, a CloudFront or S3 signing key, an
 `sts:AssumeRole`, a presign call, a token minter, an unbounded delete, anything
-that spends money — trace *outward*, away from the code and toward its callers,
+that spends money — trace _outward_, away from the code and toward its callers,
 until you reach the least-authenticated party that can cause it to run. Write
 that party down.
 
 Produce a table. The table is the deliverable; a paragraph saying "the auth
 looks fine" is not the same artifact and does not compose.
 
-| Capability | Where it lives | Least-authenticated reachable caller |
-| --- | --- | --- |
-| Signs data-plane requests with the app's HMAC secret | `photos/app/api/local-data/[...path]/route.ts` | anonymous internet |
-| Mints CloudFront signed URLs for `shared/*` | `cloud-data-server/src/api-handler.ts` (`signSharedCloudFrontUrl`) | any app with a valid HMAC signature and a matching grant |
-| Assumes a per-app role | `cloud-data-server` broker path | any app with a valid HMAC signature |
+| Capability                                           | Where it lives                                                     | Least-authenticated reachable caller                     |
+| ---------------------------------------------------- | ------------------------------------------------------------------ | -------------------------------------------------------- |
+| Signs data-plane requests with the app's HMAC secret | `photos/app/api/local-data/[...path]/route.ts`                     | anonymous internet                                       |
+| Mints CloudFront signed URLs for `shared/*`          | `cloud-data-server/src/api-handler.ts` (`signSharedCloudFrontUrl`) | any app with a valid HMAC signature and a matching grant |
+| Assumes a per-app role                               | `cloud-data-server` broker path                                    | any app with a valid HMAC signature                      |
 
 The first row is the real answer for 2026-06-05, derivable entirely from what
 that review already contained.
@@ -69,7 +69,7 @@ that review already contained.
   proxy", "requires the signature" are not — keep going until you can name who.
 - **Record the unsurprising rows too.** The value is the table existing, so a
   later review can diff it. The defect this pass catches is a capability whose
-  answer got *weaker* between two revisions while each individual change looked
+  answer got _weaker_ between two revisions while each individual change looked
   locally correct.
 
 ## Where the answers live in this system
@@ -77,7 +77,7 @@ that review already contained.
 Three facts about the platform decide most rows, and all three are easy to get
 wrong from memory:
 
-- The cloud data plane has **no JWT authorizer**. It authenticates the *app* via
+- The cloud data plane has **no JWT authorizer**. It authenticates the _app_ via
   HMAC, not the end user. End-user identity is each app's own responsibility —
   see `data-roles-and-permissions.md`, "How data access actually flows at
   runtime", and `authoring-an-app.md` §10.
@@ -87,4 +87,4 @@ wrong from memory:
 - A manifest handler's `auth: "public"` on a catch-all makes **every** path
   under `/apps/<appId>/` anonymous, including routes the app's bundle mounts
   that the manifest never names. The handler's `publicPaths` declaration states
-  the *intent*; it does not narrow the reach.
+  the _intent_; it does not narrow the reach.

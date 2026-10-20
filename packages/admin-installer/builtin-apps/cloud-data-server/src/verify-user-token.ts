@@ -120,10 +120,7 @@ function decodeJson(segment: string): Record<string, unknown> | null {
   }
 }
 
-export async function verifyUserToken(
-  token: string,
-  cfg: PoolConfig,
-): Promise<UserClaims | null> {
+export async function verifyUserToken(token: string, cfg: PoolConfig): Promise<UserClaims | null> {
   try {
     const parts = token.split(".");
     if (parts.length !== 3) return null;
@@ -165,8 +162,15 @@ export async function verifyUserToken(
     if (typeof sub !== "string" || !sub) return null;
 
     const rawGroups = payload["cognito:groups"];
-    const groups = Array.isArray(rawGroups) ? rawGroups.filter((g): g is string => typeof g === "string") : [];
-    return { sub, email: typeof payload.email === "string" ? payload.email : undefined, exp, groups };
+    const groups = Array.isArray(rawGroups)
+      ? rawGroups.filter((g): g is string => typeof g === "string")
+      : [];
+    return {
+      sub,
+      email: typeof payload.email === "string" ? payload.email : undefined,
+      exp,
+      groups,
+    };
   } catch {
     return null;
   }

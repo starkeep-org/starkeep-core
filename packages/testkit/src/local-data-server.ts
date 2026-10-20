@@ -106,8 +106,7 @@ export async function startLocalDataServer(
   options: LocalDataServerOptions = {},
 ): Promise<LocalDataServer> {
   const ownsDir = options.starkeepDir === undefined;
-  const starkeepDir =
-    options.starkeepDir ?? (await mkdtemp(join(tmpdir(), "starkeep-lds-")));
+  const starkeepDir = options.starkeepDir ?? (await mkdtemp(join(tmpdir(), "starkeep-lds-")));
   const port = options.port ?? (await getFreePort());
   const url = `http://127.0.0.1:${port}`;
 
@@ -124,9 +123,12 @@ export async function startLocalDataServer(
   let cloudUrl: unknown = options.config?.["apiGatewayUrl"];
   if (cloudUrl === undefined && !options.config) {
     try {
-      cloudUrl = (JSON.parse(await readFile(join(starkeepDir, "config.json"), "utf8")) as Record<string, unknown>)[
-        "apiGatewayUrl"
-      ];
+      cloudUrl = (
+        JSON.parse(await readFile(join(starkeepDir, "config.json"), "utf8")) as Record<
+          string,
+          unknown
+        >
+      )["apiGatewayUrl"];
     } catch {
       // A fresh dir has no config yet.
     }

@@ -7,7 +7,7 @@ it is deliberately not part of the default `pnpm test`.
 `global-setup.ts` boots one real platform stack for the whole run — a
 local-data-server child process (via `@starkeep/testkit`) and `tsx src/server.ts`
 instances of admin-web and drive on ephemeral ports, isolated in throwaway temp
-dirs — and tears it all down afterwards. The app under test is *not* booted by
+dirs — and tears it all down afterwards. The app under test is _not_ booted by
 the harness: the specs install it through the real admin-web consent flow and
 start it through the real daemon route, because that orchestration is itself
 platform behavior under test.

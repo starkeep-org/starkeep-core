@@ -88,10 +88,7 @@ describe("nudge routing and pause/resume (long tick interval)", () => {
   it("runs one engine per channel: Drive plus the installed app", async () => {
     const status = await syncStatus(app);
     expect(status.enabled).toBe(true);
-    expect(status.perApp.map((e) => e.appId).sort()).toEqual([
-      "starkeep-drive",
-      "testapp",
-    ]);
+    expect(status.perApp.map((e) => e.appId).sort()).toEqual(["starkeep-drive", "testapp"]);
   });
 
   it("a shared-record write nudges only the Drive channel", async () => {
@@ -147,9 +144,9 @@ describe("nudge routing and pause/resume (long tick interval)", () => {
       // drains rather than running one round, so the number of requests is an
       // implementation detail and waiting on it raced the round that carried
       // the record.
-      expect(
-        cloud.exchangeLog.some((e) => e.appId === "starkeep-drive" && e.inRecords > 0),
-      ).toBe(true);
+      expect(cloud.exchangeLog.some((e) => e.appId === "starkeep-drive" && e.inRecords > 0)).toBe(
+        true,
+      );
     });
     cloud.clearExchangeLog();
   });

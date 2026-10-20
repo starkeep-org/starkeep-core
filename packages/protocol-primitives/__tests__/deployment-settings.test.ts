@@ -43,7 +43,10 @@ describe("parsing the deployment's settings", () => {
     if (!parsed.ok) return;
     expect(parsed.standards.image.canonicalThreshold).toBe(6000);
     expect(parsed.standards.video.canonicalThreshold).toBe(STD.video.canonicalThreshold);
-    expect(parsed.standards.video.advisoryLongEdges).toEqual({ canonical: 1920, bySize: { 2000: 960 } });
+    expect(parsed.standards.video.advisoryLongEdges).toEqual({
+      canonical: 1920,
+      bySize: { 2000: 960 },
+    });
   });
 
   it("reads an empty object as the defaults", () => {
@@ -59,7 +62,10 @@ describe("parsing the deployment's settings", () => {
       [text({ standIns: { image: { canonicalThreshold: "big" } } }), /positive whole number/],
       [text({ standIns: { image: { canonicalThreshold: 100 } } }), /must be from 1280 to 16384/],
       [text({ standIns: { video: { canonicalThreshold: 90000 } } }), /must be from 1000 to 50000/],
-      [text({ standIns: { video: { advisoryLongEdges: { bySize: { "999": 640 } } } } }), /names no standard video size/],
+      [
+        text({ standIns: { video: { advisoryLongEdges: { bySize: { "999": 640 } } } } }),
+        /names no standard video size/,
+      ],
     ];
     for (const [input, problem] of cases) {
       const parsed = parseDeploymentSettings(input);
@@ -70,18 +76,25 @@ describe("parsing the deployment's settings", () => {
 
   it("round-trips the standards it was written from", () => {
     const standards = standardsFromSettings({ standIns: { video: { canonicalThreshold: 8000 } } });
-    const parsed = parseDeploymentSettings(serializeDeploymentSettings(settingsFromStandards(standards)));
+    const parsed = parseDeploymentSettings(
+      serializeDeploymentSettings(settingsFromStandards(standards)),
+    );
     expect(parsed.ok && parsed.standards).toEqual(standards);
   });
 
   it("ignores a field it does not know, such as the retired device list", () => {
-    const parsed = parseDeploymentSettings(text({ pairedDevices: [{}], trash: { retentionDays: 90 } }));
+    const parsed = parseDeploymentSettings(
+      text({ pairedDevices: [{}], trash: { retentionDays: 90 } }),
+    );
     expect(parsed.ok && retentionDaysFromSettings(parsed.settings)).toBe(90);
   });
 });
 
 describe("changing one setting", () => {
-  const current = { trash: { retentionDays: 90 }, standIns: { image: { canonicalThreshold: 6000 } } };
+  const current = {
+    trash: { retentionDays: 90 },
+    standIns: { image: { canonicalThreshold: 6000 } },
+  };
 
   it("keeps the standards when only the trash window changes", () => {
     const next = withDeploymentSettingsChange(current, { trash: { retentionDays: 14 } });
@@ -90,7 +103,9 @@ describe("changing one setting", () => {
   });
 
   it("keeps the trash window and the untouched category when one threshold changes", () => {
-    const next = withDeploymentSettingsChange(current, { standIns: { video: { canonicalThreshold: 8000 } } });
+    const next = withDeploymentSettingsChange(current, {
+      standIns: { video: { canonicalThreshold: 8000 } },
+    });
     expect(next.trash).toEqual({ retentionDays: 90 });
     const standards = standardsFromSettings(next);
     expect(standards.image.canonicalThreshold).toBe(6000);

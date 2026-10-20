@@ -115,15 +115,14 @@ describe("what a path resolves to", () => {
 });
 
 describe("path containment", () => {
-  it.each([
-    "/../package.json",
-    "/_immutable/../../package.json",
-    "/%2e%2e/package.json",
-  ])("refuses %s", (path) => {
-    // A `..` that climbed out of the build must not be read, whatever it points
-    // at — and the decoded form is the one a naive check misses.
-    expect(resolveClientRequest(path)).toEqual({ kind: "notFound" });
-  });
+  it.each(["/../package.json", "/_immutable/../../package.json", "/%2e%2e/package.json"])(
+    "refuses %s",
+    (path) => {
+      // A `..` that climbed out of the build must not be read, whatever it points
+      // at — and the decoded form is the one a naive check misses.
+      expect(resolveClientRequest(path)).toEqual({ kind: "notFound" });
+    },
+  );
 
   it("refuses a malformed escape instead of throwing", () => {
     // `decodeURIComponent` throws on a lone `%`, and a throw here would be a

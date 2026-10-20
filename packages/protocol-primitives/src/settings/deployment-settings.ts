@@ -140,7 +140,11 @@ export function settingsFromStandards(standards: StandInStandards): DeploymentSe
 }
 
 export type DeploymentSettingsCheck =
-  | { readonly ok: true; readonly settings: DeploymentSettings; readonly standards: StandInStandards }
+  | {
+      readonly ok: true;
+      readonly settings: DeploymentSettings;
+      readonly standards: StandInStandards;
+    }
   | { readonly ok: false; readonly problems: readonly string[] };
 
 /**
@@ -189,9 +193,13 @@ export function checkDeploymentSettings(value: unknown): DeploymentSettingsCheck
       } else if (isObject(bySize)) {
         for (const [size, edge] of Object.entries(bySize)) {
           if (!DEFAULT_STAND_IN_STANDARDS.video.standardSizes.includes(Number(size))) {
-            problems.push(`standIns.video.advisoryLongEdges.bySize.${size} names no standard video size`);
+            problems.push(
+              `standIns.video.advisoryLongEdges.bySize.${size} names no standard video size`,
+            );
           } else if (!isPositiveInteger(edge)) {
-            problems.push(`standIns.video.advisoryLongEdges.bySize.${size} must be a positive whole number`);
+            problems.push(
+              `standIns.video.advisoryLongEdges.bySize.${size} must be a positive whole number`,
+            );
           }
         }
       }
@@ -235,7 +243,8 @@ export function withDeploymentSettingsChange(
   const standIns =
     change.standIns === undefined
       ? current.standIns
-      : settingsFromStandards(standardsFromSettings(change, standardsFromSettings(current))).standIns;
+      : settingsFromStandards(standardsFromSettings(change, standardsFromSettings(current)))
+          .standIns;
   return {
     ...(retentionDays !== undefined ? { trash: { retentionDays } } : {}),
     ...(standIns !== undefined ? { standIns } : {}),

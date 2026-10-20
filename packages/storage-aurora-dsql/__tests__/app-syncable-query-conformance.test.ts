@@ -17,10 +17,7 @@ import {
   QUERY_COLUMNS,
   type QueryConformanceHarness,
 } from "@starkeep/storage-adapter/conformance/query";
-import type {
-  AppSyncableNamespace,
-  AppSyncableNamespaceStore,
-} from "@starkeep/sync-engine";
+import type { AppSyncableNamespace, AppSyncableNamespaceStore } from "@starkeep/sync-engine";
 import { pgColumnType } from "@starkeep/protocol-primitives";
 import { PG_RAW_PARSERS } from "../src/pg-timestamps.js";
 import { DsqlAppSyncableApplier } from "../src/app-syncable/apply.js";
@@ -64,7 +61,10 @@ async function makeHarness(): Promise<QueryConformanceHarness> {
     [
       "user_id TEXT NOT NULL",
       ...cols.map((c) => `${c.name} ${pgColumnType(c.type)}${c.primaryKey ? " NOT NULL" : ""}`),
-      `PRIMARY KEY (user_id, ${cols.filter((c) => c.primaryKey).map((c) => c.name).join(", ")})`,
+      `PRIMARY KEY (user_id, ${cols
+        .filter((c) => c.primaryKey)
+        .map((c) => c.name)
+        .join(", ")})`,
     ].join(", ");
   const columns = withOwner(QUERY_COLUMNS);
   // The metadata-shaped table: a primary key, two ordinary columns, and no

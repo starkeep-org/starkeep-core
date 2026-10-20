@@ -52,9 +52,7 @@ describe("contentAddressedId", () => {
   it("cannot be confused by where one field ends and the next begins", () => {
     // Without a separator the inputs concatenate to the same string, and two
     // genuinely different records would collapse into one row.
-    expect(contentAddressedId(null, "ab", "c")).not.toBe(
-      contentAddressedId(null, "a", "bc"),
-    );
+    expect(contentAddressedId(null, "ab", "c")).not.toBe(contentAddressedId(null, "a", "bc"));
     expect(contentAddressedId("ab" as StarkeepId, "c", HASH_A)).not.toBe(
       contentAddressedId("a" as StarkeepId, "bc", HASH_A),
     );

@@ -15,7 +15,11 @@ import type { LocalAppEntry } from "../src/lib/app-types";
 vi.mock("@/lib/operator-session", () => ({ operatorSessionIfSignedIn: async () => null }));
 
 const VIEW = {
-  image: { canonicalThreshold: 4272, standardSizes: [320, 640, 1280, 2560], advisoryLongEdges: null },
+  image: {
+    canonicalThreshold: 4272,
+    standardSizes: [320, 640, 1280, 2560],
+    advisoryLongEdges: null,
+  },
   video: {
     canonicalThreshold: 4800,
     standardSizes: [2000],
@@ -85,7 +89,11 @@ describe("the library's quality section", () => {
     stubFetch({ "GET /api/library/stand-in-standards": () => ({ body: standards() }) });
     render(<LibraryStandardsSection />);
     const photos = await screen.findByLabelText("Threshold for Photos");
-    expect(within(photos).getAllByRole("option").map((o) => o.textContent)).toEqual([
+    expect(
+      within(photos)
+        .getAllByRole("option")
+        .map((o) => o.textContent),
+    ).toEqual([
       "2560 px",
       "3200 px",
       "4272 px (default)",
@@ -95,13 +103,11 @@ describe("the library's quality section", () => {
       "Custom…",
     ]);
     const videos = screen.getByLabelText("Threshold for Videos");
-    expect(within(videos).getAllByRole("option").map((o) => o.textContent)).toEqual([
-      "3000 kbps",
-      "4800 kbps (default)",
-      "8000 kbps",
-      "12000 kbps",
-      "Custom…",
-    ]);
+    expect(
+      within(videos)
+        .getAllByRole("option")
+        .map((o) => o.textContent),
+    ).toEqual(["3000 kbps", "4800 kbps (default)", "8000 kbps", "12000 kbps", "Custom…"]);
     expect(
       within(screen.getByLabelText("Resolution for the canonical video"))
         .getAllByRole("option")
@@ -122,13 +128,19 @@ describe("the library's quality section", () => {
 
     await user.clear(input);
     await user.type(input, "7000");
-    expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(
+      false,
+    );
   });
 
   it("states what an original count means in bytes", async () => {
-    stubFetch({ "GET /api/library/stand-in-standards": () => ({ body: standards({ images: 1000 }) }) });
+    stubFetch({
+      "GET /api/library/stand-in-standards": () => ({ body: standards({ images: 1000 }) }),
+    });
     render(<LibraryStandardsSection />);
-    expect(await screen.findByText("The library holds 1,000 photos, 3.9 GiB of originals.")).toBeTruthy();
+    expect(
+      await screen.findByText("The library holds 1,000 photos, 3.9 GiB of originals."),
+    ).toBeTruthy();
     expect(screen.getByText("The library holds no videos yet.")).toBeTruthy();
   });
 
@@ -156,7 +168,9 @@ describe("the library's quality section", () => {
     await user.selectOptions(await screen.findByLabelText("Threshold for Photos"), "6000");
     await user.click(screen.getByRole("button", { name: "Save" }));
     const dialog = await screen.findByRole("dialog");
-    expect(dialog.textContent).toMatch(/Photos already in the library keep their current archived-quality copies/);
+    expect(dialog.textContent).toMatch(
+      /Photos already in the library keep their current archived-quality copies/,
+    );
     expect(dialog.textContent).toMatch(/applies to originals added from now on/);
     expect(puts()).toHaveLength(0);
     await user.click(within(dialog).getByRole("button", { name: "Save" }));
@@ -171,7 +185,10 @@ describe("the library's quality section", () => {
     });
     const user = userEvent.setup();
     render(<LibraryStandardsSection />);
-    await user.selectOptions(await screen.findByLabelText("Resolution for the 2000 kbps video"), "1920");
+    await user.selectOptions(
+      await screen.findByLabelText("Resolution for the 2000 kbps video"),
+      "1920",
+    );
     await user.click(screen.getByRole("button", { name: "Save" }));
     await screen.findByText(/picks it up at its next sync/);
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -190,7 +207,9 @@ describe("the install flow's quality step", () => {
       id: "photos",
       name: "Photos",
       infraRequirements: {
-        fileAccess: [{ types: ["image/jpeg", "video/mp4"], access: "readwrite", rationale: "your photos" }],
+        fileAccess: [
+          { types: ["image/jpeg", "video/mp4"], access: "readwrite", rationale: "your photos" },
+        ],
       },
     },
   };
@@ -201,7 +220,9 @@ describe("the install flow's quality step", () => {
       id: "notes",
       name: "Notes",
       infraRequirements: {
-        fileAccess: [{ types: ["document/markdown"], access: "readwrite", rationale: "your notes" }],
+        fileAccess: [
+          { types: ["document/markdown"], access: "readwrite", rationale: "your notes" },
+        ],
       },
     },
   };
@@ -261,6 +282,8 @@ describe("the install flow's quality step", () => {
     await user.click(screen.getByRole("button", { name: "Approve & Install" }));
     await vi.waitFor(() => expect(calls.some((c) => c.url === "/api/apps/install")).toBe(true));
     const order = calls.map((c) => `${c.method} ${c.url}`);
-    expect(order.indexOf("PUT /api/deployment-settings")).toBeLessThan(order.indexOf("POST /api/apps/install"));
+    expect(order.indexOf("PUT /api/deployment-settings")).toBeLessThan(
+      order.indexOf("POST /api/apps/install"),
+    );
   });
 });

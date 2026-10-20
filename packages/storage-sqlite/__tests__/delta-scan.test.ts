@@ -124,9 +124,7 @@ describe("querySince — delta scan", () => {
     for (const peerWatermarks of shapes) {
       const expected = await referenceScan(adapter, peerWatermarks);
       const actual = await adapter.querySince(peerWatermarks, 1000);
-      expect(idsOf(actual.rows), JSON.stringify(peerWatermarks)).toEqual(
-        idsOf(expected),
-      );
+      expect(idsOf(actual.rows), JSON.stringify(peerWatermarks)).toEqual(idsOf(expected));
       expect(actual.hasMore).toBe(false);
     }
   });
@@ -197,7 +195,7 @@ describe("querySince — delta scan", () => {
     expect(page.hasMore).toBe(false);
   });
 
-  it("treats a zero budget as \"nothing is safe\", not as \"nothing is owed\"", async () => {
+  it('treats a zero budget as "nothing is safe", not as "nothing is owed"', async () => {
     // A `null` mark blocks shipping for that author entirely. Reporting `{}`
     // here would claim complete enumeration of a table nobody read.
     await seedThreeAuthors();

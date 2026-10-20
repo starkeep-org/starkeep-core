@@ -35,9 +35,7 @@ describe("cloud-installable app id format", () => {
 });
 
 describe("app data role trust policy", () => {
-  function principalsOf(doc: {
-    Statement: { Principal: Record<string, string> }[];
-  }): string[] {
+  function principalsOf(doc: { Statement: { Principal: Record<string, string> }[] }): string[] {
     return doc.Statement.map((s) => s.Principal.Service ?? s.Principal.AWS);
   }
 
@@ -98,9 +96,7 @@ describe("app exec role policy", () => {
   const doc = JSON.parse(buildAppExecPolicy("starkeep", "photos")) as {
     Statement: { Sid: string; Action: string | string[]; Resource: unknown }[];
   };
-  const actions = doc.Statement.flatMap((s) =>
-    Array.isArray(s.Action) ? s.Action : [s.Action],
-  );
+  const actions = doc.Statement.flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action]));
 
   it("grants no S3, no DSQL, and no role assumption", () => {
     for (const forbidden of ["s3:", "dsql:", "sts:AssumeRole"]) {

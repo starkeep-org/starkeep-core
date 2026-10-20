@@ -349,7 +349,10 @@ export async function runAppInstallDdl(
           .addColumn("deleted_at", "text");
         const pks = table.columns.filter((c) => c.primaryKey).map((c) => c.name);
         if (pks.length > 0) {
-          tb = tb.addPrimaryKeyConstraint(`pk_${schemaName}_${table.name}`, [OWNER_COLUMN, ...pks] as never[]);
+          tb = tb.addPrimaryKeyConstraint(`pk_${schemaName}_${table.name}`, [
+            OWNER_COLUMN,
+            ...pks,
+          ] as never[]);
         }
         await tb.execute();
         await sql
@@ -410,10 +413,10 @@ export async function runAppInstallDdl(
           .addColumn("deleted_at", "text");
         const reservedPks = FILE_RECORDS_COLUMNS.filter((c) => c.primaryKey).map((c) => c.name);
         if (reservedPks.length > 0) {
-          tb = tb.addPrimaryKeyConstraint(
-            `pk_${schemaName}_${FILE_RECORDS_TABLE}`,
-            [OWNER_COLUMN, ...reservedPks] as never[],
-          );
+          tb = tb.addPrimaryKeyConstraint(`pk_${schemaName}_${FILE_RECORDS_TABLE}`, [
+            OWNER_COLUMN,
+            ...reservedPks,
+          ] as never[]);
         }
         await tb.execute();
         await sql
@@ -452,7 +455,10 @@ export async function runAppInstallDdl(
         .addColumn(OWNER_COLUMN, "text", (col) => col.notNull())
         .addColumn("node_id", "text", (col) => col.notNull())
         .addColumn("hlc", "text", (col) => col.notNull())
-        .addPrimaryKeyConstraint(`pk_${schemaName}_${BYTE_COVERAGE_TABLE}`, [OWNER_COLUMN, "node_id"] as never[])
+        .addPrimaryKeyConstraint(`pk_${schemaName}_${BYTE_COVERAGE_TABLE}`, [
+          OWNER_COLUMN,
+          "node_id",
+        ] as never[])
         .execute();
       await sql
         .raw(`GRANT SELECT, INSERT, UPDATE ON ${schemaName}."${BYTE_COVERAGE_TABLE}" TO ${pgRole}`)

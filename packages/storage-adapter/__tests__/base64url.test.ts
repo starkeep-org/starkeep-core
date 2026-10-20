@@ -94,9 +94,7 @@ describe("base64url", () => {
     expect(decoded).toEqual(cursor);
 
     const withNulls = { ...cursor, keys: [{ isNull: true, value: null }] };
-    expect(
-      decodeQueryCursor(encodeQueryCursor(withNulls), cursor.order),
-    ).toEqual(withNulls);
+    expect(decodeQueryCursor(encodeQueryCursor(withNulls), cursor.order)).toEqual(withNulls);
   });
 
   it("uses no global beyond the language itself", () => {

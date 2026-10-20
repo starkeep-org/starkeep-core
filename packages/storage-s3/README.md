@@ -16,8 +16,9 @@ import { S3ObjectStorageAdapter } from "@starkeep/storage-s3";
 const objectStorage = new S3ObjectStorageAdapter({
   bucketName: "my-starkeep-bucket",
   region: "us-east-1",
-  keyPrefix: "user-123/",         // optional prefix for all keys
-  credentials: {                   // optional, falls back to default AWS credential chain
+  keyPrefix: "user-123/", // optional prefix for all keys
+  credentials: {
+    // optional, falls back to default AWS credential chain
     accessKeyId: "AKIA...",
     secretAccessKey: "...",
   },
@@ -47,9 +48,9 @@ await objectStorage.close();
 
 ## API
 
-| Export | Description |
-|---|---|
-| `S3ObjectStorageAdapter` | Class implementing `ObjectStorageAdapter` for Amazon S3 |
+| Export                          | Description                                                             |
+| ------------------------------- | ----------------------------------------------------------------------- |
+| `S3ObjectStorageAdapter`        | Class implementing `ObjectStorageAdapter` for Amazon S3                 |
 | `S3ObjectStorageAdapterOptions` | Options: `bucketName`, `region`, optional `keyPrefix` and `credentials` |
 
 The S3 client is created lazily on first use. Files larger than 5 MB are uploaded via the AWS SDK multipart `Upload` utility automatically.

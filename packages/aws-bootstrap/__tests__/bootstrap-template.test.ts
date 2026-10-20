@@ -80,7 +80,9 @@ describe("bootstrap template structure", () => {
 
   it("interpolates a custom stack prefix into generation-time strings", () => {
     const raw = generateBootstrapTemplate({ stackPrefix: "teststk" });
-    expect(raw).toContain("arn:aws:s3:::teststk-files-*/shared/${aws:PrincipalTag/starkeep:userId}/*");
+    expect(raw).toContain(
+      "arn:aws:s3:::teststk-files-*/shared/${aws:PrincipalTag/starkeep:userId}/*",
+    );
     expect(raw).not.toContain("arn:aws:s3:::starkeep-files-*");
   });
 });
@@ -139,11 +141,14 @@ describe("trust policies (who can assume which role)", () => {
   it("the federated identity pool maps only starkeep-admins to AdminAppRole, and denies everyone else", () => {
     const props = resources.IdentityPoolRoleAttachment.Properties as unknown as {
       Roles?: unknown;
-      RoleMappings: Record<string, {
-        Type: string;
-        AmbiguousRoleResolution: string;
-        RulesConfiguration: { Rules: Array<Record<string, unknown>> };
-      }>;
+      RoleMappings: Record<
+        string,
+        {
+          Type: string;
+          AmbiguousRoleResolution: string;
+          RulesConfiguration: { Rules: Array<Record<string, unknown>> };
+        }
+      >;
     };
     // No default role: a user who matches no rule gets no credentials.
     expect(props.Roles).toEqual({});
@@ -182,7 +187,11 @@ describe("the device client", () => {
   });
 
   it("issues fifteen-minute ID tokens and ten-year refresh tokens, revocable one at a time", () => {
-    expect(props().TokenValidityUnits).toEqual({ IdToken: "minutes", AccessToken: "minutes", RefreshToken: "days" });
+    expect(props().TokenValidityUnits).toEqual({
+      IdToken: "minutes",
+      AccessToken: "minutes",
+      RefreshToken: "days",
+    });
     expect(props().IdTokenValidity).toBe(15);
     expect(props().RefreshTokenValidity).toBe(3650);
     expect(props().EnableTokenRevocation).toBe(true);
@@ -190,9 +199,11 @@ describe("the device client", () => {
   });
 
   it("is not trusted by the identity pool, so a device token reaches no AWS role", () => {
-    const providers = (resources.IdentityPool!.Properties as {
-      CognitoIdentityProviders: Array<{ ClientId: unknown }>;
-    }).CognitoIdentityProviders;
+    const providers = (
+      resources.IdentityPool!.Properties as {
+        CognitoIdentityProviders: Array<{ ClientId: unknown }>;
+      }
+    ).CognitoIdentityProviders;
     expect(providers).toHaveLength(1);
     expect(providers[0]!.ClientId).toEqual({ Ref: "UserPoolClient" });
   });

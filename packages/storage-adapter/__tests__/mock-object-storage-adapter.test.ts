@@ -113,7 +113,9 @@ describe("MockObjectStorageAdapter", () => {
   // thing those tests exist to catch.
   describe("checksum enforcement", () => {
     const data = Buffer.from("verified bytes");
-    const digest = createHash("sha256").update(data as unknown as Uint8Array).digest("base64");
+    const digest = createHash("sha256")
+      .update(data as unknown as Uint8Array)
+      .digest("base64");
 
     it("stores a body that matches the declared checksum", async () => {
       await adapter.put("k", data, { checksumSha256: digest });
@@ -157,7 +159,11 @@ describe("MockObjectStorageAdapter", () => {
     // has() cannot.
     it("distinguishes an archived object from an absent one", async () => {
       await adapter.put("k", Buffer.from("cold"));
-      adapter.setAvailability("k", { state: "archived", tier: "DEEP_ARCHIVE", expectedLatencyHours: 12 }, "DEEP_ARCHIVE");
+      adapter.setAvailability(
+        "k",
+        { state: "archived", tier: "DEEP_ARCHIVE", expectedLatencyHours: 12 },
+        "DEEP_ARCHIVE",
+      );
 
       expect(await adapter.has("k")).toBe(true);
       expect(await adapter.stat("k")).toMatchObject({
@@ -169,7 +175,10 @@ describe("MockObjectStorageAdapter", () => {
     it("reports a restore in flight", async () => {
       await adapter.put("k", Buffer.from("thawing"));
       adapter.setAvailability("k", { state: "restoring", readyAt: null });
-      expect((await adapter.stat("k"))?.availability).toEqual({ state: "restoring", readyAt: null });
+      expect((await adapter.stat("k"))?.availability).toEqual({
+        state: "restoring",
+        readyAt: null,
+      });
     });
   });
 });

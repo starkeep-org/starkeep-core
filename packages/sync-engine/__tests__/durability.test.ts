@@ -16,8 +16,14 @@ import { MockObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { assessDurability, type ReplicaProbe } from "../src/durability.js";
 
 const bytesFor = (n: number, fill = n % 256) => Buffer.alloc(n, fill);
-const hashOf = (b: Buffer) => createHash("sha256").update(b as unknown as Uint8Array).digest("hex");
-const b64Of = (b: Buffer) => createHash("sha256").update(b as unknown as Uint8Array).digest("base64");
+const hashOf = (b: Buffer) =>
+  createHash("sha256")
+    .update(b as unknown as Uint8Array)
+    .digest("hex");
+const b64Of = (b: Buffer) =>
+  createHash("sha256")
+    .update(b as unknown as Uint8Array)
+    .digest("base64");
 
 const data = bytesFor(64);
 const hash = hashOf(data);

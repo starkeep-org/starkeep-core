@@ -14,8 +14,4 @@ export {
 } from "./bootstrap/index.js";
 
 // IAM rendering utilities for CloudFormation template generators
-export {
-  renderStatementsYaml,
-  type IamStatement,
-  type CfnValue,
-} from "./iam-utils.js";
+export { renderStatementsYaml, type IamStatement, type CfnValue } from "./iam-utils.js";

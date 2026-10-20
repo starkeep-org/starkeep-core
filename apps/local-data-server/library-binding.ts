@@ -62,11 +62,13 @@ export function bindLibrary(db: RawDatabase, objectsDir: string, userId: string)
 
   let movedDirs = 0;
   mkdirSync(join(objectsDir, "shared"), { recursive: true });
-  if (mergeDir(join(objectsDir, "shared", LOCAL_USER_SEGMENT), join(objectsDir, "shared", userId))) movedDirs += 1;
+  if (mergeDir(join(objectsDir, "shared", LOCAL_USER_SEGMENT), join(objectsDir, "shared", userId)))
+    movedDirs += 1;
   const appsDir = join(objectsDir, "apps");
   if (existsSync(appsDir)) {
     for (const appId of readdirSync(appsDir)) {
-      if (mergeDir(join(appsDir, appId, LOCAL_USER_SEGMENT), join(appsDir, appId, userId))) movedDirs += 1;
+      if (mergeDir(join(appsDir, appId, LOCAL_USER_SEGMENT), join(appsDir, appId, userId)))
+        movedDirs += 1;
     }
   }
 

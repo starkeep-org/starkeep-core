@@ -4,7 +4,7 @@
 
 ## Overview
 
-App-specific data is the data an installed app keeps **for itself**: its own row tables (a tag taxonomy, layout preferences, captions on a photo) and, optionally, its own files (an app-private blob the user never sees as a "Starkeep item"). It is the deliberate counterpart to shared data: where shared data is typed by the platform, addressable across apps, and outlives uninstall, app-specific data is named by the app, invisible to other apps, and torn down on uninstall *at the location where the uninstall happened*. The two live in structurally separate namespaces — different schemas, different SQLite table prefixes, different object-storage prefixes — so the isolation is enforced by *where the bytes live*, not by convention.
+App-specific data is the data an installed app keeps **for itself**: its own row tables (a tag taxonomy, layout preferences, captions on a photo) and, optionally, its own files (an app-private blob the user never sees as a "Starkeep item"). It is the deliberate counterpart to shared data: where shared data is typed by the platform, addressable across apps, and outlives uninstall, app-specific data is named by the app, invisible to other apps, and torn down on uninstall _at the location where the uninstall happened_. The two live in structurally separate namespaces — different schemas, different SQLite table prefixes, different object-storage prefixes — so the isolation is enforced by _where the bytes live_, not by convention.
 
 The rest of Part 1 walks the concepts in roughly the order an app meets them: what counts as app-specific data at all; how an app declares it; the namespace and isolation rules; the on-disk storage model in the cloud and locally; how the data is indexed for both reads and pull-based sync; the install/uninstall lifecycle at a single location; and the sync semantics that move app-specific data between locations of the same app.
 
@@ -15,7 +15,7 @@ The top-level split in the platform's data model is **shared data vs. app-specif
 Two shapes of app-specific data exist:
 
 - **App-syncable row tables.** Schemaful per-app tables the app freely reads and writes. This is the main case.
-- **App-syncable files** (optional). An app may opt in to a private object-storage prefix and write blobs there. The platform tracks these blobs in a framework-owned bookkeeping table (see "Storage model" below). This is the only case where app-specific *file* bytes exist; apps that don't opt in have row-only app-specific data.
+- **App-syncable files** (optional). An app may opt in to a private object-storage prefix and write blobs there. The platform tracks these blobs in a framework-owned bookkeeping table (see "Storage model" below). This is the only case where app-specific _file_ bytes exist; apps that don't opt in have row-only app-specific data.
 
 ## Declaration: the manifest opt-in
 
@@ -44,7 +44,7 @@ The `apps/<appId>/` parent prefix is reserved exclusively for `apps/<appId>/sync
 
 ## Storage model
 
-App-syncable row tables follow a uniform shape regardless of substrate. Whatever the app declares in the manifest is the column set; the runtime *appends* two columns to every table:
+App-syncable row tables follow a uniform shape regardless of substrate. Whatever the app declares in the manifest is the column set; the runtime _appends_ two columns to every table:
 
 - `updated_at TEXT NOT NULL` — a serialized Hybrid Logical Clock timestamp. This column is the row's durable change marker (see "Indexing" and "Sync").
 - `deleted_at TEXT NULL` — non-null means tombstoned. Deletes are soft so tombstones can propagate via sync.
@@ -66,14 +66,14 @@ There is no other index over app-specific data — no full-text index, no per-ap
 
 ## Install/uninstall lifecycle at a single location
 
-App-specific data comes into existence at install and is torn down at uninstall *at that location only* — other locations of the same app are unaffected. The mechanics of install/uninstall as a whole belong to the install/uninstall topics; this section covers only the app-specific-data slice.
+App-specific data comes into existence at install and is torn down at uninstall _at that location only_ — other locations of the same app are unaffected. The mechanics of install/uninstall as a whole belong to the install/uninstall topics; this section covers only the app-specific-data slice.
 
 At install, both the cloud (`runAppInstallDdl` in `dsql-ddl.ts`) and the local installer (`installLocal` in `packages/admin-installer/src/local/installer.ts`) do four things for app-specific data:
 
 1. Create each declared app-syncable table with the appended `updated_at`/`deleted_at` columns and the HLC index.
 2. If `files: true`, also create the reserved `_starkeep_sync_records` table in the same namespace.
 3. Grant the per-app PG role full DML on its own tables (cloud only; local SQLite has no role system).
-4. Upsert a row into a namespace registry — `shared.app_syncable_namespaces` in the cloud, the `app_syncable_namespaces` SQLite table locally — whose `tables_json` column carries the full table-name + PK-columns list, plus a `files_enabled` boolean. This registry is what the sync runtime reads to know *which apps and which tables exist* at this location; nothing else does (the per-app PG role is the source of truth for grants; the registry is purely a sync runtime concern).
+4. Upsert a row into a namespace registry — `shared.app_syncable_namespaces` in the cloud, the `app_syncable_namespaces` SQLite table locally — whose `tables_json` column carries the full table-name + PK-columns list, plus a `files_enabled` boolean. This registry is what the sync runtime reads to know _which apps and which tables exist_ at this location; nothing else does (the per-app PG role is the source of truth for grants; the registry is purely a sync runtime concern).
 
 At uninstall, both sides reverse the same four steps. The local installer (`uninstallLocal` in `local/installer.ts`) is explicit about ordering: revoke access grants, drop app-syncable tables (driven off the registry's table list, so it works even if the manifest is no longer available), invoke the caller-supplied `deleteFilesPrefix(prefix)` to clear `apps/<appId>/syncable/` from object storage, delete the namespace registry row, and delete the app registry row. In the cloud, the analogous steps are split across the install orchestrator and the DDL: the orchestrator's `delete_s3_files` step (`packages/admin-installer/src/orchestrator.ts`) runs first, under the app's own role, and clears the entire `apps/<appId>/` prefix (which, since that prefix is reserved exclusively for `apps/<appId>/syncable/`, is exactly the app-specific blob namespace); then `runAppUninstallDdl` drops the entire `app_<appId>` schema with `CASCADE` — removing every declared table and the reserved file-records table in one statement — and deletes the matching `shared.app_syncable_namespaces` row.
 

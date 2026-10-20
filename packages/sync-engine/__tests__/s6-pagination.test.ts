@@ -153,14 +153,8 @@ describe("S6 — pagination / exceeds-page-limit (SR)", () => {
     // Each watermark should equal the highest HLC seen for that nodeId.
     const localOrigin = w.subjectIds.filter((_, i) => i % 2 === 0);
     const cloudOrigin = w.subjectIds.filter((_, i) => i % 2 === 1);
-    const lastLocal = (await w.getRecord(
-      "local",
-      localOrigin[localOrigin.length - 1]!,
-    ))!;
-    const lastCloud = (await w.getRecord(
-      "local",
-      cloudOrigin[cloudOrigin.length - 1]!,
-    ))!;
+    const lastLocal = (await w.getRecord("local", localOrigin[localOrigin.length - 1]!))!;
+    const lastCloud = (await w.getRecord("local", cloudOrigin[cloudOrigin.length - 1]!))!;
     expect(peer[w.local.nodeId]).toEqual(lastLocal.updatedAt);
     expect(peer[w.cloud.nodeId]).toEqual(lastCloud.updatedAt);
   });

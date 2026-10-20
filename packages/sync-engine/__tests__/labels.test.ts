@@ -1,6 +1,11 @@
 import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
 import { describe, it, expect } from "vitest";
-import { compareHLC, createDataRecord, generateId, type StarkeepId } from "@starkeep/protocol-primitives";
+import {
+  compareHLC,
+  createDataRecord,
+  generateId,
+  type StarkeepId,
+} from "@starkeep/protocol-primitives";
 import { createSyncEngine } from "../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../src/transports/in-process-transport.js";
 import { buildSide } from "./sync-test-harness/side.js";
@@ -24,7 +29,6 @@ import type { SyncStateStore, Watermarks } from "../src/types.js";
  * label goes missing.
  */
 describe("label sync", () => {
-
   type Side = Awaited<ReturnType<typeof buildSide>>;
 
   async function seedRecord(side: Side): Promise<StarkeepId> {
@@ -241,10 +245,12 @@ describe("label sync", () => {
 
     for (const side of [local, cloud]) {
       const labels = (await side.db.getLabelsByRecordIds([recordId])).get(recordId)!;
-      expect(labels.filter((l) => l.key === "face").map((l) => l.value).sort()).toEqual([
-        "Alice",
-        "Bob",
-      ]);
+      expect(
+        labels
+          .filter((l) => l.key === "face")
+          .map((l) => l.value)
+          .sort(),
+      ).toEqual(["Alice", "Bob"]);
     }
   });
 
@@ -267,8 +273,7 @@ describe("label sync", () => {
     expect(onCloud.map((l) => l.value)).toEqual(["Alicia"]);
     // The retraction shipped as a tombstone rather than as an absence, so the
     // old name cannot be resurrected by a later round.
-    expect((await cloud.db.getLabel(recordId, "alpha", "face", "Alice"))!.deletedAt)
-      .not.toBeNull();
+    expect((await cloud.db.getLabel(recordId, "alpha", "face", "Alice"))!.deletedAt).not.toBeNull();
   });
 
   it("keeps a label's LWW domain separate from its record's", async () => {
@@ -398,9 +403,7 @@ describe("label sync", () => {
     const labelWatermarks = await cloud.db.getLabelNodeWatermarks();
     // The last thing written on L was a label, so the label side is the
     // higher of the two — the union has to reach it.
-    expect(labelWatermarks["L"]!.wallTime).toBeGreaterThan(
-      recordWatermarks["L"]!.wallTime,
-    );
+    expect(labelWatermarks["L"]!.wallTime).toBeGreaterThan(recordWatermarks["L"]!.wallTime);
 
     // A second exchange ships nothing: the watermark genuinely covered both.
     const before = await cloud.db.getLabelNodeWatermarks();
@@ -542,8 +545,7 @@ describe("label sync", () => {
 
     const syncState = createMemorySyncStateStore();
     // Below the backlog, so the round caps and the remainder follows next round.
-    const engine = () =>
-      driveEngine(local, cloud, { syncState, maxItems: 5 });
+    const engine = () => driveEngine(local, cloud, { syncState, maxItems: 5 });
 
     let rounds = 0;
     let landed = 0;

@@ -155,7 +155,9 @@ export async function planStandInWrite(
       // The original is unstamped, so the stand-in cannot be checked — but the
       // fidelity this write reported is a fact about the file, and keeping it
       // is what lets the cloud stamp the original and the retry succeed.
-      ...(first.code === "parent-awaits-stamp" && verdict.recordParentFidelity !== null && liveParent
+      ...(first.code === "parent-awaits-stamp" &&
+      verdict.recordParentFidelity !== null &&
+      liveParent
         ? {
             recordFidelityFirst: {
               parent: liveParent,
@@ -220,8 +222,7 @@ export function standInExists(existingId: string): {
     body: {
       error: "StandInExists",
       code: "stand-in-exists",
-      detail:
-        "a live stand-in already holds this slot; reuse it rather than producing another",
+      detail: "a live stand-in already holds this slot; reuse it rather than producing another",
       existing: existingId,
     },
   };
@@ -328,7 +329,11 @@ export async function planFidelityReport(
       message: "a stand-in's fidelity is set when it is written; report the original's",
     });
   }
-  const checked = planOriginalFidelity({ type: record.type, parentId: record.parentId, fidelity: reported });
+  const checked = planOriginalFidelity({
+    type: record.type,
+    parentId: record.parentId,
+    fidelity: reported,
+  });
   if (!checked.ok) return checked;
   const reconciled = reconcileReportedFidelity(record, checked.fidelity);
   if (!reconciled.ok) return reconciled;
@@ -368,7 +373,8 @@ export async function recordOriginalFidelity(
  * the cloud reads its settings for an exchange only when one arrives.
  */
 export function awaitsStamp(record: DataRecord): boolean {
-  if (record.deletedAt || record.fidelity === null || record.canonicalThreshold !== null) return false;
+  if (record.deletedAt || record.fidelity === null || record.canonicalThreshold !== null)
+    return false;
   return isStandInOriginal(record);
 }
 

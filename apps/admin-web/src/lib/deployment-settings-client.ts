@@ -23,7 +23,11 @@ export async function saveDeploymentSettings(change: unknown): Promise<string[]>
     body: JSON.stringify({
       change,
       ...(session
-        ? { credentials: session.credentials, stackPrefix: session.stackPrefix, region: session.region }
+        ? {
+            credentials: session.credentials,
+            stackPrefix: session.stackPrefix,
+            region: session.region,
+          }
         : {}),
     }),
   });

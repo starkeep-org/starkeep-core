@@ -41,7 +41,10 @@ const run = (key: string, script: string, ...args: string[]) =>
 
 describe("a detached run", () => {
   it("records the installer's output, stdout and stderr together, and its exit code", async () => {
-    run("basic", "console.log('one'); console.error('two'); process.stdout.write('three'); process.exit(3)");
+    run(
+      "basic",
+      "console.log('one'); console.error('two'); process.stdout.write('three'); process.exit(3)",
+    );
     const { lines, code } = await followToEnd("basic");
     expect(lines).toEqual(["one", "two", "three"]);
     expect(code).toBe(3);
@@ -101,7 +104,9 @@ describe("a detached run", () => {
     await followToEnd("ids");
     const second = runStatus("ids");
     expect(first.state === "ended" && first.runId).toMatch(/^[0-9a-f]{16}$/);
-    expect(second.state === "ended" && second.runId).not.toBe(first.state === "ended" && first.runId);
+    expect(second.state === "ended" && second.runId).not.toBe(
+      first.state === "ended" && first.runId,
+    );
   });
 
   it("reports no run for a slot that never had one", () => {

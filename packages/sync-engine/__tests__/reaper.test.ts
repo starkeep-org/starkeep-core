@@ -62,7 +62,10 @@ async function deleteDaysAgo(record: DataRecord, daysAgo: number): Promise<void>
 }
 
 const reap = (retentionDays: number | null, dryRun = false) =>
-  reapDeleted({ databaseAdapter: db, objectStorage: storage }, { retentionDays, dryRun, nowMs: NOW });
+  reapDeleted(
+    { databaseAdapter: db, objectStorage: storage },
+    { retentionDays, dryRun, nowMs: NOW },
+  );
 
 /** A reap on a host whose store only links to the given keys. */
 const reapBorrowing = (borrowed: readonly string[], retentionDays = 30) =>
@@ -131,7 +134,11 @@ describe("the refcount over the object key", () => {
     const report = await reap(30);
     expect(report.reaped).toEqual([]);
     expect(report.refused).toEqual([
-      { objectStorageKey: key, reason: "live-record", detail: `${live.id} still holds these bytes` },
+      {
+        objectStorageKey: key,
+        reason: "live-record",
+        detail: `${live.id} still holds these bytes`,
+      },
     ]);
     expect(await storage.has(key)).toBe(true);
   });

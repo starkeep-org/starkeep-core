@@ -28,10 +28,7 @@ import { createHttpSyncTransport } from "../src/transports/http-transport.js";
 import { SyncError } from "../src/errors.js";
 import { buildSide } from "./sync-test-harness/side.js";
 import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
-import {
-  failingDirectMethod,
-  failingMethod,
-} from "./sync-test-harness/failure-injection.js";
+import { failingDirectMethod, failingMethod } from "./sync-test-harness/failure-injection.js";
 import type {
   AppSyncableRowEntry,
   ResidencyHooks,

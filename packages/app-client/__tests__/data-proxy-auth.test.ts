@@ -39,7 +39,11 @@ beforeEach(() => {
   mkdirSync(join(dir, "app-creds"), { recursive: true });
   writeFileSync(
     join(dir, "app-creds", "testapp.json"),
-    JSON.stringify({ appId: "testapp", hmacSecret: "s3cret", dataServerUrl: "http://127.0.0.1:9820" }),
+    JSON.stringify({
+      appId: "testapp",
+      hmacSecret: "s3cret",
+      dataServerUrl: "http://127.0.0.1:9820",
+    }),
   );
 });
 
@@ -124,7 +128,8 @@ describe("endUserAuth: session", () => {
     const handler = createDataProxyHandler({
       appId: "testapp",
       endUserAuth: { auth: "session", verifySession: () => false, allowAnonymousLocal: false },
-      onUnauthenticated: () => new Response(null, { status: 302, headers: { location: "/sign-in" } }),
+      onUnauthenticated: () =>
+        new Response(null, { status: 302, headers: { location: "/sign-in" } }),
     });
 
     const res = await handler(request(), ctx);

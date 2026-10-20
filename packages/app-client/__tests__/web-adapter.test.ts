@@ -122,9 +122,7 @@ describe("payload encoding", () => {
   });
 
   it("returns text bodies as text and everything else as base64", async () => {
-    const text = await toResult(
-      new Response("hi", { headers: { "content-type": "text/plain" } }),
-    );
+    const text = await toResult(new Response("hi", { headers: { "content-type": "text/plain" } }));
     expect(text).toMatchObject({ statusCode: 200, body: "hi" });
     expect(text.isBase64Encoded).toBeUndefined();
 
@@ -163,10 +161,7 @@ describe("cookies", () => {
       requestUpstream: requestUpstream(),
     });
     const res = await handler(event(`${BASE}/api/session/sign-in`));
-    expect(res.cookies).toEqual([
-      "sk_session=a; Path=/; HttpOnly",
-      "sk_token=b; Path=/; HttpOnly",
-    ]);
+    expect(res.cookies).toEqual(["sk_session=a; Path=/; HttpOnly", "sk_token=b; Path=/; HttpOnly"]);
     expect(Object.keys(res.headers).map((k) => k.toLowerCase())).not.toContain("set-cookie");
   });
 });
@@ -216,9 +211,9 @@ describe("static assets", () => {
   });
 
   it("answers 404 on a miss when the app owns the whole prefix", async () => {
-    const res = await (await staticHandler({ staticMiss: "notFound" }))(
-      event(`${BASE}/_immutable/gone.js`),
-    );
+    const res = await (
+      await staticHandler({ staticMiss: "notFound" })
+    )(event(`${BASE}/_immutable/gone.js`));
     expect(res.statusCode).toBe(404);
   });
 
@@ -291,9 +286,9 @@ describe("the SPA shell", () => {
   it("prefers a real file over the shell", async () => {
     // `/icon.png` is both declared static and, were it listed, a client route.
     // The file is the more specific answer and wins.
-    const res = await (await shellHandler({ shellPaths: ["/", "/icon.png"] }))(
-      event(`${BASE}/icon.png`),
-    );
+    const res = await (
+      await shellHandler({ shellPaths: ["/", "/icon.png"] })
+    )(event(`${BASE}/icon.png`));
     expect(res.headers["content-type"]).toBe("image/png");
   });
 
@@ -305,9 +300,9 @@ describe("the SPA shell", () => {
   it("falls through to the app when the shell file is missing", async () => {
     // A build that never ran should read as "the app answered", not as a
     // routing bug with a 404 nobody can place.
-    const res = await (await shellHandler({ shellFile: "never-built.html" }))(
-      event(`${BASE}/settings`),
-    );
+    const res = await (
+      await shellHandler({ shellFile: "never-built.html" })
+    )(event(`${BASE}/settings`));
     expect(res.body).toBe("upstream:/settings");
   });
 

@@ -5,8 +5,9 @@ Goal: a spec-driven harness so each of the ~100 ranked candidates compiles to a
 assertions stay imperative inline so failures point at a concrete predicate.
 
 Non-goals:
+
 - A canned "expected world" comparator. Each candidate's expected outcome is
-  too varied to express declaratively, and a generic diff would hide *why* a
+  too varied to express declaratively, and a generic diff would hide _why_ a
   test failed. Keep assertions in the test body.
 - Hiding the sync engine. Tests should still call `world.engine.exchange()`
   directly; the harness only assembles the inputs.
@@ -17,15 +18,16 @@ Non-goals:
 
 ```ts
 const w = await setupCase({ dt, presence, tomb, blob, wm, batch });
-await w.driveOperation({ side, verb, withBlob });   // optional
-await w.exchange({ rounds, inject });                // 1 | 2 | "until-converged"
+await w.driveOperation({ side, verb, withBlob }); // optional
+await w.exchange({ rounds, inject }); // 1 | 2 | "until-converged"
 
 expect(await w.cloud.recordExists(w.subjectId)).toBe(true);
 expect(await w.peerWatermarks().local).toEqual(w.hlcOf(w.subjectId));
 ```
 
 Three phases reflect the test dimensions cleanly:
-1. **`setupCase(spec)`** materializes the *initial state* dimensions (1–6).
+
+1. **`setupCase(spec)`** materializes the _initial state_ dimensions (1–6).
 2. **`driveOperation`** applies dimension 7 (the trigger).
 3. **`exchange`** runs dimensions 8–10 (rounds, failure, recovery).
 
@@ -44,14 +46,14 @@ interface CaseSpec {
   presence: "neither" | "local-only" | "cloud-only" | "both-same" | "both-diverged";
 
   // Defaults: tomb="nd", blob inferred from dt+presence, wm="p", batch="single".
-  tomb?:  "nd" | "cd" | "ld" | "bd" | "bd-diff-ts" | "cdu";
-  blob?:  "nb" | "cb" | "lb" | "bb" | "nh";   // ignored for AW
-  wm?:    "0" | "p" | "cur" | "cR" | "lR";
+  tomb?: "nd" | "cd" | "ld" | "bd" | "bd-diff-ts" | "cdu";
+  blob?: "nb" | "cb" | "lb" | "bb" | "nh"; // ignored for AW
+  wm?: "0" | "p" | "cur" | "cR" | "lR";
   batch?: "single" | "multi-homogeneous" | "multi-mixed-nodes" | "exceeds-page-limit";
-  batchCount?: number;  // default 3 for multi-*, 2001 for exceeds-page-limit
+  batchCount?: number; // default 3 for multi-*, 2001 for exceeds-page-limit
 
-  appId?: string;       // for AR/AW; default "test-app"
-  nodeIds?: { local: string; cloud: string };  // default { local:"local", cloud:"cloud" }
+  appId?: string; // for AR/AW; default "test-app"
+  nodeIds?: { local: string; cloud: string }; // default { local:"local", cloud:"cloud" }
 }
 ```
 
@@ -59,25 +61,26 @@ Defaults chosen so single-record SR happy-path tests are just `{ dt:"SR", presen
 
 ### Seeding semantics
 
-| presence | what gets seeded |
-|---|---|
-| `neither` | nothing — both sides empty |
-| `local-only` | record/row exists on local at HLC T₁, with blob per `blob` |
-| `cloud-only` | mirror |
-| `both-same` | identical id + content + same HLC on both sides |
+| presence        | what gets seeded                                             |
+| --------------- | ------------------------------------------------------------ |
+| `neither`       | nothing — both sides empty                                   |
+| `local-only`    | record/row exists on local at HLC T₁, with blob per `blob`   |
+| `cloud-only`    | mirror                                                       |
+| `both-same`     | identical id + content + same HLC on both sides              |
 | `both-diverged` | local at HLC T₁ content A, cloud at HLC T₂ content B (T₂>T₁) |
 
 For `both-diverged`, the harness exposes both HLCs as `w.localHlc` / `w.cloudHlc` and the "winning" HLC (the larger one) as `w.expectedWinnerHlc`.
 
 ### Tombstone × presence
 
-The tombstone is applied *after* seeding. Tombstones require the record to
+The tombstone is applied _after_ seeding. Tombstones require the record to
 exist on the side(s) being marked deleted — the harness throws if a `tomb`
 value is incompatible with `presence` (matches constraint C2).
 
 ### Blob × presence
 
 Blob defaults by data type when omitted:
+
 - SR: `bb` if `both-*`, else mirrors presence (`lb` for local-only, `cb` for cloud-only); `nh` is illegal for `neither`.
 - AR: same as SR.
 - AW: forced to `nb` (constraint C4); throws otherwise.
@@ -91,7 +94,7 @@ a small value (default 5) for tests, and exposes it on the spec:
 ```ts
 interface CaseSpec {
   // ...
-  maxItems?: number;  // harness default: 5; overrideable per case
+  maxItems?: number; // harness default: 5; overrideable per case
 }
 ```
 
@@ -106,13 +109,13 @@ for correctness — that threshold is a tuning parameter, not a code path.
 In the in-process model the "cloud" is stateless across exchanges — only the
 local side has persisted watermarks (`syncState`). So:
 
-| `wm` value | what it means in this harness |
-|---|---|
-| `0` | both `ownWatermarks` and `peerWatermarks` empty |
-| `p` | partial: set behind the most-recently-seeded HLC by one tick |
-| `cur` | current: set AT the most-recently-seeded HLC (next exchange is a no-op) |
-| `lR` | `ownWatermarks` wiped; `peerWatermarks` preserved (models "local SQLite wipe with data intact") |
-| `cR` | `peerWatermarks` wiped; `ownWatermarks` preserved (models "cloud forgot what local sent") |
+| `wm` value | what it means in this harness                                                                   |
+| ---------- | ----------------------------------------------------------------------------------------------- |
+| `0`        | both `ownWatermarks` and `peerWatermarks` empty                                                 |
+| `p`        | partial: set behind the most-recently-seeded HLC by one tick                                    |
+| `cur`      | current: set AT the most-recently-seeded HLC (next exchange is a no-op)                         |
+| `lR`       | `ownWatermarks` wiped; `peerWatermarks` preserved (models "local SQLite wipe with data intact") |
+| `cR`       | `peerWatermarks` wiped; `ownWatermarks` preserved (models "cloud forgot what local sent")       |
 
 `cR` reflects what an in-process test can simulate of a real cloud reset — the
 local side now believes it's shipped nothing to the cloud, so it re-ships.
@@ -135,15 +138,16 @@ a stateful transport, which is out of scope here.
 interface Operation {
   side: "local" | "cloud";
   verb: "insert" | "update" | "soft-delete";
-  withBlob?: boolean;         // for insert/update on blob-bearing DTs
-  target?: StarkeepId;        // defaults to w.subjectId
-  newContent?: Uint8Array;    // override content for an update
+  withBlob?: boolean; // for insert/update on blob-bearing DTs
+  target?: StarkeepId; // defaults to w.subjectId
+  newContent?: Uint8Array; // override content for an update
 }
 
 await w.driveOperation(op);
 ```
 
 Bridges to whichever code path the operation belongs to:
+
 - SR `insert`/`update` → `databaseAdapter.put` + storage `put`.
 - SR `soft-delete` → `databaseAdapter.delete(id, clock.now())`.
 - AR `insert`/`update` → applier.apply on the `_starkeep_sync_records` table + storage `put` (in app-namespaced key).
@@ -180,19 +184,24 @@ interface ExchangeOpts {
 }
 
 type FailureSpec =
-  | { kind: "blob-upload-fails",     target?: BlobTarget, recov: "transient" | "persistent" }
-  | { kind: "blob-download-fails",   target?: BlobTarget, recov: "transient" | "persistent" }
-  | { kind: "fail-before-request",   recov: "transient" | "persistent" }
-  | { kind: "fail-after-send-before-response", recov: "transient" | "persistent" }
-  | { kind: "partial-response-truncated", at?: number /* record index */ };
+  | { kind: "blob-upload-fails"; target?: BlobTarget; recov: "transient" | "persistent" }
+  | { kind: "blob-download-fails"; target?: BlobTarget; recov: "transient" | "persistent" }
+  | { kind: "fail-before-request"; recov: "transient" | "persistent" }
+  | { kind: "fail-after-send-before-response"; recov: "transient" | "persistent" }
+  | { kind: "partial-response-truncated"; at?: number /* record index */ };
 
 type BlobTarget =
-  | "all"                              // every blob attempt fails
-  | { index: number }                  // Nth blob in HLC order
-  | { id: StarkeepId }                 // specific record/row
-  | "first" | "middle" | "last";       // ergonomic shortcuts for multi-record batches
+  | "all" // every blob attempt fails
+  | { index: number } // Nth blob in HLC order
+  | { id: StarkeepId } // specific record/row
+  | "first"
+  | "middle"
+  | "last"; // ergonomic shortcuts for multi-record batches
 
-await w.exchange({ rounds: "until-converged", inject: { kind: "blob-upload-fails", target: "middle", recov: "transient" } });
+await w.exchange({
+  rounds: "until-converged",
+  inject: { kind: "blob-upload-fails", target: "middle", recov: "transient" },
+});
 ```
 
 ### Implementation sketch
@@ -214,26 +223,26 @@ The wrappers are part of the harness, not production code.
 
 ```ts
 interface World {
-  spec: CaseSpec;            // the resolved spec (defaults filled in)
+  spec: CaseSpec; // the resolved spec (defaults filled in)
 
   local: Side;
   cloud: Side;
-  engine: SyncEngine;        // the local-side engine that drives exchange
+  engine: SyncEngine; // the local-side engine that drives exchange
   syncState: SyncStateStore; // for direct watermark introspection / mutation
 
   // Subject helpers — populated by setupCase / driveOperation
-  subjectId: StarkeepId;     // for single-record tests
-  subjectIds: StarkeepId[];  // for multi-record tests; subjectIds[0] === subjectId
+  subjectId: StarkeepId; // for single-record tests
+  subjectIds: StarkeepId[]; // for multi-record tests; subjectIds[0] === subjectId
   objectKey(id?: StarkeepId): string;
-  hlcOf(id: StarkeepId): HLCTimestamp;   // the HLC the record was seeded with
-  localHlc?: HLCTimestamp;               // for `both-diverged` cases
+  hlcOf(id: StarkeepId): HLCTimestamp; // the HLC the record was seeded with
+  localHlc?: HLCTimestamp; // for `both-diverged` cases
   cloudHlc?: HLCTimestamp;
-  expectedWinnerHlc?: HLCTimestamp;      // for `both-diverged`, max of the two
+  expectedWinnerHlc?: HLCTimestamp; // for `both-diverged`, max of the two
 
   // Drivers
   driveOperation(op: Operation): Promise<void>;
   driveConcurrent(c: { variant: ConcurrentVariant; target?: StarkeepId }): Promise<void>;
-  exchange(opts: ExchangeOpts): Promise<ExchangeResult[]>;  // one per round
+  exchange(opts: ExchangeOpts): Promise<ExchangeResult[]>; // one per round
 
   // Assertion helpers (thin wrappers; tests can also reach into adapters directly)
   recordExists(side: "local" | "cloud", id?: StarkeepId): Promise<boolean>;
@@ -244,7 +253,7 @@ interface World {
 
 interface Side {
   db: DatabaseAdapter;
-  storage: ObjectStorageAdapter;       // FailingObjectStorageAdapter when fail injection is active
+  storage: ObjectStorageAdapter; // FailingObjectStorageAdapter when fail injection is active
   applier?: AppSyncableApplier & ScanCapableApplier;
   namespaces?: AppSyncableNamespaceStore;
   clock: HLCClock;
@@ -367,7 +376,7 @@ top-level imports stay short because everything routes through
    Proposal: `app/<appId>/<subjectId>` — matches the prefix-encoded-key model
    we settled on. Hard-code it in the harness; tests don't pass keys in.
 
-3. **`exceeds-page-limit` performance** — *resolved*: `SyncEngine` now takes
+3. **`exceeds-page-limit` performance** — _resolved_: `SyncEngine` now takes
    a `maxItems` option (default 1000 in production). The harness sets it to
    5 for `exceeds-page-limit` cases and seeds 6 records, exercising the same
    `hasMore` / multi-round-resume / no-dup / watermark-fan-out invariants in

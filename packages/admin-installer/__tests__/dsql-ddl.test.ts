@@ -132,7 +132,13 @@ describe("install DDL for the photos manifest", () => {
   it("creates the private schema with ownership and default privileges", async () => {
     await installPhotos();
     const s = stmts();
-    expect(s.some((t) => t.includes("CREATE SCHEMA IF NOT EXISTS app_photos") && t.includes("AUTHORIZATION starkeep_app_photos"))).toBe(true);
+    expect(
+      s.some(
+        (t) =>
+          t.includes("CREATE SCHEMA IF NOT EXISTS app_photos") &&
+          t.includes("AUTHORIZATION starkeep_app_photos"),
+      ),
+    ).toBe(true);
     expect(s.some((t) => t.includes("GRANT ALL PRIVILEGES ON SCHEMA app_photos"))).toBe(true);
     expect(s.some((t) => t.includes("ALTER DEFAULT PRIVILEGES IN SCHEMA app_photos"))).toBe(true);
   });
@@ -140,9 +146,17 @@ describe("install DDL for the photos manifest", () => {
   it("grants shared.records read + write (photos is readwrite)", async () => {
     await installPhotos();
     const s = stmts();
-    expect(s.some((t) => t.includes("GRANT USAGE ON SCHEMA shared TO starkeep_app_photos"))).toBe(true);
-    expect(s.some((t) => t.includes("GRANT SELECT ON shared.records TO starkeep_app_photos"))).toBe(true);
-    expect(s.some((t) => t.includes("GRANT INSERT, UPDATE, DELETE ON shared.records TO starkeep_app_photos"))).toBe(true);
+    expect(s.some((t) => t.includes("GRANT USAGE ON SCHEMA shared TO starkeep_app_photos"))).toBe(
+      true,
+    );
+    expect(s.some((t) => t.includes("GRANT SELECT ON shared.records TO starkeep_app_photos"))).toBe(
+      true,
+    );
+    expect(
+      s.some((t) =>
+        t.includes("GRANT INSERT, UPDATE, DELETE ON shared.records TO starkeep_app_photos"),
+      ),
+    ).toBe(true);
   });
 
   it("grants a metadata table per declared category, and only those", async () => {
@@ -151,8 +165,14 @@ describe("install DDL for the photos manifest", () => {
     // Photos declares image AND video types (a camera roll is both), so both
     // metadata tables are granted — and nothing else is.
     for (const table of ["record_image_metadata", "record_video_metadata"]) {
-      expect(s.some((t) => t.includes(`GRANT SELECT ON shared.${table}`)), table).toBe(true);
-      expect(s.some((t) => t.includes(`GRANT INSERT, UPDATE ON shared.${table}`)), table).toBe(true);
+      expect(
+        s.some((t) => t.includes(`GRANT SELECT ON shared.${table}`)),
+        table,
+      ).toBe(true);
+      expect(
+        s.some((t) => t.includes(`GRANT INSERT, UPDATE ON shared.${table}`)),
+        table,
+      ).toBe(true);
     }
     expect(s.some((t) => t.includes("record_audio_metadata"))).toBe(false);
     expect(s.some((t) => t.includes("record_document_metadata"))).toBe(false);
@@ -174,15 +194,25 @@ describe("install DDL for the photos manifest", () => {
   it("creates app syncable tables with reserved HLC columns, async index, and DML grant", async () => {
     await installPhotos();
     const s = stmts();
-    const createTable = s.find((t) => t.includes('create table if not exists "app_photos"."image_enriched"'));
+    const createTable = s.find((t) =>
+      t.includes('create table if not exists "app_photos"."image_enriched"'),
+    );
     expect(createTable).toBeDefined();
     expect(createTable).toContain('"updated_at" text not null');
     expect(createTable).toContain('"deleted_at" text');
     // The owner leads: each user's rows are a library of their own.
     expect(createTable).toContain('"user_id" text not null');
     expect(createTable).toContain('primary key ("user_id", "record_id")');
-    expect(s.some((t) => t.includes('CREATE INDEX ASYNC IF NOT EXISTS "idx_app_photos_image_enriched_updated_at"'))).toBe(true);
-    expect(s.some((t) => t.includes('GRANT SELECT, INSERT, UPDATE, DELETE ON app_photos."image_enriched"'))).toBe(true);
+    expect(
+      s.some((t) =>
+        t.includes('CREATE INDEX ASYNC IF NOT EXISTS "idx_app_photos_image_enriched_updated_at"'),
+      ),
+    ).toBe(true);
+    expect(
+      s.some((t) =>
+        t.includes('GRANT SELECT, INSERT, UPDATE, DELETE ON app_photos."image_enriched"'),
+      ),
+    ).toBe(true);
   });
 
   it("creates the indexes a manifest declares, and names them from the columns", async () => {
@@ -240,7 +270,11 @@ describe("install DDL for the photos manifest", () => {
   it("creates the reserved file-records table when files sync is enabled, and registers the namespace", async () => {
     await installPhotos();
     const s = stmts();
-    expect(s.some((t) => t.includes('"app_photos"."_starkeep_sync_records"') && t.startsWith("create table"))).toBe(true);
+    expect(
+      s.some(
+        (t) => t.includes('"app_photos"."_starkeep_sync_records"') && t.startsWith("create table"),
+      ),
+    ).toBe(true);
     const ns = s.find((t) => t.includes('insert into "shared"."app_syncable_namespaces"'));
     expect(ns).toBeDefined();
     expect(ns).toContain('on conflict ("app_id") do update');
@@ -272,11 +306,19 @@ describe("the cloud's bytes-watermark table", () => {
     await installPhotos();
     const s = stmts();
     expect(
-      s.some((t) => t.startsWith("create table if not exists") && t.includes('"app_photos"."_starkeep_byte_coverage"')),
+      s.some(
+        (t) =>
+          t.startsWith("create table if not exists") &&
+          t.includes('"app_photos"."_starkeep_byte_coverage"'),
+      ),
     ).toBe(true);
-    expect(s).toContain('GRANT SELECT, INSERT, UPDATE ON app_photos."_starkeep_byte_coverage" TO starkeep_app_photos');
+    expect(s).toContain(
+      'GRANT SELECT, INSERT, UPDATE ON app_photos."_starkeep_byte_coverage" TO starkeep_app_photos',
+    );
     // Never to PUBLIC, and never in `shared`.
-    expect(s.some((t) => t.includes("_starkeep_byte_coverage") && t.includes("PUBLIC"))).toBe(false);
+    expect(s.some((t) => t.includes("_starkeep_byte_coverage") && t.includes("PUBLIC"))).toBe(
+      false,
+    );
     expect(s.some((t) => t.includes('"shared"."_starkeep_byte_coverage"'))).toBe(false);
   });
 
@@ -303,10 +345,17 @@ describe("install DDL for Drive (fileAccessAll)", () => {
     const s = stmts();
     expect(s.some((t) => t.includes('insert into "shared"."access_grants"'))).toBe(false);
     // Full write on shared.records
-    expect(s.some((t) => t.includes("GRANT INSERT, UPDATE, DELETE ON shared.records TO starkeep_app_starkeep_drive"))).toBe(true);
+    expect(
+      s.some((t) =>
+        t.includes("GRANT INSERT, UPDATE, DELETE ON shared.records TO starkeep_app_starkeep_drive"),
+      ),
+    ).toBe(true);
     // Every grantable category's metadata table is granted (spot-check a few)
     for (const cat of ["image", "video", "document"]) {
-      expect(s.some((t) => t.includes(`GRANT INSERT, UPDATE ON shared.record_${cat}_metadata`)), cat).toBe(true);
+      expect(
+        s.some((t) => t.includes(`GRANT INSERT, UPDATE ON shared.record_${cat}_metadata`)),
+        cat,
+      ).toBe(true);
     }
     // No namespace row: Drive has no app-specific syncable data
     expect(s.some((t) => t.includes("app_syncable_namespaces"))).toBe(false);
@@ -326,7 +375,9 @@ describe("read-only app install DDL", () => {
     expect(s.some((t) => t.includes("GRANT INSERT, UPDATE, DELETE ON shared.records"))).toBe(false);
     // Metadata: read yes, write no (no readwrite, no metadataWrite)
     expect(s.some((t) => t.includes("GRANT SELECT ON shared.record_document_metadata"))).toBe(true);
-    expect(s.some((t) => t.includes("GRANT INSERT, UPDATE ON shared.record_document_metadata"))).toBe(false);
+    expect(
+      s.some((t) => t.includes("GRANT INSERT, UPDATE ON shared.record_document_metadata")),
+    ).toBe(false);
   });
 
   it("metadata_write without readwrite still grants metadata-table writes (thumbnail-worker shape)", async () => {
@@ -338,7 +389,9 @@ describe("read-only app install DDL", () => {
     );
     const s = stmts();
     expect(s.some((t) => t.includes("GRANT INSERT, UPDATE, DELETE ON shared.records"))).toBe(false);
-    expect(s.some((t) => t.includes("GRANT INSERT, UPDATE ON shared.record_image_metadata"))).toBe(true);
+    expect(s.some((t) => t.includes("GRANT INSERT, UPDATE ON shared.record_image_metadata"))).toBe(
+      true,
+    );
   });
 });
 
@@ -368,9 +421,7 @@ describe("the label-key registry", () => {
     // Upsert, not plain insert: a reinstall must not fail on the existing row,
     // and an edited description has to land.
     expect(
-      inserts.every((t) =>
-        t.includes('on conflict ("app_id", "key") do update set "description"'),
-      ),
+      inserts.every((t) => t.includes('on conflict ("app_id", "key") do update set "description"')),
     ).toBe(true);
   });
 
@@ -400,9 +451,7 @@ describe("the label-key registry", () => {
     // wipe every other app's declarations. (Values are bound, so what is
     // checkable in the statement text is that the predicate is there at all.)
     await installWithKeys([{ key: "thumbnail", description: "d" }]);
-    const deletes = stmts().filter((t) =>
-      t.includes('delete from "shared"."app_label_keys"'),
-    );
+    const deletes = stmts().filter((t) => t.includes('delete from "shared"."app_label_keys"'));
     expect(deletes.length).toBeGreaterThan(0);
     expect(deletes.every((t) => t.includes('where "app_id" ='))).toBe(true);
   });
@@ -415,10 +464,16 @@ describe("uninstall DDL", () => {
     const ir = photosManifest.infraRequirements;
     await runAppUninstallDdl(opts, "photos", ir.fileAccess, ir.fileAccessAll);
     const s = stmts();
-    expect(s.some((t) => t.includes("REVOKE ALL ON shared.records FROM starkeep_app_photos"))).toBe(true);
+    expect(s.some((t) => t.includes("REVOKE ALL ON shared.records FROM starkeep_app_photos"))).toBe(
+      true,
+    );
     expect(s.some((t) => t.includes("REVOKE ALL ON shared.record_image_metadata"))).toBe(true);
-    expect(s.some((t) => t.includes("REVOKE USAGE ON SCHEMA shared FROM starkeep_app_photos"))).toBe(true);
-    expect(s.some((t) => t.includes('delete from "shared"."access_grants" where "app_id" ='))).toBe(true);
+    expect(
+      s.some((t) => t.includes("REVOKE USAGE ON SCHEMA shared FROM starkeep_app_photos")),
+    ).toBe(true);
+    expect(s.some((t) => t.includes('delete from "shared"."access_grants" where "app_id" ='))).toBe(
+      true,
+    );
     expect(s.some((t) => t.includes('delete from "shared"."app_syncable_namespaces"'))).toBe(true);
     expect(s).toContain("DROP SCHEMA IF EXISTS app_photos CASCADE");
     expect(s).toContain(

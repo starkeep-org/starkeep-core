@@ -59,9 +59,7 @@ describe("mapping events to observations", () => {
   });
 
   it("records a completed restore as readable, carrying its expiry", () => {
-    const o = observationFor(
-      event({ kind: "restore-completed", restoredUntilMs: 9_999 }),
-    )!;
+    const o = observationFor(event({ kind: "restore-completed", restoredUntilMs: 9_999 }))!;
     // A caller asking "can I read this" wants yes. The expiry is what lets a
     // later reconcile notice it has passed without another round trip.
     expect(o.state).toBe("instant");

@@ -19,9 +19,7 @@ import type { IamStatement } from "../iam-utils.js";
  * before any other app, which is why a single magic-string check in
  * createAppRole is sufficient to route the boundary correctly.
  */
-export function foundationalPermissionsBoundaryStatements(
-  stackPrefix: string,
-): IamStatement[] {
+export function foundationalPermissionsBoundaryStatements(stackPrefix: string): IamStatement[] {
   const cdsAppId = "cloud-data-server";
 
   const apigatewayv2Verbs = [
@@ -129,10 +127,7 @@ export function foundationalPermissionsBoundaryStatements(
         "s3:PutBucketNotification",
         "s3:PutInventoryConfiguration",
       ],
-      Resource: [
-        `arn:aws:s3:::${stackPrefix}-files-*`,
-        `arn:aws:s3:::${stackPrefix}-billing-*`,
-      ],
+      Resource: [`arn:aws:s3:::${stackPrefix}-files-*`, `arn:aws:s3:::${stackPrefix}-billing-*`],
     },
     {
       Sid: "FoundationalS3Objects",
@@ -151,7 +146,13 @@ export function foundationalPermissionsBoundaryStatements(
     {
       Sid: "FoundationalPulumiState",
       Effect: "Allow",
-      Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket", "s3:GetAccelerateConfiguration"],
+      Action: [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket",
+        "s3:GetAccelerateConfiguration",
+      ],
       Resource: [
         `arn:aws:s3:::${stackPrefix}-pulumi-state-*`,
         `arn:aws:s3:::${stackPrefix}-pulumi-state-*/.pulumi/`,

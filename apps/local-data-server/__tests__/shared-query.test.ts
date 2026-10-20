@@ -92,10 +92,7 @@ async function metadataQuery(
   return app.fetch(`/data/metadata/${category}${search ? `?${search}` : ""}`);
 }
 
-async function labelQuery(
-  app: InstalledApp,
-  params: Record<string, string>,
-): Promise<Response> {
+async function labelQuery(app: InstalledApp, params: Record<string, string>): Promise<Response> {
   return app.fetch(`/data/labels?${new URLSearchParams(params).toString()}`);
 }
 

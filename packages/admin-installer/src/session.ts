@@ -55,7 +55,9 @@ async function assumeRoleWithRetry(
       }
       if (attempt > 1) {
         const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-        console.log(`[diag] sts:AssumeRole ${roleArn}: succeeded on attempt ${attempt} after ${elapsed}s`);
+        console.log(
+          `[diag] sts:AssumeRole ${roleArn}: succeeded on attempt ${attempt} after ${elapsed}s`,
+        );
       }
       return {
         accessKeyId: c.AccessKeyId,

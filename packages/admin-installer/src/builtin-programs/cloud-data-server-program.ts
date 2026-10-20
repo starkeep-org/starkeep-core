@@ -156,110 +156,118 @@ export function buildCloudDataServerProgram(
     // -----------------------------------------------------------------------
     // DSQL cluster
     // -----------------------------------------------------------------------
-    const cluster = new aws.dsql.Cluster(`${ctx.stackPrefix}-db`, {
-      // Protect real user clusters from accidental destroy; ephemeral e2e
-      // clusters stay unprotected so the suite can tear them down each run.
-      deletionProtectionEnabled: !ctx.ephemeral,
-      tags: {
-        "starkeep:managed": "true",
-        "starkeep:appId": "cloud-data-server",
-        // Every other resource in this stack carries its stack prefix in its
-        // own name, so teardown can select by name. A DSQL cluster's identifier
-        // is assigned by AWS, so this tag is the only thing that says which
-        // deployment the cluster belongs to — and without it teardown for one
-        // prefix cannot tell its own cluster from another deployment's.
-        "starkeep:stackPrefix": ctx.stackPrefix,
+    const cluster = new aws.dsql.Cluster(
+      `${ctx.stackPrefix}-db`,
+      {
+        // Protect real user clusters from accidental destroy; ephemeral e2e
+        // clusters stay unprotected so the suite can tear them down each run.
+        deletionProtectionEnabled: !ctx.ephemeral,
+        tags: {
+          "starkeep:managed": "true",
+          "starkeep:appId": "cloud-data-server",
+          // Every other resource in this stack carries its stack prefix in its
+          // own name, so teardown can select by name. A DSQL cluster's identifier
+          // is assigned by AWS, so this tag is the only thing that says which
+          // deployment the cluster belongs to — and without it teardown for one
+          // prefix cannot tell its own cluster from another deployment's.
+          "starkeep:stackPrefix": ctx.stackPrefix,
+        },
       },
-    }, {
-      /**
-       * The same guard as the files bucket, and it is *not* redundant with
-       * `deletionProtectionEnabled` above.
-       *
-       * That flag is enforced by AWS at the moment of deletion. This one is
-       * enforced by Pulumi at the moment of *planning*, so a plan that would
-       * replace this cluster fails before it touches anything — rather than
-       * getting partway, as the bucket's replacement did, and leaving the
-       * stack in a state where some resources are gone and some are not.
-       *
-       * Two layers because they fail at different times, and the earlier
-       * failure is the more useful one.
-       */
-      protect: !ctx.ephemeral,
-    });
+      {
+        /**
+         * The same guard as the files bucket, and it is *not* redundant with
+         * `deletionProtectionEnabled` above.
+         *
+         * That flag is enforced by AWS at the moment of deletion. This one is
+         * enforced by Pulumi at the moment of *planning*, so a plan that would
+         * replace this cluster fails before it touches anything — rather than
+         * getting partway, as the bucket's replacement did, and leaving the
+         * stack in a state where some resources are gone and some are not.
+         *
+         * Two layers because they fail at different times, and the earlier
+         * failure is the more useful one.
+         */
+        protect: !ctx.ephemeral,
+      },
+    );
 
     const auroraHostname = pulumi.interpolate`${cluster.identifier}.dsql.${ctx.region}.on.aws`;
 
     // -----------------------------------------------------------------------
     // Files bucket + bucket policy
     // -----------------------------------------------------------------------
-    const bucket = new aws.s3.BucketV2(`${ctx.stackPrefix}-files`, {
-      bucket: `${ctx.stackPrefix}-files-${ctx.accountId}-${ctx.region}`,
-      // Ephemeral e2e buckets self-empty on `pulumi destroy` so repeated
-      // teardown isn't wedged by leftover objects; real user buckets keep the
-      // default guard (destroy fails on a non-empty bucket) so a stray destroy
-      // can't silently wipe customer files. forceDestroy is only ever true when
-      // versioning is off (both ride ctx.ephemeral), so the existing
-      // s3:DeleteObject grant suffices — no s3:DeleteObjectVersion is needed.
-      forceDestroy: ctx.ephemeral,
-      // Object Lock — the flag ONLY, never a bucket-level default retention.
-      //
-      // This can only be set at bucket creation. A bucket that misses it can
-      // never get Object Lock without an AWS Support request, so it has to
-      // land before anyone has a bucket worth protecting — which is why this
-      // is item 0 of the media plan while the retention that actually uses it
-      // is item 36, deliberately last.
-      //
-      // Setting the flag makes nothing undeletable. A bucket with Object Lock
-      // enabled and no retention configured behaves exactly like an ordinary
-      // bucket; objects become undeletable only when a retain-until date is
-      // written on them individually. There must NEVER be a bucket-level
-      // default retention here — compliance retention can be extended but not
-      // reduced, so anything written under a bucket default would be
-      // permanently undeletable, which would make rendition supersession
-      // impossible. Retention is set per object, on `archive` intent only.
-      //
-      // Rides !ctx.ephemeral exactly like versioning does (Object Lock
-      // requires versioning, and AWS turns it on implicitly at creation), or
-      // an e2e bucket could never be torn down.
-      objectLockEnabled: !ctx.ephemeral,
-      tags: {
-        "starkeep:managed": "true",
-        "starkeep:appId": "cloud-data-server",
+    const bucket = new aws.s3.BucketV2(
+      `${ctx.stackPrefix}-files`,
+      {
+        bucket: `${ctx.stackPrefix}-files-${ctx.accountId}-${ctx.region}`,
+        // Ephemeral e2e buckets self-empty on `pulumi destroy` so repeated
+        // teardown isn't wedged by leftover objects; real user buckets keep the
+        // default guard (destroy fails on a non-empty bucket) so a stray destroy
+        // can't silently wipe customer files. forceDestroy is only ever true when
+        // versioning is off (both ride ctx.ephemeral), so the existing
+        // s3:DeleteObject grant suffices — no s3:DeleteObjectVersion is needed.
+        forceDestroy: ctx.ephemeral,
+        // Object Lock — the flag ONLY, never a bucket-level default retention.
+        //
+        // This can only be set at bucket creation. A bucket that misses it can
+        // never get Object Lock without an AWS Support request, so it has to
+        // land before anyone has a bucket worth protecting — which is why this
+        // is item 0 of the media plan while the retention that actually uses it
+        // is item 36, deliberately last.
+        //
+        // Setting the flag makes nothing undeletable. A bucket with Object Lock
+        // enabled and no retention configured behaves exactly like an ordinary
+        // bucket; objects become undeletable only when a retain-until date is
+        // written on them individually. There must NEVER be a bucket-level
+        // default retention here — compliance retention can be extended but not
+        // reduced, so anything written under a bucket default would be
+        // permanently undeletable, which would make rendition supersession
+        // impossible. Retention is set per object, on `archive` intent only.
+        //
+        // Rides !ctx.ephemeral exactly like versioning does (Object Lock
+        // requires versioning, and AWS turns it on implicitly at creation), or
+        // an e2e bucket could never be torn down.
+        objectLockEnabled: !ctx.ephemeral,
+        tags: {
+          "starkeep:managed": "true",
+          "starkeep:appId": "cloud-data-server",
+        },
       },
-    }, {
-      /**
-       * Refuse to delete this bucket, including as half of a replacement.
-       *
-       * ## The incident this exists to prevent
-       *
-       * `objectLockEnabled` is **ForceNew** in the AWS provider, because AWS can
-       * only set Object Lock at bucket creation. So on a stack whose bucket
-       * predates that field, the provider does not report an error — it reports
-       * "this requires replacement", and Pulumi plans a delete and a create.
-       * S3 bucket names are globally unique, so the delete has to go *first*:
-       * the policy, versioning, public-access block, CORS and encryption
-       * configuration are all torn down, then the bucket itself.
-       *
-       * That ran against a real deployment on 2026-08-02. Every user file
-       * survived for exactly one reason — `DeleteBucket` returned
-       * `BucketNotEmpty`. Nothing in the design stopped it; the data was saved
-       * by the accident of existing.
-       *
-       * `protect` converts that plan from an execution into an error, which is
-       * the behaviour anyone would have assumed was already there.
-       *
-       * ## Why this does not block teardown
-       *
-       * `scripts/teardown-cloud-data-server.sh` deletes through the AWS CLI and
-       * empties the bucket first; it never runs `pulumi destroy`. A deliberate
-       * teardown is unaffected. What is blocked is an *incidental* delete —
-       * one nobody asked for, arriving as a side effect of deploying a Lambda.
-       *
-       * Off for ephemeral e2e stacks, which are created and destroyed by the
-       * suite and hold nothing.
-       */
-      protect: !ctx.ephemeral,
-    });
+      {
+        /**
+         * Refuse to delete this bucket, including as half of a replacement.
+         *
+         * ## The incident this exists to prevent
+         *
+         * `objectLockEnabled` is **ForceNew** in the AWS provider, because AWS can
+         * only set Object Lock at bucket creation. So on a stack whose bucket
+         * predates that field, the provider does not report an error — it reports
+         * "this requires replacement", and Pulumi plans a delete and a create.
+         * S3 bucket names are globally unique, so the delete has to go *first*:
+         * the policy, versioning, public-access block, CORS and encryption
+         * configuration are all torn down, then the bucket itself.
+         *
+         * That ran against a real deployment on 2026-08-02. Every user file
+         * survived for exactly one reason — `DeleteBucket` returned
+         * `BucketNotEmpty`. Nothing in the design stopped it; the data was saved
+         * by the accident of existing.
+         *
+         * `protect` converts that plan from an execution into an error, which is
+         * the behaviour anyone would have assumed was already there.
+         *
+         * ## Why this does not block teardown
+         *
+         * `scripts/teardown-cloud-data-server.sh` deletes through the AWS CLI and
+         * empties the bucket first; it never runs `pulumi destroy`. A deliberate
+         * teardown is unaffected. What is blocked is an *incidental* delete —
+         * one nobody asked for, arriving as a side effect of deploying a Lambda.
+         *
+         * Off for ephemeral e2e stacks, which are created and destroyed by the
+         * suite and hold nothing.
+         */
+        protect: !ctx.ephemeral,
+      },
+    );
 
     // Data-protection hardening — asserted explicitly for real user accounts;
     // skipped for ephemeral e2e buckets (see ctx.ephemeral). The IAM
@@ -281,13 +289,10 @@ export function buildCloudDataServerProgram(
       // is intentionally NOT used here: the permissions boundary only grants
       // kms:Decrypt via SSM, so a CMK would require widening IAM and granting
       // the broker role KMS access — a separate, larger change.
-      new aws.s3.BucketServerSideEncryptionConfigurationV2(
-        `${ctx.stackPrefix}-files-sse`,
-        {
-          bucket: bucket.id,
-          rules: [{ applyServerSideEncryptionByDefault: { sseAlgorithm: "AES256" } }],
-        },
-      );
+      new aws.s3.BucketServerSideEncryptionConfigurationV2(`${ctx.stackPrefix}-files-sse`, {
+        bucket: bucket.id,
+        rules: [{ applyServerSideEncryptionByDefault: { sseAlgorithm: "AES256" } }],
+      });
 
       // Block all public access. Presigned-URL access (SigV4) and the Deny-only
       // cross-app bucket policy below are unaffected; this only forecloses
@@ -371,13 +376,15 @@ export function buildCloudDataServerProgram(
     // answer CORS preflights. Mirrors the gateway's `allowOrigins: ["*"]`.
     new aws.s3.BucketCorsConfigurationV2(`${ctx.stackPrefix}-files-cors`, {
       bucket: bucket.id,
-      corsRules: [{
-        allowedMethods: ["GET", "PUT", "HEAD"],
-        allowedOrigins: ["*"],
-        allowedHeaders: ["*"],
-        exposeHeaders: ["ETag"],
-        maxAgeSeconds: 3000,
-      }],
+      corsRules: [
+        {
+          allowedMethods: ["GET", "PUT", "HEAD"],
+          allowedOrigins: ["*"],
+          allowedHeaders: ["*"],
+          exposeHeaders: ["ETag"],
+          maxAgeSeconds: 3000,
+        },
+      ],
     });
 
     // -----------------------------------------------------------------------
@@ -481,15 +488,12 @@ export function buildCloudDataServerProgram(
     // bucket — and gating them meant the only suite that runs a real install
     // never exercised the IAM grants they need. That gap is exactly how a
     // missing s3:PutInventoryConfiguration reached a real account.
-    const s3InvokePermission = new aws.lambda.Permission(
-      `${ctx.stackPrefix}-files-notify-invoke`,
-      {
-        action: "lambda:InvokeFunction",
-        function: fn.name,
-        principal: "s3.amazonaws.com",
-        sourceArn: bucket.arn,
-      },
-    );
+    const s3InvokePermission = new aws.lambda.Permission(`${ctx.stackPrefix}-files-notify-invoke`, {
+      action: "lambda:InvokeFunction",
+      function: fn.name,
+      principal: "s3.amazonaws.com",
+      sourceArn: bucket.arn,
+    });
 
     new aws.s3.BucketNotification(
       `${ctx.stackPrefix}-files-notify`,
@@ -915,9 +919,7 @@ export function buildCloudDataServerProgram(
     });
 
     // API Gateway execute-api origin domain (apiEndpoint minus the scheme).
-    const gatewayOriginDomain = api.apiEndpoint.apply((ep) =>
-      ep.replace(/^https?:\/\//, ""),
-    );
+    const gatewayOriginDomain = api.apiEndpoint.apply((ep) => ep.replace(/^https?:\/\//, ""));
     const gatewayOriginId = "api-gateway";
 
     // -----------------------------------------------------------------------
@@ -994,95 +996,90 @@ export function buildCloudDataServerProgram(
 
     const filesOriginId = "shared-files-s3";
 
-    const distribution = new aws.cloudfront.Distribution(
-      `${ctx.stackPrefix}-cdn`,
-      {
-        enabled: true,
-        // Default *.cloudfront.net domain — no custom domain / ACM cert.
-        comment: `${ctx.stackPrefix} platform CDN`,
-        origins: [
-          {
-            originId: gatewayOriginId,
-            domainName: gatewayOriginDomain,
-            customOriginConfig: {
-              httpPort: 80,
-              httpsPort: 443,
-              originProtocolPolicy: "https-only",
-              originSslProtocols: ["TLSv1.2"],
-            },
+    const distribution = new aws.cloudfront.Distribution(`${ctx.stackPrefix}-cdn`, {
+      enabled: true,
+      // Default *.cloudfront.net domain — no custom domain / ACM cert.
+      comment: `${ctx.stackPrefix} platform CDN`,
+      origins: [
+        {
+          originId: gatewayOriginId,
+          domainName: gatewayOriginDomain,
+          customOriginConfig: {
+            httpPort: 80,
+            httpsPort: 443,
+            originProtocolPolicy: "https-only",
+            originSslProtocols: ["TLSv1.2"],
           },
-          {
-            // Part B: the shared-data files bucket, locked with OAC.
-            originId: filesOriginId,
-            domainName: bucket.bucketRegionalDomainName,
-            originAccessControlId: filesOac.id,
-            // s3OriginConfig with an empty OAI is required by the API when
-            // using OAC on an S3 origin (OAC supersedes the legacy OAI).
-            s3OriginConfig: { originAccessIdentity: "" },
-          },
-        ],
-        orderedCacheBehaviors: [
-          {
-            // The platform's reserved prefix for an app's content-hashed build
-            // output — immutable, safe for long TTLs, and the *only* prefix
-            // cached forever: an app that wants an asset cached names it here
-            // by hashing it, not by asking for another behavior. Public (no
-            // auth headers), so CachingOptimized needs no origin request
-            // policy.
-            pathPattern: "/apps/*/_immutable/*",
-            targetOriginId: gatewayOriginId,
-            viewerProtocolPolicy: "redirect-to-https",
-            allowedMethods: ["GET", "HEAD"],
-            cachedMethods: ["GET", "HEAD"],
-            cachePolicyId: cachingOptimizedId,
-            compress: true,
-          },
-          {
-            // Part B: content-addressed shared file bytes. Served from S3,
-            // require CloudFront-signed requests from the key group, path-keyed
-            // caching. `shared/*` matches the confirmed key layout
-            // shared/<category>/<shard>/<hash> and never collides with the
-            // gateway routes (which live under /apps/*).
-            pathPattern: "shared/*",
-            targetOriginId: filesOriginId,
-            viewerProtocolPolicy: "redirect-to-https",
-            allowedMethods: ["GET", "HEAD"],
-            cachedMethods: ["GET", "HEAD"],
-            cachePolicyId: sharedFilesCachePolicy.id,
-            trustedKeyGroups: [keyGroup.id],
-            compress: true,
-          },
-        ],
-        defaultCacheBehavior: {
-          // Everything else: SPA HTML entry points + all API routes. No caching;
-          // forward all viewer headers except Host so JWT/HMAC auth passes
-          // through and the gateway sees its own hostname.
+        },
+        {
+          // Part B: the shared-data files bucket, locked with OAC.
+          originId: filesOriginId,
+          domainName: bucket.bucketRegionalDomainName,
+          originAccessControlId: filesOac.id,
+          // s3OriginConfig with an empty OAI is required by the API when
+          // using OAC on an S3 origin (OAC supersedes the legacy OAI).
+          s3OriginConfig: { originAccessIdentity: "" },
+        },
+      ],
+      orderedCacheBehaviors: [
+        {
+          // The platform's reserved prefix for an app's content-hashed build
+          // output — immutable, safe for long TTLs, and the *only* prefix
+          // cached forever: an app that wants an asset cached names it here
+          // by hashing it, not by asking for another behavior. Public (no
+          // auth headers), so CachingOptimized needs no origin request
+          // policy.
+          pathPattern: "/apps/*/_immutable/*",
           targetOriginId: gatewayOriginId,
           viewerProtocolPolicy: "redirect-to-https",
-          allowedMethods: ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"],
+          allowedMethods: ["GET", "HEAD"],
           cachedMethods: ["GET", "HEAD"],
-          cachePolicyId: cachingDisabledId,
-          originRequestPolicyId: allViewerExceptHostId,
+          cachePolicyId: cachingOptimizedId,
           compress: true,
-          // Default behavior only. Never on the immutable-asset behaviors,
-          // which forward no cookies — the function would see every request as
-          // signed out — and must keep their cache.
-          functionAssociations: [
-            { eventType: "viewer-request", functionArn: signedOutRedirect.arn },
-          ],
         },
-        restrictions: {
-          geoRestriction: { restrictionType: "none" },
+        {
+          // Part B: content-addressed shared file bytes. Served from S3,
+          // require CloudFront-signed requests from the key group, path-keyed
+          // caching. `shared/*` matches the confirmed key layout
+          // shared/<category>/<shard>/<hash> and never collides with the
+          // gateway routes (which live under /apps/*).
+          pathPattern: "shared/*",
+          targetOriginId: filesOriginId,
+          viewerProtocolPolicy: "redirect-to-https",
+          allowedMethods: ["GET", "HEAD"],
+          cachedMethods: ["GET", "HEAD"],
+          cachePolicyId: sharedFilesCachePolicy.id,
+          trustedKeyGroups: [keyGroup.id],
+          compress: true,
         },
-        viewerCertificate: {
-          cloudfrontDefaultCertificate: true,
-        },
-        tags: {
-          "starkeep:managed": "true",
-          "starkeep:appId": "cloud-data-server",
-        },
+      ],
+      defaultCacheBehavior: {
+        // Everything else: SPA HTML entry points + all API routes. No caching;
+        // forward all viewer headers except Host so JWT/HMAC auth passes
+        // through and the gateway sees its own hostname.
+        targetOriginId: gatewayOriginId,
+        viewerProtocolPolicy: "redirect-to-https",
+        allowedMethods: ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"],
+        cachedMethods: ["GET", "HEAD"],
+        cachePolicyId: cachingDisabledId,
+        originRequestPolicyId: allViewerExceptHostId,
+        compress: true,
+        // Default behavior only. Never on the immutable-asset behaviors,
+        // which forward no cookies — the function would see every request as
+        // signed out — and must keep their cache.
+        functionAssociations: [{ eventType: "viewer-request", functionArn: signedOutRedirect.arn }],
       },
-    );
+      restrictions: {
+        geoRestriction: { restrictionType: "none" },
+      },
+      viewerCertificate: {
+        cloudfrontDefaultCertificate: true,
+      },
+      tags: {
+        "starkeep:managed": "true",
+        "starkeep:appId": "cloud-data-server",
+      },
+    });
 
     const publicBaseUrl = pulumi.interpolate`https://${distribution.domainName}`;
 
@@ -1206,32 +1203,36 @@ export function buildCloudDataServerProgram(
     // Created after the bucket policy (and ordered on it explicitly): the
     // policy's AllowInventoryDelivery statement is what makes delivery
     // possible, and Pulumi would otherwise schedule the two in parallel.
-    new aws.s3.Inventory(`${ctx.stackPrefix}-files-inventory`, {
-      bucket: bucket.id,
-      name: "availability",
-      includedObjectVersions: "Current",
-      schedule: { frequency: "Daily" },
-      // Only shared blobs. App-syncable files are not subject to archiving,
-      // so listing them would be paying to enumerate rows nothing reads.
-      filter: { prefix: "shared/" },
-      optionalFields: [
-        "StorageClass",
-        // The field that distinguishes a cheap-but-readable I-T object from
-        // one that has sunk into an asynchronous archive tier. Without it the
-        // reconcile would read storage class alone and call the second one
-        // readable — the exact confusion `stat()` was widened to avoid.
-        "IntelligentTieringAccessTier",
-        "Size",
-      ],
-      destination: {
-        bucket: {
-          bucketArn: bucket.arn,
-          format: "CSV",
-          prefix: INVENTORY_PREFIX,
-          accountId: ctx.accountId,
+    new aws.s3.Inventory(
+      `${ctx.stackPrefix}-files-inventory`,
+      {
+        bucket: bucket.id,
+        name: "availability",
+        includedObjectVersions: "Current",
+        schedule: { frequency: "Daily" },
+        // Only shared blobs. App-syncable files are not subject to archiving,
+        // so listing them would be paying to enumerate rows nothing reads.
+        filter: { prefix: "shared/" },
+        optionalFields: [
+          "StorageClass",
+          // The field that distinguishes a cheap-but-readable I-T object from
+          // one that has sunk into an asynchronous archive tier. Without it the
+          // reconcile would read storage class alone and call the second one
+          // readable — the exact confusion `stat()` was widened to avoid.
+          "IntelligentTieringAccessTier",
+          "Size",
+        ],
+        destination: {
+          bucket: {
+            bucketArn: bucket.arn,
+            format: "CSV",
+            prefix: INVENTORY_PREFIX,
+            accountId: ctx.accountId,
+          },
         },
       },
-    }, { dependsOn: [filesBucketPolicy] });
+      { dependsOn: [filesBucketPolicy] },
+    );
 
     // -----------------------------------------------------------------------
     // Billing bucket + CUR report definition
@@ -1283,18 +1284,22 @@ export function buildCloudDataServerProgram(
     });
 
     const reportName = `${ctx.stackPrefix}-billing`;
-    new aws.cur.ReportDefinition(reportName, {
+    new aws.cur.ReportDefinition(
       reportName,
-      timeUnit: "DAILY",
-      format: "textORcsv",
-      compression: "GZIP",
-      additionalSchemaElements: [],
-      s3Bucket: billingBucket.bucket,
-      s3Prefix: "reports",
-      s3Region: ctx.region,
-      refreshClosedReports: true,
-      reportVersioning: "OVERWRITE_REPORT",
-    }, { provider: usEast1Provider, dependsOn: [billingBucket, billingBucketPolicy] });
+      {
+        reportName,
+        timeUnit: "DAILY",
+        format: "textORcsv",
+        compression: "GZIP",
+        additionalSchemaElements: [],
+        s3Bucket: billingBucket.bucket,
+        s3Prefix: "reports",
+        s3Region: ctx.region,
+        refreshClosedReports: true,
+        reportVersioning: "OVERWRITE_REPORT",
+      },
+      { provider: usEast1Provider, dependsOn: [billingBucket, billingBucketPolicy] },
+    );
 
     // -----------------------------------------------------------------------
     // Stack outputs — matches what per-app installs read to attach their
@@ -1307,9 +1312,9 @@ export function buildCloudDataServerProgram(
       apiGatewayId: api.id,
       apiGatewayExecutionArn: api.executionArn,
       // $default stage is served at the API root — do not append the stage name.
-      apiGatewayUrl: pulumi.all([api.apiEndpoint, stage.name]).apply(([endpoint, name]) =>
-        name === "$default" ? endpoint : `${endpoint}/${name}`,
-      ),
+      apiGatewayUrl: pulumi
+        .all([api.apiEndpoint, stage.name])
+        .apply(([endpoint, name]) => (name === "$default" ? endpoint : `${endpoint}/${name}`)),
       // Browser-facing base URL — the CloudFront distribution domain. Everything
       // downstream (runtime-config → SPA data-client / cloud-config / admin-web)
       // derives its origin from this. Server-to-server calls keep using

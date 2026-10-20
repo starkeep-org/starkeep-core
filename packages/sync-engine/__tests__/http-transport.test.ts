@@ -59,9 +59,7 @@ describe("the request that goes out", () => {
     });
     await transport.exchange({ watermarks: {} });
 
-    expect(fetchStub.calls[0]!.url).toBe(
-      "https://cloud.example/apps/photos/sync/exchange",
-    );
+    expect(fetchStub.calls[0]!.url).toBe("https://cloud.example/apps/photos/sync/exchange");
     expect(fetchStub.calls[0]!.init.method).toBe("POST");
   });
 
@@ -72,9 +70,7 @@ describe("the request that goes out", () => {
       fetch: fetchStub.impl,
     }).exchange({ watermarks: {} });
 
-    expect(fetchStub.calls[0]!.url).toBe(
-      "https://cloud.example/apps/photos/sync/exchange",
-    );
+    expect(fetchStub.calls[0]!.url).toBe("https://cloud.example/apps/photos/sync/exchange");
   });
 
   it("signs over the exact bytes it sends", async () => {
@@ -98,9 +94,7 @@ describe("the request that goes out", () => {
     expect((sent.headers as Record<string, string>)["X-Starkeep-App-Sig"]).toBe(
       `POST /sync/exchange ${(sent.body as string).length}`,
     );
-    expect((sent.headers as Record<string, string>)["Content-Type"]).toBe(
-      "application/json",
-    );
+    expect((sent.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
   });
 
   it("carries an HLC watermark through as an object, not a string", async () => {

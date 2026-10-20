@@ -25,10 +25,7 @@ import {
   type MetadataRow,
   type StarkeepId,
 } from "@starkeep/protocol-primitives";
-import {
-  MockDatabaseAdapter,
-  MockObjectStorageAdapter,
-} from "@starkeep/storage-adapter";
+import { MockDatabaseAdapter, MockObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { createSyncEngine } from "../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../src/transports/in-process-transport.js";
 import type { SyncEngine, SyncTransport } from "../src/types.js";
@@ -120,10 +117,7 @@ async function writeMetadataThroughApi(
   await db.put({ ...existing, updatedAt: clock.now() });
 }
 
-async function metadataOf(
-  db: MockDatabaseAdapter,
-  id: StarkeepId,
-): Promise<MetadataRow | null> {
+async function metadataOf(db: MockDatabaseAdapter, id: StarkeepId): Promise<MetadataRow | null> {
   return db.getMetadata("image", id);
 }
 
@@ -265,7 +259,12 @@ describe("metadata riding the record it belongs to", () => {
     // already agreed, so the cascade cannot depend on one.
     const deleted = (await p.local.get(record.id))!;
     const restoreAt = p.localClock.now();
-    await p.local.put({ ...deleted, deletedAt: null, updatedAt: restoreAt, version: deleted.version + 1 });
+    await p.local.put({
+      ...deleted,
+      deletedAt: null,
+      updatedAt: restoreAt,
+      version: deleted.version + 1,
+    });
     await p.local.restoreMetadata("image", record.id);
     await p.engine.exchange();
 

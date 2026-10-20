@@ -20,16 +20,16 @@ The same shape applies on the cloud side: any cloud-data-server replica needs a 
 
 `server.ts:57-69`, `308`, `374-385`:
 
-| Var | Default | Disposition |
-|---|---|---|
-| `STARKEEP_DIR` | `~/.starkeep` | Keep — chicken-and-egg with the config file's own location. |
-| `STARKEEP_PORT` | `9820` | Keep (runtime/CLI concern), or move to config — caller's preference. |
-| `STARKEEP_OWNER_ID` | `"starkeep-user"` | Removed by [[todo-shared-data-drop-owner-id-field]]; field is being dropped. |
-| `STARKEEP_NODE_ID` | `"starkeep-local"` | Generated-once, persisted in config (see above). |
-| `STARKEEP_PULL_INTERVAL_MS` | 30000 | Move to config. |
-| `STARKEEP_PUSH_DEBOUNCE_MS` | 500 | Move to config. |
-| `STARKEEP_CLOUD_URL` | — | Delete — redundant with `starkeepConfig.apiGatewayUrl`. |
-| `STARKEEP_S3_BUCKET` / `_REGION` / `_KEY_PREFIX` / `_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` | — | Delete the env fallback — config already supplies the bucket and region; the access-key pair is a relic from before Cognito-broker creds were in use. |
+| Var                                                                                        | Default            | Disposition                                                                                                                                           |
+| ------------------------------------------------------------------------------------------ | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `STARKEEP_DIR`                                                                             | `~/.starkeep`      | Keep — chicken-and-egg with the config file's own location.                                                                                           |
+| `STARKEEP_PORT`                                                                            | `9820`             | Keep (runtime/CLI concern), or move to config — caller's preference.                                                                                  |
+| `STARKEEP_OWNER_ID`                                                                        | `"starkeep-user"`  | Removed by [[todo-shared-data-drop-owner-id-field]]; field is being dropped.                                                                          |
+| `STARKEEP_NODE_ID`                                                                         | `"starkeep-local"` | Generated-once, persisted in config (see above).                                                                                                      |
+| `STARKEEP_PULL_INTERVAL_MS`                                                                | 30000              | Move to config.                                                                                                                                       |
+| `STARKEEP_PUSH_DEBOUNCE_MS`                                                                | 500                | Move to config.                                                                                                                                       |
+| `STARKEEP_CLOUD_URL`                                                                       | —                  | Delete — redundant with `starkeepConfig.apiGatewayUrl`.                                                                                               |
+| `STARKEEP_S3_BUCKET` / `_REGION` / `_KEY_PREFIX` / `_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` | —                  | Delete the env fallback — config already supplies the bucket and region; the access-key pair is a relic from before Cognito-broker creds were in use. |
 
 ## Scope
 

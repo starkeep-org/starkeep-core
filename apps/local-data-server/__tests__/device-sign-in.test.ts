@@ -19,7 +19,12 @@ import {
   type FakeCloud,
   type LocalDataServer,
 } from "@starkeep/testkit";
-import { builtinAppCreds, createRecordWithBytes, eventually, type InstalledApp } from "./helpers.js";
+import {
+  builtinAppCreds,
+  createRecordWithBytes,
+  eventually,
+  type InstalledApp,
+} from "./helpers.js";
 
 const EMAIL = "member@example.com";
 const TEMPORARY = "Temporary-1";
@@ -67,7 +72,11 @@ describe("signing this machine in", () => {
   });
 
   it("refuses a sign-in from a web page, which any site in the browser could send", async () => {
-    const res = await post("/auth/login", { email: EMAIL, password: TEMPORARY }, { Origin: "https://evil.example" });
+    const res = await post(
+      "/auth/login",
+      { email: EMAIL, password: TEMPORARY },
+      { Origin: "https://evil.example" },
+    );
     expect(res.status).toBe(403);
     expect(cloud.pool.signIns(EMAIL)).toBe(0);
   });
@@ -82,7 +91,11 @@ describe("signing this machine in", () => {
     const first = await post("/auth/login", { email: EMAIL, password: TEMPORARY });
     expect(first).toEqual({ status: 200, body: { challenge: "NEW_PASSWORD_REQUIRED" } });
 
-    const second = await post("/auth/login", { email: EMAIL, password: TEMPORARY, newPassword: CHOSEN });
+    const second = await post("/auth/login", {
+      email: EMAIL,
+      password: TEMPORARY,
+      newPassword: CHOSEN,
+    });
     expect(second.status, JSON.stringify(second.body)).toBe(200);
     expect(second.body).toMatchObject({ ok: true, email: EMAIL, userId: FAKE_CLOUD_USER_ID });
 
@@ -100,7 +113,10 @@ describe("signing this machine in", () => {
   });
 
   it("syncs with the token alone", { timeout: 30_000 }, async () => {
-    const { record } = await createRecordWithBytes(drive, { bytes: "signed-in-bytes", fileName: "member.jpg" });
+    const { record } = await createRecordWithBytes(drive, {
+      bytes: "signed-in-bytes",
+      fileName: "member.jpg",
+    });
     await eventually(async () => {
       const ids = (await cloud.sharedRecords()).map((r) => r.id);
       expect(ids).toContain(record.id);
@@ -108,7 +124,10 @@ describe("signing this machine in", () => {
   });
 
   it("refuses another account on a library that belongs to this one", async () => {
-    const res = await post("/auth/login", { email: "other@example.com", password: "Other-password-3" });
+    const res = await post("/auth/login", {
+      email: "other@example.com",
+      password: "Other-password-3",
+    });
     expect(res.status).toBe(409);
     expect(await status()).toMatchObject({ state: "signed-in", email: EMAIL });
   });
@@ -117,7 +136,10 @@ describe("signing this machine in", () => {
     const res = await post("/auth/sign-out", {});
     expect(res.body).toEqual({ ok: true, revocation: "revoked" });
     expect(cloud.pool.revoked.size).toBeGreaterThan(0);
-    expect(await status()).toMatchObject({ state: "signed-out", libraryUserId: FAKE_CLOUD_USER_ID });
+    expect(await status()).toMatchObject({
+      state: "signed-out",
+      libraryUserId: FAKE_CLOUD_USER_ID,
+    });
   });
 
   it("signs in again with the chosen password, and the library stays bound to the same user", async () => {

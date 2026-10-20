@@ -25,7 +25,9 @@ function serverExpectedSig(
     "utf8",
   );
   const input = Buffer.concat([prefix as unknown as Uint8Array, body as unknown as Uint8Array]);
-  return createHmac("sha256", secret).update(input as unknown as Uint8Array).digest("hex");
+  return createHmac("sha256", secret)
+    .update(input as unknown as Uint8Array)
+    .digest("hex");
 }
 
 const creds: AppCredentials = {
@@ -76,7 +78,14 @@ describe("signRequest matches the server's validateAppHmac formula", () => {
       timestamp: TS,
     });
     expect(headers["X-Starkeep-App-Sig"]).toBe(
-      serverExpectedSig("super-secret", "photos", "POST", "/data/records", TS, Buffer.from(body, "utf8")),
+      serverExpectedSig(
+        "super-secret",
+        "photos",
+        "POST",
+        "/data/records",
+        TS,
+        Buffer.from(body, "utf8"),
+      ),
     );
   });
 
@@ -137,7 +146,9 @@ describe("canonicalSignedPath", () => {
     expect(canonicalSignedPath("/data/records?type=jpg&limit=5")).toBe("/data/records");
   });
   it("percent-decodes so encoded and decoded forms agree", () => {
-    expect(canonicalSignedPath("/files/shared%2Fimage%2Fab%2Fcd")).toBe("/files/shared/image/ab/cd");
+    expect(canonicalSignedPath("/files/shared%2Fimage%2Fab%2Fcd")).toBe(
+      "/files/shared/image/ab/cd",
+    );
   });
 });
 
@@ -173,7 +184,14 @@ describe("signedFetch", () => {
     const headers = calls[0].init.headers as Record<string, string>;
     const ts = Number(headers["X-Starkeep-App-Ts"]);
     expect(headers["X-Starkeep-App-Sig"]).toBe(
-      serverExpectedSig("super-secret", "photos", "POST", "/data/records", ts, Buffer.from(body, "utf8")),
+      serverExpectedSig(
+        "super-secret",
+        "photos",
+        "POST",
+        "/data/records",
+        ts,
+        Buffer.from(body, "utf8"),
+      ),
     );
     expect(calls[0].init.body).toBe(body);
   });

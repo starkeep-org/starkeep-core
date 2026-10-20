@@ -37,10 +37,7 @@ import {
   appSyncableApplierConformance,
   type ConformanceHarness,
 } from "@starkeep/storage-adapter/conformance";
-import type {
-  AppSyncableNamespace,
-  AppSyncableNamespaceStore,
-} from "@starkeep/sync-engine";
+import type { AppSyncableNamespace, AppSyncableNamespaceStore } from "@starkeep/sync-engine";
 import { DsqlAppSyncableApplier } from "../src/app-syncable/apply.js";
 import type { DatabaseClient } from "../src/types.js";
 
@@ -149,8 +146,12 @@ async function makeHarness(): Promise<ConformanceHarness> {
 
 describe("app-syncable applier conformance — the DSQL applier, executed", () => {
   for (const testCase of appSyncableApplierConformance) {
-    it(testCase.name, async () => {
-      await testCase.run(await makeHarness());
-    }, 60_000);
+    it(
+      testCase.name,
+      async () => {
+        await testCase.run(await makeHarness());
+      },
+      60_000,
+    );
   }
 });

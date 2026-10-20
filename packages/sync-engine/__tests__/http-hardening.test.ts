@@ -35,7 +35,12 @@ async function serve(
   close: () => Promise<void>;
 }> {
   let t = 0;
-  const cloud = await buildSide({ role: "cloud", nodeId: "C", wallClock: () => t++, appId: "photos" });
+  const cloud = await buildSide({
+    role: "cloud",
+    nodeId: "C",
+    wallClock: () => t++,
+    appId: "photos",
+  });
   const handler = createHttpSyncHandler({
     databaseAdapter: cloud.db,
     objectStorageAdapter: cloud.storage,
@@ -319,18 +324,14 @@ describe("the response the transport is willing to believe", () => {
     // directions drained" exit and reported a completed sync against a peer
     // that never said so.
     const { hasMore: _omitted, ...missing } = good;
-    await expect(respondingWith(missing).exchange({ watermarks: {} })).rejects.toThrow(
-      /hasMore/,
-    );
+    await expect(respondingWith(missing).exchange({ watermarks: {} })).rejects.toThrow(/hasMore/);
   });
 
   it("refuses a response with no responderWatermarks", async () => {
     // This one already failed, but it failed inside `sameWatermarks` several
     // frames down, where nothing identifies the peer as the cause.
     const { responderWatermarks: _omitted, ...missing } = good;
-    await expect(respondingWith(missing).exchange({ watermarks: {} })).rejects.toThrow(
-      SyncError,
-    );
+    await expect(respondingWith(missing).exchange({ watermarks: {} })).rejects.toThrow(SyncError);
   });
 
   it("fills in absent payload arrays, which an empty round legitimately omits", async () => {

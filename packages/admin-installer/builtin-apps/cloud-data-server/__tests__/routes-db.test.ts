@@ -245,7 +245,12 @@ describe("grants parity on records routes", () => {
         appId: "gp6",
         method: "POST",
         subPath: "/data/records",
-        body: { type: "document/pdf", contentType: "application/pdf", contentHash: VALID_HASH, sizeBytes: 3 },
+        body: {
+          type: "document/pdf",
+          contentType: "application/pdf",
+          contentHash: VALID_HASH,
+          sizeBytes: 3,
+        },
       }),
       context,
     );
@@ -267,7 +272,12 @@ describe("record registration", () => {
         appId: "reg1",
         method: "POST",
         subPath: "/data/records",
-        body: { type: "image/jpeg", contentType: "image/jpeg", contentHash: VALID_HASH, sizeBytes: 3 },
+        body: {
+          type: "image/jpeg",
+          contentType: "image/jpeg",
+          contentHash: VALID_HASH,
+          sizeBytes: 3,
+        },
       }),
       context,
     );
@@ -422,7 +432,9 @@ describe("record registration", () => {
     // why a transaction would buy nothing durable here.
     const db = fakeDsqlWithGrants(grants)
       .on(RECORDS_INSERT, [])
-      .on(/from "shared"\."app_label_keys"/, [{ app_id: "photos", key: "thumbnail", description: "d" }])
+      .on(/from "shared"\."app_label_keys"/, [
+        { app_id: "photos", key: "thumbnail", description: "d" },
+      ])
       // The record-type lookup every label write makes — the read the
       // single-statement upsert hides, and the dominant cost of a bulk job.
       .on(/from "shared"\."records" where "id" in/, (q) => [
@@ -476,9 +488,11 @@ describe("record registration", () => {
   // two copies of one file under two names share an object whatever this check
   // does. See `~/projects/starkeep/sync-duplicate-derivation-wedge-2026-08-29.md`.
   it("dedups a byte-identical top-level record, not just a derived child", async () => {
-    const db = fakeDsqlWithGrants(grants, [], [
-      recordRow({ id: "already-here", type: "image/jpeg", content_hash: VALID_HASH }),
-    ]);
+    const db = fakeDsqlWithGrants(
+      grants,
+      [],
+      [recordRow({ id: "already-here", type: "image/jpeg", content_hash: VALID_HASH })],
+    );
     setDbFactory(db);
     s3Mock.on(HeadObjectCommand).resolves({});
     const res = await handler(
@@ -531,9 +545,18 @@ describe("record registration", () => {
   });
 
   it("dedups a byte-identical derived child of the same parent", async () => {
-    const db = fakeDsqlWithGrants(grants, [], [
-      recordRow({ id: "existing-thumb", type: "image/jpeg", content_hash: VALID_HASH, parent_id: "parent-1" }),
-    ]);
+    const db = fakeDsqlWithGrants(
+      grants,
+      [],
+      [
+        recordRow({
+          id: "existing-thumb",
+          type: "image/jpeg",
+          content_hash: VALID_HASH,
+          parent_id: "parent-1",
+        }),
+      ],
+    );
     setDbFactory(db);
     s3Mock.on(HeadObjectCommand).resolves({});
     const res = await handler(
@@ -657,15 +680,19 @@ describe("record registration", () => {
     // The convergent case the key exists for: two derivations of one rung
     // agree on the parent, the name and the bytes, so the second is the first
     // arriving again.
-    const db = fakeDsqlWithGrants(grants, [], [
-      recordRow({
-        id: "existing-rung",
-        type: "image/jpeg",
-        content_hash: VALID_HASH,
-        parent_id: "parent-1",
-        original_filename: "image-thumb_sunset.jpg",
-      }),
-    ]);
+    const db = fakeDsqlWithGrants(
+      grants,
+      [],
+      [
+        recordRow({
+          id: "existing-rung",
+          type: "image/jpeg",
+          content_hash: VALID_HASH,
+          parent_id: "parent-1",
+          original_filename: "image-thumb_sunset.jpg",
+        }),
+      ],
+    );
     setDbFactory(db);
     s3Mock.on(HeadObjectCommand).resolves({});
     const res = await handler(
@@ -699,12 +726,15 @@ describe("list metadata enrichment (?include=metadata)", () => {
         recordRow({ id: "rec-1", type: "image/jpeg" }),
         recordRow({ id: "rec-2", type: "image/jpeg" }),
       ])
-      .on(IMAGE_META_SELECT, [
-        { record_id: "rec-1", width: 600, height: 800, orientation: null },
-      ]);
+      .on(IMAGE_META_SELECT, [{ record_id: "rec-1", width: 600, height: 800, orientation: null }]);
     setDbFactory(db);
     const res = await handler(
-      signedEvent({ appId: "m1", method: "GET", subPath: "/data/records", query: { include: "metadata" } }),
+      signedEvent({
+        appId: "m1",
+        method: "GET",
+        subPath: "/data/records",
+        query: { include: "metadata" },
+      }),
       context,
     );
     expect(res.statusCode).toBe(200);
@@ -718,10 +748,9 @@ describe("list metadata enrichment (?include=metadata)", () => {
   });
 
   it("omits metadata and issues no metadata query by default", async () => {
-    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(
-      RECORDS_SELECT,
-      [recordRow({ id: "rec-1", type: "image/jpeg" })],
-    );
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(RECORDS_SELECT, [
+      recordRow({ id: "rec-1", type: "image/jpeg" }),
+    ]);
     setDbFactory(db);
     const res = await handler(
       signedEvent({ appId: "m2", method: "GET", subPath: "/data/records" }),
@@ -920,9 +949,7 @@ describe("metadata routes", () => {
       fakeDsqlWithGrants([
         { type_id: "image/jpeg", access: "readwrite" },
         { type_id: "video/mp4", access: "readwrite" },
-      ]).on(/from "shared"\."records" where "id" =/, [
-        recordRow({ id: "rv2", type: "video/mp4" }),
-      ]),
+      ]).on(/from "shared"\."records" where "id" =/, [recordRow({ id: "rv2", type: "video/mp4" })]),
     );
     const res = await handler(
       signedEvent({
@@ -1066,7 +1093,13 @@ describe("per-record routes honor read/write grants", () => {
     // the single file-url route 403s instead of signing a foreign-category URL.
     const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(
       /from "shared"\."records" where "id" =/,
-      [recordRow({ id: "mm1", type: "image/jpeg", object_storage_key: `shared/test-user/audio/ab/${"a".repeat(64)}` })],
+      [
+        recordRow({
+          id: "mm1",
+          type: "image/jpeg",
+          object_storage_key: `shared/test-user/audio/ab/${"a".repeat(64)}`,
+        }),
+      ],
     );
     setDbFactory(db);
     const res = await handler(
@@ -1081,7 +1114,11 @@ describe("per-record routes honor read/write grants", () => {
     // silently omitted (batch semantics) rather than signed.
     const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(RECORDS_SELECT, [
       recordRow({ id: "ok1", type: "image/jpeg" }),
-      recordRow({ id: "bad1", type: "image/jpeg", object_storage_key: `shared/test-user/audio/ab/${"a".repeat(64)}` }),
+      recordRow({
+        id: "bad1",
+        type: "image/jpeg",
+        object_storage_key: `shared/test-user/audio/ab/${"a".repeat(64)}`,
+      }),
     ]);
     setDbFactory(db);
     const res = await handler(
@@ -1286,7 +1323,12 @@ describe("sync exchange channel split", () => {
         subPath: "/sync/exchange",
         body: {
           watermarks: {},
-          records: [{ ...incomingRecord, objectStorageKey: dataRecordObjectKey("someone-else", "image/jpeg", VALID_HASH) }],
+          records: [
+            {
+              ...incomingRecord,
+              objectStorageKey: dataRecordObjectKey("someone-else", "image/jpeg", VALID_HASH),
+            },
+          ],
         },
       }),
       context,
@@ -1331,9 +1373,7 @@ describe("sync exchange channel split", () => {
     // Round 1 against an empty (redeployed) store: nothing to ship back and
     // — the fix under test — coverage is reported as empty so the requester
     // drops its stale peerWatermarks.
-    const emptyDb = fakeDsqlWithGrants()
-      .on(RECORDS_SELECT, [])
-      .on(RECORDS_NODE_WATERMARKS, []);
+    const emptyDb = fakeDsqlWithGrants().on(RECORDS_SELECT, []).on(RECORDS_NODE_WATERMARKS, []);
     setDbFactory(emptyDb);
     const res1 = await handler(
       signedEvent({
@@ -1352,9 +1392,7 @@ describe("sync exchange channel split", () => {
       .on(/from "shared"\."records" where "id" =/, [])
       .on(RECORDS_INSERT, [])
       .on(RECORDS_SELECT, [])
-      .on(RECORDS_NODE_WATERMARKS, [
-        { node_id: "peer", max_updated_at: serializeHLC(hlc) },
-      ]);
+      .on(RECORDS_NODE_WATERMARKS, [{ node_id: "peer", max_updated_at: serializeHLC(hlc) }]);
     setDbFactory(db);
     const res2 = await handler(
       signedEvent({
@@ -1398,13 +1436,19 @@ describe("sync exchange channel split", () => {
 describe("exchangeKeyRefusal", () => {
   const own = `apps/memo/${TEST_USER_ID}/syncable/media/a.mp3`;
   const foreign = "apps/memo/someone-else/syncable/media/a.mp3";
-  const fileRow = (id: string) => ({ table: "_starkeep_sync_records", row: { id, object_storage_key: id } });
+  const fileRow = (id: string) => ({
+    table: "_starkeep_sync_records",
+    row: { id, object_storage_key: id },
+  });
 
   it("passes keys under the caller's segment, and rows with no key", () => {
     expect(
       exchangeKeyRefusal(
         {
-          records: [{ objectStorageKey: dataRecordObjectKey(TEST_USER_ID, "image/jpeg", VALID_HASH) }, { objectStorageKey: null }],
+          records: [
+            { objectStorageKey: dataRecordObjectKey(TEST_USER_ID, "image/jpeg", VALID_HASH) },
+            { objectStorageKey: null },
+          ],
           appSyncableRows: [fileRow(own), { table: "cards", row: { id: "card-1" } }],
         },
         TEST_USER_ID,
@@ -1413,15 +1457,23 @@ describe("exchangeKeyRefusal", () => {
   });
 
   it("refuses a file row, or a file-row delete, naming another user's key", () => {
-    expect(exchangeKeyRefusal({ appSyncableRows: [fileRow(foreign)] }, TEST_USER_ID)).toMatch(/not under this user's segment/);
+    expect(exchangeKeyRefusal({ appSyncableRows: [fileRow(foreign)] }, TEST_USER_ID)).toMatch(
+      /not under this user's segment/,
+    );
     expect(
-      exchangeKeyRefusal({ appSyncableRows: [{ table: "_starkeep_sync_records", where: { id: foreign } }] }, TEST_USER_ID),
+      exchangeKeyRefusal(
+        { appSyncableRows: [{ table: "_starkeep_sync_records", where: { id: foreign } }] },
+        TEST_USER_ID,
+      ),
     ).toMatch(/not under this user's segment/);
   });
 
   it("refuses a key in the old layout, which names no user", () => {
     expect(
-      exchangeKeyRefusal({ records: [{ objectStorageKey: `shared/image/aa/${"a".repeat(64)}` }] }, TEST_USER_ID),
+      exchangeKeyRefusal(
+        { records: [{ objectStorageKey: `shared/image/aa/${"a".repeat(64)}` }] },
+        TEST_USER_ID,
+      ),
     ).not.toBeNull();
   });
 });
@@ -1436,7 +1488,12 @@ describe("the cloud's bytes watermark on /sync/exchange", () => {
 
   function exchange(appId = "starkeep-drive") {
     return handler(
-      signedEvent({ appId, method: "POST", subPath: "/sync/exchange", body: { watermarks: {}, limit: 0 } }),
+      signedEvent({
+        appId,
+        method: "POST",
+        subPath: "/sync/exchange",
+        body: { watermarks: {}, limit: 0 },
+      }),
       context,
     );
   }
@@ -1469,7 +1526,9 @@ describe("the cloud's bytes watermark on /sync/exchange", () => {
       // The no-cloud check on the missing file: a record with no labels.
       .on(/from "shared"\."record_labels" where "record_id" in/, []);
     setDbFactory(db);
-    s3Mock.on(HeadObjectCommand).rejects(Object.assign(new Error("NotFound"), { name: "NotFound" }));
+    s3Mock
+      .on(HeadObjectCommand)
+      .rejects(Object.assign(new Error("NotFound"), { name: "NotFound" }));
 
     const res = await exchange();
 
@@ -1495,7 +1554,9 @@ describe("the cloud's bytes watermark on /sync/exchange", () => {
         },
       ]);
     setDbFactory(db);
-    s3Mock.on(HeadObjectCommand).rejects(Object.assign(new Error("NotFound"), { name: "NotFound" }));
+    s3Mock
+      .on(HeadObjectCommand)
+      .rejects(Object.assign(new Error("NotFound"), { name: "NotFound" }));
 
     const res = await exchange();
 
@@ -1506,9 +1567,12 @@ describe("the cloud's bytes watermark on /sync/exchange", () => {
     // An app installed before the table existed. Requesters stop pushing
     // rather than ship rows whose uploads nothing would remember.
     const db = storeWithOneRecord().on(COVERAGE_LOAD, () => {
-      throw Object.assign(new Error('relation "app_starkeep_drive._starkeep_byte_coverage" does not exist'), {
-        code: "42P01",
-      });
+      throw Object.assign(
+        new Error('relation "app_starkeep_drive._starkeep_byte_coverage" does not exist'),
+        {
+          code: "42P01",
+        },
+      );
     });
     setDbFactory(db);
 
@@ -1579,9 +1643,7 @@ describe("sync exchange request validation", () => {
     // hence the watermark row.
     const db = fakeDsqlWithGrants()
       .on(RECORDS_SELECT, [])
-      .on(RECORDS_NODE_WATERMARKS, [
-        { node_id: "peer", max_updated_at: serializeHLC(hlc) },
-      ]);
+      .on(RECORDS_NODE_WATERMARKS, [{ node_id: "peer", max_updated_at: serializeHLC(hlc) }]);
     setDbFactory(db);
     const res = await exchange({ watermarks: {}, limit: 1e9 });
     expect(res.statusCode).toBe(200);
@@ -1905,7 +1967,11 @@ describe("/app-data routes", () => {
           appId: "appdata1",
           method: "POST",
           subPath: "/app-data/files/presign",
-          body: { subKey: "cover", contentType: "image/png", ...(contentHash ? { contentHash } : {}) },
+          body: {
+            subKey: "cover",
+            contentType: "image/png",
+            ...(contentHash ? { contentHash } : {}),
+          },
         }),
         context,
       );
@@ -1947,7 +2013,9 @@ describe("/app-data routes", () => {
   });
 
   it("GET presigns from the index row (no byte download), 404s when absent", async () => {
-    const present = fakeDsqlWithGrants().on(NS_SELECT, [filesNamespace]).on(FILE_RECORDS_SELECT, [fileRow]);
+    const present = fakeDsqlWithGrants()
+      .on(NS_SELECT, [filesNamespace])
+      .on(FILE_RECORDS_SELECT, [fileRow]);
     setDbFactory(present);
     const found = await handler(
       signedEvent({ appId: "appdata1", method: "GET", subPath: "/app-data/files/cover" }),
@@ -2020,7 +2088,12 @@ describe("/app-data routes", () => {
     });
 
     it("400s on a malformed or oversized subKeys list", async () => {
-      const cases: unknown[] = [[], ["ok", 7], "cover", Array.from({ length: 201 }, (_, i) => `k${i}`)];
+      const cases: unknown[] = [
+        [],
+        ["ok", 7],
+        "cover",
+        Array.from({ length: 201 }, (_, i) => `k${i}`),
+      ];
       for (const subKeys of cases) {
         setDbFactory(fakeDsqlWithGrants().on(NS_SELECT, [filesNamespace]));
         const res = await handler(
@@ -2358,7 +2431,12 @@ describe("availability and restore", () => {
       const db = archivedDb();
       setDbFactory(db);
       const res = await handler(
-        signedEvent({ appId: "app1", method: "POST", subPath: "/data/records/rec-1/restore", body: {} }),
+        signedEvent({
+          appId: "app1",
+          method: "POST",
+          subPath: "/data/records/rec-1/restore",
+          body: {},
+        }),
         context,
       );
       expect(res.statusCode).toBe(200);
@@ -2923,7 +3001,10 @@ describe("POST /files/presign pins the expected checksum", () => {
         appId: "app1",
         method: "POST",
         subPath: "/files/presign",
-        body: { key: sharedKey, checksumSha256: Buffer.from("f".repeat(64), "hex").toString("base64") },
+        body: {
+          key: sharedKey,
+          checksumSha256: Buffer.from("f".repeat(64), "hex").toString("base64"),
+        },
       }),
       context,
     );
@@ -2968,13 +3049,17 @@ describe("POST /files/presign pins the expected checksum", () => {
     expect(String(bodyOf(res)["url"])).toContain("x-amz-checksum-sha256");
 
     const missing = await handler(
-      signedEvent({ appId: "app1", method: "POST", subPath: "/files/presign", body: { key: appKey } }),
+      signedEvent({
+        appId: "app1",
+        method: "POST",
+        subPath: "/files/presign",
+        body: { key: appKey },
+      }),
       context,
     );
     expect(missing.statusCode).toBe(400);
     expect(String(bodyOf(missing)["error"])).toMatch(/contentHash is required/);
   });
-
 });
 
 describe("the shared-plane query routes", () => {
@@ -3067,21 +3152,18 @@ describe("the shared-plane query routes", () => {
   });
 
   it("gates a label query on the labelled record's type", async () => {
-    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(
-      LABELS_SELECT,
-      [
-        {
-          record_id: "rec-1",
-          app_id: "photos",
-          key: "album",
-          value: "trip",
-          record_type: "image/jpeg",
-          created_at: TEST_HLC_FOR_LABELS,
-          updated_at: TEST_HLC_FOR_LABELS,
-          node_id: "test",
-        },
-      ],
-    );
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(LABELS_SELECT, [
+      {
+        record_id: "rec-1",
+        app_id: "photos",
+        key: "album",
+        value: "trip",
+        record_type: "image/jpeg",
+        created_at: TEST_HLC_FOR_LABELS,
+        updated_at: TEST_HLC_FOR_LABELS,
+        node_id: "test",
+      },
+    ]);
     setDbFactory(db);
     const res = await handler(
       signedEvent({

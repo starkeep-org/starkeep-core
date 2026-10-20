@@ -43,7 +43,10 @@ import { CATEGORIES, hasMetadataTable } from "@starkeep/protocol-primitives";
 const APPLY = process.argv.includes("--yes");
 
 const config = JSON.parse(
-  readFileSync(join(process.env.STARKEEP_DIR ?? join(homedir(), ".starkeep"), "config.json"), "utf8"),
+  readFileSync(
+    join(process.env.STARKEEP_DIR ?? join(homedir(), ".starkeep"), "config.json"),
+    "utf8",
+  ),
 ) as { stackPrefix: string; auroraEndpoint: string; s3Bucket: string; region?: string };
 const region = config.region ?? "us-east-2";
 
@@ -60,7 +63,11 @@ async function s3Keys(s3: S3Client, prefix: string): Promise<string[]> {
   let token: string | undefined;
   do {
     const page = await s3.send(
-      new ListObjectsV2Command({ Bucket: config.s3Bucket, Prefix: prefix, ContinuationToken: token }),
+      new ListObjectsV2Command({
+        Bucket: config.s3Bucket,
+        Prefix: prefix,
+        ContinuationToken: token,
+      }),
     );
     for (const o of page.Contents ?? []) if (o.Key) keys.push(o.Key);
     token = page.NextContinuationToken;
@@ -78,16 +85,24 @@ async function main(): Promise<void> {
   let token: string | undefined;
   do {
     const page = await ssm.send(
-      new GetParametersByPathCommand({ Path: `/${config.stackPrefix}/app-creds/`, NextToken: token }),
+      new GetParametersByPathCommand({
+        Path: `/${config.stackPrefix}/app-creds/`,
+        NextToken: token,
+      }),
     );
     for (const p of page.Parameters ?? []) if (p.Name?.includes("/_device-")) devices.push(p.Name);
     token = page.NextToken;
   } while (token);
 
-  console.log(`S3 ${config.s3Bucket}: ${shared.length} objects under shared/, ${apps.length} under apps/ (not .keep)`);
+  console.log(
+    `S3 ${config.s3Bucket}: ${shared.length} objects under shared/, ${apps.length} under apps/ (not .keep)`,
+  );
   console.log(`SSM: ${devices.length} old device records: ${devices.join(" ")}`);
 
-  const password = await new DsqlSigner({ hostname: config.auroraEndpoint, region }).getDbConnectAdminAuthToken();
+  const password = await new DsqlSigner({
+    hostname: config.auroraEndpoint,
+    region,
+  }).getDbConnectAdminAuthToken();
   const client = new pg.Client({
     host: config.auroraEndpoint,
     port: 5432,

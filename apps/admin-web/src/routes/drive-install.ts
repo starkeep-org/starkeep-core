@@ -35,7 +35,6 @@ interface StarkeepConfig {
   authorizerId?: string;
 }
 
-
 export async function POST(req: Request) {
   const body = (await req.json()) as {
     accessKeyId: string;
@@ -53,10 +52,10 @@ export async function POST(req: Request) {
   }
 
   if (!existsSync(CONFIG_PATH)) {
-    return new Response(
-      JSON.stringify({ error: `~/.starkeep/config.json not found` }),
-      { status: 400, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: `~/.starkeep/config.json not found` }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
   }
   const preConfig = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as StarkeepConfig;
 
@@ -70,7 +69,12 @@ export async function POST(req: Request) {
     );
   }
   // Drive depends on the cloud-data-server foundational outputs being present.
-  if (!preConfig.auroraEndpoint || !preConfig.s3Bucket || !preConfig.apiGatewayId || !preConfig.authorizerId) {
+  if (
+    !preConfig.auroraEndpoint ||
+    !preConfig.s3Bucket ||
+    !preConfig.apiGatewayId ||
+    !preConfig.authorizerId
+  ) {
     return new Response(
       JSON.stringify({
         error:

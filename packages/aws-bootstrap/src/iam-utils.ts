@@ -3,11 +3,7 @@
  * Used by the bootstrap template generator and policy builders.
  */
 
-export type CfnValue =
-  | string
-  | { Sub: string }
-  | { GetAtt: string }
-  | { Ref: string };
+export type CfnValue = string | { Sub: string } | { GetAtt: string } | { Ref: string };
 
 export interface IamStatement {
   Sid: string;
@@ -17,10 +13,7 @@ export interface IamStatement {
   Condition?: Record<string, Record<string, CfnValue | CfnValue[]>>;
 }
 
-export function renderStatementsYaml(
-  statements: IamStatement[],
-  indentSpaces: number,
-): string {
+export function renderStatementsYaml(statements: IamStatement[], indentSpaces: number): string {
   const indent = " ".repeat(indentSpaces);
   const lines: string[] = [];
 

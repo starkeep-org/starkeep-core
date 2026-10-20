@@ -10,18 +10,13 @@
 import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
 import { describe, it, expect } from "vitest";
 import { createHash } from "node:crypto";
-import {
-  createHLCClock,
-  createDataRecord,
-  type StarkeepId,
-} from "@starkeep/protocol-primitives";
+import { createHLCClock, createDataRecord, type StarkeepId } from "@starkeep/protocol-primitives";
 import { MockDatabaseAdapter, MockObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { createSyncEngine } from "../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../src/transports/in-process-transport.js";
 import { residencyOf } from "../src/residency.js";
 import type { BlobCandidate, ResidencyVerdict } from "../src/residency-policy.js";
 import type { FileRecordRow, SyncStateStore, Watermarks } from "../src/types.js";
-
 
 interface Fixture {
   engine: ReturnType<typeof createSyncEngine>;
@@ -40,9 +35,7 @@ interface Fixture {
  * One cloud-originated record with a blob, and a local engine whose residency
  * decision the test controls.
  */
-async function setup(
-  verdictFor: (c: BlobCandidate) => ResidencyVerdict,
-): Promise<Fixture> {
+async function setup(verdictFor: (c: BlobCandidate) => ResidencyVerdict): Promise<Fixture> {
   let time = 1000;
   const localClock = createHLCClock({ nodeId: "local", wallClockFunction: () => time++ });
   const cloudClock = createHLCClock({ nodeId: "cloud", wallClockFunction: () => time++ });
@@ -58,7 +51,9 @@ async function setup(
   // the transfer for the right reason and make this test look like a residency
   // bug.
   const blob = Buffer.from([4, 5, 6]);
-  const blobHash = createHash("sha256").update(blob as unknown as Uint8Array).digest("hex");
+  const blobHash = createHash("sha256")
+    .update(blob as unknown as Uint8Array)
+    .digest("hex");
   const cloudRecord = createDataRecord(
     {
       type: "image/jpeg",
@@ -382,9 +377,10 @@ describe("residencyOf names the ways a blob can be missing", () => {
   });
 
   it("reports tombstoned regardless of the blob or the policy", async () => {
-    expect(
-      await stateOf(() => verdict("elide", "above-ceiling"), { deleted_at: "t" }),
-    ).toEqual({ state: "tombstoned", reason: null });
+    expect(await stateOf(() => verdict("elide", "above-ceiling"), { deleted_at: "t" })).toEqual({
+      state: "tombstoned",
+      reason: null,
+    });
   });
 
   it("reports absent for no row at all", async () => {

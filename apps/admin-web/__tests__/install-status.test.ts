@@ -77,9 +77,9 @@ describe("when the data server is not running", () => {
     // dead port means loading a second copy of the module.
     vi.resetModules();
     process.env.STARKEEP_LOCAL_DATA_SERVER_URL = "http://127.0.0.1:1";
-    const { GET: downGET } = (await import(
-      "../src/routes/apps-install-status"
-    )) as unknown as { GET: typeof GET };
+    const { GET: downGET } = (await import("../src/routes/apps-install-status")) as unknown as {
+      GET: typeof GET;
+    };
     process.env.STARKEEP_LOCAL_DATA_SERVER_URL = upstream.url;
 
     const res = await downGET(getRequest("/api/apps/photos/install-status"), {

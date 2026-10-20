@@ -97,11 +97,7 @@ async function seedRecord(
   return id;
 }
 
-async function seedLabel(
-  side: Side,
-  recordId: StarkeepId,
-  authored?: HLCTimestamp,
-): Promise<void> {
+async function seedLabel(side: Side, recordId: StarkeepId, authored?: HLCTimestamp): Promise<void> {
   if (authored) {
     await side.db.putLabel({
       recordId,

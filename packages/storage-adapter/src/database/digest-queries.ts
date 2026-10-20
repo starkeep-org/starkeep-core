@@ -147,11 +147,7 @@ export function buildBucketDigest(
   const bucket = sql<string>`substr(updated_at, 1, ${sql.lit(prefixLength)})`;
   return k
     .selectFrom(table)
-    .select(({ fn }) => [
-      "node_id",
-      bucket.as("bucket"),
-      fn.countAll().as("row_count"),
-    ])
+    .select(({ fn }) => ["node_id", bucket.as("bucket"), fn.countAll().as("row_count")])
     .groupBy(["node_id", bucket])
     .compile();
 }
@@ -235,9 +231,7 @@ function bucketKey(b: { nodeId: string; bucket: string; scope?: string }): strin
  * Returning the bucket start itself would skip a row landing exactly on the
  * boundary — the one row a repair is least able to afford to miss.
  */
-export function repairFloorsFor(
-  missing: readonly DigestBucket[],
-): Record<string, HLCTimestamp> {
+export function repairFloorsFor(missing: readonly DigestBucket[]): Record<string, HLCTimestamp> {
   const floors: Record<string, HLCTimestamp> = {};
   for (const b of missing) {
     // The prefix is the leading hex digits of a 12-digit wall-clock reading;

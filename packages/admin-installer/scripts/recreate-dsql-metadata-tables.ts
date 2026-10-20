@@ -54,7 +54,6 @@ function loadStarkeepConfig(): StarkeepConfig {
   return JSON.parse(readFileSync(path, "utf8")) as StarkeepConfig;
 }
 
-
 async function assume(
   arn: string,
   creds: Creds,

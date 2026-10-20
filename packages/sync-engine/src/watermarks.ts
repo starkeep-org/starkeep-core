@@ -15,9 +15,7 @@ export function computeRecordWatermarks(records: Iterable<AnyRecord>): Watermark
   return out;
 }
 
-export function computeAppSyncableWatermarks(
-  rows: Iterable<AppSyncableRowEntry>,
-): Watermarks {
+export function computeAppSyncableWatermarks(rows: Iterable<AppSyncableRowEntry>): Watermarks {
   const out: Watermarks = {};
   for (const r of rows) {
     advanceWatermark(out, r.timestamp);

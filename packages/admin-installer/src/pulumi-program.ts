@@ -106,53 +106,57 @@ export function buildPulumiProgram(
         tags: { "starkeep:appId": ctx.appId, "starkeep:managed": "true" },
       });
 
-      const fn = new aws.lambda.Function(`fn-${handler.name}`, {
-        name: fnName,
-        // The exec role, not the data role. Running an app's own code as the
-        // role that holds its S3 and DSQL grants let that code read every
-        // record row of every type and fetch any blob in a granted category
-        // directly — bypassing the broker, the HMAC scheme and every grant
-        // check the broker performs. No control in @starkeep/app-client or at
-        // the broker could reach that; only this line could.
-        role: ctx.appExecRoleArn,
-        runtime: aws.lambda.Runtime.NodeJS22dX,
-        handler: handler.handler,
-        s3Bucket: ctx.artifactsBucket,
-        s3Key: `apps/${ctx.appId}/latest/dist.zip`,
-        ...(ctx.bundleHash ? { sourceCodeHash: ctx.bundleHash } : {}),
-        memorySize: handler.memoryMb,
-        timeout: handler.timeoutSeconds,
-        // Reserved rather than shared when the manifest says so. This both
-        // caps the handler — a client fanning out cannot take the whole
-        // account pool — and guarantees it that many slots, so a burst
-        // elsewhere cannot starve it either.
-        ...(handler.reservedConcurrency === undefined
-          ? {}
-          : { reservedConcurrentExecutions: handler.reservedConcurrency }),
-        environment: {
-          variables: {
-            STARKEEP_APP_ID: ctx.appId,
-            STARKEEP_STACK_PREFIX: ctx.stackPrefix,
-            STARKEEP_DSQL_HOSTNAME: ctx.dsqlHostname,
-            STARKEEP_FILES_BUCKET: ctx.filesBucket,
-            // Activate @starkeep/app-client cloud mode: the client will fetch
-            // its HMAC secret from SSM via the Lambda's exec role and route
-            // signed calls through the shared API Gateway. See
-            // packages/app-client/src/credentials.ts.
-            STARKEEP_APP_CLIENT_MODE: "cloud",
-            // The mount prefix, as a runtime fact rather than a build-time one.
-            // The installer already passes this name into `pnpm bundle`; the
-            // app's server half needs the same answer when it emits a URL a
-            // browser will resolve, and deriving it from the app id in app code
-            // would be a second copy of the platform's own routing choice.
-            STARKEEP_APP_BASE_PATH: `/apps/${ctx.appId}`,
-            STARKEEP_CLOUD_DATA_BASE: ctx.apiGatewayUrl,
-            STARKEEP_APP_CREDS_PARAMETER_NAME: `/${ctx.stackPrefix}/app-creds/${ctx.appId}`,
-            ...handler.env,
+      const fn = new aws.lambda.Function(
+        `fn-${handler.name}`,
+        {
+          name: fnName,
+          // The exec role, not the data role. Running an app's own code as the
+          // role that holds its S3 and DSQL grants let that code read every
+          // record row of every type and fetch any blob in a granted category
+          // directly — bypassing the broker, the HMAC scheme and every grant
+          // check the broker performs. No control in @starkeep/app-client or at
+          // the broker could reach that; only this line could.
+          role: ctx.appExecRoleArn,
+          runtime: aws.lambda.Runtime.NodeJS22dX,
+          handler: handler.handler,
+          s3Bucket: ctx.artifactsBucket,
+          s3Key: `apps/${ctx.appId}/latest/dist.zip`,
+          ...(ctx.bundleHash ? { sourceCodeHash: ctx.bundleHash } : {}),
+          memorySize: handler.memoryMb,
+          timeout: handler.timeoutSeconds,
+          // Reserved rather than shared when the manifest says so. This both
+          // caps the handler — a client fanning out cannot take the whole
+          // account pool — and guarantees it that many slots, so a burst
+          // elsewhere cannot starve it either.
+          ...(handler.reservedConcurrency === undefined
+            ? {}
+            : { reservedConcurrentExecutions: handler.reservedConcurrency }),
+          environment: {
+            variables: {
+              STARKEEP_APP_ID: ctx.appId,
+              STARKEEP_STACK_PREFIX: ctx.stackPrefix,
+              STARKEEP_DSQL_HOSTNAME: ctx.dsqlHostname,
+              STARKEEP_FILES_BUCKET: ctx.filesBucket,
+              // Activate @starkeep/app-client cloud mode: the client will fetch
+              // its HMAC secret from SSM via the Lambda's exec role and route
+              // signed calls through the shared API Gateway. See
+              // packages/app-client/src/credentials.ts.
+              STARKEEP_APP_CLIENT_MODE: "cloud",
+              // The mount prefix, as a runtime fact rather than a build-time one.
+              // The installer already passes this name into `pnpm bundle`; the
+              // app's server half needs the same answer when it emits a URL a
+              // browser will resolve, and deriving it from the app id in app code
+              // would be a second copy of the platform's own routing choice.
+              STARKEEP_APP_BASE_PATH: `/apps/${ctx.appId}`,
+              STARKEEP_CLOUD_DATA_BASE: ctx.apiGatewayUrl,
+              STARKEEP_APP_CREDS_PARAMETER_NAME: `/${ctx.stackPrefix}/app-creds/${ctx.appId}`,
+              ...handler.env,
+            },
           },
+          tags: { "starkeep:appId": ctx.appId, "starkeep:managed": "true" },
         },
-        tags: { "starkeep:appId": ctx.appId, "starkeep:managed": "true" },
-      }, { dependsOn: [logGroup] });
+        { dependsOn: [logGroup] },
+      );
 
       // Allow the shared API Gateway to invoke this Lambda. AWS_PROXY
       // integrations require a Lambda resource-based policy entry — without
@@ -178,7 +182,6 @@ export function buildPulumiProgram(
       // therefore no longer all-or-nothing — a public shell can sit beside a
       // JWT-gated data subtree on the same Lambda.
       for (const route of resolveHandlerRoutes(handler)) {
-
         // Prefix every app route under /apps/<appId>. A route key like
         // "GET /foo" becomes "GET /apps/photos/foo". The root "GET /" must
         // collapse to "GET /apps/photos" (no trailing slash) — API Gateway v2
@@ -202,12 +205,12 @@ export function buildPulumiProgram(
             if (RESERVED_SUBPATHS.has(firstSeg)) {
               throw new Error(
                 `App "${ctx.appId}" handler "${handler.name}" declares route "${route.declared}" ` +
-                `which after prefixing becomes "${prefixedRouteKey}". The sub-paths ` +
-                `/apps/${ctx.appId}/{data,files,sync,health,app-data}/... are reserved for the ` +
-                `cloud-data-server and cannot be claimed by an app handler. ` +
-                `Note: these paths are also unreachable via a wildcard like "GET /{proxy+}" — ` +
-                `API Gateway v2 routes the broker's more-specific reserved routes first, ` +
-                `so a wildcard handler will silently never see them.`,
+                  `which after prefixing becomes "${prefixedRouteKey}". The sub-paths ` +
+                  `/apps/${ctx.appId}/{data,files,sync,health,app-data}/... are reserved for the ` +
+                  `cloud-data-server and cannot be claimed by an app handler. ` +
+                  `Note: these paths are also unreachable via a wildcard like "GET /{proxy+}" — ` +
+                  `API Gateway v2 routes the broker's more-specific reserved routes first, ` +
+                  `so a wildcard handler will silently never see them.`,
               );
             }
           }

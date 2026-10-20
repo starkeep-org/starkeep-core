@@ -71,7 +71,10 @@ export async function POST_CLOUD(req: Request): Promise<Response> {
   } catch {
     return Response.json({ error: "Body is not valid JSON" }, { status: 400 });
   }
-  if (typeof url !== "string" || !/^https:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/\S*)?$/.test(url.trim())) {
+  if (
+    typeof url !== "string" ||
+    !/^https:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/\S*)?$/.test(url.trim())
+  ) {
     return Response.json({ error: "The cloud address must be an https URL." }, { status: 400 });
   }
   return forward("/config", {

@@ -82,11 +82,7 @@ interface CheckResult {
   missing: Array<{ sid: string | undefined; action: string }>;
 }
 
-function checkPair(
-  pairName: string,
-  policyJson: string,
-  boundary: IamStatement[],
-): CheckResult {
+function checkPair(pairName: string, policyJson: string, boundary: IamStatement[]): CheckResult {
   const policy = JSON.parse(policyJson) as PolicyDocument;
   const allowed = boundaryAllowedActions(boundary);
   const missing: CheckResult["missing"] = [];
@@ -138,7 +134,9 @@ for (const result of pairs) {
     failed = true;
     console.error(`FAIL ${result.pairName}`);
     for (const m of result.missing) {
-      console.error(`     Sid=${m.sid ?? "(none)"}: action "${m.action}" is not Allowed by the boundary`);
+      console.error(
+        `     Sid=${m.sid ?? "(none)"}: action "${m.action}" is not Allowed by the boundary`,
+      );
     }
   }
 }

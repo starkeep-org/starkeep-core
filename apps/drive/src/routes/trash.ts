@@ -77,8 +77,5 @@ function scheduledDeletion(deletedAt: string | null, policy: TrashPolicy): strin
 
 function errorResponse(err: unknown): Response {
   const status = err instanceof DriveNotInstalledError ? 503 : 502;
-  return Response.json(
-    { error: err instanceof Error ? err.message : String(err) },
-    { status },
-  );
+  return Response.json({ error: err instanceof Error ? err.message : String(err) }, { status });
 }

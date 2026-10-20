@@ -2,7 +2,7 @@
 
 The app-data file plane (presign → direct upload → register; existence via
 the `_starkeep_sync_records` index; bidirectional blob sync) is now covered
-by two complementary but *separate* test layers:
+by two complementary but _separate_ test layers:
 
 1. **Broker write path** — `cloud-data-server/__tests__/routes-db.test.ts`
    exercises the real `POST /app-data/files/presign`, the `/record`
@@ -24,7 +24,7 @@ to a real local-data-server** in the same run. The fake cloud deliberately
 mounts only `/sync/exchange` + blob endpoints, not the `/app-data/...`
 broker routes, so the wire harness can't originate a write through the
 broker's actual request path. We therefore trust that the broker's write
-*effects* match `setAppFile` — which is true today but is an assumption a
+_effects_ match `setAppFile` — which is true today but is an assumption a
 refactor of either side could silently break.
 
 ## Fix shape

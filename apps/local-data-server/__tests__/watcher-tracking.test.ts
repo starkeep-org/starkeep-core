@@ -156,7 +156,9 @@ async function uploadToCloud(n: Node, recordId: string): Promise<void> {
   const record = (await n.db.get(recordId as StarkeepId))!;
   const bytes = (await n.objects.get(record.objectStorageKey))!.data;
   await n.cloud.put(record.objectStorageKey, bytes, {
-    checksumSha256: createHash("sha256").update(bytes as unknown as Uint8Array).digest("base64"),
+    checksumSha256: createHash("sha256")
+      .update(bytes as unknown as Uint8Array)
+      .digest("base64"),
   });
 }
 
@@ -222,7 +224,10 @@ describe("watch_files tracking table", () => {
     await writeFile(join(n.dir, "a.txt"), "aaa");
     await writeFile(join(n.dir, "b.txt"), "bbb");
     const first = await n.restart();
-    const before = first.getWatchFiles(WATCH_ID).map((f) => f.dataRecordId).sort();
+    const before = first
+      .getWatchFiles(WATCH_ID)
+      .map((f) => f.dataRecordId)
+      .sort();
     expect(before).toHaveLength(2);
 
     // A fresh local install can keep the record database and the watch table while
@@ -235,7 +240,12 @@ describe("watch_files tracking table", () => {
 
     const second = await n.restart();
     expect(counts(second)).toEqual({ synced: 2, total: 2 });
-    expect(second.getWatchFiles(WATCH_ID).map((f) => f.dataRecordId).sort()).toEqual(before);
+    expect(
+      second
+        .getWatchFiles(WATCH_ID)
+        .map((f) => f.dataRecordId)
+        .sort(),
+    ).toEqual(before);
     for (const id of before) {
       const record = (await n.db.get(id as StarkeepId))!;
       expect(await n.objects.has(record.objectStorageKey)).toBe(true);
@@ -393,7 +403,10 @@ describe("identical files under two names", () => {
 
     const [first, second] = [recordIdFor(mgr, a), recordIdFor(mgr, copy)];
     expect(first).not.toBe(second);
-    const [recA, recCopy] = [(await n.db.get(first as StarkeepId))!, (await n.db.get(second as StarkeepId))!];
+    const [recA, recCopy] = [
+      (await n.db.get(first as StarkeepId))!,
+      (await n.db.get(second as StarkeepId))!,
+    ];
     expect(recA.originalFilename).toBe("a.jpg");
     expect(recCopy.originalFilename).toBe("copy-of-a.jpg");
     expect(recCopy.objectStorageKey).toBe(recA.objectStorageKey);

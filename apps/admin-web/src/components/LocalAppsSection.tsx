@@ -2,12 +2,7 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
 import { ACTION_OCCASIONAL, ACTION_OPEN, ACTION_START } from "@/lib/action-colors";
 import type { DaemonStatus, InstallStep, LocalAppEntry, ManifestSummary } from "@/lib/app-types";
@@ -22,7 +17,12 @@ import {
   type LibraryStandardsResponse,
 } from "@/components/LibraryStandardsSection";
 
-export function LocalAppsSection({ apps, refresh, localOnline, leading }: {
+export function LocalAppsSection({
+  apps,
+  refresh,
+  localOnline,
+  leading,
+}: {
   apps: LocalAppEntry[] | null;
   refresh: () => Promise<void>;
   // Whether the local data server is reachable, owned by the Dashboard so the
@@ -44,15 +44,17 @@ export function LocalAppsSection({ apps, refresh, localOnline, leading }: {
   // so the spinner survives the first poll round.
   const [pending, setPending] = useState<Record<string, "start" | "stop" | undefined>>({});
   const refreshStatus = useCallback(async (appIds: string[]) => {
-    const entries = await Promise.all(appIds.map(async (id) => {
-      try {
-        const res = await fetch(`/api/exec/daemon/status?id=${encodeURIComponent(id)}`);
-        if (!res.ok) return [id, { running: false }] as const;
-        return [id, (await res.json()) as DaemonStatus] as const;
-      } catch {
-        return [id, { running: false }] as const;
-      }
-    }));
+    const entries = await Promise.all(
+      appIds.map(async (id) => {
+        try {
+          const res = await fetch(`/api/exec/daemon/status?id=${encodeURIComponent(id)}`);
+          if (!res.ok) return [id, { running: false }] as const;
+          return [id, (await res.json()) as DaemonStatus] as const;
+        } catch {
+          return [id, { running: false }] as const;
+        }
+      }),
+    );
     setRunStatus((prev) => {
       const next = { ...prev };
       for (const [id, s] of entries) next[id] = s;
@@ -81,7 +83,9 @@ export function LocalAppsSection({ apps, refresh, localOnline, leading }: {
         try {
           const res = await fetch(`/api/exec/daemon/status?id=${encodeURIComponent(appId)}`);
           if (res.ok) s = (await res.json()) as DaemonStatus;
-        } catch { /* keep s as not-running and retry */ }
+        } catch {
+          /* keep s as not-running and retry */
+        }
         setRunStatus((prev) => ({ ...prev, [appId]: s }));
         if ((want === "start" && s.running) || (want === "stop" && !s.running)) return s;
       }
@@ -107,7 +111,11 @@ export function LocalAppsSection({ apps, refresh, localOnline, leading }: {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setPending((p) => { const n = { ...p }; delete n[appId]; return n; });
+      setPending((p) => {
+        const n = { ...p };
+        delete n[appId];
+        return n;
+      });
     }
   };
 
@@ -128,7 +136,11 @@ export function LocalAppsSection({ apps, refresh, localOnline, leading }: {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setPending((p) => { const n = { ...p }; delete n[appId]; return n; });
+      setPending((p) => {
+        const n = { ...p };
+        delete n[appId];
+        return n;
+      });
     }
   };
 
@@ -158,7 +170,8 @@ export function LocalAppsSection({ apps, refresh, localOnline, leading }: {
   };
 
   const handleUninstall = async (entry: LocalAppEntry) => {
-    if (!confirm(`Uninstall ${entry.appId}? Records it produced will remain in shared storage.`)) return;
+    if (!confirm(`Uninstall ${entry.appId}? Records it produced will remain in shared storage.`))
+      return;
     setBusyAppId(entry.appId);
     setError(null);
     try {
@@ -244,22 +257,34 @@ export function LocalAppsSection({ apps, refresh, localOnline, leading }: {
               badges={
                 <>
                   {installed && (
-                    <Badge variant="secondary" className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+                    <Badge
+                      variant="secondary"
+                      className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+                    >
                       Installed
                     </Badge>
                   )}
                   {installed && running && port && (
-                    <Badge variant="secondary" className="text-xs bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">
+                    <Badge
+                      variant="secondary"
+                      className="text-xs bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200"
+                    >
                       Running :{port}
                     </Badge>
                   )}
                   {installed && !running && want === "start" && (
-                    <Badge variant="secondary" className="text-xs bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200">
+                    <Badge
+                      variant="secondary"
+                      className="text-xs bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200"
+                    >
                       Starting…
                     </Badge>
                   )}
                   {installed && running && want === "stop" && (
-                    <Badge variant="secondary" className="text-xs bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200">
+                    <Badge
+                      variant="secondary"
+                      className="text-xs bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200"
+                    >
                       Stopping…
                     </Badge>
                   )}
@@ -273,7 +298,9 @@ export function LocalAppsSection({ apps, refresh, localOnline, leading }: {
                     </Badge>
                   )}
                   {!installed && !statusUnknown && (
-                    <Badge variant="outline" className="text-xs">Not installed</Badge>
+                    <Badge variant="outline" className="text-xs">
+                      Not installed
+                    </Badge>
                   )}
                 </>
               }
@@ -286,7 +313,12 @@ export function LocalAppsSection({ apps, refresh, localOnline, leading }: {
                     Start the local data server to see this app&rsquo;s status.
                   </p>
                 ) : !installed ? (
-                  <span className="block" title={localOnline ? undefined : "Start the local data server before installing"}>
+                  <span
+                    className="block"
+                    title={
+                      localOnline ? undefined : "Start the local data server before installing"
+                    }
+                  >
                     <Button
                       size="sm"
                       className={ACTION_OCCASIONAL}
@@ -302,7 +334,11 @@ export function LocalAppsSection({ apps, refresh, localOnline, leading }: {
                   // rather than disappearing.
                   port ? (
                     <Button asChild size="sm" className={ACTION_OPEN}>
-                      <a href={`http://localhost:${port}`} target="_blank" rel="noopener noreferrer">
+                      <a
+                        href={`http://localhost:${port}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
                         Open {name} ↗
                       </a>
                     </Button>
@@ -342,10 +378,7 @@ export function LocalAppsSection({ apps, refresh, localOnline, leading }: {
         />
       )}
 
-      <InstallStepsDialog
-        appId={stepsOpenFor}
-        onClose={() => setStepsOpenFor(null)}
-      />
+      <InstallStepsDialog appId={stepsOpenFor} onClose={() => setStepsOpenFor(null)} />
     </div>
   );
 }
@@ -388,7 +421,12 @@ function InstallStepsDialog({ appId, onClose }: { appId: string | null; onClose:
   const opened = appId !== null;
 
   return (
-    <Dialog open={opened} onOpenChange={(open) => { if (!open) onClose(); }}>
+    <Dialog
+      open={opened}
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
       <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>Install steps for {appId ?? "app"}</DialogTitle>
@@ -450,12 +488,16 @@ function InstallStepsDialog({ appId, onClose }: { appId: string | null; onClose:
           <Button
             variant="outline"
             size="sm"
-            onClick={() => { if (appId) load(appId); }}
+            onClick={() => {
+              if (appId) load(appId);
+            }}
             disabled={!appId || loading}
           >
             Refresh
           </Button>
-          <Button variant="outline" onClick={onClose}>Close</Button>
+          <Button variant="outline" onClick={onClose}>
+            Close
+          </Button>
         </div>
       </DialogContent>
     </Dialog>
@@ -492,17 +534,17 @@ function ConsentModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
       <div className="bg-background rounded-lg border shadow-lg max-w-lg w-full flex flex-col gap-4 p-5">
-        <h3 className="text-lg font-semibold">
-          Install {entry.manifest.name ?? entry.appId}?
-        </h3>
+        <h3 className="text-lg font-semibold">Install {entry.manifest.name ?? entry.appId}?</h3>
         <p className="text-sm text-muted-foreground">
           This app is requesting the following access to your shared data. Other apps with grants on
-          the same file types will see records this app creates; records persist if the app is uninstalled.
+          the same file types will see records this app creates; records persist if the app is
+          uninstalled.
         </p>
 
         {allAccess && (
           <div className="text-sm">
-            This app is the <span className="font-medium">User-Data-Owner</span>: read + write access to
+            This app is the <span className="font-medium">User-Data-Owner</span>: read + write
+            access to
             <span className="font-mono"> all files</span>, including unclassified ones.
           </div>
         )}
@@ -521,8 +563,12 @@ function ConsentModal({
                 <li key={i} className="border rounded-md p-3 flex flex-col gap-1">
                   <div className="flex items-center gap-2 text-sm flex-wrap">
                     <span className="font-mono">{g.types.join(", ")}</span>
-                    <Badge variant="secondary" className="text-xs">records: {dataPermissions}</Badge>
-                    <Badge variant="secondary" className="text-xs">metadata: {metadataPermissions}</Badge>
+                    <Badge variant="secondary" className="text-xs">
+                      records: {dataPermissions}
+                    </Badge>
+                    <Badge variant="secondary" className="text-xs">
+                      metadata: {metadataPermissions}
+                    </Badge>
                   </div>
                   <p className="text-xs text-muted-foreground">{g.rationale}</p>
                 </li>
@@ -556,10 +602,15 @@ function ConsentModal({
         )}
 
         <div className="flex justify-end gap-2 pt-1">
-          <Button variant="outline" onClick={onCancel}>Cancel</Button>
+          <Button variant="outline" onClick={onCancel}>
+            Cancel
+          </Button>
           <Button
             onClick={() => void approve()}
-            disabled={saving || (quality !== null && draftProblems(quality.draft, quality.state.ranges).length > 0)}
+            disabled={
+              saving ||
+              (quality !== null && draftProblems(quality.draft, quality.state.ranges).length > 0)
+            }
           >
             {saving ? "Saving…" : "Approve & Install"}
           </Button>

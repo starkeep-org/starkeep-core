@@ -47,8 +47,17 @@ describe("createDsqlByteCoverageStore", () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]!.text).toContain('insert into "app_photos"."_starkeep_byte_coverage"');
-    expect(calls[0]!.text).toContain('on conflict ("user_id", "node_id") do update set "hlc" = "excluded"."hlc"');
-    expect(calls[0]!.values).toEqual(["a", serializeHLC(hlc("a", 5)), "user-a", "b", serializeHLC(hlc("b", 7)), "user-a"]);
+    expect(calls[0]!.text).toContain(
+      'on conflict ("user_id", "node_id") do update set "hlc" = "excluded"."hlc"',
+    );
+    expect(calls[0]!.values).toEqual([
+      "a",
+      serializeHLC(hlc("a", 5)),
+      "user-a",
+      "b",
+      serializeHLC(hlc("b", 7)),
+      "user-a",
+    ]);
   });
 
   it("writes nothing for an empty map", async () => {
@@ -63,6 +72,8 @@ describe("createDsqlByteCoverageStore", () => {
         code: "42P01",
       }),
     );
-    await expect(createDsqlByteCoverageStore(client, "photos", "user-a").load()).rejects.toThrow(/does not exist/);
+    await expect(createDsqlByteCoverageStore(client, "photos", "user-a").load()).rejects.toThrow(
+      /does not exist/,
+    );
   });
 });

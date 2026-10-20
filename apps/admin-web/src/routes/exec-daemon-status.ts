@@ -9,15 +9,27 @@ import {
   pidFile,
 } from "../lib/daemon-control";
 
-interface DaemonMeta { pid: number; port: number; }
+interface DaemonMeta {
+  pid: number;
+  port: number;
+}
 
 function tryHost(host: string, port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const socket = createConnection({ host, port });
     socket.setTimeout(300);
-    socket.once("connect", () => { socket.destroy(); resolve(true); });
-    socket.once("error", () => { socket.destroy(); resolve(false); });
-    socket.once("timeout", () => { socket.destroy(); resolve(false); });
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once("error", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.once("timeout", () => {
+      socket.destroy();
+      resolve(false);
+    });
   });
 }
 
@@ -40,7 +52,12 @@ export async function GET(req: Request) {
     if (isWorkspaceDaemonId(id)) {
       const adopted = adoptOrphanWorkspaceDaemon(id);
       if (adopted) {
-        return Response.json({ running: true, pid: adopted.pid, port: adopted.port, adopted: true });
+        return Response.json({
+          running: true,
+          pid: adopted.pid,
+          port: adopted.port,
+          adopted: true,
+        });
       }
     }
     return Response.json({ running: false });
@@ -58,15 +75,13 @@ export async function GET(req: Request) {
 
   const metaPath = resolve(PIDS_DIR, `${id}.meta.json`);
   const meta: DaemonMeta | null = existsSync(metaPath)
-    ? JSON.parse(readFileSync(metaPath, "utf-8")) as DaemonMeta
+    ? (JSON.parse(readFileSync(metaPath, "utf-8")) as DaemonMeta)
     : null;
 
   // For external daemons with a known port, prefer port-based liveness check —
   // the stored PID is pnpm's launcher process which may exit once the app's own
   // server takes over.
-  const running = meta?.port
-    ? await isPortBound(meta.port)
-    : isAlive(pid);
+  const running = meta?.port ? await isPortBound(meta.port) : isAlive(pid);
 
   // Only clean up if the process is actually gone. A transient "port not yet
   // bound" reading during startup must not delete the pid/meta files — the

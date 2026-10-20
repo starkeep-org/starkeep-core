@@ -86,10 +86,10 @@ async function request(method: string, path: string, body?: unknown): Promise<un
 // ---------------------------------------------------------------------------
 
 async function watchAdd(dirPath: string, recursive: boolean): Promise<void> {
-  const watch = await request("POST", "/watches", {
+  const watch = (await request("POST", "/watches", {
     directoryPath: dirPath,
     recursive,
-  }) as { id: string; content?: { directoryPath?: string; recursive?: boolean } };
+  })) as { id: string; content?: { directoryPath?: string; recursive?: boolean } };
 
   const id = watch.id ?? "?";
   const content = watch.content ?? {};
@@ -101,7 +101,10 @@ async function watchAdd(dirPath: string, recursive: boolean): Promise<void> {
 
 async function resolveWatchId(idOrPath: string): Promise<string> {
   if (!idOrPath.startsWith("/")) return idOrPath;
-  const status = await request("GET", `/watches/directory-status?path=${encodeURIComponent(idOrPath)}`) as {
+  const status = (await request(
+    "GET",
+    `/watches/directory-status?path=${encodeURIComponent(idOrPath)}`,
+  )) as {
     watched: boolean;
     watchId?: string;
   };
@@ -119,7 +122,7 @@ async function watchRemove(idOrPath: string): Promise<void> {
 }
 
 async function watchList(): Promise<void> {
-  const watches = await request("GET", "/watches") as Array<{
+  const watches = (await request("GET", "/watches")) as Array<{
     id: string;
     directoryPath: string;
     state: string;

@@ -99,54 +99,61 @@ export function fakeDsqlWithGrants(
    */
   dedupRows: Rows = [],
 ): FakeDsql {
-  return new FakeDsql()
-    .on(/from "shared"\."access_grants"/, grantRows)
-    // Every record listing now reads availability in one batched query. Empty
-    // by default: no stored row means the default (instant), which is the
-    // ordinary state of an object nothing has moved.
-    //
-    // Scoped to the select-*-by-key shape specifically. A looser pattern would
-    // also swallow the restore rate limit's aggregate below and hand it a row
-    // list where it expects a count — which would "work" by accident, since the
-    // missing column reads as zero.
-    .on(/select \* from "shared"\."object_availability"/, availabilityRows)
-    // The restore rate limit's in-flight aggregate. No rows = nothing in
-    // flight, which is what every test that isn't about the limit wants.
-    .on(/count\(.*\) .*from "shared"\."object_availability"/, [])
-    // Issuing a restore records the new state.
-    .on(/insert into "shared"\."object_availability"/, [])
-    .on(/from "shared"\."records" where "updated_at" like/, [])
-    // Record-level dedup runs on every registration now, not just for
-    // children. Empty by default: no existing record for these bytes, which is
-    // the ordinary case. Tests that exercise dedup override it.
-    .on(/from "shared"\."records" where "content_hash" =/, dedupRows)
-    .on(/from "shared"\."record_labels" order by "record_id"/, [])
-    .on(/from "shared"\."record_labels" (?:where "shared"\."record_labels"\."user_id" = \$\d+ )?group by "node_id"/, [])
-    // DELETE /data/records/:id cascades to labels on every record delete,
-    // since DSQL has no foreign keys to do it. Returns no rows; tests that
-    // assert on the cascade read `db.calls(...)`, which logs every statement
-    // regardless of which route answered it.
-    .on(/update "shared"\."record_labels" set "deleted_at"/, [])
-    // A record delete tombstones the record's metadata row, and a restore lifts
-    // the stamp again, in whichever category table holds it. No rows either way.
-    .on(/update "shared"\."record_\w+_metadata" set "deleted_at"/, [])
-    // The reaper's hard delete, at the end of the retention window.
-    .on(/delete from "shared"\."record_\w+_metadata"/, [])
-    // Every listing of originals in a stand-in category asks for the page's
-    // stand-ins, to build each item's size summary. None by default; a test
-    // about stand-ins answers with `on(STAND_INS_OF_PAGE, …)`, which wins.
-    .otherwise(STAND_INS_OF_PAGE, []);
+  return (
+    new FakeDsql()
+      .on(/from "shared"\."access_grants"/, grantRows)
+      // Every record listing now reads availability in one batched query. Empty
+      // by default: no stored row means the default (instant), which is the
+      // ordinary state of an object nothing has moved.
+      //
+      // Scoped to the select-*-by-key shape specifically. A looser pattern would
+      // also swallow the restore rate limit's aggregate below and hand it a row
+      // list where it expects a count — which would "work" by accident, since the
+      // missing column reads as zero.
+      .on(/select \* from "shared"\."object_availability"/, availabilityRows)
+      // The restore rate limit's in-flight aggregate. No rows = nothing in
+      // flight, which is what every test that isn't about the limit wants.
+      .on(/count\(.*\) .*from "shared"\."object_availability"/, [])
+      // Issuing a restore records the new state.
+      .on(/insert into "shared"\."object_availability"/, [])
+      .on(/from "shared"\."records" where "updated_at" like/, [])
+      // Record-level dedup runs on every registration now, not just for
+      // children. Empty by default: no existing record for these bytes, which is
+      // the ordinary case. Tests that exercise dedup override it.
+      .on(/from "shared"\."records" where "content_hash" =/, dedupRows)
+      .on(/from "shared"\."record_labels" order by "record_id"/, [])
+      .on(
+        /from "shared"\."record_labels" (?:where "shared"\."record_labels"\."user_id" = \$\d+ )?group by "node_id"/,
+        [],
+      )
+      // DELETE /data/records/:id cascades to labels on every record delete,
+      // since DSQL has no foreign keys to do it. Returns no rows; tests that
+      // assert on the cascade read `db.calls(...)`, which logs every statement
+      // regardless of which route answered it.
+      .on(/update "shared"\."record_labels" set "deleted_at"/, [])
+      // A record delete tombstones the record's metadata row, and a restore lifts
+      // the stamp again, in whichever category table holds it. No rows either way.
+      .on(/update "shared"\."record_\w+_metadata" set "deleted_at"/, [])
+      // The reaper's hard delete, at the end of the retention window.
+      .on(/delete from "shared"\."record_\w+_metadata"/, [])
+      // Every listing of originals in a stand-in category asks for the page's
+      // stand-ins, to build each item's size summary. None by default; a test
+      // about stand-ins answers with `on(STAND_INS_OF_PAGE, …)`, which wins.
+      .otherwise(STAND_INS_OF_PAGE, [])
+  );
 }
 
 /** The page-wide stand-in lookup behind every listing's size summary. */
-export const STAND_INS_OF_PAGE = /from "shared"\."records" where "parent_id" in \(.*\) and "stand_in_role" in/;
+export const STAND_INS_OF_PAGE =
+  /from "shared"\."records" where "parent_id" in \(.*\) and "stand_in_role" in/;
 
 /**
  * The children lookup a delete makes to find what cascades. Tests register it
  * ahead of any broader `select * from "shared"."records"` route, which would
  * otherwise answer it with the record itself.
  */
-export const CHILDREN_OF = /from "shared"\."records" where "parent_id" = \$1 and "deleted_at" is null/;
+export const CHILDREN_OF =
+  /from "shared"\."records" where "parent_id" = \$1 and "deleted_at" is null/;
 
 const TEST_HLC = serializeHLC({ wallTime: Date.UTC(2026, 0, 1), counter: 0, nodeId: "test" });
 

@@ -36,7 +36,9 @@ describe("stand-in slot collisions across nodes", () => {
     cloud: Side,
     opts: {
       syncState?: SyncStateStore;
-      keepLiveOnTombstone?: Parameters<typeof createInProcessSyncTransport>[0]["keepLiveOnTombstone"];
+      keepLiveOnTombstone?: Parameters<
+        typeof createInProcessSyncTransport
+      >[0]["keepLiveOnTombstone"];
       onApplied?: Parameters<typeof createInProcessSyncTransport>[0]["onApplied"];
     } = {},
   ) {
@@ -127,8 +129,18 @@ describe("stand-in slot collisions across nodes", () => {
   ] as const) {
     it(`keeps the cloud's first ${role} stand-in and tombstones the other everywhere`, async () => {
       const { a, b, cloud, stateA, stateB, original } = await withOriginalEverywhere();
-      const fromA = await put(a, { hash: "sha256:encoder-a", parentId: original.id, standInRole: role, fidelity });
-      const fromB = await put(b, { hash: "sha256:encoder-b", parentId: original.id, standInRole: role, fidelity });
+      const fromA = await put(a, {
+        hash: "sha256:encoder-a",
+        parentId: original.id,
+        standInRole: role,
+        fidelity,
+      });
+      const fromB = await put(b, {
+        hash: "sha256:encoder-b",
+        parentId: original.id,
+        standInRole: role,
+        fidelity,
+      });
 
       await engine(a, cloud, { syncState: stateA }).exchange();
       // B's round carries its stand-in up and the verdict back in one exchange.
@@ -145,8 +157,18 @@ describe("stand-in slot collisions across nodes", () => {
 
   it("converges: later rounds apply and ship nothing", async () => {
     const { a, b, cloud, stateA, stateB, original } = await withOriginalEverywhere();
-    await put(a, { hash: "sha256:a", parentId: original.id, standInRole: "canonical", fidelity: 4272 });
-    await put(b, { hash: "sha256:b", parentId: original.id, standInRole: "canonical", fidelity: 4272 });
+    await put(a, {
+      hash: "sha256:a",
+      parentId: original.id,
+      standInRole: "canonical",
+      fidelity: 4272,
+    });
+    await put(b, {
+      hash: "sha256:b",
+      parentId: original.id,
+      standInRole: "canonical",
+      fidelity: 4272,
+    });
     for (let i = 0; i < 3; i++) {
       await engine(a, cloud, { syncState: stateA }).exchange();
       await engine(b, cloud, { syncState: stateB }).exchange();
@@ -159,9 +181,19 @@ describe("stand-in slot collisions across nodes", () => {
 
   it("lets a node that pulls the winner first yield its own stand-in before pushing", async () => {
     const { a, b, cloud, stateA, stateB, original } = await withOriginalEverywhere();
-    const fromA = await put(a, { hash: "sha256:a", parentId: original.id, standInRole: "smaller", fidelity: 320 });
+    const fromA = await put(a, {
+      hash: "sha256:a",
+      parentId: original.id,
+      standInRole: "smaller",
+      fidelity: 320,
+    });
     await engine(a, cloud, { syncState: stateA }).exchange();
-    const fromB = await put(b, { hash: "sha256:b", parentId: original.id, standInRole: "smaller", fidelity: 320 });
+    const fromB = await put(b, {
+      hash: "sha256:b",
+      parentId: original.id,
+      standInRole: "smaller",
+      fidelity: 320,
+    });
     await engine(b, cloud, { syncState: stateB }).exchange();
     await engine(b, cloud, { syncState: stateB }).exchange();
     expect(await liveIn(b, original.id, "smaller")).toEqual([fromA.id]);
@@ -197,7 +229,12 @@ describe("stand-in slot collisions across nodes", () => {
 
   it("reports what it applied, once per exchange", async () => {
     const { a, cloud, stateA, original } = await withOriginalEverywhere();
-    const small = await put(a, { hash: "sha256:s", parentId: original.id, standInRole: "smaller", fidelity: 640 });
+    const small = await put(a, {
+      hash: "sha256:s",
+      parentId: original.id,
+      standInRole: "smaller",
+      fidelity: 640,
+    });
     await a.db.upsertLabels([
       {
         recordId: original.id,

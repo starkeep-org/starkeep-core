@@ -3,12 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { CommandOutput } from "@/components/CommandOutput";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   readCloudConfig,
   readCognitoSession,
@@ -21,7 +16,10 @@ import { ACTION_OCCASIONAL, ACTION_OPEN } from "@/lib/action-colors";
 import type { LocalAppEntry } from "@/lib/app-types";
 import { runInstallStream } from "@/lib/install-stream-client";
 
-export function CloudAppsSection({ apps, leading }: {
+export function CloudAppsSection({
+  apps,
+  leading,
+}: {
   apps: LocalAppEntry[] | null;
   /** Cards rendered ahead of the discovered apps — the built-in Data Server. */
   leading?: ReactNode;
@@ -33,8 +31,14 @@ export function CloudAppsSection({ apps, leading }: {
   const [cloudReady, setCloudReady] = useState<boolean | null>(null);
   const [credError, setCredError] = useState<string | null>(null);
   // The app whose install modal is currently open (null when closed).
-  const [installing, setInstalling] = useState<{ appId: string; appName: string; endpoint: string } | null>(null);
-  const [credentials, setCredentials] = useState<(STSCredentials & { region?: string }) | null>(null);
+  const [installing, setInstalling] = useState<{
+    appId: string;
+    appName: string;
+    endpoint: string;
+  } | null>(null);
+  const [credentials, setCredentials] = useState<(STSCredentials & { region?: string }) | null>(
+    null,
+  );
   // Apps that the cloud registry reports as installed. Loaded from
   // `shared.app_registry` via POST /api/apps/cloud/list; refreshed after
   // every successful install. null = not yet loaded / cloud not configured.
@@ -97,10 +101,16 @@ export function CloudAppsSection({ apps, leading }: {
   const handleInstall = async (appId: string, appName: string, endpoint: string) => {
     setCredError(null);
     const cfg = await readCloudConfig();
-    if (!cfg) { setCredError("Cloud is not configured. Complete the cloud setup first."); return; }
+    if (!cfg) {
+      setCredError("Cloud is not configured. Complete the cloud setup first.");
+      return;
+    }
 
     const session = await readCognitoSession();
-    if (!session?.refreshToken) { setCredError("Not signed in. Sign in from the dashboard first."); return; }
+    if (!session?.refreshToken) {
+      setCredError("Not signed in. Sign in from the dashboard first.");
+      return;
+    }
 
     let creds: STSCredentials;
     try {
@@ -166,11 +176,16 @@ export function CloudAppsSection({ apps, leading }: {
               actions={actions}
               badges={
                 installed ? (
-                  <Badge variant="secondary" className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+                  <Badge
+                    variant="secondary"
+                    className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+                  >
                     Installed
                   </Badge>
                 ) : (
-                  <Badge variant="outline" className="text-xs">Not installed</Badge>
+                  <Badge variant="outline" className="text-xs">
+                    Not installed
+                  </Badge>
                 )
               }
               primary={
@@ -183,7 +198,10 @@ export function CloudAppsSection({ apps, leading }: {
                 ) : (
                   // The title sits on the wrapper because a disabled button
                   // swallows the hover that would raise the tooltip.
-                  <span className="block" title={cloudReady ? undefined : "Set up cloud before installing apps"}>
+                  <span
+                    className="block"
+                    title={cloudReady ? undefined : "Set up cloud before installing apps"}
+                  >
                     <Button
                       size="sm"
                       className={ACTION_OCCASIONAL}
@@ -206,8 +224,13 @@ export function CloudAppsSection({ apps, leading }: {
         appName={installing?.appName ?? null}
         endpoint={installing?.endpoint ?? null}
         credentials={credentials}
-        onClose={() => { setInstalling(null); setCredentials(null); }}
-        onSuccess={() => { refreshRegistry(); }}
+        onClose={() => {
+          setInstalling(null);
+          setCredentials(null);
+        }}
+        onSuccess={() => {
+          refreshRegistry();
+        }}
       />
     </div>
   );
@@ -266,11 +289,18 @@ function CloudAppInstallModal({
     }
 
     run();
-    return () => { aborted = true; };
+    return () => {
+      aborted = true;
+    };
   }, [opened, credentials, endpoint, retryNonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <Dialog open={opened} onOpenChange={(open) => { if (!open && status !== "running") onClose(); }}>
+    <Dialog
+      open={opened}
+      onOpenChange={(open) => {
+        if (!open && status !== "running") onClose();
+      }}
+    >
       <DialogContent className="sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle>Install {appName ?? "app"} in cloud</DialogTitle>
@@ -286,7 +316,9 @@ function CloudAppInstallModal({
                 <Button onClick={() => setRetryNonce((n) => n + 1)}>Retry</Button>
               </>
             )}
-            <Button variant="outline" onClick={onClose}>Close</Button>
+            <Button variant="outline" onClick={onClose}>
+              Close
+            </Button>
           </div>
         )}
       </DialogContent>

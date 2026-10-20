@@ -18,7 +18,7 @@ Direct consequences:
 
 ## What the change is
 
-Starkeep is single-user per deployment; the deployment *is* the owner. Drop the field.
+Starkeep is single-user per deployment; the deployment _is_ the owner. Drop the field.
 
 - Remove the `owner_id` column from `shared.records` (DSQL: `packages/admin-installer/src/dsql-schema-init.ts:128`) and from `shared_records` (sqlite: `packages/storage-sqlite/src/schema/bootstrap.ts:38`).
 - Simplify the natural-key index on both sides to

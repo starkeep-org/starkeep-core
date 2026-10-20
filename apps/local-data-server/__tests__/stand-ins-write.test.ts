@@ -9,12 +9,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
-import {
-  installApp,
-  registerWithBytes,
-  standInAppManifest,
-  type InstalledApp,
-} from "./helpers.js";
+import { installApp, registerWithBytes, standInAppManifest, type InstalledApp } from "./helpers.js";
 
 const BIG = 2 * 1024 * 1024;
 
@@ -32,7 +27,9 @@ beforeAll(async () => {
       id: "blind",
       name: "Blind",
       infraRequirements: {
-        fileAccess: [{ types: ["image/avif"], access: "readwrite", metadataWrite: false, rationale: "test" }],
+        fileAccess: [
+          { types: ["image/avif"], access: "readwrite", metadataWrite: false, rationale: "test" },
+        ],
       },
     }),
   );
@@ -59,7 +56,12 @@ async function original(over: Record<string, unknown> = {}): Promise<string> {
   return body.record!.id;
 }
 
-function standIn(parentId: string, role: string, fidelity: number, over: Record<string, unknown> = {}) {
+function standIn(
+  parentId: string,
+  role: string,
+  fidelity: number,
+  over: Record<string, unknown> = {},
+) {
   return registerWithBytes(app, {
     type: "image/avif",
     parentId,
@@ -83,7 +85,9 @@ describe("an original reporting its fidelity", () => {
         version: "1.0.0",
         tier: "community",
         infraRequirements: {
-          fileAccess: [{ types: ["document/pdf"], access: "readwrite", metadataWrite: false, rationale: "t" }],
+          fileAccess: [
+            { types: ["document/pdf"], access: "readwrite", metadataWrite: false, rationale: "t" },
+          ],
         },
       }),
       { type: "document/pdf", fidelity: 12 },
@@ -94,7 +98,11 @@ describe("an original reporting its fidelity", () => {
 
   it("refuses a fidelity on a derived record", async () => {
     const parent = await original({ fidelity: 6000 });
-    const res = await registerWithBytes(app, { type: "image/jpeg", parentId: parent, fidelity: 640 });
+    const res = await registerWithBytes(app, {
+      type: "image/jpeg",
+      parentId: parent,
+      fidelity: 640,
+    });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("fidelity-on-derived-record");
   });
@@ -102,7 +110,12 @@ describe("an original reporting its fidelity", () => {
   it("records a reported fidelity on bytes another registration left without one", async () => {
     const bytes = `shared-bytes-${Math.random()}`;
     const first = await registerWithBytes(app, { type: "image/jpeg", bytes, fileName: "same.jpg" });
-    const second = await registerWithBytes(app, { type: "image/jpeg", bytes, fileName: "same.jpg", fidelity: 3000 });
+    const second = await registerWithBytes(app, {
+      type: "image/jpeg",
+      bytes,
+      fileName: "same.jpg",
+      fidelity: 3000,
+    });
     expect(second.status).toBe(200);
     expect(second.body.deduped).toBe(true);
     expect(second.body.record!.id).toBe(first.body.record!.id);
@@ -112,7 +125,12 @@ describe("an original reporting its fidelity", () => {
   it("answers 409 for a dedup that reports a different fidelity", async () => {
     const bytes = `shared-bytes-${Math.random()}`;
     await registerWithBytes(app, { type: "image/jpeg", bytes, fileName: "x.jpg", fidelity: 3000 });
-    const again = await registerWithBytes(app, { type: "image/jpeg", bytes, fileName: "x.jpg", fidelity: 3001 });
+    const again = await registerWithBytes(app, {
+      type: "image/jpeg",
+      bytes,
+      fileName: "x.jpg",
+      fidelity: 3001,
+    });
     expect(again.status).toBe(409);
     expect(again.body.code).toBe("fidelity-mismatch");
   });
@@ -123,7 +141,11 @@ describe("a stand-in write", () => {
     const parent = await original({ fidelity: 6000 });
     const res = await standIn(parent, "smaller", 640);
     expect(res.status).toBe(200);
-    expect(res.body.record).toMatchObject({ stand_in_role: "smaller", fidelity: 640, parent_id: parent });
+    expect(res.body.record).toMatchObject({
+      stand_in_role: "smaller",
+      fidelity: 640,
+      parent_id: parent,
+    });
   });
 
   it("records a canonical stand-in at the threshold", async () => {
@@ -343,7 +365,11 @@ describe("the canonical threshold stamp", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ fidelity: 5000 }),
     });
-    expect(await res.json()).toMatchObject({ fidelity: 5000, canonical_threshold: 4272, recorded: true });
+    expect(await res.json()).toMatchObject({
+      fidelity: 5000,
+      canonical_threshold: 4272,
+      recorded: true,
+    });
   });
 });
 
@@ -373,7 +399,9 @@ describe("POST /data/records/:id/fidelity", () => {
     await report(app, id, 200);
     const where = encodeURIComponent(JSON.stringify({ id }));
     const res = await app.fetch(`/data/records?where=${where}`);
-    const record = ((await res.json()) as { records: Array<{ stand_ins: { status: string; top: number } }> }).records[0]!;
+    const record = (
+      (await res.json()) as { records: Array<{ stand_ins: { status: string; top: number } }> }
+    ).records[0]!;
     expect(record.stand_ins).toMatchObject({ status: "self-canonical", top: 200 });
   });
 
@@ -382,7 +410,9 @@ describe("POST /data/records/:id/fidelity", () => {
     const small = await standIn(parent, "smaller", 640);
     expect((await report(app, small.body.record!.id, 640)).status).toBe(400);
     const derived = await registerWithBytes(app, { type: "image/jpeg", parentId: parent });
-    expect((await report(app, derived.body.record!.id, 10)).body.code).toBe("fidelity-on-derived-record");
+    expect((await report(app, derived.body.record!.id, 10)).body.code).toBe(
+      "fidelity-on-derived-record",
+    );
     expect((await report(app, parent, null)).status).toBe(400);
     expect((await report(app, "01NOSUCHRECORD000000000000", 5)).status).toBe(404);
   });

@@ -41,7 +41,9 @@ function original(over: Partial<StandInFacts> = {}): StandInFacts & { objectStor
     // is what a node that knows the library's value writes beside the fidelity.
     // An unstamped original is `awaiting-stamp` and takes no stand-in at all,
     // so the cases about that state pass `canonicalThreshold: null`.
-    ...(standardsFor(type, STD) ? { canonicalThreshold: standardsFor(type, STD)!.canonicalThreshold } : {}),
+    ...(standardsFor(type, STD)
+      ? { canonicalThreshold: standardsFor(type, STD)!.canonicalThreshold }
+      : {}),
     ...over,
   };
 }
@@ -80,14 +82,21 @@ describe("the default standards", () => {
       ["video", 500],
       ["video", 60000],
     ] as const) {
-      const broken: StandInStandards = { ...STD, [category]: { ...STD[category], canonicalThreshold: threshold } };
-      expect(validateStandInStandards(broken).join("\n"), `${category} ${threshold}`).toMatch(/must be from/);
+      const broken: StandInStandards = {
+        ...STD,
+        [category]: { ...STD[category], canonicalThreshold: threshold },
+      };
+      expect(validateStandInStandards(broken).join("\n"), `${category} ${threshold}`).toMatch(
+        /must be from/,
+      );
     }
     const tiny: StandInStandards = {
       ...STD,
       video: { ...STD.video, advisoryLongEdges: { canonical: 100, bySize: { 2000: 1280 } } },
     };
-    expect(validateStandInStandards(tiny).join("\n")).toMatch(/canonical advisory long edge must be from 320/);
+    expect(validateStandInStandards(tiny).join("\n")).toMatch(
+      /canonical advisory long edge must be from 320/,
+    );
   });
 
   it("refuse sizes that do not ascend", () => {
@@ -103,7 +112,9 @@ describe("the default standards", () => {
       ...STD,
       video: { ...STD.video, standardSizes: [1000, 2000] },
     };
-    expect(validateStandInStandards(broken).join("\n")).toMatch(/standard size 1000 has no advisory long edge/);
+    expect(validateStandInStandards(broken).join("\n")).toMatch(
+      /standard size 1000 has no advisory long edge/,
+    );
   });
 
   it("publish video in kbps with 1080p and 720p advisory long edges", () => {
@@ -128,12 +139,24 @@ describe("originalStatus", () => {
     ["image above the threshold and the floor", { fidelity: 6000 }, "archivable"],
     ["image at the threshold", { fidelity: 4272 }, "self-canonical"],
     ["image below the threshold", { fidelity: 3000 }, "self-canonical"],
-    ["image below the floor, even when huge", { fidelity: 9000, sizeBytes: SMALL }, "self-canonical"],
-    ["image below the floor with no fidelity", { fidelity: null, sizeBytes: SMALL }, "self-canonical"],
+    [
+      "image below the floor, even when huge",
+      { fidelity: 9000, sizeBytes: SMALL },
+      "self-canonical",
+    ],
+    [
+      "image below the floor with no fidelity",
+      { fidelity: null, sizeBytes: SMALL },
+      "self-canonical",
+    ],
     ["image with no fidelity", { fidelity: null }, "fidelity-unknown"],
     ["video above the threshold", { type: "video/mp4", fidelity: 12000 }, "archivable"],
     ["video below the threshold", { type: "video/mp4", fidelity: 3000 }, "archivable"],
-    ["video below the floor", { type: "video/mov", fidelity: 3000, sizeBytes: SMALL }, "video-below-floor"],
+    [
+      "video below the floor",
+      { type: "video/mov", fidelity: 3000, sizeBytes: SMALL },
+      "video-below-floor",
+    ],
     ["video with no fidelity", { type: "video/mp4", fidelity: null }, "fidelity-unknown"],
     // Audio has no stand-in standards, so it is an ordinary file like a document.
     ["lossless audio", { type: "audio/flac", fidelity: 900 }, null],
@@ -152,8 +175,12 @@ describe("expectedCanonicalFidelity and topFidelity", () => {
   });
 
   it("is the original's own bitrate for a video below the threshold", () => {
-    expect(expectedCanonicalFidelity(original({ type: "video/mp4", fidelity: 3000 }), STD)).toBe(3000);
-    expect(expectedCanonicalFidelity(original({ type: "video/mp4", fidelity: 12000 }), STD)).toBe(4800);
+    expect(expectedCanonicalFidelity(original({ type: "video/mp4", fidelity: 3000 }), STD)).toBe(
+      3000,
+    );
+    expect(expectedCanonicalFidelity(original({ type: "video/mp4", fidelity: 12000 }), STD)).toBe(
+      4800,
+    );
   });
 
   it("is null for a self-canonical original, whose own fidelity is the top", () => {
@@ -205,7 +232,10 @@ describe("an original nobody has stamped yet", () => {
     ["an image above the threshold", { fidelity: 6000, canonicalThreshold: null }],
     ["an image below the threshold", { fidelity: 3000, canonicalThreshold: null }],
     ["a video", { type: "video/mp4", fidelity: 12000, canonicalThreshold: null }],
-    ["a video below the size floor", { type: "video/mov", fidelity: 3000, sizeBytes: SMALL, canonicalThreshold: null }],
+    [
+      "a video below the size floor",
+      { type: "video/mov", fidelity: 3000, sizeBytes: SMALL, canonicalThreshold: null },
+    ],
   ];
   for (const [name, over] of cases) {
     it(`waits: ${name}`, () => {
@@ -244,7 +274,9 @@ describe("an original whose canonical encode could not shrink it", () => {
   it("sits within a ceiling at its own fidelity", () => {
     const video = original({ type: "video/mp4", fidelity: 1500, selfCanonical: true });
     expect(ceilingPlacement(video, { image: null, video: 2000 }, STD)).toBe("within");
-    expect(ceilingPlacement({ ...video, selfCanonical: false }, { image: null, video: 2000 }, STD)).toBe("above");
+    expect(
+      ceilingPlacement({ ...video, selfCanonical: false }, { image: null, video: 2000 }, STD),
+    ).toBe("above");
   });
 });
 
@@ -259,13 +291,17 @@ describe("isStandInOriginal", () => {
 
 describe("standInSlot", () => {
   it("names the canonical slot once per original", () => {
-    expect(standInSlot({ parentId: "p", standInRole: "canonical", fidelity: 4272 })).toBe("canonical");
+    expect(standInSlot({ parentId: "p", standInRole: "canonical", fidelity: 4272 })).toBe(
+      "canonical",
+    );
   });
   it("names a smaller stand-in's slot by its fidelity", () => {
     expect(standInSlot({ parentId: "p", standInRole: "smaller", fidelity: 640 })).toBe("640");
   });
   it("is null for a tombstone, an ordinary record and a derived record", () => {
-    expect(standInSlot({ parentId: "p", standInRole: "smaller", fidelity: 640, deletedAt: "x" })).toBeNull();
+    expect(
+      standInSlot({ parentId: "p", standInRole: "smaller", fidelity: 640, deletedAt: "x" }),
+    ).toBeNull();
     expect(standInSlot({ parentId: null, standInRole: null, fidelity: 6000 })).toBeNull();
     expect(standInSlot({ parentId: "p", standInRole: null, fidelity: null })).toBeNull();
   });
@@ -297,7 +333,10 @@ describe("checkStandInWrite", () => {
   });
 
   it("refuses an unknown role and a non-integer fidelity", () => {
-    expect(codes(check({ role: "huge", fidelity: 1.5 }))).toEqual(["invalid-role", "invalid-fidelity"]);
+    expect(codes(check({ role: "huge", fidelity: 1.5 }))).toEqual([
+      "invalid-role",
+      "invalid-fidelity",
+    ]);
   });
 
   it("requires a parent", () => {
@@ -312,9 +351,9 @@ describe("checkStandInWrite", () => {
   });
 
   it("refuses a stand-in whose parent is itself a stand-in", () => {
-    expect(codes(check({ parent: original({ standInRole: "canonical", parentId: "o" }) }))).toEqual([
-      "parent-is-stand-in",
-    ]);
+    expect(codes(check({ parent: original({ standInRole: "canonical", parentId: "o" }) }))).toEqual(
+      ["parent-is-stand-in"],
+    );
   });
 
   it("refuses a stand-in for a derived record", () => {
@@ -333,7 +372,9 @@ describe("checkStandInWrite", () => {
   });
 
   it("requires the parent's fidelity, and records a reported one", () => {
-    expect(codes(check({ parent: original({ fidelity: null }) }))).toEqual(["parent-fidelity-unknown"]);
+    expect(codes(check({ parent: original({ fidelity: null }) }))).toEqual([
+      "parent-fidelity-unknown",
+    ]);
     const v = check({ parent: original({ fidelity: null }), reportedParentFidelity: 6000 });
     expect(v.refusals).toEqual([]);
     expect(v.recordParentFidelity).toBe(6000);
@@ -358,20 +399,26 @@ describe("checkStandInWrite", () => {
   });
 
   it("refuses a canonical stand-in at the wrong fidelity", () => {
-    expect(codes(check({ role: "canonical", fidelity: 4000 }))).toEqual(["canonical-fidelity-wrong"]);
-  });
-
-  it("takes a video canonical stand-in at the original's own bitrate below the threshold", () => {
-    const parent = original({ type: "video/mp4", fidelity: 3000 });
-    expect(check({ type: "video/webm", role: "canonical", fidelity: 3000, parent }).refusals).toEqual([]);
-    expect(codes(check({ type: "video/webm", role: "canonical", fidelity: 4800, parent }))).toEqual([
+    expect(codes(check({ role: "canonical", fidelity: 4000 }))).toEqual([
       "canonical-fidelity-wrong",
     ]);
   });
 
+  it("takes a video canonical stand-in at the original's own bitrate below the threshold", () => {
+    const parent = original({ type: "video/mp4", fidelity: 3000 });
+    expect(
+      check({ type: "video/webm", role: "canonical", fidelity: 3000, parent }).refusals,
+    ).toEqual([]);
+    expect(codes(check({ type: "video/webm", role: "canonical", fidelity: 4800, parent }))).toEqual(
+      ["canonical-fidelity-wrong"],
+    );
+  });
+
   it("takes a video canonical stand-in for a video below the size floor", () => {
     const parent = original({ type: "video/mp4", fidelity: 4800, sizeBytes: SMALL });
-    expect(check({ type: "video/webm", role: "canonical", fidelity: 4800, parent }).refusals).toEqual([]);
+    expect(
+      check({ type: "video/webm", role: "canonical", fidelity: 4800, parent }).refusals,
+    ).toEqual([]);
   });
 
   it("marks the original self-canonical for a canonical stand-in no smaller than it", () => {
@@ -388,10 +435,13 @@ describe("checkStandInWrite", () => {
     // original's stamp is settled before it can take a canonical stand-in and
     // never moves. So the slot is simply taken.
     const parent = original({ canonicalThreshold: 2560 });
-    for (const existingCanonical of [{ id: "same", fidelity: 2560 }, { id: "other", fidelity: 4272 }]) {
-      expect(codes(check({ role: "canonical", fidelity: 2560, parent, existingCanonical }))).toEqual([
-        "canonical-matches",
-      ]);
+    for (const existingCanonical of [
+      { id: "same", fidelity: 2560 },
+      { id: "other", fidelity: 4272 },
+    ]) {
+      expect(
+        codes(check({ role: "canonical", fidelity: 2560, parent, existingCanonical })),
+      ).toEqual(["canonical-matches"]);
     }
   });
 
@@ -425,7 +475,10 @@ describe("checkStandInWrite", () => {
 
   it("offers a stamped original only the standard sizes below its stamp", () => {
     const parent = original({ canonicalThreshold: 2000 });
-    expect(codes(check({ fidelity: 2560, parent }))).toEqual(["not-a-standard-size", "exceeds-canonical"]);
+    expect(codes(check({ fidelity: 2560, parent }))).toEqual([
+      "not-a-standard-size",
+      "exceeds-canonical",
+    ]);
     expect(check({ fidelity: 1280, parent }).refusals).toEqual([]);
   });
 
@@ -436,14 +489,18 @@ describe("checkStandInWrite", () => {
   it("refuses a smaller stand-in at or above the canonical stand-in", () => {
     const parent = original({ type: "video/mp4", fidelity: 2000 });
     // 2000 is a standard video size, but the canonical stand-in sits at 2000.
-    expect(codes(check({ type: "video/webm", fidelity: 2000, parent }))).toEqual(["exceeds-canonical"]);
+    expect(codes(check({ type: "video/webm", fidelity: 2000, parent }))).toEqual([
+      "exceeds-canonical",
+    ]);
   });
 
   it("takes a smaller video stand-in only below the original's own bitrate", () => {
     const above = original({ type: "video/mp4", fidelity: 12000 });
     expect(check({ type: "video/webm", fidelity: 2000, parent: above }).refusals).toEqual([]);
     const below = original({ type: "video/mp4", fidelity: 1500 });
-    expect(codes(check({ type: "video/webm", fidelity: 2000, parent: below }))).toEqual(["exceeds-canonical"]);
+    expect(codes(check({ type: "video/webm", fidelity: 2000, parent: below }))).toEqual([
+      "exceeds-canonical",
+    ]);
   });
 
   it("measures a smaller stand-in against an existing canonical stand-in", () => {
@@ -460,25 +517,29 @@ describe("checkStandInWrite", () => {
 
 describe("checkOriginalFidelity", () => {
   it("accepts a positive integer on an original in a stand-in category", () => {
-    expect(checkOriginalFidelity({ type: "image/jpeg", parentId: null, fidelity: 4000 })).toEqual([]);
+    expect(checkOriginalFidelity({ type: "image/jpeg", parentId: null, fidelity: 4000 })).toEqual(
+      [],
+    );
   });
   it("accepts an absent fidelity anywhere", () => {
-    expect(checkOriginalFidelity({ type: "document/pdf", parentId: "p", fidelity: undefined })).toEqual([]);
+    expect(
+      checkOriginalFidelity({ type: "document/pdf", parentId: "p", fidelity: undefined }),
+    ).toEqual([]);
   });
   it("refuses a fidelity on a derived record", () => {
-    expect(checkOriginalFidelity({ type: "image/jpeg", parentId: "p", fidelity: 640 })[0]!.code).toBe(
-      "fidelity-on-derived-record",
-    );
+    expect(
+      checkOriginalFidelity({ type: "image/jpeg", parentId: "p", fidelity: 640 })[0]!.code,
+    ).toBe("fidelity-on-derived-record");
   });
   it("refuses a fidelity outside the stand-in categories", () => {
-    expect(checkOriginalFidelity({ type: "document/pdf", parentId: null, fidelity: 5 })[0]!.code).toBe(
-      "fidelity-outside-stand-in-category",
-    );
+    expect(
+      checkOriginalFidelity({ type: "document/pdf", parentId: null, fidelity: 5 })[0]!.code,
+    ).toBe("fidelity-outside-stand-in-category");
   });
   it("refuses a malformed fidelity", () => {
-    expect(checkOriginalFidelity({ type: "image/jpeg", parentId: null, fidelity: "big" })[0]!.code).toBe(
-      "invalid-fidelity",
-    );
+    expect(
+      checkOriginalFidelity({ type: "image/jpeg", parentId: null, fidelity: "big" })[0]!.code,
+    ).toBe("invalid-fidelity");
   });
 });
 
@@ -508,7 +569,12 @@ describe("summarizeStandIns", () => {
     expect(summary).toMatchObject({ top: 4272, canonicalTarget: 4272 });
     // An original still waiting for its stamp has no target and no sizes.
     const waiting = summarizeStandIns(original({ canonicalThreshold: null }), [], STD, here)!;
-    expect(waiting).toMatchObject({ status: "awaiting-stamp", canonicalTarget: null, top: null, sizes: [] });
+    expect(waiting).toMatchObject({
+      status: "awaiting-stamp",
+      canonicalTarget: null,
+      top: null,
+      sizes: [],
+    });
   });
 
   it("says where the original's own bytes sit", () => {
@@ -520,7 +586,11 @@ describe("summarizeStandIns", () => {
 
   it("lists a missing canonical stand-in at the expected fidelity", () => {
     const summary = summarizeStandIns(original(), [], STD, here)!;
-    expect(summary.sizes.at(-1)).toMatchObject({ fidelity: 4272, role: "canonical", placement: "missing" });
+    expect(summary.sizes.at(-1)).toMatchObject({
+      fidelity: 4272,
+      role: "canonical",
+      placement: "missing",
+    });
   });
 
   it("lets a self-canonical original answer its own top size", () => {
@@ -536,14 +606,24 @@ describe("summarizeStandIns", () => {
   });
 
   it("lists only what exists for an original with no fidelity", () => {
-    const summary = summarizeStandIns(original({ fidelity: null }), [standIn("smaller", 320)], STD, here)!;
+    const summary = summarizeStandIns(
+      original({ fidelity: null }),
+      [standIn("smaller", 320)],
+      STD,
+      here,
+    )!;
     expect(summary.status).toBe("fidelity-unknown");
     expect(summary.top).toBeNull();
     expect(summary.sizes.map((s) => s.fidelity)).toEqual([320]);
   });
 
   it("ignores tombstoned stand-ins", () => {
-    const summary = summarizeStandIns(original(), [standIn("smaller", 640, { deletedAt: "t" })], STD, here)!;
+    const summary = summarizeStandIns(
+      original(),
+      [standIn("smaller", 640, { deletedAt: "t" })],
+      STD,
+      here,
+    )!;
     expect(summary.sizes.find((s) => s.fidelity === 640)!.placement).toBe("missing");
   });
 
@@ -562,7 +642,10 @@ describe("resolveSize", () => {
   )!;
 
   it("serves the stand-in at an exact standard size", () => {
-    expect(resolveSize(summary, 640, STD)).toMatchObject({ kind: "serve", size: { fidelity: 640 } });
+    expect(resolveSize(summary, 640, STD)).toMatchObject({
+      kind: "serve",
+      size: { fidelity: 640 },
+    });
   });
 
   it("reports a standard size nobody has produced", () => {
@@ -570,8 +653,14 @@ describe("resolveSize", () => {
   });
 
   it("serves the canonical stand-in for canonical and for any larger size", () => {
-    expect(resolveSize(summary, "canonical", STD)).toMatchObject({ kind: "serve", size: { role: "canonical" } });
-    expect(resolveSize(summary, 8000, STD)).toMatchObject({ kind: "serve", size: { role: "canonical" } });
+    expect(resolveSize(summary, "canonical", STD)).toMatchObject({
+      kind: "serve",
+      size: { role: "canonical" },
+    });
+    expect(resolveSize(summary, 8000, STD)).toMatchObject({
+      kind: "serve",
+      size: { role: "canonical" },
+    });
   });
 
   it("refuses a size between standard sizes", () => {
@@ -580,7 +669,10 @@ describe("resolveSize", () => {
 
   it("serves a self-canonical original for canonical", () => {
     const own = summarizeStandIns(original({ fidelity: 2000 }), [], STD, () => "here")!;
-    expect(resolveSize(own, "canonical", STD)).toMatchObject({ kind: "serve", size: { role: "original" } });
+    expect(resolveSize(own, "canonical", STD)).toMatchObject({
+      kind: "serve",
+      size: { role: "original" },
+    });
   });
 
   it("cannot resolve an original with no fidelity", () => {
@@ -613,7 +705,9 @@ describe("ceilingPlacement", () => {
   });
 
   it("puts every video stand-in above a ceiling of none", () => {
-    expect(place({ type: "video/webm", parentId: "o", standInRole: "smaller", fidelity: 2000 })).toBe("above");
+    expect(
+      place({ type: "video/webm", parentId: "o", standInRole: "smaller", fidelity: 2000 }),
+    ).toBe("above");
     expect(place({ type: "video/mp4", fidelity: 2000 })).toBe("above");
   });
 

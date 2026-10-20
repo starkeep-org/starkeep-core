@@ -106,10 +106,7 @@ export interface MintedToken {
  * Resolve the caller's ID token, re-minting it if needed, and report the
  * `Set-Cookie` the caller must echo when a re-mint happened.
  */
-export async function mintIdToken(
-  req: MinimalRequest,
-  appId: string,
-): Promise<MintedToken | null> {
+export async function mintIdToken(req: MinimalRequest, appId: string): Promise<MintedToken | null> {
   const minted = await resolveIdToken(req);
   if (!minted) return null;
   if (!minted.reminted) return { token: minted.token, claims: minted.claims };
@@ -126,9 +123,7 @@ export async function mintIdToken(
  * refresh performed here is paid for again on the next request. Route handlers
  * that can set headers should use {@link mintIdToken} instead.
  */
-export async function requireSession(
-  req: MinimalRequest,
-): Promise<VerifiedClaims | null> {
+export async function requireSession(req: MinimalRequest): Promise<VerifiedClaims | null> {
   return (await resolveIdToken(req))?.claims ?? null;
 }
 

@@ -280,10 +280,7 @@ export function sharedQueryDiscriminant(target: SharedQueryTarget): string {
  * Aggregate queries need none of this, because their output columns are their
  * `GROUP BY` list, which the parser already checked against the schema.
  */
-export function withDeclaredProjection(
-  query: ParsedQuery,
-  schema: QueryTableSchema,
-): ParsedQuery {
+export function withDeclaredProjection(query: ParsedQuery, schema: QueryTableSchema): ParsedQuery {
   if (query.mode !== "rows" || query.select !== null) return query;
   const select = schema.columns.map((c) => c.name);
   return { ...query, select } satisfies RowQuery;

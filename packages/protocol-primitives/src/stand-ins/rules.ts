@@ -54,10 +54,15 @@ export interface StandInFacts {
 }
 
 /** What the rules read off an original to place it. */
-export type OriginalFacts = Pick<StandInFacts, "type" | "sizeBytes" | "fidelity" | "canonicalThreshold" | "selfCanonical">;
+export type OriginalFacts = Pick<
+  StandInFacts,
+  "type" | "sizeBytes" | "fidelity" | "canonicalThreshold" | "selfCanonical"
+>;
 
 /** Whether a record is an original in the sense this design uses. */
-export function isStandInOriginal(record: Pick<StandInFacts, "type" | "parentId" | "standInRole">): boolean {
+export function isStandInOriginal(
+  record: Pick<StandInFacts, "type" | "parentId" | "standInRole">,
+): boolean {
   return (
     record.parentId === null &&
     record.standInRole === null &&
@@ -65,10 +70,7 @@ export function isStandInOriginal(record: Pick<StandInFacts, "type" | "parentId"
   );
 }
 
-export function standardsFor(
-  type: string,
-  standards: StandInStandards,
-): CategoryStandards | null {
+export function standardsFor(type: string, standards: StandInStandards): CategoryStandards | null {
   const category = typeCategory(type);
   return isStandInCategory(category) ? standards[category] : null;
 }
@@ -237,7 +239,9 @@ export function topFidelity(
  * below the canonical one — which is what lets one column carry both rules.
  */
 export function standInSlot(
-  record: Pick<StandInFacts, "parentId" | "standInRole" | "fidelity"> & { readonly deletedAt?: unknown },
+  record: Pick<StandInFacts, "parentId" | "standInRole" | "fidelity"> & {
+    readonly deletedAt?: unknown;
+  },
 ): string | null {
   if (record.deletedAt) return null;
   if (record.parentId === null || record.standInRole === null) return null;
@@ -505,7 +509,9 @@ export function checkOriginalFidelity(input: {
 }): StandInRefusal[] {
   if (input.fidelity === undefined || input.fidelity === null) return [];
   if (!isPositiveInteger(input.fidelity)) {
-    return [{ code: "invalid-fidelity", status: 400, message: "fidelity must be a positive integer" }];
+    return [
+      { code: "invalid-fidelity", status: 400, message: "fidelity must be a positive integer" },
+    ];
   }
   if (input.parentId !== null) {
     return [
@@ -601,7 +607,9 @@ export function summarizeStandIns(
   const status = originalStatus(original, standards);
   if (!s || !status || !isStandInOriginal(original)) return null;
 
-  const live = standIns.filter((r) => !r.deletedAt && r.standInRole !== null && r.fidelity !== null);
+  const live = standIns.filter(
+    (r) => !r.deletedAt && r.standInRole !== null && r.fidelity !== null,
+  );
   const canonical = live.find((r) => r.standInRole === "canonical") ?? null;
   const top = topFidelity(original, canonical, standards);
   const canonicalTarget = expectedCanonicalFidelity(original, standards);
@@ -710,7 +718,6 @@ function isPositiveInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
 }
 
-
 // ---------------------------------------------------------------------------
 // Residency: where a file sits against a node's ceiling
 // ---------------------------------------------------------------------------
@@ -738,7 +745,13 @@ export type CeilingPlacement = "within" | "above" | "keep";
 export function ceilingPlacement(
   record: Pick<
     StandInFacts,
-    "type" | "parentId" | "standInRole" | "fidelity" | "sizeBytes" | "canonicalThreshold" | "selfCanonical"
+    | "type"
+    | "parentId"
+    | "standInRole"
+    | "fidelity"
+    | "sizeBytes"
+    | "canonicalThreshold"
+    | "selfCanonical"
   >,
   ceilings: SyncDownCeilings,
   standards: StandInStandards,
@@ -746,7 +759,8 @@ export function ceilingPlacement(
   const s = standardsFor(record.type, standards);
   if (s === null) return "keep";
   const ceiling = ceilings[s.category];
-  const fits = (fidelity: number | null) => fidelity !== null && ceiling !== null && fidelity <= ceiling;
+  const fits = (fidelity: number | null) =>
+    fidelity !== null && ceiling !== null && fidelity <= ceiling;
   if (record.standInRole !== null) return fits(record.fidelity) ? "within" : "above";
   if (record.parentId !== null) return "keep";
   // An original counts as a stand-in at its own fidelity only when it stands

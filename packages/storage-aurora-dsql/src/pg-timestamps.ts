@@ -60,8 +60,7 @@ export function applyPgTypeParsers(pg: {
   pg.types.setTypeParser(PG_TIMESTAMP_OID, raw);
 }
 
-const PG_RENDERED =
-  /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?$/;
+const PG_RENDERED = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?$/;
 
 /**
  * Postgres' rendering of a `timestamp`, put back into canonical ISO-8601 UTC.

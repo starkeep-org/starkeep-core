@@ -48,14 +48,14 @@ await databaseAdapter.close();
 
 ## API
 
-| Export | Description |
-|---|---|
-| `AuroraDsqlDatabaseAdapter` | Class implementing `DatabaseAdapter` for Aurora DSQL |
-| `buildPostgresQuery(query)` | Compile a `Query` object into parameterized PostgreSQL via Kysely |
-| `AuroraDsqlDatabaseAdapterOptions` | Options: `hostname`, `region`, optional `database` |
-| `DatabaseClient` | Interface: `query(text, values)` and `end()` |
-| `DatabaseClientFactory` | Factory interface for creating `DatabaseClient` instances |
-| `BuiltPostgresQuery` | Return type of `buildPostgresQuery`: `{ text, values }` |
+| Export                             | Description                                                       |
+| ---------------------------------- | ----------------------------------------------------------------- |
+| `AuroraDsqlDatabaseAdapter`        | Class implementing `DatabaseAdapter` for Aurora DSQL              |
+| `buildPostgresQuery(query)`        | Compile a `Query` object into parameterized PostgreSQL via Kysely |
+| `AuroraDsqlDatabaseAdapterOptions` | Options: `hostname`, `region`, optional `database`                |
+| `DatabaseClient`                   | Interface: `query(text, values)` and `end()`                      |
+| `DatabaseClientFactory`            | Factory interface for creating `DatabaseClient` instances         |
+| `BuiltPostgresQuery`               | Return type of `buildPostgresQuery`: `{ text, values }`           |
 
 The adapter uses JSONB for the payload column and creates indexes on `type`, `sync_status`, `target_id`, `updated_at`, and `kind`.
 

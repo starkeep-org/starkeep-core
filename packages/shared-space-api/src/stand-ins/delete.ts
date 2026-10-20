@@ -31,7 +31,10 @@ export type DeletePlan =
   | { readonly ok: true; readonly record: DataRecord; readonly cascade: readonly DataRecord[] }
   | { readonly ok: false; readonly status: number; readonly body: Record<string, unknown> };
 
-export async function planRecordDelete(db: DatabaseAdapter, record: DataRecord): Promise<DeletePlan> {
+export async function planRecordDelete(
+  db: DatabaseAdapter,
+  record: DataRecord,
+): Promise<DeletePlan> {
   if (record.standInRole === "canonical" && record.parentId) {
     const original = await db.get(record.parentId);
     if (original && !original.deletedAt) {
@@ -252,6 +255,8 @@ export async function keepCanonicalOfArchivedOriginal(
   if (incoming.some((r) => r.id === parentId && r.deletedAt)) return false;
   const original = await db.get(parentId);
   if (!original || original.deletedAt || !original.objectStorageKey) return false;
-  const row = (await db.getAvailability([original.objectStorageKey])).get(original.objectStorageKey);
+  const row = (await db.getAvailability([original.objectStorageKey])).get(
+    original.objectStorageKey,
+  );
   return row?.state === "archived" || row?.state === "restoring";
 }

@@ -26,7 +26,12 @@ function input(over: Partial<CreateAppRoleInput> = {}): CreateAppRoleInput {
     accountId: "111122223333",
     ...BOUNDARIES,
     fileAccess: [
-      { types: ["image/jpeg", "image/png"], access: "readwrite", metadataWrite: true, rationale: "t" },
+      {
+        types: ["image/jpeg", "image/png"],
+        access: "readwrite",
+        metadataWrite: true,
+        rationale: "t",
+      },
     ],
     fileAccessAll: false,
     brokerPower: false,
@@ -82,9 +87,9 @@ describe("boundary routing — the magic-string check", () => {
 
 describe("re-install (role already exists)", () => {
   it("heals the trust policy instead of failing", async () => {
-    iamMock.on(CreateRoleCommand).rejects(
-      new EntityAlreadyExistsException({ message: "exists", $metadata: {} }),
-    );
+    iamMock
+      .on(CreateRoleCommand)
+      .rejects(new EntityAlreadyExistsException({ message: "exists", $metadata: {} }));
     await createAppRole(input());
     const update = iamMock.commandCalls(UpdateAssumeRolePolicyCommand);
     expect(update).toHaveLength(1);
@@ -124,9 +129,7 @@ describe("inline policies", () => {
     expect(broker.Statement[3].Resource).toBe(
       "arn:aws:ssm:*:111122223333:parameter/starkeep/platform/*",
     );
-    expect(broker.Statement[0].Resource).toBe(
-      "arn:aws:iam::111122223333:role/starkeep-app-*",
-    );
+    expect(broker.Statement[0].Resource).toBe("arn:aws:iam::111122223333:role/starkeep-app-*");
     // The broker may name a session's user and nothing else: a session tag
     // overrides the role's `starkeep:appId` tag of the same key.
     expect(broker.Statement[1]).toMatchObject({

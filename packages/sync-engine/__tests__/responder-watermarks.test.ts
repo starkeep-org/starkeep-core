@@ -8,17 +8,11 @@ import {
   type HLCClock,
   type HLCTimestamp,
 } from "@starkeep/protocol-primitives";
-import {
-  MockDatabaseAdapter,
-  MockObjectStorageAdapter,
-} from "@starkeep/storage-adapter";
+import { MockDatabaseAdapter, MockObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { createSyncEngine } from "../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../src/transports/in-process-transport.js";
 import { computeRecordWatermarks } from "../src/watermarks.js";
-import {
-  makeMockAppSource,
-  type MockAppRowStore,
-} from "./sync-test-harness/mock-app-source.js";
+import { makeMockAppSource, type MockAppRowStore } from "./sync-test-harness/mock-app-source.js";
 import { failingApplier } from "./sync-test-harness/failure-injection.js";
 import type {
   AppSyncableRowEntry,
@@ -106,9 +100,7 @@ async function makeDevice(
   await db.init();
   await storage.init();
   const syncState = makeSyncState();
-  const app = makeMockAppSource("test-app", [
-    { name: "test_rows", pkColumns: ["id"] },
-  ]);
+  const app = makeMockAppSource("test-app", [{ name: "test_rows", pkColumns: ["id"] }]);
   const engine = createSyncEngine({
     localDatabaseAdapter: db,
     localObjectStorage: storage,
@@ -170,12 +162,8 @@ describe("responderWatermarks — coverage computation", () => {
       },
     });
     expect(res.records).toEqual([]);
-    expect(serializeHLC(res.responderWatermarks["node-a"]!)).toBe(
-      serializeHLC(latestA.updatedAt),
-    );
-    expect(serializeHLC(res.responderWatermarks["node-b"]!)).toBe(
-      serializeHLC(onlyB.updatedAt),
-    );
+    expect(serializeHLC(res.responderWatermarks["node-a"]!)).toBe(serializeHLC(latestA.updatedAt));
+    expect(serializeHLC(res.responderWatermarks["node-b"]!)).toBe(serializeHLC(onlyB.updatedAt));
   });
 
   it("is computed after applying inbound — a just-pushed record is covered", async () => {
@@ -186,15 +174,11 @@ describe("responderWatermarks — coverage computation", () => {
       watermarks: {},
       records: [pushed],
     });
-    expect(serializeHLC(res.responderWatermarks["device-1"]!)).toBe(
-      serializeHLC(pushed.updatedAt),
-    );
+    expect(serializeHLC(res.responderWatermarks["device-1"]!)).toBe(serializeHLC(pushed.updatedAt));
   });
 
   it("channel split: a per-app channel covers only its app rows, never shared records", async () => {
-    const appSource = makeMockAppSource("test-app", [
-      { name: "test_rows", pkColumns: ["id"] },
-    ]);
+    const appSource = makeMockAppSource("test-app", [{ name: "test_rows", pkColumns: ["id"] }]);
     const cloud = await makeCloud(appSource, false);
     // Shared record present in the same DB — different plane, must not leak.
     const sharedNode = makeClock("shared-node");
@@ -205,9 +189,7 @@ describe("responderWatermarks — coverage computation", () => {
 
     const res = await cloud.transport.exchange({ watermarks: {} });
     expect(res.responderWatermarks["shared-node"]).toBeUndefined();
-    expect(serializeHLC(res.responderWatermarks["device-1"]!)).toBe(
-      serializeHLC(row.timestamp),
-    );
+    expect(serializeHLC(res.responderWatermarks["device-1"]!)).toBe(serializeHLC(row.timestamp));
   });
 
   it("Drive channel with no app source covers only shared records", async () => {
@@ -240,9 +222,7 @@ describe("responderWatermarks — coverage computation", () => {
   it("scoping: a foreign app's higher-HLC row on the same node never inflates the channel's coverage", async () => {
     // One applier physically holds rows for apps P and Q (same nodeId,
     // Q's HLC higher), but the channel's namespace store lists only P.
-    const appSource = makeMockAppSource("app-p", [
-      { name: "test_rows", pkColumns: ["id"] },
-    ]);
+    const appSource = makeMockAppSource("app-p", [{ name: "test_rows", pkColumns: ["id"] }]);
     const dev = makeClock("device-1");
     const pRow = appRow("app-p", "test_rows", "p1", dev.now());
     await appSource.applier.apply(pRow);
@@ -262,15 +242,11 @@ describe("responderWatermarks — coverage computation", () => {
 
     const cloud = await makeCloud(appSource, false);
     const res = await cloud.transport.exchange({ watermarks: {} });
-    expect(serializeHLC(res.responderWatermarks["device-1"]!)).toBe(
-      serializeHLC(pRow.timestamp),
-    );
+    expect(serializeHLC(res.responderWatermarks["device-1"]!)).toBe(serializeHLC(pRow.timestamp));
   });
 
   it("a throwing getNodeWatermarks omits its nodes without failing the exchange", async () => {
-    const appSource = makeMockAppSource("test-app", [
-      { name: "test_rows", pkColumns: ["id"] },
-    ]);
+    const appSource = makeMockAppSource("test-app", [{ name: "test_rows", pkColumns: ["id"] }]);
     const dev = makeClock("device-1");
     await appSource.applier.apply(appRow("test-app", "test_rows", "r1", dev.now()));
     const throwingApplier: typeof appSource.applier = {
@@ -279,10 +255,7 @@ describe("responderWatermarks — coverage computation", () => {
         throw new Error("boom");
       },
     };
-    const cloud = await makeCloud(
-      { ...appSource, applier: throwingApplier },
-      false,
-    );
+    const cloud = await makeCloud({ ...appSource, applier: throwingApplier }, false);
     const res = await cloud.transport.exchange({ watermarks: {} });
     // Fail-safe direction: the node is merely omitted (→ re-ship next round).
     expect(res.responderWatermarks).toEqual({});
@@ -295,9 +268,7 @@ describe("responderWatermarks — false-ack and contiguity (Defect C)", () => {
   // coverage watermark, that one pins that the requester is *told*.
 
   it("an app row that fails to apply is excluded from coverage and re-ships next round", async () => {
-    const cloudApp = makeMockAppSource("test-app", [
-      { name: "test_rows", pkColumns: ["id"] },
-    ]);
+    const cloudApp = makeMockAppSource("test-app", [{ name: "test_rows", pkColumns: ["id"] }]);
     let failing = true;
     const cloud = await makeCloud(
       {
@@ -307,18 +278,14 @@ describe("responderWatermarks — false-ack and contiguity (Defect C)", () => {
       true,
     );
     const device = await makeDevice("device-1", cloud.transport, cloud.storage);
-    await device.app.applier.apply(
-      appRow("test-app", "test_rows", "r1", device.clock.now()),
-    );
+    await device.app.applier.apply(appRow("test-app", "test_rows", "r1", device.clock.now()));
 
     // Round 1: cloud acks the exchange but the apply failed — coverage must
     // not include the row, so the requester's cache stays behind it.
     const r1 = await device.exchange();
     expect(r1.shipped).toBe(1);
     expect(cloudApp.rows.size).toBe(0);
-    expect(
-      (await device.syncState.getPeerWatermarks())["device-1"],
-    ).toBeUndefined();
+    expect((await device.syncState.getPeerWatermarks())["device-1"]).toBeUndefined();
 
     // Round 2 (responder healed): the row re-ships and lands.
     failing = false;
@@ -330,36 +297,25 @@ describe("responderWatermarks — false-ack and contiguity (Defect C)", () => {
   });
 
   it("gap case: a same-node failure halts later rows so full-state MAX can't mask the failed one", async () => {
-    const cloudApp = makeMockAppSource("test-app", [
-      { name: "test_rows", pkColumns: ["id"] },
-    ]);
+    const cloudApp = makeMockAppSource("test-app", [{ name: "test_rows", pkColumns: ["id"] }]);
     let failR1 = true;
     const cloud = await makeCloud(
       {
         ...cloudApp,
-        applier: failingApplier(
-          cloudApp.applier,
-          (e) => failR1 && e.row?.["id"] === "r1",
-        ),
+        applier: failingApplier(cloudApp.applier, (e) => failR1 && e.row?.["id"] === "r1"),
       },
       true,
     );
     const device = await makeDevice("device-1", cloud.transport, cloud.storage);
-    await device.app.applier.apply(
-      appRow("test-app", "test_rows", "r1", device.clock.now()),
-    );
-    await device.app.applier.apply(
-      appRow("test-app", "test_rows", "r2", device.clock.now()),
-    );
+    await device.app.applier.apply(appRow("test-app", "test_rows", "r1", device.clock.now()));
+    await device.app.applier.apply(appRow("test-app", "test_rows", "r2", device.clock.now()));
 
     // Round 1: r1's apply throws. Without the per-node halt, r2 would land
     // and coverage would report r2's (higher) HLC — permanently masking r1.
     const r1 = await device.exchange();
     expect(r1.shipped).toBe(2);
     expect(cloudApp.rows.size).toBe(0); // r2 must NOT have been applied
-    expect(
-      (await device.syncState.getPeerWatermarks())["device-1"],
-    ).toBeUndefined();
+    expect((await device.syncState.getPeerWatermarks())["device-1"]).toBeUndefined();
 
     // Round 2 (healed): both rows re-ship in HLC order and land.
     failR1 = false;

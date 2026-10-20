@@ -37,9 +37,7 @@ import { GET } from "../src/routes/record-file";
  * fail here rather than agree with itself.
  */
 function call(id: string, query = "") {
-  const req = new Request(
-    `http://drive.local/api/records/${encodeURIComponent(id)}/file${query}`,
-  );
+  const req = new Request(`http://drive.local/api/records/${encodeURIComponent(id)}/file${query}`);
   return GET(req, id);
 }
 

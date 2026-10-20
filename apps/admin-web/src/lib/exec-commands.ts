@@ -63,13 +63,20 @@ export const DAEMON_COMMANDS: Record<DaemonId, { args: string[]; port?: number }
 // runs the installer detached so it survives admin-web restarts (see
 // lib/install-stream.ts). `local-deploy` here has no caller in the UI.
 // reset-cloud-data is unimplemented in the new model.
-export const STREAM_COMMANDS: Record<StreamCommandId, { args: string[]; requiresCreds: boolean }> = {
-  "reset-local-data": {
-    args: ["bash", "scripts/reset-local-data.sh", "--yes"],
-    requiresCreds: false,
-  },
-  "local-deploy": {
-    args: ["pnpm", "--filter", "@starkeep/admin-installer", "cli:install-cloud-data-server", "--non-interactive"],
-    requiresCreds: true,
-  },
-};
+export const STREAM_COMMANDS: Record<StreamCommandId, { args: string[]; requiresCreds: boolean }> =
+  {
+    "reset-local-data": {
+      args: ["bash", "scripts/reset-local-data.sh", "--yes"],
+      requiresCreds: false,
+    },
+    "local-deploy": {
+      args: [
+        "pnpm",
+        "--filter",
+        "@starkeep/admin-installer",
+        "cli:install-cloud-data-server",
+        "--non-interactive",
+      ],
+      requiresCreds: true,
+    },
+  };

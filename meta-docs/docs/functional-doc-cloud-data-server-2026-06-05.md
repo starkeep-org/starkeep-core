@@ -2,7 +2,7 @@
 
 > **Revision note (2026-06-10).** Revised after commits `345ec13` (HMAC app-auth), `10ce75b` (Pulumi passphrase + cloud-side `/app-data/*` routes), and `9e88958` (removed `owner_id` from `shared.records`). Part 1 has been updated to describe the current state; Part 2 captures the bugs and gaps these changes introduced.
 
-Scope: the `cloud-data-server` topic and its nine children (auth, data-ops, db-indexing, install, object-storage, security, serverless, sync, uninstall). The deep IAM/PG/trust-policy reasoning belongs to the cloud bootstrap doc and to `data-roles-and-permissions.md`; this review covers it only to the extent that it shapes how the cloud data server *works*.
+Scope: the `cloud-data-server` topic and its nine children (auth, data-ops, db-indexing, install, object-storage, security, serverless, sync, uninstall). The deep IAM/PG/trust-policy reasoning belongs to the cloud bootstrap doc and to `data-roles-and-permissions.md`; this review covers it only to the extent that it shapes how the cloud data server _works_.
 
 ---
 
@@ -25,7 +25,7 @@ The cloud data server's runtime identity (`...-app-cloud-data-server-role`) has 
 The mechanics are mostly enforced outside this code:
 
 - API Gateway authenticates the calling human (or app) at the network edge. The reserved data-plane routes (`/apps/{appId}/{data,files,sync}/{proxy+}` and `GET /apps/{appId}/health`) are still wired with a Cognito JWT authorizer (`authorizationType: "JWT"`, `identitySources: $request.header.Authorization`) in `cloud-data-server-program.ts`. `GET /health` and `OPTIONS /{proxy+}` are unauthenticated.
-- IAM permissions boundaries cap what any app role can do regardless of attached policy (the cloud data server's runtime role is bounded by the *foundational* boundary; everything else by the per-app one).
+- IAM permissions boundaries cap what any app role can do regardless of attached policy (the cloud data server's runtime role is bounded by the _foundational_ boundary; everything else by the per-app one).
 - The S3 bucket policy denies cross-app prefix access independent of IAM.
 
 What the cloud data server itself contributes to this layered model lives in four places:
@@ -37,7 +37,7 @@ What the cloud data server itself contributes to this layered model lives in fou
 
 The reserved `starkeep-drive` app id is the **User-Data-Owner channel**: it is granted all-access by app id (not via grant rows), and it is the only channel that ships shared records to the cloud (see Sync, below). The cloud data server's authorization code special-cases this app id; the deeper rationale for why Drive owns shared-record custody is the bootstrap doc's concern.
 
-The end result is that compromise or buggy behavior in the broker code can still only do what the calling app's role allows. *How* and *why* that property is constructed at the IAM layer is covered exhaustively in `data-roles-and-permissions.md` and the cloud-overview-and-bootstrap functional doc; this doc covers only the per-request mechanics the broker enforces in code.
+The end result is that compromise or buggy behavior in the broker code can still only do what the calling app's role allows. _How_ and _why_ that property is constructed at the IAM layer is covered exhaustively in `data-roles-and-permissions.md` and the cloud-overview-and-bootstrap functional doc; this doc covers only the per-request mechanics the broker enforces in code.
 
 ## The shared API surface
 
@@ -50,10 +50,10 @@ The cloud data server presents one HTTPS API to clients. The shape is `/apps/{ap
 - `/apps/{appId}/sync/exchange` — the channel-level sync endpoint (see Sync).
 - `/apps/{appId}/app-data/db/<table>` (GET/POST/PATCH/DELETE) and `/apps/{appId}/app-data/files/<key>` (GET/PUT/DELETE) — the cloud counterpart of local-data-server's `/app-data/*` surface, letting a cloud-served app read and write its own app-specific syncable data through the broker. The handler logic was added in the 2026-06-10 changes; the gateway route `ANY /apps/{appId}/app-data/{proxy+}` is claimed in `cloud-data-server-program.ts` (verified reachable 2026-06-11). The byte-path shape is still suboptimal — see todos 40 (existence check downloads full bytes) and 41 (PUT pushes bytes through APIGW instead of presigning).
 
-Two structural points are worth calling out because they shape what the API *does*:
+Two structural points are worth calling out because they shape what the API _does_:
 
 - **The `/apps/{appId}/` namespace is shared with every installed app's own Lambda.** Per-app installs attach their own routes to the same API Gateway (see Install). The data-server routes claim the reserved `data`, `files`, `sync`, and `health` sub-namespaces; everything else under `/apps/{appId}/` flows to the app's own Lambda. APIGW v2's most-specific-match rule keeps the routing unambiguous.
-- **The handler reuses the per-request grants for both records and blobs.** A `POST /data/records` write is rejected if the type is not in the caller's `writableTypes`. A `POST /files/presign` is rejected if the *derived category* of the requested key (`shared/<category>/...`) is not in the caller's `writableCategories`. The same grants object services both checks.
+- **The handler reuses the per-request grants for both records and blobs.** A `POST /data/records` write is rejected if the type is not in the caller's `writableTypes`. A `POST /files/presign` is rejected if the _derived category_ of the requested key (`shared/<category>/...`) is not in the caller's `writableCategories`. The same grants object services both checks.
 
 App-private file keys (`apps/<appId>/syncable/...`) are only legal for the named app — cross-app syncable keys are rejected outright in `parseObjectKey`. Shared keys (`shared/<category>/<shard>/<hash>`) are gated by the category-level grants.
 
@@ -61,7 +61,7 @@ App-private file keys (`apps/<appId>/syncable/...`) are only legal for the named
 
 A shared record is one row in `shared.records` plus one immutable blob in S3 and zero-or-one row in a per-category metadata table.
 
-- **`shared.records` is a single flat PostgreSQL-compatible table.** Every shared type — photos, markdown, generic blobs, etc. — lives in the same table, keyed by id. Per-type segregation is *application-layer* (the access grants gate above) plus PG-level on metadata tables (below); the records table itself is one heap of rows.
+- **`shared.records` is a single flat PostgreSQL-compatible table.** Every shared type — photos, markdown, generic blobs, etc. — lives in the same table, keyed by id. Per-type segregation is _application-layer_ (the access grants gate above) plus PG-level on metadata tables (below); the records table itself is one heap of rows.
 - **All records are file-backed.** There is no inline content column. The record carries a `content_hash` (SHA-256, hex) and an `object_storage_key`; the bytes live in S3 at that key. Writes are content-addressed: the client first PUTs the bytes via a presigned URL to `shared/<category>/<shard>/<hash>`, then registers the record by hash. The server refuses to register a record whose blob is not already in S3 (`409`).
 - **Per-category metadata tables.** Each category (image, markdown, etc., excluding `other`) has its own `shared.record_<category>_metadata` table generated from the `CATEGORIES` registry. Apps write metadata through `POST /data/records/{id}/metadata`; the server validates that the keys are in the category's schema and writes through the database adapter. Read is symmetric.
 - **Parent / derived-record dedup.** A record may carry a `parentId` (used for thumbnails and other derived blobs). On register, the server looks for an existing live record with the same `(parentId, contentHash)` and returns it instead of creating a duplicate. The dedup is bytewise-exact: different crops of the same source produce different hashes and stay distinct.
@@ -161,8 +161,8 @@ It does not run in production and is not part of the broker code path; it is a d
 
 ## Missing behaviors
 
-- **(Deferred with todo 15)** **Blob garbage collection for tombstoned records.** Soft-deleting a record updates `deleted_at` in DSQL but leaves the S3 blob in place. The records table grows with tombstones, and the files bucket grows with orphaned blobs that no live record references. There is no current path for either. (App-uninstall deletes `apps/<appId>/*` private keys, but shared keys under `shared/<category>/...` are not cleaned up by anything.) Whether this is "intentional, will be done out-of-band" or "intentional, never delete" is unclear; the *functional* gap is that disk usage in the cloud is monotonically increasing under normal use.
-- **(Deferred with todo 16)** **No staleness signal on cached app credentials beyond expiry.** `getAppCreds` caches STS credentials per app id for ~14 minutes. If an admin uninstalls an app and immediately reinstalls it (which mints a fresh role with a new RoleId), the cached credentials remain valid against the *old* role identifier for up to the cache TTL. The Lambda would then keep brokering under stale credentials until the cached entry expires or the worker recycles. There is no cache invalidation hook tied to install/uninstall. The same property now applies to `hmacSecretCache` (5-min TTL): an uninstall + reinstall flips the per-app HMAC secret in SSM, but in-flight warm Lambdas continue to accept signatures under the old secret (or reject signatures from the new caller) until the cache expires.
+- **(Deferred with todo 15)** **Blob garbage collection for tombstoned records.** Soft-deleting a record updates `deleted_at` in DSQL but leaves the S3 blob in place. The records table grows with tombstones, and the files bucket grows with orphaned blobs that no live record references. There is no current path for either. (App-uninstall deletes `apps/<appId>/*` private keys, but shared keys under `shared/<category>/...` are not cleaned up by anything.) Whether this is "intentional, will be done out-of-band" or "intentional, never delete" is unclear; the _functional_ gap is that disk usage in the cloud is monotonically increasing under normal use.
+- **(Deferred with todo 16)** **No staleness signal on cached app credentials beyond expiry.** `getAppCreds` caches STS credentials per app id for ~14 minutes. If an admin uninstalls an app and immediately reinstalls it (which mints a fresh role with a new RoleId), the cached credentials remain valid against the _old_ role identifier for up to the cache TTL. The Lambda would then keep brokering under stale credentials until the cached entry expires or the worker recycles. There is no cache invalidation hook tied to install/uninstall. The same property now applies to `hmacSecretCache` (5-min TTL): an uninstall + reinstall flips the per-app HMAC secret in SSM, but in-flight warm Lambdas continue to accept signatures under the old secret (or reject signatures from the new caller) until the cache expires.
 
 ## Behavioral bugs
 

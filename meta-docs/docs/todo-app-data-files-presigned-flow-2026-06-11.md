@@ -76,7 +76,7 @@ Mirror the shared-data flow for app-data:
 Mirror the shared-data flow exactly; no new mechanism is invented:
 
 1. `POST /apps/{appId}/app-data/files/presign` — body `{ subKey,
-   contentType? }`. Manifest gate (the `appSpecificSyncable` view must
+contentType? }`. Manifest gate (the `appSpecificSyncable` view must
    exist), construct the key server-side via
    `appSyncableObjectKey(appId, subKey)` (so the client never has to know
    the key scheme), return `{ url, key }` from

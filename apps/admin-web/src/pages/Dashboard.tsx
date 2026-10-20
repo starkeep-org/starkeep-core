@@ -5,12 +5,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Link } from "react-router";
 import { Input } from "@/components/ui/input";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   Table,
   TableBody,
@@ -51,10 +46,7 @@ import {
   type CognitoConfig,
   type STSCredentials,
 } from "../lib/cognito-auth";
-import {
-  projectFullMonth,
-  type ServiceCost,
-} from "../lib/cost-usage-report";
+import { projectFullMonth, type ServiceCost } from "../lib/cost-usage-report";
 import { localDataServerUrl } from "../lib/runtime-config";
 import { ACTION_OCCASIONAL, ACTION_START } from "../lib/action-colors";
 
@@ -82,7 +74,11 @@ export function DashboardPage() {
     }
   }, []);
 
-  const bumpAll = () => { setRefreshKey((k) => k + 1); setLocalRefreshKey((k) => k + 1); refreshApps(); };
+  const bumpAll = () => {
+    setRefreshKey((k) => k + 1);
+    setLocalRefreshKey((k) => k + 1);
+    refreshApps();
+  };
 
   // Local data server
   const [localOnline, setLocalOnline] = useState<boolean | null>(null);
@@ -95,7 +91,9 @@ export function DashboardPage() {
   const [cognitoSession, setCognitoSession] = useState<CognitoSession | null>(null);
 
   // Costs
-  const [costs, setCosts] = useState<ServiceCost[] | "loading" | "error" | "no-data" | "not-signed-in">("loading");
+  const [costs, setCosts] = useState<
+    ServiceCost[] | "loading" | "error" | "no-data" | "not-signed-in"
+  >("loading");
   const [costProjection, setCostProjection] = useState<ServiceCost[] | null>(null);
 
   // Add watch form
@@ -174,8 +172,13 @@ export function DashboardPage() {
       try {
         const base = await localDataServerUrl();
         const probe = await fetch(`${base}/health`, { signal: AbortSignal.timeout(1500) });
-        if (probe.ok) { setLocalRefreshKey((k) => k + 1); return; }
-      } catch { /* not reachable — proceed to start */ }
+        if (probe.ok) {
+          setLocalRefreshKey((k) => k + 1);
+          return;
+        }
+      } catch {
+        /* not reachable — proceed to start */
+      }
     }
     setDaemonLoading((l) => ({ ...l, [id]: true }));
     try {
@@ -221,7 +224,10 @@ export function DashboardPage() {
       const base = await localDataServerUrl();
       try {
         const healthResp = await fetch(`${base}/health`, { signal: controller.signal });
-        if (!healthResp.ok) { setLocalOnline(false); return; }
+        if (!healthResp.ok) {
+          setLocalOnline(false);
+          return;
+        }
         setLocalOnline(true);
       } catch {
         if (!controller.signal.aborted) setLocalOnline(false);
@@ -240,7 +246,9 @@ export function DashboardPage() {
           const cfg = await configResp.json();
           if (cfg.cognitoConfig) setLocalCognitoConfig(cfg.cognitoConfig as CognitoConfig);
         }
-      } catch { /* leave per-section state null */ }
+      } catch {
+        /* leave per-section state null */
+      }
     }
 
     fetchLocal();
@@ -254,12 +262,16 @@ export function DashboardPage() {
   }, [refreshKey]);
 
   // Initial app-list fetch (also re-run by bumpAll via refreshApps).
-  useEffect(() => { refreshApps(); }, [refreshApps]);
+  useEffect(() => {
+    refreshApps();
+  }, [refreshApps]);
 
   // The Discover apps button lives in the shell header, outside this tree, so
   // it announces a changed directory list on `window` rather than calling back.
   useEffect(() => {
-    const onChanged = () => { refreshApps(); };
+    const onChanged = () => {
+      refreshApps();
+    };
     window.addEventListener(APPS_CHANGED_EVENT, onChanged);
     return () => window.removeEventListener(APPS_CHANGED_EVENT, onChanged);
   }, [refreshApps]);
@@ -285,34 +297,54 @@ export function DashboardPage() {
     setCostProjection(null);
     async function fetchCosts() {
       const cfg = await readCloudConfig();
-      if (!cfg || !cfg.apiGatewayUrl) { setCosts("no-data"); return; }
+      if (!cfg || !cfg.apiGatewayUrl) {
+        setCosts("no-data");
+        return;
+      }
       const session = await readCognitoSession();
       let creds: STSCredentials | null = await readCloudCredentials();
       if (!creds || credentialsNearExpiry(creds)) {
-        if (!session?.refreshToken) { setCosts("not-signed-in"); return; }
+        if (!session?.refreshToken) {
+          setCosts("not-signed-in");
+          return;
+        }
         try {
           const tokens = await refreshTokens(cfg.cognitoConfig, session.refreshToken);
           creds = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
           await writeCloudCredentials(creds);
           await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
-        } catch { setCosts("not-signed-in"); return; }
+        } catch {
+          setCosts("not-signed-in");
+          return;
+        }
       }
       try {
         const resp = await fetch("/api/costs", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ credentials: creds, stackPrefix: cfg.stackPrefix, region: cfg.region }),
+          body: JSON.stringify({
+            credentials: creds,
+            stackPrefix: cfg.stackPrefix,
+            region: cfg.region,
+          }),
         });
         if (!resp.ok) {
-          const body = await resp.json().catch(() => ({})) as { error?: string; code?: string };
-          const isAuthError = body.code === "InvalidClientTokenId" || body.code === "ExpiredTokenException";
+          const body = (await resp.json().catch(() => ({}))) as { error?: string; code?: string };
+          const isAuthError =
+            body.code === "InvalidClientTokenId" || body.code === "ExpiredTokenException";
           setCosts(isAuthError ? "not-signed-in" : "error");
           return;
         }
-        const { costs: mtd } = await resp.json() as { costs: ServiceCost[] | null };
-        if (mtd === null) { setCosts("no-data"); }
-        else { setCosts(mtd); setCostProjection(projectFullMonth(mtd)); }
-      } catch { setCosts("error"); }
+        const { costs: mtd } = (await resp.json()) as { costs: ServiceCost[] | null };
+        if (mtd === null) {
+          setCosts("no-data");
+        } else {
+          setCosts(mtd);
+          setCostProjection(projectFullMonth(mtd));
+        }
+      } catch {
+        setCosts("error");
+      }
     }
     fetchCosts();
   }, [refreshKey]);
@@ -327,7 +359,10 @@ export function DashboardPage() {
       const result = await initiateAuth(cognitoConfig, signInEmail, signInPassword);
       if (result.tokens) {
         const email = extractEmailFromIdToken(result.tokens.idToken);
-        await writeCognitoSession({ refreshToken: result.tokens.refreshToken, userEmail: email ?? undefined });
+        await writeCognitoSession({
+          refreshToken: result.tokens.refreshToken,
+          userEmail: email ?? undefined,
+        });
         setSignInOpen(false);
         bumpAll();
       } else if (result.challengeName === "NEW_PASSWORD_REQUIRED" && result.session) {
@@ -345,13 +380,24 @@ export function DashboardPage() {
   async function handleNewPassword() {
     const cognitoConfig = localCognitoConfig ?? cloudConfig?.cognitoConfig;
     if (!cognitoConfig || !signInChallenge) return;
-    if (signInNewPassword !== signInConfirmPassword) { setSignInError("Passwords do not match"); return; }
+    if (signInNewPassword !== signInConfirmPassword) {
+      setSignInError("Passwords do not match");
+      return;
+    }
     setSignInLoading(true);
     setSignInError(null);
     try {
-      const tokens = await respondNewPasswordChallenge(cognitoConfig, signInChallenge.session, signInEmail, signInNewPassword);
+      const tokens = await respondNewPasswordChallenge(
+        cognitoConfig,
+        signInChallenge.session,
+        signInEmail,
+        signInNewPassword,
+      );
       const email = extractEmailFromIdToken(tokens.idToken);
-      await writeCognitoSession({ refreshToken: tokens.refreshToken, userEmail: email ?? undefined });
+      await writeCognitoSession({
+        refreshToken: tokens.refreshToken,
+        userEmail: email ?? undefined,
+      });
       setSignInOpen(false);
       bumpAll();
     } catch (err) {
@@ -362,18 +408,29 @@ export function DashboardPage() {
   }
 
   function openSignIn() {
-    setSignInEmail(""); setSignInPassword(""); setSignInNewPassword(""); setSignInConfirmPassword("");
-    setSignInChallenge(null); setSignInError(null); setSignInOpen(true);
+    setSignInEmail("");
+    setSignInPassword("");
+    setSignInNewPassword("");
+    setSignInConfirmPassword("");
+    setSignInChallenge(null);
+    setSignInError(null);
+    setSignInOpen(true);
   }
 
   // Watch handlers
   async function handleAddWatch() {
     const path = watchPath.trim();
     if (!path) return;
-    setWatchError(null); setWatchSuccess(null);
+    setWatchError(null);
+    setWatchSuccess(null);
     const expanded = path.startsWith("~/") ? path.replace("~", "") : path;
-    const duplicate = watches?.some((w) => w.directoryPath === path || w.directoryPath.endsWith(expanded));
-    if (duplicate) { setWatchError("A watch for this directory already exists."); return; }
+    const duplicate = watches?.some(
+      (w) => w.directoryPath === path || w.directoryPath.endsWith(expanded),
+    );
+    if (duplicate) {
+      setWatchError("A watch for this directory already exists.");
+      return;
+    }
     setWatchSubmitting(true);
     try {
       const base = await localDataServerUrl();
@@ -384,21 +441,27 @@ export function DashboardPage() {
       });
       const data = await resp.json();
       if (resp.ok) {
-        setWatchPath(""); setWatchSuccess(`Watch started: ${data.watch?.directoryPath ?? path}`);
+        setWatchPath("");
+        setWatchSuccess(`Watch started: ${data.watch?.directoryPath ?? path}`);
         const wResp = await fetch(`${base}/watches`);
         if (wResp.ok) setWatches((await wResp.json()).watches);
       } else {
         setWatchError(data.error ?? "Failed to add watch.");
       }
-    } catch { setWatchError("Could not reach the data server."); }
-    finally { setWatchSubmitting(false); }
+    } catch {
+      setWatchError("Could not reach the data server.");
+    } finally {
+      setWatchSubmitting(false);
+    }
   }
 
   async function handleRemoveWatch(id: string) {
     try {
       await fetch(`${await localDataServerUrl()}/watches/${id}`, { method: "DELETE" });
       setWatches((ws) => ws?.filter((w) => w.id !== id) ?? null);
-    } catch { /* server offline */ }
+    } catch {
+      /* server offline */
+    }
   }
 
   /**
@@ -464,7 +527,9 @@ export function DashboardPage() {
                   name="Data Server"
                   badges={
                     <>
-                      <Badge variant="secondary" className="text-xs">Built-in</Badge>
+                      <Badge variant="secondary" className="text-xs">
+                        Built-in
+                      </Badge>
                       <StatusBadge online={localOnline} />
                     </>
                   }
@@ -523,7 +588,9 @@ export function DashboardPage() {
                         disabled={!!daemonLoading["local-data-server"]}
                         onClick={() => startDaemon("local-data-server")}
                       >
-                        {daemonLoading["local-data-server"] && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
+                        {daemonLoading["local-data-server"] && (
+                          <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                        )}
                         Start Data Server
                       </Button>
                     ) : undefined
@@ -605,7 +672,9 @@ export function DashboardPage() {
                   ) : costs === "error" ? (
                     <p className="text-sm text-muted-foreground">Could not load cost data.</p>
                   ) : costs === "no-data" ? (
-                    <p className="text-sm text-muted-foreground">Cost report configured — data arrives within 24 hours.</p>
+                    <p className="text-sm text-muted-foreground">
+                      Cost report configured — data arrives within 24 hours.
+                    </p>
                   ) : (
                     <Table>
                       <TableHeader>
@@ -622,14 +691,20 @@ export function DashboardPage() {
                             <TableRow key={row.service}>
                               <TableCell>{row.service}</TableCell>
                               <TableCell className="text-right">${row.amount.toFixed(2)}</TableCell>
-                              <TableCell className="text-right text-muted-foreground">${(proj?.amount ?? 0).toFixed(2)}</TableCell>
+                              <TableCell className="text-right text-muted-foreground">
+                                ${(proj?.amount ?? 0).toFixed(2)}
+                              </TableCell>
                             </TableRow>
                           );
                         })}
                         <TableRow className="font-medium">
                           <TableCell>Total</TableCell>
-                          <TableCell className="text-right">${costs.reduce((s, r) => s + r.amount, 0).toFixed(2)}</TableCell>
-                          <TableCell className="text-right text-muted-foreground">${(costProjection ?? []).reduce((s, r) => s + r.amount, 0).toFixed(2)}</TableCell>
+                          <TableCell className="text-right">
+                            ${costs.reduce((s, r) => s + r.amount, 0).toFixed(2)}
+                          </TableCell>
+                          <TableCell className="text-right text-muted-foreground">
+                            ${(costProjection ?? []).reduce((s, r) => s + r.amount, 0).toFixed(2)}
+                          </TableCell>
                         </TableRow>
                       </TableBody>
                     </Table>
@@ -642,7 +717,13 @@ export function DashboardPage() {
       </div>
 
       {/* Sign-in dialog */}
-      <Dialog open={signInOpen} onOpenChange={(open) => { setSignInOpen(open); if (!open) setSignInChallenge(null); }}>
+      <Dialog
+        open={signInOpen}
+        onOpenChange={(open) => {
+          setSignInOpen(open);
+          if (!open) setSignInChallenge(null);
+        }}
+      >
         <DialogContent className="max-w-sm">
           <DialogHeader>
             <DialogTitle>Sign in as admin</DialogTitle>
@@ -651,40 +732,71 @@ export function DashboardPage() {
             <div className="flex flex-col gap-4">
               <div className="flex flex-col gap-1.5">
                 <label className="text-sm font-medium">Email</label>
-                <Input value={signInEmail} onChange={(e) => setSignInEmail(e.currentTarget.value)} disabled={signInLoading} />
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <label className="text-sm font-medium">Password</label>
-                <Input type="password" value={signInPassword}
-                  onChange={(e) => setSignInPassword(e.currentTarget.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") handleSignIn(); }}
+                <Input
+                  value={signInEmail}
+                  onChange={(e) => setSignInEmail(e.currentTarget.value)}
                   disabled={signInLoading}
                 />
               </div>
-              {signInError && <Alert variant="destructive"><AlertDescription>{signInError}</AlertDescription></Alert>}
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium">Password</label>
+                <Input
+                  type="password"
+                  value={signInPassword}
+                  onChange={(e) => setSignInPassword(e.currentTarget.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleSignIn();
+                  }}
+                  disabled={signInLoading}
+                />
+              </div>
+              {signInError && (
+                <Alert variant="destructive">
+                  <AlertDescription>{signInError}</AlertDescription>
+                </Alert>
+              )}
               <Button onClick={handleSignIn} disabled={signInLoading} className="w-full">
-                {signInLoading && <span className="mr-2 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />}
+                {signInLoading && (
+                  <span className="mr-2 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                )}
                 Sign in
               </Button>
             </div>
           ) : (
             <div className="flex flex-col gap-4">
-              <p className="text-sm text-muted-foreground">This account requires a new permanent password.</p>
+              <p className="text-sm text-muted-foreground">
+                This account requires a new permanent password.
+              </p>
               <div className="flex flex-col gap-1.5">
                 <label className="text-sm font-medium">New password</label>
-                <Input type="password" value={signInNewPassword} onChange={(e) => setSignInNewPassword(e.currentTarget.value)} disabled={signInLoading} />
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <label className="text-sm font-medium">Confirm new password</label>
-                <Input type="password" value={signInConfirmPassword}
-                  onChange={(e) => setSignInConfirmPassword(e.currentTarget.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") handleNewPassword(); }}
+                <Input
+                  type="password"
+                  value={signInNewPassword}
+                  onChange={(e) => setSignInNewPassword(e.currentTarget.value)}
                   disabled={signInLoading}
                 />
               </div>
-              {signInError && <Alert variant="destructive"><AlertDescription>{signInError}</AlertDescription></Alert>}
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium">Confirm new password</label>
+                <Input
+                  type="password"
+                  value={signInConfirmPassword}
+                  onChange={(e) => setSignInConfirmPassword(e.currentTarget.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleNewPassword();
+                  }}
+                  disabled={signInLoading}
+                />
+              </div>
+              {signInError && (
+                <Alert variant="destructive">
+                  <AlertDescription>{signInError}</AlertDescription>
+                </Alert>
+              )}
               <Button onClick={handleNewPassword} disabled={signInLoading} className="w-full">
-                {signInLoading && <span className="mr-2 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />}
+                {signInLoading && (
+                  <span className="mr-2 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                )}
                 Set password &amp; sign in
               </Button>
             </div>
@@ -700,14 +812,19 @@ export function DashboardPage() {
             <DialogTitle>Clear local data</DialogTitle>
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
-            This will permanently delete all local object files, the SQLite database, and
-            watch configs on this machine. Cloud data is untouched.
+            This will permanently delete all local object files, the SQLite database, and watch
+            configs on this machine. Cloud data is untouched.
           </p>
           <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={() => setClearConfirmOpen(false)}>Cancel</Button>
+            <Button variant="outline" onClick={() => setClearConfirmOpen(false)}>
+              Cancel
+            </Button>
             <Button
               variant="destructive"
-              onClick={() => { setClearConfirmOpen(false); setClearOutputOpen(true); }}
+              onClick={() => {
+                setClearConfirmOpen(false);
+                setClearOutputOpen(true);
+              }}
             >
               Confirm
             </Button>
@@ -717,7 +834,10 @@ export function DashboardPage() {
 
       <CommandOutputModal
         opened={clearOutputOpen}
-        onClose={() => { setClearOutputOpen(false); bumpAll(); }}
+        onClose={() => {
+          setClearOutputOpen(false);
+          bumpAll();
+        }}
         commandId={clearOutputOpen ? "reset-local-data" : null}
         title="Clear local data"
       />
@@ -727,11 +847,18 @@ export function DashboardPage() {
         open={foldersOpen}
         onOpenChange={(open) => {
           setFoldersOpen(open);
-          if (!open) { setWatchError(null); setWatchSuccess(null); }
+          if (!open) {
+            setWatchError(null);
+            setWatchSuccess(null);
+          }
         }}
         watches={watches}
         path={watchPath}
-        onPathChange={(v) => { setWatchPath(v); setWatchError(null); setWatchSuccess(null); }}
+        onPathChange={(v) => {
+          setWatchPath(v);
+          setWatchError(null);
+          setWatchSuccess(null);
+        }}
         onAdd={handleAddWatch}
         onRemove={handleRemoveWatch}
         onAddBack={handleAddBackWatchedFile}
@@ -743,4 +870,3 @@ export function DashboardPage() {
     </div>
   );
 }
-

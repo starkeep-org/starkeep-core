@@ -11,11 +11,17 @@
 import { describe, expect, it } from "vitest";
 import { buildRuntimePolicy } from "../src/temp-policies.js";
 
-type Statement = { Sid: string; Resource: string | string[]; Condition?: Record<string, Record<string, unknown>> };
+type Statement = {
+  Sid: string;
+  Resource: string | string[];
+  Condition?: Record<string, Record<string, unknown>>;
+};
 const USER = "${aws:PrincipalTag/starkeep:userId}";
 
 function statements(categories: string[], fileAccessAll: boolean): Map<string, Statement> {
-  const doc = JSON.parse(buildRuntimePolicy("starkeep", "photos", categories, true, fileAccessAll)) as {
+  const doc = JSON.parse(
+    buildRuntimePolicy("starkeep", "photos", categories, true, fileAccessAll),
+  ) as {
     Statement: Statement[];
   };
   return new Map(doc.Statement.map((s) => [s.Sid, s]));
@@ -37,15 +43,23 @@ describe("the runtime policy's user scope", () => {
 
   it("gives a user's session only its part of the app's own prefix", () => {
     const s = statements(["image"], false);
-    expect(s.get("AppS3OwnUserPrefix")!.Resource).toBe(`arn:aws:s3:::starkeep-files-*/apps/photos/${USER}/*`);
-    expect(s.get("AppS3ListOwnPrefix")!.Condition!["StringLike"]!["s3:prefix"]).toEqual([`apps/photos/${USER}/*`]);
+    expect(s.get("AppS3OwnUserPrefix")!.Resource).toBe(
+      `arn:aws:s3:::starkeep-files-*/apps/photos/${USER}/*`,
+    );
+    expect(s.get("AppS3ListOwnPrefix")!.Condition!["StringLike"]!["s3:prefix"]).toEqual([
+      `apps/photos/${USER}/*`,
+    ]);
   });
 
   it("gives the whole own prefix only to a session that names no user", () => {
     const s = statements(["image"], false);
     for (const sid of ["AppS3OwnPrefixNoUser", "AppS3ListOwnPrefixNoUser"]) {
-      expect(s.get(sid)!.Condition!["Null"]).toEqual({ "aws:PrincipalTag/starkeep:userId": "true" });
+      expect(s.get(sid)!.Condition!["Null"]).toEqual({
+        "aws:PrincipalTag/starkeep:userId": "true",
+      });
     }
-    expect(s.get("AppS3OwnPrefixNoUser")!.Resource).toBe("arn:aws:s3:::starkeep-files-*/apps/photos/*");
+    expect(s.get("AppS3OwnPrefixNoUser")!.Resource).toBe(
+      "arn:aws:s3:::starkeep-files-*/apps/photos/*",
+    );
   });
 });

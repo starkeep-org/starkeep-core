@@ -49,7 +49,7 @@ not collide on multiple NULLs (PG/DSQL default = NULLs distinct in
 unique indexes). Two options:
 
 - **Preferred:** `CREATE UNIQUE INDEX ASYNC ... ON shared.records
-  (original_filename, content_hash, deleted_at) NULLS NOT DISTINCT` —
+(original_filename, content_hash, deleted_at) NULLS NOT DISTINCT` —
   verify DSQL supports `NULLS NOT DISTINCT` (PG 15+ feature) first. If
   so this is a one-word fix.
 - **Fallback:** stamp live rows with a sentinel `deleted_at` value (e.g.
@@ -71,8 +71,8 @@ In `packages/admin-installer/src/orchestrator.ts`:
     `hmac_secret` column whenever it mints, so the supervisor and the
     cloud verifier agree, or
   - (b) refuse to mint and require local install to have run first.
-  (a) is friendlier; (b) is stricter. Pick based on whether cloud-only
-  installs are a supported flow.
+    (a) is friendlier; (b) is stricter. Pick based on whether cloud-only
+    installs are a supported flow.
 
 In `apps/local-data-server/sync-supervisor.ts`:
 

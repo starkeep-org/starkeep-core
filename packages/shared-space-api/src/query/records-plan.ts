@@ -38,10 +38,7 @@
  * the library is answered there.
  */
 
-import {
-  serializeHLC,
-  type AccessGrants,
-} from "@starkeep/protocol-primitives";
+import { serializeHLC, type AccessGrants } from "@starkeep/protocol-primitives";
 import {
   planFindByLabel,
   sharedQuerySchema,
@@ -204,20 +201,14 @@ const SORT_FIELD_OF: Record<string, string> = {
 function softDeletedScope(raw: string | undefined): SoftDeletedScope {
   if (raw === undefined) return "exclude";
   if (raw === "exclude" || raw === "only" || raw === "include") return raw;
-  throw new ApiError(
-    `deleted must be "exclude", "only" or "include" (got "${raw}")`,
-    400,
-  );
+  throw new ApiError(`deleted must be "exclude", "only" or "include" (got "${raw}")`, 400);
 }
 
 /** Read a `<appId>/<key>` label reference, or reject it by name. */
 function labelRef(parameter: string, raw: string): { appId: string; key: string } {
   const slash = raw.indexOf("/");
   if (slash <= 0 || slash === raw.length - 1) {
-    throw new ApiError(
-      `${parameter} must be of the form "<appId>/<key>" (got "${raw}")`,
-      400,
-    );
+    throw new ApiError(`${parameter} must be of the form "<appId>/<key>" (got "${raw}")`, 400);
   }
   return { appId: raw.slice(0, slash), key: raw.slice(slash + 1) };
 }
@@ -258,7 +249,8 @@ export function planRecordQuery(
   // list, so an aggregate can ask for the uncollapsed view too — the one place
   // a storage-level question ("how many bytes do I store") needs it most.
   const includeParam = get("include");
-  const includeEdges = includeParam === undefined ? [] : includeParam.split(",").map((e) => e.trim());
+  const includeEdges =
+    includeParam === undefined ? [] : includeParam.split(",").map((e) => e.trim());
   const includeStandIns = includeEdges.includes("stand-ins");
   const includeStandInUrls = includeEdges.includes("stand-in-urls");
   const grammarIncludes = includeEdges.filter(
@@ -315,7 +307,9 @@ export function planRecordQuery(
       ["variant", get("variant")],
     ] as const) {
       if (value !== undefined) {
-        throw new QueryParseError(`"${name}" selects or hydrates rows, and an aggregate holds none`);
+        throw new QueryParseError(
+          `"${name}" selects or hydrates rows, and an aggregate holds none`,
+        );
       }
     }
     const aggregate = withUpdatedAfter(parsed, get("updated_after"));
@@ -353,9 +347,7 @@ export function planRecordQuery(
     ...(rows.order.length > 0 ? { sort: sortFor(rows) } : {}),
     limit: rows.limit,
     ...(pageTokenParam === undefined ? {} : { cursor: pageTokenParam }),
-    ...(notLabelParam === undefined
-      ? {}
-      : { excludeLabel: labelRef("notLabel", notLabelParam) }),
+    ...(notLabelParam === undefined ? {} : { excludeLabel: labelRef("notLabel", notLabelParam) }),
   };
 
   return {
@@ -415,10 +407,7 @@ export function assertRecordParams(names: Iterable<string>): void {
  * describes a set the caller may not know the membership of, so the grant
  * predicate narrowing it silently is the right answer there.
  */
-function assertNamedTypesReadable(
-  where: readonly WhereClause[],
-  grants: AccessGrants,
-): void {
+function assertNamedTypesReadable(where: readonly WhereClause[], grants: AccessGrants): void {
   for (const clause of where) {
     if (clause.column !== "type") continue;
     const named =
@@ -429,10 +418,7 @@ function assertNamedTypesReadable(
           : null;
     if (named === null) continue;
     if (!named.some((type) => typeof type === "string" && grants.readableTypes.has(type))) {
-      throw new ApiError(
-        `No read grant on ${named.map((t) => JSON.stringify(t)).join(", ")}`,
-        403,
-      );
+      throw new ApiError(`No read grant on ${named.map((t) => JSON.stringify(t)).join(", ")}`, 403);
     }
   }
 }

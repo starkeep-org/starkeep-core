@@ -28,11 +28,7 @@ import { buildSide } from "./sync-test-harness/side.js";
 import { FailingObjectStorageAdapter } from "./sync-test-harness/failure-injection.js";
 import { FILE_RECORDS_TABLE } from "./sync-test-harness/mock-app-source.js";
 import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
-import type {
-  AppSyncableRowEntry,
-  ResidencyHooks,
-  SyncStateStore,
-} from "../src/types.js";
+import type { AppSyncableRowEntry, ResidencyHooks, SyncStateStore } from "../src/types.js";
 import type { BlobCandidate, ResidencyVerdict } from "../src/residency-policy.js";
 
 const APP_ID = "notes";
@@ -62,7 +58,9 @@ async function seedAppFile(
   const sizeBytes = options.sizeBytes ?? 24;
   const id = options.id ?? `file-${side.appRows.size + 1}`;
   const blob = Buffer.alloc(sizeBytes, 7);
-  const hash = createHash("sha256").update(blob as unknown as Uint8Array).digest("hex");
+  const hash = createHash("sha256")
+    .update(blob as unknown as Uint8Array)
+    .digest("hex");
   const key = `shared/image/${hash.slice(0, 2)}/${hash}`;
   await side.storage.put(key, blob);
 
@@ -127,7 +125,7 @@ function recordingHooks(decision: ResidencyVerdict["decision"]): ResidencyHooks 
       asked.push(candidate);
       return {
         decision,
-          reason: decision === "fetch" ? "kept" : "above-ceiling",
+        reason: decision === "fetch" ? "kept" : "above-ceiling",
       };
     },
     onLanded: async (candidate) => {

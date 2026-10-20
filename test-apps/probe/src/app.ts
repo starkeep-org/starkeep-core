@@ -126,10 +126,7 @@ export const app = new Hono();
 // authorizer in the cloud; it is mounted anyway because it is the one gate an
 // app served outside the gateway would still have, and because a fixture that
 // does not mount it would not prove it mounts.
-app.use(
-  "*",
-  honoOriginGate({ publicPaths: PUBLIC_PATHS, signInPath: "/sign-in" }),
-);
+app.use("*", honoOriginGate({ publicPaths: PUBLIC_PATHS, signInPath: "/sign-in" }));
 
 // The immutable asset. Cached hard on purpose: the platform's CloudFront
 // behavior for this path is CachingOptimized, and an edge hit on it is what
@@ -140,13 +137,15 @@ app.use(
 // makes Probe a test of the adapter's static path rather than only of its
 // payload encoding. Both answers come from `assetScript()`, so the two surfaces
 // cannot drift.
-app.get(`/_immutable/${ASSET_NAME}`, () =>
-  new Response(assetScript(), {
-    headers: {
-      "Content-Type": "application/javascript; charset=utf-8",
-      "Cache-Control": "public, max-age=31536000, immutable",
-    },
-  }),
+app.get(
+  `/_immutable/${ASSET_NAME}`,
+  () =>
+    new Response(assetScript(), {
+      headers: {
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Cache-Control": "public, max-age=31536000, immutable",
+      },
+    }),
 );
 
 app.get("/sign-in", () => html(signInPage(appBasePath())));

@@ -16,7 +16,12 @@
  */
 
 import type { DeviceAuthConfig } from "./auth-config.js";
-import { CognitoError, idTokenClaims, type AuthTokens, type CognitoClient } from "./cognito-client.js";
+import {
+  CognitoError,
+  idTokenClaims,
+  type AuthTokens,
+  type CognitoClient,
+} from "./cognito-client.js";
 
 /** What a device keeps across restarts. Only the refresh token and the email. */
 export interface StoredSession {

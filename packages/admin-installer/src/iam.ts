@@ -27,7 +27,11 @@ import {
   appExecRoleName,
 } from "./temp-policies";
 import type { FileAccess } from "@starkeep/admin-manifest";
-import { APP_GRANTABLE_CATEGORIES, typeCategory, isGrantableCategory } from "@starkeep/protocol-primitives";
+import {
+  APP_GRANTABLE_CATEGORIES,
+  typeCategory,
+  isGrantableCategory,
+} from "@starkeep/protocol-primitives";
 
 /**
  * The session tag the broker sets on each per-app session: the user the
@@ -162,11 +166,16 @@ export function assertCloudInstallableAppId(appId: string): void {
 
 export async function createAppRole(input: CreateAppRoleInput): Promise<string> {
   const {
-    stackPrefix, appId, accountId,
-    permissionsBoundaryArn, foundationalPermissionsBoundaryArn,
+    stackPrefix,
+    appId,
+    accountId,
+    permissionsBoundaryArn,
+    foundationalPermissionsBoundaryArn,
     userDataOwnerPermissionsBoundaryArn,
-    fileAccess, fileAccessAll,
-    brokerPower, managerCreds,
+    fileAccess,
+    fileAccessAll,
+    brokerPower,
+    managerCreds,
   } = input;
   const iam = makeIamClient(managerCreds);
   const roleName = `${stackPrefix}-app-${appId}-role`;
@@ -178,9 +187,7 @@ export async function createAppRole(input: CreateAppRoleInput): Promise<string> 
         ? userDataOwnerPermissionsBoundaryArn
         : permissionsBoundaryArn;
 
-  const categories = fileAccessAll
-    ? [...APP_GRANTABLE_CATEGORIES]
-    : categoriesOf(fileAccess);
+  const categories = fileAccessAll ? [...APP_GRANTABLE_CATEGORIES] : categoriesOf(fileAccess);
   const hasWriteAccess = fileAccessAll || fileAccess.some((e) => e.access === "readwrite");
 
   const assumeRolePolicy = buildAppRoleTrustPolicy(
@@ -194,7 +201,10 @@ export async function createAppRole(input: CreateAppRoleInput): Promise<string> 
         RoleName: roleName,
         AssumeRolePolicyDocument: assumeRolePolicy,
         PermissionsBoundary: boundaryArn,
-        Tags: [{ Key: "starkeep:appId", Value: appId }, { Key: "starkeep:managed", Value: "true" }],
+        Tags: [
+          { Key: "starkeep:appId", Value: appId },
+          { Key: "starkeep:managed", Value: "true" },
+        ],
       }),
     );
   } catch (err) {
@@ -208,7 +218,11 @@ export async function createAppRole(input: CreateAppRoleInput): Promise<string> 
   }
 
   const runtimePolicy = buildRuntimePolicy(
-    stackPrefix, appId, categories, hasWriteAccess, fileAccessAll,
+    stackPrefix,
+    appId,
+    categories,
+    hasWriteAccess,
+    fileAccessAll,
   );
   await iam.send(
     new PutRolePolicyCommand({
@@ -466,17 +480,13 @@ export async function createAppExecRole(input: {
   return `arn:aws:iam::${accountId}:role/${roleName}`;
 }
 
-
-
 export async function deleteAppRole(
   stackPrefix: string,
   appId: string,
   managerCreds: AwsCredentials,
 ): Promise<void> {
   const iam = makeIamClient(managerCreds);
-  await iam.send(
-    new DeleteRoleCommand({ RoleName: `${stackPrefix}-app-${appId}-role` }),
-  );
+  await iam.send(new DeleteRoleCommand({ RoleName: `${stackPrefix}-app-${appId}-role` }));
 }
 
 /**
@@ -566,12 +576,16 @@ export async function attachTempInstallCloudDataServerPolicy(
   // re-propagation delay on every install attempt. Skipping preserves the
   // already-propagated state from the previous run.
   try {
-    const existing = await iam.send(new GetRolePolicyCommand({ RoleName: roleName, PolicyName: policyName }));
+    const existing = await iam.send(
+      new GetRolePolicyCommand({ RoleName: roleName, PolicyName: policyName }),
+    );
     if (existing.PolicyDocument) {
       const currentDoc = JSON.parse(decodeURIComponent(existing.PolicyDocument));
       const desiredDoc = JSON.parse(desiredDocument);
       if (canonicalJson(currentDoc) === canonicalJson(desiredDoc)) {
-        console.log("temp-install-cloud-data-server policy unchanged; skipping PutRolePolicy (preserves IAM propagation)");
+        console.log(
+          "temp-install-cloud-data-server policy unchanged; skipping PutRolePolicy (preserves IAM propagation)",
+        );
         return false;
       }
     }

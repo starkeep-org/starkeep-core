@@ -134,11 +134,7 @@ export function managerPolicyStatements(stackPrefix: string): IamStatement[] {
       // edits settings through it.
       Sid: "ManagerManagePlatformParameters",
       Effect: "Allow",
-      Action: [
-        "ssm:GetParameter",
-        "ssm:PutParameter",
-        "ssm:DeleteParameter",
-      ],
+      Action: ["ssm:GetParameter", "ssm:PutParameter", "ssm:DeleteParameter"],
       Resource: SUB(`arn:aws:ssm:*:*:parameter/${stackPrefix}/platform/*`),
     },
     {

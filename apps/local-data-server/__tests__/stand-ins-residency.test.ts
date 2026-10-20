@@ -42,11 +42,18 @@ async function converge(apps: InstalledApp[] = [driveA, driveB]): Promise<void> 
 }
 
 /** Whether a node holds a record's bytes on disk, as opposed to merely its row. */
-async function holds(server: LocalDataServer, app: InstalledApp, recordId: string): Promise<boolean> {
+async function holds(
+  server: LocalDataServer,
+  app: InstalledApp,
+  recordId: string,
+): Promise<boolean> {
   const res = await app.fetch(`/data/records/${recordId}`);
   expect(res.status).toBe(200);
   const body = (await res.json()) as Record<string, unknown>;
-  const record = (body.record ?? body) as { objectStorageKey?: string; object_storage_key?: string };
+  const record = (body.record ?? body) as {
+    objectStorageKey?: string;
+    object_storage_key?: string;
+  };
   const key = record.objectStorageKey ?? record.object_storage_key;
   expect(key, JSON.stringify(body)).toBeTruthy();
   return existsSync(join(server.starkeepDir, "objects", key!));
@@ -56,8 +63,11 @@ async function holds(server: LocalDataServer, app: InstalledApp, recordId: strin
 async function placements(app: InstalledApp, original: string): Promise<Record<number, string>> {
   const where = encodeURIComponent(JSON.stringify({ id: original }));
   const res = await app.fetch(`/data/records?where=${where}`);
-  const sizes = ((await res.json()) as { records: Array<{ stand_ins: { sizes: Array<{ fidelity: number; placement: string }> } }> })
-    .records[0]!.stand_ins.sizes;
+  const sizes = (
+    (await res.json()) as {
+      records: Array<{ stand_ins: { sizes: Array<{ fidelity: number; placement: string }> } }>;
+    }
+  ).records[0]!.stand_ins.sizes;
   return Object.fromEntries(sizes.map((s) => [s.fidelity, s.placement]));
 }
 
@@ -78,7 +88,12 @@ async function waitForRestart(server: LocalDataServer): Promise<void> {
 
 beforeAll(async () => {
   cloud = await startFakeCloud();
-  config = { apiGatewayUrl: cloud.url, pullIntervalMs: 600_000, pushDebounceMs: 50, syncMaxItems: 5 };
+  config = {
+    apiGatewayUrl: cloud.url,
+    pullIntervalMs: 600_000,
+    pushDebounceMs: 50,
+    syncMaxItems: 5,
+  };
   serverA = await startLocalDataServer({ config });
   serverB = await startLocalDataServer({ config });
   driveA = await builtinAppCreds(serverA, "starkeep-drive");
@@ -130,7 +145,11 @@ describe("what a desktop receives against its ceiling", () => {
     await converge();
 
     // The rows arrive everywhere; the bytes follow the ceiling.
-    expect(await placements(driveB, f.original)).toMatchObject({ 1280: "here", 2560: "here", 4272: "cloud" });
+    expect(await placements(driveB, f.original)).toMatchObject({
+      1280: "here",
+      2560: "here",
+      4272: "cloud",
+    });
     expect(await holds(serverB, driveB, f.original)).toBe(false);
   });
 
@@ -224,8 +243,11 @@ describe("what a desktop receives against its ceiling", () => {
     await converge();
     const where = encodeURIComponent(JSON.stringify({ id: f.original }));
     const res = await driveB.fetch(`/data/records?where=${where}`);
-    const sizes = ((await res.json()) as { records: Array<{ stand_ins: { sizes: Array<{ fidelity: number; placement: string }> } }> })
-      .records[0]!.stand_ins.sizes;
+    const sizes = (
+      (await res.json()) as {
+        records: Array<{ stand_ins: { sizes: Array<{ fidelity: number; placement: string }> } }>;
+      }
+    ).records[0]!.stand_ins.sizes;
     expect(sizes.map((s) => [s.fidelity, s.placement])).toEqual([
       [320, "missing"],
       [640, "missing"],
@@ -366,7 +388,11 @@ describe("a desktop that syncs with no cloud", () => {
   });
 
   it("answers file-url with 404 for bytes that are not here, since nothing could fetch them", async () => {
-    const id = await create(driveL, { type: "image/jpeg", sizeBytes: 64, fileName: `gone-${Math.random()}.jpg` });
+    const id = await create(driveL, {
+      type: "image/jpeg",
+      sizeBytes: 64,
+      fileName: `gone-${Math.random()}.jpg`,
+    });
     const res = await driveL.fetch(`/data/records/${id}`);
     const path = ((await res.json()) as { record: { path: string } }).record.path;
     await rm(path);
@@ -392,13 +418,29 @@ describe("the ceiling routes", () => {
   it("count the backlog across every type, for the operator", async () => {
     type Backlog = Record<string, { count: number; complete: boolean }>;
     const read = async () =>
-      ((await (await fetch(`${serverA.url}/residency/stand-ins`)).json()) as { backlog: Backlog }).backlog;
+      ((await (await fetch(`${serverA.url}/residency/stand-ins`)).json()) as { backlog: Backlog })
+        .backlog;
     const before = await read();
-    await create(driveA, { type: "image/jpeg", sizeBytes: BIG, fileName: `waiting-${Math.random()}.jpg`, fidelity: 6000 });
-    await create(driveA, { type: "image/jpeg", sizeBytes: BIG, fileName: `unmeasured-${Math.random()}.jpg` });
+    await create(driveA, {
+      type: "image/jpeg",
+      sizeBytes: BIG,
+      fileName: `waiting-${Math.random()}.jpg`,
+      fidelity: 6000,
+    });
+    await create(driveA, {
+      type: "image/jpeg",
+      sizeBytes: BIG,
+      fileName: `unmeasured-${Math.random()}.jpg`,
+    });
     const after = await read();
-    expect(after["missing-canonical"]).toEqual({ count: before["missing-canonical"]!.count + 1, complete: true });
-    expect(after["missing-fidelity"]).toEqual({ count: before["missing-fidelity"]!.count + 1, complete: true });
+    expect(after["missing-canonical"]).toEqual({
+      count: before["missing-canonical"]!.count + 1,
+      complete: true,
+    });
+    expect(after["missing-fidelity"]).toEqual({
+      count: before["missing-fidelity"]!.count + 1,
+      complete: true,
+    });
   });
 
   it("refuse a malformed ceiling without saving it", async () => {
@@ -440,7 +482,9 @@ describe("POST /residency/free-up-space", () => {
     const refused = body.refused as Array<{ recordId: string; reason: string }>;
     expect(refused.find((r) => r.recordId === f.original)?.reason).toBe("not-durable");
     // Other files on this shared server are refused too — none is removed.
-    expect(refused.every((r) => r.reason === "not-durable" || r.reason === "no-canonical")).toBe(true);
+    expect(refused.every((r) => r.reason === "not-durable" || r.reason === "no-canonical")).toBe(
+      true,
+    );
     expect((await contentUrl(driveA, f.original, "canonical")).body.available_here).toBe(true);
   });
 

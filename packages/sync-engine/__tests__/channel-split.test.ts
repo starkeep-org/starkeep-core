@@ -21,7 +21,6 @@ import type { AppSyncableRowEntry, SyncStateStore, Watermarks } from "../src/typ
  * both the engine (requester) and the in-process transport (responder).
  */
 describe("channel split — SR vs. AR/AW", () => {
-
   async function seedSr(side: Awaited<ReturnType<typeof buildSide>>): Promise<StarkeepId> {
     const id = generateId() as StarkeepId;
     const rec = {
@@ -42,7 +41,10 @@ describe("channel split — SR vs. AR/AW", () => {
     return id;
   }
 
-  async function seedAr(side: Awaited<ReturnType<typeof buildSide>>, appId: string): Promise<string> {
+  async function seedAr(
+    side: Awaited<ReturnType<typeof buildSide>>,
+    appId: string,
+  ): Promise<string> {
     const pk = generateId();
     const ts = side.clock.now();
     const entry: AppSyncableRowEntry = {

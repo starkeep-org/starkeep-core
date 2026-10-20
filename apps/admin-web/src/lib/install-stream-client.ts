@@ -124,7 +124,9 @@ export async function runInstallStream(
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(
-          reattach ? { ...body, reattach: true, ...(resumeFrom !== null ? { resumeFrom } : {}) } : body,
+          reattach
+            ? { ...body, reattach: true, ...(resumeFrom !== null ? { resumeFrom } : {}) }
+            : body,
         ),
       });
     } catch {
@@ -138,10 +140,17 @@ export async function runInstallStream(
     if (result.kind !== "dropped") return result;
     if (isAborted()) return { kind: "error", message: "Cancelled", tokenExpired: false };
     if (attempt >= reconnects) {
-      return { kind: "error", message: "Lost the connection to admin-web during the install", tokenExpired: false };
+      return {
+        kind: "error",
+        message: "Lost the connection to admin-web during the install",
+        tokenExpired: false,
+      };
     }
     // Said once per dropped stream, not once per failed reconnect.
-    if (resp) options.onLine("[Lost the connection to admin-web — the install keeps running. Reconnecting…]");
+    if (resp)
+      options.onLine(
+        "[Lost the connection to admin-web — the install keeps running. Reconnecting…]",
+      );
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
 }

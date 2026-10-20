@@ -63,7 +63,10 @@ describe("GET /api/events — the live path", () => {
   it("pipes upstream frames to the client as they arrive, not at the end", async () => {
     const upstream = pushableStream();
     mockFetch().mockResolvedValue(
-      new Response(upstream.body, { status: 200, headers: { "content-type": "text/event-stream" } }),
+      new Response(upstream.body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
     );
 
     const res = await call();

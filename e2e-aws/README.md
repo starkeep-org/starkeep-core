@@ -25,10 +25,10 @@ which registers only **platform** assertions; the app arrives as a `JourneyApp`
 describing what differs between apps — its id, its directory, the label keys and
 table its manifest declared, the route behind its JWT authorizer.
 
-| `STARKEEP_AWS_APP_DIR` | What runs |
-| --- | --- |
-| _(unset)_ | `test-apps/probe`, the fixture core ships. Needs no other checkout on the machine. |
-| a path | That app. The same platform journey, against a real application — which is what proves a genuine framework app survives the bundle-and-deploy path. |
+| `STARKEEP_AWS_APP_DIR` | What runs                                                                                                                                           |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| _(unset)_              | `test-apps/probe`, the fixture core ships. Needs no other checkout on the machine.                                                                  |
+| a path                 | That app. The same platform journey, against a real application — which is what proves a genuine framework app survives the bundle-and-deploy path. |
 
 A path holding no `starkeep.manifest.json` **fails the run** rather than falling
 back. Asking for a real app and silently getting the fixture would report a
@@ -56,56 +56,56 @@ registry database, which must not land in a checkout you do not own.
 4. Boot a local-data-server (testkit) pointed at the real cloud.
 5. Sign in through the LDS `/auth/tokens` handoff (real Cognito→STS exchange).
 6. Install Drive, then 7. the app under test, via the real install CLIs.
-8. Create a record locally, `POST /sync/now`, assert the row + blob landed in the
+7. Create a record locally, `POST /sync/now`, assert the row + blob landed in the
    cloud under Drive with the app as origin.
-9. Cross-app labels against real DSQL: write, hydrate, reverse query, retract.
+8. Cross-app labels against real DSQL: write, hydrate, reverse query, retract.
    The keys come from the app's manifest, because the broker rejects an
    undeclared key with a 400 and an invented one would fail here rather than at
    the thing the step tests.
-10. Drift a local creds file, re-run the Drive cloud install, and assert sync
-    still validates — the todo-39 regression.
-    - **Rows ahead of bytes, Drive channel.** A record loses its local bytes
-      before sync. Its row must reach the cloud anyway, S3 must lack the file,
-      and the cloud's bytes watermark must stop below the row. Once the bytes
-      return, the file must reach S3 and the watermark must pass the row. This
-      is the only coverage of `_starkeep_byte_coverage` on real DSQL and of
-      the cloud's walk against real S3.
-    - **Rows ahead of bytes, the app's own channel.** The same property for an
-      app-private file in `_starkeep_sync_records`, through the per-app
-      handler and the app's own role. Skipped for an app whose manifest
-      declares no private files.
-11. Static handler; 12. the app root's trailing-slash spelling is gated (a
+9. Drift a local creds file, re-run the Drive cloud install, and assert sync
+   still validates — the todo-39 regression.
+   - **Rows ahead of bytes, Drive channel.** A record loses its local bytes
+     before sync. Its row must reach the cloud anyway, S3 must lack the file,
+     and the cloud's bytes watermark must stop below the row. Once the bytes
+     return, the file must reach S3 and the watermark must pass the row. This
+     is the only coverage of `_starkeep_byte_coverage` on real DSQL and of
+     the cloud's walk against real S3.
+   - **Rows ahead of bytes, the app's own channel.** The same property for an
+     app-private file in `_starkeep_sync_records`, through the per-app
+     handler and the app's own role. Skipped for an app whose manifest
+     declares no private files.
+10. Static handler; 12. the app root's trailing-slash spelling is gated (a
     platform limit, pinned so a change is deliberate).
-13. The cloud-served `/api/local-data` proxy (list + a write verb).
-14. The **negative** case: every app in the cloud registry, probed on both its
+11. The cloud-served `/api/local-data` proxy (list + a write verb).
+12. The **negative** case: every app in the cloud registry, probed on both its
     broker mount and its proxy mount with no token, no cookie and no prior state,
     must answer `401`/`403`. It names no app — the list comes from the registry.
-15. A valid app signature is not enough; the broker demands an end user too.
-16. One URL that answers `200` with a session cookie and `401` without it.
-17. A full **browser** journey in real Chromium (Cognito sign-in → upload through
+13. A valid app signature is not enough; the broker demands an end user too.
+14. One URL that answers `200` with a session cookie and `401` without it.
+15. A full **browser** journey in real Chromium (Cognito sign-in → upload through
     the live file input → see it), exercising presign → S3 PUT →
     `POST /data/records` end-to-end. This is the only coverage of S3 CORS on a
     real presigned PUT. Skipped for an app that declares no browser surface.
-18. The cloud-origin browser upload syncs back **down** to the local data server.
-19. The app's JWT-gated route on the gateway **and** through CloudFront (proving
+16. The cloud-origin browser upload syncs back **down** to the local data server.
+17. The app's JWT-gated route on the gateway **and** through CloudFront (proving
     `Authorization` survives the edge).
-20. An app-private row through the cloud `/app-data` plane.
-21. Part A: shell + `_immutable` assets through the CloudFront distribution (edge hit).
+18. An app-private row through the cloud `/app-data` plane.
+19. Part A: shell + `_immutable` assets through the CloudFront distribution (edge hit).
     Part B: shared bytes via CloudFront signed URL — edge hit, tamper rejected,
     `apps/*` isolated.
-22. The app's own steps (`extraSteps`), if it has any.
-23. Uninstall; assert the app plane is gone but shared records survive.
+20. The app's own steps (`extraSteps`), if it has any.
+21. Uninstall; assert the app plane is gone but shared records survive.
 
 ## Environment contract (`src/env.ts`)
 
-| Var | Default | Meaning |
-| --- | --- | --- |
-| `STARKEEP_AWS_TESTS` | _(unset)_ | Must be `1` to run; otherwise the suite skips. |
-| `STARKEEP_AWS_APP_DIR` | _(unset)_ | The app to run against. Unset selects `test-apps/probe`. A path with no manifest fails the run. |
-| `STARKEEP_AWS_STACK_PREFIX` | `sktest` | Dedicated test stack prefix. **Never** point this at a live deployment's prefix. |
-| `STARKEEP_AWS_REGION` | `us-east-2` | Region for a from-scratch bootstrap (an existing stack's own region always wins via its pool ID). |
-| `STARKEEP_AWS_TEARDOWN` | `all` | What to tear down **after a fully passing run**: `all` → `teardown-bootstrap.sh`; `apps` → `teardown-cloud-data-server.sh`; `none` → keep everything up. A run with **any failed step never tears down**, so a broken stack is left for debugging. |
-| `HMAC_CACHE_TTL_MS` | `0` (in this suite) | Baked into the broker Lambda at install. The suite sets `0` so a just-rotated/revoked app secret isn't served from the broker's cache. Real installs leave it unset → broker keeps its 5-min default. |
+| Var                         | Default             | Meaning                                                                                                                                                                                                                                            |
+| --------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `STARKEEP_AWS_TESTS`        | _(unset)_           | Must be `1` to run; otherwise the suite skips.                                                                                                                                                                                                     |
+| `STARKEEP_AWS_APP_DIR`      | _(unset)_           | The app to run against. Unset selects `test-apps/probe`. A path with no manifest fails the run.                                                                                                                                                    |
+| `STARKEEP_AWS_STACK_PREFIX` | `sktest`            | Dedicated test stack prefix. **Never** point this at a live deployment's prefix.                                                                                                                                                                   |
+| `STARKEEP_AWS_REGION`       | `us-east-2`         | Region for a from-scratch bootstrap (an existing stack's own region always wins via its pool ID).                                                                                                                                                  |
+| `STARKEEP_AWS_TEARDOWN`     | `all`               | What to tear down **after a fully passing run**: `all` → `teardown-bootstrap.sh`; `apps` → `teardown-cloud-data-server.sh`; `none` → keep everything up. A run with **any failed step never tears down**, so a broken stack is left for debugging. |
+| `HMAC_CACHE_TTL_MS`         | `0` (in this suite) | Baked into the broker Lambda at install. The suite sets `0` so a just-rotated/revoked app secret isn't served from the broker's cache. Real installs leave it unset → broker keeps its 5-min default.                                              |
 
 AWS credentials come from the ambient profile/role (the default profile during
 development). The runner authenticates the admin user itself and hands the
@@ -145,12 +145,12 @@ disposable test stack.
 ## Gotchas learned bringing this green
 
 - **App secrets rotate per run.** The ephemeral local-data-server re-mints each
-  app's HMAC secret on every boot, so the cloud install must *reconcile* it to
+  app's HMAC secret on every boot, so the cloud install must _reconcile_ it to
   SSM every run (`put_app_creds_parameter` is an `alwaysRun` orchestrator step,
   not skip-if-done) and the uploaded content must be unique per run (the cloud
   dedupes identical content on live rows, otherwise `shipped: 0`).
 - **Two auth models.** The broker's data/sync/app-data planes are HMAC-signed
-  (app identity); an app's *own* routes sit behind the gateway's Cognito JWT
+  (app identity); an app's _own_ routes sit behind the gateway's Cognito JWT
   authorizer (user identity, `Authorization: Bearer`).
 - **A locally-run app needs `dataServerUrl` in its creds file.** `cli-install-app`
   mirrors the registry secret into `app-creds/<appId>.json` but leaves the URL

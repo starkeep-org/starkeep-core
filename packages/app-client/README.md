@@ -98,12 +98,11 @@ Published to npm. Apps inside `starkeep-core` take it as `workspace:*`;
 
 The local-data-server authenticates every per-app request by HMAC-SHA256 over
 the request body, keyed on the app's `hmacSecret`. The wire contract that every
-local app must implement byte-for-byte (a `timingSafeEqual` mismatch returns
-401) is:
+local app must implement byte-for-byte (a `timingSafeEqual` mismatch returns 401) is:
 
-| Header | Value |
-|---|---|
-| `X-Starkeep-App-Id` | Your `appId`. |
+| Header               | Value                                               |
+| -------------------- | --------------------------------------------------- |
+| `X-Starkeep-App-Id`  | Your `appId`.                                       |
 | `X-Starkeep-App-Sig` | `hex(hmac_sha256(hmacSecret, "<appId>:" ++ body))`. |
 
 The signature input is the bytes `appId`, then a literal `:` byte, then the raw
@@ -160,7 +159,7 @@ import {
   `{ auth: "anonymous", justification }`. It is required because this handler
   holds the app's HMAC credential and will sign whatever reaches it: on the
   cloud surface nothing upstream checks who the caller is (the data plane
-  authenticates the *app*, and a browser navigation cannot carry a bearer
+  authenticates the _app_, and a browser navigation cannot carry a bearer
   token), so if the app does not check, nobody does. In local mode the session
   check is skipped by default — on-device data belongs to the person at the
   keyboard, and a sign-in gate there would break local-first — which
@@ -169,6 +168,7 @@ import {
   wires in this package's own cookie-session verifier. The explicit
   `verifySession` form stays for an unusual verifier; every app in this
   codebase wants what `sessionAuth()` returns.
+
 - **`createRuntimeConfigHandler()`** — returns a `() => Response` that serves
   the cloud-config env vars (`STARKEEP_API_GATEWAY_URL`,
   `STARKEEP_USER_POOL_ID`, etc.) as JSON. Mount it on any GET route. It reads
@@ -227,7 +227,7 @@ considered separately.
 
 A cloud app gets sign-in, sign-out, refresh and an origin gate from this
 package rather than writing them. The division is deliberate: the app owns the
-sign-in *page* — its route, markup, copy and styling — and the platform owns
+sign-in _page_ — its route, markup, copy and styling — and the platform owns
 everything the page talks to, because cookie names, flags, path scoping, the
 Cognito flow and token verification are properties of the deployment rather
 than of any app. The operational rule is that this package ships no React and
@@ -236,7 +236,7 @@ names no app; a component appearing in it means the boundary has been crossed.
 Three entry points:
 
 - **`@starkeep/app-client/edge`** — `createOriginGate({ publicPaths,
-  signInPath, basePath })`, one function of `Request -> Response | undefined`.
+signInPath, basePath })`, one function of `Request -> Response | undefined`.
   It is deny-by-default: a path the manifest has not declared public is
   refused, so a route added later is gated until someone says otherwise. Pass
   `publicPaths` from the manifest itself, never as a second hand-maintained

@@ -18,7 +18,12 @@ import { SSMClient, GetParameterCommand, ParameterNotFound } from "@aws-sdk/clie
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 import { signRequest } from "@starkeep/app-client";
 import type { APIGatewayEvent, LambdaContext } from "../src/handler-utils.js";
-import { installUserTokenFixture, mintTestUserToken, TEST_POOL_ID, TEST_REGION } from "./user-token.js";
+import {
+  installUserTokenFixture,
+  mintTestUserToken,
+  TEST_POOL_ID,
+  TEST_REGION,
+} from "./user-token.js";
 
 const ssmMock = mockClient(SSMClient);
 const stsMock = mockClient(STSClient);
@@ -36,7 +41,11 @@ let deviceWriteRefusal: (typeof import("../src/api-handler.js"))["deviceWriteRef
 
 /** A token from the device client, for a user in the data group. */
 function deviceToken(over: Record<string, unknown> = {}): Promise<string> {
-  return mintTestUserToken({ aud: DEVICE_CLIENT_ID, "cognito:groups": ["starkeep-users"], ...over });
+  return mintTestUserToken({
+    aud: DEVICE_CLIENT_ID,
+    "cognito:groups": ["starkeep-users"],
+    ...over,
+  });
 }
 
 beforeAll(async () => {
@@ -62,7 +71,9 @@ beforeEach(() => {
       Expiration: new Date(Date.now() + 900_000),
     },
   });
-  ssmMock.on(GetParameterCommand).rejects(new ParameterNotFound({ message: "not found", $metadata: {} }));
+  ssmMock
+    .on(GetParameterCommand)
+    .rejects(new ParameterNotFound({ message: "not found", $metadata: {} }));
   for (const appId of ["starkeep-drive", "photos"]) {
     ssmMock
       .on(GetParameterCommand, { Name: `/teststack/app-creds/${appId}`, WithDecryption: true })
@@ -126,7 +137,12 @@ describe("a device token", () => {
 
   it("acts as any cloud-installed app, as a desktop does", async () => {
     const res = await handler(
-      event({ method: "POST", path: "/apps/photos/sync/exchange", body: "{}", token: await deviceToken() }),
+      event({
+        method: "POST",
+        path: "/apps/photos/sync/exchange",
+        body: "{}",
+        token: await deviceToken(),
+      }),
       context,
     );
     expect(res.statusCode).toBe(500);
@@ -140,7 +156,12 @@ describe("a device token", () => {
 
   it("is refused for an app that is not installed in the cloud", async () => {
     const res = await handler(
-      event({ method: "POST", path: "/apps/ghost/sync/exchange", body: "{}", token: await deviceToken() }),
+      event({
+        method: "POST",
+        path: "/apps/ghost/sync/exchange",
+        body: "{}",
+        token: await deviceToken(),
+      }),
       context,
     );
     expect(res.statusCode).toBe(401);
@@ -149,7 +170,11 @@ describe("a device token", () => {
 
   it("is refused on a route outside the sync routes", async () => {
     const res = await handler(
-      event({ method: "DELETE", path: "/apps/starkeep-drive/data/records/r1", token: await deviceToken() }),
+      event({
+        method: "DELETE",
+        path: "/apps/starkeep-drive/data/records/r1",
+        token: await deviceToken(),
+      }),
       context,
     );
     expect(res.statusCode).toBe(403);
@@ -176,7 +201,10 @@ describe("a device token", () => {
         method: "POST",
         path: "/apps/starkeep-drive/sync/exchange",
         body: JSON.stringify({
-          records: [{ id: "img-1", type: "image/jpeg" }, { id: "s-1", type: "starkeep/settings", deletedAt: "t" }],
+          records: [
+            { id: "img-1", type: "image/jpeg" },
+            { id: "s-1", type: "starkeep/settings", deletedAt: "t" },
+          ],
         }),
         token: await deviceToken(),
       }),
@@ -228,7 +256,10 @@ describe("a device token", () => {
   });
 
   it("is refused when it is an access token rather than an ID token", async () => {
-    const res = await handler(event({ ...EXCHANGE, token: await deviceToken({ token_use: "access" }) }), context);
+    const res = await handler(
+      event({ ...EXCHANGE, token: await deviceToken({ token_use: "access" }) }),
+      context,
+    );
     expect(res.statusCode).toBe(401);
   });
 
@@ -250,7 +281,11 @@ describe("a device token, beyond the sync routes", () => {
     // token alone once signed in. No parameter is set here, so the answer is
     // the empty document rather than a refusal.
     const res = await handler(
-      event({ method: "GET", path: "/apps/starkeep-drive/deployment/settings", token: await deviceToken() }),
+      event({
+        method: "GET",
+        path: "/apps/starkeep-drive/deployment/settings",
+        token: await deviceToken(),
+      }),
       context,
     );
     expect(res.statusCode, res.body).toBe(200);
@@ -263,7 +298,9 @@ describe("a device token, beyond the sync routes", () => {
     const res = await handler(
       event({
         ...EXCHANGE,
-        token: await deviceToken({ iss: `https://cognito-idp.${TEST_REGION}.amazonaws.com/${TEST_REGION}_OTHERPOOL` }),
+        token: await deviceToken({
+          iss: `https://cognito-idp.${TEST_REGION}.amazonaws.com/${TEST_REGION}_OTHERPOOL`,
+        }),
       }),
       context,
     );
@@ -332,7 +369,13 @@ describe("a device token on the HMAC branch", () => {
     // Signed as Photos with Photos' own secret, so the HMAC passes; the token
     // beside it is a device token, which the HMAC branch never accepts.
     const body = "{}";
-    const signed = signRequest({ appId: "photos", hmacSecret: "photos-secret", method: "POST", path: "/sync/exchange", body });
+    const signed = signRequest({
+      appId: "photos",
+      hmacSecret: "photos-secret",
+      method: "POST",
+      path: "/sync/exchange",
+      body,
+    });
     const res = await handler(
       event({
         method: "POST",

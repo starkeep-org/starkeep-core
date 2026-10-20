@@ -265,9 +265,13 @@ describe("idTokenClaims", () => {
   });
 
   it("reads the account's groups, and ignores anything that is not a string", () => {
-    const claims = idTokenClaims(idTokenWith({ sub: "u-1", "cognito:groups": ["starkeep-users", 7, "starkeep-admins"] }));
+    const claims = idTokenClaims(
+      idTokenWith({ sub: "u-1", "cognito:groups": ["starkeep-users", 7, "starkeep-admins"] }),
+    );
     expect(claims.groups).toEqual(["starkeep-users", "starkeep-admins"]);
-    expect(idTokenClaims(idTokenWith({ sub: "u-1", "cognito:groups": "starkeep-users" })).groups).toEqual([]);
+    expect(
+      idTokenClaims(idTokenWith({ sub: "u-1", "cognito:groups": "starkeep-users" })).groups,
+    ).toEqual([]);
   });
 
   it("returns null rather than throwing on anything unreadable", () => {

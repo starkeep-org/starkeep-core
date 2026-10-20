@@ -37,7 +37,10 @@ const created: CreatedResource[] = [];
 
 pulumi.runtime.setMocks(
   {
-    newResource(args: pulumi.runtime.MockResourceArgs): { id: string; state: Record<string, unknown> } {
+    newResource(args: pulumi.runtime.MockResourceArgs): {
+      id: string;
+      state: Record<string, unknown>;
+    } {
       created.push({ type: args.type, name: args.name, inputs: args.inputs });
       const extra: Record<string, unknown> = {};
       if (args.type.endsWith("apigatewayv2/api:Api")) {
@@ -46,7 +49,10 @@ pulumi.runtime.setMocks(
       if (args.type.endsWith("cloudfront/distribution:Distribution")) {
         extra.domainName = `${args.name}.cloudfront.net`;
       }
-      return { id: `${args.name}-id`, state: { ...args.inputs, arn: `arn:fake:${args.name}`, ...extra } };
+      return {
+        id: `${args.name}-id`,
+        state: { ...args.inputs, arn: `arn:fake:${args.name}`, ...extra },
+      };
     },
     // The managed cache / origin-request policies are looked up by NAME through
     // data-source calls, so the mock echoes the name back as the id. That makes

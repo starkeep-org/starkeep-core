@@ -136,9 +136,7 @@ describe("paging a sorted query", () => {
     // skips all but one of it.
     const clock = createHLCClock({ nodeId: "test", wallClockFunction: () => 5000 });
     for (let i = 0; i < 15; i += 1) {
-      await adapter.put(
-        createDataRecord(baseInput({ originalFilename: `tied-${i}.jpg` }), clock),
-      );
+      await adapter.put(createDataRecord(baseInput({ originalFilename: `tied-${i}.jpg` }), clock));
     }
     const query: Query = { sort: [{ field: "createdAt", direction: "desc" }] };
     const ids = await pageThrough(query, 4);

@@ -13,7 +13,9 @@ import { createLambdaEntry } from "../src/lambda.js";
 describe("createLambdaEntry", () => {
   it("returns the upstream handler", async () => {
     const upstreamHandler = async (event: { n: number }) => ({ n: event.n + 1 });
-    const handler = await createLambdaEntry({ upstream: Promise.resolve({ handler: upstreamHandler }) });
+    const handler = await createLambdaEntry({
+      upstream: Promise.resolve({ handler: upstreamHandler }),
+    });
     await expect(handler({ n: 1 })).resolves.toEqual({ n: 2 });
   });
 

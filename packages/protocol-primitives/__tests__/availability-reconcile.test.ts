@@ -24,13 +24,15 @@ const stored = (over: Partial<StoredAvailabilityLike> = {}): StoredAvailabilityL
   ...over,
 });
 
-function run(over: {
-  rows?: InventoryRow[];
-  stored?: StoredAvailabilityLike[];
-  snapshotAtMs?: number;
-  nowMs?: number;
-  expectedInstant?: (k: string) => boolean;
-} = {}) {
+function run(
+  over: {
+    rows?: InventoryRow[];
+    stored?: StoredAvailabilityLike[];
+    snapshotAtMs?: number;
+    nowMs?: number;
+    expectedInstant?: (k: string) => boolean;
+  } = {},
+) {
   return reconcileAvailability({
     rows: over.rows ?? [row()],
     stored: new Map((over.stored ?? []).map((s) => [s.objectStorageKey, s])),

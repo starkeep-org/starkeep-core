@@ -6,7 +6,12 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createHash, createHmac } from "node:crypto";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
 import { signRequest } from "@starkeep/app-client";
-import { installApp, testAppManifest, createRecordWithBytes, type InstalledApp } from "./helpers.js";
+import {
+  installApp,
+  testAppManifest,
+  createRecordWithBytes,
+  type InstalledApp,
+} from "./helpers.js";
 
 let server: LocalDataServer;
 let app: InstalledApp;
@@ -85,7 +90,12 @@ describe("HMAC on the data plane", () => {
   });
 
   it("rejects when the body is tampered after signing", async () => {
-    const body = JSON.stringify({ type: "image/jpeg", contentType: "image/jpeg", contentHash: "0".repeat(64), sizeBytes: 1 });
+    const body = JSON.stringify({
+      type: "image/jpeg",
+      contentType: "image/jpeg",
+      contentHash: "0".repeat(64),
+      sizeBytes: 1,
+    });
     const headers = signRequest({
       appId: app.appId,
       hmacSecret: app.hmacSecret,

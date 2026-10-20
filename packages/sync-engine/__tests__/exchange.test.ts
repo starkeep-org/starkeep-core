@@ -12,10 +12,7 @@ import {
   serializeHLC,
   type HLCTimestamp,
 } from "@starkeep/protocol-primitives";
-import {
-  MockDatabaseAdapter,
-  MockObjectStorageAdapter,
-} from "@starkeep/storage-adapter";
+import { MockDatabaseAdapter, MockObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { createSyncEngine } from "../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../src/transports/in-process-transport.js";
 import type { SyncStateStore, Watermarks } from "../src/types.js";
@@ -50,7 +47,6 @@ function fileRecordRow(
     deleted_at: null,
   };
 }
-
 
 describe("version-vector exchange", () => {
   it("round-trips local creates to the cloud and pulls cloud-created records back", async () => {
@@ -445,12 +441,7 @@ describe("version-vector exchange", () => {
     expect(result.shipped).toBe(1);
 
     // Cloud's AR row landed via the appSyncable apply path...
-    const cloudPage = await cloudApp.applier.scanSince(
-      "test-app",
-      FILE_RECORDS_TABLE,
-      {},
-      1000,
-    );
+    const cloudPage = await cloudApp.applier.scanSince("test-app", FILE_RECORDS_TABLE, {}, 1000);
     expect(cloudPage.rows).toHaveLength(1);
     expect(cloudPage.rows[0]!.row?.["id"]).toBe("local-photo-1");
 
@@ -568,12 +559,7 @@ describe("version-vector exchange", () => {
 
     // Every row ships, the AR row included.
     expect(await cloudDb.get(srEarly.id)).not.toBeNull();
-    const cloudArPage = await cloudApp.applier.scanSince(
-      "test-app",
-      FILE_RECORDS_TABLE,
-      {},
-      1000,
-    );
+    const cloudArPage = await cloudApp.applier.scanSince("test-app", FILE_RECORDS_TABLE, {}, 1000);
     expect(cloudArPage.rows).toHaveLength(1);
     expect(await cloudDb.get(srLate.id)).not.toBeNull();
     expect(await cloudStorage.has(srLate.objectStorageKey)).toBe(true);
@@ -625,12 +611,8 @@ describe("version-vector exchange", () => {
     // transfer. Seed 10 rows; maxItems=3 forces the
     // cursor to traverse multiple scanSince pages per round.
     const ROW_COUNT = 10;
-    const localApp = makeMockAppSource("test-app", [
-      { name: "items", pkColumns: ["id"] },
-    ]);
-    const cloudApp = makeMockAppSource("test-app", [
-      { name: "items", pkColumns: ["id"] },
-    ]);
+    const localApp = makeMockAppSource("test-app", [{ name: "items", pkColumns: ["id"] }]);
+    const cloudApp = makeMockAppSource("test-app", [{ name: "items", pkColumns: ["id"] }]);
 
     for (let i = 0; i < ROW_COUNT; i++) {
       const hlc = localClock.now();
@@ -681,18 +663,9 @@ describe("version-vector exchange", () => {
     }
 
     // All rows should have made it to the cloud.
-    const cloudPage = await cloudApp.applier.scanSince(
-      "test-app",
-      "items",
-      {},
-      1000,
-    );
+    const cloudPage = await cloudApp.applier.scanSince("test-app", "items", {}, 1000);
     expect(cloudPage.rows).toHaveLength(ROW_COUNT);
-    const cloudIds = cloudPage.rows
-      .map((r) => r.row?.["id"] as string)
-      .sort();
-    expect(cloudIds).toEqual(
-      Array.from({ length: ROW_COUNT }, (_, i) => `row-${i}`).sort(),
-    );
+    const cloudIds = cloudPage.rows.map((r) => r.row?.["id"] as string).sort();
+    expect(cloudIds).toEqual(Array.from({ length: ROW_COUNT }, (_, i) => `row-${i}`).sort());
   });
 });

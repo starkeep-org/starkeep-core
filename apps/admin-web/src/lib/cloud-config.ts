@@ -112,7 +112,9 @@ export async function readCloudConfig(): Promise<CloudConfig | null> {
   }
 }
 
-export async function patchCloudConfig(patch: { [K in keyof StarkeepConfig]?: string | null }): Promise<CloudConfig | null> {
+export async function patchCloudConfig(patch: {
+  [K in keyof StarkeepConfig]?: string | null;
+}): Promise<CloudConfig | null> {
   const res = await fetch("/api/config", {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -160,4 +162,3 @@ export function credentialsNearExpiry(creds: STSCredentials): boolean {
   const expiry = new Date(creds.expiration).getTime();
   return Date.now() > expiry - 5 * 60 * 1000;
 }
-

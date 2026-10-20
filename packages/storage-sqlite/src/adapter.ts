@@ -258,11 +258,13 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
       .insertInto("shared_records")
       .values({ ...row })
       .onConflict((oc) =>
-        oc.column("id").doUpdateSet((eb) =>
-          Object.fromEntries(
-            updateColumns.map((column) => [column, eb.ref(`excluded.${column}`)]),
+        oc
+          .column("id")
+          .doUpdateSet((eb) =>
+            Object.fromEntries(
+              updateColumns.map((column) => [column, eb.ref(`excluded.${column}`)]),
+            ),
           ),
-        ),
       )
       .compile();
     this.runStmt(query.sql, ...query.parameters);
@@ -337,9 +339,7 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     return { rows: rows.map(rowToLabel), hasMore, truncated };
   }
 
-  async bucketDigest(
-    prefixLength: number = DEFAULT_BUCKET_PREFIX_LENGTH,
-  ): Promise<DigestBucket[]> {
+  async bucketDigest(prefixLength: number = DEFAULT_BUCKET_PREFIX_LENGTH): Promise<DigestBucket[]> {
     // Records and labels together: they are one channel and one coverage
     // watermark, so a digest over only half of it would report agreement while
     // a label was missing.
@@ -418,17 +418,8 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     const booleans = booleanColumnNames(schema.columns);
 
     if (query.mode === "aggregate") {
-      const compiled = buildAppAggregateQuery(
-        qb,
-        table,
-        query,
-        SQLITE_APP_QUERY_DIALECT,
-        build,
-      );
-      return collectAggregatePage(
-        query,
-        fromSqliteRows(this.selectCompiled(compiled), booleans),
-      );
+      const compiled = buildAppAggregateQuery(qb, table, query, SQLITE_APP_QUERY_DIALECT, build);
+      return collectAggregatePage(query, fromSqliteRows(this.selectCompiled(compiled), booleans));
     }
     const compiled = buildAppRowQuery(qb, table, query, build);
     // Converted before the page is collected rather than after, so the page
@@ -492,9 +483,11 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
       .values(values)
       .onConflict((oc) =>
         updateColumns.length > 0
-          ? oc.column("record_id").doUpdateSet((eb) =>
-              Object.fromEntries(updateColumns.map((c) => [c, eb.ref(`excluded.${c}`)])),
-            )
+          ? oc
+              .column("record_id")
+              .doUpdateSet((eb) =>
+                Object.fromEntries(updateColumns.map((c) => [c, eb.ref(`excluded.${c}`)])),
+              )
           : oc.column("record_id").doNothing(),
       )
       .compile();
@@ -602,14 +595,10 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     }
   }
 
-  async getLabelsByRecordIds(
-    recordIds: StarkeepId[],
-  ): Promise<Map<StarkeepId, RecordLabel[]>> {
+  async getLabelsByRecordIds(recordIds: StarkeepId[]): Promise<Map<StarkeepId, RecordLabel[]>> {
     if (recordIds.length === 0) return new Map();
     const query = buildLabelsByRecordIds(qb, LABELS, recordIds);
-    return groupLabelsByRecordId(
-      this.allRows<LabelRow>(query.sql, ...query.parameters),
-    );
+    return groupLabelsByRecordId(this.allRows<LabelRow>(query.sql, ...query.parameters));
   }
 
   /**
@@ -712,7 +701,11 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
     // and only the record row knows how big the object is.
     const compiled = qb
       .selectFrom(AVAILABILITY)
-      .innerJoin("shared_records", "shared_records.object_storage_key", `${AVAILABILITY}.object_storage_key`)
+      .innerJoin(
+        "shared_records",
+        "shared_records.object_storage_key",
+        `${AVAILABILITY}.object_storage_key`,
+      )
       .select(({ fn }) => [
         fn.count<number>(`${AVAILABILITY}.object_storage_key`).as("object_count"),
         fn.sum<number>("shared_records.size_bytes").as("bytes"),

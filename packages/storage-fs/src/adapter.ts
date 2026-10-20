@@ -1,4 +1,16 @@
-import { mkdir, readFile, writeFile, unlink, readdir, stat, lstat, symlink, readlink, access, rename } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  writeFile,
+  unlink,
+  readdir,
+  stat,
+  lstat,
+  symlink,
+  readlink,
+  access,
+  rename,
+} from "node:fs/promises";
 import { createReadStream, createWriteStream } from "node:fs";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -6,7 +18,15 @@ import { randomUUID } from "node:crypto";
 import { join, dirname } from "node:path";
 import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { verifyingStream } from "@starkeep/storage-adapter";
-import type { ByteRange, PutOptions, PutStreamOptions, GetResult, ListOptions, ListResult, ObjectFacts } from "@starkeep/storage-adapter";
+import type {
+  ByteRange,
+  PutOptions,
+  PutStreamOptions,
+  GetResult,
+  ListOptions,
+  ListResult,
+  ObjectFacts,
+} from "@starkeep/storage-adapter";
 
 export interface FsObjectStorageAdapterOptions {
   basePath: string;
@@ -168,7 +188,10 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
       let metadata: Record<string, string> | undefined;
       try {
         const metaRaw = await readFile(`${filePath}.meta.json`, "utf8");
-        const meta = JSON.parse(metaRaw) as { contentType?: string; metadata?: Record<string, string> };
+        const meta = JSON.parse(metaRaw) as {
+          contentType?: string;
+          metadata?: Record<string, string>;
+        };
         contentType = meta.contentType;
         metadata = meta.metadata;
       } catch {
@@ -242,10 +265,7 @@ export class FsObjectStorageAdapter implements ObjectStorageAdapter {
     } catch {
       // No sidecar yet.
     }
-    await writeFile(
-      `${filePath}.meta.json`,
-      JSON.stringify({ ...existing, tags }),
-    );
+    await writeFile(`${filePath}.meta.json`, JSON.stringify({ ...existing, tags }));
   }
 
   async restoreObject(

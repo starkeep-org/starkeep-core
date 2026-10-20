@@ -8,7 +8,9 @@ import {
 } from "../src/object-storage/stream-verify.js";
 
 const bytes = Buffer.from("a few bytes worth verifying");
-const hex = createHash("sha256").update(bytes as unknown as Uint8Array).digest("hex");
+const hex = createHash("sha256")
+  .update(bytes as unknown as Uint8Array)
+  .digest("hex");
 
 /** A stream that yields its input in several chunks, like a real network read. */
 function chunked(data: Buffer, chunkSize: number): ReadableStream<Uint8Array> {

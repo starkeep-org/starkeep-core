@@ -1,6 +1,11 @@
 import type { RawDatabase } from "@starkeep/storage-adapter";
 import { sql } from "kysely";
-import { CATEGORIES, sqliteMetadataDdl, metadataIndexDdls, hasMetadataTable } from "@starkeep/protocol-primitives";
+import {
+  CATEGORIES,
+  sqliteMetadataDdl,
+  metadataIndexDdls,
+  hasMetadataTable,
+} from "@starkeep/protocol-primitives";
 import { compiler as qb } from "../query-builder.js";
 
 /**
@@ -86,7 +91,11 @@ function applyLocalSchemaDdl(db: RawDatabase): void {
       .compile().sql,
   );
   const sharedRecordsIndexes = [
-    qb.schema.createIndex("idx_shared_records_type").ifNotExists().on("shared_records").column("type"),
+    qb.schema
+      .createIndex("idx_shared_records_type")
+      .ifNotExists()
+      .on("shared_records")
+      .column("type"),
     qb.schema
       .createIndex("idx_shared_records_node_watermark")
       .ifNotExists()
@@ -179,9 +188,7 @@ function applyLocalSchemaDdl(db: RawDatabase): void {
       .ifNotExists()
       .unique()
       .on("shared_records")
-      .expression(
-        sql`COALESCE(parent_id, ''), COALESCE(original_filename, ''), content_hash`,
-      )
+      .expression(sql`COALESCE(parent_id, ''), COALESCE(original_filename, ''), content_hash`)
       .where(sql.ref("deleted_at"), "is", null)
       .compile().sql,
   );

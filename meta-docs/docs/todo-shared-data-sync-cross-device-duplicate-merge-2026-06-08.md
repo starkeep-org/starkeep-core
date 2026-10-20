@@ -22,4 +22,4 @@ This is reachable in the live design: a user who imports the same file on two de
 ## Notes for revisit
 
 - Touches the same family of "what does sync settlement allow" reasoning as the blob-GC / `parent_id` integrity todo ([[todo-cloud-data-server-blob-gc]]) — coordinate when picking up either.
-- Originally captured in `TODO.md` predating the Drive single-channel design; the deferral rationale ("revisit once multi-device sync is being exercised") has lapsed because multi-device shared sync via Drive *is* the live design.
+- Originally captured in `TODO.md` predating the Drive single-channel design; the deferral rationale ("revisit once multi-device sync is being exercised") has lapsed because multi-device shared sync via Drive _is_ the live design.

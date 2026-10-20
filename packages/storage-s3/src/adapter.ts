@@ -102,20 +102,14 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
 
   async healthCheck(): Promise<boolean> {
     try {
-      await this.getClient().send(
-        new HeadBucketCommand({ Bucket: this.options.bucketName }),
-      );
+      await this.getClient().send(new HeadBucketCommand({ Bucket: this.options.bucketName }));
       return true;
     } catch {
       return false;
     }
   }
 
-  async put(
-    key: string,
-    data: Buffer | Uint8Array,
-    options?: PutOptions,
-  ): Promise<void> {
+  async put(key: string, data: Buffer | Uint8Array, options?: PutOptions): Promise<void> {
     const resolvedKey = this.resolveKey(key);
     const contentType = options?.contentType;
 
@@ -145,9 +139,7 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
           // S3's Range header is inclusive at both ends and an absent end means
           // "to the last byte" — the same shape as ByteRange, so this is a
           // formatting change and not a semantic one.
-          ...(range
-            ? { Range: `bytes=${range.start}-${range.end ?? ""}` }
-            : {}),
+          ...(range ? { Range: `bytes=${range.start}-${range.end ?? ""}` } : {}),
         }),
       );
       if (!response.Body) return null;
@@ -155,8 +147,9 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
       // contract is a web ReadableStream so the same interface is
       // implementable on React Native and in a browser. `transformToWebStream`
       // is the SDK's own conversion, so no bytes are buffered here.
-      return (response.Body as { transformToWebStream(): ReadableStream<Uint8Array> })
-        .transformToWebStream();
+      return (
+        response.Body as { transformToWebStream(): ReadableStream<Uint8Array> }
+      ).transformToWebStream();
     } catch (error: unknown) {
       if (isMissingOrForbidden(error)) return null;
       throw error;
@@ -381,9 +374,7 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
       }),
     );
 
-    const keys = (response.Contents ?? []).map(
-      (object) => (object.Key ?? "").slice(prefixOffset),
-    );
+    const keys = (response.Contents ?? []).map((object) => (object.Key ?? "").slice(prefixOffset));
 
     return {
       keys,
@@ -392,10 +383,7 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
     };
   }
 
-  async getSignedUrl(
-    key: string,
-    options?: SignedUrlOptions,
-  ): Promise<string> {
+  async getSignedUrl(key: string, options?: SignedUrlOptions): Promise<string> {
     const expiresInSeconds = options?.expiresIn ?? 3600;
     const command = new GetObjectCommand({
       Bucket: this.options.bucketName,
@@ -407,10 +395,7 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
     });
   }
 
-  async getSignedPutUrl(
-    key: string,
-    options?: SignedPutUrlOptions,
-  ): Promise<string> {
+  async getSignedPutUrl(key: string, options?: SignedPutUrlOptions): Promise<string> {
     const expiresInSeconds = options?.expiresIn ?? 3600;
     const command = new PutObjectCommand({
       Bucket: this.options.bucketName,
@@ -420,9 +405,7 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
       // may write these exact bytes to this key and nothing else. S3 rejects a
       // mismatched body rather than storing it, so "200" becomes a statement
       // about the bytes and not just about the request.
-      ...(options?.checksumSha256
-        ? { ChecksumSHA256: options.checksumSha256 }
-        : {}),
+      ...(options?.checksumSha256 ? { ChecksumSHA256: options.checksumSha256 } : {}),
       ...(options?.storageClass
         ? { StorageClass: options.storageClass as PutObjectCommandInput["StorageClass"] }
         : {}),

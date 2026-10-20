@@ -200,9 +200,7 @@ export class MockObjectStorageAdapter implements ObjectStorageAdapter {
       .sort();
 
     const limit = options?.limit ?? allKeys.length;
-    const cursorIndex = options?.cursor
-      ? allKeys.indexOf(options.cursor) + 1
-      : 0;
+    const cursorIndex = options?.cursor ? allKeys.indexOf(options.cursor) + 1 : 0;
 
     const keys = allKeys.slice(cursorIndex, cursorIndex + limit);
     const hasMore = cursorIndex + limit < allKeys.length;

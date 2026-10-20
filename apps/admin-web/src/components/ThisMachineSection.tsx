@@ -260,16 +260,26 @@ export function ThisMachineSection({
           <Button
             type="submit"
             disabled={
-              busy || email.trim() === "" || password === "" || (needsNewPassword && newPassword.length < 8)
+              busy ||
+              email.trim() === "" ||
+              password === "" ||
+              (needsNewPassword && newPassword.length < 8)
             }
           >
-            {busy ? "Signing in…" : needsNewPassword ? "Set password and sign in" : "Sign in to sync"}
+            {busy
+              ? "Signing in…"
+              : needsNewPassword
+                ? "Set password and sign in"
+                : "Sign in to sync"}
           </Button>
         </form>
       )}
 
       {deviceAddress && !restarting && v.cloudUrl !== null && (
-        <div className="flex flex-wrap items-center gap-2 text-sm" aria-label="Address for other devices">
+        <div
+          className="flex flex-wrap items-center gap-2 text-sm"
+          aria-label="Address for other devices"
+        >
           <span className="text-muted-foreground">Phones and other computers sign in with</span>
           <span className="font-mono break-all">{deviceAddress}</span>
           <Button variant="outline" size="sm" onClick={() => copyAddress(deviceAddress)}>

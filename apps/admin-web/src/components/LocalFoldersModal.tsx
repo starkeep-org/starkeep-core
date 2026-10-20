@@ -88,21 +88,23 @@ export function LocalFoldersModal({
             watches.map((w) => (
               <div key={w.id} className="flex flex-col gap-2 rounded-md border p-2">
                 <div className="flex items-center justify-between gap-2">
-                <div className="flex min-w-0 flex-1 items-center gap-2">
-                  <span className="flex-1 truncate text-sm">{w.directoryPath}</span>
-                  <Badge variant="outline" className="shrink-0 text-xs">{w.state}</Badge>
-                  <span className="shrink-0 text-xs text-muted-foreground">
-                    {w.syncedFiles}/{w.totalFiles}
-                  </span>
-                </div>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="shrink-0 text-destructive hover:text-destructive"
-                  onClick={() => onRemove(w.id)}
-                >
-                  Remove
-                </Button>
+                  <div className="flex min-w-0 flex-1 items-center gap-2">
+                    <span className="flex-1 truncate text-sm">{w.directoryPath}</span>
+                    <Badge variant="outline" className="shrink-0 text-xs">
+                      {w.state}
+                    </Badge>
+                    <span className="shrink-0 text-xs text-muted-foreground">
+                      {w.syncedFiles}/{w.totalFiles}
+                    </span>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="shrink-0 text-destructive hover:text-destructive"
+                    onClick={() => onRemove(w.id)}
+                  >
+                    Remove
+                  </Button>
                 </div>
                 <WatchExceptions watch={w} onAddBack={onAddBack} addingBack={addingBack} />
               </div>
@@ -118,7 +120,9 @@ export function LocalFoldersModal({
             className="h-8 text-sm"
             value={path}
             onChange={(e) => onPathChange(e.currentTarget.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") onAdd(); }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") onAdd();
+            }}
           />
           <Button size="sm" onClick={onAdd} disabled={submitting || !path.trim()}>
             {submitting && (
@@ -165,8 +169,8 @@ function WatchExceptions({
             {possiblyLost.length === 1 ? "1 file" : `${possiblyLost.length} files`} may be lost
           </span>
           <span className="text-muted-foreground">
-            These left the folder before the cloud was confirmed to hold them, so Starkeep may
-            have no copy. Put the file back, or delete the item from Drive&apos;s Trash.
+            These left the folder before the cloud was confirmed to hold them, so Starkeep may have
+            no copy. Put the file back, or delete the item from Drive&apos;s Trash.
           </span>
           {possiblyLost.map((p) => (
             <span key={p} className="truncate font-mono text-destructive" title={p}>

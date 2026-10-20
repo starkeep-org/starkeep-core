@@ -18,10 +18,7 @@ import {
   QUERY_COLUMNS,
   type QueryConformanceHarness,
 } from "@starkeep/storage-adapter/conformance/query";
-import type {
-  AppSyncableNamespace,
-  AppSyncableNamespaceStore,
-} from "@starkeep/shared-space-api";
+import type { AppSyncableNamespace, AppSyncableNamespaceStore } from "@starkeep/shared-space-api";
 import { SqliteAppSyncableApplier } from "../src/app-syncable/apply.js";
 import { appSyncableTableName } from "../src/app-syncable/namespace.js";
 

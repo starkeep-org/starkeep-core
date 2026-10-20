@@ -116,9 +116,7 @@ export async function assessDurability(
   query: DurabilityQuery,
   probes: readonly ReplicaProbe[],
 ): Promise<DurabilityVerdict> {
-  const replicas = await Promise.all(
-    probes.map((probe) => probeReplica(query, probe)),
-  );
+  const replicas = await Promise.all(probes.map((probe) => probeReplica(query, probe)));
 
   const confirmed = replicas.filter((r) => r.state === "confirmed");
   const unverified = replicas.filter((r) => r.state === "present-unverified");
@@ -136,10 +134,7 @@ export async function assessDurability(
   };
 }
 
-async function probeReplica(
-  query: DurabilityQuery,
-  probe: ReplicaProbe,
-): Promise<ReplicaReport> {
+async function probeReplica(query: DurabilityQuery, probe: ReplicaProbe): Promise<ReplicaReport> {
   let facts;
   try {
     facts = await probe.storage.stat(query.objectStorageKey);

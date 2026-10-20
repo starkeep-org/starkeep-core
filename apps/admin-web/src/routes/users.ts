@@ -80,33 +80,48 @@ function cognito(body: SessionBody): CognitoIdentityProviderClient {
 
 function userPoolId(): string {
   const config = readStarkeepConfig() as { userPoolId?: string };
-  if (!config.userPoolId) throw new Error("~/.starkeep/config.json has no userPoolId — complete the cloud setup first");
+  if (!config.userPoolId)
+    throw new Error("~/.starkeep/config.json has no userPoolId — complete the cloud setup first");
   return config.userPoolId;
 }
 
-async function allUsers(client: CognitoIdentityProviderClient, poolId: string): Promise<UserType[]> {
+async function allUsers(
+  client: CognitoIdentityProviderClient,
+  poolId: string,
+): Promise<UserType[]> {
   const users: UserType[] = [];
   let token: string | undefined;
   do {
-    const page = await client.send(new ListUsersCommand({ UserPoolId: poolId, PaginationToken: token }));
+    const page = await client.send(
+      new ListUsersCommand({ UserPoolId: poolId, PaginationToken: token }),
+    );
     users.push(...(page.Users ?? []));
     token = page.PaginationToken;
   } while (token);
   return users;
 }
 
-async function membersOf(client: CognitoIdentityProviderClient, poolId: string, group: Group): Promise<Set<string>> {
+async function membersOf(
+  client: CognitoIdentityProviderClient,
+  poolId: string,
+  group: Group,
+): Promise<Set<string>> {
   const members = new Set<string>();
   let token: string | undefined;
   do {
-    const page = await client.send(new ListUsersInGroupCommand({ UserPoolId: poolId, GroupName: group, NextToken: token }));
+    const page = await client.send(
+      new ListUsersInGroupCommand({ UserPoolId: poolId, GroupName: group, NextToken: token }),
+    );
     for (const user of page.Users ?? []) if (user.Username) members.add(user.Username);
     token = page.NextToken;
   } while (token);
   return members;
 }
 
-async function listUsers(client: CognitoIdentityProviderClient, poolId: string): Promise<UserView[]> {
+async function listUsers(
+  client: CognitoIdentityProviderClient,
+  poolId: string,
+): Promise<UserView[]> {
   const [users, admins, data] = await Promise.all([
     allUsers(client, poolId),
     membersOf(client, poolId, ADMINS_GROUP),
@@ -143,7 +158,11 @@ export async function LIST(req: Request): Promise<Response> {
 
 /** Create an account. Body: session plus `{ email, admin?, data? }`. Cognito emails the invitation. */
 export async function CREATE(req: Request): Promise<Response> {
-  const body = (await req.json()) as SessionBody & { email?: string; admin?: boolean; data?: boolean };
+  const body = (await req.json()) as SessionBody & {
+    email?: string;
+    admin?: boolean;
+    data?: boolean;
+  };
   const email = typeof body.email === "string" ? body.email.trim() : "";
   if (!/^[^\s@]+@[^\s@]+$/.test(email)) {
     return Response.json({ error: "Enter the person's email address." }, { status: 400 });
@@ -163,9 +182,18 @@ export async function CREATE(req: Request): Promise<Response> {
       }),
     );
     const username = created.User?.Username ?? email;
-    for (const [group, wanted] of [[ADMINS_GROUP, body.admin], [DATA_GROUP, body.data]] as const) {
+    for (const [group, wanted] of [
+      [ADMINS_GROUP, body.admin],
+      [DATA_GROUP, body.data],
+    ] as const) {
       if (wanted) {
-        await client.send(new AdminAddUserToGroupCommand({ UserPoolId: poolId, Username: username, GroupName: group }));
+        await client.send(
+          new AdminAddUserToGroupCommand({
+            UserPoolId: poolId,
+            Username: username,
+            GroupName: group,
+          }),
+        );
       }
     }
     return Response.json({ users: await listUsers(client, poolId) });
@@ -176,7 +204,11 @@ export async function CREATE(req: Request): Promise<Response> {
 
 /** Add an account to a group or take it out. Body: session plus `{ username, group, member }`. */
 export async function SET_GROUP(req: Request): Promise<Response> {
-  const body = (await req.json()) as SessionBody & { username?: string; group?: string; member?: boolean };
+  const body = (await req.json()) as SessionBody & {
+    username?: string;
+    group?: string;
+    member?: boolean;
+  };
   const { username, group, member } = body;
   if (!username || !GROUPS.includes(group as Group) || typeof member !== "boolean") {
     return Response.json({ error: "username, group and member are required" }, { status: 400 });
@@ -185,7 +217,13 @@ export async function SET_GROUP(req: Request): Promise<Response> {
     const client = cognito(body);
     const poolId = userPoolId();
     if (member) {
-      await client.send(new AdminAddUserToGroupCommand({ UserPoolId: poolId, Username: username, GroupName: group }));
+      await client.send(
+        new AdminAddUserToGroupCommand({
+          UserPoolId: poolId,
+          Username: username,
+          GroupName: group,
+        }),
+      );
     } else {
       if (group === ADMINS_GROUP) {
         const admins = await membersOf(client, poolId, ADMINS_GROUP);
@@ -197,7 +235,13 @@ export async function SET_GROUP(req: Request): Promise<Response> {
           );
         }
       }
-      await client.send(new AdminRemoveUserFromGroupCommand({ UserPoolId: poolId, Username: username, GroupName: group }));
+      await client.send(
+        new AdminRemoveUserFromGroupCommand({
+          UserPoolId: poolId,
+          Username: username,
+          GroupName: group,
+        }),
+      );
     }
     return Response.json({ users: await listUsers(client, poolId) });
   } catch (err) {
@@ -222,7 +266,9 @@ export async function SIGN_OUT_EVERYWHERE(req: Request): Promise<Response> {
   try {
     const client = cognito(body);
     const poolId = userPoolId();
-    await client.send(new AdminUserGlobalSignOutCommand({ UserPoolId: poolId, Username: body.username }));
+    await client.send(
+      new AdminUserGlobalSignOutCommand({ UserPoolId: poolId, Username: body.username }),
+    );
     return Response.json({ users: await listUsers(client, poolId) });
   } catch (err) {
     return failed(err, "sign out everywhere");
@@ -254,7 +300,9 @@ export async function SET_ENABLED(req: Request): Promise<Response> {
       return Response.json({ users: await listUsers(client, poolId) });
     }
     await client.send(new AdminDisableUserCommand({ UserPoolId: poolId, Username: username }));
-    await client.send(new AdminUserGlobalSignOutCommand({ UserPoolId: poolId, Username: username }));
+    await client.send(
+      new AdminUserGlobalSignOutCommand({ UserPoolId: poolId, Username: username }),
+    );
     return Response.json({ users: await listUsers(client, poolId) });
   } catch (err) {
     return failed(err, "set enabled");
@@ -274,7 +322,8 @@ export function temporaryPassword(): string {
   // 256 is not a multiple of the alphabet's size, so the bias toward early
   // letters is a fraction of a bit over the whole password. Not worth a
   // rejection loop for a password the person replaces at once.
-  for (const byte of bytes) out += TEMPORARY_PASSWORD_ALPHABET[byte % TEMPORARY_PASSWORD_ALPHABET.length];
+  for (const byte of bytes)
+    out += TEMPORARY_PASSWORD_ALPHABET[byte % TEMPORARY_PASSWORD_ALPHABET.length];
   return out;
 }
 

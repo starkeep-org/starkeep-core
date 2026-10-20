@@ -78,9 +78,7 @@ describe.each(backends)("label contract — $name", (backend) => {
     value = "",
     recordType = "image/jpeg",
   ) {
-    await adapter.upsertLabels([
-      { recordId, appId, key, value, recordType, hlc: clock.now() },
-    ]);
+    await adapter.upsertLabels([{ recordId, appId, key, value, recordType, hlc: clock.now() }]);
   }
 
   async function pageToExhaustion(q: {
@@ -152,9 +150,30 @@ describe.each(backends)("label contract — $name", (backend) => {
     // in the shared query builder precisely so no adapter can differ here.
     const hlc = clock.now();
     await adapter.upsertLabels([
-      { recordId: rid(1), appId: "alpha", key: "quality", value: "high", recordType: "image/jpeg", hlc },
-      { recordId: rid(1), appId: "alpha", key: "quality", value: "high", recordType: "image/png", hlc },
-      { recordId: rid(2), appId: "alpha", key: "quality", value: "mid", recordType: "image/jpeg", hlc },
+      {
+        recordId: rid(1),
+        appId: "alpha",
+        key: "quality",
+        value: "high",
+        recordType: "image/jpeg",
+        hlc,
+      },
+      {
+        recordId: rid(1),
+        appId: "alpha",
+        key: "quality",
+        value: "high",
+        recordType: "image/png",
+        hlc,
+      },
+      {
+        recordId: rid(2),
+        appId: "alpha",
+        key: "quality",
+        value: "mid",
+        recordType: "image/jpeg",
+        hlc,
+      },
     ]);
 
     const one = (await adapter.getLabelsByRecordIds([rid(1)])).get(rid(1))!;
@@ -169,8 +188,22 @@ describe.each(backends)("label contract — $name", (backend) => {
     // single-valued one with no error at all.
     const hlc = clock.now();
     await adapter.upsertLabels([
-      { recordId: rid(1), appId: "alpha", key: "face", value: "Alice", recordType: "image/jpeg", hlc },
-      { recordId: rid(1), appId: "alpha", key: "face", value: "Bob", recordType: "image/jpeg", hlc },
+      {
+        recordId: rid(1),
+        appId: "alpha",
+        key: "face",
+        value: "Alice",
+        recordType: "image/jpeg",
+        hlc,
+      },
+      {
+        recordId: rid(1),
+        appId: "alpha",
+        key: "face",
+        value: "Bob",
+        recordType: "image/jpeg",
+        hlc,
+      },
     ]);
     const labels = (await adapter.getLabelsByRecordIds([rid(1)])).get(rid(1))!;
     expect(labels.map((l) => l.value).sort()).toEqual(["Alice", "Bob"]);
@@ -227,8 +260,9 @@ describe.each(backends)("label contract — $name", (backend) => {
     await replaceValues(rid(1), "face", ["Carol"]);
 
     const labels = (await adapter.getLabelsByRecordIds([rid(1)])).get(rid(1))!;
-    expect(labels.filter((l) => l.appId === "alpha" && l.key === "face").map((l) => l.value))
-      .toEqual(["Carol"]);
+    expect(
+      labels.filter((l) => l.appId === "alpha" && l.key === "face").map((l) => l.value),
+    ).toEqual(["Carol"]);
     // Scoped by (record, app, key): another key of the same app, and the same
     // key of another app, are untouched.
     expect(labels.find((l) => l.key === "quality")!.value).toBe("high");
@@ -272,7 +306,9 @@ describe.each(backends)("label contract — $name", (backend) => {
     ]);
 
     expect((await adapter.getLabelsByRecordIds([rid(1)])).get(rid(1))).toBeUndefined();
-    expect((await adapter.findByLabel({ appId: "alpha", key: "needs-review" })).labels).toHaveLength(0);
+    expect(
+      (await adapter.findByLabel({ appId: "alpha", key: "needs-review" })).labels,
+    ).toHaveLength(0);
     // getLabel returns tombstones on purpose: a tombstone is exactly what a
     // later arrival has to be LWW-compared against.
     const row = await adapter.getLabel(rid(1), "alpha", "needs-review", "");
@@ -288,9 +324,7 @@ describe.each(backends)("label contract — $name", (backend) => {
 
     const found = await adapter.findByLabel({ appId: "alpha", key: "needs-review" });
     expect(found.labels.map((l) => l.recordId)).toEqual([rid(1)]);
-    expect(
-      (await adapter.getLabel(rid(1), "alpha", "needs-review", ""))!.deletedAt,
-    ).toBeNull();
+    expect((await adapter.getLabel(rid(1), "alpha", "needs-review", ""))!.deletedAt).toBeNull();
   });
 
   it("retracting a row that was never written creates nothing", async () => {
@@ -303,9 +337,7 @@ describe.each(backends)("label contract — $name", (backend) => {
   it("retraction is scoped by primary key, so it cannot reach another app's row", async () => {
     await setLabel(rid(1), "alpha", "k");
     await setLabel(rid(1), "gamma", "k");
-    await adapter.retractLabels([
-      { recordId: rid(1), appId: "alpha", key: "k", hlc: clock.now() },
-    ]);
+    await adapter.retractLabels([{ recordId: rid(1), appId: "alpha", key: "k", hlc: clock.now() }]);
 
     const live = (await adapter.getLabelsByRecordIds([rid(1)])).get(rid(1))!;
     expect(live.map((l) => l.appId)).toEqual(["gamma"]);
@@ -593,9 +625,7 @@ describe.each(backends)("label contract — $name", (backend) => {
     await setLabel(rid(2), "alpha", "k");
     await setLabel(rid(1), "gamma", "k");
     await setLabel(rid(1), "alpha", "k");
-    await adapter.retractLabels([
-      { recordId: rid(2), appId: "alpha", key: "k", hlc: clock.now() },
-    ]);
+    await adapter.retractLabels([{ recordId: rid(2), appId: "alpha", key: "k", hlc: clock.now() }]);
 
     const page = await adapter.queryLabels({});
     expect(page.labels.map((l) => `${l.recordId}/${l.appId}`)).toEqual([
@@ -645,9 +675,7 @@ describe.each(backends)("label contract — $name", (backend) => {
       },
     ]);
     const last = clock.now();
-    await adapter.retractLabels([
-      { recordId: rid(1), appId: "alpha", key: "k", hlc: last },
-    ]);
+    await adapter.retractLabels([{ recordId: rid(1), appId: "alpha", key: "k", hlc: last }]);
 
     const watermarks = await adapter.getLabelNodeWatermarks();
     expect(Object.keys(watermarks).sort()).toEqual(["nodeA", "nodeB"]);
@@ -678,9 +706,7 @@ describe.each(backends)("label contract — $name", (backend) => {
   it("does not restamp labels already tombstoned when the record is deleted", async () => {
     await setLabel(rid(1), "alpha", "k");
     const retractedAt = clock.now();
-    await adapter.retractLabels([
-      { recordId: rid(1), appId: "alpha", key: "k", hlc: retractedAt },
-    ]);
+    await adapter.retractLabels([{ recordId: rid(1), appId: "alpha", key: "k", hlc: retractedAt }]);
 
     await adapter.tombstoneLabelsForRecord(rid(1), clock.now());
 

@@ -131,8 +131,17 @@ export interface FileWatchManager {
   getStatus(watchId: string): WatchStatus | null;
   getAllStatuses(): WatchStatus[];
   getWatchFiles(watchId: string): WatchFileInfo[];
-  getFileStatus(filePath: string): { watched: boolean; synced: boolean; watchId?: string; recordId?: string };
-  getDirectoryStatus(dirPath: string): { watched: boolean; watchId?: string; directoryPath?: string };
+  getFileStatus(filePath: string): {
+    watched: boolean;
+    synced: boolean;
+    watchId?: string;
+    recordId?: string;
+  };
+  getDirectoryStatus(dirPath: string): {
+    watched: boolean;
+    watchId?: string;
+    directoryPath?: string;
+  };
   /**
    * Put an excluded path back in the library.
    *
@@ -603,7 +612,9 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
       }
       if (!fileStat.isFile()) return;
       if (fileStat.size > MAX_FILE_SIZE) {
-        console.warn(`Skipping large file (${(fileStat.size / 1024 / 1024).toFixed(0)}MB): ${filePath}`);
+        console.warn(
+          `Skipping large file (${(fileStat.size / 1024 / 1024).toFixed(0)}MB): ${filePath}`,
+        );
         return;
       }
       if (fileStat.size === 0) return;
@@ -819,7 +830,10 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
         },
       );
     } catch (err) {
-      console.error(`FS watcher failed for ${active.config.directoryPath}:`, (err as Error).message);
+      console.error(
+        `FS watcher failed for ${active.config.directoryPath}:`,
+        (err as Error).message,
+      );
     }
   }
 
@@ -830,7 +844,10 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
   function statusOf(active: ActiveWatch): WatchStatus {
     const files = Array.from(active.files.values());
     const pathsIn = (state: WatchLibraryState): string[] =>
-      files.filter((f) => f.libraryState === state).map((f) => f.filePath).sort();
+      files
+        .filter((f) => f.libraryState === state)
+        .map((f) => f.filePath)
+        .sort();
     return {
       id: active.config.id,
       directoryPath: active.config.directoryPath,
@@ -846,9 +863,7 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
   }
 
   /** The watch a path belongs to, and what this watcher knows about it. */
-  function findTracked(
-    filePath: string,
-  ): { active: ActiveWatch; tracked: WatchFileInfo } | null {
+  function findTracked(filePath: string): { active: ActiveWatch; tracked: WatchFileInfo } | null {
     for (const active of watches.values()) {
       const tracked = active.files.get(filePath);
       if (tracked) return { active, tracked };
@@ -908,9 +923,7 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
             // The same two steps `addBack` runs once its own restore returns.
             active.files.set(current.filePath, { ...current, libraryState: "synced" });
             setLibraryState(current.filePath, "synced");
-            console.log(
-              `[watch] ${current.filePath} is in the library again; putting it back`,
-            );
+            console.log(`[watch] ${current.filePath} is in the library again; putting it back`);
             await ingestFile(active, current.filePath);
           }
         }
@@ -974,7 +987,7 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
 
       // Start FS event monitoring
       startFsWatcher(active);
-      const synced = Array.from(active.files.values()).filter(f => f.status === "synced").length;
+      const synced = Array.from(active.files.values()).filter((f) => f.status === "synced").length;
       console.log(`Watch ready: ${config.directoryPath} (${synced}/${active.files.size} files)`);
     },
 
@@ -1066,7 +1079,10 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
 
     getDirectoryStatus(dirPath) {
       for (const [, active] of watches) {
-        if (dirPath === active.config.directoryPath || dirPath.startsWith(active.config.directoryPath + "/")) {
+        if (
+          dirPath === active.config.directoryPath ||
+          dirPath.startsWith(active.config.directoryPath + "/")
+        ) {
           return {
             watched: true,
             watchId: active.config.id,

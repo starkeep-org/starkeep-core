@@ -1,6 +1,6 @@
 # Local data server — functional documentation (2026-06-01)
 
-Topic scope: `local-data-server` and all its sub-topics (start/stop, watcher, local data operations, DB indexing, object storage, permissions, cloud auth broker, cloud sync). The cross-cutting sync engine in `packages/sync-engine` is treated as a black box at the boundary; only how the local server *uses* it is in scope here.
+Topic scope: `local-data-server` and all its sub-topics (start/stop, watcher, local data operations, DB indexing, object storage, permissions, cloud auth broker, cloud sync). The cross-cutting sync engine in `packages/sync-engine` is treated as a black box at the boundary; only how the local server _uses_ it is in scope here.
 
 Audience: a new contributor who will modify this code and is comfortable with Node/TypeScript and HTTP services, but has no prior starkeep context.
 
@@ -14,7 +14,7 @@ The local data server is a single Node.js process that runs on the user's machin
 
 Three concerns are colocated in this process because they share the same database, the same object store, and the same view of "what the user has":
 
-1. **A local data plane.** Two distinct planes actually: *shared records* (the user-visible content layer, collaborated on through type-based access grants) and *app-specific syncable data* (per-app SQLite tables and per-app file blobs, isolated to a single app's namespace).
+1. **A local data plane.** Two distinct planes actually: _shared records_ (the user-visible content layer, collaborated on through type-based access grants) and _app-specific syncable data_ (per-app SQLite tables and per-app file blobs, isolated to a single app's namespace).
 2. **A cloud-authentication broker.** The local server holds the user's Cognito refresh token and STS credentials, refreshes them in the background, and presents them when talking to the cloud server. Local apps never see the user's cloud credentials directly.
 3. **A bidirectional sync orchestrator.** The local server runs N+1 sync channels (one always-on Drive channel plus one per installed app) and is the only thing on the local side that pushes to or pulls from the cloud server.
 
@@ -55,7 +55,7 @@ Two routes in the loopback-authorized set don't fit that principle cleanly. `/br
 
 ## Shared records data plane
 
-Shared records are the layer where apps collaborate. The model is simple: every record has a *type* (typically the lowercase file extension — `photo.jpg`, `note.md`, …), and types are grouped into *categories* (photo, video, audio, document, other). Apps are granted access at the type level but enforcement happens at the category level for object-storage operations.
+Shared records are the layer where apps collaborate. The model is simple: every record has a _type_ (typically the lowercase file extension — `photo.jpg`, `note.md`, …), and types are grouped into _categories_ (photo, video, audio, document, other). Apps are granted access at the type level but enforcement happens at the category level for object-storage operations.
 
 The on-disk shape (`packages/storage-sqlite/src/`) is a single `shared_records` table holding identity, type/kind, content hash, owner, the object-storage key for the bytes, timestamps, soft-delete tombstone, parent linkage for derived records (e.g. thumbnails belonging to a photo), and the immutable `origin_app_id` that first created the row. Per-category metadata tables (`metadata_photo`, `metadata_video`, …) are created lazily and only for categories whose schemas declare metadata; the catch-all "other" category has no metadata table at all, which is why `POST /data/records/:id/metadata` rejects records of unmapped types.
 
@@ -68,7 +68,7 @@ A few invariants matter for callers:
 
 The SQLite adapter exposes generic `put` / `get` / `query` primitives plus a `getRawDatabase()` escape hatch for sibling subsystems (the sync-state store, the per-app namespace store, the installer). It does **not** enforce access control itself: every grant check happens in the HTTP layer in front of it. This split is deliberate — internal callers (sync engine, installer, watcher) reach into the adapter directly under system identities and shouldn't be paying the per-row access cost.
 
-`POST /data/records` accepts bytes in two shapes. The *key-ref* shape assumes the caller has already uploaded the blob (via a presigned token) and is now registering the metadata around an existing object-storage key. The *filePath* shape lets the caller name a local path that the server itself reads, hashes, and ingests; it exists for the watcher and for the local CLI experience where it would be silly to make the caller round-trip its own bytes through HTTP.
+`POST /data/records` accepts bytes in two shapes. The _key-ref_ shape assumes the caller has already uploaded the blob (via a presigned token) and is now registering the metadata around an existing object-storage key. The _filePath_ shape lets the caller name a local path that the server itself reads, hashes, and ingests; it exists for the watcher and for the local CLI experience where it would be silly to make the caller round-trip its own bytes through HTTP.
 
 Read paths follow the obvious shape: `GET /data/records` paginates the table, filters out anything the calling app can't read, and orders by `updatedAt` descending; `GET /data/records/:id` is the singleton form; `GET /data/types` reports the per-type counts of records the caller can actually see, which is the surface the Drive UI uses to populate its type sidebar.
 
@@ -81,19 +81,19 @@ The shape is intentionally narrow:
 - `POST /app-data/db/:table` / `PATCH` / `DELETE` / `GET` operate on rows in one of the tables the app declared in its manifest. Other apps' tables are not addressable.
 - `PUT/GET/DELETE /app-data/files/:subKey` operate on file blobs in the app's own object-storage namespace.
 
-Isolation is enforced two ways. At the HTTP layer, the route handler extracts the calling app's id from the validated HMAC header and refuses to operate on tables the app didn't declare. At the sync layer, each per-app sync engine is constructed against a *narrowed* namespace store that exposes only that app's tables; even a bug in the sync engine couldn't carry one app's rows into another's channel because the rows are not visible to its scan.
+Isolation is enforced two ways. At the HTTP layer, the route handler extracts the calling app's id from the validated HMAC header and refuses to operate on tables the app didn't declare. At the sync layer, each per-app sync engine is constructed against a _narrowed_ namespace store that exposes only that app's tables; even a bug in the sync engine couldn't carry one app's rows into another's channel because the rows are not visible to its scan.
 
-Shared records and app-specific data are kept on completely separate sync channels (see *Sync orchestration*), so a slow per-app channel cannot back up the user-visible shared-data sync.
+Shared records and app-specific data are kept on completely separate sync channels (see _Sync orchestration_), so a slow per-app channel cannot back up the user-visible shared-data sync.
 
 ## Object storage
 
 The local object store (`packages/storage-fs`) is a content-addressed filesystem under `~/.starkeep/objects/`. Keys are deterministic — `shared/<category>/<2-char-shard>/<sha256>` for shared records, with a 256-way fan-out from the first two hex characters of the hash, and a per-app prefix for app-specific blobs. The adapter exposes `put`, `get`, `has`, `delete`, `list`, `resolvePath`, and `putSymlink`; a sidecar `.meta.json` stores the content type and any metadata next to each blob. Deletes and metadata reads tolerate `ENOENT` so callers don't have to pre-check.
 
-The interesting affordance is `putSymlink`. The watcher uses it to make a record whose canonical bytes live at a path on the user's disk *appear* in the object store at the content-addressed key, without copying the bytes. The rest of the system can then treat that record as it would any other; the storage layer transparently follows the symlink on read.
+The interesting affordance is `putSymlink`. The watcher uses it to make a record whose canonical bytes live at a path on the user's disk _appear_ in the object store at the content-addressed key, without copying the bytes. The rest of the system can then treat that record as it would any other; the storage layer transparently follows the symlink on read.
 
 For the cloud side, the local server uses an `HttpObjectStorageAdapter` that talks to the cloud server's S3-backed object store via presigned URLs. The local FS adapter is canonical: a missing remote blob is something the sync engine notices and re-uploads, not something that requires recovery from the cloud. `GET /data/records/:id/file-url` always checks the local cache first and only mints a remote presigned URL when the bytes really aren't on this box.
 
-Locally, file traffic uses two patterns. *Token uploads* go through `POST /files/presign` (which checks the calling app's category write grant and mints a short-lived token over a per-startup HMAC secret) followed by `PUT /data/files/upload/:token` (which validates the body's hash matches what the token committed to). *Direct ingestion* through `POST /data/files?type=X` lets a trusted caller hand bytes over in one round-trip. The per-startup token secret is intentional: every restart invalidates all outstanding upload/read tokens, which is fine because callers regenerate them on demand and the tokens are never meant to be persisted by the consumer.
+Locally, file traffic uses two patterns. _Token uploads_ go through `POST /files/presign` (which checks the calling app's category write grant and mints a short-lived token over a per-startup HMAC secret) followed by `PUT /data/files/upload/:token` (which validates the body's hash matches what the token committed to). _Direct ingestion_ through `POST /data/files?type=X` lets a trusted caller hand bytes over in one round-trip. The per-startup token secret is intentional: every restart invalidates all outstanding upload/read tokens, which is fine because callers regenerate them on demand and the tokens are never meant to be persisted by the consumer.
 
 ## Access control
 
@@ -120,15 +120,15 @@ The entry points (`cognito-auth.ts`, plus the `/auth/*` HTTP routes) are:
 - `POST /auth/logout` — clears both files.
 - `GET /auth/status` — reports whether a live id token exists.
 
-Behind those endpoints, two refresh paths run independently. The id token / refresh token pair is refreshed on a one-hour timer (the JWT's `exp` claim is decoded locally and the token is treated as stale five seconds before expiry). The STS credentials are exchanged via `GetIdentityPoolCredentials` whenever a fresh id token lands; the resulting credentials are written to `~/.starkeep/cloud-credentials.json` and are *re-read from disk on every cloud adapter call* rather than being held in memory. The disk-roundtrip pattern is deliberate: it lets an external process rotate the credentials file without restarting the server.
+Behind those endpoints, two refresh paths run independently. The id token / refresh token pair is refreshed on a one-hour timer (the JWT's `exp` claim is decoded locally and the token is treated as stale five seconds before expiry). The STS credentials are exchanged via `GetIdentityPoolCredentials` whenever a fresh id token lands; the resulting credentials are written to `~/.starkeep/cloud-credentials.json` and are _re-read from disk on every cloud adapter call_ rather than being held in memory. The disk-roundtrip pattern is deliberate: it lets an external process rotate the credentials file without restarting the server.
 
 The supervisor watches the id-token liveness gate: `idTokenIsLive()` decodes the stored JWT and inspects `exp`. Sync exchanges are simply skipped while the gate is closed, which avoids a thundering herd of 401s every time the user's network has been off for longer than the token's lifetime. When a refresh succeeds, the refresh callback calls `supervisor.kick()` to reset every per-engine backoff and run all engines immediately, which is the path that drains accumulated local writes once auth is back.
 
 ## Sync orchestration
 
-The local server runs the sync engine; this section is about *how it runs it*, not how the engine itself works.
+The local server runs the sync engine; this section is about _how it runs it_, not how the engine itself works.
 
-The supervisor (`sync-supervisor.ts`) owns N+1 sync engines. One is the *Drive channel*: always on, attributed to the `starkeep-drive` identity, responsible for the entire shared-records data plane. The other N are *per-app channels*: one per installed non-system app, each responsible only for that app's app-specific tables and blobs. System apps (Drive itself and the watcher) do not get their own channels — their shared-record writes ride the Drive channel under Drive's identity.
+The supervisor (`sync-supervisor.ts`) owns N+1 sync engines. One is the _Drive channel_: always on, attributed to the `starkeep-drive` identity, responsible for the entire shared-records data plane. The other N are _per-app channels_: one per installed non-system app, each responsible only for that app's app-specific tables and blobs. System apps (Drive itself and the watcher) do not get their own channels — their shared-record writes ride the Drive channel under Drive's identity.
 
 Each engine has three timing inputs:
 
@@ -140,13 +140,13 @@ Each engine has three timing inputs:
 
 The supervisor exposes one more method internally: `rescan()`, called by the installer whenever an app is installed or uninstalled. It diffs the registry against its current engine set, creates engines for newly installed apps, and stops engines for removed ones — so installing a new local app starts syncing it without restarting the process.
 
-There is one cross-cutting detail worth knowing: a local write to *any* data plane nudges *every* engine, not just the engine that would have something to push. The engines short-circuit internally when they have no new rows, so the cost is small, but it does mean nudge volume scales with installed apps. This is observable in `/sync/status` as engines that "exchanged" but moved no data.
+There is one cross-cutting detail worth knowing: a local write to _any_ data plane nudges _every_ engine, not just the engine that would have something to push. The engines short-circuit internally when they have no new rows, so the cost is small, but it does mean nudge volume scales with installed apps. This is observable in `/sync/status` as engines that "exchanged" but moved no data.
 
 ## Filesystem watcher
 
 The watcher (`watcher.ts`) lets the user point the server at a directory on disk and have its contents become shared records automatically. It is implemented as a `WatchManager` that owns a set of `Watch` instances, each restored from `watches.json` on startup.
 
-A watch has three lifecycle states. *Scanning* is the initial full walk: every file under the watched path is hashed (SHA-256), inserted into the private `watch_files` table that maps disk path → record id, and registered as a shared record under the watcher's all-access identity. *Watching* is steady state: a Node `FSWatcher` observes the directory and reacts to add, modify, and delete events by rehashing or tombstoning as needed. *Error* is the terminal state for permission denied, path no longer exists, and similar conditions.
+A watch has three lifecycle states. _Scanning_ is the initial full walk: every file under the watched path is hashed (SHA-256), inserted into the private `watch_files` table that maps disk path → record id, and registered as a shared record under the watcher's all-access identity. _Watching_ is steady state: a Node `FSWatcher` observes the directory and reacts to add, modify, and delete events by rehashing or tombstoning as needed. _Error_ is the terminal state for permission denied, path no longer exists, and similar conditions.
 
 Concurrency and limits live here too: at most four files are hashed in parallel; files larger than 100 MB are skipped with a logged warning; a small default exclusion list (`.DS_Store`, `Thumbs.db`, `.gitkeep`) is hard-coded and supplemented by user-supplied include/exclude glob patterns. `recursive` is a per-watch flag.
 

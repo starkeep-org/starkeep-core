@@ -70,9 +70,7 @@ export class FailingObjectStorageAdapter implements ObjectStorageAdapter {
       const shouldFail = rule.recov === "persistent" || !rule.firedFor.has(key);
       if (shouldFail) {
         rule.firedFor.add(key);
-        throw new Error(
-          `[harness] injected put failure (${rule.label}) for key: ${key}`,
-        );
+        throw new Error(`[harness] injected put failure (${rule.label}) for key: ${key}`);
       }
     }
     await this.base.put(key, data, options);
@@ -103,9 +101,7 @@ export class FailingObjectStorageAdapter implements ObjectStorageAdapter {
         // connection open, and the retry on the next round would then contend
         // with it.
         await body.cancel().catch(() => {});
-        throw new Error(
-          `[harness] injected putStream failure (${rule.label}) for key: ${key}`,
-        );
+        throw new Error(`[harness] injected putStream failure (${rule.label}) for key: ${key}`);
       }
     }
     await this.base.putStream(key, body, options);
@@ -184,8 +180,7 @@ export function failingMethod<T extends object>(
       // their watermark read as `this.getNodeWatermarks(...)` from inside
       // `scanSince`, and an injection that only caught direct calls would test
       // a shape no production caller has.
-      return (...args: unknown[]) =>
-        (value as (...a: unknown[]) => unknown).apply(proxy, args);
+      return (...args: unknown[]) => (value as (...a: unknown[]) => unknown).apply(proxy, args);
     },
   }) as T;
   return proxy;
@@ -232,8 +227,7 @@ export function failingDirectMethod<T extends object>(
         };
       }
       // Bound to the base, so the object's internal calls are untouched.
-      return (...args: unknown[]) =>
-        (value as (...a: unknown[]) => unknown).apply(target, args);
+      return (...args: unknown[]) => (value as (...a: unknown[]) => unknown).apply(target, args);
     },
   }) as T;
 }
@@ -317,13 +311,7 @@ export function losingResponseTransport(
  * key (caller provides the resolver).
  */
 export function buildKeyMatcher(
-  target:
-    | "all"
-    | "first"
-    | "middle"
-    | "last"
-    | { index: number }
-    | { id: string },
+  target: "all" | "first" | "middle" | "last" | { index: number } | { id: string },
   candidateKeys: readonly string[],
   resolveIdToKey?: (id: string) => string | undefined,
 ): (key: string) => boolean {

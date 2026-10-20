@@ -58,17 +58,26 @@ export function ownerScopedCompiler(userId: string): PostgresCompiler {
   return compiler.withPlugin(new OwnerScopePlugin(userId));
 }
 
-export function buildPostgresQuery(query: Query, qb: PostgresCompiler = compiler): BuiltPostgresQuery {
+export function buildPostgresQuery(
+  query: Query,
+  qb: PostgresCompiler = compiler,
+): BuiltPostgresQuery {
   const compiled = buildRecordSelect(qb, DIALECT, query);
   return { text: compiled.sql, values: [...compiled.parameters] };
 }
 
-export function buildPostgresCountQuery(query: Query, qb: PostgresCompiler = compiler): BuiltPostgresQuery {
+export function buildPostgresCountQuery(
+  query: Query,
+  qb: PostgresCompiler = compiler,
+): BuiltPostgresQuery {
   const compiled = buildRecordCount(qb, DIALECT, query);
   return { text: compiled.sql, values: [...compiled.parameters] };
 }
 
-export function buildPostgresTypeCountsQuery(query: Query, qb: PostgresCompiler = compiler): BuiltPostgresQuery {
+export function buildPostgresTypeCountsQuery(
+  query: Query,
+  qb: PostgresCompiler = compiler,
+): BuiltPostgresQuery {
   const compiled = buildRecordTypeCounts(qb, DIALECT, query);
   return { text: compiled.sql, values: [...compiled.parameters] };
 }

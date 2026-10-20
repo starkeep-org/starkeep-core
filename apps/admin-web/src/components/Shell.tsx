@@ -60,7 +60,9 @@ function ShellGate({ children }: { children: ReactNode }) {
       <header className="flex h-14 items-center justify-between border-b px-6 shrink-0">
         <Link to="/" className="flex items-center gap-2">
           <span className="font-semibold">Starkeep Admin</span>
-          <Badge variant="secondary" className="text-xs">Web</Badge>
+          <Badge variant="secondary" className="text-xs">
+            Web
+          </Badge>
         </Link>
         <AppDiscovery />
       </header>
@@ -68,9 +70,7 @@ function ShellGate({ children }: { children: ReactNode }) {
       {/* Each page brings its own ground and padding. The dashboard lays cards
           on the off-white surface so they read as cards; the detail pages carry
           prose and forms, which read as a document on the page background. */}
-      <main className="flex-1 overflow-y-auto">
-        {children}
-      </main>
+      <main className="flex-1 overflow-y-auto">{children}</main>
     </div>
   );
 }

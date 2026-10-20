@@ -53,7 +53,9 @@ export function useCloudDataServerHealth(
       }
     }
     check();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [cloudConfig, refreshKey]);
 
   return state;
@@ -122,7 +124,9 @@ export function CloudDataServerStatus({
       name="Data Server"
       badges={
         <>
-          <Badge variant="secondary" className="text-xs">Built-in</Badge>
+          <Badge variant="secondary" className="text-xs">
+            Built-in
+          </Badge>
           {configured ? (
             <>
               <StatusBadge online={online} />
@@ -137,11 +141,15 @@ export function CloudDataServerStatus({
                   Signed in as admin
                 </Badge>
               ) : (
-                <Badge variant="secondary" className="text-xs">Not signed in as admin</Badge>
+                <Badge variant="secondary" className="text-xs">
+                  Not signed in as admin
+                </Badge>
               )}
             </>
           ) : (
-            <Badge variant="secondary" className="text-xs">Not configured</Badge>
+            <Badge variant="secondary" className="text-xs">
+              Not configured
+            </Badge>
           )}
         </>
       }

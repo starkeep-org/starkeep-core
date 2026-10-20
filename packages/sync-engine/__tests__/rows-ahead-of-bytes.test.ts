@@ -322,7 +322,14 @@ describe("pushing rows ahead of files", () => {
     const [cloud, phone] = await sides("C", "P");
     const id = await seedFile(phone!, 10);
     await phone!.db.upsertLabels([
-      { recordId: id, appId: "starkeep", key: "no-cloud", value: "", recordType: "image/jpeg", hlc: phone!.clock.now() },
+      {
+        recordId: id,
+        appId: "starkeep",
+        key: "no-cloud",
+        value: "",
+        recordType: "image/jpeg",
+        hlc: phone!.clock.now(),
+      },
     ]);
     const node = engine(phone!, cloud!, responder(cloud!, { declinesBlob: async () => true }));
 
@@ -474,7 +481,9 @@ describe("a phone's video and a desktop, end to end", () => {
     await phoneSync.sync({ maxRounds: 10 });
     await desktopSync.sync({ maxRounds: 10 });
     expect(await desktop!.storage.has(videoKey)).toBe(true);
-    expect((await desktopState.getByteWatermarks())?.["P"]).toEqual(await hlcOf(phone!, thumbs[1]!));
+    expect((await desktopState.getByteWatermarks())?.["P"]).toEqual(
+      await hlcOf(phone!, thumbs[1]!),
+    );
   });
 });
 
@@ -491,7 +500,11 @@ describe("transferFileOutcome", () => {
     expect(await files.transferFileOutcome(manifest, source, destination)).toBe("transferred");
     expect(await files.transferFileOutcome(manifest, source, destination)).toBe("present");
     expect(
-      await files.transferFileOutcome({ ...manifest, objectStorageKey: "missing" }, source, destination),
+      await files.transferFileOutcome(
+        { ...manifest, objectStorageKey: "missing" },
+        source,
+        destination,
+      ),
     ).toBe("failed");
   });
 });

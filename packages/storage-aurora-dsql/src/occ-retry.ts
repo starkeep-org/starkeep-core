@@ -37,8 +37,7 @@ export interface OccRetryOpts {
   sleep?: (ms: number) => Promise<void>;
 }
 
-const defaultSleep = (ms: number): Promise<void> =>
-  new Promise((r) => setTimeout(r, ms));
+const defaultSleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // Marks that we are already inside a retry loop for the current async context.
 // The OUTERMOST withOccRetry owns the retry; nested calls run their body once

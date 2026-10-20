@@ -111,7 +111,11 @@ async function main(): Promise<void> {
   const base = await adminBaseCredentials();
   const managerCreds = await roleChain([cfg.managerRoleArn], {
     // The identity pool's credentials last an hour; AWS enforces the real expiry.
-    baseCredentials: { ...base, sessionToken: base.sessionToken ?? "", expiration: new Date(Date.now() + 3_600_000) },
+    baseCredentials: {
+      ...base,
+      sessionToken: base.sessionToken ?? "",
+      expiration: new Date(Date.now() + 3_600_000),
+    },
   });
 
   // Same attach / run / detach shape as the orchestrator, through the same

@@ -50,12 +50,15 @@ export function extractEmailFromIdToken(idToken: string): string | null {
 export const ADMINS_GROUP = "starkeep-admins";
 
 /** The refusal an account outside the admin group gets from admin-web. */
-export const NOT_AN_ADMIN = "This account has no admin rights on this cloud. Ask an admin to make you one.";
+export const NOT_AN_ADMIN =
+  "This account has no admin rights on this cloud. Ask an admin to make you one.";
 
 /** The `cognito:groups` claim of an ID token, or none. The token came straight from Cognito, so it is read, not verified. */
 export function groupsOfIdToken(idToken: string): string[] {
   try {
-    const payload = JSON.parse(atob(idToken.split(".")[1]!.replace(/-/g, "+").replace(/_/g, "/"))) as {
+    const payload = JSON.parse(
+      atob(idToken.split(".")[1]!.replace(/-/g, "+").replace(/_/g, "/")),
+    ) as {
       "cognito:groups"?: unknown;
     };
     const groups = payload["cognito:groups"];

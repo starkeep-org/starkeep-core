@@ -35,9 +35,7 @@ const appCreds = {
 
 function invalidAccessKeyId(): Error {
   // Shape the AWS SDK throws for a not-yet-recognized principal.
-  const err = new Error(
-    "The AWS Access Key Id you provided does not exist in our records.",
-  );
+  const err = new Error("The AWS Access Key Id you provided does not exist in our records.");
   err.name = "InvalidAccessKeyId";
   return err;
 }

@@ -29,7 +29,17 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { starkeepDir } from "@starkeep/app-client";
@@ -45,9 +55,9 @@ const POLL_MS = 100;
  * parsed by the shell.
  */
 const RECORD_SCRIPT = [
-  'log=$1; exitf=$2; shift 2',
+  "log=$1; exitf=$2; shift 2",
   '"$@" >>"$log" 2>&1',
-  'code=$?',
+  "code=$?",
   'printf "%s" "$code" >"$exitf.tmp" && mv "$exitf.tmp" "$exitf"',
 ].join("; ");
 
@@ -61,7 +71,13 @@ interface RunPaths {
 
 function pathsFor(key: string): RunPaths {
   const dir = join(starkeepDir(), "installs", key);
-  return { dir, id: join(dir, "id"), pid: join(dir, "pid"), log: join(dir, "output.log"), exit: join(dir, "exit") };
+  return {
+    dir,
+    id: join(dir, "id"),
+    pid: join(dir, "pid"),
+    log: join(dir, "output.log"),
+    exit: join(dir, "exit"),
+  };
 }
 
 /** Where a run's full output is, for a caller that keeps a copy. */

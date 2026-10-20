@@ -77,68 +77,73 @@ describe("config & lifecycle", () => {
     }
   });
 
-  it("PATCH /config persists the patch, exits, and the replacement respawns serving it", { timeout: 30_000 }, async () => {
-    const server = await startLocalDataServer();
-    const { port, starkeepDir } = server;
-    let replacements: number[] = [];
-    try {
-      const originalNodeId = (
-        JSON.parse(await readFile(join(starkeepDir, "config.json"), "utf8")) as {
+  it(
+    "PATCH /config persists the patch, exits, and the replacement respawns serving it",
+    { timeout: 30_000 },
+    async () => {
+      const server = await startLocalDataServer();
+      const { port, starkeepDir } = server;
+      let replacements: number[] = [];
+      try {
+        const originalNodeId = (
+          JSON.parse(await readFile(join(starkeepDir, "config.json"), "utf8")) as {
+            nodeId: string;
+          }
+        ).nodeId;
+
+        const res = await fetch(`${server.url}/config`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ stage: "patched-stage", nodeId: "must-not-change" }),
+        });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ ok: true });
+
+        // The serving process exits to apply the change…
+        const exitCode = await server.waitForExit(10_000);
+        expect(exitCode).toBe(0);
+
+        // The patch is on disk, with nodeId immutable.
+        const onDisk = JSON.parse(await readFile(join(starkeepDir, "config.json"), "utf8")) as {
+          stage?: string;
           nodeId: string;
-        }
-      ).nodeId;
+        };
+        expect(onDisk.stage).toBe("patched-stage");
+        expect(onDisk.nodeId).toBe(originalNodeId);
 
-      const res = await fetch(`${server.url}/config`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ stage: "patched-stage", nodeId: "must-not-change" }),
-      });
-      expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ ok: true });
+        // …and the detached replacement restartProcess spawns comes back up on
+        // the same port, serving the patched config. restartProcess now re-execs
+        // with process.execArgv, so the tsx loader survives the respawn (it did
+        // not before — the replacement crashed with ERR_MODULE_NOT_FOUND).
+        // The respawn boots into an append-only log file; assert it reached the
+        // "listening" line (a missing loader would instead log
+        // ERR_MODULE_NOT_FOUND and never bind).
+        const logPath = join(starkeepDir, "local-data-server.log");
+        const booted = await eventually(
+          async () => {
+            const log = await readFile(logPath, "utf8");
+            expect(log).toMatch(/listening on|ERR_MODULE_NOT_FOUND/);
+            return log;
+          },
+          { timeoutMs: 15_000 },
+        );
+        expect(booted).not.toMatch(/ERR_MODULE_NOT_FOUND/);
+        expect(booted).toMatch(/listening on/);
 
-      // The serving process exits to apply the change…
-      const exitCode = await server.waitForExit(10_000);
-      expect(exitCode).toBe(0);
+        // The replacement is detached and reparented to init, so nothing about
+        // the process tree will clean it up — the harness has to know its pid.
+        replacements = server.successorPids();
+        expect(replacements).toHaveLength(1);
+      } finally {
+        await server.stop();
+      }
 
-      // The patch is on disk, with nodeId immutable.
-      const onDisk = JSON.parse(
-        await readFile(join(starkeepDir, "config.json"), "utf8"),
-      ) as { stage?: string; nodeId: string };
-      expect(onDisk.stage).toBe("patched-stage");
-      expect(onDisk.nodeId).toBe(originalNodeId);
-
-      // …and the detached replacement restartProcess spawns comes back up on
-      // the same port, serving the patched config. restartProcess now re-execs
-      // with process.execArgv, so the tsx loader survives the respawn (it did
-      // not before — the replacement crashed with ERR_MODULE_NOT_FOUND).
-      // The respawn boots into an append-only log file; assert it reached the
-      // "listening" line (a missing loader would instead log
-      // ERR_MODULE_NOT_FOUND and never bind).
-      const logPath = join(starkeepDir, "local-data-server.log");
-      const booted = await eventually(
-        async () => {
-          const log = await readFile(logPath, "utf8");
-          expect(log).toMatch(/listening on|ERR_MODULE_NOT_FOUND/);
-          return log;
-        },
-        { timeoutMs: 15_000 },
-      );
-      expect(booted).not.toMatch(/ERR_MODULE_NOT_FOUND/);
-      expect(booted).toMatch(/listening on/);
-
-      // The replacement is detached and reparented to init, so nothing about
-      // the process tree will clean it up — the harness has to know its pid.
-      replacements = server.successorPids();
-      expect(replacements).toHaveLength(1);
-    } finally {
-      await server.stop();
-    }
-
-    // stop() reaped the replacement rather than leaving it running against the
-    // cloud on a temp dir it no longer owns — the orphan-accumulation bug.
-    for (const pid of replacements) {
-      expect(() => process.kill(pid, 0)).toThrow();
-    }
-    await expect(fetch(`http://127.0.0.1:${port}/health`)).rejects.toThrow();
-  });
+      // stop() reaped the replacement rather than leaving it running against the
+      // cloud on a temp dir it no longer owns — the orphan-accumulation bug.
+      for (const pid of replacements) {
+        expect(() => process.kill(pid, 0)).toThrow();
+      }
+      await expect(fetch(`http://127.0.0.1:${port}/health`)).rejects.toThrow();
+    },
+  );
 });

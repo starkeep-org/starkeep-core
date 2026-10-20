@@ -1,4 +1,3 @@
-
 const LOCAL_DATA_SERVER = process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://127.0.0.1:9820";
 
 /**
@@ -6,10 +5,7 @@ const LOCAL_DATA_SERVER = process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://
  * show which step a half-failed install got stuck on without the operator
  * having to inspect sqlite directly.
  */
-export async function GET(
-  _req: Request,
-  { params }: { params: Promise<{ appId: string }> },
-) {
+export async function GET(_req: Request, { params }: { params: Promise<{ appId: string }> }) {
   const { appId } = await params;
 
   let resp: Response;

@@ -37,7 +37,10 @@ const optionsByName = new Map<string, pulumi.ResourceOptions>();
 
 pulumi.runtime.setMocks(
   {
-    newResource(args: pulumi.runtime.MockResourceArgs): { id: string; state: Record<string, unknown> } {
+    newResource(args: pulumi.runtime.MockResourceArgs): {
+      id: string;
+      state: Record<string, unknown>;
+    } {
       created.push({ type: args.type, name: args.name, inputs: args.inputs });
       const extra: Record<string, unknown> = {};
       // The API Gateway's apiEndpoint is a computed output the mock must supply,
@@ -50,7 +53,10 @@ pulumi.runtime.setMocks(
       if (args.type.endsWith("cloudfront/distribution:Distribution")) {
         extra.domainName = `${args.name}.cloudfront.net`;
       }
-      return { id: `${args.name}-id`, state: { ...args.inputs, arn: `arn:fake:${args.name}`, ...extra } };
+      return {
+        id: `${args.name}-id`,
+        state: { ...args.inputs, arn: `arn:fake:${args.name}`, ...extra },
+      };
     },
     call(args: pulumi.runtime.MockCallArgs) {
       return args.inputs;
@@ -115,16 +121,18 @@ const filesBucket = (): CreatedResource =>
 const dsqlCluster = (): CreatedResource => byTypeSuffix("dsql/cluster:Cluster")[0];
 const versioning = (): CreatedResource[] => byTypeSuffix("bucketVersioningV2:BucketVersioningV2");
 const sse = (): CreatedResource[] =>
-  byTypeSuffix("bucketServerSideEncryptionConfigurationV2:BucketServerSideEncryptionConfigurationV2");
-const pab = (): CreatedResource[] => byTypeSuffix("bucketPublicAccessBlock:BucketPublicAccessBlock");
+  byTypeSuffix(
+    "bucketServerSideEncryptionConfigurationV2:BucketServerSideEncryptionConfigurationV2",
+  );
+const pab = (): CreatedResource[] =>
+  byTypeSuffix("bucketPublicAccessBlock:BucketPublicAccessBlock");
 const objectLockConfig = (): CreatedResource[] =>
   byTypeSuffix("bucketObjectLockConfigurationV2:BucketObjectLockConfigurationV2");
 const lifecycle = (): CreatedResource[] =>
   byTypeSuffix("bucketLifecycleConfigurationV2:BucketLifecycleConfigurationV2");
 const bucketNotification = (): CreatedResource[] =>
   byTypeSuffix("s3/bucketNotification:BucketNotification");
-const lambdaPermissions = (): CreatedResource[] =>
-  byTypeSuffix("lambda/permission:Permission");
+const lambdaPermissions = (): CreatedResource[] => byTypeSuffix("lambda/permission:Permission");
 const intelligentTiering = (): CreatedResource[] =>
   byTypeSuffix("bucketIntelligentTieringConfiguration:BucketIntelligentTieringConfiguration");
 
@@ -177,7 +185,9 @@ describe("real installs (ephemeral=false) are hardened", () => {
     await run(false);
     const e = sse();
     expect(e).toHaveLength(1);
-    const rule = (e[0].inputs.rules as { applyServerSideEncryptionByDefault: { sseAlgorithm: string } }[])[0];
+    const rule = (
+      e[0].inputs.rules as { applyServerSideEncryptionByDefault: { sseAlgorithm: string } }[]
+    )[0];
     expect(rule.applyServerSideEncryptionByDefault.sseAlgorithm).toBe("AES256");
   });
 
@@ -232,7 +242,7 @@ describe("the archive lifecycle rule (media plan item 18)", () => {
     await run(false);
     const configs = lifecycle();
     expect(configs).toHaveLength(1);
-    expect((configs[0]!.inputs.rules as unknown[])).toHaveLength(1);
+    expect(configs[0]!.inputs.rules as unknown[]).toHaveLength(1);
   });
 
   // Archiving is paused until the platform stabilizes (2026-10-17). A reinstall
@@ -267,7 +277,9 @@ describe("the archive lifecycle rule (media plan item 18)", () => {
     // The same floor the platform's archiving decision applies per category;
     // a disagreement would tag objects the rule then ignores.
     for (const category of STAND_IN_CATEGORIES) {
-      expect(DEFAULT_STAND_IN_STANDARDS[category].sizeFloorBytes).toBe(filter.and.objectSizeGreaterThan);
+      expect(DEFAULT_STAND_IN_STANDARDS[category].sizeFloorBytes).toBe(
+        filter.and.objectSizeGreaterThan,
+      );
     }
     const transitions = rule.transitions as Array<{ storageClass: string; days: number }>;
     expect(transitions).toHaveLength(1);
@@ -474,7 +486,8 @@ describe("device sign-in wiring", () => {
 
     const functions = byTypeSuffix("lambda/function:Function");
     const withDeviceClient = functions.filter((f) => {
-      const env = (f.inputs.environment as { variables?: Record<string, string> } | undefined)?.variables;
+      const env = (f.inputs.environment as { variables?: Record<string, string> } | undefined)
+        ?.variables;
       return env?.STARKEEP_DEVICE_USER_POOL_CLIENT_ID === "deviceclient456";
     });
     expect(withDeviceClient.map((f) => f.name)).toHaveLength(1);
@@ -483,7 +496,9 @@ describe("device sign-in wiring", () => {
   it("declares GET /auth/config on the gateway with no authorizer", async () => {
     await run(false);
 
-    const routes = byTypeSuffix("apigatewayv2/route:Route").filter((r) => r.inputs.routeKey === "GET /auth/config");
+    const routes = byTypeSuffix("apigatewayv2/route:Route").filter(
+      (r) => r.inputs.routeKey === "GET /auth/config",
+    );
     expect(routes).toHaveLength(1);
     expect(routes[0]!.inputs.authorizationType ?? "NONE").toBe("NONE");
     expect(routes[0]!.inputs.authorizerId).toBeUndefined();

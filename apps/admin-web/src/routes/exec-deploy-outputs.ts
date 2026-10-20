@@ -20,7 +20,10 @@ export async function GET() {
   const { s3Bucket, auroraEndpoint, apiGatewayUrl } = config;
   if (!s3Bucket || !auroraEndpoint) {
     return Response.json(
-      { error: "Config is missing s3Bucket or auroraEndpoint — has cloud-data-server been installed?" },
+      {
+        error:
+          "Config is missing s3Bucket or auroraEndpoint — has cloud-data-server been installed?",
+      },
       { status: 404 },
     );
   }

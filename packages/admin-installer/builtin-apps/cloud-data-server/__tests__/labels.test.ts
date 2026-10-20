@@ -111,7 +111,8 @@ const LABELS_UPDATE = /update "shared"\."record_labels"/;
  * Matched on the ordering-key aliases the grammar's compiler selects, which is
  * what keeps it from shadowing the forward hydration below.
  */
-const LABELS_SELECT = /select \*, "value" as "__ok0", "record_id" as "__ok1" from "shared"\."record_labels"/;
+const LABELS_SELECT =
+  /select \*, "value" as "__ok0", "record_id" as "__ok1" from "shared"\."record_labels"/;
 /**
  * The forward hydration shape — `?include=labels`, and now also the
  * value-cardinality cap's read of what the app already has stored. Narrow
@@ -126,19 +127,24 @@ function annotatorDb(over?: {
   declaredKeys?: string[];
   storedLabels?: Record<string, unknown>[];
 }): FakeDsql {
-  return fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }])
-    .on(LABEL_KEYS_SELECT, (over?.declaredKeys ?? ["faces-detected", "face-count"]).map((key) => ({
-      app_id: "annotator",
-      key,
-      description: `desc for ${key}`,
-    })))
-    .on(RECORDS_SELECT, over?.records ?? [recordRow({ id: "rec1", type: "image/jpeg" })])
-    // The write path reads this app's stored values for the batch's records, so
-    // the value cap counts rows already there and not just the ones in front of
-    // it. Empty = nothing stored yet, which is what every test here assumes.
-    .on(LABELS_BY_IDS, over?.storedLabels ?? [])
-    .on(LABELS_INSERT, [])
-    .on(LABELS_UPDATE, []);
+  return (
+    fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }])
+      .on(
+        LABEL_KEYS_SELECT,
+        (over?.declaredKeys ?? ["faces-detected", "face-count"]).map((key) => ({
+          app_id: "annotator",
+          key,
+          description: `desc for ${key}`,
+        })),
+      )
+      .on(RECORDS_SELECT, over?.records ?? [recordRow({ id: "rec1", type: "image/jpeg" })])
+      // The write path reads this app's stored values for the batch's records, so
+      // the value cap counts rows already there and not just the ones in front of
+      // it. Empty = nothing stored yet, which is what every test here assumes.
+      .on(LABELS_BY_IDS, over?.storedLabels ?? [])
+      .on(LABELS_INSERT, [])
+      .on(LABELS_UPDATE, [])
+  );
 }
 
 describe("POST /data/labels", () => {
@@ -364,10 +370,7 @@ describe("GET /data/label-keys", () => {
     const { labelKeys } = bodyOf(res) as {
       labelKeys: Array<{ app_id: string; label: string; description: string }>;
     };
-    expect(labelKeys.map((k) => k.label)).toEqual([
-      "annotator/faces-detected",
-      "photos/thumbnail",
-    ]);
+    expect(labelKeys.map((k) => k.label)).toEqual(["annotator/faces-detected", "photos/thumbnail"]);
   });
 });
 
@@ -408,10 +411,9 @@ describe("GET /data/records with labels", () => {
   });
 
   it("omits the labels field entirely when not requested", async () => {
-    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(
-      RECORDS_SELECT,
-      [recordRow({ id: "rec1", type: "image/jpeg" })],
-    );
+    const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(RECORDS_SELECT, [
+      recordRow({ id: "rec1", type: "image/jpeg" }),
+    ]);
     setDbFactory(db);
     const res = await handler(
       signedEvent({ appId: "reader", method: "GET", subPath: "/data/records" }),
@@ -721,24 +723,26 @@ describe("labels supplied on record create", () => {
   const VALID_HASH = "b".repeat(64);
 
   function createDb(over?: { declaredKeys?: string[] }) {
-    return fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }])
-      .on(RECORDS_INSERT, [])
-      .on(
-        LABEL_KEYS_SELECT,
-        (over?.declaredKeys ?? ["thumbnail"]).map((key) => ({
-          app_id: "photos",
-          key,
-          description: "d",
-        })),
-      )
-      .on(/from "shared"\."records" where "id" in/, (q) => [
-        recordRow({ id: String(q.values[0]), type: "image/jpeg" }),
-      ])
-      // The write path reads this app's stored values for the batch's records
-      // so the value cap counts what is already there. A brand-new record has
-      // none.
-      .on(LABELS_BY_IDS, [])
-      .on(LABELS_INSERT, []);
+    return (
+      fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }])
+        .on(RECORDS_INSERT, [])
+        .on(
+          LABEL_KEYS_SELECT,
+          (over?.declaredKeys ?? ["thumbnail"]).map((key) => ({
+            app_id: "photos",
+            key,
+            description: "d",
+          })),
+        )
+        .on(/from "shared"\."records" where "id" in/, (q) => [
+          recordRow({ id: String(q.values[0]), type: "image/jpeg" }),
+        ])
+        // The write path reads this app's stored values for the batch's records
+        // so the value cap counts what is already there. A brand-new record has
+        // none.
+        .on(LABELS_BY_IDS, [])
+        .on(LABELS_INSERT, [])
+    );
   }
 
   function createEvent(labels: Array<{ key: string; value?: string }>) {

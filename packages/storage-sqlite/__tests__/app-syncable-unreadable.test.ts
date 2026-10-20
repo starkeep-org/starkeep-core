@@ -19,10 +19,7 @@
 
 import { describe, it, expect } from "vitest";
 import { DatabaseSync } from "node:sqlite";
-import type {
-  AppSyncableNamespace,
-  AppSyncableNamespaceStore,
-} from "@starkeep/shared-space-api";
+import type { AppSyncableNamespace, AppSyncableNamespaceStore } from "@starkeep/shared-space-api";
 import { SqliteAppSyncableApplier } from "../src/app-syncable/apply.js";
 import { appSyncableTableName } from "../src/app-syncable/namespace.js";
 
@@ -126,7 +123,9 @@ describe("SqliteAppSyncableApplier — a row with a NULL updated_at", () => {
 
   function readPayload(db: DatabaseSync): unknown {
     const rows = db
-      .prepare(`SELECT payload, deleted_at FROM ${appSyncableTableName(APP, TABLE)} WHERE id = 'r1'`)
+      .prepare(
+        `SELECT payload, deleted_at FROM ${appSyncableTableName(APP, TABLE)} WHERE id = 'r1'`,
+      )
       .all() as Array<{ payload: string; deleted_at: string | null }>;
     return rows[0];
   }

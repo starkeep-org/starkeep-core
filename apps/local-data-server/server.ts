@@ -48,7 +48,10 @@ import { ApiError } from "../../packages/shared-space-api/src/errors.js";
 import { FsObjectStorageAdapter } from "../../packages/storage-fs/src/adapter.js";
 import type { Filter } from "../../packages/storage-adapter/src/database/types.js";
 import { createNodeClock, createStarkeepSdk } from "../../packages/sdk/src/sdk.js";
-import { createSqliteSyncStateStore, createChangeNotifier } from "../../packages/sync-engine/src/index.js";
+import {
+  createSqliteSyncStateStore,
+  createChangeNotifier,
+} from "../../packages/sync-engine/src/index.js";
 import { setHashFactory } from "@starkeep/storage-adapter";
 import {
   labelPageFrom,
@@ -242,9 +245,7 @@ function grantsForApp(db: RawDatabase, appId: string): AppGrantRow[] {
     .select(["type_id", "access", "metadata_write"])
     .where("app_id", "=", appId)
     .compile();
-  return db
-    .prepare(query.sql)
-    .all(...(query.parameters as string[])) as unknown as AppGrantRow[];
+  return db.prepare(query.sql).all(...(query.parameters as string[])) as unknown as AppGrantRow[];
 }
 
 // All-access local identities: Starkeep Drive (the User-Data-Owner) and the
@@ -311,9 +312,9 @@ function getAppHmacSecret(db: RawDatabase, appId: string): string | null {
     .where("app_id", "=", appId)
     .where("status", "=", "active")
     .compile();
-  const row = db
-    .prepare(query.sql)
-    .get(...(query.parameters as string[])) as { hmac_secret: string } | undefined;
+  const row = db.prepare(query.sql).get(...(query.parameters as string[])) as
+    | { hmac_secret: string }
+    | undefined;
   return row?.hmac_secret ?? null;
 }
 
@@ -344,7 +345,9 @@ function validateAppHmac(
     "utf8",
   );
   const input = Buffer.concat([prefix as unknown as Uint8Array, body as unknown as Uint8Array]);
-  const expected = createHmac("sha256", secret).update(input as unknown as Uint8Array).digest("hex");
+  const expected = createHmac("sha256", secret)
+    .update(input as unknown as Uint8Array)
+    .digest("hex");
   // timingSafeEqual requires equal-length buffers
   const sigBuf = Buffer.from(sig, "hex");
   const expBuf = Buffer.from(expected, "hex");
@@ -454,7 +457,9 @@ function resolveCeilings(config: Pick<StarkeepConfig, "standInCeilings">): SyncD
  * records table. With the bytes this node holds, it tells the person roughly
  * what turning on "Keep originals here" would download.
  */
-function originalBytesByCategory(db: RawDatabase): Record<StandInCategory, { count: number; bytes: number }> {
+function originalBytesByCategory(
+  db: RawDatabase,
+): Record<StandInCategory, { count: number; bytes: number }> {
   const query = qb
     .selectFrom("shared_records")
     .select(({ fn }) => [
@@ -485,10 +490,7 @@ function originalBytesByCategory(db: RawDatabase): Record<StandInCategory, { cou
   return out;
 }
 
-function ceilingProblems(body: {
-  ceilings?: unknown;
-  keepOriginals?: unknown;
-}): string[] {
+function ceilingProblems(body: { ceilings?: unknown; keepOriginals?: unknown }): string[] {
   const problems: string[] = [];
   if (body.keepOriginals !== undefined && typeof body.keepOriginals !== "boolean") {
     problems.push("keepOriginals must be true or false");
@@ -501,7 +503,6 @@ function regionFromUserPoolId(userPoolId: string): string {
   const parts = userPoolId.split("_");
   return parts.length > 1 ? parts[0] : "";
 }
-
 
 function restartProcess(): void {
   console.log("[server] Restarting to apply config changes…");
@@ -518,16 +519,12 @@ function restartProcess(): void {
   // STARKEEP_DIR so logs survive the restart and the child is fully detached.
   mkdirSync(STARKEEP_DIR, { recursive: true });
   const logFd = openSync(join(STARKEEP_DIR, "local-data-server.log"), "a");
-  const child = spawn(
-    process.execPath,
-    [...process.execArgv, ...process.argv.slice(1)],
-    {
-      detached: true,
-      stdio: ["ignore", logFd, logFd],
-      env: process.env,
-      cwd: process.cwd(),
-    },
-  );
+  const child = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+    env: process.env,
+    cwd: process.cwd(),
+  });
   child.unref();
   // The replacement has no parent link to whoever started us, so its pid is the
   // only handle anyone gets. Print it before exiting (stdout is synchronous on
@@ -591,7 +588,9 @@ async function loadStarkeepConfig(): Promise<StarkeepConfig> {
   try {
     parsed = JSON.parse(await readFile(STARKEEP_CONFIG_PATH, "utf8"));
   } catch {
-    console.warn(`No config found at ${STARKEEP_CONFIG_PATH} — cloud features disabled until setup`);
+    console.warn(
+      `No config found at ${STARKEEP_CONFIG_PATH} — cloud features disabled until setup`,
+    );
   }
   if (!parsed.nodeId) {
     parsed.nodeId = randomUUID();
@@ -664,9 +663,12 @@ async function runSharedQuery(
     serverWhere: plan.serverWhere,
     softDeleted: plan.softDeleted,
   });
-  json(res, result.mode === "rows"
-    ? { rows: result.rows, truncated: result.truncated, page_token: result.pageToken }
-    : { groups: result.groups, truncated: result.truncated });
+  json(
+    res,
+    result.mode === "rows"
+      ? { rows: result.rows, truncated: result.truncated, page_token: result.pageToken }
+      : { groups: result.groups, truncated: result.truncated },
+  );
 }
 
 async function main() {
@@ -736,8 +738,17 @@ async function main() {
    */
   type SessionState =
     | { readonly state: "signed-out" }
-    | { readonly state: "signed-in"; readonly email: string | null; readonly userId: string | null; readonly bound: boolean }
-    | { readonly state: "bound-elsewhere"; readonly email: string | null; readonly message: string };
+    | {
+        readonly state: "signed-in";
+        readonly email: string | null;
+        readonly userId: string | null;
+        readonly bound: boolean;
+      }
+    | {
+        readonly state: "bound-elsewhere";
+        readonly email: string | null;
+        readonly message: string;
+      };
   let sessionState: SessionState = { state: "signed-out" };
 
   // The token source for the stored session's pool, rebuilt when a sign-in
@@ -750,7 +761,9 @@ async function main() {
       region: auth.region,
       userPoolClientId: auth.deviceClientId,
       // Test seam: the tier-2 suite's fake cloud plays the pool.
-      ...(process.env.STARKEEP_COGNITO_ENDPOINT ? { endpoint: process.env.STARKEEP_COGNITO_ENDPOINT } : {}),
+      ...(process.env.STARKEEP_COGNITO_ENDPOINT
+        ? { endpoint: process.env.STARKEEP_COGNITO_ENDPOINT }
+        : {}),
     });
   }
 
@@ -774,7 +787,12 @@ async function main() {
     if (auth) useSessionPool(auth);
     const stored = await deviceSession.store.read();
     if (stored && auth) {
-      sessionState = { state: "signed-in", email: stored.email, userId: deviceSession.userId(), bound: false };
+      sessionState = {
+        state: "signed-in",
+        email: stored.email,
+        userId: deviceSession.userId(),
+        bound: false,
+      };
     }
     // A sign-out that could not reach its pool finishes now, in the background.
     void revokePendingSignOut(cognitoClientFor, deviceSession.store).catch(() => undefined);
@@ -857,23 +875,23 @@ async function main() {
   // is removed except through "Free up space".
   const ceilings = resolveCeilings(starkeepConfig);
   const residencyManager = createResidencyManager({
-        localDb,
-        databaseAdapter,
-        localObjectStorage: localAdapter,
-        // The local data server is never the cloud node. `starkeep/no-cloud`
-        // is a constraint about cloud storage; a laptop holding such a record
-        // is the intended outcome, not a violation.
-        isCloudNode: false,
-        ceilings,
-        keepOriginals: starkeepConfig.keepOriginals === true,
-        standards: () => librarySettings.standards(),
-        // A watched file is symlinked into the object store rather than copied,
-        // so its bytes belong to the person's folder. Removing the key frees
-        // nothing and loses the link, which is a removal that costs something
-        // and reclaims nothing. The phone answers the same question from its
-        // camera-roll alias table.
-        borrowsBytes: (key) => localAdapter.isAlias(key),
-      });
+    localDb,
+    databaseAdapter,
+    localObjectStorage: localAdapter,
+    // The local data server is never the cloud node. `starkeep/no-cloud`
+    // is a constraint about cloud storage; a laptop holding such a record
+    // is the intended outcome, not a violation.
+    isCloudNode: false,
+    ceilings,
+    keepOriginals: starkeepConfig.keepOriginals === true,
+    standards: () => librarySettings.standards(),
+    // A watched file is symlinked into the object store rather than copied,
+    // so its bytes belong to the person's folder. Removing the key frees
+    // nothing and loses the link, which is a removal that costs something
+    // and reclaims nothing. The phone answers the same question from its
+    // camera-roll alias table.
+    borrowsBytes: (key) => localAdapter.isAlias(key),
+  });
 
   const namespaceStore = new SqliteAppSyncableNamespaceStore(localDb);
   const appApplier = new SqliteAppSyncableApplier(localDb, namespaceStore);
@@ -1075,7 +1093,9 @@ async function main() {
    * the first pass ran. A user other than the library's stops sync: the two
    * libraries must not mix.
    */
-  async function bindToUser(userId: string): Promise<{ readonly ok: true } | { readonly ok: false; readonly message: string }> {
+  async function bindToUser(
+    userId: string,
+  ): Promise<{ readonly ok: true } | { readonly ok: false; readonly message: string }> {
     try {
       const report = bindLibrary(localDb, objectsBasePath, userId);
       if (libraryUser !== report.userId || report.movedDirs > 0 || report.rewrittenKeys > 0) {
@@ -1093,7 +1113,9 @@ async function main() {
       // start again, so the machine syncs again only after a restart.
       if (supervisorStarted) {
         await supervisor?.stop();
-        console.error("[auth] sync stopped. Restart the local data server once this machine signs in as the library's owner.");
+        console.error(
+          "[auth] sync stopped. Restart the local data server once this machine signs in as the library's owner.",
+        );
       }
       return { ok: false, message: err.message };
     }
@@ -1224,9 +1246,9 @@ async function main() {
   // Restore persisted watches from local config file
   const persistedWatches = await loadWatchConfigs();
   for (const config of persistedWatches) {
-    watchManager.startWatch(config).catch((err: Error) =>
-      console.error(`Failed to restore watch ${config.id}:`, err.message)
-    );
+    watchManager
+      .startWatch(config)
+      .catch((err: Error) => console.error(`Failed to restore watch ${config.id}:`, err.message));
   }
 
   const server = createServer(async (req, res) => {
@@ -1316,10 +1338,7 @@ async function main() {
       // is what makes it safe on a surface with no app identity.
       /^\/sync\/verify$/,
     ];
-    const TOKEN_AUTHORIZED_PATTERNS = [
-      /^\/data\/files\/upload\/[^/]+$/,
-      /^\/data\/files\/[^/]+$/,
-    ];
+    const TOKEN_AUTHORIZED_PATTERNS = [/^\/data\/files\/upload\/[^/]+$/, /^\/data\/files\/[^/]+$/];
 
     const isLoopbackAuthorized = LOOPBACK_AUTHORIZED_PATTERNS.some((re) => re.test(path));
     const isTokenAuthorized = TOKEN_AUTHORIZED_PATTERNS.some((re) => re.test(path));
@@ -1341,12 +1360,12 @@ async function main() {
         return;
       }
       const rawBody =
-        req.method === "GET" || req.method === "HEAD"
-          ? Buffer.alloc(0)
-          : await readBodyBuffer(req);
+        req.method === "GET" || req.method === "HEAD" ? Buffer.alloc(0) : await readBodyBuffer(req);
       if (!validateAppHmac(localDb, appId, req.method ?? "GET", path, rawBody, appSig, appTs)) {
         res.writeHead(401);
-        json(res, { error: "Invalid X-Starkeep-App-Sig (app not installed or signature mismatch)" });
+        json(res, {
+          error: "Invalid X-Starkeep-App-Sig (app not installed or signature mismatch)",
+        });
         return;
       }
       // readBody caches the raw bytes on the request itself, so downstream
@@ -1422,9 +1441,18 @@ async function main() {
         json(res, {
           cloudUrl: CLOUD_URL ?? null,
           ...(sessionState.state === "signed-in"
-            ? { state: sessionState.bound ? "signed-in" : "connecting", email: sessionState.email, userId: sessionState.userId }
+            ? {
+                state: sessionState.bound ? "signed-in" : "connecting",
+                email: sessionState.email,
+                userId: sessionState.userId,
+              }
             : sessionState.state === "bound-elsewhere"
-              ? { state: "bound-elsewhere", email: sessionState.email, message: sessionState.message, userId: null }
+              ? {
+                  state: "bound-elsewhere",
+                  email: sessionState.email,
+                  message: sessionState.message,
+                  userId: null,
+                }
               : { state: "signed-out", email: null, userId: null }),
           libraryUserId: libraryUser === LOCAL_USER_SEGMENT ? null : libraryUser,
         });
@@ -1517,7 +1545,8 @@ async function main() {
           await client.revoke(tokens.refreshToken).catch(() => undefined);
           res.writeHead(409);
           json(res, {
-            error: "This machine's library belongs to another account. Sign in as that account to sync it.",
+            error:
+              "This machine's library belongs to another account. Sign in as that account to sync it.",
           });
           return;
         }
@@ -1526,7 +1555,10 @@ async function main() {
         // session on this machine is replaced and ended at its own pool.
         await endReplacedSession(cognitoClientFor, deviceSession.store, deviceSession.auth());
         const signedInEmail = claims.email ?? email;
-        deviceSession.writeSignIn(auth, userId, { refreshToken: tokens.refreshToken, email: signedInEmail });
+        deviceSession.writeSignIn(auth, userId, {
+          refreshToken: tokens.refreshToken,
+          email: signedInEmail,
+        });
         useSessionPool(auth);
         sessionState = { state: "signed-in", email: signedInEmail, userId, bound: false };
         console.log(`[auth] this machine signed in as ${signedInEmail}`);
@@ -1598,9 +1630,7 @@ async function main() {
           json(res, { error: "sync not configured" });
           return;
         }
-        supervisor.resume().catch((err: Error) =>
-          console.error("resume failed:", err),
-        );
+        supervisor.resume().catch((err: Error) => console.error("resume failed:", err));
         json(res, { ok: true });
         return;
       }
@@ -1664,7 +1694,9 @@ async function main() {
         const tokens = syncAllowed() ? activeTokenSource() : null;
         if (!tokens) {
           res.writeHead(503);
-          json(res, { error: "This machine is not signed in to the cloud yet — sign in from admin-web" });
+          json(res, {
+            error: "This machine is not signed in to the cloud yet — sign in from admin-web",
+          });
           return;
         }
         const subPath = path.slice("/cloud".length); // "/data/types" | "/data/records"
@@ -1686,7 +1718,9 @@ async function main() {
           res.end(text);
         } catch (err) {
           res.writeHead(502);
-          json(res, { error: `cloud request failed: ${err instanceof Error ? err.message : String(err)}` });
+          json(res, {
+            error: `cloud request failed: ${err instanceof Error ? err.message : String(err)}`,
+          });
         }
         return;
       }
@@ -1742,9 +1776,7 @@ async function main() {
       ): Promise<Map<string, Set<string>>> => {
         const out = new Map<string, Set<string>>();
         if (recordIds.length === 0) return out;
-        for (const labels of (
-          await databaseAdapter.getLabelsByRecordIds(recordIds)
-        ).values()) {
+        for (const labels of (await databaseAdapter.getLabelsByRecordIds(recordIds)).values()) {
           for (const l of labels) {
             if (l.appId !== writerAppId || l.deletedAt) continue;
             const k = labelValueSetKey(l.recordId, l.key);
@@ -1965,9 +1997,7 @@ async function main() {
             // One filesystem stat per record on a page is microseconds — the
             // reason the cloud cannot do this is that its equivalent is a
             // HeadObject per record, which is O(library) in network requests.
-            const here = r.objectStorageKey
-              ? await localAdapter.has(r.objectStorageKey)
-              : false;
+            const here = r.objectStorageKey ? await localAdapter.has(r.objectStorageKey) : false;
             availabilityByRecord.set(r.id, here ? { state: "instant" } : { state: "absent" });
           }
         }
@@ -1976,10 +2006,9 @@ async function main() {
         // the named label, with its dimensions. Generic over child records, a
         // label key and the width/height columns, so this server never learns
         // what any particular derived kind is.
-        const candidatesById =
-          variantLabel
-            ? await loadVariantCandidatesForPage(databaseAdapter, readable, variantLabel)
-            : null;
+        const candidatesById = variantLabel
+          ? await loadVariantCandidatesForPage(databaseAdapter, readable, variantLabel)
+          : null;
         const candidateAvailability = new Map<string, boolean>();
         if (candidatesById) {
           await Promise.all(
@@ -2002,15 +2031,17 @@ async function main() {
         const labelsById = new Map<string, RecordLabel[]>();
         if (includeLabels && readable.length > 0) {
           const wantedApps = labelApps
-            ? new Set(labelApps.split(",").map((s) => s.trim()).filter(Boolean))
+            ? new Set(
+                labelApps
+                  .split(",")
+                  .map((s) => s.trim())
+                  .filter(Boolean),
+              )
             : null;
           for (const [id, labels] of await databaseAdapter.getLabelsByRecordIds(
             readable.map((r) => r.id),
           )) {
-            labelsById.set(
-              id,
-              wantedApps ? labels.filter((l) => wantedApps.has(l.appId)) : labels,
-            );
+            labelsById.set(id, wantedApps ? labels.filter((l) => wantedApps.has(l.appId)) : labels);
           }
         }
 
@@ -2026,7 +2057,7 @@ async function main() {
         );
 
         const records = await Promise.all(
-          readable.map(async r => ({
+          readable.map(async (r) => ({
             id: r.id,
             kind: r.kind,
             type: r.type,
@@ -2054,9 +2085,7 @@ async function main() {
             // mechanism, over the path every other read already takes.
             deleted_at: r.deletedAt ? new Date(r.deletedAt.wallTime).toISOString() : null,
             availability: availabilityByRecord.get(r.id) ?? { state: "instant" },
-            path: r.objectStorageKey
-              ? await localAdapter.resolvePath(r.objectStorageKey)
-              : null,
+            path: r.objectStorageKey ? await localAdapter.resolvePath(r.objectStorageKey) : null,
             // `null` = enrichment requested but no metadata row (e.g. bytes
             // ingested by the folder watcher, which doesn't extract metadata).
             ...(includeMetadata ? { metadata: metadataById.get(r.id) ?? null } : {}),
@@ -2107,7 +2136,9 @@ async function main() {
                             )}`,
                             url_lifetime: {
                               kind: "expires",
-                              expires_at: new Date(Date.now() + VARIANT_URL_TTL_SECONDS * 1000).toISOString(),
+                              expires_at: new Date(
+                                Date.now() + VARIANT_URL_TTL_SECONDS * 1000,
+                              ).toISOString(),
                             },
                           }
                         : {}),
@@ -2257,7 +2288,8 @@ async function main() {
           json(res, {
             error: "InvalidStandIn",
             code: "fidelity-on-stand-in",
-            detail: "a stand-in reports its own fidelity in standIn.fidelity and the original's in parentFidelity",
+            detail:
+              "a stand-in reports its own fidelity in standIn.fidelity and the original's in parentFidelity",
           });
           return;
         }
@@ -2266,7 +2298,8 @@ async function main() {
           json(res, {
             error: "InvalidFidelity",
             code: "parent-fidelity-without-stand-in",
-            detail: "parentFidelity accompanies a stand-in; an original reports its own fidelity in fidelity",
+            detail:
+              "parentFidelity accompanies a stand-in; an original reports its own fidelity in fidelity",
           });
           return;
         }
@@ -2375,7 +2408,11 @@ async function main() {
                     existing,
                     reconciled.write,
                     clock,
-                    stampFor(existing.type, librarySettings.standards(), librarySettings.knowsLibraryValue()),
+                    stampFor(
+                      existing.type,
+                      librarySettings.standards(),
+                      librarySettings.knowsLibraryValue(),
+                    ),
                   )
                 : existing;
             json(res, { record: await renderRecord(current), deduped: true });
@@ -2635,7 +2672,10 @@ async function main() {
         }
         if (userIdFromObjectKey(body.key) !== libraryUser) {
           res.writeHead(403);
-          json(res, { error: "AccessDenied", detail: `the key is not under this library's user, ${libraryUser}` });
+          json(res, {
+            error: "AccessDenied",
+            detail: `the key is not under this library's user, ${libraryUser}`,
+          });
           return;
         }
         if (!appCanWriteCategory(localDb, appId!, category)) {
@@ -2753,8 +2793,12 @@ async function main() {
           json(res, { error: "File too large (20 MB limit)" });
           return;
         }
-        const mimeType = (req.headers["content-type"] ?? "application/octet-stream").split(";")[0]!.trim();
-        const hex = createHash("sha256").update(fileBuffer as unknown as Uint8Array).digest("hex");
+        const mimeType = (req.headers["content-type"] ?? "application/octet-stream")
+          .split(";")[0]!
+          .trim();
+        const hex = createHash("sha256")
+          .update(fileBuffer as unknown as Uint8Array)
+          .digest("hex");
         const key = dataRecordObjectKey(libraryUser, typeId, hex);
         await localAdapter.put(key, fileBuffer, { contentType: mimeType });
         json(res, { key, contentHash: hex, mimeType, sizeBytes: fileBuffer.length });
@@ -2826,9 +2870,12 @@ async function main() {
             // with no cap while the cloud one defaulted to 50 capped at 500.
             if (req.method === "GET") {
               const result = await view.query(table, queryParamsFrom(url.searchParams));
-              json(res, result.mode === "rows"
-                ? { rows: result.rows, truncated: result.truncated, page_token: result.pageToken }
-                : { groups: result.groups, truncated: result.truncated });
+              json(
+                res,
+                result.mode === "rows"
+                  ? { rows: result.rows, truncated: result.truncated, page_token: result.pageToken }
+                  : { groups: result.groups, truncated: result.truncated },
+              );
               return;
             }
           } catch (err) {
@@ -3019,10 +3066,15 @@ async function main() {
           return;
         }
         const expiresIn =
-          typeof parsed.expiresIn === "number" && Number.isFinite(parsed.expiresIn) && parsed.expiresIn > 0
+          typeof parsed.expiresIn === "number" &&
+          Number.isFinite(parsed.expiresIn) &&
+          parsed.expiresIn > 0
             ? parsed.expiresIn
             : 3600;
-        const urls: Record<string, { url: string; mimeType?: string | null; sizeBytes?: number | null }> = {};
+        const urls: Record<
+          string,
+          { url: string; mimeType?: string | null; sizeBytes?: number | null }
+        > = {};
         const readable: AnyRecord[] = [];
         for (const id of new Set(parsed.ids)) {
           const record = await sdk.data.get(createStarkeepId(id));
@@ -3066,7 +3118,11 @@ async function main() {
         const page = await pageBacklog(
           databaseAdapter,
           appGrants(localDb, appId!),
-          { kind: kind as BacklogKind, limit: Number.isFinite(limit) ? limit : 100, ...(cursor ? { cursor } : {}) },
+          {
+            kind: kind as BacklogKind,
+            limit: Number.isFinite(limit) ? limit : 100,
+            ...(cursor ? { cursor } : {}),
+          },
           librarySettings.standards(),
         );
         json(res, {
@@ -3110,9 +3166,10 @@ async function main() {
           return;
         }
         const { size } = outcome;
-        const served = size.recordId === outcome.original.id
-          ? outcome.original
-          : await databaseAdapter.get(size.recordId as StarkeepId);
+        const served =
+          size.recordId === outcome.original.id
+            ? outcome.original
+            : await databaseAdapter.get(size.recordId as StarkeepId);
         if (!served || !served.objectStorageKey) {
           res.writeHead(404);
           json(res, { error: "NotFound", detail: "the record that answers this size has no file" });
@@ -3294,7 +3351,15 @@ async function main() {
           await Promise.all(
             BACKLOG_KINDS.map(
               async (kind) =>
-                [kind, await countBacklog(databaseAdapter, everything, kind, librarySettings.standards())] as const,
+                [
+                  kind,
+                  await countBacklog(
+                    databaseAdapter,
+                    everything,
+                    kind,
+                    librarySettings.standards(),
+                  ),
+                ] as const,
             ),
           ),
         );
@@ -3343,7 +3408,9 @@ async function main() {
           return;
         }
         const patch: Partial<StarkeepConfig> = {
-          ...(body.ceilings ? { standInCeilings: body.ceilings as StarkeepConfig["standInCeilings"] } : {}),
+          ...(body.ceilings
+            ? { standInCeilings: body.ceilings as StarkeepConfig["standInCeilings"] }
+            : {}),
           ...(typeof body.keepOriginals === "boolean" ? { keepOriginals: body.keepOriginals } : {}),
         };
         const updated: StarkeepConfig = { ...starkeepConfig, ...patch };
@@ -3382,7 +3449,10 @@ async function main() {
           set: status.set,
           problems: status.problems,
           knowsLibraryValue: librarySettings.knowsLibraryValue(),
-          ranges: { canonicalThreshold: CANONICAL_THRESHOLD_RANGES, advisoryLongEdge: ADVISORY_LONG_EDGE_RANGE },
+          ranges: {
+            canonicalThreshold: CANONICAL_THRESHOLD_RANGES,
+            advisoryLongEdge: ADVISORY_LONG_EDGE_RANGE,
+          },
           libraryOriginals: originalBytesByCategory(localDb),
         });
         return;
@@ -3601,9 +3671,7 @@ async function main() {
         }
 
         const hlc = clock.now();
-        await databaseAdapter.upsertLabels(
-          plan.writes.map((w) => ({ ...w, appId: appId!, hlc })),
-        );
+        await databaseAdapter.upsertLabels(plan.writes.map((w) => ({ ...w, appId: appId!, hlc })));
         // Nudges the Drive channel with the affected records. Note this does
         // NOT touch records.updated_at — a label write that did would re-ship
         // the whole record and disturb every peer's watermark.
@@ -3757,9 +3825,7 @@ async function main() {
         }
 
         const hlc = clock.now();
-        await databaseAdapter.retractLabels(
-          plan.writes.map((r) => ({ ...r, appId: appId!, hlc })),
-        );
+        await databaseAdapter.retractLabels(plan.writes.map((r) => ({ ...r, appId: appId!, hlc })));
         changeNotifier.emit({
           eventType: "local-change-recorded",
           recordIds: plan.writes.map((r) => r.recordId),
@@ -3800,7 +3866,9 @@ async function main() {
           databaseAdapter,
           decodeURIComponent(fidelityMatch[1]!),
           body.fidelity,
-          (type) => appCanRead(localDb, appId!, type) && appCanWriteMetadataCategory(localDb, appId!, typeCategory(type)),
+          (type) =>
+            appCanRead(localDb, appId!, type) &&
+            appCanWriteMetadataCategory(localDb, appId!, typeCategory(type)),
         );
         if (!plan.ok) {
           res.writeHead(plan.status);
@@ -3815,7 +3883,11 @@ async function main() {
                 plan.record,
                 plan.write,
                 clock,
-                stampFor(plan.record.type, librarySettings.standards(), librarySettings.knowsLibraryValue()),
+                stampFor(
+                  plan.record.type,
+                  librarySettings.standards(),
+                  librarySettings.knowsLibraryValue(),
+                ),
               );
         if (plan.write !== null) {
           changeNotifier.emit({
@@ -3837,7 +3909,10 @@ async function main() {
       if (metadataWriteMatch && req.method === "POST") {
         const recordId = metadataWriteMatch[1]!;
         const body = await readBody(req);
-        const { typeId, metadata } = JSON.parse(body) as { typeId?: string; metadata?: Record<string, unknown> };
+        const { typeId, metadata } = JSON.parse(body) as {
+          typeId?: string;
+          metadata?: Record<string, unknown>;
+        };
         if (!typeId) {
           res.writeHead(400);
           json(res, { error: "typeId is required" });
@@ -3866,12 +3941,17 @@ async function main() {
         const category = typeCategory(subject.type);
         if (!appCanWriteMetadataCategory(localDb, appId!, category)) {
           res.writeHead(403);
-          json(res, { error: "AccessDenied", detail: `app "${appId}" has no metadataWrite grant on category "${category}"` });
+          json(res, {
+            error: "AccessDenied",
+            detail: `app "${appId}" has no metadataWrite grant on category "${category}"`,
+          });
           return;
         }
         if (!hasMetadataTable(category)) {
           res.writeHead(400);
-          json(res, { error: `Category "${category}" has no metadata table — only mapped categories support metadata` });
+          json(res, {
+            error: `Category "${category}" has no metadata table — only mapped categories support metadata`,
+          });
           return;
         }
         const checked = checkMetadataValues(category as Category, metadata);
@@ -3913,7 +3993,10 @@ async function main() {
         }
         if (!appCanRead(localDb, appId!, record.type)) {
           res.writeHead(403);
-          json(res, { error: "AccessDenied", detail: `app "${appId}" has no read grant on type "${record.type}"` });
+          json(res, {
+            error: "AccessDenied",
+            detail: `app "${appId}" has no read grant on type "${record.type}"`,
+          });
           return;
         }
         const category = typeCategory(record.type);
@@ -4001,14 +4084,19 @@ async function main() {
             fidelity: record.fidelity,
             canonical_threshold: record.canonicalThreshold,
             self_canonical: record.selfCanonical,
-            path: record.kind === "data" && record.objectStorageKey
-              ? await localAdapter.resolvePath(record.objectStorageKey)
-              : null,
+            path:
+              record.kind === "data" && record.objectStorageKey
+                ? await localAdapter.resolvePath(record.objectStorageKey)
+                : null,
             // Same `include` vocabulary as the list route. Asking about one
             // record is the cheapest possible form of "is this record a
             // rendition"; without it the only way to answer that was to list
             // the library and look, which is O(library) to learn one bit.
-            ...(url.searchParams.get("include")?.split(",").map((v) => v.trim()).includes("labels")
+            ...(url.searchParams
+              .get("include")
+              ?.split(",")
+              .map((v) => v.trim())
+              .includes("labels")
               ? {
                   labels: (
                     (await databaseAdapter.getLabelsByRecordIds([record.id])).get(record.id) ?? []
@@ -4040,7 +4128,9 @@ async function main() {
       // the SDK use. A canonical stand-in whose original is live is refused on
       // its own; deleting the original deletes both.
       if (recordMatch && req.method === "DELETE") {
-        const record = await databaseAdapter.get(createStarkeepId(decodeURIComponent(recordMatch[1]!)));
+        const record = await databaseAdapter.get(
+          createStarkeepId(decodeURIComponent(recordMatch[1]!)),
+        );
         if (!record || record.deletedAt || !appCanRead(localDb, appId!, record.type)) {
           res.writeHead(404);
           json(res, { error: "Record not found" });
@@ -4079,7 +4169,9 @@ async function main() {
       if (restoreMatch && req.method === "POST") {
         // Tombstones included, deliberately: this is the one read whose whole
         // purpose is to find a deleted record.
-        const record = await databaseAdapter.get(createStarkeepId(decodeURIComponent(restoreMatch[1]!)));
+        const record = await databaseAdapter.get(
+          createStarkeepId(decodeURIComponent(restoreMatch[1]!)),
+        );
         if (!record || !appCanRead(localDb, appId!, record.type)) {
           res.writeHead(404);
           json(res, { error: "Record not found" });
@@ -4200,10 +4292,16 @@ async function main() {
       // POST /watches — register a new directory watch
       if (path === "/watches" && req.method === "POST") {
         const body = await readBody(req);
-        const { directoryPath: rawDirectoryPath, recursive, includePatterns, excludePatterns } = JSON.parse(body);
-        const directoryPath = typeof rawDirectoryPath === "string"
-          ? rawDirectoryPath.replace(/^~/, homedir())
-          : rawDirectoryPath;
+        const {
+          directoryPath: rawDirectoryPath,
+          recursive,
+          includePatterns,
+          excludePatterns,
+        } = JSON.parse(body);
+        const directoryPath =
+          typeof rawDirectoryPath === "string"
+            ? rawDirectoryPath.replace(/^~/, homedir())
+            : rawDirectoryPath;
         if (!directoryPath) {
           res.writeHead(400);
           json(res, { error: "directoryPath is required" });
@@ -4422,7 +4520,7 @@ async function main() {
         res.writeHead(200, {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-cache",
-          "Connection": "keep-alive",
+          Connection: "keep-alive",
         });
         res.flushHeaders();
         res.write(": connected\n\n");
@@ -4464,7 +4562,7 @@ async function main() {
   });
 
   const shutdown = async () => {
-    sseClients.forEach(c => c.end());
+    sseClients.forEach((c) => c.end());
     server.close();
     if (supervisor) await supervisor.stop();
     await watchManager.shutdown();
@@ -4603,9 +4701,7 @@ function quantisedExpiry(expiresIn: number): number {
 }
 
 /** Verify and decode a file token. Returns null if invalid or expired. */
-function verifyFileToken(
-  token: string,
-): { key: string; mimeType: string; expires: number } | null {
+function verifyFileToken(token: string): { key: string; mimeType: string; expires: number } | null {
   const parsed = decodeSignedToken(token);
   if (!parsed) return null;
   if (parsed.scope !== "r") return null;

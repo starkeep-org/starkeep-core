@@ -50,7 +50,7 @@ function startResponse(outcome: StartOutcome): Response {
 }
 
 export async function POST(req: Request) {
-  const body = await req.json() as { action: "start" | "stop" | "restart"; id: string };
+  const body = (await req.json()) as { action: "start" | "stop" | "restart"; id: string };
   const { action, id } = body;
 
   if (action === "restart") {
@@ -95,12 +95,17 @@ export async function POST(req: Request) {
     // not started from the admin UI.
     const found = findApp(id);
     if (!found) {
-      return Response.json({ error: `No manifest found for app '${id}' in configured app parent dirs` }, { status: 404 });
+      return Response.json(
+        { error: `No manifest found for app '${id}' in configured app parent dirs` },
+        { status: 404 },
+      );
     }
     const localRun = found.manifest.localRun as LocalRunBlock | undefined;
     if (!localRun || typeof localRun.command !== "string") {
       return Response.json(
-        { error: `App '${id}' has no localRun block in its manifest; cannot be started from admin-web.` },
+        {
+          error: `App '${id}' has no localRun block in its manifest; cannot be started from admin-web.`,
+        },
         { status: 400 },
       );
     }

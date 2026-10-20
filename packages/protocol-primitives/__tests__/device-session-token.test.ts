@@ -54,7 +54,12 @@ function setup(options: { signedIn?: boolean; lifetimeMs?: number } = {}) {
   };
   const store = memorySessionStore();
   const rejected: string[] = [];
-  const tokens = createCloudTokenSource({ client, store, now: () => clock, onRejected: (r) => rejected.push(r) });
+  const tokens = createCloudTokenSource({
+    client,
+    store,
+    now: () => clock,
+    onRejected: (r) => rejected.push(r),
+  });
   return {
     tokens,
     store,
@@ -104,7 +109,11 @@ describe("the token source", () => {
     const env = setup();
     await env.signIn();
 
-    const results = await Promise.all([env.tokens.current(), env.tokens.current(), env.tokens.current()]);
+    const results = await Promise.all([
+      env.tokens.current(),
+      env.tokens.current(),
+      env.tokens.current(),
+    ]);
 
     expect(new Set(results).size).toBe(1);
     expect(env.refresh).toHaveBeenCalledTimes(1);
@@ -169,7 +178,11 @@ describe("the channel fetch", () => {
     await env.signIn();
     const { seen, impl } = recordingFetch();
 
-    await withUserToken(impl, CHANNEL, env.tokens)(`${CHANNEL}/sync/exchange`, {
+    await withUserToken(
+      impl,
+      CHANNEL,
+      env.tokens,
+    )(`${CHANNEL}/sync/exchange`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
     });
@@ -183,7 +196,11 @@ describe("the channel fetch", () => {
     await env.signIn();
     const { seen, impl } = recordingFetch();
 
-    await withUserToken(impl, CHANNEL, env.tokens)("https://bucket.s3.amazonaws.com/shared/x?X-Amz-Signature=abc");
+    await withUserToken(
+      impl,
+      CHANNEL,
+      env.tokens,
+    )("https://bucket.s3.amazonaws.com/shared/x?X-Amz-Signature=abc");
 
     expect(seen[0]!.headers.get(USER_TOKEN_HEADER)).toBeNull();
     expect(env.refresh).not.toHaveBeenCalled();

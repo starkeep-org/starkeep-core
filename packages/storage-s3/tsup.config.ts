@@ -6,8 +6,5 @@ export default defineConfig({
   dts: true,
   clean: true,
   sourcemap: true,
-  external: [
-    "@aws-sdk/client-s3",
-    "@aws-sdk/s3-request-presigner",
-  ],
+  external: ["@aws-sdk/client-s3", "@aws-sdk/s3-request-presigner"],
 });

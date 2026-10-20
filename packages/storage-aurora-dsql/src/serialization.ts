@@ -1,10 +1,5 @@
 import { OWNER_COLUMN } from "./owner-scope.js";
-import type {
-  Category,
-  DataRecord,
-  MetadataRow,
-  StarkeepId,
-} from "@starkeep/protocol-primitives";
+import type { Category, DataRecord, MetadataRow, StarkeepId } from "@starkeep/protocol-primitives";
 import {
   serializeHLC,
   deserializeHLC,
@@ -103,7 +98,11 @@ export function rowToRecord(row: PostgresRow): DataRecord {
  * conversions live in `@starkeep/storage-adapter` — re-exported here for the
  * adapter that used to own them.
  */
-export { rowToLabel, labelToRow, type LabelRow as PostgresLabelRow } from "@starkeep/storage-adapter";
+export {
+  rowToLabel,
+  labelToRow,
+  type LabelRow as PostgresLabelRow,
+} from "@starkeep/storage-adapter";
 
 /**
  * One stored metadata row, with Postgres' renderings turned back into the

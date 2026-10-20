@@ -12,10 +12,7 @@
 import { describe, it, expect } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { initializeLocalSchema } from "@starkeep/storage-sqlite";
-import {
-  appSyncableTableName,
-  getAppSyncableNamespace,
-} from "@starkeep/storage-sqlite";
+import { appSyncableTableName, getAppSyncableNamespace } from "@starkeep/storage-sqlite";
 import { installLocal } from "../src/local/installer.js";
 import { FILE_RECORDS_COLUMNS, FILE_RECORDS_TABLE } from "@starkeep/shared-space-api";
 import { sqliteColumnType } from "@starkeep/protocol-primitives";
@@ -204,9 +201,10 @@ describe("reapplying an install upgrades it", () => {
   }
 
   function rowOf(db: DatabaseSync, appId = "memo") {
-    return db
-      .prepare(`SELECT * FROM shared_app_registry WHERE app_id = ?`)
-      .get(appId) as Record<string, string>;
+    return db.prepare(`SELECT * FROM shared_app_registry WHERE app_id = ?`).get(appId) as Record<
+      string,
+      string
+    >;
   }
 
   it("refreshes the stored manifest, which nothing else can do", () => {
@@ -247,9 +245,7 @@ describe("reapplying an install upgrades it", () => {
     const indexesBefore = db
       .prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?`)
       .all(cardState) as Array<{ name: string }>;
-    expect(indexesBefore.map((i) => i.name)).not.toContain(
-      `idx_${cardState}_deck_id_reps`,
-    );
+    expect(indexesBefore.map((i) => i.name)).not.toContain(`idx_${cardState}_deck_id_reps`);
 
     reapply(db);
 

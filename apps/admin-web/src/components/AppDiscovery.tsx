@@ -36,7 +36,10 @@ export function AppDiscovery() {
   );
 }
 
-function AppDiscoveryModal({ open, onOpenChange }: {
+function AppDiscoveryModal({
+  open,
+  onOpenChange,
+}: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
@@ -58,7 +61,9 @@ function AppDiscoveryModal({ open, onOpenChange }: {
   }, []);
 
   // Reload on every open, so a directory added in another tab shows up.
-  useEffect(() => { if (open) load(); }, [open, load]);
+  useEffect(() => {
+    if (open) load();
+  }, [open, load]);
 
   const save = useCallback(async (next: string[]) => {
     setSaving(true);
@@ -81,7 +86,10 @@ function AppDiscoveryModal({ open, onOpenChange }: {
 
   const add = () => {
     const d = newDir.trim();
-    if (!d || (dirs ?? []).includes(d)) { setNewDir(""); return; }
+    if (!d || (dirs ?? []).includes(d)) {
+      setNewDir("");
+      return;
+    }
     setNewDir("");
     save([...(dirs ?? []), d]);
   };
@@ -95,8 +103,8 @@ function AppDiscoveryModal({ open, onOpenChange }: {
           <DialogTitle>App discovery</DialogTitle>
           <DialogDescription>
             Parent directories scanned for apps — each subdirectory holding a{" "}
-            <code className="text-xs">starkeep.manifest.json</code> counts as an app.
-            Add parent directories as siblings to starkeep-core.
+            <code className="text-xs">starkeep.manifest.json</code> counts as an app. Add parent
+            directories as siblings to starkeep-core.
           </DialogDescription>
         </DialogHeader>
 
@@ -110,14 +118,13 @@ function AppDiscoveryModal({ open, onOpenChange }: {
         {dirs === null ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
         ) : dirs.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No directories — no apps will be discovered.</p>
+          <p className="text-sm text-muted-foreground">
+            No directories — no apps will be discovered.
+          </p>
         ) : (
           <ul className="flex flex-col gap-2">
             {dirs.map((d) => (
-              <li
-                key={d}
-                className="flex items-center justify-between gap-2 rounded-md border p-2"
-              >
+              <li key={d} className="flex items-center justify-between gap-2 rounded-md border p-2">
                 <code className="min-w-0 flex-1 truncate text-xs">{d}</code>
                 <Button
                   size="sm"
@@ -139,7 +146,9 @@ function AppDiscoveryModal({ open, onOpenChange }: {
             className="h-8 text-sm"
             value={newDir}
             onChange={(e) => setNewDir(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") add(); }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") add();
+            }}
             disabled={saving}
           />
           <Button size="sm" onClick={add} disabled={saving || newDir.trim().length === 0}>

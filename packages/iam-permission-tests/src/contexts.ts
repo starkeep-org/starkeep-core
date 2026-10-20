@@ -356,9 +356,7 @@ const CONTEXTS: Record<string, ContextBuilder> = {
       const roleName = `${stackPrefix}-app-cloud-data-server-role`;
       const tempInstall: PolicyDoc = {
         name: "temp-install-cloud-data-server",
-        policy: JSON.parse(
-          buildTempInstallCloudDataServerPolicy(stackPrefix, accountId, region),
-        ),
+        policy: JSON.parse(buildTempInstallCloudDataServerPolicy(stackPrefix, accountId, region)),
       };
       return {
         principalArn: assumedRoleArn(accountId, roleName, "install"),
@@ -441,9 +439,7 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         // runtime data access happens under the assumed app creds, not the
         // broker's exec creds, so AppS3SharedData isn't needed on the CDS role
         // itself.
-        policy: JSON.parse(
-          buildRuntimePolicy(stackPrefix, "cloud-data-server", [], false, false),
-        ),
+        policy: JSON.parse(buildRuntimePolicy(stackPrefix, "cloud-data-server", [], false, false)),
       };
       return {
         principalArn: assumedRoleArn(accountId, roleName, "runtime"),
@@ -533,9 +529,7 @@ const CONTEXTS: Record<string, ContextBuilder> = {
       const roleName = `${stackPrefix}-install-infra-role`;
       const tempInstallInfra: PolicyDoc = {
         name: `temp-install-infra-${id}`,
-        policy: JSON.parse(
-          buildTempInstallInfraPolicy(stackPrefix, id, accountId, region),
-        ),
+        policy: JSON.parse(buildTempInstallInfraPolicy(stackPrefix, id, accountId, region)),
       };
       return {
         principalArn: assumedRoleArn(accountId, roleName, "install"),
@@ -565,10 +559,26 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         // shared .pulumi/ metadata.
         { action: "s3:GetObject", resource: stateKey, why: "Pulumi reads existing stack state." },
         { action: "s3:PutObject", resource: stateKey, why: "Pulumi writes updated stack state." },
-        { action: "s3:DeleteObject", resource: stateKey, why: "Pulumi removes stack state on destroy." },
-        { action: "s3:ListBucket", resource: stateBucketArn, why: "Pulumi enumerates state objects under .pulumi/." },
-        { action: "s3:GetAccelerateConfiguration", resource: stateBucketArn, why: "probePulumiStateBucket() — IAM propagation probe before Pulumi up." },
-        { action: "ssm:GetParameter", resource: `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/pulumi/passphrase`, why: "Pulumi loads the passphrase for state encryption." },
+        {
+          action: "s3:DeleteObject",
+          resource: stateKey,
+          why: "Pulumi removes stack state on destroy.",
+        },
+        {
+          action: "s3:ListBucket",
+          resource: stateBucketArn,
+          why: "Pulumi enumerates state objects under .pulumi/.",
+        },
+        {
+          action: "s3:GetAccelerateConfiguration",
+          resource: stateBucketArn,
+          why: "probePulumiStateBucket() — IAM propagation probe before Pulumi up.",
+        },
+        {
+          action: "ssm:GetParameter",
+          resource: `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/pulumi/passphrase`,
+          why: "Pulumi loads the passphrase for state encryption.",
+        },
         {
           action: "kms:Decrypt",
           resource: "*",
@@ -577,50 +587,126 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         },
 
         // Artifacts upload + Pulumi-source read of the bundle.
-        { action: "s3:PutObject", resource: artifactKey, why: "uploadAppBundle writes apps/<appId>/latest/dist.zip." },
-        { action: "s3:GetObject", resource: artifactKey, why: "Pulumi's aws.lambda.Function reads the bundle as code source." },
-        { action: "s3:ListBucket", resource: artifactsBucketArn, why: "Pulumi enumerates artifacts under apps/<appId>/." },
+        {
+          action: "s3:PutObject",
+          resource: artifactKey,
+          why: "uploadAppBundle writes apps/<appId>/latest/dist.zip.",
+        },
+        {
+          action: "s3:GetObject",
+          resource: artifactKey,
+          why: "Pulumi's aws.lambda.Function reads the bundle as code source.",
+        },
+        {
+          action: "s3:ListBucket",
+          resource: artifactsBucketArn,
+          why: "Pulumi enumerates artifacts under apps/<appId>/.",
+        },
 
         // Lambda admin on the per-app function.
-        { action: "lambda:CreateFunction", resource: lambdaArn, why: "Pulumi provisions the app's Lambda." },
+        {
+          action: "lambda:CreateFunction",
+          resource: lambdaArn,
+          why: "Pulumi provisions the app's Lambda.",
+        },
         { action: "lambda:DeleteFunction", resource: lambdaArn, why: "destroy path." },
         { action: "lambda:GetFunction", resource: lambdaArn, why: "Pulumi refresh." },
         { action: "lambda:GetFunctionConfiguration", resource: lambdaArn, why: "Pulumi refresh." },
-        { action: "lambda:UpdateFunctionCode", resource: lambdaArn, why: "redeploy with new bundle." },
-        { action: "lambda:UpdateFunctionConfiguration", resource: lambdaArn, why: "env/memory/timeout updates." },
+        {
+          action: "lambda:UpdateFunctionCode",
+          resource: lambdaArn,
+          why: "redeploy with new bundle.",
+        },
+        {
+          action: "lambda:UpdateFunctionConfiguration",
+          resource: lambdaArn,
+          why: "env/memory/timeout updates.",
+        },
         { action: "lambda:TagResource", resource: lambdaArn, why: "Pulumi tagging." },
         { action: "lambda:UntagResource", resource: lambdaArn, why: "Pulumi tagging." },
         { action: "lambda:ListTags", resource: lambdaArn, why: "Pulumi refresh." },
-        { action: "lambda:AddPermission", resource: lambdaArn, why: "aws.lambda.Permission for APIGw → invoke." },
+        {
+          action: "lambda:AddPermission",
+          resource: lambdaArn,
+          why: "aws.lambda.Permission for APIGw → invoke.",
+        },
         { action: "lambda:RemovePermission", resource: lambdaArn, why: "destroy path." },
-        { action: "lambda:GetPolicy", resource: lambdaArn, why: "Pulumi refresh of resource-based policy." },
-        { action: "lambda:ListVersionsByFunction", resource: lambdaArn, why: "Pulumi BucketV2-style refresh read." },
-        { action: "lambda:GetFunctionCodeSigningConfig", resource: lambdaArn, why: "Pulumi refresh read." },
-        { action: "lambda:GetFunctionConcurrency", resource: lambdaArn, why: "Pulumi refresh read." },
+        {
+          action: "lambda:GetPolicy",
+          resource: lambdaArn,
+          why: "Pulumi refresh of resource-based policy.",
+        },
+        {
+          action: "lambda:ListVersionsByFunction",
+          resource: lambdaArn,
+          why: "Pulumi BucketV2-style refresh read.",
+        },
+        {
+          action: "lambda:GetFunctionCodeSigningConfig",
+          resource: lambdaArn,
+          why: "Pulumi refresh read.",
+        },
+        {
+          action: "lambda:GetFunctionConcurrency",
+          resource: lambdaArn,
+          why: "Pulumi refresh read.",
+        },
         { action: "lambda:GetFunctionUrlConfig", resource: lambdaArn, why: "Pulumi refresh read." },
-        { action: "lambda:ListFunctionEventInvokeConfigs", resource: lambdaArn, why: "Pulumi refresh read." },
-        { action: "lambda:GetRuntimeManagementConfig", resource: lambdaArn, why: "Pulumi refresh read." },
+        {
+          action: "lambda:ListFunctionEventInvokeConfigs",
+          resource: lambdaArn,
+          why: "Pulumi refresh read.",
+        },
+        {
+          action: "lambda:GetRuntimeManagementConfig",
+          resource: lambdaArn,
+          why: "Pulumi refresh read.",
+        },
 
         // CloudWatch Logs: per-app log group lifecycle.
-        { action: "logs:CreateLogGroup", resource: logGroupArn, why: "Pulumi provisions the app's log group." },
+        {
+          action: "logs:CreateLogGroup",
+          resource: logGroupArn,
+          why: "Pulumi provisions the app's log group.",
+        },
         { action: "logs:DeleteLogGroup", resource: logGroupArn, why: "destroy path." },
         { action: "logs:PutRetentionPolicy", resource: logGroupArn, why: "Pulumi sets retention." },
         { action: "logs:TagResource", resource: logGroupArn, why: "Pulumi tagging." },
         { action: "logs:UntagResource", resource: logGroupArn, why: "Pulumi tagging." },
         { action: "logs:ListTagsForResource", resource: logGroupArn, why: "Pulumi refresh." },
-        { action: "logs:DescribeLogGroups", resource: "*", why: "Pulumi list-level read (must be on *)." },
+        {
+          action: "logs:DescribeLogGroups",
+          resource: "*",
+          why: "Pulumi list-level read (must be on *).",
+        },
 
         // API Gateway v2: integrations + routes hung off the shared API.
         { action: "apigatewayv2:GetApi", resource: "*", why: "Pulumi reads the shared API." },
         { action: "apigatewayv2:GetApis", resource: "*", why: "Pulumi refresh." },
-        { action: "apigatewayv2:GetAuthorizer", resource: "*", why: "Pulumi reads JWT authorizer." },
+        {
+          action: "apigatewayv2:GetAuthorizer",
+          resource: "*",
+          why: "Pulumi reads JWT authorizer.",
+        },
         { action: "apigatewayv2:GetAuthorizers", resource: "*", why: "Pulumi refresh." },
-        { action: "apigatewayv2:CreateIntegration", resource: "*", why: "Pulumi creates per-handler integration." },
-        { action: "apigatewayv2:UpdateIntegration", resource: "*", why: "Pulumi updates integration." },
+        {
+          action: "apigatewayv2:CreateIntegration",
+          resource: "*",
+          why: "Pulumi creates per-handler integration.",
+        },
+        {
+          action: "apigatewayv2:UpdateIntegration",
+          resource: "*",
+          why: "Pulumi updates integration.",
+        },
         { action: "apigatewayv2:DeleteIntegration", resource: "*", why: "destroy path." },
         { action: "apigatewayv2:GetIntegration", resource: "*", why: "Pulumi refresh." },
         { action: "apigatewayv2:GetIntegrations", resource: "*", why: "Pulumi refresh." },
-        { action: "apigatewayv2:CreateRoute", resource: "*", why: "Pulumi creates per-handler route." },
+        {
+          action: "apigatewayv2:CreateRoute",
+          resource: "*",
+          why: "Pulumi creates per-handler route.",
+        },
         { action: "apigatewayv2:UpdateRoute", resource: "*", why: "Pulumi updates route." },
         { action: "apigatewayv2:DeleteRoute", resource: "*", why: "destroy path." },
         { action: "apigatewayv2:GetRoute", resource: "*", why: "Pulumi refresh." },
@@ -634,18 +720,50 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         // `/apis/{api-id}/integrations` etc. — not `/v2/*` — so the resource
         // must match `/apis/*`. (Captured-call confirmation: photos install
         // hit `apigateway:POST` on `/apis/<id>/integrations`.)
-        { action: "apigateway:GET", resource: "arn:aws:apigateway:*::/apis/*", why: "Pulumi reads integrations/routes via legacy namespace." },
-        { action: "apigateway:POST", resource: "arn:aws:apigateway:*::/apis/*", why: "Pulumi creates integrations/routes via legacy namespace." },
-        { action: "apigateway:PATCH", resource: "arn:aws:apigateway:*::/apis/*", why: "Pulumi updates integrations/routes via legacy namespace." },
-        { action: "apigateway:PUT", resource: "arn:aws:apigateway:*::/apis/*", why: "Pulumi upserts integrations/routes via legacy namespace." },
-        { action: "apigateway:DELETE", resource: "arn:aws:apigateway:*::/apis/*", why: "destroy path via legacy namespace." },
-        { action: "apigateway:TagResource", resource: "arn:aws:apigateway:*::/tags/*", why: "Pulumi tags v2 resources via legacy namespace." },
-        { action: "apigateway:UntagResource", resource: "arn:aws:apigateway:*::/tags/*", why: "Pulumi untags v2 resources via legacy namespace." },
+        {
+          action: "apigateway:GET",
+          resource: "arn:aws:apigateway:*::/apis/*",
+          why: "Pulumi reads integrations/routes via legacy namespace.",
+        },
+        {
+          action: "apigateway:POST",
+          resource: "arn:aws:apigateway:*::/apis/*",
+          why: "Pulumi creates integrations/routes via legacy namespace.",
+        },
+        {
+          action: "apigateway:PATCH",
+          resource: "arn:aws:apigateway:*::/apis/*",
+          why: "Pulumi updates integrations/routes via legacy namespace.",
+        },
+        {
+          action: "apigateway:PUT",
+          resource: "arn:aws:apigateway:*::/apis/*",
+          why: "Pulumi upserts integrations/routes via legacy namespace.",
+        },
+        {
+          action: "apigateway:DELETE",
+          resource: "arn:aws:apigateway:*::/apis/*",
+          why: "destroy path via legacy namespace.",
+        },
+        {
+          action: "apigateway:TagResource",
+          resource: "arn:aws:apigateway:*::/tags/*",
+          why: "Pulumi tags v2 resources via legacy namespace.",
+        },
+        {
+          action: "apigateway:UntagResource",
+          resource: "arn:aws:apigateway:*::/tags/*",
+          why: "Pulumi untags v2 resources via legacy namespace.",
+        },
 
         // STS pre-flight that Pulumi's aws provider issues for account/region
         // detection before any resource call. Always Allowed for any principal,
         // but modeled so the call ledger matches reality.
-        { action: "sts:GetCallerIdentity", resource: "*", why: "pulumi-aws issues this on provider init to learn the calling account/region." },
+        {
+          action: "sts:GetCallerIdentity",
+          resource: "*",
+          why: "pulumi-aws issues this on provider init to learn the calling account/region.",
+        },
 
         // iam:PassRole — required so Pulumi can attach the app's *exec* role to
         // the new Lambda. Condition key must be set for the simulator.
@@ -911,9 +1029,7 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         name: "runtime",
         // Drive installs with fileAccess=all — the cross-cutting shared/*
         // write ceiling that powers every app's shared-record sync.
-        policy: JSON.parse(
-          buildRuntimePolicy(stackPrefix, USER_DATA_OWNER_APP_ID, [], true, true),
-        ),
+        policy: JSON.parse(buildRuntimePolicy(stackPrefix, USER_DATA_OWNER_APP_ID, [], true, true)),
       };
       return {
         principalArn: assumedRoleArn(accountId, roleName, "runtime"),
@@ -970,9 +1086,7 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         // only AppS3OwnPrefixNoUser — Manager's install session names no user
         // — so an empty-categories policy is sufficient for modeling the
         // install-time call.
-        policy: JSON.parse(
-          buildRuntimePolicy(stackPrefix, id, [], false, false),
-        ),
+        policy: JSON.parse(buildRuntimePolicy(stackPrefix, id, [], false, false)),
       };
       return {
         principalArn: assumedRoleArn(accountId, roleName, "install"),

@@ -128,17 +128,15 @@ describe("cloud-mode credentials", () => {
   });
 
   it("returns null when the parameter does not exist", async () => {
-    ssmMock.on(GetParameterCommand).rejects(
-      new ParameterNotFound({ message: "no such parameter", $metadata: {} }),
-    );
+    ssmMock
+      .on(GetParameterCommand)
+      .rejects(new ParameterNotFound({ message: "no such parameter", $metadata: {} }));
     expect(await loadAppCredentials("photos")).toBeNull();
   });
 
   it("throws when cloud mode is missing its required env", async () => {
     delete process.env.STARKEEP_CLOUD_DATA_BASE;
-    await expect(loadAppCredentials("photos")).rejects.toThrow(
-      /STARKEEP_CLOUD_DATA_BASE/,
-    );
+    await expect(loadAppCredentials("photos")).rejects.toThrow(/STARKEEP_CLOUD_DATA_BASE/);
   });
 
   it("caches the SSM result per process", async () => {

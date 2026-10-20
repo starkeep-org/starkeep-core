@@ -9,9 +9,7 @@ export interface PaginatedApiResponse {
   };
 }
 
-export function formatPaginatedResponse(
-  result: QueryResult,
-): PaginatedApiResponse {
+export function formatPaginatedResponse(result: QueryResult): PaginatedApiResponse {
   return {
     data: result.records,
     pagination: {

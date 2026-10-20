@@ -47,8 +47,19 @@ vi.mock("../src/routes/cloud-data-server-install", () =>
 );
 vi.mock("../src/routes/config", () => spy("config", ["GET", "PATCH"]));
 vi.mock("../src/routes/costs", () => spy("costs", ["POST"]));
-vi.mock("../src/routes/this-machine", () => spy("this-machine", ["GET", "POST_SIGN_IN", "POST_SIGN_OUT", "POST_CLOUD"]));
-vi.mock("../src/routes/users", () => spy("users", ["LIST", "CREATE", "SET_GROUP", "SET_ENABLED", "RESET_PASSWORD", "SIGN_OUT_EVERYWHERE"]));
+vi.mock("../src/routes/this-machine", () =>
+  spy("this-machine", ["GET", "POST_SIGN_IN", "POST_SIGN_OUT", "POST_CLOUD"]),
+);
+vi.mock("../src/routes/users", () =>
+  spy("users", [
+    "LIST",
+    "CREATE",
+    "SET_GROUP",
+    "SET_ENABLED",
+    "RESET_PASSWORD",
+    "SIGN_OUT_EVERYWHERE",
+  ]),
+);
 vi.mock("../src/routes/drive-install", () => spy("drive-install", ["POST"]));
 vi.mock("../src/routes/exec-daemon", () => spy("exec-daemon", ["POST"]));
 vi.mock("../src/routes/exec-daemon-status", () => spy("exec-daemon-status", ["GET"]));

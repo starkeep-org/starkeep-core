@@ -6,9 +6,7 @@ export interface ParsedQueryParams {
   readonly sortDirection?: "asc" | "desc";
 }
 
-export function parseQueryParams(
-  query: Record<string, string> | undefined,
-): ParsedQueryParams {
+export function parseQueryParams(query: Record<string, string> | undefined): ParsedQueryParams {
   if (!query) {
     return { limit: 50 };
   }
@@ -17,8 +15,7 @@ export function parseQueryParams(
   const limit = query.limit ? parseInt(query.limit, 10) : 50;
   const cursor = query.cursor || undefined;
   const sortField = query.sort || undefined;
-  const sortDirection =
-    query.order === "desc" ? ("desc" as const) : ("asc" as const);
+  const sortDirection = query.order === "desc" ? ("desc" as const) : ("asc" as const);
 
   return {
     types,

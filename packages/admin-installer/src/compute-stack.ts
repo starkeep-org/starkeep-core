@@ -346,9 +346,7 @@ export async function pulumiUpInline(opts: {
   // admin-web. Without onError, automation API buffers stderr internally
   // and only surfaces it on failure. Gated by PULUMI_VERBOSE_TRACE so it
   // can be flipped back on when we need the traces again.
-  const onError = PULUMI_VERBOSE_TRACE
-    ? (line: string) => process.stderr.write(line)
-    : undefined;
+  const onError = PULUMI_VERBOSE_TRACE ? (line: string) => process.stderr.write(line) : undefined;
 
   // Prune before refresh: a pruned resource is gone from both AWS and state
   // by the time `up` plans its creates, so the create sees a free identity.

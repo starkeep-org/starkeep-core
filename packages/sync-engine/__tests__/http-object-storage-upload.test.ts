@@ -8,7 +8,10 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { FileUriTransferRefused } from "@starkeep/storage-adapter";
-import { HttpObjectStorageAdapter, type UploadFile } from "../src/transports/http-object-storage.js";
+import {
+  HttpObjectStorageAdapter,
+  type UploadFile,
+} from "../src/transports/http-object-storage.js";
 
 const KEY = "shared/video/ab/" + "ab".repeat(32);
 const URI = "content://media/external/video/media/42";

@@ -15,9 +15,7 @@ describe("local-data-server harness", () => {
       expect(await health.json()).toEqual({ status: "ok" });
 
       // First boot persists a generated nodeId.
-      const config = JSON.parse(
-        await readFile(join(server.starkeepDir, "config.json"), "utf8"),
-      );
+      const config = JSON.parse(await readFile(join(server.starkeepDir, "config.json"), "utf8"));
       expect(typeof config.nodeId).toBe("string");
       expect(config.nodeId.length).toBeGreaterThan(0);
 
@@ -33,9 +31,7 @@ describe("local-data-server harness", () => {
   it("honors a pre-seeded config.json and keeps a caller-owned dir", async () => {
     const first = await startLocalDataServer({ config: { pullIntervalMs: 1234 } });
     try {
-      const config = JSON.parse(
-        await readFile(join(first.starkeepDir, "config.json"), "utf8"),
-      );
+      const config = JSON.parse(await readFile(join(first.starkeepDir, "config.json"), "utf8"));
       expect(config.pullIntervalMs).toBe(1234);
       expect(config.nodeId).toMatch(/^test-/);
     } finally {
@@ -45,9 +41,7 @@ describe("local-data-server harness", () => {
     // Same dir can be re-used for a restart (durability tests rely on this).
     const second = await startLocalDataServer({ starkeepDir: first.starkeepDir });
     try {
-      const config = JSON.parse(
-        await readFile(join(second.starkeepDir, "config.json"), "utf8"),
-      );
+      const config = JSON.parse(await readFile(join(second.starkeepDir, "config.json"), "utf8"));
       expect(config.nodeId).toMatch(/^test-/); // nodeId survives restarts
     } finally {
       await second.stop(); // does not own the dir → leaves it in place

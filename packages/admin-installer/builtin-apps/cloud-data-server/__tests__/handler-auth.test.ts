@@ -137,7 +137,12 @@ describe("HMAC gate", () => {
 
   it("401s a header appId that does not match the path, without assuming a role", async () => {
     scriptSecret("app-mismatch", "secret-mismatch");
-    const headers = signRequest({ appId: "other-app", hmacSecret: "secret-mismatch", method: "GET", path: "/health" });
+    const headers = signRequest({
+      appId: "other-app",
+      hmacSecret: "secret-mismatch",
+      method: "GET",
+      path: "/health",
+    });
     const res = await handler(
       makeEvent({ method: "GET", path: "/apps/app-mismatch/health", headers }),
       context,
@@ -149,7 +154,12 @@ describe("HMAC gate", () => {
 
   it("401s a signature made with the wrong secret", async () => {
     scriptSecret("app-badsig", "the-real-secret");
-    const headers = signRequest({ appId: "app-badsig", hmacSecret: "some-other-secret", method: "GET", path: "/health" });
+    const headers = signRequest({
+      appId: "app-badsig",
+      hmacSecret: "some-other-secret",
+      method: "GET",
+      path: "/health",
+    });
     const res = await handler(
       makeEvent({ method: "GET", path: "/apps/app-badsig/health", headers }),
       context,
@@ -198,7 +208,12 @@ describe("HMAC gate", () => {
     scriptSecret("app-valid", "secret-valid");
     scriptAssumeRole();
     // GET signs over the empty body on both sides (sign.ts / validateAppHmac).
-    const headers = signRequest({ appId: "app-valid", hmacSecret: "secret-valid", method: "GET", path: "/health" });
+    const headers = signRequest({
+      appId: "app-valid",
+      hmacSecret: "secret-valid",
+      method: "GET",
+      path: "/health",
+    });
     const res = await handler(
       makeEvent({ method: "GET", path: "/apps/app-valid/health", headers }),
       context,
@@ -216,7 +231,13 @@ describe("HMAC gate", () => {
     scriptSecret("app-b64", "secret-b64");
     scriptAssumeRole();
     const bodyBytes = Buffer.from(JSON.stringify({ hello: "wörld" }), "utf8");
-    const headers = signRequest({ appId: "app-b64", hmacSecret: "secret-b64", method: "POST", path: "/data/records", body: bodyBytes });
+    const headers = signRequest({
+      appId: "app-b64",
+      hmacSecret: "secret-b64",
+      method: "POST",
+      path: "/data/records",
+      body: bodyBytes,
+    });
     const res = await handler(
       makeEvent({
         method: "POST",
@@ -238,7 +259,12 @@ describe("warm-instance caches", () => {
     // reinstalled app's new secret is not seen until the 5-min TTL lapses.
     scriptSecret("app-cache", "secret-cache");
     scriptAssumeRole();
-    const headers = signRequest({ appId: "app-cache", hmacSecret: "secret-cache", method: "GET", path: "/health" });
+    const headers = signRequest({
+      appId: "app-cache",
+      hmacSecret: "secret-cache",
+      method: "GET",
+      path: "/health",
+    });
     const event = makeEvent({ method: "GET", path: "/apps/app-cache/health", headers });
     expect((await handler(event, context)).statusCode).toBe(500);
     expect((await handler(event, context)).statusCode).toBe(500);
@@ -248,7 +274,12 @@ describe("warm-instance caches", () => {
   it("assumes the per-app role once per app while the session is fresh", async () => {
     scriptSecret("app-stscache", "secret-stscache");
     scriptAssumeRole();
-    const headers = signRequest({ appId: "app-stscache", hmacSecret: "secret-stscache", method: "GET", path: "/health" });
+    const headers = signRequest({
+      appId: "app-stscache",
+      hmacSecret: "secret-stscache",
+      method: "GET",
+      path: "/health",
+    });
     const event = makeEvent({ method: "GET", path: "/apps/app-stscache/health", headers });
     expect((await handler(event, context)).statusCode).toBe(500);
     expect((await handler(event, context)).statusCode).toBe(500);

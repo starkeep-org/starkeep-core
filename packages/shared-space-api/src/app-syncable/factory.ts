@@ -12,11 +12,7 @@ import type { AppSpecificOperations, ApiSubject } from "../types.js";
 import { parseQuery } from "../query/parse.js";
 import { checkValue } from "../query/values.js";
 import { SYSTEM_COLUMN_NAMES } from "./columns.js";
-import type {
-  ParsedQuery,
-  ParsedQueryResult,
-  QueryTableSchema,
-} from "../query/types.js";
+import type { ParsedQuery, ParsedQueryResult, QueryTableSchema } from "../query/types.js";
 import { validateTableName } from "./validation.js";
 import { FILE_RECORDS_TABLE, RESERVED_TABLE_NAMES } from "./reserved.js";
 
@@ -78,9 +74,7 @@ export function createAppSpecificFactory(
     // Framework-reserved tables (e.g. `_starkeep_sync_records`) live in
     // ns.tables so the applier and pull scanner see them, but apps must not
     // be able to address them through insertRow/updateRow/etc.
-    const declaredTables = new Set(
-      ns.tableNames.filter((t) => !RESERVED_TABLE_NAMES.has(t)),
-    );
+    const declaredTables = new Set(ns.tableNames.filter((t) => !RESERVED_TABLE_NAMES.has(t)));
 
     function resolveTable(table: string): void {
       validateTableName(table);
@@ -169,10 +163,7 @@ export function createAppSpecificFactory(
      * applier, which fails on it as it always has — narrowing that is a
      * separate decision with its own migration.
      */
-    function validateRow(
-      table: string,
-      row: Record<string, unknown>,
-    ): Record<string, unknown> {
+    function validateRow(table: string, row: Record<string, unknown>): Record<string, unknown> {
       const info = ns!.tables.find((t) => t.name === table);
       if (!info) return row;
       const normalized: Record<string, unknown> = { ...row };
@@ -210,9 +201,7 @@ export function createAppSpecificFactory(
      * is the framework reading its own bookkeeping, not an app asking a
      * question — there is no caller input to validate.
      */
-    async function readFileRecord(
-      key: string,
-    ): Promise<Record<string, unknown> | null> {
+    async function readFileRecord(key: string): Promise<Record<string, unknown> | null> {
       const result = await requireQueryCapable().runQuery(appId, FILE_RECORDS_TABLE, {
         mode: "rows",
         table: FILE_RECORDS_TABLE,
@@ -381,9 +370,5 @@ export function createAppSpecificFactory(
 
 /** Optional capability for appliers that can execute read queries. */
 interface QueryCapableApplier extends AppSyncableApplier {
-  runQuery(
-    appId: string,
-    table: string,
-    query: ParsedQuery,
-  ): Promise<ParsedQueryResult>;
+  runQuery(appId: string, table: string, query: ParsedQuery): Promise<ParsedQueryResult>;
 }

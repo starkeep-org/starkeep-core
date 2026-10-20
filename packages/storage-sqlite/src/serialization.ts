@@ -1,8 +1,4 @@
-import type {
-  DataRecord,
-  MetadataRow,
-  StarkeepId,
-} from "@starkeep/protocol-primitives";
+import type { DataRecord, MetadataRow, StarkeepId } from "@starkeep/protocol-primitives";
 import {
   serializeHLC,
   deserializeHLC,

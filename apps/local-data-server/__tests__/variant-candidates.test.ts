@@ -8,7 +8,12 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
-import { installApp, testAppManifest, createRecordWithBytes, type InstalledApp } from "./helpers.js";
+import {
+  installApp,
+  testAppManifest,
+  createRecordWithBytes,
+  type InstalledApp,
+} from "./helpers.js";
 
 let server: LocalDataServer;
 let app: InstalledApp;
@@ -99,8 +104,10 @@ describe("asking for the whole set", () => {
       expect(candidate.width).toBeGreaterThan(0);
       expect(candidate.height).toBeGreaterThan(0);
       expect(candidate.url).toBeTypeOf("string");
-      expect((candidate as unknown as { url_lifetime: { kind: string; expires_at: string } }).url_lifetime)
-        .toMatchObject({ kind: "expires" });
+      expect(
+        (candidate as unknown as { url_lifetime: { kind: string; expires_at: string } })
+          .url_lifetime,
+      ).toMatchObject({ kind: "expires" });
       expect(candidate.label_value).toBeTypeOf("string");
       expect(candidate.available_here).toBe(true);
     }
@@ -122,8 +129,12 @@ describe("choosing a size", () => {
   it("is not a parameter of the listing any more", async () => {
     // A size of the original is `GET /data/records/:id/content-url?size=`,
     // answered from its stand-ins.
-    const res = await app.fetch(`/data/records?variant=${encodeURIComponent(LABEL)}&variantLongEdge=500`);
+    const res = await app.fetch(
+      `/data/records?variant=${encodeURIComponent(LABEL)}&variantLongEdge=500`,
+    );
     expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toMatch(/"variantLongEdge" is not a parameter/);
+    expect(((await res.json()) as { error: string }).error).toMatch(
+      /"variantLongEdge" is not a parameter/,
+    );
   }, 30_000);
 });

@@ -25,9 +25,7 @@ import type { IamStatement } from "../iam-utils.js";
  * `starkeep-drive` app id to this boundary, so a third-party app cannot opt into
  * the cross-category shared ceiling.
  */
-export function userDataOwnerPermissionsBoundaryStatements(
-  stackPrefix: string,
-): IamStatement[] {
+export function userDataOwnerPermissionsBoundaryStatements(stackPrefix: string): IamStatement[] {
   return [
     {
       // dsql:DbConnect (not admin): Drive maps to a PG role with the wildcard

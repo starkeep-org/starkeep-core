@@ -2,10 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { HLCClock } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { createInProcessSyncTransport } from "./in-process-transport.js";
-import {
-  sanitizeExchangeRequest,
-  InvalidExchangeRequest,
-} from "../exchange-request.js";
+import { sanitizeExchangeRequest, InvalidExchangeRequest } from "../exchange-request.js";
 import type { SyncExchangeRequest, SyncTransport } from "../types.js";
 
 export interface HttpSyncServerOptions {
@@ -67,9 +64,7 @@ type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
  * Returns `true` if the request was handled; callers can compose this with
  * their own routing layer.
  */
-export function createHttpSyncHandler(
-  options: HttpSyncServerOptions,
-): Handler {
+export function createHttpSyncHandler(options: HttpSyncServerOptions): Handler {
   const transport =
     options.transport ??
     createInProcessSyncTransport({
@@ -81,19 +76,14 @@ export function createHttpSyncHandler(
   const maxFileBody = options.maxFileBodyBytes ?? MAX_FILE_BODY_BYTES;
 
   return async (req, res) => {
-    const url = new URL(
-      req.url || "/",
-      `http://${req.headers.host ?? "localhost"}`,
-    );
+    const url = new URL(req.url || "/", `http://${req.headers.host ?? "localhost"}`);
 
     if (req.method === "POST" && url.pathname === "/sync/exchange") {
       // Checked, not cast: the parsed body is whatever the peer sent, and its
       // numbers reach a `LIMIT ?` and a `substr(…, 1, N)` a few frames down.
       let body: SyncExchangeRequest;
       try {
-        body = sanitizeExchangeRequest(
-          await readJson<unknown>(req, maxExchangeBody),
-        );
+        body = sanitizeExchangeRequest(await readJson<unknown>(req, maxExchangeBody));
       } catch (err) {
         if (err instanceof InvalidExchangeRequest) {
           sendJson(res, 400, { error: err.message });
@@ -171,8 +161,7 @@ export function createHttpSyncHandler(
         }
         const contentType = req.headers["content-type"];
         await storage.put(key, bytes, {
-          contentType:
-            typeof contentType === "string" ? contentType : undefined,
+          contentType: typeof contentType === "string" ? contentType : undefined,
         });
         res.writeHead(200);
         res.end();
@@ -217,11 +206,7 @@ async function readJson<T>(req: IncomingMessage, limit: number): Promise<T> {
  * flush before destroying costs a small, bounded window of discarded bytes and
  * buys a client that can read its own error.
  */
-function refuseTooLarge(
-  req: IncomingMessage,
-  res: ServerResponse,
-  err: BodyTooLarge,
-): void {
+function refuseTooLarge(req: IncomingMessage, res: ServerResponse, err: BodyTooLarge): void {
   res.writeHead(413, { "Content-Type": "application/json", Connection: "close" });
   res.end(JSON.stringify({ error: err.message }), () => {
     // Now the sender can stop: leaving the socket open means it keeps pushing

@@ -3,7 +3,7 @@ import { REPO_ROOT, STREAM_COMMANDS, type StreamCommandId } from "../lib/exec-co
 import type { STSCredentials } from "../lib/cognito-auth";
 
 export async function POST(req: Request) {
-  const body = await req.json() as {
+  const body = (await req.json()) as {
     id: StreamCommandId;
     credentials?: STSCredentials & { region: string };
   };
@@ -51,7 +51,9 @@ export async function POST(req: Request) {
       });
 
       child.on("error", (err) => {
-        controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify(err.message)}\n\n`));
+        controller.enqueue(
+          encoder.encode(`event: error\ndata: ${JSON.stringify(err.message)}\n\n`),
+        );
         controller.close();
       });
     },

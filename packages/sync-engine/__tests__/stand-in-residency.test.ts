@@ -39,17 +39,20 @@ import { createInProcessSyncTransport } from "../src/transports/in-process-trans
 import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
 import { scanForAcquirable } from "../src/acquisition-scan.js";
 import { runAcquisition } from "../src/acquisition.js";
-import {
-  decideResidency,
-  type BlobCandidate,
-} from "../src/residency-policy.js";
+import { decideResidency, type BlobCandidate } from "../src/residency-policy.js";
 import { blobCandidateForRecord } from "../src/sync-engine.js";
 import type { ReplicaProbe } from "../src/durability.js";
 
 const MB = 1024 * 1024;
 const clock = createHLCClock({ nodeId: "node" });
-const hashOf = (b: Buffer) => createHash("sha256").update(b as unknown as Uint8Array).digest("hex");
-const b64Of = (b: Buffer) => createHash("sha256").update(b as unknown as Uint8Array).digest("base64");
+const hashOf = (b: Buffer) =>
+  createHash("sha256")
+    .update(b as unknown as Uint8Array)
+    .digest("hex");
+const b64Of = (b: Buffer) =>
+  createHash("sha256")
+    .update(b as unknown as Uint8Array)
+    .digest("base64");
 
 describe("decideResidency", () => {
   const base = { constraints: { deniedHere: false } };
@@ -87,7 +90,9 @@ describe("starkeep/no-cloud, evaluated against this node's identity", () => {
   function build(labels: Label[], isCloudNode: boolean): ResidencyManager {
     const adapter = {
       async getLabelsByRecordIds(ids: StarkeepId[]) {
-        return new Map(ids.map((id) => [id, labels.map((l) => ({ ...l, recordId: id, deletedAt: null }))]));
+        return new Map(
+          ids.map((id) => [id, labels.map((l) => ({ ...l, recordId: id, deletedAt: null }))]),
+        );
       },
     } as unknown as DatabaseAdapter;
     return createResidencyManager({
@@ -216,17 +221,34 @@ describe("a residency manager", () => {
   }
 
   async function family(opts: { cloudCanonical?: boolean; cloudOriginal?: boolean } = {}) {
-    const original = await file({ fidelity: 6000, size: 8 * MB }, { here: true, cloud: opts.cloudOriginal ?? true });
+    const original = await file(
+      { fidelity: 6000, size: 8 * MB },
+      { here: true, cloud: opts.cloudOriginal ?? true },
+    );
     const canonical = await file(
-      { type: "image/avif", parentId: original.id, standInRole: "canonical", fidelity: 4272, size: 3 * MB },
+      {
+        type: "image/avif",
+        parentId: original.id,
+        standInRole: "canonical",
+        fidelity: 4272,
+        size: 3 * MB,
+      },
       { here: true, cloud: opts.cloudCanonical ?? true },
     );
-    const screen = await file(
-      { type: "image/avif", parentId: original.id, standInRole: "smaller", fidelity: 2560, size: MB },
-    );
-    const medium = await file(
-      { type: "image/avif", parentId: original.id, standInRole: "smaller", fidelity: 1280, size: MB / 2 },
-    );
+    const screen = await file({
+      type: "image/avif",
+      parentId: original.id,
+      standInRole: "smaller",
+      fidelity: 2560,
+      size: MB,
+    });
+    const medium = await file({
+      type: "image/avif",
+      parentId: original.id,
+      standInRole: "smaller",
+      fidelity: 1280,
+      size: MB / 2,
+    });
     return { original, canonical, screen, medium };
   }
 
@@ -264,7 +286,10 @@ describe("a residency manager", () => {
     const phone = makeManager(DEFAULT_SYNC_DOWN_CEILINGS.phone);
     const pdf = await file({ type: "document/pdf", size: 64 * MB }, { here: false, cloud: true });
     const original = await file({ fidelity: 6000 }, { here: false, cloud: true });
-    const poster = await file({ type: "image/webp", parentId: original.id }, { here: false, cloud: true });
+    const poster = await file(
+      { type: "image/webp", parentId: original.id },
+      { here: false, cloud: true },
+    );
     for (const r of [pdf, poster]) {
       expect(await phone.decide(blobCandidateForRecord(r)!), r.type).toMatchObject({
         decision: "fetch",
@@ -305,7 +330,9 @@ describe("a residency manager", () => {
         });
         expect(await manager.considerForAcquisition(blobCandidateForRecord(r)!)).toBe("queued");
       }
-      expect((await manager.decide(blobCandidateForRecord(canonical)!)).reason).toBe("above-ceiling");
+      expect((await manager.decide(blobCandidateForRecord(canonical)!)).reason).toBe(
+        "above-ceiling",
+      );
     });
 
     it("still counts originals as originals", async () => {
@@ -317,7 +344,11 @@ describe("a residency manager", () => {
       const { original, canonical, screen, medium } = await family();
       const narrow = await manager.freeUpSpace({ bytes: 100 * MB, scope: "originals", probes });
       expect(narrow.eligibleBytes).toBe(0);
-      const wide = await manager.freeUpSpace({ bytes: 100 * MB, scope: "originals-and-above-ceiling", probes });
+      const wide = await manager.freeUpSpace({
+        bytes: 100 * MB,
+        scope: "originals-and-above-ceiling",
+        probes,
+      });
       expect(wide.removed.map((r) => r.recordId).sort()).toEqual([canonical.id, screen.id].sort());
       for (const r of [original, medium]) expect(await local.has(r.objectStorageKey)).toBe(true);
     });
@@ -333,10 +364,15 @@ describe("a residency manager", () => {
       const pdf = await file({ type: "document/pdf" }, { here: false, cloud: true });
       expect(await manager.considerForAcquisition(blobCandidateForRecord(small)!)).toBe("queued");
       expect(await manager.considerForAcquisition(blobCandidateForRecord(pdf)!)).toBe("queued");
-      expect(await manager.considerForAcquisition(blobCandidateForRecord(original)!)).toBe("unwanted");
-      expect(manager.deferredCandidates(10).map((e) => e.recordId).sort()).toEqual(
-        [small.id, pdf.id].sort(),
+      expect(await manager.considerForAcquisition(blobCandidateForRecord(original)!)).toBe(
+        "unwanted",
       );
+      expect(
+        manager
+          .deferredCandidates(10)
+          .map((e) => e.recordId)
+          .sort(),
+      ).toEqual([small.id, pdf.id].sort());
     });
 
     it("adopts bytes already here that the index never saw", async () => {
@@ -356,7 +392,10 @@ describe("a residency manager", () => {
       await local.put(own.objectStorageKey, data);
       expect(manager.index.get(own.objectStorageKey)).toBeNull();
       expect(await manager.considerForAcquisition(blobCandidateForRecord(own)!)).toBe("held");
-      expect(manager.index.get(own.objectStorageKey)).toMatchObject({ resident: true, group: KEPT_GROUP });
+      expect(manager.index.get(own.objectStorageKey)).toMatchObject({
+        resident: true,
+        group: KEPT_GROUP,
+      });
     });
 
     it("stops wanting a queued file once the node no longer wants it", async () => {
@@ -377,7 +416,9 @@ describe("a residency manager", () => {
         { here: false, cloud: true },
       );
       const candidate = blobCandidateForRecord(screen)!;
-      expect(await at(DEFAULT_SYNC_DOWN_CEILINGS.desktop).considerForAcquisition(candidate)).toBe("queued");
+      expect(await at(DEFAULT_SYNC_DOWN_CEILINGS.desktop).considerForAcquisition(candidate)).toBe(
+        "queued",
+      );
       const lowered = at(DEFAULT_SYNC_DOWN_CEILINGS.phone);
       expect(await lowered.considerForAcquisition(candidate)).toBe("unwanted");
       expect(lowered.deferredCandidates(10)).toEqual([]);
@@ -392,7 +433,9 @@ describe("a residency manager", () => {
       const { screen } = await family();
       await manager.noteDeparture(blobCandidateForRecord(screen)!);
       expect(manager.wasEvicted(screen.objectStorageKey)).toBe(true);
-      expect(await manager.considerForAcquisition(blobCandidateForRecord(screen)!)).toBe("unwanted");
+      expect(await manager.considerForAcquisition(blobCandidateForRecord(screen)!)).toBe(
+        "unwanted",
+      );
       expect(manager.deferredCandidates(10)).toEqual([]);
       // Still remembered as a departure, which is what residency reports.
       expect(manager.wasEvicted(screen.objectStorageKey)).toBe(true);
@@ -439,7 +482,8 @@ describe("a residency manager", () => {
     it("leaves stand-ins alone in the originals scope", async () => {
       const { canonical, screen, medium } = await family();
       await manager.freeUpSpace({ bytes: 100 * MB, scope: "originals", probes });
-      for (const r of [canonical, screen, medium]) expect(await local.has(r.objectStorageKey)).toBe(true);
+      for (const r of [canonical, screen, medium])
+        expect(await local.has(r.objectStorageKey)).toBe(true);
     });
 
     // No stand-in can replace either, so neither is ever eligible.
@@ -454,12 +498,17 @@ describe("a residency manager", () => {
     it("takes stand-ins above the ceiling in the wider scope, never those within it", async () => {
       manager = makeManager(DEFAULT_SYNC_DOWN_CEILINGS.phone);
       const { original, canonical, screen, medium } = await family();
-      const report = await manager.freeUpSpace({ bytes: 100 * MB, scope: "originals-and-above-ceiling", probes });
+      const report = await manager.freeUpSpace({
+        bytes: 100 * MB,
+        scope: "originals-and-above-ceiling",
+        probes,
+      });
       expect(report.removed.map((r) => r.recordId).sort()).toEqual(
         [original.id, canonical.id, screen.id].sort(),
       );
       expect(await local.has(medium.objectStorageKey)).toBe(true);
-      for (const r of [original, canonical, screen]) expect(await local.has(r.objectStorageKey)).toBe(false);
+      for (const r of [original, canonical, screen])
+        expect(await local.has(r.objectStorageKey)).toBe(false);
       expect(manager.wasEvicted(original.objectStorageKey)).toBe(true);
     });
 
@@ -500,7 +549,11 @@ describe("a residency manager", () => {
 
     it("never takes a self-canonical original within the ceiling", async () => {
       const own = await file({ fidelity: 2000, size: 3 * MB });
-      const report = await manager.freeUpSpace({ bytes: 100 * MB, scope: "originals-and-above-ceiling", probes });
+      const report = await manager.freeUpSpace({
+        bytes: 100 * MB,
+        scope: "originals-and-above-ceiling",
+        probes,
+      });
       expect(report.eligibleBytes).toBe(0);
       expect(await local.has(own.objectStorageKey)).toBe(true);
     });
@@ -525,7 +578,13 @@ describe("a residency manager", () => {
       await local.put(own.objectStorageKey, data);
       await cloud.put(own.objectStorageKey, data, { checksumSha256: b64Of(data) });
       await file(
-        { type: "image/avif", parentId: own.id, standInRole: "canonical", fidelity: 4272, size: MB },
+        {
+          type: "image/avif",
+          parentId: own.id,
+          standInRole: "canonical",
+          fidelity: 4272,
+          size: MB,
+        },
         { here: false, cloud: true },
       );
       expect(manager.index.get(own.objectStorageKey)).toBeNull();
@@ -538,7 +597,10 @@ describe("a residency manager", () => {
 
     it("skips bytes the store only borrows, such as a phone's camera-roll alias", async () => {
       const { original } = await family();
-      manager = makeManager(DEFAULT_SYNC_DOWN_CEILINGS.desktop, (key) => key === original.objectStorageKey);
+      manager = makeManager(
+        DEFAULT_SYNC_DOWN_CEILINGS.desktop,
+        (key) => key === original.objectStorageKey,
+      );
       const report = await manager.freeUpSpace({ bytes: 100 * MB, scope: "originals", probes });
       // Deleting the key would drop the alias and free nothing, so the
       // original is not even eligible.
@@ -549,7 +611,12 @@ describe("a residency manager", () => {
 
     it("proves but removes nothing on a dry run", async () => {
       const { original } = await family();
-      const report = await manager.freeUpSpace({ bytes: 100 * MB, scope: "originals", probes, dryRun: true });
+      const report = await manager.freeUpSpace({
+        bytes: 100 * MB,
+        scope: "originals",
+        probes,
+        dryRun: true,
+      });
       expect(report).toMatchObject({ dryRun: true, freedBytes: 8 * MB });
       expect(await local.has(original.objectStorageKey)).toBe(true);
       expect(manager.wasEvicted(original.objectStorageKey)).toBe(false);
@@ -568,7 +635,10 @@ describe("a round and the acquisition pass, against a ceiling", () => {
     const cloudStorage = new MockObjectStorageAdapter();
     await Promise.all([localDb.init(), cloudDb.init(), localStorage.init(), cloudStorage.init()]);
 
-    async function cloudFile(over: Partial<Parameters<typeof createDataRecord>[0]>, fill: number): Promise<DataRecord> {
+    async function cloudFile(
+      over: Partial<Parameters<typeof createDataRecord>[0]>,
+      fill: number,
+    ): Promise<DataRecord> {
       const blob = Buffer.alloc(4096, fill);
       const hash = hashOf(blob);
       const type = over.type ?? "image/jpeg";
@@ -607,7 +677,7 @@ describe("a round and the acquisition pass, against a ceiling", () => {
         databaseAdapter: localDb,
         localObjectStorage: localStorage,
         isCloudNode: false,
-          ceilings,
+        ceilings,
       });
       const engine = createSyncEngine({
         localDatabaseAdapter: localDb,

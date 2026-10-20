@@ -1,8 +1,4 @@
-import type {
-  SyncTransport,
-  SyncExchangeRequest,
-  SyncExchangeResponse,
-} from "../types.js";
+import type { SyncTransport, SyncExchangeRequest, SyncExchangeResponse } from "../types.js";
 import { SyncError } from "../errors.js";
 import { sanitizeWatermarkMap } from "../exchange-request.js";
 
@@ -15,27 +11,18 @@ export interface HttpSyncTransportOptions {
    * HMAC-sign requests for the cloud verifier; mirrors the shape
    * `@starkeep/app-client/sign.ts`'s `signRequest` emits (method/path/ts bound).
    */
-  readonly signRequest?: (
-    method: string,
-    path: string,
-    body: string,
-  ) => Record<string, string>;
+  readonly signRequest?: (method: string, path: string, body: string) => Record<string, string>;
 }
 
 /**
  * `SyncTransport` that talks to a remote Starkeep-compatible HTTP server
  * over `fetch`. Single endpoint: `POST {baseUrl}/sync/exchange`.
  */
-export function createHttpSyncTransport(
-  options: HttpSyncTransportOptions,
-): SyncTransport {
+export function createHttpSyncTransport(options: HttpSyncTransportOptions): SyncTransport {
   const { baseUrl, fetch: fetchImpl = globalThis.fetch, signRequest } = options;
   const trimmed = baseUrl.replace(/\/+$/, "");
 
-  async function postJson<TRequest, TResponse>(
-    path: string,
-    body: TRequest,
-  ): Promise<TResponse> {
+  async function postJson<TRequest, TResponse>(path: string, body: TRequest): Promise<TResponse> {
     const serialized = JSON.stringify(body);
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -50,9 +37,7 @@ export function createHttpSyncTransport(
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
-      throw new SyncError(
-        `${path} failed: ${response.status} ${response.statusText} ${text}`,
-      );
+      throw new SyncError(`${path} failed: ${response.status} ${response.statusText} ${text}`);
     }
 
     return (await response.json()) as TResponse;
@@ -209,7 +194,6 @@ function sanitizeExchangeResponse(body: unknown): SyncExchangeResponse {
     responderByteWatermarks,
     records: (raw["records"] as SyncExchangeResponse["records"]) ?? [],
     labels: (raw["labels"] as SyncExchangeResponse["labels"]) ?? [],
-    appSyncableRows:
-      (raw["appSyncableRows"] as SyncExchangeResponse["appSyncableRows"]) ?? [],
+    appSyncableRows: (raw["appSyncableRows"] as SyncExchangeResponse["appSyncableRows"]) ?? [],
   };
 }

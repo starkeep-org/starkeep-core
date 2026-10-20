@@ -50,7 +50,10 @@ describe("workspace daemon ports", () => {
   });
 
   it("ignore an unparseable value rather than recording NaN", async () => {
-    const { DAEMON_COMMANDS: commands } = await loadDaemonCommands({ STARKEEP_PORT: "", STARKEEP_DRIVE_PORT: "nope" });
+    const { DAEMON_COMMANDS: commands } = await loadDaemonCommands({
+      STARKEEP_PORT: "",
+      STARKEEP_DRIVE_PORT: "nope",
+    });
     expect(commands["local-data-server"].port).toBe(9820);
     expect(commands.drive.port).toBe(9830);
   });
@@ -70,9 +73,7 @@ describe("workspace daemon commands name a script that exists", () => {
 
   it.each(Object.keys(packageFor))("%s", async (workspace) => {
     const { DAEMON_COMMANDS } = await loadDaemonCommands({});
-    const command = Object.values(DAEMON_COMMANDS).find((c) =>
-      c.args.includes(workspace),
-    );
+    const command = Object.values(DAEMON_COMMANDS).find((c) => c.args.includes(workspace));
     expect(command, `no daemon spawns ${workspace}`).toBeDefined();
 
     // `pnpm --filter <workspace> <script>` — the script is the last argument.

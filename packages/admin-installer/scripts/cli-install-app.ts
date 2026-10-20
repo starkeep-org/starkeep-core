@@ -76,8 +76,8 @@ function buildAppBundle(appDir: string, appBasePath: string): Buffer {
     if (result.status !== 0) {
       console.error(
         `App bundle build failed (pnpm bundle exited ${result.status}). ` +
-        `Cloud-installable apps must provide a "bundle" script that writes ` +
-        `dist.zip to STARKEEP_BUNDLE_OUT.`,
+          `Cloud-installable apps must provide a "bundle" script that writes ` +
+          `dist.zip to STARKEEP_BUNDLE_OUT.`,
       );
       process.exit(result.status ?? 1);
     }
@@ -117,8 +117,8 @@ const stackPrefix = config.stackPrefix;
 if (!config.apiGatewayId || !config.authorizerId || !config.s3Bucket || !config.auroraEndpoint) {
   console.error(
     `Error: ${starkeepConfigPath()} is missing required fields: ` +
-    "apiGatewayId, authorizerId, s3Bucket, auroraEndpoint.\n" +
-    "Install the cloud-data-server first.",
+      "apiGatewayId, authorizerId, s3Bucket, auroraEndpoint.\n" +
+      "Install the cloud-data-server first.",
   );
   process.exit(1);
 }
@@ -126,7 +126,9 @@ if (!config.apiGatewayId || !config.authorizerId || !config.s3Bucket || !config.
 if (nonInteractive) {
   const { AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN } = process.env;
   if (!AWS_ACCESS_KEY_ID || !AWS_SECRET_ACCESS_KEY || !AWS_SESSION_TOKEN) {
-    console.error("--non-interactive requires AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN env vars");
+    console.error(
+      "--non-interactive requires AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN env vars",
+    );
     process.exit(1);
   }
 } else {
@@ -137,7 +139,10 @@ if (nonInteractive) {
     console.log("\nThis account requires a new password (first login).");
     const newPw = await prompt("New password: ", true);
     const confirmPw = await prompt("Confirm new password: ", true);
-    if (newPw !== confirmPw) { console.error("Passwords do not match."); process.exit(1); }
+    if (newPw !== confirmPw) {
+      console.error("Passwords do not match.");
+      process.exit(1);
+    }
     return newPw;
   });
   console.log("Fetching temporary AWS credentials…");

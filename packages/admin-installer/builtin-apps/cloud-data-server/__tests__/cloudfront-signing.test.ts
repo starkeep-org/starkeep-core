@@ -60,11 +60,13 @@ beforeEach(() => {
   });
 });
 
-function grants(overrides: Partial<{
-  readableCategories: string[];
-  writableCategories: string[];
-  allAccess: boolean;
-}> = {}): AccessGrants {
+function grants(
+  overrides: Partial<{
+    readableCategories: string[];
+    writableCategories: string[];
+    allAccess: boolean;
+  }> = {},
+): AccessGrants {
   return {
     readableTypes: new Set(),
     writableTypes: new Set(),
@@ -159,23 +161,20 @@ describe("signSharedCloudFrontUrl — namespace confinement", () => {
     expect(ssmMock.calls()).toHaveLength(0);
   });
 
-  it.each([
-    "private/photos/x",
-    "",
-    "sharedish/image/ab/hash",
-    "shared",
-    "shared/u1/",
-  ])("400s the unknown/short namespace %j", async (key) => {
-    const res = await signSharedCloudFrontUrl(
-      as("photos"),
-      key,
-      grants({ allAccess: true }),
-      3600,
-    );
-    expect(res).toMatchObject({ ok: false });
-    if (res.ok) throw new Error("expected rejection");
-    expect(res.status).toBe(400);
-  });
+  it.each(["private/photos/x", "", "sharedish/image/ab/hash", "shared", "shared/u1/"])(
+    "400s the unknown/short namespace %j",
+    async (key) => {
+      const res = await signSharedCloudFrontUrl(
+        as("photos"),
+        key,
+        grants({ allAccess: true }),
+        3600,
+      );
+      expect(res).toMatchObject({ ok: false });
+      if (res.ok) throw new Error("expected rejection");
+      expect(res.status).toBe(400);
+    },
+  );
 });
 
 describe("signSharedCloudFrontUrl — path traversal & encoding", () => {

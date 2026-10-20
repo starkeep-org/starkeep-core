@@ -170,10 +170,7 @@ export interface DatabaseAdapter {
    * Batched read of per-type metadata rows. Returned map is keyed by recordId
    * and contains only ids that have a metadata row.
    */
-  getMetadataByIds(
-    typeId: string,
-    recordIds: StarkeepId[],
-  ): Promise<Map<StarkeepId, MetadataRow>>;
+  getMetadataByIds(typeId: string, recordIds: StarkeepId[]): Promise<Map<StarkeepId, MetadataRow>>;
 
   /**
    * Delete the per-type metadata row for `recordId` (no-op if absent).

@@ -31,15 +31,11 @@ const cache = new Map<string, Promise<AppCredentials | null>>();
  * async request handler — so there is no way to silently get `null` in cloud
  * mode by picking a sync loader.
  */
-export async function loadAppCredentials(
-  appId: string,
-): Promise<AppCredentials | null> {
+export async function loadAppCredentials(appId: string): Promise<AppCredentials | null> {
   const existing = cache.get(appId);
   if (existing) return existing;
   const promise = (
-    clientMode() === "cloud"
-      ? fetchCloudCredentials(appId)
-      : loadLocalCredentials(appId)
+    clientMode() === "cloud" ? fetchCloudCredentials(appId) : loadLocalCredentials(appId)
   ).catch((err) => {
     // Don't cache a transient failure (e.g. an SSM throttle); let the next
     // call retry. A resolved `null` (genuinely not installed) stays cached.
@@ -73,9 +69,7 @@ function clientMode(): "local" | "cloud" {
 async function fetchCloudCredentials(appId: string): Promise<AppCredentials | null> {
   const base = process.env.STARKEEP_CLOUD_DATA_BASE;
   if (!base) {
-    throw new Error(
-      "STARKEEP_APP_CLIENT_MODE=cloud but STARKEEP_CLOUD_DATA_BASE is not set",
-    );
+    throw new Error("STARKEEP_APP_CLIENT_MODE=cloud but STARKEEP_CLOUD_DATA_BASE is not set");
   }
   const explicitName = process.env.STARKEEP_APP_CREDS_PARAMETER_NAME;
   const stackPrefix = process.env.STACK_PREFIX ?? process.env.STARKEEP_STACK_PREFIX;
@@ -86,16 +80,12 @@ async function fetchCloudCredentials(appId: string): Promise<AppCredentials | nu
     );
   }
   // Lazy import keeps `@aws-sdk/client-ssm` off the load path in local mode.
-  const { SSMClient, GetParameterCommand, ParameterNotFound } = await import(
-    "@aws-sdk/client-ssm"
-  );
+  const { SSMClient, GetParameterCommand, ParameterNotFound } = await import("@aws-sdk/client-ssm");
   const ssm = new SSMClient({
     region: process.env.AWS_REGION ?? "us-east-1",
   });
   try {
-    const result = await ssm.send(
-      new GetParameterCommand({ Name: name, WithDecryption: true }),
-    );
+    const result = await ssm.send(new GetParameterCommand({ Name: name, WithDecryption: true }));
     const raw = result.Parameter?.Value;
     if (!raw) return null;
     const parsed = JSON.parse(raw) as { appId?: string; hmacSecret?: string };

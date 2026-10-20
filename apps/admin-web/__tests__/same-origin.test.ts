@@ -64,7 +64,13 @@ describe("hostAllowed", () => {
     for (const host of ["localhost", "localhost:3000", "127.0.0.1:3000", "[::1]:3000"]) {
       expect(hostAllowed(host), host).toBe(true);
     }
-    for (const host of [REBIND, "localhost.attacker.example", "127.0.0.1.nip.io:3000", "192.168.1.51:3000", ""]) {
+    for (const host of [
+      REBIND,
+      "localhost.attacker.example",
+      "127.0.0.1.nip.io:3000",
+      "192.168.1.51:3000",
+      "",
+    ]) {
       expect(hostAllowed(host), host).toBe(false);
     }
   });
@@ -72,24 +78,38 @@ describe("hostAllowed", () => {
 
 describe("the check in front of every route", () => {
   it("refuses a rebinding page's Host, on reads as well as writes", () => {
-    expect(serverRefusal({ method: "GET", host: REBIND, origin: undefined })).toMatch(/own address/);
-    expect(serverRefusal({ method: "POST", host: REBIND, origin: `http://${REBIND}` })).toMatch(/own address/);
+    expect(serverRefusal({ method: "GET", host: REBIND, origin: undefined })).toMatch(
+      /own address/,
+    );
+    expect(serverRefusal({ method: "POST", host: REBIND, origin: `http://${REBIND}` })).toMatch(
+      /own address/,
+    );
   });
 
   it("refuses another site's write, and lets its read through to the browser's own rule", () => {
-    expect(serverRefusal({ method: "POST", host: "localhost:3000", origin: "https://evil.example" })).toMatch(/own page/);
-    expect(serverRefusal({ method: "DELETE", host: "localhost:3000", origin: "null" })).toMatch(/own page/);
-    expect(serverRefusal({ method: "GET", host: "localhost:3000", origin: "https://evil.example" })).toBeNull();
+    expect(
+      serverRefusal({ method: "POST", host: "localhost:3000", origin: "https://evil.example" }),
+    ).toMatch(/own page/);
+    expect(serverRefusal({ method: "DELETE", host: "localhost:3000", origin: "null" })).toMatch(
+      /own page/,
+    );
+    expect(
+      serverRefusal({ method: "GET", host: "localhost:3000", origin: "https://evil.example" }),
+    ).toBeNull();
   });
 
   it("passes admin-web's own page, and a caller with no Origin", () => {
-    expect(serverRefusal({ method: "POST", host: "localhost:3000", origin: "http://localhost:3000" })).toBeNull();
+    expect(
+      serverRefusal({ method: "POST", host: "localhost:3000", origin: "http://localhost:3000" }),
+    ).toBeNull();
     expect(serverRefusal({ method: "POST", host: "127.0.0.1:3000", origin: undefined })).toBeNull();
     expect(serverRefusal({ method: "GET", host: "localhost:3000", origin: undefined })).toBeNull();
   });
 
   it("refuses a page on one loopback spelling writing to another", () => {
     // The browser treats the two spellings as different sites, so admin-web does too.
-    expect(serverRefusal({ method: "POST", host: "127.0.0.1:3000", origin: "http://localhost:3000" })).toMatch(/own page/);
+    expect(
+      serverRefusal({ method: "POST", host: "127.0.0.1:3000", origin: "http://localhost:3000" }),
+    ).toMatch(/own page/);
   });
 });

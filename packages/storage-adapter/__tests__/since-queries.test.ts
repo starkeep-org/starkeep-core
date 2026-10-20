@@ -41,9 +41,7 @@ describe("planNodeScans", () => {
   it("scans from the beginning for an author the peer has never heard of", () => {
     // `null`, not "wall time zero": the peer needs all of it, and a bound of
     // any kind would be a claim nobody made.
-    expect(planNodeScans({ L: hlc(9, "L") }, {})).toEqual([
-      { nodeId: "L", since: null },
-    ]);
+    expect(planNodeScans({ L: hlc(9, "L") }, {})).toEqual([{ nodeId: "L", since: null }]);
   });
 
   it("plans only for authors we actually hold rows from", () => {
@@ -52,10 +50,7 @@ describe("planNodeScans", () => {
   });
 
   it("returns authors in a stable order", () => {
-    const scans = planNodeScans(
-      { c: hlc(9, "c"), a: hlc(9, "a"), b: hlc(9, "b") },
-      {},
-    );
+    const scans = planNodeScans({ c: hlc(9, "c"), a: hlc(9, "a"), b: hlc(9, "b") }, {});
     expect(scans.map((s) => s.nodeId)).toEqual(["a", "b", "c"]);
   });
 });
@@ -142,10 +137,7 @@ describe("collectSince — the budget is split per author", () => {
     const page = await collectSince(
       scans,
       2,
-      async (scan) =>
-        scan.nodeId === "A"
-          ? [1, 2, 3].map((i) => rowAt(i, "A"))
-          : [rowAt(1, "B")],
+      async (scan) => (scan.nodeId === "A" ? [1, 2, 3].map((i) => rowAt(i, "A")) : [rowAt(1, "B")]),
       (r) => r.hlc,
     );
     expect(page.truncated["A"]).toEqual(hlc(1, "A"));
@@ -157,7 +149,12 @@ describe("collectSince — the budget is split per author", () => {
     // get counts without a shipment, and this is what makes the round ship
     // nothing. `cutRound` would not — it always takes a first item regardless
     // of budget. `null` for every planned author is what stops it.
-    const page = await collectSince(scans, 0, async () => [rowAt(1, "A")], (r) => r.hlc);
+    const page = await collectSince(
+      scans,
+      0,
+      async () => [rowAt(1, "A")],
+      (r) => r.hlc,
+    );
     expect(page.rows).toEqual([]);
     expect(page.truncated).toEqual({ A: null, B: null });
     expect(page.hasMore).toBe(true);
@@ -180,7 +177,12 @@ describe("collectSince — the budget is split per author", () => {
   it("reports a drained channel as complete rather than as a zero-budget stop", async () => {
     // No authors owe anything, so there is nothing to put a ceiling on. The
     // empty `truncated` here means "complete", the opposite of the case above.
-    const page = await collectSince([], 10, async () => [], (r: Row) => r.hlc);
+    const page = await collectSince(
+      [],
+      10,
+      async () => [],
+      (r: Row) => r.hlc,
+    );
     expect(page).toEqual({ rows: [], hasMore: false, truncated: {} });
   });
 });

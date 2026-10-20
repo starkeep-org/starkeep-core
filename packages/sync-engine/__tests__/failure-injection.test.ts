@@ -29,15 +29,8 @@ import { createSyncEngine } from "../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../src/transports/in-process-transport.js";
 import { buildSide } from "./sync-test-harness/side.js";
 import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
-import {
-  failingMethod,
-  losingResponseTransport,
-} from "./sync-test-harness/failure-injection.js";
-import type {
-  AppSyncableRowEntry,
-  ScanCapableApplier,
-  SyncStateStore,
-} from "../src/types.js";
+import { failingMethod, losingResponseTransport } from "./sync-test-harness/failure-injection.js";
+import type { AppSyncableRowEntry, ScanCapableApplier, SyncStateStore } from "../src/types.js";
 
 type Side = Awaited<ReturnType<typeof buildSide>>;
 
@@ -350,9 +343,7 @@ describe("an inbound write that fails holds the author's watermark", () => {
 
     await engineWith(local.db).sync();
 
-    expect(
-      await local.db.getLabel(id, APP_ID, "album", "trip"),
-    ).not.toBeNull();
+    expect(await local.db.getLabel(id, APP_ID, "album", "trip")).not.toBeNull();
   });
 });
 
@@ -383,9 +374,9 @@ describe("a response lost after the peer applied it", () => {
         syncSharedRecords: true,
       });
 
-    await expect(
-      engineWith(losingResponseTransport(base)).exchange(),
-    ).rejects.toThrow(/lost in transit/);
+    await expect(engineWith(losingResponseTransport(base)).exchange()).rejects.toThrow(
+      /lost in transit/,
+    );
 
     // The peer applied everything even though we never heard so.
     for (const id of ids) expect(await cloud.db.get(id)).not.toBeNull();

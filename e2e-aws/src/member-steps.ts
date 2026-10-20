@@ -38,7 +38,13 @@ import {
   CognitoIdentityProviderClient,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
-import { driveCreds, createRecordWithBytes, eventually, solidPng, type LdsApp } from "@starkeep/e2e";
+import {
+  driveCreds,
+  createRecordWithBytes,
+  eventually,
+  solidPng,
+  type LdsApp,
+} from "@starkeep/e2e";
 import type { AppCredentials } from "@starkeep/app-client";
 import {
   cognitoPasswordAuthTokens,
@@ -102,7 +108,10 @@ export function defineMemberSteps(m: MemberStepsContext): void {
 
   /** A sign-in through the pool's device client, as a desktop or phone makes it. */
   function deviceClient() {
-    return createCognitoClient({ region: REGION, userPoolClientId: m.config().deviceUserPoolClientId });
+    return createCognitoClient({
+      region: REGION,
+      userPoolClientId: m.config().deviceUserPoolClientId,
+    });
   }
 
   /** Call one of admin-web's Users routes as the signed-in admin. */
@@ -112,7 +121,9 @@ export function defineMemberSteps(m: MemberStepsContext): void {
   ): Promise<{ status: number; body: Record<string, unknown> }> {
     const session = m.session();
     const adminSub = (
-      JSON.parse(Buffer.from(session.idToken.split(".")[1]!, "base64url").toString("utf8")) as { sub: string }
+      JSON.parse(Buffer.from(session.idToken.split(".")[1]!, "base64url").toString("utf8")) as {
+        sub: string;
+      }
     ).sub;
     const req = new Request("http://localhost/api/users", {
       method: "POST",
@@ -147,9 +158,13 @@ export function defineMemberSteps(m: MemberStepsContext): void {
 
   async function deleteMember(): Promise<void> {
     // The operator's ambient credentials: no Starkeep identity deletes accounts.
-    const cognito = new CognitoIdentityProviderClient({ region: regionFromUserPoolId(m.config().userPoolId) });
+    const cognito = new CognitoIdentityProviderClient({
+      region: regionFromUserPoolId(m.config().userPoolId),
+    });
     try {
-      await cognito.send(new AdminDeleteUserCommand({ UserPoolId: m.config().userPoolId, Username: MEMBER_EMAIL }));
+      await cognito.send(
+        new AdminDeleteUserCommand({ UserPoolId: m.config().userPoolId, Username: MEMBER_EMAIL }),
+      );
     } catch (err) {
       if ((err as { name?: string }).name !== "UserNotFoundException") throw err;
     }
@@ -191,7 +206,10 @@ export function defineMemberSteps(m: MemberStepsContext): void {
 
     // As the admin role, the way admin-web's CREATE runs, minus the email.
     const session = m.session();
-    const asAdmin = new CognitoIdentityProviderClient({ region: session.region, credentials: session.awsCredentials });
+    const asAdmin = new CognitoIdentityProviderClient({
+      region: session.region,
+      credentials: session.awsCredentials,
+    });
     const created = await asAdmin.send(
       new AdminCreateUserCommand({
         UserPoolId: m.config().userPoolId,
@@ -205,7 +223,11 @@ export function defineMemberSteps(m: MemberStepsContext): void {
     );
     memberSub = created.User!.Username!;
 
-    const grouped = await callUsers("SET_GROUP", { username: memberSub, group: "starkeep-users", member: true });
+    const grouped = await callUsers("SET_GROUP", {
+      username: memberSub,
+      group: "starkeep-users",
+      member: true,
+    });
     expect(grouped.status, JSON.stringify(grouped.body)).toBe(200);
 
     const reset = await callUsers("RESET_PASSWORD", { username: memberSub });
@@ -246,7 +268,11 @@ export function defineMemberSteps(m: MemberStepsContext): void {
     expect(await first.json()).toEqual({ challenge: "NEW_PASSWORD_REQUIRED" });
 
     chosenPassword = `Member-${randomBytes(9).toString("base64url")}`;
-    const second = await login({ email: MEMBER_EMAIL, password: temporaryPassword, newPassword: chosenPassword });
+    const second = await login({
+      email: MEMBER_EMAIL,
+      password: temporaryPassword,
+      newPassword: chosenPassword,
+    });
     const body = (await second.json()) as Record<string, unknown>;
     expect(second.status, JSON.stringify(body)).toBe(200);
     expect(body).toMatchObject({ ok: true, email: MEMBER_EMAIL, userId: memberSub });
@@ -263,7 +289,10 @@ export function defineMemberSteps(m: MemberStepsContext): void {
   });
 
   it("the member's record reaches the cloud in the member's slice, and only the member sees it", async () => {
-    const bytes = solidPng([...randomBytes(3)] as [number, number, number], 16 + (randomBytes(1)[0]! % 48));
+    const bytes = solidPng(
+      [...randomBytes(3)] as [number, number, number],
+      16 + (randomBytes(1)[0]! % 48),
+    );
     const { record } = await createRecordWithBytes(memberDrive, { bytes, fileName: "member.png" });
     memberRecordId = record.id;
 
@@ -283,13 +312,20 @@ export function defineMemberSteps(m: MemberStepsContext): void {
 
     const res = await asMember.fetch(`/data/records/${memberRecordId}`);
     const json = (await res.json()) as Record<string, unknown>;
-    const stored = (json.record ?? json) as { objectStorageKey?: string; object_storage_key?: string };
-    expect(stored.objectStorageKey ?? stored.object_storage_key).toMatch(new RegExp(`^shared/${memberSub}/`));
+    const stored = (json.record ?? json) as {
+      objectStorageKey?: string;
+      object_storage_key?: string;
+    };
+    expect(stored.objectStorageKey ?? stored.object_storage_key).toMatch(
+      new RegExp(`^shared/${memberSub}/`),
+    );
 
     // The admin's view of the same cloud holds none of it.
     const asAdmin = m.cloudAppAs(m.adminDrive(), () => m.session().idToken);
     expect((await asAdmin.fetch(`/data/records/${memberRecordId}`)).status).toBe(404);
-    const adminList = (await (await asAdmin.fetch("/data/records")).json()) as { records: Array<{ id: string }> };
+    const adminList = (await (await asAdmin.fetch("/data/records")).json()) as {
+      records: Array<{ id: string }>;
+    };
     expect(adminList.records.map((r) => r.id)).not.toContain(memberRecordId);
   });
 
@@ -299,7 +335,9 @@ export function defineMemberSteps(m: MemberStepsContext): void {
 
     expect((await m.adminDrive().fetch(`/data/records/${memberRecordId}`)).status).toBe(404);
     expect((await memberDrive.fetch(`/data/records/${m.adminRecordId()}`)).status).toBe(404);
-    const memberList = (await (await memberDrive.fetch("/data/records")).json()) as { records: Array<{ id: string }> };
+    const memberList = (await (await memberDrive.fetch("/data/records")).json()) as {
+      records: Array<{ id: string }>;
+    };
     expect(memberList.records.map((r) => r.id)).toContain(memberRecordId);
     expect(memberList.records.map((r) => r.id)).not.toContain(m.adminRecordId());
   });
@@ -331,12 +369,20 @@ export function defineMemberSteps(m: MemberStepsContext): void {
 
     expect((await settingsAsDevice()).status).toBe(200);
 
-    const out = await callUsers("SET_GROUP", { username: memberSub, group: "starkeep-users", member: false });
+    const out = await callUsers("SET_GROUP", {
+      username: memberSub,
+      group: "starkeep-users",
+      member: false,
+    });
     expect(out.status, JSON.stringify(out.body)).toBe(200);
     const refused = await settingsAsDevice();
     expect(refused.status, await refused.text()).toBe(403);
 
-    const back = await callUsers("SET_GROUP", { username: memberSub, group: "starkeep-users", member: true });
+    const back = await callUsers("SET_GROUP", {
+      username: memberSub,
+      group: "starkeep-users",
+      member: true,
+    });
     expect(back.status, JSON.stringify(back.body)).toBe(200);
     expect((await settingsAsDevice()).status).toBe(200);
   });
@@ -349,10 +395,13 @@ export function defineMemberSteps(m: MemberStepsContext): void {
     // revoked refresh token, and the machine shows it is signed out.
     await memberLds!.stopKeepData();
     memberLds = await startLocalDataServer({ starkeepDir: memberDir!, signIn: false });
-    await eventually(async () => expect(await memberStatus()).toMatchObject({ state: "signed-out" }), {
-      timeoutMs: 60_000,
-      intervalMs: 1_000,
-    });
+    await eventually(
+      async () => expect(await memberStatus()).toMatchObject({ state: "signed-out" }),
+      {
+        timeoutMs: 60_000,
+        intervalMs: 1_000,
+      },
+    );
     // The library stays the member's: a later sign-in as anyone else is refused.
     expect(await memberStatus()).toMatchObject({ libraryUserId: memberSub });
 

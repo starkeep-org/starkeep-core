@@ -106,7 +106,7 @@ ACCOUNT_ID=<id> REGION=us-east-2 APP_ID=photos \
 
 Calls made by the Manager role itself (CreateRole, PutRolePolicy on
 the per-app role and on install-ddl/install-infra-role) are correctly
-*skipped* by the principal filter in each per-app context — Manager
+_skipped_ by the principal filter in each per-app context — Manager
 has a standing policy, not a temp grant, and is a separate concern.
 
 Both contexts also work standalone (no trace) — the modeled expected
@@ -147,6 +147,7 @@ real-world failure (`pulumi up` or an SDK call blowing up with
 `AccessDenied`).
 
 **Misses, for now:**
+
 - **Resource-scoped denies.** Resource is passed as `*` to the
   simulator when the parser can't recover an ARN. A policy that
   restricts `s3:PutObject` to a specific bucket would still simulate
@@ -173,7 +174,7 @@ iam-data — so typos and stale renames are caught immediately.
 ## Related
 
 - `packages/admin-installer/scripts/check-temp-vs-boundary.ts` — the
-  *static* counterpart. Asserts every action in a temp policy is also
+  _static_ counterpart. Asserts every action in a temp policy is also
   permitted by the matching boundary. This package adds the
   observational side: every call we actually made is in policy ∩
   boundary.

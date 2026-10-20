@@ -5,12 +5,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { rm } from "node:fs/promises";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
-import {
-  installApp,
-  registerWithBytes,
-  standInAppManifest,
-  type InstalledApp,
-} from "./helpers.js";
+import { installApp, registerWithBytes, standInAppManifest, type InstalledApp } from "./helpers.js";
 
 const BIG = 2 * 1024 * 1024;
 
@@ -59,10 +54,20 @@ async function create(body: Record<string, unknown>): Promise<string> {
 }
 
 async function original(over: Record<string, unknown> = {}): Promise<string> {
-  return create({ type: "image/jpeg", sizeBytes: BIG, fileName: `o-${Math.random()}.jpg`, ...over });
+  return create({
+    type: "image/jpeg",
+    sizeBytes: BIG,
+    fileName: `o-${Math.random()}.jpg`,
+    ...over,
+  });
 }
 
-async function standIn(parentId: string, role: string, fidelity: number, over: Record<string, unknown> = {}) {
+async function standIn(
+  parentId: string,
+  role: string,
+  fidelity: number,
+  over: Record<string, unknown> = {},
+) {
   return create({
     type: "image/avif",
     contentType: "image/avif",
@@ -81,9 +86,9 @@ describe("listings", () => {
   it("collapse stand-ins into their original by default", async () => {
     const parent = await original({ fidelity: 6000 });
     const small = await standIn(parent, "smaller", 640);
-    const ids = (await list(`where=${encodeURIComponent(JSON.stringify({ id: { in: [parent, small] } }))}`)).map(
-      (r) => r.id,
-    );
+    const ids = (
+      await list(`where=${encodeURIComponent(JSON.stringify({ id: { in: [parent, small] } }))}`)
+    ).map((r) => r.id);
     expect(ids).toEqual([parent]);
   });
 
@@ -97,7 +102,9 @@ describe("listings", () => {
   it("show stand-ins to a where that names stand_in_role", async () => {
     const parent = await original({ fidelity: 6000 });
     const canonical = await standIn(parent, "canonical", 4272);
-    const where = encodeURIComponent(JSON.stringify({ parent_id: parent, stand_in_role: "canonical" }));
+    const where = encodeURIComponent(
+      JSON.stringify({ parent_id: parent, stand_in_role: "canonical" }),
+    );
     expect((await list(`where=${where}`)).map((r) => r.id)).toEqual([canonical]);
   });
 
@@ -148,11 +155,20 @@ describe("the size summary", () => {
     const parent = await original({ fidelity: 2000 });
     const summary = await summaryOf(parent);
     expect(summary.status).toBe("self-canonical");
-    expect(summary.sizes.at(-1)).toMatchObject({ fidelity: 2000, role: "original", record_id: parent });
+    expect(summary.sizes.at(-1)).toMatchObject({
+      fidelity: 2000,
+      role: "original",
+      record_id: parent,
+    });
   });
 
   it("describes a video original, which always takes a canonical stand-in", async () => {
-    const parent = await create({ type: "video/mp4", sizeBytes: BIG, fidelity: 12000, fileName: "v.mp4" });
+    const parent = await create({
+      type: "video/mp4",
+      sizeBytes: BIG,
+      fidelity: 12000,
+      fileName: "v.mp4",
+    });
     const summary = await summaryOf(parent);
     expect(summary.sizes.map((s) => [s.fidelity, s.role])).toEqual([
       [2000, "smaller"],
@@ -239,7 +255,12 @@ describe("GET /data/records/:id/content-url", () => {
   it("serves a self-canonical original as itself", async () => {
     const parent = await original({ fidelity: 2000 });
     const { body } = await read(parent, "canonical");
-    expect(body).toMatchObject({ record_id: parent, role: "original", type: "image/jpeg", fidelity: 2000 });
+    expect(body).toMatchObject({
+      record_id: parent,
+      role: "original",
+      type: "image/jpeg",
+      fidelity: 2000,
+    });
   });
 
   it("answers 404 with the summary for a size nobody produced", async () => {
@@ -309,7 +330,9 @@ describe("DELETE /data/records/:id", () => {
       version: "1.0.0",
       tier: "community",
       infraRequirements: {
-        fileAccess: [{ types: ["image/jpeg"], access: "read", metadataWrite: false, rationale: "t" }],
+        fileAccess: [
+          { types: ["image/jpeg"], access: "read", metadataWrite: false, rationale: "t" },
+        ],
       },
     });
     const parent = await original({ fidelity: 6000 });
@@ -318,10 +341,20 @@ describe("DELETE /data/records/:id", () => {
 });
 
 describe("GET /data/stand-ins/backlog", () => {
-  async function backlog(kind: string, extra = ""): Promise<{ status: number; ids: string[]; next: string | null }> {
+  async function backlog(
+    kind: string,
+    extra = "",
+  ): Promise<{ status: number; ids: string[]; next: string | null }> {
     const res = await app.fetch(`/data/stand-ins/backlog?kind=${kind}${extra}`);
-    const body = (await res.json()) as { records?: Array<{ id: string }>; nextCursor?: string | null };
-    return { status: res.status, ids: (body.records ?? []).map((r) => r.id), next: body.nextCursor ?? null };
+    const body = (await res.json()) as {
+      records?: Array<{ id: string }>;
+      nextCursor?: string | null;
+    };
+    return {
+      status: res.status,
+      ids: (body.records ?? []).map((r) => r.id),
+      next: body.nextCursor ?? null,
+    };
   }
   async function all(kind: string): Promise<string[]> {
     const ids: string[] = [];

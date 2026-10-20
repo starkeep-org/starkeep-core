@@ -45,10 +45,10 @@ await databaseAdapter.close();
 
 ## API
 
-| Export | Description |
-|---|---|
-| `SqliteDatabaseAdapter` | Class implementing `DatabaseAdapter` for SQLite |
-| `SqliteDatabaseAdapterOptions` | Options type: `{ path: string \| ":memory:" }` |
+| Export                         | Description                                     |
+| ------------------------------ | ----------------------------------------------- |
+| `SqliteDatabaseAdapter`        | Class implementing `DatabaseAdapter` for SQLite |
+| `SqliteDatabaseAdapterOptions` | Options type: `{ path: string \| ":memory:" }`  |
 
 The adapter automatically creates the `records` table, indexes, and a `migrations` table on `init()`. WAL journal mode and foreign keys are enabled by default.
 

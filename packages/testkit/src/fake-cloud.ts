@@ -40,7 +40,13 @@ import {
   type DeploymentSettings,
 } from "@starkeep/protocol-primitives";
 import { sha256HexToBase64 } from "@starkeep/storage-adapter";
-import { createFakePool, FAKE_DEVICE_CLIENT_ID, FAKE_POOL_ID, FAKE_POOL_REGION, type FakePool } from "./fake-pool.js";
+import {
+  createFakePool,
+  FAKE_DEVICE_CLIENT_ID,
+  FAKE_POOL_ID,
+  FAKE_POOL_REGION,
+  type FakePool,
+} from "./fake-pool.js";
 import { createAppSpecificFactory, stampUnstampedOriginals } from "@starkeep/shared-space-api";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
@@ -111,7 +117,10 @@ export const FAKE_CLOUD_USER_ID = "test-user";
  * {@link FAKE_CLOUD_USER_ID}. The test harness signs a local data server in
  * with it whenever the server has a cloud, as a person signs a machine in.
  */
-export const FAKE_CLOUD_ACCOUNT = { email: "owner@example.com", password: "Owner-password-1" } as const;
+export const FAKE_CLOUD_ACCOUNT = {
+  email: "owner@example.com",
+  password: "Owner-password-1",
+} as const;
 
 export interface FakeCloud {
   url: string;
@@ -192,7 +201,10 @@ export async function startFakeCloud(): Promise<FakeCloud> {
   const port = await getFreePort();
   const url = `http://127.0.0.1:${port}`;
 
-  const databaseAdapter = new SqliteDatabaseAdapter({ path: join(dir, "cloud.db"), driver: nodeSqliteDriver });
+  const databaseAdapter = new SqliteDatabaseAdapter({
+    path: join(dir, "cloud.db"),
+    driver: nodeSqliteDriver,
+  });
   await databaseAdapter.init();
   const db = databaseAdapter.getRawDatabase();
   const objectStorage = new FsObjectStorageAdapter({ basePath: join(dir, "objects") });
@@ -266,7 +278,9 @@ export async function startFakeCloud(): Promise<FakeCloud> {
       "utf8",
     );
     const input = Buffer.concat([prefix as unknown as Uint8Array, body as unknown as Uint8Array]);
-    const expected = createHmac("sha256", secret).update(input as unknown as Uint8Array).digest("hex");
+    const expected = createHmac("sha256", secret)
+      .update(input as unknown as Uint8Array)
+      .digest("hex");
     const sigBuf = Buffer.from(sig, "hex");
     const expBuf = Buffer.from(expected, "hex");
     if (sigBuf.length !== expBuf.length) return false;
@@ -308,7 +322,12 @@ export async function startFakeCloud(): Promise<FakeCloud> {
             // the stamp back.
             onApplied: async ({ records }) => {
               await librarySettings.refresh();
-              await stampUnstampedOriginals(databaseAdapter, records, librarySettings.standards(), clock);
+              await stampUnstampedOriginals(
+                databaseAdapter,
+                records,
+                librarySettings.standards(),
+                clock,
+              );
             },
           })
         : createInProcessSyncTransport({
@@ -365,12 +384,22 @@ export async function startFakeCloud(): Promise<FakeCloud> {
 
     // The discovery route a signed-out device reads, and the fake pool.
     if (pathname === AUTH_CONFIG_ROUTE && req.method === "GET") {
-      sendJson(res, 200, { region: FAKE_POOL_REGION, userPoolId: FAKE_POOL_ID, deviceClientId: FAKE_DEVICE_CLIENT_ID });
+      sendJson(res, 200, {
+        region: FAKE_POOL_REGION,
+        userPoolId: FAKE_POOL_ID,
+        deviceClientId: FAKE_DEVICE_CLIENT_ID,
+      });
       return;
     }
     if (pathname === "/cognito/" && req.method === "POST") {
-      const target = String(req.headers["x-amz-target"] ?? "").replace("AWSCognitoIdentityProviderService.", "");
-      const answer = pool.handle(target, JSON.parse((await readBody(req)).toString("utf8")) as Record<string, unknown>);
+      const target = String(req.headers["x-amz-target"] ?? "").replace(
+        "AWSCognitoIdentityProviderService.",
+        "",
+      );
+      const answer = pool.handle(
+        target,
+        JSON.parse((await readBody(req)).toString("utf8")) as Record<string, unknown>,
+      );
       res.writeHead(answer.status, { "Content-Type": "application/x-amz-json-1.1" });
       res.end(JSON.stringify(answer.body));
       return;
@@ -395,7 +424,9 @@ export async function startFakeCloud(): Promise<FakeCloud> {
             });
             return;
           }
-          const actual = createHash("sha256").update(bytes as unknown as Uint8Array).digest("base64");
+          const actual = createHash("sha256")
+            .update(bytes as unknown as Uint8Array)
+            .digest("base64");
           if (actual !== supplied || supplied !== sha256HexToBase64(expected)) {
             sendJson(res, 400, {
               error: `BadDigest: body ${actual} vs declared ${supplied} for key ${key}`,
@@ -576,8 +607,7 @@ export async function startFakeCloud(): Promise<FakeCloud> {
       // is enough for a fake, and anything richer belongs in a test against a
       // real server rather than against this.
       const where = new URL(req.url ?? "/", url).searchParams.get("where");
-      const typeFilter =
-        where === null ? undefined : (JSON.parse(where) as { type?: string }).type;
+      const typeFilter = where === null ? undefined : (JSON.parse(where) as { type?: string }).type;
       const records = (await collectSharedRecords()).filter(
         (r) => !r.deletedAt && (typeFilter === undefined || r.type === typeFilter),
       );
@@ -700,7 +730,9 @@ export async function startFakeCloud(): Promise<FakeCloud> {
       const key = appSyncableObjectKey(appId, FAKE_CLOUD_USER_ID, subKey);
       await objectStorage.put(key, body, { contentType: mimeType });
       return view.registerFile(subKey, {
-        contentHash: createHash("sha256").update(body as unknown as Uint8Array).digest("hex"),
+        contentHash: createHash("sha256")
+          .update(body as unknown as Uint8Array)
+          .digest("hex"),
         mimeType,
         sizeBytes: body.length,
       });

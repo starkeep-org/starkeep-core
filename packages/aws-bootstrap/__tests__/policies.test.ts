@@ -34,9 +34,7 @@ function cfnString(v: CfnValue): string {
 
 /** Every boundary must carry the mutating-IAM Deny block. */
 function expectDeniesMutatingIam(statements: IamStatement[]): void {
-  const deny = statements.find(
-    (s) => s.Effect === "Deny" && /DenyOtherIam$/.test(s.Sid),
-  );
+  const deny = statements.find((s) => s.Effect === "Deny" && /DenyOtherIam$/.test(s.Sid));
   expect(deny, "expected a DenyOtherIam statement").toBeDefined();
   const actions = Array.isArray(deny!.Action) ? deny!.Action : [deny!.Action];
   for (const verb of ["iam:Create*", "iam:Put*", "iam:Attach*", "iam:Delete*", "iam:Update*"]) {
@@ -81,7 +79,9 @@ describe("manager policy (the install/uninstall allow-list)", () => {
     for (const s of statements) {
       const acts = Array.isArray(s.Action) ? s.Action : [s.Action];
       if (acts.some((a) => a === "ssm:GetParameter")) {
-        expect(cfnString(s.Resource as CfnValue)).toBe(`arn:aws:ssm:*:*:parameter/${PREFIX}/platform/*`);
+        expect(cfnString(s.Resource as CfnValue)).toBe(
+          `arn:aws:ssm:*:*:parameter/${PREFIX}/platform/*`,
+        );
       }
     }
     expect(actions.some((a) => a.startsWith("s3:"))).toBe(false);
@@ -91,12 +91,10 @@ describe("manager policy (the install/uninstall allow-list)", () => {
   it("gates CreateRole on exactly the three known permissions boundaries", () => {
     const create = byId(statements, "ManagerCreateAppRoleWithBoundary");
     expect(create.Action).toBe("iam:CreateRole");
-    expect(cfnString(create.Resource as CfnValue)).toBe(
-      `arn:aws:iam::*:role/${PREFIX}-app-*`,
+    expect(cfnString(create.Resource as CfnValue)).toBe(`arn:aws:iam::*:role/${PREFIX}-app-*`);
+    const boundaries = (create.Condition!.ArnLike["iam:PermissionsBoundary"] as CfnValue[]).map(
+      cfnString,
     );
-    const boundaries = (
-      create.Condition!.ArnLike["iam:PermissionsBoundary"] as CfnValue[]
-    ).map(cfnString);
     expect(boundaries).toEqual([
       `arn:aws:iam::*:policy/${PREFIX}-app-permissions-boundary`,
       `arn:aws:iam::*:policy/${PREFIX}-foundational-permissions-boundary`,
@@ -113,7 +111,9 @@ describe("manager policy (the install/uninstall allow-list)", () => {
       .map((s) => cfnString(s.Resource as CfnValue));
     for (const r of roleResources) {
       expect(r).toMatch(
-        new RegExp(`^arn:aws:iam::\\*:role/${PREFIX}-(app-\\*|install-ddl-role|install-infra-role)$`),
+        new RegExp(
+          `^arn:aws:iam::\\*:role/${PREFIX}-(app-\\*|install-ddl-role|install-infra-role)$`,
+        ),
       );
     }
   });
@@ -147,12 +147,16 @@ describe("per-app permissions boundary (the per-app runtime ceiling)", () => {
 
   it("gives the whole own prefix only to a session that names no user", () => {
     const whole = byId(statements, "AppS3OwnPrefixNoUser");
-    expect(whole.Resource).toBe(`arn:aws:s3:::${PREFIX}-files-*/apps/\${aws:PrincipalTag/starkeep:appId}/*`);
+    expect(whole.Resource).toBe(
+      `arn:aws:s3:::${PREFIX}-files-*/apps/\${aws:PrincipalTag/starkeep:appId}/*`,
+    );
     expect(whole.Condition).toEqual({ Null: { "aws:PrincipalTag/starkeep:userId": "true" } });
   });
 
   it("caps shared data at the session's own user", () => {
-    expect(byId(statements, "AppS3SharedData").Resource).toBe(`arn:aws:s3:::${PREFIX}-files-*/shared/\${aws:PrincipalTag/starkeep:userId}/*`);
+    expect(byId(statements, "AppS3SharedData").Resource).toBe(
+      `arn:aws:s3:::${PREFIX}-files-*/shared/\${aws:PrincipalTag/starkeep:userId}/*`,
+    );
   });
 
   it("scopes ListBucket by s3:prefix to the user's own and shared prefixes (no cross-app or cross-user listing)", () => {
@@ -185,7 +189,9 @@ describe("user-data-owner boundary (Drive's layer-2 hard floor)", () => {
 
   it("caps shared-data custody at the session's own user's shared prefix", () => {
     const shared = byId(statements, "UserDataOwnerS3SharedData");
-    expect(shared.Resource).toBe(`arn:aws:s3:::${PREFIX}-files-*/shared/\${aws:PrincipalTag/starkeep:userId}/*`);
+    expect(shared.Resource).toBe(
+      `arn:aws:s3:::${PREFIX}-files-*/shared/\${aws:PrincipalTag/starkeep:userId}/*`,
+    );
     expect(shared.Action).toEqual([
       "s3:GetObject",
       "s3:PutObject",

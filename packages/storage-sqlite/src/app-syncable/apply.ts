@@ -2,7 +2,13 @@ import type { RawDatabase } from "@starkeep/storage-adapter";
 import { sql, type CompiledQuery } from "kysely";
 import type { HLCTimestamp } from "@starkeep/protocol-primitives";
 import { serializeHLC, deserializeHLC } from "@starkeep/protocol-primitives";
-import type { AppSyncableApplier, AppSyncableRowEntry, AppSyncableNamespaceStore, ScanCapableApplier, ScanSincePage } from "@starkeep/shared-space-api";
+import type {
+  AppSyncableApplier,
+  AppSyncableRowEntry,
+  AppSyncableNamespaceStore,
+  ScanCapableApplier,
+  ScanSincePage,
+} from "@starkeep/shared-space-api";
 import {
   buildAppAggregateQuery,
   buildAppRowQuery,
@@ -50,9 +56,7 @@ function allCompiled<T>(db: RawDatabase, compiled: CompiledQuery): T[] {
  * Delete is soft: the `deleted_at` column is set rather than removing the row
  * so that the inline-HLC pull path can propagate tombstones to other clients.
  */
-export class SqliteAppSyncableApplier
-  implements AppSyncableApplier, ScanCapableApplier
-{
+export class SqliteAppSyncableApplier implements AppSyncableApplier, ScanCapableApplier {
   constructor(
     private readonly db: RawDatabase,
     private readonly namespace: AppSyncableNamespaceStore,
@@ -61,9 +65,7 @@ export class SqliteAppSyncableApplier
   apply(entry: AppSyncableRowEntry): void {
     const ns = this.namespace.get(entry.appId);
     if (!ns) {
-      throw new Error(
-        `SqliteAppSyncableApplier: app "${entry.appId}" not installed`,
-      );
+      throw new Error(`SqliteAppSyncableApplier: app "${entry.appId}" not installed`);
     }
     const tableInfo = ns.tables.find((t) => t.name === entry.table);
     if (!tableInfo) {
@@ -84,11 +86,7 @@ export class SqliteAppSyncableApplier
     }
   }
 
-  private applyInsert(
-    fullName: string,
-    pkColumns: string[],
-    entry: AppSyncableRowEntry,
-  ): void {
+  private applyInsert(fullName: string, pkColumns: string[], entry: AppSyncableRowEntry): void {
     const row = withNodeId(entry.row ?? {}, entry);
     const cols = Object.keys(row);
     if (cols.length === 0) return;
@@ -98,7 +96,11 @@ export class SqliteAppSyncableApplier
       // No PK declared (or nothing beyond it) — just insert, ignoring duplicates.
       runCompiled(
         this.db,
-        qb.insertInto(fullName).orIgnore().values({ ...row }).compile(),
+        qb
+          .insertInto(fullName)
+          .orIgnore()
+          .values({ ...row })
+          .compile(),
       );
       return;
     }
@@ -188,10 +190,7 @@ export class SqliteAppSyncableApplier
       pkColumns.length > 0 &&
       pkColumns.every((column) => entry.row?.[column] !== undefined);
     if (carriesFullRow) {
-      const row = withNodeId(
-        { ...entry.row, updated_at: ts, deleted_at: ts },
-        entry,
-      );
+      const row = withNodeId({ ...entry.row, updated_at: ts, deleted_at: ts }, entry);
       const updateCols = Object.keys(row).filter((c) => !pkColumns.includes(c));
       runCompiled(
         this.db,
@@ -220,9 +219,7 @@ export class SqliteAppSyncableApplier
       query = query.where(c, "=", where[c]);
     }
     // LWW guard: tombstone only rows the incoming timestamp supersedes.
-    query = query.where((eb) =>
-      eb.or([eb("updated_at", "is", null), eb("updated_at", "<", ts)]),
-    );
+    query = query.where((eb) => eb.or([eb("updated_at", "is", null), eb("updated_at", "<", ts)]));
     runCompiled(this.db, query.compile());
   }
 
@@ -279,10 +276,7 @@ export class SqliteAppSyncableApplier
    * every author complete" — the exact silent-loss shape `scanSince`'s own catch
    * was written to prevent, reached one frame earlier.
    */
-  async getNodeWatermarks(
-    appId: string,
-    table: string,
-  ): Promise<Record<string, HLCTimestamp>> {
+  async getNodeWatermarks(appId: string, table: string): Promise<Record<string, HLCTimestamp>> {
     const fullName = appSyncableTableName(appId, table);
     // Table might not exist yet (app not installed locally).
     if (!this.tableExists(fullName)) return {};
@@ -320,8 +314,8 @@ export class SqliteAppSyncableApplier
     // by getNodeWatermarks returning {} so no author is planned — which is why
     // nothing below needs a catch for it.
     const scans = planNodeScans(await this.getNodeWatermarks(appId, table), peerWatermarks);
-    const pkColumns = this.namespace.get(appId)?.tables.find((t) => t.name === table)
-      ?.pkColumns ?? [];
+    const pkColumns =
+      this.namespace.get(appId)?.tables.find((t) => t.name === table)?.pkColumns ?? [];
     try {
       const { rows, hasMore, truncated } = await collectSince<Record<string, unknown>>(
         scans,
@@ -385,10 +379,7 @@ export class SqliteAppSyncableApplier
         SQLITE_APP_QUERY_DIALECT,
         options,
       );
-      return collectAggregatePage(
-        query,
-        fromSqliteRows(this.selectRows(compiled), booleanColumns),
-      );
+      return collectAggregatePage(query, fromSqliteRows(this.selectRows(compiled), booleanColumns));
     }
 
     const compiled = buildAppRowQuery(qb, fullName, query, options);
@@ -412,9 +403,10 @@ export class SqliteAppSyncableApplier
 
   /** Bind and run a compiled SELECT, adapting values SQLite cannot bind. */
   private selectRows(compiled: CompiledQuery): Record<string, unknown>[] {
-    return this.db
-      .prepare(compiled.sql)
-      .all(...compiled.parameters.map(toSqliteParam)) as Record<string, unknown>[];
+    return this.db.prepare(compiled.sql).all(...compiled.parameters.map(toSqliteParam)) as Record<
+      string,
+      unknown
+    >[];
   }
 }
 

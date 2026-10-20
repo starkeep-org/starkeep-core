@@ -34,11 +34,7 @@ import {
   ApiError,
 } from "@starkeep/shared-space-api";
 import type { SyncStateStore } from "@starkeep/sync-engine";
-import type {
-  StarkeepSdk,
-  StarkeepSdkOptions,
-  DataPutInput,
-} from "./types.js";
+import type { StarkeepSdk, StarkeepSdkOptions, DataPutInput } from "./types.js";
 
 /**
  * DSQL caps a write transaction at 3,000 modified rows, and secondary-index
@@ -119,9 +115,7 @@ export async function createNodeClock(options: {
                 // one that is up to date, right up until a restart resumes
                 // behind what this node already emitted.
                 if (pending === null) pending = flushing;
-                console.warn(
-                  `[sdk] could not persist HLC clock state: ${(err as Error).message}`,
-                );
+                console.warn(`[sdk] could not persist HLC clock state: ${(err as Error).message}`);
               });
             }
           }, 5000);
@@ -144,15 +138,8 @@ export async function createNodeClock(options: {
   };
 }
 
-export async function createStarkeepSdk(
-  options: StarkeepSdkOptions,
-): Promise<StarkeepSdk> {
-  const {
-    databaseAdapter,
-    objectStorageAdapter,
-    nodeId,
-    syncStateStore,
-  } = options;
+export async function createStarkeepSdk(options: StarkeepSdkOptions): Promise<StarkeepSdk> {
+  const { databaseAdapter, objectStorageAdapter, nodeId, syncStateStore } = options;
 
   await databaseAdapter.init();
   await objectStorageAdapter.init();
@@ -210,9 +197,7 @@ export async function createStarkeepSdk(
    * This read — not the upsert — is very likely the dominant cost of a bulk
    * labelling job, and it is what the "one statement per batch" framing hides.
    */
-  async function loadRecordTypes(
-    recordIds: StarkeepId[],
-  ): Promise<Map<string, string>> {
+  async function loadRecordTypes(recordIds: StarkeepId[]): Promise<Map<string, string>> {
     const ids = [...new Set(recordIds)];
     const types = new Map<string, string>();
     for (let i = 0; i < ids.length; i += LABEL_WRITE_CHUNK) {
@@ -274,7 +259,9 @@ export async function createStarkeepSdk(
         const contentHash = await sha256Hex(file);
         const objectStorageKey = dataRecordObjectKey(options.userId(), input.type, contentHash);
 
-        await objectStorageAdapter.put(objectStorageKey, file, { contentType: contentType ?? undefined });
+        await objectStorageAdapter.put(objectStorageKey, file, {
+          contentType: contentType ?? undefined,
+        });
         return writeRecordAndMetadata(
           { ...input, contentHash, objectStorageKey } as DataPutInput,
           file,
@@ -289,9 +276,13 @@ export async function createStarkeepSdk(
         const objectStorageKey = dataRecordObjectKey(options.userId(), input.type, contentHash);
 
         if (objectStorageAdapter.putSymlink) {
-          await objectStorageAdapter.putSymlink(objectStorageKey, filePath, { contentType: contentType ?? undefined });
+          await objectStorageAdapter.putSymlink(objectStorageKey, filePath, {
+            contentType: contentType ?? undefined,
+          });
         } else {
-          await objectStorageAdapter.put(objectStorageKey, fileBytes, { contentType: contentType ?? undefined });
+          await objectStorageAdapter.put(objectStorageKey, fileBytes, {
+            contentType: contentType ?? undefined,
+          });
         }
 
         return writeRecordAndMetadata(
@@ -565,9 +556,7 @@ export async function createStarkeepSdk(
         // which is not the (value, record_id) order the cursor is keyed on.
         const byId = new Map(fetched.records.map((r) => [r.id as string, r]));
         return {
-          records: ids
-            .map((id) => byId.get(id))
-            .filter((r): r is DataRecord => r !== undefined),
+          records: ids.map((id) => byId.get(id)).filter((r): r is DataRecord => r !== undefined),
           nextCursor: found.nextCursor,
         };
       },

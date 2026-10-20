@@ -53,9 +53,7 @@ const REQUIRED_OUTPUT_KEYS: Record<keyof BootstrapOutputs, string> = {
 };
 
 function outputsFromStack(stack: Stack, stackName: string): BootstrapOutputs {
-  const byKey = new Map(
-    (stack.Outputs ?? []).map((o) => [o.OutputKey, o.OutputValue] as const),
-  );
+  const byKey = new Map((stack.Outputs ?? []).map((o) => [o.OutputKey, o.OutputValue] as const));
   const result: Partial<Record<keyof BootstrapOutputs, string>> = {};
   for (const [field, key] of Object.entries(REQUIRED_OUTPUT_KEYS)) {
     const value = byKey.get(key);
@@ -113,10 +111,7 @@ export async function ensureBootstrapStack(options: {
     }),
   );
 
-  await waitUntilStackCreateComplete(
-    { client, maxWaitTime: 15 * 60 },
-    { StackName: stackName },
-  );
+  await waitUntilStackCreateComplete({ client, maxWaitTime: 15 * 60 }, { StackName: stackName });
 
   const created = await describeStack(client, stackName);
   if (!created) throw new Error(`stack ${stackName} vanished after create`);

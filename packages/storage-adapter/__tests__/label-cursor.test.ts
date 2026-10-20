@@ -59,13 +59,7 @@ describe("compareLabelScanOrder", () => {
       [...rows]
         .sort(compareLabelScanOrder)
         .map((r) => `${r.recordId}/${r.appId}/${r.key}=${r.value}`),
-    ).toEqual([
-      "r1/alpha/a=Alice",
-      "r1/alpha/a=Bob",
-      "r1/alpha/z=",
-      "r1/gamma/a=",
-      "r2/alpha/a=",
-    ]);
+    ).toEqual(["r1/alpha/a=Alice", "r1/alpha/a=Bob", "r1/alpha/z=", "r1/gamma/a=", "r2/alpha/a="]);
   });
 
   it("agrees with isAfterLabelScanCursor at every tie-break level", () => {
@@ -73,9 +67,7 @@ describe("compareLabelScanOrder", () => {
     expect(isAfterLabelScanCursor({ ...cursor, key: "n" }, cursor)).toBe(true);
     expect(isAfterLabelScanCursor({ ...cursor, key: "l" }, cursor)).toBe(false);
     expect(isAfterLabelScanCursor({ ...cursor, appId: "beta", key: "a" }, cursor)).toBe(true);
-    expect(isAfterLabelScanCursor({ ...cursor, recordId: id("r0"), key: "z" }, cursor)).toBe(
-      false,
-    );
+    expect(isAfterLabelScanCursor({ ...cursor, recordId: id("r0"), key: "z" }, cursor)).toBe(false);
     // The value tie-break: two values of one key, which is the case that
     // silently dropped rows before `value` joined the cursor.
     expect(isAfterLabelScanCursor({ ...cursor, value: "n" }, cursor)).toBe(true);

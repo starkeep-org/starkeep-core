@@ -117,7 +117,9 @@ function StepToC({
             className={cn(
               "flex items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm transition-colors",
               isActive && "bg-primary/10 text-primary font-medium cursor-default",
-              isDone && !isActive && "text-foreground hover:bg-accent hover:text-accent-foreground cursor-pointer",
+              isDone &&
+                !isActive &&
+                "text-foreground hover:bg-accent hover:text-accent-foreground cursor-pointer",
               isLocked && "text-muted-foreground cursor-default",
             )}
           >
@@ -190,7 +192,9 @@ function Step1Bootstrap({
 
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-1.5">
-          <label className="text-sm font-medium" htmlFor="region">AWS Region</label>
+          <label className="text-sm font-medium" htmlFor="region">
+            AWS Region
+          </label>
           <Select value={region} onValueChange={setRegion}>
             <SelectTrigger id="region" className="w-full">
               <SelectValue placeholder="Select a region" />
@@ -203,11 +207,15 @@ function Step1Bootstrap({
               ))}
             </SelectContent>
           </Select>
-          <p className="text-xs text-muted-foreground">The AWS region where your Starkeep infrastructure will be deployed.</p>
+          <p className="text-xs text-muted-foreground">
+            The AWS region where your Starkeep infrastructure will be deployed.
+          </p>
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <label className="text-sm font-medium" htmlFor="stackPrefix">Stack prefix</label>
+          <label className="text-sm font-medium" htmlFor="stackPrefix">
+            Stack prefix
+          </label>
           <Input
             id="stackPrefix"
             placeholder="starkeep"
@@ -215,7 +223,10 @@ function Step1Bootstrap({
             maxLength={MAX_STACK_PREFIX_LENGTH}
             onChange={(e) => setStackPrefix(e.currentTarget.value.toLowerCase())}
           />
-          <p className="text-xs text-muted-foreground">A short name used to prefix all Starkeep resources. Lowercase letters, numbers, and hyphens only ({MAX_STACK_PREFIX_LENGTH} chars max).</p>
+          <p className="text-xs text-muted-foreground">
+            A short name used to prefix all Starkeep resources. Lowercase letters, numbers, and
+            hyphens only ({MAX_STACK_PREFIX_LENGTH} chars max).
+          </p>
         </div>
       </div>
 
@@ -248,7 +259,9 @@ function Step1Bootstrap({
             size="sm"
             onClick={() => {
               setShowInstructions(true);
-              openUrl(getCloudFormationCreateStackUrl(region, { stackName: `${stackPrefix}-bootstrap` }));
+              openUrl(
+                getCloudFormationCreateStackUrl(region, { stackName: `${stackPrefix}-bootstrap` }),
+              );
               requestAnimationFrame(() => {
                 downloadStepRef.current?.scrollIntoView({ block: "start" });
               });
@@ -285,8 +298,9 @@ function Step1Bootstrap({
             </p>
 
             <p>
-              Unless you’re already signed in to AWS, click <strong>Create a new AWS account</strong>{" "}
-              (or <strong>Sign in as root user email</strong> if you already have an AWS account you
+              Unless you’re already signed in to AWS, click{" "}
+              <strong>Create a new AWS account</strong> (or{" "}
+              <strong>Sign in as root user email</strong> if you already have an AWS account you
               want to use).
             </p>
 
@@ -302,20 +316,21 @@ function Step1Bootstrap({
                 <strong>Upload a template file</strong>
               </li>
               <li>
-                Click <strong>Choose file</strong> and select the template .yaml file downloaded from
-                Starkeep Setup
+                Click <strong>Choose file</strong> and select the template .yaml file downloaded
+                from Starkeep Setup
               </li>
               <li>
                 Click <strong>Next</strong>
               </li>
               <li>
-                Click <strong>Next</strong> again without modifying the values (these are preset based
-                on your input during Starkeep Setup)
+                Click <strong>Next</strong> again without modifying the values (these are preset
+                based on your input during Starkeep Setup)
               </li>
               <li>
                 When the next page loads, scroll to the bottom and check the checkbox “
                 <strong>
-                  I acknowledge that AWS CloudFormation might create IAM resources with custom names.
+                  I acknowledge that AWS CloudFormation might create IAM resources with custom
+                  names.
                 </strong>
                 ”
               </li>
@@ -326,13 +341,13 @@ function Step1Bootstrap({
                 Scroll to the bottom of the final page and click <strong>Submit</strong>.
               </li>
               <li>
-                Click on the <strong>Outputs</strong> tab. It will say “No outputs” at first, but once
-                the stack finishing deploying (take about a minute) you will see various properties
-                show up.
+                Click on the <strong>Outputs</strong> tab. It will say “No outputs” at first, but
+                once the stack finishing deploying (take about a minute) you will see various
+                properties show up.
               </li>
               <li>
-                Once you see Outputs properties show up, go back to your Starkeep Cloud Setup tab and click{" "}
-                <strong>Stack is deployed - Continue</strong>.
+                Once you see Outputs properties show up, go back to your Starkeep Cloud Setup tab
+                and click <strong>Stack is deployed - Continue</strong>.
               </li>
             </ol>
 
@@ -380,8 +395,12 @@ function Step2Outputs({
   onBack: () => void;
 }) {
   const [userPoolId, setUserPoolId] = useState(initialCognitoConfig.userPoolId ?? "");
-  const [userPoolClientId, setUserPoolClientId] = useState(initialCognitoConfig.userPoolClientId ?? "");
-  const [deviceUserPoolClientId, setDeviceUserPoolClientId] = useState(initialDeviceUserPoolClientId ?? "");
+  const [userPoolClientId, setUserPoolClientId] = useState(
+    initialCognitoConfig.userPoolClientId ?? "",
+  );
+  const [deviceUserPoolClientId, setDeviceUserPoolClientId] = useState(
+    initialDeviceUserPoolClientId ?? "",
+  );
   const [identityPoolId, setIdentityPoolId] = useState(initialCognitoConfig.identityPoolId ?? "");
   const [touched, setTouched] = useState<Record<string, boolean>>({});
 
@@ -419,7 +438,9 @@ function Step2Outputs({
 
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-1.5">
-          <label className="text-sm font-medium" htmlFor="deviceUserPoolClientId">DeviceUserPoolClientId</label>
+          <label className="text-sm font-medium" htmlFor="deviceUserPoolClientId">
+            DeviceUserPoolClientId
+          </label>
           <Input
             id="deviceUserPoolClientId"
             placeholder="7abc4defghij5klmnopq6rstuv"
@@ -427,7 +448,11 @@ function Step2Outputs({
             onChange={(e) => setDeviceUserPoolClientId(e.currentTarget.value.trim())}
             onBlur={() => touch("deviceUserPoolClientId")}
             aria-invalid={touched.deviceUserPoolClientId && !!errors.deviceUserPoolClientId}
-            className={cn(touched.deviceUserPoolClientId && errors.deviceUserPoolClientId && "border-destructive")}
+            className={cn(
+              touched.deviceUserPoolClientId &&
+                errors.deviceUserPoolClientId &&
+                "border-destructive",
+            )}
           />
           {touched.deviceUserPoolClientId && errors.deviceUserPoolClientId && (
             <p className="text-xs text-destructive">{errors.deviceUserPoolClientId}</p>
@@ -435,7 +460,9 @@ function Step2Outputs({
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <label className="text-sm font-medium" htmlFor="identityPoolId">IdentityPoolId</label>
+          <label className="text-sm font-medium" htmlFor="identityPoolId">
+            IdentityPoolId
+          </label>
           <Input
             id="identityPoolId"
             placeholder="us-east-1:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
@@ -451,7 +478,9 @@ function Step2Outputs({
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <label className="text-sm font-medium" htmlFor="userPoolClientId">UserPoolClientId</label>
+          <label className="text-sm font-medium" htmlFor="userPoolClientId">
+            UserPoolClientId
+          </label>
           <Input
             id="userPoolClientId"
             placeholder="3abc4defghij5klmnopq6rstuv"
@@ -459,7 +488,9 @@ function Step2Outputs({
             onChange={(e) => setUserPoolClientId(e.currentTarget.value.trim())}
             onBlur={() => touch("userPoolClientId")}
             aria-invalid={touched.userPoolClientId && !!errors.userPoolClientId}
-            className={cn(touched.userPoolClientId && errors.userPoolClientId && "border-destructive")}
+            className={cn(
+              touched.userPoolClientId && errors.userPoolClientId && "border-destructive",
+            )}
           />
           {touched.userPoolClientId && errors.userPoolClientId && (
             <p className="text-xs text-destructive">{errors.userPoolClientId}</p>
@@ -467,7 +498,9 @@ function Step2Outputs({
         </div>
 
         <div className="flex flex-col gap-1.5">
-          <label className="text-sm font-medium" htmlFor="userPoolId">UserPoolId</label>
+          <label className="text-sm font-medium" htmlFor="userPoolId">
+            UserPoolId
+          </label>
           <Input
             id="userPoolId"
             placeholder="us-east-1_Xxxxxxxxx"
@@ -484,9 +517,13 @@ function Step2Outputs({
       </div>
 
       <div className="flex justify-between">
-        <Button variant="ghost" onClick={onBack}>Back to previous step</Button>
+        <Button variant="ghost" onClick={onBack}>
+          Back to previous step
+        </Button>
         <Button
-          onClick={() => onContinue({ userPoolId, userPoolClientId, identityPoolId, deviceUserPoolClientId })}
+          onClick={() =>
+            onContinue({ userPoolId, userPoolClientId, identityPoolId, deviceUserPoolClientId })
+          }
           disabled={!isValid}
         >
           Continue
@@ -510,7 +547,9 @@ function Step3CreateUser({
   onBack: () => void;
 }) {
   const [showInstructions, setShowInstructions] = useState(false);
-  const region = cognitoConfig.userPoolId ? regionFromUserPoolId(cognitoConfig.userPoolId) : "us-east-1";
+  const region = cognitoConfig.userPoolId
+    ? regionFromUserPoolId(cognitoConfig.userPoolId)
+    : "us-east-1";
   const consoleLink = cognitoConfig.userPoolId
     ? `https://${region}.console.aws.amazon.com/cognito/v2/idp/user-pools/${cognitoConfig.userPoolId}/users/create`
     : null;
@@ -601,7 +640,9 @@ function Step3CreateUser({
       )}
 
       <div className="flex justify-between">
-        <Button variant="ghost" onClick={onBack}>Back to previous step</Button>
+        <Button variant="ghost" onClick={onBack}>
+          Back to previous step
+        </Button>
         <Button onClick={onContinue}>User Created — Continue</Button>
       </div>
     </div>
@@ -696,7 +737,9 @@ function Step4SignIn({
         )}
         <div className="flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium" htmlFor="starkeep-new-password">New password</label>
+            <label className="text-sm font-medium" htmlFor="starkeep-new-password">
+              New password
+            </label>
             <Input
               id="starkeep-new-password"
               name="starkeep-new-password"
@@ -709,7 +752,9 @@ function Step4SignIn({
             />
           </div>
           <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium" htmlFor="starkeep-confirm-password">Confirm new password</label>
+            <label className="text-sm font-medium" htmlFor="starkeep-confirm-password">
+              Confirm new password
+            </label>
             <Input
               id="starkeep-confirm-password"
               name="starkeep-confirm-password"
@@ -722,12 +767,16 @@ function Step4SignIn({
           </div>
         </div>
         <div className="flex justify-between">
-          <Button variant="ghost" onClick={() => setSession(null)} disabled={loading}>Back to sign in</Button>
+          <Button variant="ghost" onClick={() => setSession(null)} disabled={loading}>
+            Back to sign in
+          </Button>
           <Button
             onClick={handleSetNewPassword}
             disabled={signInDisabled || !newPassword || newPassword.length < 8}
           >
-            {loading && <span className="mr-2 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />}
+            {loading && (
+              <span className="mr-2 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+            )}
             Set password and sign in
           </Button>
         </div>
@@ -747,7 +796,9 @@ function Step4SignIn({
       )}
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-1.5">
-          <label className="text-sm font-medium" htmlFor="starkeep-signin-email">Email</label>
+          <label className="text-sm font-medium" htmlFor="starkeep-signin-email">
+            Email
+          </label>
           <Input
             id="starkeep-signin-email"
             name="starkeep-signin-email"
@@ -761,7 +812,9 @@ function Step4SignIn({
           />
         </div>
         <div className="flex flex-col gap-1.5">
-          <label className="text-sm font-medium" htmlFor="starkeep-temp-password">Password</label>
+          <label className="text-sm font-medium" htmlFor="starkeep-temp-password">
+            Password
+          </label>
           <Input
             id="starkeep-temp-password"
             name="starkeep-temp-password"
@@ -770,15 +823,21 @@ function Step4SignIn({
             placeholder="Shown in the email you received, or already set by you"
             value={password}
             onChange={(e) => setPassword(e.currentTarget.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") handleSignIn(); }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleSignIn();
+            }}
             disabled={loading}
           />
         </div>
       </div>
       <div className="flex justify-between">
-        <Button variant="ghost" onClick={onBack} disabled={loading}>Back to previous step</Button>
+        <Button variant="ghost" onClick={onBack} disabled={loading}>
+          Back to previous step
+        </Button>
         <Button onClick={handleSignIn} disabled={signInDisabled || !email || !password}>
-          {loading && <span className="mr-2 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />}
+          {loading && (
+            <span className="mr-2 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+          )}
           Sign in
         </Button>
       </div>
@@ -943,14 +1002,23 @@ function Step5Deploy({
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ action: "restart", id: "local-data-server" }),
           });
-          const body = (await resp.json().catch(() => ({}))) as { restarted?: boolean; error?: string };
+          const body = (await resp.json().catch(() => ({}))) as {
+            restarted?: boolean;
+            error?: string;
+          };
           if (resp.ok && body.restarted) {
             setLines((l) => [...l, "", "[Restarted local-data-server to apply new cloud config]"]);
           } else if (!resp.ok) {
-            setLines((l) => [...l, `[Warning: could not restart local-data-server: ${body.error ?? resp.statusText}]`]);
+            setLines((l) => [
+              ...l,
+              `[Warning: could not restart local-data-server: ${body.error ?? resp.statusText}]`,
+            ]);
           }
         } catch (err) {
-          setLines((l) => [...l, `[Warning: could not restart local-data-server: ${err instanceof Error ? err.message : String(err)}]`]);
+          setLines((l) => [
+            ...l,
+            `[Warning: could not restart local-data-server: ${err instanceof Error ? err.message : String(err)}]`,
+          ]);
         }
 
         // Re-read the config so the status card sees the just-written
@@ -970,7 +1038,9 @@ function Step5Deploy({
     }
 
     run();
-    return () => { aborted = true; };
+    return () => {
+      aborted = true;
+    };
   }
 
   return (
@@ -980,8 +1050,14 @@ function Step5Deploy({
           Deploy the Starkeep cloud. This runs two passes in sequence:
         </p>
         <ul className="text-sm text-muted-foreground flex flex-col gap-0.5 pl-4">
-          <li>• <strong>cloud-data-server</strong> — Aurora DSQL cluster, S3 file bucket, Lambda + API Gateway (Cognito JWT authorizer), shared-schema migrations</li>
-          <li>• <strong>Starkeep Drive</strong> — the User-Data-Owner identity that owns shared-record sync (IAM role + grants; no compute)</li>
+          <li>
+            • <strong>cloud-data-server</strong> — Aurora DSQL cluster, S3 file bucket, Lambda + API
+            Gateway (Cognito JWT authorizer), shared-schema migrations
+          </li>
+          <li>
+            • <strong>Starkeep Drive</strong> — the User-Data-Owner identity that owns shared-record
+            sync (IAM role + grants; no compute)
+          </li>
         </ul>
       </div>
 
@@ -1014,20 +1090,26 @@ function Step5Deploy({
         <>
           <Alert variant="destructive">
             <AlertDescription>
-              Your AWS sign-in session expired. Sign in again to retry the deploy —
-              your progress so far is preserved.
+              Your AWS sign-in session expired. Sign in again to retry the deploy — your progress so
+              far is preserved.
             </AlertDescription>
           </Alert>
-          <Button onClick={onTokenExpired} variant="outline">Sign in again</Button>
+          <Button onClick={onTokenExpired} variant="outline">
+            Sign in again
+          </Button>
         </>
       )}
 
       {status === "failure" && !tokenExpired && (
-        <Button onClick={handleInstall} variant="outline">Retry install</Button>
+        <Button onClick={handleInstall} variant="outline">
+          Retry install
+        </Button>
       )}
 
       <div className="flex justify-start">
-        <Button variant="ghost" onClick={onBack} disabled={installing}>Back to previous step</Button>
+        <Button variant="ghost" onClick={onBack} disabled={installing}>
+          Back to previous step
+        </Button>
       </div>
     </div>
   );
@@ -1061,7 +1143,9 @@ function DeploymentSummary({
           <StatusBadge online={healthToOnline(health)} />
         </div>
         <Button size="sm" variant="outline" onClick={onRedeploy} disabled={installing}>
-          {installing && <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />}
+          {installing && (
+            <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+          )}
           Redeploy
         </Button>
       </div>
@@ -1108,7 +1192,10 @@ export function CloudSetupWizard({ onComplete }: Props) {
     : {};
 
   // Session state — lives in localStorage, not in the config file.
-  const [signInResult, setSignInResult] = useState<{ idToken: string; refreshToken: string } | null>(null);
+  const [signInResult, setSignInResult] = useState<{
+    idToken: string;
+    refreshToken: string;
+  } | null>(null);
   const [credentials, setCredentials] = useState<STSCredentials | null>(null);
 
   const refreshCloudConfig = useCallback(async () => {
@@ -1151,7 +1238,10 @@ export function CloudSetupWizard({ onComplete }: Props) {
       // A config from before the device client existed reopens this step, so
       // the operator copies the new output in after updating the stack.
       const hasCognito = !!(
-        cfg?.userPoolId && cfg?.userPoolClientId && cfg?.identityPoolId && cfg?.deviceUserPoolClientId
+        cfg?.userPoolId &&
+        cfg?.userPoolClientId &&
+        cfg?.identityPoolId &&
+        cfg?.deviceUserPoolClientId
       );
       if (hasCognito) done.add(2);
 
@@ -1223,7 +1313,9 @@ export function CloudSetupWizard({ onComplete }: Props) {
     <div className="flex gap-6 min-h-[400px]">
       {/* ToC */}
       <div className="w-48 shrink-0">
-        <p className="px-3 py-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider">Steps</p>
+        <p className="px-3 py-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+          Steps
+        </p>
         <StepToC
           currentStep={currentStep}
           completedSteps={completedSteps}
@@ -1238,14 +1330,18 @@ export function CloudSetupWizard({ onComplete }: Props) {
         <div className="flex items-center gap-2 mb-5">
           <h2 className="text-base font-semibold">{stepTitles[currentStep]}</h2>
           {completedSteps.has(currentStep) && currentStep !== 5 && (
-            <Badge variant="secondary" className="text-xs">Completed</Badge>
+            <Badge variant="secondary" className="text-xs">
+              Completed
+            </Badge>
           )}
         </div>
 
         {currentStep === 1 && (
           <Step1Bootstrap
             initialStackPrefix={stackPrefix}
-            initialRegion={cloudConfig?.userPoolId ? regionFromUserPoolId(cloudConfig.userPoolId) : ""}
+            initialRegion={
+              cloudConfig?.userPoolId ? regionFromUserPoolId(cloudConfig.userPoolId) : ""
+            }
             onContinue={async (prefix, region) => {
               setBootstrapRegion(region);
               const isChanging = !!cloudConfig?.stackPrefix && cloudConfig.stackPrefix !== prefix;
@@ -1258,14 +1354,23 @@ export function CloudSetupWizard({ onComplete }: Props) {
                 const updated = await patchCloudConfig({
                   stackPrefix: prefix,
                   stage: prefix,
-                  userPoolId: null, userPoolClientId: null, identityPoolId: null,
+                  userPoolId: null,
+                  userPoolClientId: null,
+                  identityPoolId: null,
                   deviceUserPoolClientId: null,
-                  accountId: null, permissionsBoundaryArn: null,
+                  accountId: null,
+                  permissionsBoundaryArn: null,
                   foundationalPermissionsBoundaryArn: null,
-                  userDataOwnerPermissionsBoundaryArn: null, managerRoleArn: null,
+                  userDataOwnerPermissionsBoundaryArn: null,
+                  managerRoleArn: null,
                   installDdlRoleArn: null,
-                  pulumiStateBucket: null, s3Bucket: null, auroraEndpoint: null,
-                  apiGatewayUrl: null, publicBaseUrl: null, apiGatewayId: null, authorizerId: null,
+                  pulumiStateBucket: null,
+                  s3Bucket: null,
+                  auroraEndpoint: null,
+                  apiGatewayUrl: null,
+                  publicBaseUrl: null,
+                  apiGatewayId: null,
+                  authorizerId: null,
                 });
                 setCloudConfig(updated);
                 setSignInResult(null);
@@ -1287,7 +1392,8 @@ export function CloudSetupWizard({ onComplete }: Props) {
             initialCognitoConfig={cognitoConfig}
             initialDeviceUserPoolClientId={cloudConfig?.deviceUserPoolClientId}
             onContinue={async (config) => {
-              const isChanging = !!cloudConfig?.userPoolId && cloudConfig.userPoolId !== config.userPoolId;
+              const isChanging =
+                !!cloudConfig?.userPoolId && cloudConfig.userPoolId !== config.userPoolId;
               const hasDownstream = !!(cloudConfig?.s3Bucket || cloudConfig?.apiGatewayUrl);
               if (isChanging && hasDownstream) {
                 const confirmed = window.confirm(
@@ -1299,8 +1405,12 @@ export function CloudSetupWizard({ onComplete }: Props) {
                   userPoolClientId: config.userPoolClientId,
                   identityPoolId: config.identityPoolId,
                   deviceUserPoolClientId: config.deviceUserPoolClientId,
-                  s3Bucket: null, auroraEndpoint: null,
-                  apiGatewayUrl: null, publicBaseUrl: null, apiGatewayId: null, authorizerId: null,
+                  s3Bucket: null,
+                  auroraEndpoint: null,
+                  apiGatewayUrl: null,
+                  publicBaseUrl: null,
+                  apiGatewayId: null,
+                  authorizerId: null,
                 });
                 setCloudConfig(updated);
                 setSignInResult(null);
@@ -1339,7 +1449,10 @@ export function CloudSetupWizard({ onComplete }: Props) {
             onSuccess={async (tokens, creds, userEmail) => {
               setSignInResult(tokens);
               setCredentials(creds);
-              await writeCognitoSession({ refreshToken: tokens.refreshToken, userEmail: userEmail ?? undefined });
+              await writeCognitoSession({
+                refreshToken: tokens.refreshToken,
+                userEmail: userEmail ?? undefined,
+              });
               await writeCloudCredentials(creds);
               markDone(4);
             }}
@@ -1357,7 +1470,10 @@ export function CloudSetupWizard({ onComplete }: Props) {
               setSignInResult({ idToken: tokens.idToken, refreshToken: tokens.refreshToken });
               setCredentials(fresh);
               const userEmail = extractEmailFromIdToken(tokens.idToken);
-              await writeCognitoSession({ refreshToken: tokens.refreshToken, userEmail: userEmail ?? undefined });
+              await writeCognitoSession({
+                refreshToken: tokens.refreshToken,
+                userEmail: userEmail ?? undefined,
+              });
               await writeCloudCredentials(fresh);
               return fresh;
             }}
@@ -1376,7 +1492,9 @@ export function CloudSetupWizard({ onComplete }: Props) {
                 You need to sign in before deploying. Please complete step 4 first.
               </AlertDescription>
             </Alert>
-            <Button variant="outline" onClick={() => handleNavigate(4)}>Go to Sign In</Button>
+            <Button variant="outline" onClick={() => handleNavigate(4)}>
+              Go to Sign In
+            </Button>
           </div>
         )}
       </div>

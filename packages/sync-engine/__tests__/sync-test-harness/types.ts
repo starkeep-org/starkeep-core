@@ -1,13 +1,5 @@
-import type {
-  DataRecord,
-  HLCClock,
-  HLCTimestamp,
-  StarkeepId,
-} from "@starkeep/protocol-primitives";
-import type {
-  DatabaseAdapter,
-  ObjectStorageAdapter,
-} from "@starkeep/storage-adapter";
+import type { DataRecord, HLCClock, HLCTimestamp, StarkeepId } from "@starkeep/protocol-primitives";
+import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type {
   AppSyncableApplier,
   AppSyncableNamespaceStore,
@@ -22,12 +14,7 @@ import type { RecordResidency } from "../../src/residency.js";
 
 export type DT = "SR" | "AR" | "AW";
 
-export type Presence =
-  | "neither"
-  | "local-only"
-  | "cloud-only"
-  | "both-same"
-  | "both-diverged";
+export type Presence = "neither" | "local-only" | "cloud-only" | "both-same" | "both-diverged";
 
 export type TombState = "nd" | "cd" | "ld" | "bd" | "bd-diff-ts" | "cdu";
 
@@ -145,18 +132,9 @@ export interface World {
 
   recordExists(side: "local" | "cloud", id?: StarkeepId): Promise<boolean>;
   blobExists(side: "local" | "cloud", key?: string): Promise<boolean>;
-  getRecord(
-    side: "local" | "cloud",
-    id?: StarkeepId,
-  ): Promise<DataRecord | null>;
-  getAppRow(
-    side: "local" | "cloud",
-    id?: StarkeepId,
-  ): Promise<AppSyncableRowEntry | null>;
-  residency(
-    side: "local" | "cloud",
-    id?: StarkeepId,
-  ): Promise<RecordResidency>;
+  getRecord(side: "local" | "cloud", id?: StarkeepId): Promise<DataRecord | null>;
+  getAppRow(side: "local" | "cloud", id?: StarkeepId): Promise<AppSyncableRowEntry | null>;
+  residency(side: "local" | "cloud", id?: StarkeepId): Promise<RecordResidency>;
   /**
    * The rows watermarks (`own`, `peer`) and the bytes watermarks beside them.
    * A bytes watermark is null until first written.

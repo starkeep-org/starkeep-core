@@ -84,10 +84,10 @@ beforeEach(async () => {
 describe("lifecycle", () => {
   it("refuses queries before init", async () => {
     const cold = new AuroraDsqlDatabaseAdapter(
-    { hostname: "fake.dsql", region: "us-east-1" },
-    factoryOf(new FakeClient()),
-    "user-a",
-  );
+      { hostname: "fake.dsql", region: "us-east-1" },
+      factoryOf(new FakeClient()),
+      "user-a",
+    );
     await expect(cold.get(sampleRecord().id)).rejects.toThrow(StorageError);
   });
 
@@ -202,7 +202,9 @@ describe("batch", () => {
     expect(texts[0]).toBe("BEGIN");
     expect(texts[texts.length - 1]).toBe("COMMIT");
     expect(texts.some((t) => t.startsWith('insert into "shared"."records"'))).toBe(true);
-    expect(texts.some((t) => t.startsWith('update "shared"."records" set "deleted_at"'))).toBe(true);
+    expect(texts.some((t) => t.startsWith('update "shared"."records" set "deleted_at"'))).toBe(
+      true,
+    );
   });
 
   it("rolls back when an operation fails", async () => {
@@ -219,9 +221,7 @@ describe("OCC retry", () => {
   it("retries put past OCC conflicts until the upsert commits", async () => {
     client.conflictOnce(/insert into "shared"\."records"/, 2);
     await adapter.put(sampleRecord());
-    const inserts = client
-      .texts()
-      .filter((t) => t.startsWith('insert into "shared"."records"'));
+    const inserts = client.texts().filter((t) => t.startsWith('insert into "shared"."records"'));
     // Two conflicted attempts + one that committed.
     expect(inserts).toHaveLength(3);
   });
@@ -229,9 +229,7 @@ describe("OCC retry", () => {
   it("does NOT retry a non-OCC failure — it propagates on the first attempt", async () => {
     client.failOn = /insert into "shared"\."records"/;
     await expect(adapter.put(sampleRecord())).rejects.toThrow(/injected failure/);
-    const inserts = client
-      .texts()
-      .filter((t) => t.startsWith('insert into "shared"."records"'));
+    const inserts = client.texts().filter((t) => t.startsWith('insert into "shared"."records"'));
     expect(inserts).toHaveLength(1);
   });
 
@@ -288,9 +286,9 @@ describe("metadata tables", () => {
 
   it("refuses a bare category, which would store an ungated discriminant", async () => {
     const record = sampleRecord();
-    await expect(
-      adapter.putMetadata("image", { recordId: record.id, width: 1 }),
-    ).rejects.toThrow(/needs the record's own type/);
+    await expect(adapter.putMetadata("image", { recordId: record.id, width: 1 })).rejects.toThrow(
+      /needs the record's own type/,
+    );
   });
 
   it("getMetadata round-trips and getMetadataByIds maps rows by record", async () => {

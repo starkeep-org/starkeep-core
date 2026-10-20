@@ -37,6 +37,7 @@ flip the pinned assertion to expect width/height and merge the two coverage
 paths.
 
 Related findings:
+
 - `todo-photos-consolidate-add-paths-2026-06-08.md` (doc 30) — the
   consolidation/dead-branch cleanup this gap is a consequence of; fixing that
   one properly resolves this one.

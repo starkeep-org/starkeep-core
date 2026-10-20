@@ -169,10 +169,7 @@ export function isValidLabelValue(value: string): boolean {
  * manifest is a separate check against `shared.app_label_keys`, made by the
  * data servers, because it depends on installed state this module can't see.
  */
-export function validateLabelWrite(input: {
-  key: string;
-  value: string;
-}): string | null {
+export function validateLabelWrite(input: { key: string; value: string }): string | null {
   if (!isValidLabelKey(input.key)) {
     return (
       `invalid label key "${input.key}": must match ${KEY_PATTERN.source} ` +
@@ -254,9 +251,9 @@ export type LabelPlan<T> =
  * failing a 3,000-row bulk job over, and "last wins" is the only reading that
  * matches the row it would have left behind.
  */
-export function dedupeLabelWrites<
-  T extends { recordId: StarkeepId; key: string; value?: string },
->(entries: T[]): T[] {
+export function dedupeLabelWrites<T extends { recordId: StarkeepId; key: string; value?: string }>(
+  entries: T[],
+): T[] {
   const byPk = new Map<string, T>();
   // JSON, not a delimiter-joined string. The tuple now includes a caller-supplied
   // value, so a single-character separator would let ("a b", "c") and ("a", "b c")

@@ -160,7 +160,9 @@ describe("the browser bundle reaches no server-only module", () => {
     const chain = chainTo(file, SERVER_ONLY);
     expect(
       chain === null,
-      chain ? `import chain into a server-only module:\n  ${chain.map(rel).join("\n→ ")}` : undefined,
+      chain
+        ? `import chain into a server-only module:\n  ${chain.map(rel).join("\n→ ")}`
+        : undefined,
     ).toBe(true);
   });
 });

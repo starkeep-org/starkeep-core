@@ -33,9 +33,7 @@ export interface SqliteSyncStateStoreOptions {
   readonly db: RawDatabase;
 }
 
-export function createSqliteSyncStateStore(
-  options: SqliteSyncStateStoreOptions,
-): SyncStateStore {
+export function createSqliteSyncStateStore(options: SqliteSyncStateStoreOptions): SyncStateStore {
   const { db } = options;
   db.exec(
     qb.schema
@@ -43,9 +41,7 @@ export function createSqliteSyncStateStore(
       .ifNotExists()
       .addColumn("key", "text", (c) => c.primaryKey())
       .addColumn("value_json", "text", (c) => c.notNull())
-      .addColumn("updated_at", "integer", (c) =>
-        c.notNull().defaultTo(sql`(strftime('%s','now'))`),
-      )
+      .addColumn("updated_at", "integer", (c) => c.notNull().defaultTo(sql`(strftime('%s','now'))`))
       .compile().sql,
   );
 
@@ -120,15 +116,10 @@ export function createSqliteSyncStateStore(
     async setPeerByteWatermarks(watermarks: Watermarks): Promise<void> {
       setJson(PEER_BYTE_WATERMARKS, watermarks);
     },
-    async getHlcClockState(): Promise<
-      { wallTime: number; counter: number } | null
-    > {
+    async getHlcClockState(): Promise<{ wallTime: number; counter: number } | null> {
       return getJson<{ wallTime: number; counter: number }>(HLC_CLOCK);
     },
-    async setHlcClockState(state: {
-      wallTime: number;
-      counter: number;
-    }): Promise<void> {
+    async setHlcClockState(state: { wallTime: number; counter: number }): Promise<void> {
       setJson(HLC_CLOCK, state);
     },
   };

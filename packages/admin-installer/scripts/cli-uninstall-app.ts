@@ -80,7 +80,10 @@ if (nonInteractive) {
     console.log("\nThis account requires a new password (first login).");
     const newPw = await prompt("New password: ", true);
     const confirmPw = await prompt("Confirm new password: ", true);
-    if (newPw !== confirmPw) { console.error("Passwords do not match."); process.exit(1); }
+    if (newPw !== confirmPw) {
+      console.error("Passwords do not match.");
+      process.exit(1);
+    }
     return newPw;
   });
   console.log("Fetching temporary AWS credentials…");

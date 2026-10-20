@@ -32,10 +32,7 @@ export interface ApiResponse {
   readonly headers?: Record<string, string>;
 }
 
-export type ApiHandler = (
-  request: ApiRequest,
-  context: ApiContext,
-) => Promise<ApiResponse>;
+export type ApiHandler = (request: ApiRequest, context: ApiContext) => Promise<ApiResponse>;
 
 /**
  * App-specific syncable data operations. Scoped to the calling app — the

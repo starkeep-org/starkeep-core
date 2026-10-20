@@ -15,7 +15,8 @@ const changeDeploymentSettingsParameter = vi.fn();
 const roleChain = vi.fn();
 
 vi.mock("@starkeep/admin-installer/app-creds", () => ({
-  changeDeploymentSettingsParameter: (...args: unknown[]) => changeDeploymentSettingsParameter(...args),
+  changeDeploymentSettingsParameter: (...args: unknown[]) =>
+    changeDeploymentSettingsParameter(...args),
 }));
 vi.mock("@starkeep/admin-installer/session", () => ({
   roleChain: (...args: unknown[]) => roleChain(...args),
@@ -62,10 +63,12 @@ beforeEach(() => {
   reply = { status: 200, body: "{}" };
   daemon.seen.length = 0;
   rmSync(configPath, { force: true });
-  changeDeploymentSettingsParameter.mockReset().mockImplementation(async (opts: { change: unknown }) => ({
-    ok: true,
-    settings: opts.change,
-  }));
+  changeDeploymentSettingsParameter
+    .mockReset()
+    .mockImplementation(async (opts: { change: unknown }) => ({
+      ok: true,
+      settings: opts.change,
+    }));
   roleChain.mockReset().mockResolvedValue({
     accessKeyId: "ASIA-MANAGER",
     secretAccessKey: "s",
@@ -79,7 +82,10 @@ describe("reading", () => {
     reply = { status: 200, body: JSON.stringify({ set: false, retentionDays: 30 }) };
     const res = await route.GET();
     expect(await res.json()).toEqual({ set: false, retentionDays: 30 });
-    expect(daemon.seen.at(-1)).toMatchObject({ method: "GET", url: "/library/deployment-settings" });
+    expect(daemon.seen.at(-1)).toMatchObject({
+      method: "GET",
+      url: "/library/deployment-settings",
+    });
   });
 });
 
@@ -103,7 +109,12 @@ describe("a machine with a cloud", () => {
 
   it("writes the parameter as Manager, then has the daemon read it again", async () => {
     const change = { trash: { retentionDays: 90 } };
-    const res = await put({ change, credentials: CREDENTIALS, stackPrefix: "sktest", region: "us-east-2" });
+    const res = await put({
+      change,
+      credentials: CREDENTIALS,
+      stackPrefix: "sktest",
+      region: "us-east-2",
+    });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, settings: change });
 
@@ -116,7 +127,9 @@ describe("a machine with a cloud", () => {
     expect(args).toMatchObject({ stackPrefix: "sktest", change });
     expect(args.awsCreds.accessKeyId).toBe("ASIA-MANAGER");
 
-    expect(daemon.seen.map((r) => `${r.method} ${r.url}`)).toEqual(["POST /library/deployment-settings/refresh"]);
+    expect(daemon.seen.map((r) => `${r.method} ${r.url}`)).toEqual([
+      "POST /library/deployment-settings/refresh",
+    ]);
   });
 
   it("refuses without a signed-in operator, and writes nothing anywhere", async () => {
@@ -128,7 +141,12 @@ describe("a machine with a cloud", () => {
 
   it("answers 422 with the problems when the result does not check out", async () => {
     changeDeploymentSettingsParameter.mockResolvedValue({ ok: false, problems: ["out of range"] });
-    const res = await put({ change: {}, credentials: CREDENTIALS, stackPrefix: "sktest", region: "us-east-2" });
+    const res = await put({
+      change: {},
+      credentials: CREDENTIALS,
+      stackPrefix: "sktest",
+      region: "us-east-2",
+    });
     expect(res.status).toBe(422);
     expect(((await res.json()) as { problems: string[] }).problems).toEqual(["out of range"]);
     expect(daemon.seen).toEqual([]);
@@ -136,7 +154,12 @@ describe("a machine with a cloud", () => {
 
   it("answers 500 naming the reason when Manager cannot be assumed", async () => {
     roleChain.mockRejectedValue(new Error("ExpiredToken"));
-    const res = await put({ change: {}, credentials: CREDENTIALS, stackPrefix: "sktest", region: "us-east-2" });
+    const res = await put({
+      change: {},
+      credentials: CREDENTIALS,
+      stackPrefix: "sktest",
+      region: "us-east-2",
+    });
     expect(res.status).toBe(500);
     expect(((await res.json()) as { error: string }).error).toBe("ExpiredToken");
   });

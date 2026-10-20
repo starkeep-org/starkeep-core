@@ -54,9 +54,7 @@ test("live-updates when a record is added underneath it via an /events kick", as
   );
   await page.goto(driveUrl());
   await expect(page.getByRole("heading", { name: "Starkeep Drive" })).toBeVisible();
-  await expect(
-    page.getByRole("row").filter({ hasText: "live-update.png" }),
-  ).toHaveCount(0);
+  await expect(page.getByRole("row").filter({ hasText: "live-update.png" })).toHaveCount(0);
   await eventsConnected;
 
   // Create a record now that the page is loaded and the SSE is live. The LDS write kicks /events;
@@ -69,7 +67,7 @@ test("live-updates when a record is added underneath it via an /events kick", as
     fileName: "live-update.png",
   });
 
-  await expect(
-    page.getByRole("row").filter({ hasText: "live-update.png" }),
-  ).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("row").filter({ hasText: "live-update.png" })).toBeVisible({
+    timeout: 30_000,
+  });
 });

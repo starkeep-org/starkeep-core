@@ -222,10 +222,7 @@ describe("DsqlAppSyncableApplier — absent vs. unreadable", () => {
   }
 
   function missingRelation(): Error {
-    return Object.assign(
-      new Error('relation "app_notes.note" does not exist'),
-      { code: "42P01" },
-    );
+    return Object.assign(new Error('relation "app_notes.note" does not exist'), { code: "42P01" });
   }
 
   it("answers [] and {} when the app is simply not installed here", async () => {
@@ -237,29 +234,21 @@ describe("DsqlAppSyncableApplier — absent vs. unreadable", () => {
   it("answers [] and {} for a missing schema too", async () => {
     // A per-app schema and its tables are created together at install, so an
     // app that was never installed here fails one level up.
-    failWith(
-      Object.assign(new Error('schema "app_notes" does not exist'), { code: "3F000" }),
-    );
+    failWith(Object.assign(new Error('schema "app_notes" does not exist'), { code: "3F000" }));
     expect(await applier.bucketDigest("notes", "note")).toEqual([]);
     expect(await applier.getNodeWatermarks("notes", "note")).toEqual({});
   });
 
   it("throws rather than reporting an unreadable table as an empty one", async () => {
-    failWith(
-      Object.assign(new Error("permission denied for table note"), { code: "42501" }),
-    );
-    await expect(applier.bucketDigest("notes", "note")).rejects.toThrow(
-      /permission denied/,
-    );
+    failWith(Object.assign(new Error("permission denied for table note"), { code: "42501" }));
+    await expect(applier.bucketDigest("notes", "note")).rejects.toThrow(/permission denied/);
   });
 
   it("throws from getNodeWatermarks too, and the failure reaches scanSince", async () => {
     // `scanSince` plans its authors from this map and reads it outside its own
     // catch, so a table that will not read cannot be mistaken for one with
     // nothing owed.
-    failWith(
-      Object.assign(new Error("permission denied for table note"), { code: "42501" }),
-    );
+    failWith(Object.assign(new Error("permission denied for table note"), { code: "42501" }));
     await expect(applier.getNodeWatermarks("notes", "note")).rejects.toThrow();
     await expect(applier.scanSince("notes", "note", {}, 100)).rejects.toThrow();
   });

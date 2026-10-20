@@ -1,9 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createDataRecord, createHLCClock } from "@starkeep/protocol-primitives";
-import {
-  MockDatabaseAdapter,
-  MockObjectStorageAdapter,
-} from "@starkeep/storage-adapter";
+import { MockDatabaseAdapter, MockObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { createStarkeepSdk } from "../src/sdk.js";
 
 describe("createStarkeepSdk", () => {
@@ -17,7 +14,7 @@ describe("createStarkeepSdk", () => {
     });
 
     const sdk = await createStarkeepSdk({
-        userId: () => "local",
+      userId: () => "local",
       databaseAdapter: localDatabase,
       objectStorageAdapter: localObjectStorage,
       nodeId: "test-node",
@@ -161,7 +158,7 @@ describe("label operations", () => {
     const localObjectStorage = new MockObjectStorageAdapter();
     const clock = createHLCClock({ nodeId: "test-node", wallClockFunction: () => 1000 });
     const sdk = await createStarkeepSdk({
-        userId: () => "local",
+      userId: () => "local",
       databaseAdapter: localDatabase,
       objectStorageAdapter: localObjectStorage,
       nodeId: "test-node",
@@ -254,7 +251,10 @@ describe("label operations", () => {
     let guard = 0;
     do {
       const page: { records: Array<{ id: string }>; nextCursor: string | null } =
-        await sdk.data.findByLabel({ appId: "alpha", key: "flag" }, { limit: 2, cursor: cursor ?? undefined });
+        await sdk.data.findByLabel(
+          { appId: "alpha", key: "flag" },
+          { limit: 2, cursor: cursor ?? undefined },
+        );
       seen.push(...page.records.map((r) => r.id));
       cursor = page.nextCursor;
       expect(++guard).toBeLessThan(50);
@@ -279,8 +279,12 @@ describe("label operations", () => {
 
   it("keeps two apps' opinions about one record separate", async () => {
     const { sdk, ids } = await sdkWithRecords(1);
-    await sdk.data.setLabels("alpha", [{ recordId: ids[0] as never, key: "quality", value: "high" }]);
-    await sdk.data.setLabels("gamma", [{ recordId: ids[0] as never, key: "quality", value: "low" }]);
+    await sdk.data.setLabels("alpha", [
+      { recordId: ids[0] as never, key: "quality", value: "high" },
+    ]);
+    await sdk.data.setLabels("gamma", [
+      { recordId: ids[0] as never, key: "quality", value: "low" },
+    ]);
 
     const labels = (await sdk.data.getLabelsByIds([ids[0] as never])).get(ids[0] as never)!;
     expect(new Set(labels.map((l) => `${l.appId}=${l.value}`))).toEqual(
@@ -346,7 +350,7 @@ describe("setLabels owns the chunking", () => {
     const localDatabase = new CountingAdapter();
     const clock = createHLCClock({ nodeId: "test-node", wallClockFunction: () => 1000 });
     const sdk = await createStarkeepSdk({
-        userId: () => "local",
+      userId: () => "local",
       databaseAdapter: localDatabase,
       objectStorageAdapter: new MockObjectStorageAdapter(),
       nodeId: "test-node",
@@ -519,7 +523,7 @@ describe("the SDK sits below the trust boundary", () => {
     const localDatabase = new MockDatabaseAdapter();
     const clock = createHLCClock({ nodeId: "test-node", wallClockFunction: () => 1000 });
     const sdk = await createStarkeepSdk({
-        userId: () => "local",
+      userId: () => "local",
       databaseAdapter: localDatabase,
       objectStorageAdapter: new MockObjectStorageAdapter(),
       nodeId: "test-node",
@@ -555,7 +559,7 @@ describe("delete cascades to labels", () => {
     const localObjectStorage = new MockObjectStorageAdapter();
     const clock = createHLCClock({ nodeId: "test-node", wallClockFunction: () => 1000 });
     const sdk = await createStarkeepSdk({
-        userId: () => "local",
+      userId: () => "local",
       databaseAdapter: localDatabase,
       objectStorageAdapter: localObjectStorage,
       nodeId: "test-node",

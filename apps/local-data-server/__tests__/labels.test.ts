@@ -502,9 +502,7 @@ describe("reverse query across a partially-readable library", () => {
 
     const db = new DatabaseSync(join(server.starkeepDir, "data.db"));
     try {
-      db.prepare(
-        `UPDATE shared_records SET deleted_at = updated_at WHERE id = ?`,
-      ).run(ids[1]);
+      db.prepare(`UPDATE shared_records SET deleted_at = updated_at WHERE id = ?`).run(ids[1]);
     } finally {
       db.close();
     }
@@ -737,9 +735,7 @@ async function listWith(
 ): Promise<Array<{ id: string; labels?: WireLabel[]; [k: string]: unknown }>> {
   const res = await app.fetch(`/data/records${query}`);
   if (!res.ok) throw new Error(`list failed: ${res.status} ${await res.text()}`);
-  return (
-    (await res.json()) as { records: Array<{ id: string; labels?: WireLabel[] }> }
-  ).records;
+  return ((await res.json()) as { records: Array<{ id: string; labels?: WireLabel[] }> }).records;
 }
 
 async function labelsFor(app: InstalledApp, recordId: string): Promise<WireLabel[]> {

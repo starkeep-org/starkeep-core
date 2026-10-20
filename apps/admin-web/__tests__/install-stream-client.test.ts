@@ -37,9 +37,15 @@ function scripted(...answers: Array<Response | Error>) {
 
 describe("runInstallStream", () => {
   it("returns the done payload and passes every line on", async () => {
-    const { fetchImpl } = scripted(streamOf(line("one"), line("two"), event("done", { appId: "memo" })));
+    const { fetchImpl } = scripted(
+      streamOf(line("one"), line("two"), event("done", { appId: "memo" })),
+    );
     const seen: string[] = [];
-    const outcome = await runInstallStream("/api/x", { a: 1 }, { onLine: (l) => seen.push(l), fetchImpl });
+    const outcome = await runInstallStream(
+      "/api/x",
+      { a: 1 },
+      { onLine: (l) => seen.push(l), fetchImpl },
+    );
     expect(outcome).toEqual({ kind: "done", data: JSON.stringify({ appId: "memo" }) });
     expect(seen).toEqual(["one", "two"]);
   });
@@ -51,11 +57,15 @@ describe("runInstallStream", () => {
       streamOf(line("[Reconnected to in-progress install]"), line("Deploying…"), event("done", {})),
     );
     const seen: string[] = [];
-    const outcome = await runInstallStream("/api/x", { accessKeyId: "AKIA" }, {
-      onLine: (l) => seen.push(l),
-      fetchImpl,
-      reconnectDelayMs: 0,
-    });
+    const outcome = await runInstallStream(
+      "/api/x",
+      { accessKeyId: "AKIA" },
+      {
+        onLine: (l) => seen.push(l),
+        fetchImpl,
+        reconnectDelayMs: 0,
+      },
+    );
     expect(outcome.kind).toBe("done");
     expect(bodies).toEqual([
       { accessKeyId: "AKIA" },
@@ -74,11 +84,17 @@ describe("runInstallStream", () => {
       streamOf(event("done", {})),
     );
     await runInstallStream("/api/x", {}, { onLine: () => {}, fetchImpl, reconnectDelayMs: 0 });
-    expect(bodies).toEqual([{}, { reattach: true, resumeFrom: "abc:20" }, { reattach: true, resumeFrom: "abc:20" }]);
+    expect(bodies).toEqual([
+      {},
+      { reattach: true, resumeFrom: "abc:20" },
+      { reattach: true, resumeFrom: "abc:20" },
+    ]);
   });
 
   it("reads the expired-session code off an error event", async () => {
-    const { fetchImpl } = scripted(streamOf(event("error", { message: "rejected", code: "EXPIRED_TOKEN" })));
+    const { fetchImpl } = scripted(
+      streamOf(event("error", { message: "rejected", code: "EXPIRED_TOKEN" })),
+    );
     const outcome = await runInstallStream("/api/x", {}, { onLine: () => {}, fetchImpl });
     expect(outcome).toEqual({ kind: "error", message: "rejected", tokenExpired: true });
   });
@@ -87,19 +103,35 @@ describe("runInstallStream", () => {
     const { fetchImpl, bodies } = scripted(
       new Response(JSON.stringify({ error: "config.json not found" }), { status: 400 }),
     );
-    const outcome = await runInstallStream("/api/x", {}, { onLine: () => {}, fetchImpl, reconnectDelayMs: 0 });
-    expect(outcome).toEqual({ kind: "error", message: "config.json not found", tokenExpired: false });
+    const outcome = await runInstallStream(
+      "/api/x",
+      {},
+      { onLine: () => {}, fetchImpl, reconnectDelayMs: 0 },
+    );
+    expect(outcome).toEqual({
+      kind: "error",
+      message: "config.json not found",
+      tokenExpired: false,
+    });
     expect(bodies).toHaveLength(1);
   });
 
   it("gives up after its reconnects run out", async () => {
-    const { fetchImpl, bodies } = scripted(streamOf(), new TypeError("down"), new TypeError("down"));
-    const outcome = await runInstallStream("/api/x", {}, {
-      onLine: () => {},
-      fetchImpl,
-      reconnects: 2,
-      reconnectDelayMs: 0,
-    });
+    const { fetchImpl, bodies } = scripted(
+      streamOf(),
+      new TypeError("down"),
+      new TypeError("down"),
+    );
+    const outcome = await runInstallStream(
+      "/api/x",
+      {},
+      {
+        onLine: () => {},
+        fetchImpl,
+        reconnects: 2,
+        reconnectDelayMs: 0,
+      },
+    );
     expect(outcome.kind).toBe("error");
     expect(bodies).toHaveLength(3);
   });
@@ -107,14 +139,18 @@ describe("runInstallStream", () => {
   it("stops without reconnecting once the caller aborts", async () => {
     let aborted = false;
     const { fetchImpl, bodies } = scripted(streamOf(line("one")));
-    const outcome = await runInstallStream("/api/x", {}, {
-      onLine: () => {
-        aborted = true;
+    const outcome = await runInstallStream(
+      "/api/x",
+      {},
+      {
+        onLine: () => {
+          aborted = true;
+        },
+        isAborted: () => aborted,
+        fetchImpl,
+        reconnectDelayMs: 0,
       },
-      isAborted: () => aborted,
-      fetchImpl,
-      reconnectDelayMs: 0,
-    });
+    );
     expect(outcome.kind).toBe("error");
     expect(bodies).toHaveLength(1);
   });

@@ -11,7 +11,7 @@ maintained by a small team, so please allow reasonable time for a fix before
 public disclosure.
 
 The threat model below is a deliberately candid account of the current posture,
-including what is *not* yet mitigated. A report that restates a limitation
+including what is _not_ yet mitigated. A report that restates a limitation
 already documented here is useful to us as prioritization signal, but is not
 treated as a vulnerability report.
 
@@ -32,7 +32,7 @@ Starkeep is pre-production software.
 > sample app.
 >
 > **Verified against code, not just docs.** Source refs: `starkeep-core @
-> 2a2c23d`, `starkeep-apps @ 5061ec4`. The assessments below describe the live
+2a2c23d`, `starkeep-apps @ 5061ec4`. The assessments below describe the live
 > code: the gateway places no Cognito JWT authorizer on the reserved data-plane
 > routes (HMAC is the sole identity check there), and the HMAC signature binds
 > method, path, and a timestamp.
@@ -53,18 +53,18 @@ Starkeep is pre-production software.
 
 Starkeep is **single-account, single-tenant**. The entire deployment lives in
 the customer's own AWS account; there is no Starkeep SaaS control plane, no
-cross-account assume role, and no IAM user. The customer's AWS account *is* the
+cross-account assume role, and no IAM user. The customer's AWS account _is_ the
 outer trust boundary: anyone with account-root or sufficient IAM-console power
 in that account is outside the model's protection and can read everything. The
 threat models below all assume the account itself is intact and reason about
-what can go wrong *inside* it — a misbehaving app, a forged request, an exposed
+what can go wrong _inside_ it — a misbehaving app, a forged request, an exposed
 endpoint — not about an attacker who already owns the account.
 
 ## The managed-runtime stance (no servers to patch, no network to isolate)
 
 Self-hosters reasonably expect to put a service behind a VPC, Tailscale, or a
 similar network-isolation layer. That is the standard mitigation when the thing
-you run is a long-lived server whose OS and language runtime *you* must patch,
+you run is a long-lived server whose OS and language runtime _you_ must patch,
 and where an unpatched zero-day in that stack is a real path in. Starkeep's cloud
 deliberately does not have that shape, so it draws the boundary differently.
 
@@ -82,8 +82,8 @@ What this stance does **not** outsource is Starkeep's own platform code — the
 broker, the access enforcer, the HMAC verifier, the install lifecycle, and the
 IAM/permission design. That is precisely the surface the rest of this document
 assesses (T1–T8, T11). The division is clean: AWS owns the security of the
-infrastructure and runtime *under* the code; Starkeep owns the security of the
-code and its authorization model *on top* of it. Choosing serverless over
+infrastructure and runtime _under_ the code; Starkeep owns the security of the
+code and its authorization model _on top_ of it. Choosing serverless over
 EC2-style servers is itself a security decision — it trades away a large,
 self-managed attack surface (a patchable OS and an internet-reachable host) for a
 small one (request-scoped functions behind a managed gateway). This is why the
@@ -106,13 +106,13 @@ host to harden and no perimeter to draw.
 
 ## Actors
 
-| Actor | Trust | Can hold |
-|---|---|---|
-| Human admin | trusted operator | Cognito login → admin-app role (no standing data-plane power) |
-| Installed app | **partially trusted tenant** | one per-app IAM role + PG role + HMAC secret, capped to its manifest |
-| Internet caller | untrusted | the public API Gateway hostname; presigned-URL holders |
-| Starkeep Drive | trusted built-in | the only `shared/*` cloud writer (User-Data-Owner) |
-| Broker (cloud-data-server) | trusted-but-bounded | assume-any-app-role; no standing data permissions |
+| Actor                      | Trust                        | Can hold                                                             |
+| -------------------------- | ---------------------------- | -------------------------------------------------------------------- |
+| Human admin                | trusted operator             | Cognito login → admin-app role (no standing data-plane power)        |
+| Installed app              | **partially trusted tenant** | one per-app IAM role + PG role + HMAC secret, capped to its manifest |
+| Internet caller            | untrusted                    | the public API Gateway hostname; presigned-URL holders               |
+| Starkeep Drive             | trusted built-in             | the only `shared/*` cloud writer (User-Data-Owner)                   |
+| Broker (cloud-data-server) | trusted-but-bounded          | assume-any-app-role; no standing data permissions                    |
 
 The load-bearing security property, per `data-roles-and-permissions.md`, is
 **(1) user data stays confined to the identities authorized for it**, supported
@@ -136,12 +136,12 @@ infrastructure itself.
 defended in **four independent layers**, each set by a distinct install step and
 each constraining a different surface:
 
-1. **Permissions boundary** — every per-app role is born under the *per-app*
+1. **Permissions boundary** — every per-app role is born under the _per-app_
    boundary (`createAppRole`), which scopes S3 to the app's own prefixes (driven
    by the `starkeep:appId` principal tag), permits `dsql:DbConnect` (never
    `DbConnectAdmin`), and **denies all IAM mutation**. The boundary is a hard
    ceiling: a future inline-policy bug cannot exceed it. An app cannot opt into
-   the wider *foundational* or *User-Data-Owner* boundary — magic-string checks
+   the wider _foundational_ or _User-Data-Owner_ boundary — magic-string checks
    route only `cloud-data-server` and `starkeep-drive` to those, and the
    manifest validator refuses `fileAccessAll`/`brokerPower` on any other id.
 2. **DSQL IAM-to-PG mapping + PG GRANTs** — the app's PG role owns only its own
@@ -154,7 +154,7 @@ each constraining a different surface:
    and `shared.records` is one flat table, the broker reads the caller's
    `shared.access_grants` rows per request and gates every read/write through
    `canRead`/`canWrite`/`canReadCategory`/`canWriteCategory`
-   (`access-enforcer.ts`). This is the *type-granular* cut (per
+   (`access-enforcer.ts`). This is the _type-granular_ cut (per
    `<category>/<format>`) that the coarser category-granular layers above leave
    open.
 
@@ -169,13 +169,13 @@ Two honest caveats:
 
 - **A grant is a grant.** Confinement protects against escaping the manifest, not
   against the manifest itself. An app granted `readwrite` on `image/*` can read
-  and *overwrite or tombstone* every user image any app ever wrote — that is the
+  and _overwrite or tombstone_ every user image any app ever wrote — that is the
   intended shared-data model, not a bug, but it means **the install-time grant
   decision is the actual security boundary for shared data**, and there is no
   per-item or per-origin-app restriction once the grant is held. The human admin
   is the only review gate (see T8).
 - **The app-layer check is load-bearing because DSQL has no RLS.** If a future
-  `shared.records` code path forgot to call the enforcer, layers 1–3 would *not*
+  `shared.records` code path forgot to call the enforcer, layers 1–3 would _not_
   catch a same-category-but-wrong-type access (they're category-granular). The
   single shared module (`protocol-primitives/access`) used both locally and in
   the cloud mitigates this, but it remains the thinnest layer.
@@ -219,7 +219,7 @@ method/path binding; indefinite replay is blocked by the freshness window.
 
 ## T3 — Cross-app data access (isolation)
 
-**Threat.** App A reaches app B's *app-specific* data, or reads/writes shared
+**Threat.** App A reaches app B's _app-specific_ data, or reads/writes shared
 data it has no grant for.
 
 **Stance.** App-specific data is **sole-identity owned**: it lives in
@@ -228,8 +228,8 @@ data it has no grant for.
 every route). No other app — not even Drive or the broker's own credentials —
 can see it. The object-key builder additionally rejects path traversal (`..`)
 and slashes in the app id (`object-keys.ts`), and `parseObjectKey` rejects
-`apps/<other-app>/...` keys before any AWS call. Cross-app shared reads *are*
-allowed — but only when the *reader's* grants cover the type, which is the
+`apps/<other-app>/...` keys before any AWS call. Cross-app shared reads _are_
+allowed — but only when the _reader's_ grants cover the type, which is the
 intended shared-data design, not a leak.
 
 **Assessment — Strong** for app-specific isolation (three enforcement layers,
@@ -262,13 +262,13 @@ route, or a presigned URL.
   front of any of this. Without a
   self-managed host or runtime behind the gateway to shield, the perimeter
   self-hosters build with those tools has no analogue here: the managed gateway
-  plus the HMAC/JWT identity checks *are* the boundary. The
+  plus the HMAC/JWT identity checks _are_ the boundary. The
   unpatched-runtime/OS attack path those tools guard against does not exist in
   this architecture.
 
 **Assessment — Adequate, with named gaps.**
 
-- A `public` route is a deliberate hole the *app* opens; the platform's job ends
+- A `public` route is a deliberate hole the _app_ opens; the platform's job ends
   at "the route reaches the Lambda unauthenticated, as declared." An app that
   puts data-touching logic on a `public` route without its own auth is a real
   risk, but it is the app author's responsibility, not the platform's.
@@ -290,11 +290,11 @@ route, or a presigned URL.
 code under the broker's identity.
 
 **Stance.** The broker is deliberately **powerless in its own name**. Its
-runtime role (`...-app-cloud-data-server-role`, under the *foundational*
+runtime role (`...-app-cloud-data-server-role`, under the _foundational_
 boundary) has exactly one standing data-plane capability: `sts:AssumeRole` on
 `<prefix>-app-*`, plus the SSM/KMS read needed to load app secrets. It holds
-*no* standing DSQL connect, *no* S3 data access, *no* IAM mutation. Every data
-operation runs under a freshly-assumed *per-app* role for one request.
+_no_ standing DSQL connect, _no_ S3 data access, _no_ IAM mutation. Every data
+operation runs under a freshly-assumed _per-app_ role for one request.
 
 **Assessment — Adequate, with an honest ceiling.** Compromised broker code is
 bounded by what it can assume — but it can assume **any** per-app role and can
@@ -321,10 +321,10 @@ design:
   boundaries, enforced by an `ArnLike` condition in `manager-policy.ts`), attach/
   detach temp policies on the two install roles, and assume them. It holds
   **zero standing data-plane power** — no S3, no DSQL, no Lambda. Its only
-  non-IAM standing power is writing/deleting (never *reading*) per-app HMAC
+  non-IAM standing power is writing/deleting (never _reading_) per-app HMAC
   secrets.
-- **install-ddl** is the *only* identity that can ever `dsql:DbConnectAdmin`;
-  **install-infra** is the *only* one that can provision per-app compute. Both
+- **install-ddl** is the _only_ identity that can ever `dsql:DbConnectAdmin`;
+  **install-infra** is the _only_ one that can provision per-app compute. Both
   have **no standing permissions** — Manager attaches a tightly-scoped temp
   policy around exactly the step that needs it and detaches immediately. The two
   temp policies are **never attached simultaneously**, and never to Manager.
@@ -335,7 +335,7 @@ design:
 dangerous verbs never sit on a standing, internet-reachable identity. The
 honest caveats are (a) these identities are reachable only via the admin →
 Manager role chain, so they inherit the admin account's exposure (T7); and (b) a
-compromise *during* an in-flight install — while a temp policy is attached — has
+compromise _during_ an in-flight install — while a temp policy is attached — has
 a wider momentary window, but that window is seconds and requires already
 controlling the install-ddl/infra session.
 
@@ -347,7 +347,7 @@ controlling the install-ddl/infra session.
 logs in to a Cognito user pool (`ADMIN_CREATE_USER` only,
 `ALLOW_USER_PASSWORD_AUTH`) and the identity pool exchanges that for temporary
 STS creds in the admin-app role via `AssumeRoleWithWebIdentity`. The admin-app
-role's trust policy accepts *only* Cognito identities from the same stack's
+role's trust policy accepts _only_ Cognito identities from the same stack's
 identity pool. Crucially, **the admin is not a superuser**: it has no standing
 access to shared user data. Its powers are Cognito user management, its own
 `apps/admin/*` prefix, read on the billing bucket, the Pulumi passphrase
@@ -357,7 +357,7 @@ install-ledger only — no `shared.records` grants), and `AssumeRole` to Manager
 **Assessment — Adequate.** Honest reality of what a stolen admin login yields:
 the attacker can **install/uninstall apps and redeploy infrastructure** (via
 Manager → install roles), and could install a malicious app with broad grants to
-then read user data — so admin compromise *indirectly* reaches all data. What it
+then read user data — so admin compromise _indirectly_ reaches all data. What it
 does **not** give is direct, standing shared-data access or account-root power.
 Residual concerns: password-auth is enabled (no enforced MFA visible in the
 bootstrap template — worth confirming/hardening), and the admin session is the
@@ -379,7 +379,7 @@ ids are namespace-checked (reserved ids rejected, `fileAccessAll`/`brokerPower`
 gated), and the install grants exactly what the manifest declares.
 
 **Assessment — Partial / accepted.** The platform validates the
-*shape* of the manifest and confines the app to its declared grants (T1), but:
+_shape_ of the manifest and confines the app to its declared grants (T1), but:
 
 - There is **no code signing, no bundle provenance, and no review gate** beyond
   the human deciding to install. Whatever code is in the app directory runs in
@@ -407,16 +407,16 @@ Pulumi state is encrypted with an SSM-stored passphrase (T11). The files bucket
 (`cloud-data-server-program.ts`): SSE-S3 (AES256) server-side encryption,
 versioning enabled, and a full public-access block, plus the DSQL cluster
 carries deletion protection and the bucket keeps the default destroy guard
-(no `forceDestroy`). These are IAM actions the *foundational* permissions
+(no `forceDestroy`). These are IAM actions the _foundational_ permissions
 boundary grants. Tenant isolation is **not a concern** — the deployment is
 single-tenant in the customer's own account.
 
 This data-protection posture is applied to **real installs only**. The cloud e2e suite
-provisions *ephemeral* infrastructure that deliberately skips it (no versioning
+provisions _ephemeral_ infrastructure that deliberately skips it (no versioning
 /SSE/public-access-block, no deletion protection, `forceDestroy` on so repeated
 teardown isn't wedged by leftover objects). Critically, that carve-out is
 **fail-safe by construction**: ephemerality is signalled by an explicit
-`--ephemeral` CLI flag (`isEphemeralInstall`), *not* an environment variable —
+`--ephemeral` CLI flag (`isEphemeralInstall`), _not_ an environment variable —
 because the real-user install path (admin-web) spawns the CLI with an inherited
 `process.env`, an env-based signal could leak in and silently downgrade a real
 account's data protection. A fixed argv cannot be injected that way, so a real
@@ -425,17 +425,17 @@ lock in both the resource posture and the flag's fail-safe defaulting.
 
 **Assessment — Adequate (CMK + SecureTransport-deny deferred).**
 Encryption-at-rest and the surrounding data-protection posture are
-*policy-asserted* rather than default-relied-upon. Two deliberate, named
+_policy-asserted_ rather than default-relied-upon. Two deliberate, named
 residuals remain:
 
 - **AWS-managed keys, not a customer-managed KMS key (CMK).** SSE-S3 uses
   AWS-owned keys. A CMK was consciously deferred: the foundational permissions
   boundary grants only `kms:Decrypt` gated on `kms:ViaService=ssm.*`, so a CMK
-  would require widening that boundary *and* granting the broker/app roles KMS
+  would require widening that boundary _and_ granting the broker/app roles KMS
   encrypt/decrypt to read and write objects — a larger change than the
   purely-additive S3 config, not a one-line addition.
 - **No `aws:SecureTransport` deny** on the bucket policy yet — transit is HTTPS
-  in practice (presigned URLs, gateway) but not yet *policy-enforced* against a
+  in practice (presigned URLs, gateway) but not yet _policy-enforced_ against a
   plaintext request.
 
 ## T10 — Availability, denial of service, and cost amplification
@@ -452,10 +452,10 @@ bound the blast radius (`cloud-data-server-program.ts`):
 - **Stage-wide request throttle** on the shared APIGW v2 `$default` stage
   (`defaultRouteSettings`: 50 rps steady-state, 100 burst). Applies to every
   route — the unauthenticated `/health`/`public` surface as well as the
-  HMAC-gated data plane — so it caps the *request rate* reaching the Lambda
+  HMAC-gated data plane — so it caps the _request rate_ reaching the Lambda
   regardless of which surface is hit.
 - **Lambda reserved concurrency** (`reservedConcurrentExecutions: 20`) on the
-  broker — the hard *dollar ceiling*: even if the throttle were mis-tuned, the
+  broker — the hard _dollar ceiling_: even if the throttle were mis-tuned, the
   broker can never run more than this many copies at once, bounding parallel
   DSQL connections and S3 ops, and thus worst-case spend-per-second. Legitimate
   bursts past the cap get 429'd.
@@ -500,7 +500,7 @@ up/destroy. State and artifacts buckets are versioned, account-private.
   constraint, but it means a one-time leak of that value (plus state-bucket
   read) compromises Pulumi state confidentiality permanently for that
   deployment, with no recovery short of a full teardown.
-- HMAC-secret distribution breadth is restated from T2: the *cloud* side is
+- HMAC-secret distribution breadth is restated from T2: the _cloud_ side is
   well-scoped, but the same secret existing on the local workstation in plaintext
   files widens the real attack surface beyond what the cloud IAM scoping
   suggests.
@@ -509,19 +509,19 @@ up/destroy. State and artifacts buckets are versioned, account-private.
 
 # Part 3 — Posture summary & cross-cutting gaps
 
-| # | Threat | Posture |
-|---|---|---|
-| T1 | Malicious/buggy installed app (confinement) | **Strong** |
-| T2 | App-identity forgery & replay (HMAC) | **Adequate** |
-| T3 | Cross-app isolation (app-specific) | **Strong** |
-| T4 | Unauthenticated internet caller | **Adequate** (gaps: public routes, no per-app quota, CORS; stage throttle in place) |
-| T5 | Broker code compromise | **Adequate** (blast radius = all user data, not the account) |
-| T6 | Powerful install-time identities | **Strong** |
-| T7 | Admin / Cognito compromise | **Adequate** (MFA worth confirming) |
-| T8 | Malicious app supply chain | **Partial / accepted** |
-| T9 | Data at rest / in transit | **Adequate** (files-bucket SSE/versioning/PAB + DSQL deletion-protect asserted; CMK + SecureTransport-deny deferred) |
-| T10 | DoS & cost amplification | **Partial** (throttle + concurrency cap; storage growth remains) |
-| T11 | Secret & infra-state exposure | **Adequate** |
+| #   | Threat                                      | Posture                                                                                                              |
+| --- | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| T1  | Malicious/buggy installed app (confinement) | **Strong**                                                                                                           |
+| T2  | App-identity forgery & replay (HMAC)        | **Adequate**                                                                                                         |
+| T3  | Cross-app isolation (app-specific)          | **Strong**                                                                                                           |
+| T4  | Unauthenticated internet caller             | **Adequate** (gaps: public routes, no per-app quota, CORS; stage throttle in place)                                  |
+| T5  | Broker code compromise                      | **Adequate** (blast radius = all user data, not the account)                                                         |
+| T6  | Powerful install-time identities            | **Strong**                                                                                                           |
+| T7  | Admin / Cognito compromise                  | **Adequate** (MFA worth confirming)                                                                                  |
+| T8  | Malicious app supply chain                  | **Partial / accepted**                                                                                               |
+| T9  | Data at rest / in transit                   | **Adequate** (files-bucket SSE/versioning/PAB + DSQL deletion-protect asserted; CMK + SecureTransport-deny deferred) |
+| T10 | DoS & cost amplification                    | **Partial** (throttle + concurrency cap; storage growth remains)                                                     |
+| T11 | Secret & infra-state exposure               | **Adequate**                                                                                                         |
 
 **The system's genuine strengths.** Least-privilege is real and structural, not
 aspirational: no IAM user, no long-lived keys, an admin who is not a superuser,
@@ -533,13 +533,13 @@ independent layers. This is a well-thought-out trust architecture.
 **The honest soft spots, in priority order.**
 
 1. **Cost-DoS bounded, but storage growth is not** (T10) — a stage throttle
-   + Lambda reserved concurrency cap the request-rate and worst-case-spend blast
-   radius, keeping the runaway-bill failure mode off the table. The residual gaps
-   are no per-app quota (one app can consume the shared throttle budget) and
-   unbounded storage growth (tombstoned blobs never GC'd) — the latter is the
-   more durable internet-facing concern.
+   - Lambda reserved concurrency cap the request-rate and worst-case-spend blast
+     radius, keeping the runaway-bill failure mode off the table. The residual gaps
+     are no per-app quota (one app can consume the shared throttle budget) and
+     unbounded storage growth (tombstoned blobs never GC'd) — the latter is the
+     more durable internet-facing concern.
 2. **Shared-data grants are the real boundary, and they're admin-judgment-only**
-   (T1, T8) — a granted app can touch *all* user data of its categories; nothing
+   (T1, T8) — a granted app can touch _all_ user data of its categories; nothing
    reviews or scores grant requests, and app code/bundles have no provenance.
 3. **The broker is a single high-value target** (T5) — compromise reaches all
    installed apps' data (though not the account).

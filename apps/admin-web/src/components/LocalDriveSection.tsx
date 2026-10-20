@@ -27,7 +27,9 @@ export function LocalDriveSection() {
   const [driveUrl, setDriveUrl] = useState<string>(RUNTIME_CONFIG_DEFAULTS.driveUrl);
 
   useEffect(() => {
-    getRuntimeConfig().then((c) => setDriveUrl(c.driveUrl)).catch(() => {});
+    getRuntimeConfig()
+      .then((c) => setDriveUrl(c.driveUrl))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -36,15 +38,18 @@ export function LocalDriveSection() {
   }, [driveUrl]);
 
   // Poll the URL until it matches the requested transition, with a hard cap.
-  const waitForTransition = useCallback(async (want: "start" | "stop") => {
-    const MAX_ATTEMPTS = 20; // 20 × 1s = 20s
-    for (let i = 0; i < MAX_ATTEMPTS; i++) {
-      await new Promise((r) => setTimeout(r, 1000));
-      const up = await checkUrl(driveUrl);
-      setOnline(up);
-      if ((want === "start" && up) || (want === "stop" && !up)) return;
-    }
-  }, [driveUrl]);
+  const waitForTransition = useCallback(
+    async (want: "start" | "stop") => {
+      const MAX_ATTEMPTS = 20; // 20 × 1s = 20s
+      for (let i = 0; i < MAX_ATTEMPTS; i++) {
+        await new Promise((r) => setTimeout(r, 1000));
+        const up = await checkUrl(driveUrl);
+        setOnline(up);
+        if ((want === "start" && up) || (want === "stop" && !up)) return;
+      }
+    },
+    [driveUrl],
+  );
 
   const transition = async (action: "start" | "stop") => {
     setPending(action);
@@ -66,11 +71,13 @@ export function LocalDriveSection() {
   const busy = pending !== null;
 
   const actions: AppCardAction[] = running
-    ? [{
-        label: pending === "stop" ? "Stopping…" : "Stop",
-        onSelect: () => transition("stop"),
-        disabled: busy,
-      }]
+    ? [
+        {
+          label: pending === "stop" ? "Stopping…" : "Stop",
+          onSelect: () => transition("stop"),
+          disabled: busy,
+        },
+      ]
     : [];
 
   return (
@@ -80,19 +87,30 @@ export function LocalDriveSection() {
       actions={actions}
       badges={
         <>
-          <Badge variant="secondary" className="text-xs">Built-in</Badge>
+          <Badge variant="secondary" className="text-xs">
+            Built-in
+          </Badge>
           {running && (
-            <Badge variant="secondary" className="text-xs bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">
+            <Badge
+              variant="secondary"
+              className="text-xs bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200"
+            >
               Running
             </Badge>
           )}
-          {online === false && <Badge variant="outline" className="text-xs">Stopped</Badge>}
+          {online === false && (
+            <Badge variant="outline" className="text-xs">
+              Stopped
+            </Badge>
+          )}
         </>
       }
       primary={
         running ? (
           <Button asChild size="sm" className={ACTION_OPEN}>
-            <a href={driveUrl} target="_blank" rel="noopener noreferrer">Open Drive ↗</a>
+            <a href={driveUrl} target="_blank" rel="noopener noreferrer">
+              Open Drive ↗
+            </a>
           </Button>
         ) : (
           <Button

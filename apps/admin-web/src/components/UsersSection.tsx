@@ -111,7 +111,11 @@ export function UsersSection() {
     });
 
   const setGroup = (user: UserView, group: "starkeep-admins" | "starkeep-users", member: boolean) =>
-    act("/api/users/group", { username: user.username, group, member }, () => `Updated ${user.email ?? user.username}.`);
+    act(
+      "/api/users/group",
+      { username: user.username, group, member },
+      () => `Updated ${user.email ?? user.username}.`,
+    );
 
   const setEnabled = (user: UserView, enabled: boolean) =>
     act("/api/users/enabled", { username: user.username, enabled }, () =>
@@ -130,9 +134,12 @@ export function UsersSection() {
     );
 
   const resetPassword = (user: UserView) =>
-    act("/api/users/password", { username: user.username }, ({ temporaryPassword }) =>
-      `New temporary password for ${user.email ?? user.username}: ${temporaryPassword ?? "(none)"}. ` +
-      "Send it to them; they choose their own at their next sign-in. It is not shown again.",
+    act(
+      "/api/users/password",
+      { username: user.username },
+      ({ temporaryPassword }) =>
+        `New temporary password for ${user.email ?? user.username}: ${temporaryPassword ?? "(none)"}. ` +
+        "Send it to them; they choose their own at their next sign-in. It is not shown again.",
     );
 
   return (
@@ -144,8 +151,8 @@ export function UsersSection() {
 
       <CollapsibleContent className="space-y-4 pt-4">
         <p className="text-muted-foreground text-sm">
-          An admin manages users, cloud apps and settings. A user with data has a library that syncs.
-          An account can be either or both.
+          An admin manages users, cloud apps and settings. A user with data has a library that
+          syncs. An account can be either or both.
         </p>
 
         <div className="space-y-2">
@@ -163,16 +170,29 @@ export function UsersSection() {
           </div>
           <div className="flex gap-4 text-sm">
             <label className="flex items-center gap-1">
-              <input type="checkbox" checked={newAdmin} onChange={(e) => setNewAdmin(e.target.checked)} /> Admin
+              <input
+                type="checkbox"
+                checked={newAdmin}
+                onChange={(e) => setNewAdmin(e.target.checked)}
+              />{" "}
+              Admin
             </label>
             <label className="flex items-center gap-1">
-              <input type="checkbox" checked={newData} onChange={(e) => setNewData(e.target.checked)} /> Has data
+              <input
+                type="checkbox"
+                checked={newData}
+                onChange={(e) => setNewData(e.target.checked)}
+              />{" "}
+              Has data
             </label>
           </div>
         </div>
 
         {message && (
-          <p className={message.kind === "error" ? "text-sm text-destructive" : "text-sm"} role="status">
+          <p
+            className={message.kind === "error" ? "text-sm text-destructive" : "text-sm"}
+            role="status"
+          >
             {message.text}
           </p>
         )}
@@ -191,7 +211,9 @@ export function UsersSection() {
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium">
                     {user.email ?? user.username}
-                    {!user.enabled && <span className="ml-2 text-xs text-muted-foreground">Disabled</span>}
+                    {!user.enabled && (
+                      <span className="ml-2 text-xs text-muted-foreground">Disabled</span>
+                    )}
                     {user.status === "FORCE_CHANGE_PASSWORD" && (
                       <span className="ml-2 text-xs text-muted-foreground">Invited</span>
                     )}
@@ -217,10 +239,20 @@ export function UsersSection() {
                   />
                   Has data
                 </label>
-                <Button size="sm" variant="outline" disabled={busy} onClick={() => void resetPassword(user)}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => void resetPassword(user)}
+                >
                   Reset password
                 </Button>
-                <Button size="sm" variant="outline" disabled={busy} onClick={() => void signOutEverywhere(user)}>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => void signOutEverywhere(user)}
+                >
                   Sign out all devices
                 </Button>
                 <Button

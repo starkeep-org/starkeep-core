@@ -55,7 +55,9 @@ interface CommandLike {
   input?: unknown;
 }
 
-async function resolveAccessKeyId(client: { config?: SmithyClientConfig }): Promise<string | undefined> {
+async function resolveAccessKeyId(client: {
+  config?: SmithyClientConfig;
+}): Promise<string | undefined> {
   try {
     const provider = client.config?.credentials;
     if (!provider) return undefined;
@@ -105,8 +107,7 @@ export function installSdkTrace(path: string): void {
     const commandName = command?.constructor?.name ?? "UnknownCommand";
 
     const accessKeyId = await resolveAccessKeyId(this);
-    const principal =
-      (accessKeyId && principalsByAccessKey.get(accessKeyId)) ?? "unknown";
+    const principal = (accessKeyId && principalsByAccessKey.get(accessKeyId)) ?? "unknown";
 
     record({
       t: new Date().toISOString(),

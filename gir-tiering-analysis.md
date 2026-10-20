@@ -10,7 +10,7 @@ plan is authoritative.
 The question: why not transition every size class except `video-720p`, `video-poster-thumb` and `video-skim` to
 Glacier IR after one or two weeks, leaving originals in Deep Archive?
 
-Short answer: the *instinct* is right and the plan under-uses cheaper tiers, but the selection rule
+Short answer: the _instinct_ is right and the plan under-uses cheaper tiers, but the selection rule
 should be **object size × read rate**, not age. §1–§4 work that out for Glacier IR. **§5 then
 supersedes the conclusion**: Intelligent-Tiering with the async archive tiers disabled applies the
 same boundary automatically, costs $0.31/mo more at Model B in the best case for GIR and less in any
@@ -26,7 +26,7 @@ survives and is what makes §5 work.
 Neither is in the plan today. Both come from the Price List API.
 
 **(a) GIR bills a 128 KB minimum per object.** Already noted in §5.3.1, but its consequence for the
-ladder is not: `image-thumb` (20 KB) and `image-medium` (110 KB) are *both below the floor*. A 20 KB thumb is
+ladder is not: `image-thumb` (20 KB) and `image-medium` (110 KB) are _both below the floor_. A 20 KB thumb is
 billed as 128 KB — 6.4× inflation — which more than cancels the 5.75× storage discount.
 
 **(b) GIR GET requests cost $0.01/1,000 — 25× Standard's $0.0004/1,000.** (`Requests-GIR-Tier2`
@@ -35,17 +35,17 @@ many small objects read in bulk, and it is invisible in a per-GB comparison.
 
 Supporting figures, all verified:
 
-| Item | Price |
-|---|---|
-| GIR storage | $0.004/GB-mo (`TimedStorage-GIR-ByteHrs`) |
-| GIR retrieval | $0.03/GB (`Retrieval-GIR`) |
-| GIR GET | $0.01/1,000 (`Requests-GIR-Tier2`) |
-| GIR transition | $0.02/1,000 (`Requests-Tier4` / `S3-GIRTransition`) |
-| **GIR checksum fee** | **$0.004/GB** (`Compute-Checksum-Processed-GIR-Bytes`) — see §5 |
-| GIR early-delete | prorated (`EarlyDelete-GIR`) — 90-day minimum duration |
-| Standard storage / GET | $0.023/GB-mo / $0.0004 per 1,000 |
-| Standard-IA storage / retrieval / GET | $0.0125/GB-mo / $0.01/GB / $0.001 per 1,000 |
-| Object tag | $0.00000065/tag-mo |
+| Item                                  | Price                                                           |
+| ------------------------------------- | --------------------------------------------------------------- |
+| GIR storage                           | $0.004/GB-mo (`TimedStorage-GIR-ByteHrs`)                       |
+| GIR retrieval                         | $0.03/GB (`Retrieval-GIR`)                                      |
+| GIR GET                               | $0.01/1,000 (`Requests-GIR-Tier2`)                              |
+| GIR transition                        | $0.02/1,000 (`Requests-Tier4` / `S3-GIRTransition`)             |
+| **GIR checksum fee**                  | **$0.004/GB** (`Compute-Checksum-Processed-GIR-Bytes`) — see §5 |
+| GIR early-delete                      | prorated (`EarlyDelete-GIR`) — 90-day minimum duration          |
+| Standard storage / GET                | $0.023/GB-mo / $0.0004 per 1,000                                |
+| Standard-IA storage / retrieval / GET | $0.0125/GB-mo / $0.01/GB / $0.001 per 1,000                     |
+| Object tag                            | $0.00000065/tag-mo                                              |
 
 **The break-even read rate is the same for every class: 0.63 origin reads per object per month.**
 Storage saved is $0.019/GB-mo; retrieval costs $0.03/GB. So GIR wins only on objects fetched **less
@@ -56,28 +56,28 @@ objects read between ~0.6 and ~1.0 times a month, IA beats both.)
 
 ## 2. Per-class economics, Model B (60k stills, 3k clips, 500 GB originals)
 
-| Class | obj size | count | Standard | GIR (128 KB floor applied) | Δ/mo |
-|---|---|---|---|---|---|
-| `image-thumb` | 20 KB | 60k | $0.026 | $0.029 | **−$0.003** |
-| `image-medium` | 110 KB | 60k | $0.145 | $0.029 | +$0.115 |
-| `image-screen` | 350 KB | 60k | $0.461 | $0.080 | **+$0.381** |
-| `video-poster-thumb` | 20 KB | 3k | $0.001 | $0.001 | −$0.000 |
-| `video-poster-screen` | 350 KB | 3k | $0.023 | $0.004 | +$0.019 |
-| `video-skim` | 150 KB | 3k | $0.010 | $0.002 | +$0.008 |
-| `video-720p` | 5.6 MB | 3k | $0.368 | $0.064 | **+$0.304** |
+| Class                 | obj size | count | Standard | GIR (128 KB floor applied) | Δ/mo        |
+| --------------------- | -------- | ----- | -------- | -------------------------- | ----------- |
+| `image-thumb`         | 20 KB    | 60k   | $0.026   | $0.029                     | **−$0.003** |
+| `image-medium`        | 110 KB   | 60k   | $0.145   | $0.029                     | +$0.115     |
+| `image-screen`        | 350 KB   | 60k   | $0.461   | $0.080                     | **+$0.381** |
+| `video-poster-thumb`  | 20 KB    | 3k    | $0.001   | $0.001                     | −$0.000     |
+| `video-poster-screen` | 350 KB   | 3k    | $0.023   | $0.004                     | +$0.019     |
+| `video-skim`          | 150 KB   | 3k    | $0.010   | $0.002                     | +$0.008     |
+| `video-720p`          | 5.6 MB   | 3k    | $0.368   | $0.064                     | **+$0.304** |
 
-`image-thumb` and `video-poster-thumb` *lose money in GIR before a single byte is read*. That is the floor alone.
+`image-thumb` and `video-poster-thumb` _lose money in GIR before a single byte is read_. That is the floor alone.
 
 ### The two scenarios compared
 
-| | Proposed (`image-thumb`+`image-medium`+`image-screen`+`video-poster-screen`) | Alternative (`image-screen`+`video-poster-screen`+`video-720p`) |
-|---|---|---|
-| Gross storage saving | $0.512/mo | $0.704/mo |
-| Recurring tag cost (§5.1) | −$0.119/mo | −$0.043/mo |
-| **Net, zero reads** | **$0.393/mo** | **$0.661/mo** |
-| One-time transition | $3.77 | $1.47 |
-| Reads to break even | 13.1 GB/mo | 22.0 GB/mo |
-| **Extra GET cost, one full cold re-read** | **$1.76** | **$0.63** |
+|                                           | Proposed (`image-thumb`+`image-medium`+`image-screen`+`video-poster-screen`) | Alternative (`image-screen`+`video-poster-screen`+`video-720p`) |
+| ----------------------------------------- | ---------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| Gross storage saving                      | $0.512/mo                                                                    | $0.704/mo                                                       |
+| Recurring tag cost (§5.1)                 | −$0.119/mo                                                                   | −$0.043/mo                                                      |
+| **Net, zero reads**                       | **$0.393/mo**                                                                | **$0.661/mo**                                                   |
+| One-time transition                       | $3.77                                                                        | $1.47                                                           |
+| Reads to break even                       | 13.1 GB/mo                                                                   | 22.0 GB/mo                                                      |
+| **Extra GET cost, one full cold re-read** | **$1.76**                                                                    | **$0.63**                                                       |
 
 At Model C (170k stills, 15k clips, 2 TB) the gap widens: **$1.15/mo net** for the proposal vs
 **$3.33/mo net** for the alternative, with `video-720p` alone worth $2.28/mo.
@@ -97,7 +97,7 @@ $1.15 per full AI catch-up scan (§6.2), which by design reads `image-medium` fo
    that shouldn't be demoted. The alternative's list is 66k tags for twice the saving.
 
 2. **CloudFront caching protects the wrong objects.** §5.5 routes reads through CloudFront, so repeat
-   views of *hot* items are absorbed at the edge and never touch origin. But the objects a 2-week
+   views of _hot_ items are absorbed at the edge and never touch origin. But the objects a 2-week
    lifecycle rule demotes are precisely the cold-tail objects that get evicted from edge caches
    between views — so nearly every view of a demoted object is an origin fetch. CloudFront makes the
    retrieval fee cheap exactly where the transition doesn't apply, and does nothing where it does.
@@ -128,17 +128,17 @@ $1.15 per full AI catch-up scan (§6.2), which by design reads `image-medium` fo
 
 ## 4. What the rule should be
 
-Not age. **Demote a class to GIR when its objects are comfortably above 128 KB *and* read less than
+Not age. **Demote a class to GIR when its objects are comfortably above 128 KB _and_ read less than
 ~0.6 times per object per month.** Applied to the ladder:
 
-| Class | Verdict | Why |
-|---|---|---|
-| `image-thumb`, `video-poster-thumb` | **Standard, always** | below the 128 KB floor; highest request volume in the system |
-| `image-medium` | **Standard** | below the floor; the AI rung (§6.2) and fullscreen stage 1 — read constantly |
-| `video-skim` | Standard | $0.008/mo at stake; not worth a tag |
-| `image-screen`, `video-poster-screen` | **GIR — good candidate** | 350 KB, well above the floor; read once per open, and §3.2's open question may remove it from the phone path entirely, which would make reads genuinely rare |
-| `video-720p` | **GIR — best candidate** | 5.6 MB objects, no floor problem, few objects so few tags, and playback is a deliberate rare act. §5.4 note 2 already flags this class as the lever for video-heavy libraries; it recommends Standard-IA, but GIR saves more if reads are as rare as expected |
-| `image-large`, `video-1080p` | GIR (unchanged) | already the plan |
+| Class                                 | Verdict                  | Why                                                                                                                                                                                                                                                           |
+| ------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `image-thumb`, `video-poster-thumb`   | **Standard, always**     | below the 128 KB floor; highest request volume in the system                                                                                                                                                                                                  |
+| `image-medium`                        | **Standard**             | below the floor; the AI rung (§6.2) and fullscreen stage 1 — read constantly                                                                                                                                                                                  |
+| `video-skim`                          | Standard                 | $0.008/mo at stake; not worth a tag                                                                                                                                                                                                                           |
+| `image-screen`, `video-poster-screen` | **GIR — good candidate** | 350 KB, well above the floor; read once per open, and §3.2's open question may remove it from the phone path entirely, which would make reads genuinely rare                                                                                                  |
+| `video-720p`                          | **GIR — best candidate** | 5.6 MB objects, no floor problem, few objects so few tags, and playback is a deliberate rare act. §5.4 note 2 already flags this class as the lever for video-heavy libraries; it recommends Standard-IA, but GIR saves more if reads are as rare as expected |
+| `image-large`, `video-1080p`          | GIR (unchanged)          | already the plan                                                                                                                                                                                                                                              |
 
 `image-screen` + `video-poster-screen` + `video-720p` → `cool` captures **$0.66/mo of the $0.70 available at Model B
 and $3.33/mo at Model C**, with a third of the tags, a third of the transition cost, and none of the
@@ -157,7 +157,7 @@ and the same 7-day default as §5.2 is fine. `video-720p` could arguably transit
 
 §5.3.2 priced I-T and rejected it. That analysis modelled I-T **with both opt-in async archive tiers
 enabled** (Archive Access, Deep Archive Access), and two of its three objections are objections to
-*those tiers specifically*: the "retrieval latency changes silently on a schedule we do not control"
+_those tiers specifically_: the "retrieval latency changes silently on a schedule we do not control"
 argument, and "I-T cannot reach Deep Archive economics for six months."
 
 **Neither applies if the async tiers are left off.** With only the automatic tiers — Frequent Access →
@@ -169,28 +169,28 @@ should be evaluated on its own.
 ### The property that makes it fit this ladder
 
 **I-T self-selects on the same 128 KB boundary that makes GIR wrong for the small classes.** Objects
-under 128 KB are *neither monitored nor transitioned* — they stay at the Frequent Access rate, which
+under 128 KB are _neither monitored nor transitioned_ — they stay at the Frequent Access rate, which
 is the Standard rate, and they are **not charged the monitoring fee at all**. So `image-thumb`
 (20 KB), `image-medium` (110 KB) and `video-poster-thumb` (20 KB) cost exactly what they cost today,
 and the whole §1(a) floor problem simply does not arise.
 
-That means the question this document opened with — *which classes are big enough to demote?* —
+That means the question this document opened with — _which classes are big enough to demote?_ —
 does not have to be answered. Put every rendition class in I-T and AWS applies the boundary. No
 per-class judgement, no tag, no lifecycle rule per class, and nothing to revisit when §3.4 changes
 the byte sizes.
 
 ### Verified prices
 
-| | GIR | I-T (automatic tiers only) |
-|---|---|---|
-| Storage at rest | $0.004/GB-mo | $0.004/GB-mo (`TimedStorage-INT-AIA-ByteHrs`) — **identical** |
-| Per-object recurring | tag $0.00000065/obj-mo | monitoring $0.0000025/obj-mo (`Monitoring-Automation-INT`) |
-| Retrieval fee | $0.03/GB | **none — no `Retrieval-INT` line exists** |
-| GET request | $0.01/1,000 | **$0.0004/1,000** (`Requests-INT-Tier2`) — same as Standard |
-| Objects < 128 KB | billed as 128 KB | not monitored, not charged, stay at Standard rate |
-| Promotion when read again | never — one-way | automatic and free |
-| Transition | $0.02/1,000 + $0.004/GB | $0.01/1,000 + $0.004/GB |
-| Latency / `availability` | ms / `instant` | ms / `instant` |
+|                           | GIR                     | I-T (automatic tiers only)                                    |
+| ------------------------- | ----------------------- | ------------------------------------------------------------- |
+| Storage at rest           | $0.004/GB-mo            | $0.004/GB-mo (`TimedStorage-INT-AIA-ByteHrs`) — **identical** |
+| Per-object recurring      | tag $0.00000065/obj-mo  | monitoring $0.0000025/obj-mo (`Monitoring-Automation-INT`)    |
+| Retrieval fee             | $0.03/GB                | **none — no `Retrieval-INT` line exists**                     |
+| GET request               | $0.01/1,000             | **$0.0004/1,000** (`Requests-INT-Tier2`) — same as Standard   |
+| Objects < 128 KB          | billed as 128 KB        | not monitored, not charged, stay at Standard rate             |
+| Promotion when read again | never — one-way         | automatic and free                                            |
+| Transition                | $0.02/1,000 + $0.004/GB | $0.01/1,000 + $0.004/GB                                       |
+| Latency / `availability`  | ms / `instant`          | ms / `instant`                                                |
 
 The GET line is the one that was missed the first time. **GIR charges 25× Standard per GET; I-T
 charges exactly Standard.** For a ladder whose whole point is many small objects fetched by a grid,
@@ -200,18 +200,18 @@ that is not a rounding difference.
 
 Steady state, assuming 95% of an append-only library is past the 90-day mark:
 
-| Class | Standard | GIR | I-T |
-|---|---|---|---|
-| `image-thumb` | $0.026 | $0.068 | **$0.026** |
-| `image-medium` | $0.145 | $0.068 | $0.145 |
-| `image-screen` | $0.461 | $0.119 | $0.239 |
-| `image-large` | $1.053 | $0.222 | $0.353 |
-| `video-poster-thumb` | $0.001 | $0.003 | $0.001 |
-| `video-poster-screen` | $0.023 | $0.006 | $0.012 |
-| `video-skim` | $0.010 | $0.004 | $0.009 |
-| `video-720p` | $0.368 | $0.066 | $0.078 |
-| **Total (Model B)** | **$2.09** | **$0.56** | **$0.86** |
-| **Total (Model C)** | **$7.71** | **$1.91** | **$2.84** |
+| Class                 | Standard  | GIR       | I-T        |
+| --------------------- | --------- | --------- | ---------- |
+| `image-thumb`         | $0.026    | $0.068    | **$0.026** |
+| `image-medium`        | $0.145    | $0.068    | $0.145     |
+| `image-screen`        | $0.461    | $0.119    | $0.239     |
+| `image-large`         | $1.053    | $0.222    | $0.353     |
+| `video-poster-thumb`  | $0.001    | $0.003    | $0.001     |
+| `video-poster-screen` | $0.023    | $0.006    | $0.012     |
+| `video-skim`          | $0.010    | $0.004    | $0.009     |
+| `video-720p`          | $0.368    | $0.066    | $0.078     |
+| **Total (Model B)**   | **$2.09** | **$0.56** | **$0.86**  |
+| **Total (Model C)**   | **$7.71** | **$1.91** | **$2.84**  |
 
 Against the plan as written (Standard everywhere except `image-large` in GIR — $1.26/mo at B,
 $5.35/mo at C):
@@ -224,13 +224,13 @@ $5.35/mo at C):
 GIR's advantage is a fixed $0.31/mo at B; its exposure is $0.03/GB plus a 25× GET surcharge on every
 read. Solving for the read volume at which I-T becomes cheaper:
 
-| Class | I-T beats GIR above |
-|---|---|
-| `video-720p` | **33 plays/month** |
-| `video-poster-screen` | 283 reads/mo |
-| `video-skim` | 400 reads/mo |
-| `image-large` | 3,417 reads/mo (~114/day) |
-| `image-screen` | 5,659 reads/mo (~189/day) |
+| Class                 | I-T beats GIR above       |
+| --------------------- | ------------------------- |
+| `video-720p`          | **33 plays/month**        |
+| `video-poster-screen` | 283 reads/mo              |
+| `video-skim`          | 400 reads/mo              |
+| `image-large`         | 3,417 reads/mo (~114/day) |
+| `image-screen`        | 5,659 reads/mo (~189/day) |
 
 **The video classes are not close** — 33 video plays a month is a bar any real library clears
 trivially, because there are few video objects (so monitoring is nearly free) and each one is large
@@ -265,8 +265,8 @@ reasons that are worth more than $0.31:
 
 **§5.3.2's remaining objection still stands and should be kept:** paying per object per month to
 have S3 discover access patterns we designed is philosophically backwards. The honest answer is that
-it turns out to be worth paying, because the fact we "already have" is a fact about *classes* and the
-monitoring fee buys per-*object* recency, which the class-level fact cannot express — the 5% of
+it turns out to be worth paying, because the fact we "already have" is a fact about _classes_ and the
+monitoring fee buys per-_object_ recency, which the class-level fact cannot express — the 5% of
 `image-screen` objects that are actually hot are not identifiable from the class name.
 
 **What §5.3.2 got right and should not be reversed:** originals stay on the explicit archive path.

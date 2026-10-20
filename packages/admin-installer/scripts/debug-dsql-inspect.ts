@@ -30,11 +30,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
-import {
-  IAMClient,
-  PutRolePolicyCommand,
-  DeleteRolePolicyCommand,
-} from "@aws-sdk/client-iam";
+import { IAMClient, PutRolePolicyCommand, DeleteRolePolicyCommand } from "@aws-sdk/client-iam";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
 import { adminBaseCredentials } from "./admin-credentials";
@@ -58,14 +54,22 @@ function loadStarkeepConfig(): StarkeepConfig {
   return JSON.parse(readFileSync(path, "utf8")) as StarkeepConfig;
 }
 
-
-async function assume(arn: string, creds: Creds, sessionName: string, region: string): Promise<Creds> {
+async function assume(
+  arn: string,
+  creds: Creds,
+  sessionName: string,
+  region: string,
+): Promise<Creds> {
   const sts = new STSClient({ region, credentials: creds });
   const r = await sts.send(
     new AssumeRoleCommand({ RoleArn: arn, RoleSessionName: sessionName, DurationSeconds: 900 }),
   );
   const c = r.Credentials!;
-  return { accessKeyId: c.AccessKeyId!, secretAccessKey: c.SecretAccessKey!, sessionToken: c.SessionToken! };
+  return {
+    accessKeyId: c.AccessKeyId!,
+    secretAccessKey: c.SecretAccessKey!,
+    sessionToken: c.SessionToken!,
+  };
 }
 
 async function connectAsAdminWithRetry(
@@ -123,7 +127,11 @@ async function main(): Promise<void> {
   });
 
   await iam.send(
-    new PutRolePolicyCommand({ RoleName: roleName, PolicyName: policyName, PolicyDocument: policyDoc }),
+    new PutRolePolicyCommand({
+      RoleName: roleName,
+      PolicyName: policyName,
+      PolicyDocument: policyDoc,
+    }),
   );
 
   let exitCode = 0;
@@ -183,7 +191,9 @@ async function main(): Promise<void> {
           [arn],
         );
         if (m.rows.length === 0) {
-          console.log("(none — app cannot connect via dsql:DbConnect until AWS IAM GRANT is executed)");
+          console.log(
+            "(none — app cannot connect via dsql:DbConnect until AWS IAM GRANT is executed)",
+          );
         } else {
           console.table(m.rows);
         }

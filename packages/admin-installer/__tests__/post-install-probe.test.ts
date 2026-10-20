@@ -84,7 +84,10 @@ describe("a correctly gated install", () => {
     const report = await probeAnonymousSurface(
       manifest(),
       "https://cdn.example.com",
-      fetchReturning([[/\/(data|files|sync|app-data)\//, 403], [/./, 200]]),
+      fetchReturning([
+        [/\/(data|files|sync|app-data)\//, 403],
+        [/./, 200],
+      ]),
     );
     expect(report.exposed).toBe(false);
   });
@@ -97,7 +100,10 @@ describe("an exposed install", () => {
     const report = await probeAnonymousSurface(
       manifest(),
       "https://cdn.example.com",
-      fetchReturning([[/\/app-data\//, 200], [/./, 401]]),
+      fetchReturning([
+        [/\/app-data\//, 200],
+        [/./, 401],
+      ]),
     );
     expect(report.exposed).toBe(true);
     expect(formatProbeReport(report)).toContain("EXPOSED");
@@ -109,7 +115,10 @@ describe("an exposed install", () => {
       const report = await probeAnonymousSurface(
         manifest(),
         "https://cdn.example.com",
-        fetchReturning([[new RegExp(`/${mount}/`), 200], [/./, 401]]),
+        fetchReturning([
+          [new RegExp(`/${mount}/`), 200],
+          [/./, 401],
+        ]),
       );
       expect(report.exposed, mount).toBe(true);
     }
@@ -119,7 +128,10 @@ describe("an exposed install", () => {
     const report = await probeAnonymousSurface(
       manifest(),
       "https://cdn.example.com",
-      fetchReturning([[/\/data\//, 204], [/./, 401]]),
+      fetchReturning([
+        [/\/data\//, 204],
+        [/./, 401],
+      ]),
     );
     expect(report.exposed).toBe(true);
   });
@@ -160,7 +172,11 @@ describe("declared public paths that do not answer", () => {
     const report = await probeAnonymousSurface(
       manifest(["/", "/sign-in"]),
       "https://cdn.example.com",
-      fetchReturning([[/\/sign-in$/, 401], [/\/(data|files|sync|app-data)\//, 401], [/./, 200]]),
+      fetchReturning([
+        [/\/sign-in$/, 401],
+        [/\/(data|files|sync|app-data)\//, 401],
+        [/./, 200],
+      ]),
     );
     expect(report.exposed).toBe(false);
     expect(report.unreachablePublicPaths.map((r) => new URL(r.url).pathname)).toEqual([
@@ -209,12 +225,17 @@ describe("the trailing-slash spelling of a declared public path", () => {
     const report = await probeAnonymousSurface(
       manifest(["/", "/sign-in"]),
       "https://cdn.example.com",
-      fetchReturning([[/\/apps\/memo\/$/, 403], [/./, 200]]),
+      fetchReturning([
+        [/\/apps\/memo\/$/, 403],
+        [/./, 200],
+      ]),
     );
     expect(report.unreachablePublicPaths.map((r) => new URL(r.url).pathname)).toEqual([
       "/apps/memo/",
     ]);
-    expect(formatProbeReport(report)).toContain("/apps/memo/ -> 403  <- declared public but refused");
+    expect(formatProbeReport(report)).toContain(
+      "/apps/memo/ -> 403  <- declared public but refused",
+    );
   });
 
   it("reports a deeper one without warning, because only the root is canonicalized", async () => {
@@ -225,7 +246,10 @@ describe("the trailing-slash spelling of a declared public path", () => {
     const report = await probeAnonymousSurface(
       manifest(["/", "/sign-in"]),
       "https://cdn.example.com",
-      fetchReturning([[/\/sign-in\/$/, 401], [/./, 200]]),
+      fetchReturning([
+        [/\/sign-in\/$/, 401],
+        [/./, 200],
+      ]),
     );
     expect(report.unreachablePublicPaths).toEqual([]);
     const text = formatProbeReport(report);
@@ -237,7 +261,11 @@ describe("the trailing-slash spelling of a declared public path", () => {
     const report = await probeAnonymousSurface(
       manifest(["/", "/sign-in"]),
       "https://cdn.example.com",
-      fetchReturning([[/\/(data|files|sync|app-data)\//, 401], [/\/$/, 403], [/./, 200]]),
+      fetchReturning([
+        [/\/(data|files|sync|app-data)\//, 401],
+        [/\/$/, 403],
+        [/./, 200],
+      ]),
     );
     expect(report.exposed).toBe(false);
   });
