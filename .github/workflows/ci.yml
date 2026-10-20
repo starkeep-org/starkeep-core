@@ -30,6 +30,15 @@ jobs:
           cache: pnpm
       # The root `postinstall` builds every package through turbo.
       - run: pnpm install --frozen-lockfile
+      # A pull request that changes what a published package ships must say what
+      # it releases. On main, list what awaits the next manual release.
+      - name: Changesets
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            pnpm changeset status --since=origin/main
+          else
+            pnpm changeset status --verbose
+          fi
       - run: pnpm format:check
       - run: pnpm turbo run lint typecheck test
 
