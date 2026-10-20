@@ -1,0 +1,2 @@
+# pnpm writes the lockfile; formatting it only churns the next install.
+pnpm-lock.yaml
