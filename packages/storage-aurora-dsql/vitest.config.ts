@@ -10,9 +10,14 @@ import { defineConfig } from "vitest/config";
  * A test that fails only when other tests are running is reporting machine load
  * rather than a defect, and the cost of that is worse than the cost of a slow
  * test: it trains a reader to rerun rather than to look.
+ *
+ * The hook timeout rises with it because `two-users.test.ts` boots its PGlite in
+ * `beforeEach`, where the 10s hook default applies instead, and the full run
+ * crossed that too.
  */
 export default defineConfig({
   test: {
     testTimeout: 30_000,
+    hookTimeout: 30_000,
   },
 });
