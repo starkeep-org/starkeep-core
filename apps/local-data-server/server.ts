@@ -20,7 +20,6 @@ import {
   ManifestValidationError,
 } from "../../packages/admin-installer/src/local/installer.js";
 import {
-  appRegistryRow,
   listAppRegistry,
   listInstallSteps,
 } from "../../packages/admin-installer/src/local/registry.js";
