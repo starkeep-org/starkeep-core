@@ -14,6 +14,7 @@ concurrency:
 
 jobs:
   # Tier 1: format, lint, typecheck and unit tests. The required check on main.
+  # Integration tests run in their own job below.
   tier-1:
     name: Tier 1 (format, lint, typecheck, unit)
     runs-on: ubuntu-latest
@@ -45,6 +46,24 @@ jobs:
       # cores until a worker misses its RPC deadline ("Timeout calling
       # onTaskUpdate") with every test passing. Two suites at a time does not.
       - run: pnpm turbo run test --concurrency=2
+
+  # Integration: suites under each package's `__tests__/integration/`, which boot
+  # a process, a socket or a database engine (the local data server as a child
+  # process, the fake cloud on loopback, PGlite). Advisory; branch protection
+  # requires tier 1 only.
+  integration:
+    name: Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm turbo run test:integration --concurrency=2
 
   # Tier 2: the local platform end to end, through Playwright. Advisory until
   # it has run two weeks without a flake; branch protection does not require it.

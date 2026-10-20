@@ -14,3 +14,5 @@ Always write plans, designs, and other long-form output to a file. Never leave s
 
 Use the Typescript LSP proactively as needed.
 Use Kysely when writing new SQL or modifying existing SQL.
+
+`pnpm test` runs the unit tests, which CI requires (tier 1). `pnpm test:integration` runs the suites under each package's `__tests__/integration/`: any test that spawns a process, opens a socket or boots a database engine such as PGlite belongs there. In-process SQLite (`node:sqlite`) counts as unit. CI runs the integration suites as an advisory job, and `pnpm release:publish` runs them before publishing.
