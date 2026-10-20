@@ -6,7 +6,8 @@
   "description": "Built-in app: cloud broker (DSQL + files bucket + protocol-core Lambda + API Gateway). Installed by the admin-installer pipeline as the final step of bootstrap.",
   "scripts": {
     "build": "node build.mjs",
-    "test": "vitest run",
+    "test": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

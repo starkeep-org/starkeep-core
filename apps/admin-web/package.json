@@ -8,7 +8,8 @@
     "build": "vite build",
     "start": "tsx src/server.ts",
     "lint": "eslint src/",
-    "test": "vitest run",
+    "test": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -17,6 +17,17 @@
     "@starkeep/builtin-cloud-data-server#test": {
       "dependsOn": ["^build"]
     },
+    // Integration tests (`__tests__/integration/`) boot a process, a socket or
+    // a database engine; they run apart from the unit tests, outside tier 1.
+    "test:integration": {
+      "dependsOn": ["build"]
+    },
+    "admin-web#test:integration": {
+      "dependsOn": ["^build"]
+    },
+    "@starkeep/builtin-cloud-data-server#test:integration": {
+      "dependsOn": ["^build"]
+    },
     "test:e2e": {
       // admin-web's and Drive's clients are real builds now rather than
       // something compiled on demand, so the tier-2 stack needs `dist/` present

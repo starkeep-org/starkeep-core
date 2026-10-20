@@ -28,7 +28,8 @@
   "homepage": "https://github.com/starkeep-org/starkeep-core/tree/main/packages/sync-engine",
   "scripts": {
     "build": "tsup",
-    "test": "vitest run",
+    "test": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
     "typecheck": "tsc -p tsconfig.typecheck.json",
     "lint": "eslint src/"
   },

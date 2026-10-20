@@ -1,4 +1,4 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 /**
  * A longer per-test timeout than the 5s default, for one reason: every case in
@@ -14,10 +14,28 @@ import { defineConfig } from "vitest/config";
  * The hook timeout rises with it because `two-users.test.ts` boots its PGlite in
  * `beforeEach`, where the 10s hook default applies instead, and the full run
  * crossed that too.
+ *
+ * Unit tests run in `test` (tier 1, required in CI). Tests that boot a process,
+ * a socket or a database engine live in `__tests__/integration/` and run in
+ * `test:integration`.
  */
 export default defineConfig({
   test: {
     testTimeout: 30_000,
     hookTimeout: 30_000,
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "unit",
+          include: ["__tests__/**/*.test.ts"],
+          exclude: [...configDefaults.exclude, "__tests__/integration/**"],
+        },
+      },
+      {
+        extends: true,
+        test: { name: "integration", include: ["__tests__/integration/**/*.test.ts"] },
+      },
+    ],
   },
 });
