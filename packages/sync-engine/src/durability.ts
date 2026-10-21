@@ -35,6 +35,14 @@
  * A node whose peers cannot report checksums refuses to let a file go rather
  * than guess.
  *
+ * A large file uploaded in parts stores a *composite* checksum, a digest over
+ * fixed-size part digests, which is not the object's SHA-256. Such a replica is
+ * `confirmed` only when this node's own copy, hashed whole and in parts in one
+ * read, both hashes to the record's content hash and yields the same
+ * composite. The first half ties the local bytes to the key; the second ties
+ * the cloud's bytes to the local ones. Without a local copy to hash, the
+ * replica stays `present-unverified`.
+ *
  * ## Durable is not the same as readable
  *
  * A Deep Archive copy is perfectly durable and cannot be read for twelve
@@ -45,8 +53,12 @@
  * are not symmetric.
  */
 
-import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
-import { sha256Base64ToHex } from "@starkeep/storage-adapter";
+import type { FilePartDigests, ObjectStorageAdapter } from "@starkeep/storage-adapter";
+import {
+  compositePartCount,
+  compositeSha256Checksum,
+  sha256Base64ToHex,
+} from "@starkeep/storage-adapter";
 
 /** A peer whose storage this node can interrogate about a key. */
 export interface ReplicaProbe {
@@ -100,6 +112,13 @@ export interface DurabilityQuery {
   /** Lowercase hex SHA-256 from the record. The key encodes it too; both are checked. */
   readonly contentHash: string;
   readonly sizeBytes: number;
+  /**
+   * This node's own copy, hashed whole and in multipart parts, or `null` when
+   * it holds none. Consulted only for a replica whose store reports a
+   * composite checksum, and at most once per assessment however many probes
+   * report one, because it reads the whole file.
+   */
+  readonly localPartDigests?: () => Promise<FilePartDigests | null>;
 }
 
 /**
@@ -116,7 +135,12 @@ export async function assessDurability(
   query: DurabilityQuery,
   probes: readonly ReplicaProbe[],
 ): Promise<DurabilityVerdict> {
-  const replicas = await Promise.all(probes.map((probe) => probeReplica(query, probe)));
+  let local: Promise<FilePartDigests | null> | null = null;
+  const localOnce = query.localPartDigests
+    ? () => (local ??= query.localPartDigests!())
+    : undefined;
+  const once: DurabilityQuery = { ...query, localPartDigests: localOnce };
+  const replicas = await Promise.all(probes.map((probe) => probeReplica(once, probe)));
 
   const confirmed = replicas.filter((r) => r.state === "confirmed");
   const unverified = replicas.filter((r) => r.state === "present-unverified");
@@ -174,9 +198,18 @@ async function probeReplica(query: DurabilityQuery, probe: ReplicaProbe): Promis
   }
 
   // A multipart object's stored checksum is a composite over part digests, not
-  // the object's SHA-256. `sha256Base64ToHex` returns null for it rather than
-  // decoding it into something that would compare as a mismatch — which would
-  // otherwise report every large object as corrupt.
+  // the object's SHA-256, so it is compared with a composite of this node's
+  // own copy instead.
+  const partCount = compositePartCount(facts.checksumSha256);
+  if (partCount !== null) {
+    return probeComposite(query, probe, facts.checksumSha256, partCount, {
+      readableNow,
+      storageClass: facts.storageClass,
+    });
+  }
+
+  // Anything else that does not decode to a SHA-256 is unverifiable, not a
+  // mismatch; comparing it as one would report a healthy object as corrupt.
   const reported = sha256Base64ToHex(facts.checksumSha256);
   if (reported === null) {
     return {
@@ -184,7 +217,7 @@ async function probeReplica(query: DurabilityQuery, probe: ReplicaProbe): Promis
       state: "present-unverified",
       readableNow,
       storageClass: facts.storageClass,
-      detail: "store reports a composite (multipart) checksum, which is not the object's sha256",
+      detail: "store reports a checksum that is not a sha256",
     };
   }
 
@@ -204,4 +237,55 @@ async function probeReplica(query: DurabilityQuery, probe: ReplicaProbe): Promis
     readableNow,
     storageClass: facts.storageClass,
   };
+}
+
+async function probeComposite(
+  query: DurabilityQuery,
+  probe: ReplicaProbe,
+  reported: string,
+  partCount: number,
+  facts: { readonly readableNow: boolean; readonly storageClass: string | null },
+): Promise<ReplicaReport> {
+  // Logged, unlike the whole-object branch, because this one reads the file
+  // and its verdict is the only evidence of why a large video stays put.
+  const log = (message: string): void =>
+    console.log(`[multipart] durability ${query.objectStorageKey} on ${probe.nodeId}: ${message}`);
+  const unverified = (detail: string): ReplicaReport => {
+    log(`unverified, ${detail}`);
+    return { nodeId: probe.nodeId, state: "present-unverified", ...facts, detail };
+  };
+  if (!query.localPartDigests) {
+    return unverified("store reports a multipart checksum and this node cannot hash its copy");
+  }
+  let local: FilePartDigests | null;
+  const hashStart = Date.now();
+  try {
+    local = await query.localPartDigests();
+  } catch (err) {
+    return unverified(`hashing the local copy failed: ${(err as Error).message}`);
+  }
+  if (!local) return unverified("store reports a multipart checksum and this node holds no copy");
+  // The local copy must be the record's bytes before it can vouch for the
+  // cloud's. A local copy that is not is this node's problem, not evidence
+  // about the replica, so it proves nothing either way.
+  if (local.sha256Hex !== query.contentHash || local.sizeBytes !== query.sizeBytes) {
+    return unverified(`the local copy hashes to ${local.sha256Hex}, not ${query.contentHash}`);
+  }
+  const expected = compositeSha256Checksum(local.partSha256Hex);
+  if (local.partSha256Hex.length !== partCount || expected !== reported) {
+    console.warn(
+      `[multipart] durability ${query.objectStorageKey} on ${probe.nodeId}: MISMATCH, ` +
+        `store reports ${reported}, the local copy gives ${expected}`,
+    );
+    return {
+      nodeId: probe.nodeId,
+      state: "checksum-mismatch",
+      ...facts,
+      detail: `store reports multipart checksum ${reported}, the local copy gives ${expected}`,
+    };
+  }
+  log(
+    `confirmed ${partCount} parts against the local copy, hashed in ${Date.now() - hashStart} ms`,
+  );
+  return { nodeId: probe.nodeId, state: "confirmed", ...facts };
 }

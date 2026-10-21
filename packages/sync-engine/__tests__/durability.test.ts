@@ -12,7 +12,11 @@
  */
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { MockObjectStorageAdapter } from "@starkeep/storage-adapter";
+import {
+  MockObjectStorageAdapter,
+  compositeSha256Checksum,
+  type FilePartDigests,
+} from "@starkeep/storage-adapter";
 import { assessDurability, type ReplicaProbe } from "../src/durability.js";
 
 const bytesFor = (n: number, fill = n % 256) => Buffer.alloc(n, fill);
@@ -73,6 +77,89 @@ describe("assessDurability", () => {
     const verdict = await assessDurability(query, [composite]);
     expect(verdict.durable).toBe(false);
     expect(verdict.replicas[0]!.state).toBe("present-unverified");
+  });
+
+  describe("a multipart replica", () => {
+    // The cloud reports `composite`; the local copy hashes to `local`.
+    const multipartProbe = async (composite: string): Promise<ReplicaProbe> => {
+      const real = await probe((s) => s.put(key, data));
+      const store = real.storage as MockObjectStorageAdapter;
+      return {
+        nodeId: "cloud",
+        storage: {
+          stat: async (k: string) => {
+            const facts = await store.stat(k);
+            return facts && { ...facts, checksumSha256: composite };
+          },
+        } as unknown as MockObjectStorageAdapter,
+      };
+    };
+    const local: FilePartDigests = {
+      sha256Hex: hash,
+      partSha256Hex: [hash],
+      sizeBytes: data.length,
+    };
+
+    it("confirms when the local copy is the record's bytes and gives the same composite", async () => {
+      const verdict = await assessDurability({ ...query, localPartDigests: async () => local }, [
+        await multipartProbe(compositeSha256Checksum([hash])),
+      ]);
+      expect(verdict).toMatchObject({ durable: true, confirmedReplicas: 1 });
+    });
+
+    it("reports corruption when the composites disagree", async () => {
+      const verdict = await assessDurability({ ...query, localPartDigests: async () => local }, [
+        await multipartProbe(compositeSha256Checksum([hashOf(bytesFor(9))])),
+      ]);
+      expect(verdict).toMatchObject({ durable: false, corruptionSuspected: true });
+      expect(verdict.replicas[0]!.state).toBe("checksum-mismatch");
+    });
+
+    // A local copy that is not the record's bytes cannot vouch for anything:
+    // matching it would prove the cloud holds the wrong file.
+    it("proves nothing from a local copy that does not hash to the record", async () => {
+      const other = hashOf(bytesFor(64, 9));
+      const verdict = await assessDurability(
+        {
+          ...query,
+          localPartDigests: async () => ({ ...local, sha256Hex: other, partSha256Hex: [other] }),
+        },
+        [await multipartProbe(compositeSha256Checksum([other]))],
+      );
+      expect(verdict.durable).toBe(false);
+      expect(verdict.replicas[0]!.state).toBe("present-unverified");
+    });
+
+    it("stays unverified with no local copy, or when hashing it fails", async () => {
+      for (const localPartDigests of [
+        async () => null,
+        async () => {
+          throw new Error("unreadable");
+        },
+      ]) {
+        const verdict = await assessDurability({ ...query, localPartDigests }, [
+          await multipartProbe(compositeSha256Checksum([hash])),
+        ]);
+        expect(verdict.durable).toBe(false);
+        expect(verdict.replicas[0]!.state).toBe("present-unverified");
+      }
+    });
+
+    it("reads the local copy once however many probes report a composite", async () => {
+      let reads = 0;
+      const composite = compositeSha256Checksum([hash]);
+      await assessDurability(
+        {
+          ...query,
+          localPartDigests: async () => {
+            reads += 1;
+            return local;
+          },
+        },
+        [await multipartProbe(composite), await multipartProbe(composite)],
+      );
+      expect(reads).toBe(1);
+    });
   });
 
   it("refuses, and reports corruption, when a replica's checksum disagrees", async () => {

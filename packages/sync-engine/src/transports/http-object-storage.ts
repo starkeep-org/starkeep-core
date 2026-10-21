@@ -1,5 +1,6 @@
 import type {
   ByteRange,
+  FilePartDigests,
   ObjectStorageAdapter,
   PutOptions,
   GetResult,
@@ -10,8 +11,13 @@ import type {
   PutStreamOptions,
 } from "@starkeep/storage-adapter";
 import {
+  ChecksumMismatchError,
   FileUriTransferRefused,
+  MULTIPART_PART_BYTES,
+  MULTIPART_THRESHOLD_BYTES,
   hashFactory,
+  multipartPartSpan,
+  partChecksumBase64,
   sha256Base64ToHex,
   verifyingStream,
 } from "@starkeep/storage-adapter";
@@ -121,6 +127,102 @@ export interface HttpObjectStorageAdapterOptions {
    * them is worse than the stream path it is displacing, and silently so.
    */
   readonly uploadFile?: UploadFile;
+  /**
+   * The two ports a resumable multipart upload needs. With both, a file above
+   * `MULTIPART_THRESHOLD_BYTES` goes up as fixed `MULTIPART_PART_BYTES` parts,
+   * and an interrupted upload keeps every finished part. With either absent,
+   * every file keeps the single PUT.
+   */
+  readonly hashFileParts?: HashFileParts;
+  readonly uploadFileRange?: UploadFileRange;
+  /**
+   * Where each key's in-progress upload is remembered between attempts. The
+   * default keeps it in memory, so a restart of the process starts the upload
+   * over; a node that wants resumption across restarts supplies a durable one.
+   */
+  readonly multipartSessions?: MultipartSessionStore;
+}
+
+/**
+ * Hash a file whole and in parts of `partBytes`, in one read.
+ *
+ * One read, so the part digests S3 checks and the whole-file digest the key
+ * names describe the same bytes. Must not buffer the file.
+ */
+export type HashFileParts = (fileUri: string, partBytes: number) => Promise<FilePartDigests>;
+
+/**
+ * Send one byte range of a file to a URL without reading it into JS.
+ *
+ * Resolves for any completed response, as {@link UploadFile} does, plus the
+ * response's `ETag`: completing a multipart upload names each part by it.
+ */
+export type UploadFileRange = (
+  fileUri: string,
+  range: { readonly offset: number; readonly length: number },
+  url: string,
+  init: { readonly method: "PUT"; readonly headers: Record<string, string> },
+) => Promise<{ readonly status: number; readonly body: string; readonly etag: string | null }>;
+
+/**
+ * An upload in progress, as the uploader remembers it.
+ *
+ * The uploader keeps this rather than the cloud, because finding an upload by
+ * key needs `s3:ListBucketMultipartUploads`, which no policy can narrow to one
+ * user's keys. `partSha256Hex` pins the session to one version of the file: a
+ * file whose bytes changed starts a new upload rather than mixing parts.
+ */
+export interface MultipartUploadSession {
+  readonly uploadId: string;
+  readonly partSha256Hex: readonly string[];
+  /** ETag of each finished part, by part number. */
+  readonly etags: Readonly<Record<string, string>>;
+}
+
+export interface MultipartSessionStore {
+  get(key: string): Promise<MultipartUploadSession | null>;
+  set(key: string, session: MultipartUploadSession): Promise<void>;
+  delete(key: string): Promise<void>;
+}
+
+/** The default store: resumes within one process, forgets on restart. */
+export function inMemoryMultipartSessions(): MultipartSessionStore {
+  const sessions = new Map<string, MultipartUploadSession>();
+  return {
+    get: async (key) => sessions.get(key) ?? null,
+    set: async (key, session) => void sessions.set(key, session),
+    delete: async (key) => void sessions.delete(key),
+  };
+}
+
+interface MultipartPresignResponse {
+  readonly uploadId: string;
+  readonly parts: ReadonlyArray<{ readonly partNumber: number; readonly url: string }>;
+}
+
+/** S3 answers a part PUT for an upload it no longer holds with this code. */
+function isNoSuchUpload(status: number, body: string): boolean {
+  return status === 404 && body.includes("NoSuchUpload");
+}
+
+/**
+ * One line per step of a multipart upload, under one prefix, so a device log
+ * filtered on `[multipart]` reads as the upload's whole story.
+ */
+function multipartLog(key: string, message: string): void {
+  console.log(`[multipart] ${key}: ${message}`);
+}
+
+function multipartWarn(key: string, message: string): void {
+  console.warn(`[multipart] ${key}: ${message}`);
+}
+
+function throughput(bytes: number, ms: number): string {
+  return ms > 0 ? `${(bytes / 1024 / 1024 / (ms / 1000)).toFixed(1)} MiB/s` : "instant";
+}
+
+function sameDigests(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((hex, i) => hex === b[i]);
 }
 
 /**
@@ -165,14 +267,32 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     options?: PutStreamOptions,
   ) => Promise<void>;
 
+  private readonly multipart: {
+    readonly hashFileParts: HashFileParts;
+    readonly uploadFileRange: UploadFileRange;
+    readonly sessions: MultipartSessionStore;
+  } | null;
+
   constructor(options: HttpObjectStorageAdapterOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.signRequest = options.signRequest;
+    this.multipart =
+      options.hashFileParts && options.uploadFileRange
+        ? {
+            hashFileParts: options.hashFileParts,
+            uploadFileRange: options.uploadFileRange,
+            sessions: options.multipartSessions ?? inMemoryMultipartSessions(),
+          }
+        : null;
     if (options.uploadFile) {
       const uploadFile = options.uploadFile;
-      this.putFromFileUri = (key, fileUri, putOptions) =>
-        this.sendFile(uploadFile, key, fileUri, putOptions);
+      this.putFromFileUri = (key, fileUri, putOptions) => {
+        const sizeBytes = putOptions?.sizeBytes;
+        return this.multipart && sizeBytes !== undefined && sizeBytes > MULTIPART_THRESHOLD_BYTES
+          ? this.sendFileInParts(this.multipart, key, fileUri, { ...putOptions, sizeBytes })
+          : this.sendFile(uploadFile, key, fileUri, putOptions);
+      };
     }
   }
 
@@ -297,6 +417,191 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
         `S3 PUT ${key} from ${fileUri} failed: ${result.status}${detail ? ` — ${detail}` : ""}`,
       );
     }
+  }
+
+  /**
+   * Upload a large file as fixed-size parts, resuming any upload this node
+   * already started for the key.
+   *
+   * The file is hashed whole and in parts in one read, and the whole-file
+   * digest must equal the hash the caller expects. That check is the only
+   * link between the parts and the key: S3 verifies each part against its
+   * pinned digest, but nothing in the cloud can tie the parts to the
+   * whole-file hash without reading the object.
+   *
+   * Only parts the session lacks go up. A finished part's ETag is saved before
+   * the next part starts, so an attempt aborted mid-file keeps its progress.
+   * An upload S3 no longer holds, or a completion S3 refuses, drops the
+   * session, and the next attempt starts over.
+   */
+  private async sendFileInParts(
+    multipart: NonNullable<HttpObjectStorageAdapter["multipart"]>,
+    key: string,
+    fileUri: string,
+    options: PutStreamOptions & { readonly sizeBytes: number },
+  ): Promise<void> {
+    const attemptStart = Date.now();
+    const digests = await multipart.hashFileParts(fileUri, MULTIPART_PART_BYTES);
+    const total = digests.partSha256Hex.length;
+    multipartLog(
+      key,
+      `hashed ${digests.sizeBytes} bytes into ${total} parts in ${Date.now() - attemptStart} ms ` +
+        `(${throughput(digests.sizeBytes, Date.now() - attemptStart)})`,
+    );
+    if (digests.sizeBytes !== options.sizeBytes) {
+      multipartWarn(
+        key,
+        `refused: the file is ${digests.sizeBytes} bytes, the record says ${options.sizeBytes}`,
+      );
+      throw new Error(
+        `${fileUri} is ${digests.sizeBytes} bytes, but the record for ${key} says ${options.sizeBytes}`,
+      );
+    }
+    if (options.expectedSha256Hex && digests.sha256Hex !== options.expectedSha256Hex) {
+      multipartWarn(key, `refused: the file hashes to ${digests.sha256Hex}, not the key's hash`);
+      throw new ChecksumMismatchError(key, options.expectedSha256Hex, digests.sha256Hex);
+    }
+
+    let session = await multipart.sessions.get(key);
+    if (session && !sameDigests(session.partSha256Hex, digests.partSha256Hex)) {
+      multipartWarn(key, `the file changed since upload ${session.uploadId} began; starting over`);
+      await multipart.sessions.delete(key);
+      session = null;
+    }
+
+    const partNumbers = digests.partSha256Hex.map((_, i) => i + 1);
+    const missing = partNumbers.filter((n) => !session?.etags[String(n)]);
+    multipartLog(
+      key,
+      session
+        ? `resuming upload ${session.uploadId}: ${total - missing.length}/${total} parts already sent`
+        : "no upload in progress; starting one",
+    );
+    if (missing.length > 0) {
+      const presignStart = Date.now();
+      const presigned = await this.presignParts(key, options.contentType, digests, {
+        uploadId: session?.uploadId,
+        partNumbers: missing,
+      });
+      multipartLog(
+        key,
+        `presigned ${presigned.parts.length} parts for upload ${presigned.uploadId} in ${Date.now() - presignStart} ms`,
+      );
+      if (!session || session.uploadId !== presigned.uploadId) {
+        session = { uploadId: presigned.uploadId, partSha256Hex: digests.partSha256Hex, etags: {} };
+        await multipart.sessions.set(key, session);
+      }
+      for (const { partNumber, url } of presigned.parts) {
+        const span = multipartPartSpan(digests.sizeBytes, partNumber);
+        const partStart = Date.now();
+        let result: Awaited<ReturnType<UploadFileRange>>;
+        try {
+          result = await multipart.uploadFileRange(fileUri, span, url, {
+            method: "PUT",
+            headers: {
+              "x-amz-checksum-sha256": partChecksumBase64(digests.partSha256Hex[partNumber - 1]!),
+            },
+          });
+        } catch (err) {
+          multipartWarn(
+            key,
+            `part ${partNumber}/${total} failed after ${Date.now() - partStart} ms: ${(err as Error).message}; ` +
+              `${Object.keys(session.etags).length}/${total} parts kept for the next attempt`,
+          );
+          throw err;
+        }
+        if (isNoSuchUpload(result.status, result.body)) {
+          multipartWarn(key, `S3 no longer holds upload ${session.uploadId}; dropping it`);
+          await multipart.sessions.delete(key);
+          throw new Error(`S3 no longer holds the upload for ${key}; the next attempt starts over`);
+        }
+        if (result.status < 200 || result.status >= 300) {
+          const detail = result.body.trim().replace(/\s+/g, " ").slice(0, 500);
+          multipartWarn(
+            key,
+            `part ${partNumber}/${total} answered ${result.status}${detail ? ` — ${detail}` : ""}`,
+          );
+          throw new Error(
+            `S3 PUT ${key} part ${partNumber} from ${fileUri} failed: ${result.status}${detail ? ` — ${detail}` : ""}`,
+          );
+        }
+        if (!result.etag) {
+          multipartWarn(key, `part ${partNumber}/${total} answered ${result.status} with no ETag`);
+          throw new Error(`S3 PUT ${key} part ${partNumber} returned no ETag`);
+        }
+        session = { ...session, etags: { ...session.etags, [String(partNumber)]: result.etag } };
+        await multipart.sessions.set(key, session);
+        multipartLog(
+          key,
+          `part ${partNumber}/${total} sent: ${span.length} bytes in ${Date.now() - partStart} ms ` +
+            `(${throughput(span.length, Date.now() - partStart)})`,
+        );
+      }
+    }
+
+    const completeStart = Date.now();
+    const completeBody = JSON.stringify({
+      key,
+      uploadId: session!.uploadId,
+      parts: partNumbers.map((n) => ({
+        partNumber: n,
+        etag: session!.etags[String(n)],
+        checksumSha256: partChecksumBase64(digests.partSha256Hex[n - 1]!),
+      })),
+    });
+    const res = await this.fetchImpl(`${this.apiBase()}/files/multipart/complete`, {
+      method: "POST",
+      headers: this.headers("POST", "/files/multipart/complete", completeBody, {
+        "Content-Type": "application/json",
+      }),
+      body: completeBody,
+    });
+    if (res.status === 409) {
+      multipartWarn(key, `the cloud refused to complete upload ${session!.uploadId}; dropping it`);
+      await multipart.sessions.delete(key);
+    }
+    if (!res.ok) {
+      const detail = await s3ErrorDetail(res);
+      multipartWarn(key, `completing upload ${session!.uploadId} answered ${res.status}${detail}`);
+      throw new Error(`complete multipart ${key} failed: ${res.status} ${res.statusText}${detail}`);
+    }
+    await multipart.sessions.delete(key);
+    multipartLog(
+      key,
+      `completed upload ${session!.uploadId} in ${Date.now() - completeStart} ms; ` +
+        `this attempt took ${Date.now() - attemptStart} ms`,
+    );
+  }
+
+  private async presignParts(
+    key: string,
+    contentType: string | undefined,
+    digests: FilePartDigests,
+    request: { readonly uploadId: string | undefined; readonly partNumbers: readonly number[] },
+  ): Promise<MultipartPresignResponse> {
+    const body = JSON.stringify({
+      key,
+      contentType,
+      contentHash: digests.sha256Hex,
+      ...(request.uploadId ? { uploadId: request.uploadId } : {}),
+      parts: request.partNumbers.map((n) => ({
+        partNumber: n,
+        checksumSha256: partChecksumBase64(digests.partSha256Hex[n - 1]!),
+      })),
+    });
+    const res = await this.fetchImpl(`${this.apiBase()}/files/multipart/presign`, {
+      method: "POST",
+      headers: this.headers("POST", "/files/multipart/presign", body, {
+        "Content-Type": "application/json",
+      }),
+      body,
+    });
+    if (!res.ok) {
+      throw new Error(
+        `presign multipart ${key} failed: ${res.status} ${res.statusText}${await s3ErrorDetail(res)}`,
+      );
+    }
+    return (await res.json()) as MultipartPresignResponse;
   }
 
   async put(key: string, data: Uint8Array, options?: PutOptions): Promise<void> {

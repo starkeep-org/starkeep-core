@@ -109,7 +109,13 @@ export {
   HttpObjectStorageAdapter,
   type HttpObjectStorageAdapterOptions,
   type UploadFile,
+  type HashFileParts,
+  type UploadFileRange,
+  type MultipartUploadSession,
+  type MultipartSessionStore,
+  inMemoryMultipartSessions,
 } from "./transports/http-object-storage.js";
+export { localPartDigestsFor, type LocalPartDigests } from "./local-part-digests.js";
 export { createHttpSyncHandler, type HttpSyncServerOptions } from "./transports/http-server.js";
 export { SyncError } from "./errors.js";
 export {
