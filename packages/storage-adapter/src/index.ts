@@ -189,11 +189,24 @@ export type {
   ListResult,
   SignedUrlOptions,
   SignedPutUrlOptions,
+  MultipartUploadOptions,
+  CompletedPart,
   ObjectFacts,
   ObjectAvailability,
 } from "./object-storage/types.js";
 
 export { sha256HexToBase64, sha256Base64ToHex } from "./object-storage/checksum.js";
+export {
+  MULTIPART_PART_BYTES,
+  MULTIPART_THRESHOLD_BYTES,
+  MULTIPART_MAX_PARTS,
+  multipartPartCount,
+  multipartPartSpan,
+  partChecksumBase64,
+  compositeSha256Checksum,
+  compositePartCount,
+  type FilePartDigests,
+} from "./object-storage/multipart.js";
 export {
   setHashFactory,
   hashFactory,
