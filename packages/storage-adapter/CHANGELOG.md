@@ -1,5 +1,11 @@
 # @starkeep/storage-adapter
 
+## 0.6.0
+
+### Minor Changes
+
+- e362220: Resumable multipart upload for large files. A node that supplies `hashFileParts` and `uploadFileRange` to `HttpObjectStorageAdapter` sends files above 64 MiB as fixed 16 MiB parts, each pinned to its SHA-256, and resumes an interrupted upload from the parts it already sent. The whole-file SHA-256 stays the content hash and the key. "Free up space" proves a multipart object by rehashing the local copy into the same composite checksum S3 stores.
+
 ## 0.5.0
 
 ### Minor Changes
