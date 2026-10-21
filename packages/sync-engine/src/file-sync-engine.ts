@@ -140,6 +140,11 @@ export function createFileSyncEngine(): FileSyncEngine {
         // is an ordinary failed transfer and must not be retried a second way
         // — that would send a large object twice on every genuine failure.
         if (!(err instanceof FileUriTransferRefused)) throw err;
+        // Loud, because on a phone the stream path reads the whole file into
+        // the JS heap, and a large video taking it is a crash in waiting.
+        console.warn(
+          `[sync] ${key}: the file-URI upload was refused (${err.message}); sending it as a stream instead`,
+        );
       }
     }
 
