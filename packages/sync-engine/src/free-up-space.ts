@@ -34,6 +34,7 @@ import {
 } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter, Filter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import { assessDurability } from "./durability.js";
+import type { LocalPartDigests } from "./local-part-digests.js";
 import { blobCandidateForRecord } from "./sync-engine.js";
 import type {
   FreeUpSpaceItem,
@@ -56,6 +57,8 @@ export interface FreeUpSpaceDeps {
   readonly noteRemoved: (candidate: BlobCandidate) => Promise<void>;
   /** Bytes the store answers for without holding them. See `ResidencyManagerOptions.borrowsBytes`. */
   readonly borrowsBytes?: (objectStorageKey: string) => boolean | Promise<boolean>;
+  /** See {@link ProveCloudCopiesDeps.localPartDigests}. */
+  readonly localPartDigests?: LocalPartDigests;
 }
 
 interface Candidate {
@@ -174,6 +177,13 @@ export type DurabilityProof =
 export interface ProveCloudCopiesDeps {
   readonly databaseAdapter: DatabaseAdapter;
   readonly standards: StandInStandards;
+  /**
+   * This node's copy of a key, hashed whole and in multipart parts. The only
+   * proof a large file uploaded in parts admits; absent, such a file is never
+   * proved and stays. The watcher's unlink path supplies none, because the
+   * file it asks about has already left the disk.
+   */
+  readonly localPartDigests?: LocalPartDigests;
 }
 
 /**
@@ -213,6 +223,9 @@ export async function proveCloudCopies(
         objectStorageKey: r.objectStorageKey,
         contentHash: hexHash(r.contentHash),
         sizeBytes: r.sizeBytes,
+        ...(deps.localPartDigests
+          ? { localPartDigests: () => deps.localPartDigests!(r.objectStorageKey) }
+          : {}),
       },
       probes,
     );

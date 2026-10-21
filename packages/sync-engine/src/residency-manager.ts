@@ -31,6 +31,7 @@ import {
   type SyncDownCeilings,
 } from "@starkeep/protocol-primitives";
 import type { AcquisitionConsideration } from "./acquisition-scan.js";
+import { localPartDigestsFor } from "./local-part-digests.js";
 import type { ReplicaProbe } from "./durability.js";
 import { freeUpSpaceOn } from "./free-up-space.js";
 import { decideResidency, type BlobCandidate, type ResidencyVerdict } from "./residency-policy.js";
@@ -41,6 +42,7 @@ import {
   type ResidentEntry,
   type ResidentSetIndex,
 } from "./resident-set.js";
+import type { HashFileParts } from "./transports/http-object-storage.js";
 
 export { NO_CLOUD_LABEL_KEY, STARKEEP_LABEL_APP_ID } from "./file-rows.js";
 import { NO_CLOUD_LABEL_KEY, STARKEEP_LABEL_APP_ID } from "./file-rows.js";
@@ -88,6 +90,13 @@ export interface ResidencyManagerOptions {
    * synchronous alias-table lookup still satisfies the wider type.
    */
   readonly borrowsBytes?: (objectStorageKey: string) => boolean | Promise<boolean>;
+  /**
+   * The platform's whole-and-parts file hasher. "Free up space" proves a large
+   * file uploaded in parts by rehashing the local copy, and on a phone only
+   * the platform can read a camera-roll asset without loading it whole.
+   * Absent, the local copy is streamed through JS, which suits a desktop.
+   */
+  readonly hashFileParts?: HashFileParts;
 }
 
 /** What "Free up space" is asked to reclaim. */
@@ -345,6 +354,7 @@ export function createResidencyManager(options: ResidencyManagerOptions): Reside
           ceilingOf,
           standards: currentStandards(),
           ...(options.borrowsBytes ? { borrowsBytes: options.borrowsBytes } : {}),
+          localPartDigests: localPartDigestsFor(localObjectStorage, options.hashFileParts),
           noteRemoved: (candidate) => manager.noteDeparture(candidate),
         },
         request,
