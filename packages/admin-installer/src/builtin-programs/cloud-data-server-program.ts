@@ -361,6 +361,19 @@ export function buildCloudDataServerProgram(
               },
             ],
           },
+          // A device keeps a large upload's id and finished parts between
+          // attempts, and S3 bills those parts until the upload completes or is
+          // aborted. A device that never comes back would leave them forever,
+          // and no list call can find them: listing in-progress uploads needs a
+          // permission no app role holds. Seven days outlasts any resumption
+          // worth having; a device holding an id older than that gets
+          // NoSuchUpload on its next part and starts over.
+          {
+            id: "starkeep-abort-incomplete-multipart",
+            status: "Enabled",
+            filter: {},
+            abortIncompleteMultipartUpload: { daysAfterInitiation: 7 },
+          },
         ],
       });
     }

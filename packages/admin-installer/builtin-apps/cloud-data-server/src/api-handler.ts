@@ -141,8 +141,14 @@ import type {
   DatabaseClient,
   AuroraDsqlDatabaseAdapterOptions,
 } from "@starkeep/storage-aurora-dsql";
-import type { Filter, DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
+import type {
+  CompletedPart,
+  Filter,
+  DatabaseAdapter,
+  ObjectStorageAdapter,
+} from "@starkeep/storage-adapter";
 import {
+  MULTIPART_MAX_PARTS,
   sha256HexToBase64,
   isStandInSlotConflict,
   loadStandInSummariesForPage,
@@ -260,13 +266,116 @@ export function deviceMayCall(method: string, subPath: string): boolean {
   if (method === "GET" && subPath === "/health") return true;
   if (method === "GET" && subPath === DEPLOYMENT_SETTINGS_ROUTE) return true;
   if (method === "POST" && subPath === "/sync/exchange") return true;
-  if (method === "POST" && subPath === "/files/presign") return true;
+  if (method === "POST" && UPLOAD_WRITE_ROUTES.has(subPath)) return true;
   if (method === "GET" && /^\/files\/.+\/(presign|stat)$/.test(subPath)) return true;
   if (method === "HEAD" && /^\/files\/.+$/.test(subPath)) return true;
   if (method === "GET" && (subPath === "/data/types" || subPath === "/data/records")) {
     return true;
   }
   return false;
+}
+
+/**
+ * The routes that authorize a blob write, each naming its key in the body.
+ *
+ * One set, because a device reaches all of them and the platform-category
+ * refusal below must cover every one: a multipart upload is the same write as
+ * a single PUT, in pieces.
+ */
+const UPLOAD_WRITE_ROUTES: ReadonlySet<string> = new Set([
+  "/files/presign",
+  "/files/multipart/presign",
+  "/files/multipart/complete",
+]);
+
+/** S3's base64 SHA-256 of one part: 32 bytes, so 43 characters and one pad. */
+const PART_CHECKSUM = /^[A-Za-z0-9+/]{43}=$/;
+
+/** Presign requests per call, to bound the response; a 391 MB video is 25 parts. */
+const MAX_PARTS_PER_PRESIGN = 1000;
+
+/**
+ * S3's refusals that mean the upload id or its parts no longer add up, so the
+ * uploader must start a new upload. Anything else is an ordinary failure.
+ */
+export const MULTIPART_RESTART_ERRORS: ReadonlySet<string> = new Set([
+  "NoSuchUpload",
+  "InvalidPart",
+  "InvalidPartOrder",
+  "EntityTooSmall",
+  "BadDigest",
+  "InvalidRequest",
+]);
+
+/** An upload id as S3 issues it: opaque, URL-safe, never blank. */
+export function isUploadId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9._~-]{1,1024}$/.test(value);
+}
+
+function isPartNumber(value: unknown): value is number {
+  return (
+    Number.isInteger(value) && (value as number) >= 1 && (value as number) <= MULTIPART_MAX_PARTS
+  );
+}
+
+/** The parts a multipart presign names, or why the list is refused. */
+export function parsePartChecksums(
+  value: unknown,
+): Array<{ partNumber: number; checksumSha256: string }> | string {
+  if (!Array.isArray(value) || value.length === 0) return "parts must be a non-empty array";
+  if (value.length > MAX_PARTS_PER_PRESIGN) {
+    return `at most ${MAX_PARTS_PER_PRESIGN} parts per presign`;
+  }
+  const seen = new Set<number>();
+  const parts: Array<{ partNumber: number; checksumSha256: string }> = [];
+  for (const raw of value as unknown[]) {
+    const part = (raw ?? {}) as { partNumber?: unknown; checksumSha256?: unknown };
+    if (!isPartNumber(part.partNumber)) {
+      return `partNumber must be an integer from 1 to ${MULTIPART_MAX_PARTS}`;
+    }
+    if (typeof part.checksumSha256 !== "string" || !PART_CHECKSUM.test(part.checksumSha256)) {
+      return "checksumSha256 must be the base64 SHA-256 of the part";
+    }
+    if (seen.has(part.partNumber)) return `part ${part.partNumber} is named twice`;
+    seen.add(part.partNumber);
+    parts.push({ partNumber: part.partNumber, checksumSha256: part.checksumSha256 });
+  }
+  return parts;
+}
+
+/**
+ * The parts a completion lists, or why the list is refused.
+ *
+ * The parts must run 1..N with no gap. The composite checksum's part count is
+ * the eviction proof's input, and an upload assembled from a gapped list would
+ * store a composite no node holding the file can recompute.
+ */
+export function parseCompletedParts(value: unknown): CompletedPart[] | string {
+  if (!Array.isArray(value) || value.length === 0) return "parts must be a non-empty array";
+  if (value.length > MULTIPART_MAX_PARTS) return `at most ${MULTIPART_MAX_PARTS} parts`;
+  const parts: CompletedPart[] = [];
+  for (const raw of value as unknown[]) {
+    const part = (raw ?? {}) as { partNumber?: unknown; etag?: unknown; checksumSha256?: unknown };
+    if (!isPartNumber(part.partNumber)) {
+      return `partNumber must be an integer from 1 to ${MULTIPART_MAX_PARTS}`;
+    }
+    if (typeof part.etag !== "string" || part.etag.length === 0 || part.etag.length > 128) {
+      return "etag must be the ETag the part's PUT returned";
+    }
+    if (typeof part.checksumSha256 !== "string" || !PART_CHECKSUM.test(part.checksumSha256)) {
+      return "checksumSha256 must be the base64 SHA-256 of the part";
+    }
+    parts.push({
+      partNumber: part.partNumber,
+      etag: part.etag,
+      checksumSha256: part.checksumSha256,
+    });
+  }
+  parts.sort((a, b) => a.partNumber - b.partNumber);
+  if (parts.some((p, i) => p.partNumber !== i + 1)) {
+    return "parts must run from 1 with no gap or repeat";
+  }
+  return parts;
 }
 
 /**
@@ -283,7 +392,7 @@ export function deviceMayCall(method: string, subPath: string): boolean {
  */
 export function deviceWriteRefusal(method: string, subPath: string, body: Buffer): string | null {
   if (method !== "POST") return null;
-  if (subPath !== "/sync/exchange" && subPath !== "/files/presign") return null;
+  if (subPath !== "/sync/exchange" && !UPLOAD_WRITE_ROUTES.has(subPath)) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(body.toString("utf8") || "{}");
@@ -3300,32 +3409,58 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       return ok({ key, contentHash: hex, mimeType, sizeBytes: fileBuffer.length });
     }
 
-    // POST /apps/{appId}/files/presign — issue a presigned S3 PUT URL.
-    // Body: { key, contentType? }. The local-data-server's HttpObjectStorageAdapter
-    // uploads directly to S3 with the returned URL, bypassing API Gateway size limits.
-    if (method === "POST" && subPath === "/files/presign") {
+    // The body every upload route reads: which key, which bytes, and how they
+    // should be stored. Shared by the single PUT presign and the multipart
+    // routes, so the three blob-write entry points cannot drift in what they
+    // accept.
+    interface UploadRequestBody {
+      key?: string;
+      type?: string;
+      contentType?: string;
+      intent?: string;
+      contentHash?: string;
+    }
+    const readJsonBody = (): unknown => {
       const rawBody =
         event.isBase64Encoded && event.body
           ? Buffer.from(event.body, "base64").toString("utf8")
           : (event.body ?? "{}");
-      const body = JSON.parse(rawBody) as {
-        key?: string;
-        type?: string;
-        contentType?: string;
-        intent?: string;
-        contentHash?: string;
-      };
-      // A shared record's key is the caller's user, the type's category and
-      // the hash, so a caller may name the type and hash and let the broker
-      // build it. An app then never needs to know which user it acts for.
-      if (!body.key && body.type && body.contentHash) {
+      return JSON.parse(rawBody);
+    };
+
+    /**
+     * Resolve and authorize the object an upload writes.
+     *
+     * A shared record's key is the caller's user, the type's category and the
+     * hash, so a caller may name the type and hash and let the broker build it.
+     * An app then never needs to know which user it acts for.
+     *
+     * Shared record keys *are* the SHA-256, so the expected hash derives from
+     * the key alone and the caller cannot influence it. App-syncable keys are
+     * deliberately not content-addressed, so the uploader declares the hash it
+     * already holds. Either way every object is written against a whole-object
+     * SHA-256: it is what lets a node prove the cloud holds a file before
+     * letting its own copy go.
+     */
+    const uploadTarget = async (
+      body: UploadRequestBody,
+    ): Promise<
+      | { ok: true; key: string; contentHash: string; intent: RetrievalIntent }
+      | { ok: false; response: ReturnType<typeof clientErr> }
+    > => {
+      const refuse = (message: string, status: number) => ({
+        ok: false as const,
+        response: clientErr(message, status),
+      });
+      let key = body.key;
+      if (!key && body.type && body.contentHash) {
         if (!isSha256Hex(body.contentHash))
-          return clientErr("contentHash must be a lowercase hex SHA-256", 400);
-        body.key = dataRecordObjectKey(subject.userId, body.type, body.contentHash);
+          return refuse("contentHash must be a lowercase hex SHA-256", 400);
+        key = dataRecordObjectKey(subject.userId, body.type, body.contentHash);
       }
-      if (!body.key) return clientErr("key, or type and contentHash, is required", 400);
-      const check = parseObjectKey(subject, body.key, grants, "write");
-      if (!check.ok) return clientErr(check.message, check.status);
+      if (!key) return refuse("key, or type and contentHash, is required", 400);
+      const check = parseObjectKey(subject, key, grants, "write");
+      if (!check.ok) return refuse(check.message, check.status);
       // Declared retrieval intent, in the platform's vocabulary — the app says
       // what latency it can tolerate, not which storage class it wants. An
       // unrecognized value is refused rather than defaulted: silently writing
@@ -3333,44 +3468,45 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // writing `archive` would put bytes behind a 48-hour thaw nobody asked
       // for. Neither failure announces itself.
       if (body.intent !== undefined && !isRetrievalIntent(body.intent)) {
-        return clientErr(
+        return refuse(
           `intent must be one of ${RETRIEVAL_INTENTS.join(", ")} (got "${body.intent}")`,
           400,
         );
       }
-      const intent: RetrievalIntent = body.intent ?? DEFAULT_RETRIEVAL_INTENT;
-      // Pin the permitted body into the signature. Shared record keys *are*
-      // the SHA-256, so the expected checksum is derivable from the key alone —
-      // the caller is never asked for it and could not influence it if it
-      // tried. S3 then rejects a body that hashes to anything else instead of
-      // storing it, which is what turns "the upload returned 200" into
-      // "S3 confirmed these bytes are the bytes this key names".
-      //
-      // App-syncable keys are deliberately not content-addressed, so the
-      // uploader declares the hash it already holds, and it is pinned the
-      // same way. Every object carries a whole-object SHA-256: it is what lets
-      // a node prove the cloud holds a file before letting its own copy go.
-      const noCloud = await keyIsCloudExcluded(db, body.key);
-      if (noCloud) return clientErr(NO_CLOUD_REFUSAL, 403);
+      if (await keyIsCloudExcluded(db, key)) return refuse(NO_CLOUD_REFUSAL, 403);
 
-      const keyHash = contentHashFromDataRecordObjectKey(body.key);
+      const keyHash = contentHashFromDataRecordObjectKey(key);
       const declared = body.contentHash;
       if (declared !== undefined && !isSha256Hex(declared)) {
-        return clientErr("contentHash must be a lowercase hex SHA-256", 400);
+        return refuse("contentHash must be a lowercase hex SHA-256", 400);
       }
       if (keyHash && declared !== undefined && declared !== keyHash) {
-        return clientErr(`contentHash disagrees with the hash ${body.key} names`, 400);
+        return refuse(`contentHash disagrees with the hash ${key} names`, 400);
       }
       const contentHash = keyHash ?? declared;
       if (!contentHash) {
-        return clientErr("contentHash is required for a key that does not name its own hash", 400);
+        return refuse("contentHash is required for a key that does not name its own hash", 400);
       }
-      const checksumSha256 = sha256HexToBase64(contentHash);
-      const tagging = tagsForIntent(intent);
-      const url = await storage.getSignedPutUrl!(body.key, {
+      return { ok: true, key, contentHash, intent: body.intent ?? DEFAULT_RETRIEVAL_INTENT };
+    };
+
+    // POST /apps/{appId}/files/presign — issue a presigned S3 PUT URL.
+    // Body: { key, contentType? }. The local-data-server's HttpObjectStorageAdapter
+    // uploads directly to S3 with the returned URL, bypassing API Gateway size limits.
+    if (method === "POST" && subPath === "/files/presign") {
+      const body = readJsonBody() as UploadRequestBody;
+      const target = await uploadTarget(body);
+      if (!target.ok) return target.response;
+      // Pin the permitted body into the signature. S3 then rejects a body that
+      // hashes to anything else instead of storing it, which is what turns
+      // "the upload returned 200" into "S3 confirmed these bytes are the bytes
+      // this key names".
+      const checksumSha256 = sha256HexToBase64(target.contentHash);
+      const tagging = tagsForIntent(target.intent);
+      const url = await storage.getSignedPutUrl!(target.key, {
         expiresIn: 3600,
         ...(body.contentType ? { contentType: body.contentType } : {}),
-        ...(checksumSha256 ? { checksumSha256 } : {}),
+        checksumSha256,
         // Both are bound into the signature, so the uploader cannot choose a
         // different tier or tag its way into a lifecycle rule it wasn't given.
         storageClass: WRITE_STORAGE_CLASS,
@@ -3382,12 +3518,103 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // class even is).
       return ok({
         url,
-        key: body.key,
-        ...(checksumSha256 ? { checksumSha256 } : {}),
-        intent,
+        key: target.key,
+        checksumSha256,
+        intent: target.intent,
         storageClass: WRITE_STORAGE_CLASS,
         ...(Object.keys(tagging).length > 0 ? { tagging } : {}),
       });
+    }
+
+    // POST /apps/{appId}/files/multipart/presign — start a multipart upload if
+    // the caller holds none, and presign PUTs for the parts it names.
+    // Body: the presign body plus { uploadId?, parts: [{ partNumber, checksumSha256 }] }.
+    //
+    // The uploader keeps the upload id between attempts. Finding an upload by
+    // key would need `s3:ListBucketMultipartUploads`, which supports no prefix
+    // condition: granting it would let any app session list every in-progress
+    // upload key in the bucket. A stale id costs nothing here, because
+    // presigning makes no S3 call: the part's PUT answers 404 NoSuchUpload and
+    // the uploader starts over.
+    //
+    // Each part's SHA-256 is pinned into its URL, so S3 refuses a part whose
+    // bytes disagree. Nothing here links the parts to the whole-file hash the
+    // key names; see section "Decision" of
+    // tradeoffs-multipart-content-hash-2026-10-20.md for why that is accepted.
+    if (method === "POST" && subPath === "/files/multipart/presign") {
+      const body = readJsonBody() as UploadRequestBody & {
+        uploadId?: unknown;
+        parts?: unknown;
+      };
+      const target = await uploadTarget(body);
+      if (!target.ok) return target.response;
+      const parts = parsePartChecksums(body.parts);
+      if (typeof parts === "string") return clientErr(parts, 400);
+      if (body.uploadId !== undefined && !isUploadId(body.uploadId)) {
+        return clientErr("uploadId must be the id a previous presign returned", 400);
+      }
+      const tagging = tagsForIntent(target.intent);
+      const uploadId =
+        body.uploadId ??
+        (await storage.createMultipartUpload!(target.key, {
+          ...(body.contentType ? { contentType: body.contentType } : {}),
+          storageClass: WRITE_STORAGE_CLASS,
+          ...(Object.keys(tagging).length > 0 ? { tagging } : {}),
+        }));
+      console.log(
+        `[multipart] presign ${target.key}: upload ${uploadId}` +
+          `${body.uploadId === undefined ? " (started)" : " (resumed)"}, ` +
+          `parts ${parts.map((p) => p.partNumber).join(",")}`,
+      );
+      const signed = await Promise.all(
+        parts.map(async (part) => ({
+          ...part,
+          url: await storage.getSignedUploadPartUrl!(target.key, uploadId, part.partNumber, {
+            checksumSha256: part.checksumSha256,
+            expiresIn: 3600,
+          }),
+        })),
+      );
+      return ok({ key: target.key, uploadId, parts: signed });
+    }
+
+    // POST /apps/{appId}/files/multipart/complete — assemble the object.
+    // Body: { key, uploadId, parts: [{ partNumber, etag, checksumSha256 }] }.
+    //
+    // S3 refuses a completion whose ETag or checksum disagrees with a stored
+    // part, so the uploader cannot assemble bytes S3 did not verify. Its
+    // refusal comes back as a 409 carrying S3's error name, which tells the
+    // uploader to drop its upload id and start over.
+    if (method === "POST" && subPath === "/files/multipart/complete") {
+      const body = readJsonBody() as { key?: unknown; uploadId?: unknown; parts?: unknown };
+      if (typeof body.key !== "string") return clientErr("key is required", 400);
+      const check = parseObjectKey(subject, body.key, grants, "write");
+      if (!check.ok) return clientErr(check.message, check.status);
+      if (await keyIsCloudExcluded(db, body.key)) return clientErr(NO_CLOUD_REFUSAL, 403);
+      if (!isUploadId(body.uploadId)) return clientErr("uploadId is required", 400);
+      const parts = parseCompletedParts(body.parts);
+      if (typeof parts === "string") return clientErr(parts, 400);
+      try {
+        await storage.completeMultipartUpload!(body.key, body.uploadId, parts);
+      } catch (err) {
+        const name = (err as Error)?.name;
+        console.warn(
+          `[multipart] complete ${body.key}: upload ${body.uploadId} refused by S3 ` +
+            `(${name ?? "unknown"}): ${(err as Error)?.message}`,
+        );
+        if (name && MULTIPART_RESTART_ERRORS.has(name)) {
+          return {
+            statusCode: 409,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ error: (err as Error).message, code: name }),
+          };
+        }
+        throw err;
+      }
+      console.log(
+        `[multipart] complete ${body.key}: upload ${body.uploadId} assembled from ${parts.length} parts`,
+      );
+      return ok({ key: body.key });
     }
 
     // GET /apps/{appId}/files/{encodedKey}/presign — presigned S3 GET URL.

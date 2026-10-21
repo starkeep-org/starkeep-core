@@ -238,11 +238,29 @@ describe("real installs (ephemeral=false) are hardened", () => {
 });
 
 describe("the archive lifecycle rule (media plan item 18)", () => {
-  it("creates exactly one lifecycle rule", async () => {
+  // One rule moves objects, so the conjunction below is the only path into
+  // Deep Archive. The second rule only aborts abandoned multipart uploads.
+  it("creates exactly one transition rule, beside the multipart cleanup", async () => {
     await run(false);
     const configs = lifecycle();
     expect(configs).toHaveLength(1);
-    expect(configs[0]!.inputs.rules as unknown[]).toHaveLength(1);
+    const rules = configs[0]!.inputs.rules as Array<Record<string, unknown>>;
+    expect(rules).toHaveLength(2);
+    expect(rules.filter((r) => r.transitions !== undefined)).toHaveLength(1);
+  });
+
+  // A device keeps its upload id, and nothing can list in-progress uploads, so
+  // only this rule stops abandoned parts from billing forever.
+  it("aborts incomplete multipart uploads bucket-wide, and transitions nothing", async () => {
+    await run(false);
+    const rule = (lifecycle()[0]!.inputs.rules as Array<Record<string, unknown>>)[1]!;
+    expect(rule).toMatchObject({
+      status: "Enabled",
+      filter: {},
+      abortIncompleteMultipartUpload: { daysAfterInitiation: 7 },
+    });
+    expect(rule.transitions).toBeUndefined();
+    expect(rule.expiration).toBeUndefined();
   });
 
   // Archiving is paused until the platform stabilizes (2026-10-17). A reinstall
