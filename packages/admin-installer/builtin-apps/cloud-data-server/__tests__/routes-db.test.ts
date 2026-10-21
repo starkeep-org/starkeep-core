@@ -15,6 +15,8 @@ import {
   HeadObjectCommand,
   PutObjectTaggingCommand,
   RestoreObjectCommand,
+  CreateMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
 } from "@aws-sdk/client-s3";
 import { signRequest } from "@starkeep/app-client";
 import { appSyncableTableInfo, FILE_RECORDS_TABLE_INFO } from "@starkeep/shared-space-api";
@@ -3345,5 +3347,193 @@ describe("the query grammar on /data/records", () => {
     expect(bodyOf(res)).toEqual({ groups: [{ total: 12 }], truncated: false });
     // Counted over exactly the rows the caller may read.
     expect(db.calls(RECORDS_COUNT)[0]!.values).toContain("image/jpeg");
+  });
+});
+
+// A device sends a large file as fixed-size parts. The broker starts the
+// upload, presigns each part with its own SHA-256 pinned, and completes it.
+// The uploader holds the upload id: nothing here lists uploads, because that
+// permission cannot be scoped to one user's keys.
+describe("multipart upload routes", () => {
+  const hash = "d".repeat(64);
+  const sharedKey = `shared/test-user/video/dd/${hash}`;
+  const noRecordAtKey = /from "shared"\."records" where "object_storage_key" =/;
+  const partChecksum = (c: string) => Buffer.from(c.repeat(64), "hex").toString("base64");
+  const grantVideo = () =>
+    setDbFactory(
+      fakeDsqlWithGrants([{ type_id: "video", access: "readwrite" }]).on(noRecordAtKey, []),
+    );
+
+  it("starts an upload when the caller holds none, and pins each part's checksum", async () => {
+    grantVideo();
+    s3Mock.on(CreateMultipartUploadCommand).resolves({ UploadId: "UP-1" });
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "POST",
+        subPath: "/files/multipart/presign",
+        body: {
+          key: sharedKey,
+          contentType: "video/mp4",
+          parts: [
+            { partNumber: 1, checksumSha256: partChecksum("1") },
+            { partNumber: 2, checksumSha256: partChecksum("2") },
+          ],
+        },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const body = bodyOf(res) as {
+      uploadId: string;
+      parts: Array<{ partNumber: number; url: string }>;
+    };
+    expect(body.uploadId).toBe("UP-1");
+    const create = s3Mock.commandCalls(CreateMultipartUploadCommand)[0]!.args[0].input;
+    expect(create).toMatchObject({
+      Key: sharedKey,
+      ChecksumAlgorithm: "SHA256",
+      ContentType: "video/mp4",
+    });
+    // Class and tags are the broker's decision, fixed on the upload.
+    expect(create.StorageClass).toBeDefined();
+    expect(body.parts.map((p) => p.partNumber)).toEqual([1, 2]);
+    for (const part of body.parts) {
+      const url = new URL(part.url);
+      expect(url.searchParams.get("uploadId")).toBe("UP-1");
+      expect(url.searchParams.get("X-Amz-SignedHeaders")).toContain("x-amz-checksum-sha256");
+    }
+  });
+
+  it("presigns against a held upload id without starting another", async () => {
+    grantVideo();
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "POST",
+        subPath: "/files/multipart/presign",
+        body: {
+          key: sharedKey,
+          uploadId: "UP-held",
+          parts: [{ partNumber: 7, checksumSha256: partChecksum("7") }],
+        },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(bodyOf(res)["uploadId"]).toBe("UP-held");
+    expect(s3Mock.commandCalls(CreateMultipartUploadCommand)).toHaveLength(0);
+  });
+
+  it("applies the single PUT's key checks", async () => {
+    grantVideo();
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "POST",
+        subPath: "/files/multipart/presign",
+        body: {
+          key: `shared/someone-else/video/dd/${hash}`,
+          parts: [{ partNumber: 1, checksumSha256: partChecksum("1") }],
+        },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(403);
+    expect(s3Mock.commandCalls(CreateMultipartUploadCommand)).toHaveLength(0);
+  });
+
+  it("refuses a part list it cannot pin", async () => {
+    for (const parts of [
+      [],
+      [{ partNumber: 0, checksumSha256: partChecksum("1") }],
+      [{ partNumber: 1, checksumSha256: "1".repeat(64) }],
+      [
+        { partNumber: 1, checksumSha256: partChecksum("1") },
+        { partNumber: 1, checksumSha256: partChecksum("2") },
+      ],
+    ]) {
+      grantVideo();
+      const res = await handler(
+        signedEvent({
+          appId: "app1",
+          method: "POST",
+          subPath: "/files/multipart/presign",
+          body: { key: sharedKey, parts },
+        }),
+        context,
+      );
+      expect(res.statusCode, JSON.stringify(parts)).toBe(400);
+    }
+  });
+
+  it("completes with every part's ETag and checksum", async () => {
+    grantVideo();
+    s3Mock.on(CompleteMultipartUploadCommand).resolves({});
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "POST",
+        subPath: "/files/multipart/complete",
+        body: {
+          key: sharedKey,
+          uploadId: "UP-1",
+          parts: [
+            { partNumber: 2, etag: '"e2"', checksumSha256: partChecksum("2") },
+            { partNumber: 1, etag: '"e1"', checksumSha256: partChecksum("1") },
+          ],
+        },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const input = s3Mock.commandCalls(CompleteMultipartUploadCommand)[0]!.args[0].input;
+    expect(input.MultipartUpload?.Parts?.map((p) => p.PartNumber)).toEqual([1, 2]);
+  });
+
+  it("refuses a gapped part list, whose composite no node could recompute", async () => {
+    grantVideo();
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "POST",
+        subPath: "/files/multipart/complete",
+        body: {
+          key: sharedKey,
+          uploadId: "UP-1",
+          parts: [
+            { partNumber: 1, etag: '"e1"', checksumSha256: partChecksum("1") },
+            { partNumber: 3, etag: '"e3"', checksumSha256: partChecksum("3") },
+          ],
+        },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(400);
+    expect(s3Mock.commandCalls(CompleteMultipartUploadCommand)).toHaveLength(0);
+  });
+
+  it("answers 409 with S3's reason when the upload must start over", async () => {
+    grantVideo();
+    s3Mock
+      .on(CompleteMultipartUploadCommand)
+      .rejects(
+        Object.assign(new Error("The specified upload does not exist"), { name: "NoSuchUpload" }),
+      );
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "POST",
+        subPath: "/files/multipart/complete",
+        body: {
+          key: sharedKey,
+          uploadId: "UP-gone",
+          parts: [{ partNumber: 1, etag: '"e1"', checksumSha256: partChecksum("1") }],
+        },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(409);
+    expect(bodyOf(res)["code"]).toBe("NoSuchUpload");
   });
 });

@@ -323,6 +323,12 @@ describe("deviceMayCall", () => {
     expect(deviceMayCall("GET", "/files/shared/image/ab/cd")).toBe(false);
   });
 
+  it("sends a large file as a multipart upload, and nothing else under that path", () => {
+    expect(deviceMayCall("POST", "/files/multipart/presign")).toBe(true);
+    expect(deviceMayCall("POST", "/files/multipart/complete")).toBe(true);
+    expect(deviceMayCall("POST", "/files/multipart/abort")).toBe(false);
+  });
+
   it("reads the cloud's record listing, read-only", () => {
     expect(deviceMayCall("GET", "/data/records")).toBe(true);
     expect(deviceMayCall("GET", "/data/types")).toBe(true);
@@ -340,6 +346,17 @@ describe("deviceWriteRefusal", () => {
   it("refuses by category, not by the one settings type", () => {
     const body = Buffer.from(JSON.stringify({ records: [{ type: "starkeep/some-future-file" }] }));
     expect(deviceWriteRefusal("POST", "/sync/exchange", body)).not.toBeNull();
+  });
+
+  it("refuses a multipart upload of a platform file as it refuses a single PUT", () => {
+    const body = Buffer.from(JSON.stringify({ key: "shared/u/starkeep/ab/cd" }));
+    for (const route of [
+      "/files/presign",
+      "/files/multipart/presign",
+      "/files/multipart/complete",
+    ]) {
+      expect(deviceWriteRefusal("POST", route, body), route).not.toBeNull();
+    }
   });
 
   it("ignores records with no type, such as app-syncable rows", () => {
