@@ -3,10 +3,10 @@
  *
  * A node proves the cloud holds a file by comparing the SHA-256 S3 reports
  * against the record's content hash. S3 reports a whole-object SHA-256 only
- * for a single-request upload; a multipart upload stores a composite over the
- * parts, which proves nothing, and a file uploaded that way could never be
- * freed from any device. So every write is one request, and every request
- * carries the hash.
+ * for a single-request upload. A multipart upload stores a composite over the
+ * parts, which a node can prove only by rehashing its own copy in the fixed
+ * part size. The adapter's own writes therefore stay one request each, and
+ * every request carries the hash; only presigned device uploads go multipart.
  *
  * The S3 client is replaced with a recorder: what matters is the command the
  * adapter sends, and presigning aside, sending is its only contact with S3.

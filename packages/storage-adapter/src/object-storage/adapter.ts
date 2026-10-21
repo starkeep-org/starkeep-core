@@ -8,6 +8,8 @@ import type {
   ObjectFacts,
   SignedUrlOptions,
   SignedPutUrlOptions,
+  MultipartUploadOptions,
+  CompletedPart,
 } from "./types.js";
 
 export interface ObjectStorageAdapter {
@@ -110,6 +112,30 @@ export interface ObjectStorageAdapter {
   list(prefix: string, options?: ListOptions): Promise<ListResult>;
   getSignedUrl?(key: string, options?: SignedUrlOptions): Promise<string>;
   getSignedPutUrl?(key: string, options?: SignedPutUrlOptions): Promise<string>;
+
+  /**
+   * The multipart trio behind a resumable upload. A signer offers all three or
+   * none.
+   *
+   * The store creates the upload with a SHA-256 checksum per part, so every
+   * part's PUT must carry the digest {@link getSignedUploadPartUrl} binds into
+   * its signature, and the assembled object stores a composite checksum (see
+   * `multipart.ts`). The upload id is the only resume state, and the uploader
+   * holds it: listing a bucket's in-progress uploads needs a permission that
+   * cannot be narrowed to a prefix, so no signer looks uploads up.
+   */
+  createMultipartUpload?(key: string, options?: MultipartUploadOptions): Promise<string>;
+  getSignedUploadPartUrl?(
+    key: string,
+    uploadId: string,
+    partNumber: number,
+    options: { readonly checksumSha256: string; readonly expiresIn?: number },
+  ): Promise<string>;
+  completeMultipartUpload?(
+    key: string,
+    uploadId: string,
+    parts: readonly CompletedPart[],
+  ): Promise<void>;
   putSymlink?(key: string, targetPath: string, options?: PutOptions): Promise<void>;
 
   /**

@@ -117,6 +117,27 @@ export interface SignedPutUrlOptions {
   tagging?: Record<string, string>;
 }
 
+/** What a multipart upload is created with. Same meaning as on {@link SignedPutUrlOptions}. */
+export interface MultipartUploadOptions {
+  contentType?: string;
+  storageClass?: string;
+  tagging?: Record<string, string>;
+}
+
+/**
+ * One uploaded part, as the uploader reports it at completion.
+ *
+ * The uploader learns the ETag from S3's response to the part's PUT. S3 refuses
+ * a completion whose ETag or checksum disagrees with the part it stored, so
+ * nothing the uploader reports here can assemble bytes S3 did not verify.
+ */
+export interface CompletedPart {
+  readonly partNumber: number;
+  readonly etag: string;
+  /** Base64 SHA-256 of the part, as the part's PUT pinned it. */
+  readonly checksumSha256: string;
+}
+
 /**
  * What the storage backend actually knows about a stored object — everything a
  * single HEAD-equivalent call already returns. Same call and same cost as a

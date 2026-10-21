@@ -8,6 +8,9 @@ import {
   HeadObjectCommand,
   PutObjectTaggingCommand,
   RestoreObjectCommand,
+  CreateMultipartUploadCommand,
+  UploadPartCommand,
+  CompleteMultipartUploadCommand,
 } from "@aws-sdk/client-s3";
 import type { PutObjectCommandInput } from "@aws-sdk/client-s3";
 import { getSignedUrl as awsGetSignedUrl } from "@aws-sdk/s3-request-presigner";
@@ -30,20 +33,20 @@ import type {
   PutStreamOptions,
   SignedUrlOptions,
   SignedPutUrlOptions,
+  MultipartUploadOptions,
+  CompletedPart,
 } from "@starkeep/storage-adapter";
 import type { S3ObjectStorageAdapterOptions } from "./types.js";
 
 /**
  * The largest object one PutObject request may carry.
  *
- * Every object this adapter writes goes up in one request, because only a
- * single-request upload can carry a whole-object SHA-256. S3 stores a
- * multipart upload's SHA-256 as a composite over the parts, suffixed
- * `-<partCount>`, which is not the object's hash; full-object checksums for
- * multipart exist only for the CRC algorithms. Without a whole-object SHA-256
- * no node can prove the cloud holds a file, so "Free up space" could never
- * free it. The presigned uploads devices use are single requests too, so this
- * is already the largest file the system can hold.
+ * Every object this adapter writes itself goes up in one request, so the store
+ * keeps a whole-object SHA-256 for it. A device sending a large file goes
+ * through the presigned multipart trio below instead, in fixed 16 MiB parts,
+ * and S3 stores a composite checksum over the parts. A node proves that
+ * composite by recomputing it from its own copy (see `multipart.ts` in
+ * storage-adapter), so both kinds of object can be freed.
  */
 export const MAX_SINGLE_PUT_BYTES = 5 * 1024 ** 3;
 
@@ -438,6 +441,76 @@ export class S3ObjectStorageAdapter implements ObjectStorageAdapter {
         ? { signableHeaders, unhoistableHeaders: new Set(signableHeaders) }
         : {}),
     });
+  }
+
+  /**
+   * Start a multipart upload whose every part must carry a SHA-256.
+   *
+   * Storage class and tags belong to the upload, not to its parts, so they are
+   * fixed here, by the signer, and no part's PUT can change them.
+   */
+  async createMultipartUpload(key: string, options?: MultipartUploadOptions): Promise<string> {
+    const response = await this.getClient().send(
+      new CreateMultipartUploadCommand({
+        Bucket: this.options.bucketName,
+        Key: this.resolveKey(key),
+        ChecksumAlgorithm: "SHA256",
+        ...(options?.contentType ? { ContentType: options.contentType } : {}),
+        ...(options?.storageClass
+          ? { StorageClass: options.storageClass as PutObjectCommandInput["StorageClass"] }
+          : {}),
+        ...(options?.tagging ? { Tagging: encodeTagging(options.tagging) } : {}),
+      }),
+    );
+    if (!response.UploadId) throw new Error(`CreateMultipartUpload ${key} returned no upload id`);
+    return response.UploadId;
+  }
+
+  /**
+   * Presign one part's PUT with its SHA-256 bound into the signature as a
+   * header, exactly as {@link getSignedPutUrl} binds a whole object's. S3 then
+   * refuses a part whose bytes hash to anything else.
+   */
+  async getSignedUploadPartUrl(
+    key: string,
+    uploadId: string,
+    partNumber: number,
+    options: { readonly checksumSha256: string; readonly expiresIn?: number },
+  ): Promise<string> {
+    const command = new UploadPartCommand({
+      Bucket: this.options.bucketName,
+      Key: this.resolveKey(key),
+      UploadId: uploadId,
+      PartNumber: partNumber,
+      ChecksumSHA256: options.checksumSha256,
+    });
+    const pinned = new Set(["x-amz-checksum-sha256"]);
+    return awsGetSignedUrl(this.getClient(), command, {
+      expiresIn: options.expiresIn ?? 3600,
+      signableHeaders: pinned,
+      unhoistableHeaders: new Set(pinned),
+    });
+  }
+
+  async completeMultipartUpload(
+    key: string,
+    uploadId: string,
+    parts: readonly CompletedPart[],
+  ): Promise<void> {
+    await this.getClient().send(
+      new CompleteMultipartUploadCommand({
+        Bucket: this.options.bucketName,
+        Key: this.resolveKey(key),
+        UploadId: uploadId,
+        MultipartUpload: {
+          Parts: parts.map((p) => ({
+            PartNumber: p.partNumber,
+            ETag: p.etag,
+            ChecksumSHA256: p.checksumSha256,
+          })),
+        },
+      }),
+    );
   }
 }
 
