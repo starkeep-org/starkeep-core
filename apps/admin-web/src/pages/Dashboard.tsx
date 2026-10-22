@@ -512,7 +512,7 @@ export function DashboardPage() {
         </Alert>
       )}
 
-      <div className="grid max-w-7xl grid-cols-1 xl:grid-cols-2 gap-6 items-start">
+      <div className="flex max-w-7xl flex-col gap-6">
         {/* ── LOCAL ── */}
         <div className="flex flex-col gap-4">
           <h2 className="text-lg font-medium">Local</h2>
@@ -604,7 +604,7 @@ export function DashboardPage() {
 
         {/* ── CLOUD ──
             Until a deployment exists there is nothing to report and exactly one
-            thing to do, so the column carries the deploy button alone. Once the
+            thing to do, so the section carries the deploy button alone. Once the
             cloud is up the button retires into the Data Server card's menu,
             where managing a deployment sits on the deployment it manages. */}
         <div className="flex flex-col gap-4">
