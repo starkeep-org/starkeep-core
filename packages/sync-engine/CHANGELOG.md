@@ -1,5 +1,17 @@
 # @starkeep/sync-engine
 
+## 0.8.0
+
+### Minor Changes
+
+- fcd80e9: The cloud signs no URL for a shared file that has not reached S3. `RecordAvailability` gains `awaiting-upload`, stand-in sizes and variant candidates carry `awaiting_upload: true` in place of a URL, and the single-record reads answer `409 AwaitingUpload`. `VariantCandidate` carries the child's `updatedAt`, which the cloud compares with Drive's bytes watermark. `verify()` reports `filesOwed` and `filesOwedCapped`: the files the peer is still owed, since rows now reach it ahead of their files.
+
+### Patch Changes
+
+- Updated dependencies [fcd80e9]
+  - @starkeep/protocol-primitives@0.6.0
+  - @starkeep/storage-adapter@0.7.0
+
 ## 0.7.0
 
 ### Minor Changes
