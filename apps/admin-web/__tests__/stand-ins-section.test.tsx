@@ -139,6 +139,8 @@ describe("the stand-in section", () => {
                   missingLocally: 0,
                   pendingUpload: 0,
                   pendingDownload: 0,
+                  filesOwed: 0,
+                  filesOwedCapped: false,
                 },
                 error: null,
               },
@@ -393,6 +395,45 @@ describe("the stand-in section", () => {
       );
     });
 
+    it("does not read as agreed while files are still to upload", async () => {
+      // Rows reach the cloud ahead of their files, so equal row counts are not
+      // a backed-up library.
+      vi.stubGlobal(
+        "fetch",
+        stubFetch({
+          "GET /api/residency/stand-ins": () => ({ body: STAND_INS }),
+          "POST /api/sync/verify": () => ({
+            body: {
+              channels: [
+                {
+                  appId: "starkeep-drive",
+                  result: {
+                    supported: true,
+                    localRows: 120,
+                    peerRows: 120,
+                    divergentBuckets: 0,
+                    missingLocally: 0,
+                    pendingUpload: 0,
+                    pendingDownload: 0,
+                    filesOwed: 10000,
+                    filesOwedCapped: true,
+                  },
+                  error: null,
+                },
+              ],
+            },
+          }),
+        }),
+      );
+      const user = userEvent.setup();
+      render(<StandInsSection />);
+      const verify = await panel("Check sync integrity");
+      await user.click(verify.getByRole("button", { name: "Check now" }));
+      const line = (await verify.findByRole("status")).textContent;
+      expect(line).toMatch(/120 rows here, 120 in the cloud — 10000\+ files still to upload/);
+      expect(line).not.toMatch(/agreed/);
+    });
+
     it("says a peer that could not answer did not agree", async () => {
       // Reporting zero divergence for a peer that cannot answer the digest would read
       // as "verified", which is the one thing it is not.
@@ -413,6 +454,8 @@ describe("the stand-in section", () => {
                     missingLocally: 0,
                     pendingUpload: 0,
                     pendingDownload: 0,
+                    filesOwed: 0,
+                    filesOwedCapped: false,
                   },
                   error: null,
                 },

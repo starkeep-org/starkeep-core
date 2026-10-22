@@ -508,3 +508,51 @@ describe("transferFileOutcome", () => {
     ).toBe("failed");
   });
 });
+
+// "Is my library backed up?" Rows no longer wait for their files, so matching
+// row counts say nothing about bytes, and `verify()` counts the files the
+// peer is still owed against its bytes watermark.
+describe("verify() and owed files", () => {
+  /** A cloud whose storage refuses every upload while `down()` is true. */
+  function flakyCloud(cloud: Side) {
+    let failing = true;
+    const realPut = cloud.storage.putStream.bind(cloud.storage);
+    cloud.storage.putStream = async (k: string, ...rest: unknown[]) => {
+      if (failing) throw new Error("[test] link down");
+      return (realPut as (...a: unknown[]) => Promise<void>)(k, ...rest);
+    };
+    return { restore: () => (failing = false) };
+  }
+
+  it("counts files whose rows shipped and whose uploads have not, and none once the walk passes them", async () => {
+    const [cloud, phone] = await sides("C", "P");
+    for (let i = 0; i < 3; i += 1) await seedFile(phone!, 10);
+    const link = flakyCloud(cloud!);
+    const node = engine(phone!, cloud!, responder(cloud!));
+
+    const first = await node.exchange();
+    expect(first.shipped).toBe(3);
+    expect(first.uploaded).toBe(0);
+    const before = await node.verify();
+    expect(before.supported).toBe(true);
+    expect(before.divergentBuckets).toBe(0);
+    expect(before.pendingUpload).toBe(0);
+    expect(before.filesOwed).toBe(3);
+    expect(before.filesOwedCapped).toBe(false);
+
+    link.restore();
+    await node.exchange();
+    // verify()'s own exchange walks the peer's watermark past the uploads.
+    const after = await node.verify();
+    expect(after.filesOwed).toBe(0);
+  });
+
+  it("does not count a file this node does not hold", async () => {
+    const [cloud, phone] = await sides("C", "P");
+    await seedFile(phone!, 10, { withFile: false });
+    flakyCloud(cloud!);
+    const node = engine(phone!, cloud!, responder(cloud!));
+    await node.exchange();
+    expect((await node.verify()).filesOwed).toBe(0);
+  });
+});

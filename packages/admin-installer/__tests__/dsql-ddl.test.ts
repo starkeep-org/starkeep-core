@@ -337,6 +337,31 @@ describe("the cloud's bytes-watermark table", () => {
       'GRANT SELECT, INSERT, UPDATE ON app_starkeep_drive."_starkeep_byte_coverage" TO starkeep_app_starkeep_drive',
     );
   });
+
+  // The data server reads Drive's watermark on any app's request, to tell
+  // whether a shared file is in S3 before it signs a URL. Reading only: a
+  // forged watermark would make phones skip uploads.
+  it("lets every app's role read Drive's, and write none of it", async () => {
+    await runAppInstallDdl(opts, "starkeep-drive", [], true, [], false);
+    const s = stmts();
+    expect(s).toContain("GRANT USAGE ON SCHEMA app_starkeep_drive TO PUBLIC");
+    expect(s).toContain('GRANT SELECT ON app_starkeep_drive."_starkeep_byte_coverage" TO PUBLIC');
+    expect(
+      s.some(
+        (t) =>
+          t.includes("PUBLIC") &&
+          /INSERT|UPDATE|DELETE/.test(t) &&
+          t.includes("_starkeep_byte_coverage"),
+      ),
+    ).toBe(false);
+  });
+
+  it("opens no other app's schema to PUBLIC", async () => {
+    await installPhotos();
+    expect(stmts().some((t) => t.includes("GRANT USAGE ON SCHEMA") && t.includes("PUBLIC"))).toBe(
+      false,
+    );
+  });
 });
 
 describe("install DDL for Drive (fileAccessAll)", () => {

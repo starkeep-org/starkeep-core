@@ -12,6 +12,7 @@
  */
 
 import type { StarkeepId } from "../identifiers/types.js";
+import type { HLCTimestamp } from "../hlc/types.js";
 
 /** A derived child record, with the label value that made it one. */
 export interface VariantCandidate {
@@ -24,4 +25,9 @@ export interface VariantCandidate {
   /** From the per-category metadata table. Null when not (yet) extracted. */
   readonly width: number | null;
   readonly height: number | null;
+  /**
+   * The child's `updatedAt`. The cloud compares it with its bytes watermark
+   * to tell whether the child's file has arrived yet.
+   */
+  readonly updatedAt: HLCTimestamp;
 }

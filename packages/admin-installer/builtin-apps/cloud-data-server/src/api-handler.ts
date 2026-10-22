@@ -135,6 +135,11 @@ import {
   type StandInWriteError,
   type WireStandInSummary,
 } from "@starkeep/shared-space-api";
+import {
+  createBytePresence,
+  createPresentKeyCache,
+  type BytePresence,
+} from "./byte-presence.js";
 import type { AppSpecificOperations } from "@starkeep/shared-space-api";
 import type {
   DatabaseClientFactory,
@@ -1055,6 +1060,12 @@ async function seedCloudClock(client: DatabaseClient, userId: string): Promise<H
 // hand because this handler is a separately-deployed artifact.
 const DRIVE_APP_ID = "starkeep-drive";
 
+/**
+ * Shared keys this warm Lambda has seen in S3. Positive only: a key once
+ * present stays present, since shared keys are content-addressed.
+ */
+const presentKeyCache = createPresentKeyCache();
+
 // The session tag naming the user a per-app session acts for. Mirror of
 // SESSION_USER_TAG in packages/admin-installer/src/iam.ts, which the trust and
 // broker policies restrict the broker to; kept in sync by hand because this
@@ -1309,6 +1320,7 @@ function recordToResponse(
             long_edge: v.longEdge,
             available_here: false,
             ...(v.url ? { url: v.url } : {}),
+            ...(v.awaitingUpload ? { awaiting_upload: true } : {}),
             ...(v.url
               ? {
                   url_lifetime: {
@@ -1421,24 +1433,48 @@ async function checkRestoreRateLimit(
  * One batched read rather than a HeadObject per record: that would be
  * O(library) on every grid scroll, which is why availability is a maintained
  * fact rather than a computed one. Keys with no stored row take the default.
+ *
+ * With `presence`, a shared key with no stored row is also checked against
+ * Drive's bytes watermark, and one the cloud does not hold yet reads as
+ * `awaiting-upload`. Only the lazy reads pass it; see `byte-presence.ts`.
  */
 async function loadAvailabilityForPage(
   db: DatabaseAdapter,
   records: DataRecord[],
+  presence?: BytePresence,
 ): Promise<Map<string, RecordAvailability>> {
   const out = new Map<string, RecordAvailability>();
   if (records.length === 0) return out;
   const keys = [...new Set(records.map((r) => r.objectStorageKey).filter(Boolean))];
   const stored = await db.getAvailability(keys);
+  const missing = presence
+    ? await presence.missing(
+        records
+          .filter((r) => r.objectStorageKey?.startsWith("shared/") && !stored.has(r.objectStorageKey))
+          .map((r) => ({ key: r.objectStorageKey, updatedAt: r.updatedAt })),
+      )
+    : new Set<string>();
   for (const record of records) {
-    out.set(record.id, toRecordAvailability(stored.get(record.objectStorageKey)));
+    out.set(
+      record.id,
+      missing.has(record.objectStorageKey)
+        ? AWAITING_UPLOAD
+        : toRecordAvailability(stored.get(record.objectStorageKey)),
+    );
   }
   return out;
 }
 
-/** Map a stored row (or its absence) onto the API's availability union. */
-function toRecordAvailability(row: StoredAvailability | undefined): RecordAvailability {
-  if (!row) return DEFAULT_AVAILABILITY;
+const AWAITING_UPLOAD: RecordAvailability = { state: "awaiting-upload" };
+
+/**
+ * Map a stored row (or its absence) onto the API's availability union. Never
+ * `awaiting-upload`: nothing stores that, and only a presence check yields it.
+ */
+function toRecordAvailability(
+  row: StoredAvailability | undefined,
+): Exclude<RecordAvailability, { state: "awaiting-upload" }> {
+  if (!row) return { state: "instant" };
   switch (row.state) {
     case "archived":
       return {
@@ -1498,6 +1534,16 @@ function archivedReadRefusal(availability: RecordAvailability) {
         error: "ObjectAbsent",
         availability,
         detail: "This node does not hold these bytes.",
+      },
+    };
+  }
+  if (availability.state === "awaiting-upload") {
+    return {
+      status: 409,
+      body: {
+        error: "AwaitingUpload",
+        availability,
+        detail: "The device that wrote these bytes has not uploaded them yet.",
       },
     };
   }
@@ -1597,13 +1643,46 @@ async function standInSummariesForPage(
   grants: AccessGrants,
   records: readonly DataRecord[],
   withUrls: boolean,
+  presence?: BytePresence,
 ): Promise<Map<StarkeepId, WireStandInSummary>> {
+  // Every record a size can name passes through placement, the original
+  // included, so this is where the versions the presence check needs are
+  // collected.
+  const sized: DataRecord[] = [];
   const summaries = await loadStandInSummariesForPage(
     db,
     records,
     cloudLibrarySettings.standards(),
-    cloudPlacementOf,
+    async (record) => {
+      sized.push(record);
+      return cloudPlacementOf();
+    },
   );
+  const urls = new Map<string, string>();
+  if (withUrls) {
+    const keys = new Set<string>();
+    for (const summary of summaries.values()) {
+      for (const size of summary.sizes) {
+        if (size.recordId && size.objectStorageKey) keys.add(size.objectStorageKey);
+      }
+    }
+    await Promise.all(
+      [...keys].map(async (key) => {
+        const signed = await signSharedCloudFrontUrl(subject, key, grants, VARIANT_URL_TTL_SECONDS);
+        if (signed.ok) urls.set(key, signed.url);
+      }),
+    );
+  }
+  // Checked only for keys that signed: a key the caller may not read gets no
+  // URL either way, and is not "awaiting upload".
+  const missing =
+    withUrls && presence
+      ? await presence.missing(
+          sized
+            .filter((r) => urls.has(r.objectStorageKey))
+            .map((r) => ({ key: r.objectStorageKey, updatedAt: r.updatedAt })),
+        )
+      : new Set<string>();
   const out = new Map<StarkeepId, WireStandInSummary>();
   for (const [id, summary] of summaries) {
     out.set(
@@ -1613,13 +1692,8 @@ async function standInSummariesForPage(
         withUrls
           ? async (size) => {
               if (!size.objectStorageKey) return undefined;
-              const signed = await signSharedCloudFrontUrl(
-                subject,
-                size.objectStorageKey,
-                grants,
-                VARIANT_URL_TTL_SECONDS,
-              );
-              return signed.ok ? signed.url : undefined;
+              if (missing.has(size.objectStorageKey)) return { awaitingUpload: true };
+              return urls.get(size.objectStorageKey);
             }
           : undefined,
       ),
@@ -1638,6 +1712,8 @@ interface SignedCandidate {
   readonly height: number;
   readonly longEdge: number;
   readonly url?: string;
+  /** Set instead of `url` when the cloud is owed the child's file and lacks it. */
+  readonly awaitingUpload?: true;
 }
 
 /**
@@ -1655,6 +1731,7 @@ async function signCandidatesForPage(
   subject: BrokerSubject,
   grants: AccessGrants,
   byRecord: Map<StarkeepId, VariantCandidate[]>,
+  presence?: BytePresence,
 ): Promise<Map<StarkeepId, SignedCandidate[]>> {
   const out = new Map<StarkeepId, SignedCandidate[]>();
   const urlByKey = new Map<string, string>();
@@ -1703,6 +1780,25 @@ async function signCandidatesForPage(
     }
     signed.sort((a, b) => a.longEdge - b.longEdge);
     out.set(recordId, signed);
+  }
+  if (presence) {
+    const rows = [...byRecord.values()]
+      .flat()
+      .filter((c) => urlByKey.has(c.objectStorageKey))
+      .map((c) => ({ key: c.objectStorageKey, updatedAt: c.updatedAt }));
+    const missing = await presence.missing(rows);
+    if (missing.size > 0) {
+      for (const [recordId, signed] of out) {
+        out.set(
+          recordId,
+          signed.map((c) => {
+            if (!missing.has(c.objectStorageKey)) return c;
+            const { url: _unloadable, ...rest } = c;
+            return { ...rest, awaitingUpload: true as const };
+          }),
+        );
+      }
+    }
   }
   if (dropped > 0) {
     console.warn(
@@ -2509,6 +2605,15 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     await db.init();
     toClose.push(() => db.close());
 
+    // Whether a shared file has reached S3, for the lazy reads that sign one.
+    // Reads Drive's bytes watermark on first use, over this request's own
+    // connection; see `byte-presence.ts`.
+    const presence = createBytePresence({
+      loadWatermarks: () => db.byteCoverageStore(DRIVE_APP_ID).load(),
+      has: (key) => storage.has(key),
+      cache: presentKeyCache,
+    });
+
     // Per-type read/write enforcement on shared.records. DSQL has no RLS and
     // the table is shared across every type, so we load the caller app's
     // grants once per request and gate both the records and sync paths below.
@@ -2730,20 +2835,23 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         const labelsById = plan.includeLabels
           ? await loadLabelsForPage(db, labelled, labelApps)
           : null;
+        const lazy = plan.includeStandInUrls ? presence : undefined;
         const candidatesById = variantLabel
           ? await signCandidatesForPage(
               subject,
               grants,
               await loadVariantCandidatesForPage(db, labelled, variantLabel),
+              lazy,
             )
           : null;
-        const availabilityById = await loadAvailabilityForPage(db, labelled);
+        const availabilityById = await loadAvailabilityForPage(db, labelled, lazy);
         const standInsById = await standInSummariesForPage(
           db,
           subject,
           grants,
           labelled,
           plan.includeStandInUrls,
+          lazy,
         );
         return ok({
           records: labelled.map((r) =>
@@ -2774,20 +2882,26 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const labelsById = plan.includeLabels
         ? await loadLabelsForPage(db, records, labelApps)
         : null;
+      // Presence is checked only on the lazy renditions batch, which asks for
+      // stand-in URLs over the tiles near the viewport. The bulk library list
+      // asks for up to 500 records and signs nothing, so it checks nothing.
+      const lazy = plan.includeStandInUrls ? presence : undefined;
       const candidatesById = variantLabel
         ? await signCandidatesForPage(
             subject,
             grants,
             await loadVariantCandidatesForPage(db, records, variantLabel),
+            lazy,
           )
         : null;
-      const availabilityById = await loadAvailabilityForPage(db, records);
+      const availabilityById = await loadAvailabilityForPage(db, records, lazy);
       const standInsById = await standInSummariesForPage(
         db,
         subject,
         grants,
         records,
         plan.includeStandInUrls,
+        lazy,
       );
       return ok({
         records: records.map((r) =>
@@ -3886,9 +4000,21 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         limit: ids.length,
       });
       const urls: Record<string, { url: string; mimeType?: string; sizeBytes?: number }> = {};
+      const readable = result.records.filter((r) => canRead(grants, r.type) && r.objectStorageKey);
+      // Shared bytes the cloud does not hold yet are omitted like any other
+      // id it cannot answer, and named in `awaitingUpload` so a caller can
+      // tell "later" from "never".
+      const missing = await presence.missing(
+        readable
+          .filter((r) => r.objectStorageKey.startsWith("shared/"))
+          .map((r) => ({ key: r.objectStorageKey, updatedAt: r.updatedAt })),
+      );
+      const awaitingUpload = readable
+        .filter((r) => missing.has(r.objectStorageKey))
+        .map((r) => r.id);
       await Promise.all(
-        result.records
-          .filter((r) => canRead(grants, r.type) && r.objectStorageKey)
+        readable
+          .filter((r) => !missing.has(r.objectStorageKey))
           .map(async (r) => {
             const key = r.objectStorageKey!;
             let url: string;
@@ -3916,7 +4042,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             };
           }),
       );
-      return ok({ urls, expiresIn: requestedExpiresIn });
+      return ok({
+        urls,
+        expiresIn: requestedExpiresIn,
+        ...(awaitingUpload.length > 0 ? { awaitingUpload } : {}),
+      });
     }
 
     // POST /apps/{appId}/data/records/:id/restore
@@ -4105,10 +4235,12 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       }
       // A self-canonical original can be the answer, and an original can be
       // archived; a stand-in never is. Refused the same way a file-url read
-      // of archived bytes is, rather than implicitly thawed.
-      const availability = toRecordAvailability(
-        (await db.getAvailability([served.objectStorageKey])).get(served.objectStorageKey),
-      );
+      // of archived bytes is, rather than implicitly thawed. A size whose file
+      // has not been uploaded yet is refused too, rather than signed into a
+      // URL that answers 403.
+      const availability =
+        (await loadAvailabilityForPage(db, [served], presence)).get(served.id) ??
+        DEFAULT_AVAILABILITY;
       const refusal = archivedReadRefusal(availability);
       if (refusal) return ok(refusal.body, refusal.status);
       const expiresIn = Math.min(
@@ -4144,10 +4276,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (!canRead(grants, record.type)) return clientErr("Forbidden", 403);
       if (!record.objectStorageKey) return clientErr("Record has no attached file", 404);
       // Refuse rather than hand out a URL that will fail — or worse, one whose
-      // use would trigger a thaw. A read never restores implicitly.
-      const readAvailability = toRecordAvailability(
-        (await db.getAvailability([record.objectStorageKey])).get(record.objectStorageKey),
-      );
+      // use would trigger a thaw. A read never restores implicitly. Shared
+      // bytes not yet uploaded are refused the same way.
+      const readAvailability =
+        (await loadAvailabilityForPage(db, [record], presence)).get(record.id) ??
+        DEFAULT_AVAILABILITY;
       const refusal = archivedReadRefusal(readAvailability);
       if (refusal) return { statusCode: refusal.status, body: JSON.stringify(refusal.body) };
       const expiresIn = parseInt(query["expiresIn"] ?? "3600", 10);
@@ -4195,7 +4328,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         const detailMeta = detailInclude.includes("metadata")
           ? await loadMetadataForPage(db, grants, [record])
           : null;
-        const detailAvailability = await loadAvailabilityForPage(db, [record]);
+        const detailAvailability = await loadAvailabilityForPage(db, [record], presence);
         const detailStandIns = await standInSummariesForPage(db, subject, grants, [record], false);
         return ok({
           record: recordToResponse(

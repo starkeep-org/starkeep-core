@@ -36,6 +36,7 @@ import {
 } from "@starkeep/shared-space-api";
 import type { AppSyncableTableInfo } from "@starkeep/shared-space-api";
 import { retryOnAccessDenied, retryOnTransientDbError } from "./retry-on-access-denied";
+import { USER_DATA_OWNER_APP_ID } from "./temp-policies";
 
 /**
  * Flattens a manifest's fileAccess (+ fileAccessAll) into the per-type grants
@@ -463,6 +464,18 @@ export async function runAppInstallDdl(
       await sql
         .raw(`GRANT SELECT, INSERT, UPDATE ON ${schemaName}."${BYTE_COVERAGE_TABLE}" TO ${pgRole}`)
         .execute(db);
+      // Drive's watermark alone is readable by every app's role. The cloud
+      // data server reads it on an app's request to tell whether a shared
+      // file has reached S3 before it signs a URL for it. It holds one HLC per
+      // device per user and no record content; writes stay with Drive's role,
+      // because a forged watermark would make phones skip uploads. USAGE
+      // exposes the names of Drive's other tables, not their rows.
+      if (appId === USER_DATA_OWNER_APP_ID) {
+        await sql.raw(`GRANT USAGE ON SCHEMA ${schemaName} TO PUBLIC`).execute(db);
+        await sql
+          .raw(`GRANT SELECT ON ${schemaName}."${BYTE_COVERAGE_TABLE}" TO PUBLIC`)
+          .execute(db);
+      }
 
       // Upsert namespace registry row so the pull path knows which tables exist.
       if (appSyncableTables.length > 0 || appSyncableFilesEnabled) {

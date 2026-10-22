@@ -101,6 +101,7 @@ export async function loadVariantCandidatesForPage(
       labelValue: labelValueByChild.get(c.id)!,
       width: dims.width,
       height: dims.height,
+      updatedAt: c.updatedAt,
     });
   }
   return out;

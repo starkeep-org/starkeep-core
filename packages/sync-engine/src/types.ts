@@ -1003,6 +1003,19 @@ export interface VerifyResult {
    */
   readonly pendingUpload: number;
   readonly pendingDownload: number;
+  /**
+   * Files this node holds that the peer is still owed: rows above the peer's
+   * bytes watermark that name a file here, less those marked
+   * `starkeep/no-cloud`.
+   *
+   * Rows travel ahead of their files, so equal row counts no longer mean the
+   * peer holds the library. "Backed up" also needs this at zero. An upper
+   * bound while uploads run: a file uploaded past a gap still counts until the
+   * peer's walk passes it.
+   */
+  readonly filesOwed: number;
+  /** True when the count stopped at its cap, so {@link filesOwed} is a floor. */
+  readonly filesOwedCapped: boolean;
 }
 
 export interface ExchangeOptions {

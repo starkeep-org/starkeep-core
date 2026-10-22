@@ -132,17 +132,17 @@ function request(
   };
 }
 
-function post(appId: string, body: unknown): APIGatewayEvent {
+function post(appId: string, body: unknown, path = "/data/records"): APIGatewayEvent {
   const bodyStr = JSON.stringify(body);
   const headers = signRequest({
     appId,
     hmacSecret: `secret-${appId}`,
     method: "POST",
-    path: "/data/records",
+    path,
     body: bodyStr,
   });
   return {
-    rawPath: `/apps/${appId}/data/records`,
+    rawPath: `/apps/${appId}${path}`,
     requestContext: { http: { method: "POST" } },
     headers: { ...headers, "X-Starkeep-User-Token": userToken },
     body: bodyStr,
@@ -1042,5 +1042,240 @@ describe("GET /deployment/settings", () => {
   it("is Drive's route only", async () => {
     const res = await handler(settingsRequest("photos"), context);
     expect(res.statusCode).toBe(404);
+  });
+});
+
+// ---- Whether a shared file has reached S3 -----------------------------------
+//
+// A row travels ahead of its file, so the cloud can list a record whose bytes
+// are still on the phone. The lazy reads check before they sign: at or below
+// Drive's bytes watermark by trust, above it by a HEAD. Each case names its own
+// keys, because the cloud remembers a key it found for the life of the module.
+describe("reads of a file not uploaded yet", () => {
+  const COVERAGE = /from "app_starkeep_drive"\."_starkeep_byte_coverage"/;
+  const LISTING = /select \* from "shared"\."records"/;
+  const LAZY = { include: "stand-in-urls" };
+
+  /** A parent and its 640 stand-in, each under a key no other case uses. */
+  function pair(tag: string, over: Record<string, unknown> = {}) {
+    const parentKey = `shared/test-user/image/${tag}/${tag.repeat(32)}`;
+    const smallKey = `shared/test-user/image/${tag}/${tag.repeat(31)}ff`;
+    return {
+      parentKey,
+      smallKey,
+      parent: parentRow({ object_storage_key: parentKey, ...over }),
+      small: { ...smallRow(), object_storage_key: smallKey } as Record<string, unknown>,
+    };
+  }
+
+  /** S3 holds exactly these keys. */
+  function s3Holds(keys: readonly string[]) {
+    s3Mock.on(HeadObjectCommand).callsFake(async (input: { Key?: string }) => {
+      if (keys.includes(input.Key!)) return {};
+      throw Object.assign(new Error("NotFound"), {
+        name: "NotFound",
+        $metadata: { httpStatusCode: 404 },
+      });
+    });
+  }
+
+  const headed = () =>
+    s3Mock.commandCalls(HeadObjectCommand).map((c) => c.args[0].input.Key as string);
+
+  function sizeOf(body: string, fidelity: number) {
+    return (
+      JSON.parse(body).records[0].stand_ins.sizes as Array<{
+        fidelity: number;
+        url?: string;
+        awaiting_upload?: true;
+      }>
+    ).find((s) => s.fidelity === fidelity)!;
+  }
+
+  it("withholds the URL of a size above the watermark that S3 lacks, and says it is coming", async () => {
+    const { parent, small } = pair("a1");
+    s3Holds([]);
+    setDbFactory(fakeDsqlWithGrants(GRANTS).on(STAND_INS_OF_PAGE, [small]).on(LISTING, [parent]));
+    const res = await handler(request("bp1", "GET", "/data/records", LAZY), context);
+    expect(res.statusCode).toBe(200);
+    expect(sizeOf(res.body, 640)).toMatchObject({ awaiting_upload: true });
+    expect(sizeOf(res.body, 640).url).toBeUndefined();
+    expect(JSON.parse(res.body).records[0].availability).toEqual({ state: "awaiting-upload" });
+  });
+
+  it("signs a size above the watermark once S3 holds it", async () => {
+    const { parent, small, parentKey, smallKey } = pair("a2");
+    s3Holds([parentKey, smallKey]);
+    setDbFactory(fakeDsqlWithGrants(GRANTS).on(STAND_INS_OF_PAGE, [small]).on(LISTING, [parent]));
+    const res = await handler(request("bp2", "GET", "/data/records", LAZY), context);
+    expect(sizeOf(res.body, 640).url).toMatch(/^https:\/\/d1234testcdn\.cloudfront\.net\//);
+    expect(sizeOf(res.body, 640).awaiting_upload).toBeUndefined();
+    expect(JSON.parse(res.body).records[0].availability).toEqual({ state: "instant" });
+  });
+
+  it("signs a size at the watermark without asking S3", async () => {
+    const { parent, small } = pair("a3");
+    s3Holds([]);
+    setDbFactory(
+      fakeDsqlWithGrants(GRANTS)
+        .on(COVERAGE, [{ node_id: "test", hlc: small["updated_at"] }])
+        .on(STAND_INS_OF_PAGE, [small])
+        .on(LISTING, [parent]),
+    );
+    const res = await handler(request("bp3", "GET", "/data/records", LAZY), context);
+    expect(sizeOf(res.body, 640).url).toMatch(/^https:\/\/d1234testcdn\.cloudfront\.net\//);
+    expect(headed()).toEqual([]);
+  });
+
+  it("checks nothing on the bulk library list, which signs nothing", async () => {
+    const { parent, small } = pair("a4");
+    s3Holds([]);
+    const db = fakeDsqlWithGrants(GRANTS).on(STAND_INS_OF_PAGE, [small]).on(LISTING, [parent]);
+    setDbFactory(db);
+    const res = await handler(
+      request("bp4", "GET", "/data/records"),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).records[0].availability).toEqual({ state: "instant" });
+    expect(headed()).toEqual([]);
+    expect(db.calls(COVERAGE)).toEqual([]);
+  });
+
+  it("marks a derived child S3 lacks as awaiting upload, and signs one it holds", async () => {
+    const { parent, parentKey } = pair("a0");
+    const poster = recordRow({
+      id: "01POSTER000000000000000000",
+      type: "image/jpeg",
+      parent_id: PARENT_ID,
+      object_storage_key: `shared/test-user/image/a0/${"a0".repeat(31)}01`,
+    });
+    const skim = recordRow({
+      id: "01SKIM00000000000000000000",
+      type: "image/jpeg",
+      parent_id: PARENT_ID,
+      object_storage_key: `shared/test-user/image/a0/${"a0".repeat(31)}02`,
+    });
+    s3Holds([parentKey, skim["object_storage_key"] as string]);
+    const label = (recordId: string, value: string) => ({
+      record_id: recordId,
+      app_id: "photos",
+      key: "derived",
+      value,
+      record_type: "image/jpeg",
+      created_at: parent["created_at"],
+      updated_at: parent["updated_at"],
+      deleted_at: null,
+      node_id: "test",
+    });
+    setDbFactory(
+      fakeDsqlWithGrants(GRANTS)
+        .on(/from "shared"\."records" where "parent_id" in \(.*\) and "deleted_at" is null/, [
+          poster,
+          skim,
+        ])
+        .on(/from "shared"\."record_labels" where "record_id" in/, [
+          label(poster["id"] as string, "poster"),
+          label(skim["id"] as string, "skim"),
+        ])
+        .on(/from "shared"\."record_image_metadata"/, [
+          { record_id: poster["id"], width: 1280, height: 720 },
+          { record_id: skim["id"], width: 640, height: 360 },
+        ])
+        .on(LISTING, [parent]),
+    );
+    const res = await handler(
+      request("bp0", "GET", "/data/records", { ...LAZY, variant: "photos/derived" }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const candidates = JSON.parse(res.body).records[0].variant_candidates as Array<{
+      id: string;
+      url?: string;
+      awaiting_upload?: true;
+      url_lifetime?: unknown;
+    }>;
+    const byId = new Map(candidates.map((c) => [c.id, c]));
+    expect(byId.get("01POSTER000000000000000000")).toMatchObject({ awaiting_upload: true });
+    expect(byId.get("01POSTER000000000000000000")!.url).toBeUndefined();
+    expect(byId.get("01POSTER000000000000000000")!.url_lifetime).toBeUndefined();
+    expect(byId.get("01SKIM00000000000000000000")!.url).toMatch(/^https:\/\/d1234testcdn/);
+  });
+
+  it("refuses a content read at a size S3 lacks with AwaitingUpload", async () => {
+    const { parent, small, parentKey } = pair("a5");
+    s3Holds([parentKey]);
+    setDbFactory(
+      fakeDsqlWithGrants(GRANTS)
+        .on(GET_BY_ID, (q) => (q.values.includes(SMALL_ID) ? [small] : [parent]))
+        .on(STAND_INS_OF_PAGE, [small]),
+    );
+    const res = await handler(
+      request("bp5", "GET", `/data/records/${PARENT_ID}/content-url`, { size: "640" }),
+      context,
+    );
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body)).toMatchObject({
+      error: "AwaitingUpload",
+      availability: { state: "awaiting-upload" },
+    });
+  });
+
+  it("refuses a file-url read of an original S3 lacks with AwaitingUpload", async () => {
+    const { parent } = pair("a6");
+    s3Holds([]);
+    setDbFactory(fakeDsqlWithGrants(GRANTS).on(GET_BY_ID, [parent]));
+    const res = await handler(
+      request("bp6", "GET", `/data/records/${PARENT_ID}/file-url`),
+      context,
+    );
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.body).error).toBe("AwaitingUpload");
+  });
+
+  it("signs a file-url read of an original at the watermark without asking S3", async () => {
+    const { parent } = pair("a7");
+    s3Holds([]);
+    setDbFactory(
+      fakeDsqlWithGrants(GRANTS)
+        .on(COVERAGE, [{ node_id: "test", hlc: parent["updated_at"] }])
+        .on(GET_BY_ID, [parent]),
+    );
+    const res = await handler(
+      request("bp7", "GET", `/data/records/${PARENT_ID}/file-url`),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).url).toMatch(/^https:\/\/d1234testcdn\.cloudfront\.net\//);
+    expect(headed()).toEqual([]);
+  });
+
+  it("reports the original's availability on the record route", async () => {
+    const { parent } = pair("a8");
+    s3Holds([]);
+    setDbFactory(fakeDsqlWithGrants(GRANTS).on(GET_BY_ID, [parent]));
+    const res = await handler(request("bp8", "GET", `/data/records/${PARENT_ID}`), context);
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).record.availability).toEqual({ state: "awaiting-upload" });
+  });
+
+  it("omits an id from the batch file-urls whose file S3 lacks, and names it", async () => {
+    const { parent } = pair("a9");
+    const other = pair("b1", { id: "01OTHER0000000000000000000" });
+    s3Holds([other.parentKey]);
+    setDbFactory(
+      fakeDsqlWithGrants(GRANTS).on(/from "shared"\."records" where "id" in/, [
+        parent,
+        other.parent,
+      ]),
+    );
+    const res = await handler(
+      post("bp9", { ids: [PARENT_ID, "01OTHER0000000000000000000"] }, "/data/records/file-urls"),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(Object.keys(body.urls)).toEqual(["01OTHER0000000000000000000"]);
+    expect(body.awaitingUpload).toEqual([PARENT_ID]);
   });
 });
