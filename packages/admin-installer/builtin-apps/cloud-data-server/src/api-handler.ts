@@ -135,11 +135,7 @@ import {
   type StandInWriteError,
   type WireStandInSummary,
 } from "@starkeep/shared-space-api";
-import {
-  createBytePresence,
-  createPresentKeyCache,
-  type BytePresence,
-} from "./byte-presence.js";
+import { createBytePresence, createPresentKeyCache, type BytePresence } from "./byte-presence.js";
 import type { AppSpecificOperations } from "@starkeep/shared-space-api";
 import type {
   DatabaseClientFactory,
@@ -1450,7 +1446,9 @@ async function loadAvailabilityForPage(
   const missing = presence
     ? await presence.missing(
         records
-          .filter((r) => r.objectStorageKey?.startsWith("shared/") && !stored.has(r.objectStorageKey))
+          .filter(
+            (r) => r.objectStorageKey?.startsWith("shared/") && !stored.has(r.objectStorageKey),
+          )
           .map((r) => ({ key: r.objectStorageKey, updatedAt: r.updatedAt })),
       )
     : new Set<string>();
