@@ -1,5 +1,12 @@
 # @starkeep/admin-manifest
 
+## 0.6.1
+
+### Patch Changes
+
+- Updated dependencies [fcd80e9]
+  - @starkeep/protocol-primitives@0.6.0
+
 ## 0.6.0
 
 ### Minor Changes
