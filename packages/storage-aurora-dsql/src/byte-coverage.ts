@@ -11,9 +11,11 @@
  *
  * One table per channel, in the channel's own schema (`app_<appId>`), so the
  * per-app database roles that already confine each channel confine this too:
- * no app can read or move another channel's value. The installer creates it
- * beside the app's other reserved tables (`dsql-ddl.ts`). The Drive channel is
- * installed as an app and gets one the same way.
+ * no app can move another channel's value. The installer creates it beside the
+ * app's other reserved tables (`dsql-ddl.ts`). The Drive channel is installed
+ * as an app and gets one the same way. Drive's alone is readable by every
+ * app's role, so the cloud data server can tell on an app's request whether a
+ * shared file has reached S3 (`cloud-data-server/src/byte-presence.ts`).
  */
 
 import { deserializeHLC, serializeHLC, type HLCTimestamp } from "@starkeep/protocol-primitives";

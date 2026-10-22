@@ -82,6 +82,9 @@ interface VerifyChannel {
     missingLocally: number;
     pendingUpload: number;
     pendingDownload: number;
+    /** Files the cloud is still owed; rows travel ahead of them. */
+    filesOwed: number;
+    filesOwedCapped: boolean;
   } | null;
   error: string | null;
 }
@@ -750,6 +753,13 @@ function VerifyLine({ channel }: { channel: VerifyChannel }) {
   if (r.missingLocally > 0) notes.push(`${r.missingLocally} missing here`);
   if (r.pendingUpload > 0) notes.push(`${r.pendingUpload} still to upload`);
   if (r.pendingDownload > 0) notes.push(`${r.pendingDownload} still to download`);
+  // Matching rows say nothing about bytes: a row reaches the cloud before its
+  // file does, so the library is not backed up until this reaches zero.
+  if (r.filesOwed > 0) {
+    notes.push(
+      `${r.filesOwed}${r.filesOwedCapped ? "+" : ""} file${r.filesOwed === 1 && !r.filesOwedCapped ? "" : "s"} still to upload`,
+    );
+  }
   return (
     <span className={r.divergentBuckets > 0 || r.missingLocally > 0 ? "text-destructive" : ""}>
       <span className="tabular-nums">{r.localRows}</span> rows here,{" "}

@@ -48,7 +48,16 @@ export type RecordAvailability =
    * Collapsing the two would send a client to a restore endpoint that has
    * nothing to restore.
    */
-  | { readonly state: "absent" };
+  | { readonly state: "absent" }
+  /**
+   * This node is owed the bytes and does not hold them yet. A row travels
+   * ahead of its file, so the cloud can list a record whose file is still on
+   * the phone that wrote it.
+   *
+   * Distinct from `absent`, which never changes on its own: a client polls
+   * for `awaiting-upload` and does not poll for `absent`.
+   */
+  | { readonly state: "awaiting-upload" };
 
 /**
  * What a node assumes about an object it has never heard anything about.

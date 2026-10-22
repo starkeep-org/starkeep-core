@@ -140,6 +140,10 @@ export function fakeDsqlWithGrants(
       // stand-ins, to build each item's size summary. None by default; a test
       // about stand-ins answers with `on(STAND_INS_OF_PAGE, …)`, which wins.
       .otherwise(STAND_INS_OF_PAGE, [])
+      // The lazy reads check whether a shared file is in S3, starting from
+      // Drive's bytes watermark. None by default, so every key takes a HEAD,
+      // which the S3 mock answers.
+      .otherwise(/from "app_starkeep_drive"\."_starkeep_byte_coverage"/, [])
   );
 }
 

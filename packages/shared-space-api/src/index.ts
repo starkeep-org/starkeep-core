@@ -78,6 +78,7 @@ export {
   parseSizeParam,
   type WireStandInSummary,
   type WireStandInSize,
+  type SizeUrl,
   type ContentReadOutcome,
 } from "./stand-ins/read.js";
 export {

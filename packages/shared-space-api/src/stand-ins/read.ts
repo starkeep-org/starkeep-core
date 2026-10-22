@@ -27,7 +27,16 @@ export interface WireStandInSize {
   readonly size_bytes: number | null;
   readonly placement: SizePlacement;
   readonly url?: string;
+  /**
+   * Set instead of `url` when the node is owed this size's file and does not
+   * hold it yet. A client asks again later rather than painting a URL that
+   * cannot load.
+   */
+  readonly awaiting_upload?: true;
 }
+
+/** What `urlFor` answers for one size. */
+export type SizeUrl = string | { readonly awaitingUpload: true } | undefined;
 
 export interface WireStandInSummary {
   readonly category: string;
@@ -49,11 +58,12 @@ export interface WireStandInSummary {
 
 /**
  * Render a summary. `urlFor`, when given, is asked for each size that has a
- * record, and may answer undefined for bytes the caller cannot read now.
+ * record, and may answer undefined for bytes the caller cannot read now, or
+ * `{ awaitingUpload: true }` for bytes the node is owed and lacks.
  */
 export async function renderStandInSummary(
   summary: StandInSummary,
-  urlFor?: (size: StandInSize) => Promise<string | undefined>,
+  urlFor?: (size: StandInSize) => Promise<SizeUrl>,
 ): Promise<WireStandInSummary> {
   return {
     category: summary.category,
@@ -79,7 +89,8 @@ export async function renderStandInSummary(
           type: size.type,
           size_bytes: size.sizeBytes,
           placement: size.placement,
-          ...(url ? { url } : {}),
+          ...(typeof url === "string" ? { url } : {}),
+          ...(typeof url === "object" ? { awaiting_upload: true as const } : {}),
         };
       }),
     ),

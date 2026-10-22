@@ -169,7 +169,16 @@ const NOT_VERIFIED: VerifyResult = {
   missingLocally: 0,
   pendingUpload: 0,
   pendingDownload: 0,
+  filesOwed: 0,
+  filesOwedCapped: false,
 };
+
+/**
+ * How many owed files `verify()` counts before it stops. Enough to tell "a
+ * few" from "many"; a person reading "10000+ files still to upload" needs no
+ * exact figure.
+ */
+const FILES_OWED_CAP = 10_000;
 
 /**
  * Sync engine: drives one version-vector exchange round per tick.
@@ -632,6 +641,37 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       moved,
       hasMore: availableLeftOver || (scan.ceilings.size > 0 && moved),
     };
+  }
+
+  /**
+   * Count the files the upload pass would still owe the peer, without
+   * sending any. The same selection as {@link uploadOwedFiles}: rows above
+   * the peer's bytes watermark (lowered to any repair floor) whose file this
+   * node holds and may send to the cloud.
+   */
+  async function countOwedFiles(
+    peerBytes: Watermarks,
+  ): Promise<{ readonly count: number; readonly capped: boolean } | null> {
+    const from = lowerBytesToFloors(peerBytes, await loadRepairFloors());
+    const scan = await scanFileRows(localFileRows, from, FILES_OWED_CAP);
+    if (!scan.readable) return null;
+    const held: FileRow[] = [];
+    for (const row of scan.rows) {
+      if (!row.manifest) continue;
+      if (await localHas(row.manifest.objectStorageKey)) held.push(row);
+    }
+    const excluded = await cloudExcludedRecords(
+      localDatabaseAdapter,
+      held.flatMap((row) => (row.recordId === null ? [] : [row.recordId])),
+    );
+    const owed = new Set(
+      held
+        .filter((row) => row.recordId === null || !excluded.has(row.recordId))
+        .map((row) => row.manifest!.objectStorageKey),
+    );
+    // Rows past where the scan stopped may name more: the count is a floor.
+    const capped = owed.size >= FILES_OWED_CAP || scan.ceilings.size > 0;
+    return { count: Math.min(owed.size, FILES_OWED_CAP), capped };
   }
 
   /**
@@ -1967,6 +2007,26 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         }
       }
 
+      // Rows no longer wait for their files, so matching rows say nothing
+      // about bytes. The peer's bytes watermark from this same exchange says
+      // which of our files it holds; a peer that has never reported one holds
+      // none we know of.
+      let filesOwed: { readonly count: number; readonly capped: boolean } | null;
+      try {
+        filesOwed = await countOwedFiles(
+          response.responderByteWatermarks ?? (await loadPeerByteWatermarks()) ?? {},
+        );
+      } catch (err) {
+        console.warn(`[sync] could not count owed files: ${(err as Error).message}`);
+        filesOwed = null;
+      }
+      if (filesOwed === null) {
+        // Same family as the digest guards above: an uncounted backlog is not
+        // an empty one, and "backed up" is what zero would read as.
+        console.warn("[sync] owed files uncountable; skipping verification");
+        return NOT_VERIFIED;
+      }
+
       return {
         supported: true,
         localRows: totalRows(localDigest),
@@ -1975,6 +2035,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         missingLocally: inboundDrained ? missingHere.length : 0,
         pendingUpload: outboundDrained ? 0 : missing.length,
         pendingDownload: inboundDrained ? 0 : missingHere.length,
+        filesOwed: filesOwed.count,
+        filesOwedCapped: filesOwed.capped,
       };
     },
 
