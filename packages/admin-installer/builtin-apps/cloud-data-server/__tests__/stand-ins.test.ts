@@ -1132,10 +1132,7 @@ describe("reads of a file not uploaded yet", () => {
     s3Holds([]);
     const db = fakeDsqlWithGrants(GRANTS).on(STAND_INS_OF_PAGE, [small]).on(LISTING, [parent]);
     setDbFactory(db);
-    const res = await handler(
-      request("bp4", "GET", "/data/records"),
-      context,
-    );
+    const res = await handler(request("bp4", "GET", "/data/records"), context);
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).records[0].availability).toEqual({ state: "instant" });
     expect(headed()).toEqual([]);
