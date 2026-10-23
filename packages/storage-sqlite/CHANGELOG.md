@@ -1,5 +1,11 @@
 # @starkeep/storage-sqlite
 
+## 0.5.3
+
+### Patch Changes
+
+- @starkeep/shared-space-api@0.6.1
+
 ## 0.5.2
 
 ### Patch Changes
