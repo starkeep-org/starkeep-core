@@ -21,6 +21,12 @@ import {
   sha256Base64ToHex,
   verifyingStream,
 } from "@starkeep/storage-adapter";
+import type {
+  PresignUploadAnswer,
+  PresignUploadItem,
+  PresignedPut,
+  UploadBatchReport,
+} from "../uploader.js";
 
 /** Lowercase-hex SHA-256 of bytes in hand, with the platform's portable hasher. */
 function hashHex(data: Uint8Array): string {
@@ -267,6 +273,8 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     options?: PutStreamOptions,
   ) => Promise<void>;
 
+  private readonly uploadFile: UploadFile | null;
+
   private readonly multipart: {
     readonly hashFileParts: HashFileParts;
     readonly uploadFileRange: UploadFileRange;
@@ -277,6 +285,7 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.signRequest = options.signRequest;
+    this.uploadFile = options.uploadFile ?? null;
     this.multipart =
       options.hashFileParts && options.uploadFileRange
         ? {
@@ -372,6 +381,90 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
   }
 
   /**
+   * Ask the cloud about a batch of uploads in one request: for each file,
+   * whether it already holds the bytes, refuses them, or signs a PUT.
+   *
+   * One request in place of a HEAD and a presign per file. The answers come
+   * back in the request's order. `report` is the uploader's account of its
+   * own activity, which the cloud logs and does not act on.
+   */
+  async presignUploads(
+    items: readonly PresignUploadItem[],
+    report?: UploadBatchReport,
+  ): Promise<PresignUploadAnswer[]> {
+    const body = JSON.stringify({ items, ...(report ? { report } : {}) });
+    const res = await this.fetchImpl(`${this.apiBase()}/files/presign-batch`, {
+      method: "POST",
+      headers: this.headers("POST", "/files/presign-batch", body, {
+        "Content-Type": "application/json",
+      }),
+      body,
+    });
+    if (!res.ok) {
+      throw new Error(
+        `presign batch of ${items.length} failed: ${res.status} ${res.statusText}${await s3ErrorDetail(res)}`,
+      );
+    }
+    const parsed = (await res.json()) as { answers?: PresignUploadAnswer[] };
+    if (!Array.isArray(parsed.answers) || parsed.answers.length !== items.length) {
+      throw new Error(
+        `presign batch of ${items.length} answered ${parsed.answers?.length ?? "no"} items`,
+      );
+    }
+    return parsed.answers;
+  }
+
+  /**
+   * Whether a file this size goes up in parts from `source`: above the
+   * multipart threshold, with the multipart ports configured and a file URI to
+   * read the parts from. The parts path signs its own URLs, so the batch asks
+   * only whether the cloud holds such a file.
+   */
+  sendsInParts(key: string, sizeBytes: number, source: ObjectStorageAdapter): boolean {
+    return (
+      this.multipart !== null &&
+      this.putFromFileUri !== undefined &&
+      sizeBytes > MULTIPART_THRESHOLD_BYTES &&
+      (source.localFileUriFor?.(key) ?? null) !== null
+    );
+  }
+
+  /**
+   * Send a file to a URL the batch presign signed. The bytes go
+   * platform-to-platform when the source names a file and this adapter has an
+   * uploader, and as a verified stream otherwise, as `file-sync-engine.ts`
+   * decides for a single transfer.
+   */
+  async uploadPresigned(
+    key: string,
+    signed: PresignedPut,
+    source: ObjectStorageAdapter,
+    options: PutStreamOptions,
+  ): Promise<void> {
+    const fileUri = source.localFileUriFor?.(key) ?? null;
+    if (fileUri !== null && this.uploadFile) {
+      try {
+        await this.sendFile(this.uploadFile, key, fileUri, options, signed);
+        return;
+      } catch (err) {
+        // Raised before a byte moved, so the stream below costs nothing extra.
+        if (!(err instanceof FileUriTransferRefused)) throw err;
+        console.warn(
+          `[sync] ${key}: the file-URI upload was refused (${err.message}); sending it as a stream instead`,
+        );
+      }
+    }
+    const body = await source.getStream(key);
+    if (!body) throw new Error(`${key} could not be read from this node`);
+    try {
+      await this.sendStream(key, body, signed, options);
+    } catch (err) {
+      await body.cancel().catch(() => {});
+      throw err;
+    }
+  }
+
+  /**
    * Upload a file the platform can read, without its bytes entering JS.
    *
    * See `ObjectStorageAdapter.putFromFileUri` for the contract, and the plan in
@@ -382,8 +475,10 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     key: string,
     fileUri: string,
     options?: PutStreamOptions,
+    signed?: PresignedPut,
   ): Promise<void> {
-    const presigned = await this.presignPut(key, options?.contentType, options?.expectedSha256Hex);
+    const presigned =
+      signed ?? (await this.presignPut(key, options?.contentType, options?.expectedSha256Hex));
 
     // The one refusal, raised here — after the presign round trip and before a
     // single byte moves, which is exactly where the contract permits it.
@@ -728,11 +823,18 @@ export class HttpObjectStorageAdapter implements ObjectStorageAdapter {
     body: ReadableStream<Uint8Array>,
     options?: PutStreamOptions,
   ): Promise<void> {
-    const { url, checksumSha256, storageClass, tagging } = await this.presignPut(
-      key,
-      options?.contentType,
-      options?.expectedSha256Hex,
-    );
+    const signed = await this.presignPut(key, options?.contentType, options?.expectedSha256Hex);
+    await this.sendStream(key, body, signed, options);
+  }
+
+  /** PUT a stream to a URL the server already signed. */
+  private async sendStream(
+    key: string,
+    body: ReadableStream<Uint8Array>,
+    signed: PresignedPut,
+    options?: PutStreamOptions,
+  ): Promise<void> {
+    const { url, checksumSha256, storageClass, tagging } = signed;
 
     // Hash on the way past and fail the stream on a mismatch, which aborts the
     // request rather than completing it. S3 checks the pinned `checksumSha256`

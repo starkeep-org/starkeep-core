@@ -1,3 +1,5 @@
+import type { Uploader } from "./uploader.js";
+import type { UploadQueueStore } from "./upload-queue-store.js";
 import type {
   StarkeepId,
   HLCTimestamp,
@@ -699,18 +701,11 @@ export interface ExchangeResult {
    */
   readonly landed: number;
   readonly landedBytes: number;
-  /**
-   * Files this round's upload pass sent, and their bytes. Counted per object,
-   * so two items sharing identical bytes count once, and a file found already
-   * at the peer does not count.
-   */
-  readonly uploaded: number;
-  readonly uploadedBytes: number;
   readonly shipped: number;
   /**
-   * File work remains that another round can do: a transfer pass left files
-   * for the byte budget, or an upload sent bytes and the peer's bytes
-   * watermark is therefore stale until the next exchange.
+   * Download work remains that another round can do: the download pass left
+   * files for the byte budget. Uploads never count: they run in
+   * {@link SyncEngine.uploader}, beside the round.
    *
    * A file that only another node holds does not count. Nothing this node can
    * do moves it, so counting it would keep `sync()` looping on nothing.
@@ -738,7 +733,7 @@ export interface ExchangeResult {
   readonly outboundHasMore: boolean;
   /**
    * An author's run was cut short by something that would not move — a blob
-   * that failed to transfer in either direction, or a row that would not apply.
+   * that failed to download, or a row that would not apply.
    *
    * Distinct from both `hasMore` fields, which describe **scans**. A round can
    * scan a backlog that fits the budget, select it, fail every transfer, and
@@ -813,12 +808,12 @@ export interface SyncEngine {
    *   4. Download pass: fetch the files this node wants and lacks, from its
    *      own rows above its bytes watermark, announcing them as they land.
    *      A failed download holds only the bytes watermark.
-   *   5. Upload pass: send the files of this node's rows that the peer's
-   *      bytes watermark says it lacks.
-   *   6. Persist watermarks: own rows and bytes advance over what landed; the
+   *   5. Persist watermarks: own rows and bytes advance over what landed; the
    *      peer's are **replaced** with its own reports — not local optimism —
    *      so peer-side loss (wipe, redeploy, failed apply) is detected and
    *      re-shipped.
+   *   6. Hand the saved watermarks to {@link uploader}, which reconciles its
+   *      queue against them in the background. Uploads are not part of a round.
    */
   exchange(options?: ExchangeOptions): Promise<ExchangeResult>;
 
@@ -927,6 +922,12 @@ export interface SyncEngine {
   acquireBlob(manifest: FileSyncManifest, candidate: BlobCandidate): Promise<AcquireResult>;
 
   readonly changeNotifier: ChangeNotifier;
+  /**
+   * Uploads, beside the round: a persistent queue drained continuously, small
+   * stand-ins first. The round never waits for it, and it takes no lock. See
+   * `uploader.ts`.
+   */
+  readonly uploader: Uploader;
 }
 
 /** What {@link SyncEngine.acquireBlob} did, and why. */
@@ -1171,16 +1172,21 @@ export interface SyncEngineOptions {
    */
   readonly filesOwedCap?: number;
   /**
-   * How many blobs transfer at once within a round. Default 4.
+   * How many downloads run at once within a round. Default 4.
    *
-   * Exists because a single-stream upload does not saturate a fast link, so a
-   * strictly sequential round leaves the node idle for most of it — which
-   * matters more, not less, once rounds are small. Bounded because every
-   * in-flight transfer costs memory, and a handset has little.
-   *
-   * Does not weaken the contiguous-prefix rule: transfers overlap, but what
-   * ships is decided afterwards per author in HLC order, stopping at that
-   * author's first failure.
+   * Exists because a single-stream transfer does not saturate a fast link, so
+   * a strictly sequential round leaves the node idle for most of it. Bounded
+   * because every in-flight transfer costs memory, and a handset has little.
+   * Uploads use the uploader's own lanes and ignore this.
    */
   readonly transferConcurrency?: number;
+  /**
+   * Where the uploader keeps its queue. Every real node passes the SQLite
+   * store from `upload-queue-store.ts`, in the database that holds its
+   * records, so the queue survives a restart. Defaults to memory, for tests
+   * and one-off engines.
+   */
+  readonly uploadQueue?: UploadQueueStore;
+  /** The uploader's timers, injectable so tests can drive time. */
+  readonly uploaderTimers?: import("./uploader.js").UploaderTimers;
 }

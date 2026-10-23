@@ -444,6 +444,7 @@ describe("label sync", () => {
     const syncState = createMemorySyncStateStore();
     const engine = driveEngine(local, cloud, { syncState });
     await engine.exchange();
+    await engine.uploader.drain();
     await engine.exchange();
 
     expect(await cloud.db.get(early)).not.toBeNull();
@@ -460,7 +461,10 @@ describe("label sync", () => {
     await local.storage.put(missingRow.objectStorageKey, new Uint8Array([1]), {
       contentType: "image/jpeg",
     });
+    // The cloud's walk stops at the file, and the uploader offers it once it
+    // is here, although discovery passed the row while it was missing.
     await engine.exchange();
+    await engine.uploader.drain();
     await engine.exchange();
     expect(await cloud.storage.has(missingRow.objectStorageKey)).toBe(true);
     const after = (await syncState.getPeerByteWatermarks())!;

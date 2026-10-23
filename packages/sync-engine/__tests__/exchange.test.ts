@@ -148,7 +148,9 @@ describe("version-vector exchange", () => {
     expect(pwm["local"]).toBeDefined();
     expect(pwm["local"]).toEqual(localRecord.updatedAt);
 
-    // Both sides should hold both blobs after the exchange.
+    // Both sides hold both blobs once the uploader has run: downloads move in
+    // the round, uploads beside it.
+    await engine.uploader.drain();
     expect(await cloudStorage.has(localRecord.objectStorageKey)).toBe(true);
     expect(await localStorage.has(cloudRecord.objectStorageKey)).toBe(true);
 
@@ -288,6 +290,7 @@ describe("version-vector exchange", () => {
     });
 
     await engine.exchange();
+    await engine.uploader.drain();
 
     // Every row ships; the files this node holds upload, r2's included.
     for (const record of records) expect(await cloudDb.get(record.id)).not.toBeNull();
@@ -306,8 +309,9 @@ describe("version-vector exchange", () => {
     await localStorage.put(records[1]!.objectStorageKey, new Uint8Array([2]), {
       contentType: "image/jpeg",
     });
-    const repaired = await engine.exchange();
-    expect(repaired.uploaded).toBe(1);
+    await engine.exchange();
+    await engine.uploader.drain();
+    expect(engine.uploader.stats().sent.count).toBe(3);
     expect(await cloudStorage.has(records[1]!.objectStorageKey)).toBe(true);
     await engine.exchange();
     expect((await syncState.getPeerByteWatermarks())?.["local"]).toEqual(records[2]!.updatedAt);
@@ -439,6 +443,7 @@ describe("version-vector exchange", () => {
 
     const result = await engine.exchange();
     expect(result.shipped).toBe(1);
+    await engine.uploader.drain();
 
     // Cloud's AR row landed via the appSyncable apply path...
     const cloudPage = await cloudApp.applier.scanSince("test-app", FILE_RECORDS_TABLE, {}, 1000);
@@ -555,6 +560,7 @@ describe("version-vector exchange", () => {
     });
 
     await engine.exchange();
+    await engine.uploader.drain();
     await engine.exchange();
 
     // Every row ships, the AR row included.
@@ -575,6 +581,7 @@ describe("version-vector exchange", () => {
       contentType: "image/jpeg",
     });
     await engine.exchange();
+    await engine.uploader.drain();
     await engine.exchange();
     expect(await cloudStorage.has(arKey)).toBe(true);
     const after = await syncState.getPeerByteWatermarks();

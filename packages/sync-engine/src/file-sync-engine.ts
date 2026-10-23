@@ -14,7 +14,7 @@ const HEX_SHA256 = /^[a-f0-9]{64}$/;
  * correct direction: this check exists to catch corruption, not to block
  * records that predate content hashing.
  */
-function expectedHashFor(manifest: FileSyncManifest): string | null {
+export function expectedHashFor(manifest: FileSyncManifest): string | null {
   if (HEX_SHA256.test(manifest.fileHash)) return manifest.fileHash;
   // Content-addressed keys carry the hash in their last segment.
   const last = manifest.objectStorageKey.split("/").pop() ?? "";

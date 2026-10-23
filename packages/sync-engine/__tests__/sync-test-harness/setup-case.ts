@@ -7,6 +7,7 @@ import {
 } from "@starkeep/protocol-primitives";
 import { rowToWireEntry, type MockDatabaseAdapter } from "@starkeep/storage-adapter";
 import { createSyncEngine } from "../../src/sync-engine.js";
+import { createTestUploaderClock, uploadAfterRound } from "./uploader-clock.js";
 import { createInProcessSyncTransport } from "../../src/transports/in-process-transport.js";
 import { residencyOf, type RecordResidency } from "../../src/residency.js";
 import type {
@@ -102,6 +103,7 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
       applier: cloud.applier,
     },
   });
+  const uploaderClock = createTestUploaderClock();
   const engine = createSyncEngine({
     localDatabaseAdapter: local.db,
     localObjectStorage: local.storage,
@@ -114,6 +116,7 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
       applier: local.applier,
     },
     maxItems: resolved.maxItems,
+    uploaderTimers: uploaderClock,
   });
 
   const subjectIds: StarkeepId[] = [...seeded.subjectIds];
@@ -321,10 +324,21 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
         // only happens on the following round. Treat watermark movement as
         // progress so convergence means "a full no-op round".
         const peerBefore = JSON.stringify(await syncState.getPeerWatermarks());
+        const sentBefore = engine.uploader.stats().sent.count;
         const r = await engine.exchange();
         results.push(r);
+        // Uploads run beside the round, so a harness round is an exchange
+        // and then the uploads it made owed.
+        await uploadAfterRound(engine, uploaderClock);
+        const uploaded = engine.uploader.stats().sent.count !== sentBefore;
         const peerAfter = JSON.stringify(await syncState.getPeerWatermarks());
-        if (!r.hasMore && r.applied === 0 && r.shipped === 0 && peerBefore === peerAfter) {
+        if (
+          !r.hasMore &&
+          r.applied === 0 &&
+          r.shipped === 0 &&
+          !uploaded &&
+          peerBefore === peerAfter
+        ) {
           break;
         }
         i++;
@@ -335,6 +349,7 @@ export async function setupCase(spec: CaseSpec): Promise<World> {
     } else {
       for (let i = 0; i < opts.rounds; i++) {
         results.push(await engine.exchange());
+        await uploadAfterRound(engine, uploaderClock);
       }
     }
     return results;

@@ -2,6 +2,7 @@ import {
   compareHLC,
   type DataRecord,
   type HLCClock,
+  type HLCTimestamp,
   type RecordLabel,
   type StarkeepId,
 } from "@starkeep/protocol-primitives";
@@ -134,6 +135,22 @@ export interface InProcessTransportOptions {
    * watermark reaches it. A throw is logged and never fails the exchange.
    */
   readonly onFilesHeld?: (recordIds: readonly StarkeepId[]) => Promise<void>;
+  /**
+   * Called once per exchange with what the walk did: the stored bytes
+   * watermark it started from, where it ended, and per author the first file
+   * it found missing. The cloud logs this, because the pin is where a
+   * requester's uploads are waited on. Called before the reply is built; a
+   * throw is ignored.
+   */
+  readonly onWalk?: (walk: ByteWalkReport) => void;
+}
+
+/** What one exchange's walk over the bytes watermark found. */
+export interface ByteWalkReport {
+  readonly from: Watermarks;
+  readonly to: Watermarks;
+  /** Per author, the first file the walk found missing, where it stopped. */
+  readonly pins: Readonly<Record<string, { readonly key: string; readonly hlc: HLCTimestamp }>>;
 }
 
 /**
@@ -157,6 +174,7 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
     onApplied,
     declinesBlob,
     onFilesHeld,
+    onWalk,
   } = options;
   const byteCoverage = options.byteCoverage ?? createMemoryByteCoverageStore();
 
@@ -204,6 +222,7 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
     const from = clampToRows(stored, rowsWatermarks);
     const scan = await scanFileRows(fileRowSources, from, BYTE_WALK_MAX_ROWS);
     if (!scan.readable) return from;
+    const pins: Record<string, { key: string; hlc: HLCTimestamp }> = {};
 
     const byAuthor = new Map<string, { row: FileRow; satisfied: boolean }[]>();
     for (const row of scan.rows) {
@@ -238,6 +257,10 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
         for (const [i, entry] of batch.entries()) {
           if (!held[i]) {
             stopped = true;
+            pins[entry.row.hlc.nodeId] = {
+              key: entry.row.manifest!.objectStorageKey,
+              hlc: entry.row.hlc,
+            };
             break;
           }
           entry.satisfied = true;
@@ -252,6 +275,11 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
         .map((entry) => ({ hlc: entry.row.hlc, satisfied: entry.satisfied })),
       scan.ceilings,
     );
+    try {
+      onWalk?.({ from: stored, to: next, pins });
+    } catch {
+      // A report is diagnostics; the walk's answer stands.
+    }
     if (!sameWatermarkMaps(next, stored)) {
       try {
         await byteCoverage.save(next);

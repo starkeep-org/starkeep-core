@@ -1,18 +1,16 @@
 /**
  * Round sizing: the byte budget, the item cap, and concurrent blob transfer.
  *
- * Rows travel ahead of their files, so rows are bounded by the item cap alone
- * and the byte budget bounds file transfers. Each transfer pass spends two
- * allotments of it: a head allotment in timestamp order, which moves the bytes
- * watermark, and an opportunistic one, smallest first, which lets small files
- * past a large one. These tests pin the consequences:
+ * Rows travel ahead of their files, so rows are bounded by the item cap alone.
+ * Uploads are not part of a round at all: the uploader moves them beside it,
+ * in its own lanes. These tests pin the consequences:
  *
- *   1. Bytes bound a round's files, and rows spend none of the budget.
- *   2. A file larger than the whole budget still goes, alone at the head —
- *      otherwise a single large video stalls its author's files permanently —
- *      and smaller files still go beside it.
- *   3. Transferring concurrently does not weaken the contiguous-prefix rule:
- *      a bytes watermark still stops at an author's first missing file.
+ *   1. Rows spend none of the byte budget, and a round uploads nothing.
+ *   2. A file larger than any budget still goes, and smaller files go beside
+ *      it rather than behind it.
+ *   3. Uploading concurrently does not weaken the contiguous-prefix rule: the
+ *      peer's bytes watermark still stops at an author's first missing file.
+ *   4. Downloads keep the round's transfer width.
  */
 
 import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
@@ -26,7 +24,8 @@ import {
 import { createSyncEngine } from "../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../src/transports/in-process-transport.js";
 import { buildSide } from "./sync-test-harness/side.js";
-import type { SyncStateStore, Watermarks } from "../src/types.js";
+import { uploadAfterRound, uploaderClockFor } from "./sync-test-harness/uploader-clock.js";
+import type { SyncEngine, SyncStateStore, Watermarks } from "../src/types.js";
 
 type Side = Awaited<ReturnType<typeof buildSide>>;
 
@@ -61,8 +60,21 @@ function engineFor(
     clock: local.clock,
     syncState,
     syncSharedRecords: true,
+    uploaderTimers: uploaderClockFor(local),
     ...opts,
   });
+}
+
+/** Run the uploads the rounds so far made owed, and let any backoff run out. */
+async function upload(local: Side, engine: SyncEngine): Promise<void> {
+  await uploadAfterRound(engine, uploaderClockFor(local));
+}
+
+/** Sync, upload, and sync again so the peer reports what arrived. */
+async function syncAndUpload(local: Side, engine: SyncEngine): Promise<void> {
+  await engine.sync();
+  await upload(local, engine);
+  await engine.sync();
 }
 
 /** A record with a real blob of `sizeBytes` staged in local storage. */
@@ -128,22 +140,21 @@ async function seedAuthored(side: Side, nodeId: string, wallTime: number): Promi
 }
 
 describe("round budget", () => {
-  it("bounds a round's files by bytes, and its rows by items alone", async () => {
+  it("ships every row in one round and uploads nothing inside it", async () => {
     const { local, cloud } = await twoSides();
     for (let i = 0; i < 10; i += 1) await seedBlobRecord(local, 3 * MB);
 
-    // 10 MB of budget against 3 MB files: three fit the head allotment and
-    // three more the opportunistic one. Every row ships regardless.
-    const result = await engineFor(local, cloud, createMemorySyncStateStore(), {
+    const engine = engineFor(local, cloud, createMemorySyncStateStore(), {
       maxBytes: 10 * MB,
       maxItems: 1000,
-    }).exchange();
+    });
+    const result = await engine.exchange();
 
     expect(result.shipped).toBe(10);
     expect(result.outboundHasMore).toBe(false);
-    expect(result.uploaded).toBe(6);
-    expect(result.uploadedBytes).toBe(18 * MB);
-    expect(result.bytesHasMore).toBe(true);
+    // Uploads are the uploader's: no round waits on one.
+    expect(result.bytesHasMore).toBe(false);
+    expect(engine.uploader.stats().sent.count).toBe(0);
   });
 
   it("does not charge blob-less rows against the byte budget", async () => {
@@ -161,34 +172,20 @@ describe("round budget", () => {
     expect(result.outboundHasMore).toBe(false);
   });
 
-  it("still sends a single file larger than the whole budget", async () => {
-    const { local, cloud } = await twoSides();
-    await seedBlobRecord(local, 400 * MB);
-
-    // Refusing it would stall the author's files forever rather than making
-    // one round big, so the first head file is always taken.
-    const result = await engineFor(local, cloud, createMemorySyncStateStore(), {
-      maxBytes: 10 * MB,
-    }).exchange();
-
-    expect(result.shipped).toBe(1);
-    expect(result.uploaded).toBe(1);
-  });
-
-  it("sends small files beside an oversized one rather than behind it", async () => {
+  it("uploads a file larger than any budget, and small files beside it", async () => {
     const { local, cloud } = await twoSides();
     const big = await seedBlobRecord(local, 400 * MB);
     const small: StarkeepId[] = [];
     for (let i = 0; i < 5; i += 1) small.push(await seedBlobRecord(local, 1 * MB));
 
-    const result = await engineFor(local, cloud, createMemorySyncStateStore(), {
+    const engine = engineFor(local, cloud, createMemorySyncStateStore(), {
       maxBytes: 10 * MB,
-    }).exchange();
+    });
+    const result = await engine.exchange();
+    await upload(local, engine);
 
-    // Every row ships. The big file is the head; the head allotment stops
-    // after it, and the five small files go in the opportunistic allotment.
     expect(result.shipped).toBe(6);
-    expect(result.uploaded).toBe(6);
+    expect(engine.uploader.stats().sent.count).toBe(6);
     for (const id of [big, ...small]) {
       expect(await cloud.storage.has((await local.db.get(id))!.objectStorageKey)).toBe(true);
     }
@@ -215,6 +212,8 @@ describe("round budget", () => {
     const syncState = createMemorySyncStateStore();
     const engine = engineFor(local, cloud, syncState, { maxBytes: 10 * MB });
     const result = await engine.sync({ maxRounds: 20 });
+    await upload(local, engine);
+    await engine.sync();
 
     expect(result.complete).toBe(true);
     for (const id of ids) {
@@ -247,10 +246,11 @@ describe("round budget", () => {
       transferConcurrency: 4,
     });
     const result = await engine.exchange();
+    await upload(local, engine);
 
     expect(result.shipped).toBe(5);
-    expect(result.uploaded).toBe(4);
-    expect(result.blocked).toBe(true);
+    expect(engine.uploader.stats().sent.count).toBe(4);
+    expect(engine.uploader.stats().queued.full.count).toBe(1);
     for (const id of ids) expect(await cloud.db.get(id)).not.toBeNull();
     expect(await cloud.storage.has(failing)).toBe(false);
 
@@ -260,72 +260,74 @@ describe("round budget", () => {
   });
 
   /**
-   * Ship `count` blobs with `transferConcurrency: limit` and report the most
-   * uploads ever in flight at once.
-   *
-   * Measured at the destination's `putStream`, which is where a transfer
-   * actually occupies a connection. The short delay is what makes overlap
+   * Run `count` transfers of `sizeBytes` each and report the most ever in
+   * flight at once, measured at the destination's `putStream`, which is where
+   * a transfer occupies a connection. The short delay is what makes overlap
    * possible at all: without it each transfer completes inside its own
-   * microtask and the peak is 1 no matter what the limit says — a measurement
-   * that would pass for a serialized implementation and an unbounded one alike.
+   * microtask and the peak is 1 no matter what the limit says.
    */
-  async function peakConcurrentUploads(
+  async function peakInFlight(
+    direction: "upload" | "download",
     count: number,
-    limit: number,
-  ): Promise<{ peak: number; shipped: number }> {
+    sizeBytes: number,
+    transferConcurrency?: number,
+  ): Promise<{ peak: number; moved: number }> {
     const { local, cloud } = await twoSides();
-    for (let i = 0; i < count; i += 1) await seedBlobRecord(local, 1 * MB);
+    const source = direction === "upload" ? local : cloud;
+    const destination = direction === "upload" ? cloud : local;
+    for (let i = 0; i < count; i += 1) await seedBlobRecord(source, sizeBytes);
 
     let inFlight = 0;
     let peak = 0;
-    const realPutStream = cloud.storage.putStream.bind(cloud.storage);
-    cloud.storage.putStream = async (...args: unknown[]) => {
+    let moved = 0;
+    const realPutStream = destination.storage.putStream.bind(destination.storage);
+    destination.storage.putStream = async (...args: unknown[]) => {
       inFlight += 1;
       peak = Math.max(peak, inFlight);
       try {
         await new Promise((resolve) => setTimeout(resolve, 5));
-        return await (realPutStream as (...a: unknown[]) => Promise<void>)(...args);
+        await (realPutStream as (...a: unknown[]) => Promise<void>)(...args);
+        moved += 1;
       } finally {
         inFlight -= 1;
       }
     };
 
-    const result = await engineFor(local, cloud, createMemorySyncStateStore(), {
+    const engine = engineFor(local, cloud, createMemorySyncStateStore(), {
       maxBytes: 100 * MB,
       maxItems: count,
-      transferConcurrency: limit,
-    }).exchange();
-    return { peak, shipped: result.uploaded };
+      ...(transferConcurrency !== undefined ? { transferConcurrency } : {}),
+    });
+    await engine.exchange();
+    if (direction === "upload") await upload(local, engine);
+    return { peak, moved };
   }
 
-  it("never has more transfers in flight than transferConcurrency allows", async () => {
-    // The existing concurrency case sets the limit to 4 and then asserts
-    // *truncation*, which says nothing about how many transfers ran at once: an
-    // engine that serialized every upload, and one that dispatched all eight at
-    // once, both pass it. On a handset the second is the one that matters — it
-    // is a phone opening eight uploads on a cellular link because a round
-    // happened to be large.
-    const { peak, shipped } = await peakConcurrentUploads(8, 2);
-    expect(shipped).toBe(8);
-    expect(peak).toBeLessThanOrEqual(2);
-    // …and it really did overlap, so the bound is what is holding it down
-    // rather than an implementation that never had two transfers to begin with.
+  it("never has more downloads in flight than transferConcurrency allows", async () => {
+    // On a handset this is a phone opening eight transfers on a cellular link
+    // because a round happened to be large.
+    const { peak, moved } = await peakInFlight("download", 8, 1 * MB, 2);
+    expect(moved).toBe(8);
+    // …and it really did overlap, so the bound is what is holding it down.
     expect(peak).toBe(2);
   });
 
-  it("serializes at a limit of one", async () => {
-    const { peak, shipped } = await peakConcurrentUploads(6, 1);
-    expect(shipped).toBe(6);
+  it("serializes downloads at a limit of one", async () => {
+    const { peak, moved } = await peakInFlight("download", 6, 1 * MB, 1);
+    expect(moved).toBe(6);
     expect(peak).toBe(1);
   });
 
-  it("uses the width it is given when there is work for it", async () => {
-    // The control in the other direction: raising the limit raises the peak, so
-    // the two cases above are measuring the limit and not a ceiling that
-    // something else imposes.
-    const { peak } = await peakConcurrentUploads(8, 6);
-    expect(peak).toBeGreaterThan(2);
-    expect(peak).toBeLessThanOrEqual(6);
+  it("uploads small files six at a time, in the small lane", async () => {
+    const { peak, moved } = await peakInFlight("upload", 12, 512 * 1024);
+    expect(moved).toBe(12);
+    expect(peak).toBe(6);
+  });
+
+  it("uploads large files two at a time, in the large lane", async () => {
+    const { peak, moved } = await peakInFlight("upload", 6, 4 * MB);
+    expect(moved).toBe(6);
+    expect(peak).toBe(2);
   });
 });
 
@@ -403,7 +405,7 @@ describe("sync()", () => {
     for (let i = 0; i < 12; i += 1) ids.push(await seedBlobRecord(local, 3 * MB));
 
     const syncState = createMemorySyncStateStore();
-    const engine = engineFor(local, cloud, syncState, { maxBytes: 10 * MB });
+    const engine = engineFor(local, cloud, syncState, { maxItems: 3 });
 
     let aborted = false;
     const first = await engine.sync({
@@ -430,7 +432,7 @@ describe("sync()", () => {
     for (let i = 0; i < 12; i += 1) await seedBlobRecord(local, 3 * MB);
 
     const result = await engineFor(local, cloud, createMemorySyncStateStore(), {
-      maxBytes: 10 * MB,
+      maxItems: 3,
     }).sync({ maxRounds: 2 });
 
     expect(result.rounds).toBe(2);
@@ -449,7 +451,7 @@ describe("sync()", () => {
     for (let i = 0; i < 12; i += 1) ids.push(await seedBlobRecord(local, 3 * MB));
 
     const syncState = createMemorySyncStateStore();
-    const engine = engineFor(local, cloud, syncState, { maxBytes: 10 * MB });
+    const engine = engineFor(local, cloud, syncState, { maxItems: 3 });
 
     const cut = await engine.sync({ maxRounds: 2 });
     expect(cut.complete).toBe(false);
@@ -551,7 +553,7 @@ describe("verify()", () => {
     for (let i = 0; i < 6; i += 1) ids.push(await seedBlobRecord(local, 1 * MB));
     const syncState = createMemorySyncStateStore();
     const engine = engineFor(local, cloud, syncState, { maxBytes: 100 * MB });
-    await engine.sync();
+    await syncAndUpload(local, engine);
 
     await loseFromMiddle(cloud, ids[2]!);
     await engine.verify();
@@ -675,7 +677,9 @@ describe("records sharing one object key", () => {
       return realPutStream(...args);
     };
 
-    await engineFor(local, cloud, createMemorySyncStateStore()).sync();
+    // The queue keys on the object key, so three rows are one entry.
+    const engine = engineFor(local, cloud, createMemorySyncStateStore());
+    await syncAndUpload(local, engine);
     expect(puts).toBe(1);
   });
 
@@ -691,14 +695,16 @@ describe("records sharing one object key", () => {
     };
 
     const syncState = createMemorySyncStateStore();
-    const result = await engineFor(local, cloud, syncState).sync();
+    const engine = engineFor(local, cloud, syncState);
+    await syncAndUpload(local, engine);
 
-    // Both rows ship; neither one's file is counted as held.
+    // Both rows ship; neither one's file is counted as held, and the one
+    // entry both name stays queued.
     expect(await cloud.db.get(first)).not.toBeNull();
     expect(await cloud.db.get(second)).not.toBeNull();
     expect(await cloud.storage.has(key)).toBe(false);
     expect((await syncState.getPeerByteWatermarks())?.["L"]).toBeUndefined();
-    expect(result.complete).toBe(false);
+    expect(engine.uploader.stats().queued.full.count).toBe(1);
   });
 
   it("two channels naming the same key each send it, and both succeed", async () => {
@@ -731,8 +737,10 @@ describe("records sharing one object key", () => {
     };
 
     const [first, second] = await Promise.all([a.sync(), b.sync()]);
+    await Promise.all([a.uploader.drain(), b.uploader.drain()]);
 
     expect(first.complete && second.complete, "neither may read the other as a failure").toBe(true);
+    expect(a.uploader.stats().sent.count + b.uploader.stats().sent.count).toBe(2);
     expect(await cloud.db.get(id)).not.toBeNull();
     expect(await cloud.storage.has(key)).toBe(true);
     expect(puts, "each engine sends it once; nothing coordinates across them").toBe(2);
@@ -796,12 +804,13 @@ describe("the responder's half of the byte budget", () => {
 });
 
 describe("sync() termination", () => {
-  it("stops when a round achieves nothing, instead of reissuing it 10,000 times", async () => {
+  it("does not hold a sync open over a file whose upload keeps failing", async () => {
+    // Uploads left the round, so a failing one can neither loop `sync()` nor
+    // keep it from finishing. The file waits in the uploader's queue, and the
+    // files behind it go.
     const { local, cloud } = await twoSides();
     for (let i = 0; i < 5; i += 1) await seedBlobRecord(local, 3 * MB);
 
-    // The earliest record's file never uploads. Rows all ship, the other
-    // files all go, and then every round is byte-identical.
     const oldest = (await local.db.query({})).records.sort(
       (a, b) => a.updatedAt.wallTime - b.updatedAt.wallTime,
     )[0]!;
@@ -811,30 +820,28 @@ describe("sync() termination", () => {
       return (realPutStream as (...a: unknown[]) => Promise<void>)(key, ...rest);
     };
 
-    const result = await engineFor(local, cloud, createMemorySyncStateStore(), {
+    const engine = engineFor(local, cloud, createMemorySyncStateStore(), {
       maxBytes: 4 * MB,
       maxItems: 100,
-    }).sync({ maxRounds: 500 });
+    });
+    const result = await engine.sync({ maxRounds: 500 });
+    await upload(local, engine);
 
-    expect(result.rounds).toBeLessThan(12);
+    expect(result.rounds).toBeLessThan(4);
     expect(result.shipped).toBe(5);
-    // The stuck file does not keep the files behind it from going.
+    expect(result.complete).toBe(true);
     for (const record of (await local.db.query({})).records) {
       if (record.id === oldest.id) continue;
       expect(await cloud.storage.has(record.objectStorageKey)).toBe(true);
     }
-    // Not "complete" — work remains — and `stalled` says which of the two it
-    // is, so a caller can tell "finished" from "wedged".
-    expect(result.complete).toBe(false);
-    expect(result.stalled).toBe(true);
+    // The stuck file is not lost: the queue holds it for its next attempt.
+    expect(engine.uploader.stats().queued.full.count).toBe(1);
+    expect(engine.uploader.stats().sent.count).toBe(4);
   });
 
-  it("does not report complete when the only record's upload keeps failing", async () => {
-    // The case the scan signals cannot see. Both row scans drain, so
-    // `hasMore` and `outboundHasMore` are false, and the row reached the peer
-    // — but its file did not. Reporting complete here is a "backup finished"
-    // for a file that is not in the cloud; that is the value `/sync/now`
-    // returns and the one the phone's Sync button reads.
+  it("keeps a file whose upload keeps failing in the queue, where the uploader reports it", async () => {
+    // The honest "backup not finished" now comes from the uploader: the round
+    // drained, and the file is still owed.
     const { local, cloud } = await twoSides();
     const id = await seedBlobRecord(local, 1 * MB);
     const record = (await local.db.get(id))!;
@@ -842,15 +849,18 @@ describe("sync() termination", () => {
       throw new Error("[test] permanent upload failure");
     };
 
-    const result = await engineFor(local, cloud, createMemorySyncStateStore(), {
+    const engine = engineFor(local, cloud, createMemorySyncStateStore(), {
       maxBytes: 100 * MB,
-    }).sync();
+    });
+    const result = await engine.sync();
+    await engine.uploader.drain();
 
     expect(result.shipped).toBe(1);
     expect(await cloud.db.get(id)).not.toBeNull();
     expect(await cloud.storage.has(record.objectStorageKey)).toBe(false);
-    expect(result.complete).toBe(false);
-    expect(result.stalled).toBe(true);
+    const stats = engine.uploader.stats();
+    expect(stats.queued.full.count).toBe(1);
+    expect(stats.backingOff).toBe(1);
   });
 
   it("does not report complete when an inbound blob keeps failing", async () => {
@@ -886,9 +896,9 @@ describe("sync() termination", () => {
     expect(result.stalled).toBe(false);
   });
 
-  it("resumes and finishes once the failing transfer starts working", async () => {
-    // A stall is not a terminal state. Stopping is only safe because the
-    // watermarks are untouched, so the next call picks up where this one gave up.
+  it("resumes and finishes once the failing upload starts working", async () => {
+    // A failure is not a terminal state: the entry backs off and is tried
+    // again, and the cloud's bytes watermark then passes it.
     const { local, cloud } = await twoSides();
     const ids: StarkeepId[] = [];
     for (let i = 0; i < 5; i += 1) ids.push(await seedBlobRecord(local, 3 * MB));
@@ -903,12 +913,16 @@ describe("sync() termination", () => {
 
     const syncState = createMemorySyncStateStore();
     const engine = engineFor(local, cloud, syncState, { maxBytes: 4 * MB });
-    expect((await engine.sync()).stalled).toBe(true);
+    await syncAndUpload(local, engine);
+    expect(await cloud.storage.has(oldest.objectStorageKey)).toBe(false);
 
     failing = false;
+    await upload(local, engine);
     const recovered = await engine.sync();
     expect(recovered.complete).toBe(true);
     for (const id of ids) expect(await cloud.db.get(id), id).not.toBeNull();
+    const last = (await local.db.get(ids[4]!))!;
+    expect((await syncState.getPeerByteWatermarks())?.["L"]).toEqual(last.updatedAt);
   });
 });
 
@@ -943,64 +957,65 @@ describe("repair floor retirement", () => {
   // workspace's other suites are running beside them, which is exactly when a
   // 5-second default bites. A slow test is not a failing one, and a flake here
   // reads as a sync regression.
-  it("keeps the floor when the repair round's upload failed", { timeout: 30_000 }, async () => {
-    const { local, cloud } = await twoSides();
-    const ids: StarkeepId[] = [];
-    for (let i = 0; i < 5; i += 1) ids.push(await seedBlobRecord(local, 1 * MB));
+  it(
+    "keeps a repaired file queued when its upload fails, though the floor retires",
+    { timeout: 30_000 },
+    async () => {
+      const { local, cloud } = await twoSides();
+      const ids: StarkeepId[] = [];
+      for (let i = 0; i < 5; i += 1) ids.push(await seedBlobRecord(local, 1 * MB));
 
-    const syncState = createMemorySyncStateStore();
-    const engine = engineFor(local, cloud, syncState, { maxBytes: 100 * MB });
-    await engine.sync();
+      const syncState = createMemorySyncStateStore();
+      const engine = engineFor(local, cloud, syncState, { maxBytes: 100 * MB });
+      await syncAndUpload(local, engine);
 
-    // A hole in the middle, row and file: MAX(updated_at) is unchanged, so
-    // neither watermark the cloud reports moves, and only a count comparison
-    // can see it.
-    await loseFromMiddle(cloud, ids[2]!);
-    await engine.verify();
-    expect(Object.keys(await syncState.getRepairFloors())).toHaveLength(1);
+      // A hole in the middle, row and file: MAX(updated_at) is unchanged, so
+      // neither watermark the cloud reports moves, and only a count
+      // comparison can see it.
+      await loseFromMiddle(cloud, ids[2]!);
+      await engine.verify();
+      expect(Object.keys(await syncState.getRepairFloors())).toHaveLength(1);
 
-    // The row re-ships, but the file's upload fails. The cloud's bytes
-    // watermark sits above the hole, so the floor is the only thing that
-    // keeps the upload pass offering that file: retiring it now would read
-    // "repair done" and abandon the file.
-    const lost = ids[2]!;
-    const lostKey = (await local.db.get(lost))!.objectStorageKey;
-    const realPutStream = cloud.storage.putStream.bind(cloud.storage);
-    cloud.storage.putStream = async (key: string, ...rest: unknown[]) => {
-      if (key === lostKey) throw new Error("[test] upload failure during repair");
-      return (realPutStream as (...a: unknown[]) => Promise<void>)(key, ...rest);
-    };
-    await engine.sync();
+      // The row re-ships, and the file's upload fails. The floor retires with
+      // its rows: the uploader saw the floor lower the cloud's watermark, read
+      // the range again, and holds the file in its own queue.
+      const lost = ids[2]!;
+      const lostKey = (await local.db.get(lost))!.objectStorageKey;
+      const realPutStream = cloud.storage.putStream.bind(cloud.storage);
+      cloud.storage.putStream = async (key: string, ...rest: unknown[]) => {
+        if (key === lostKey) throw new Error("[test] upload failure during repair");
+        return (realPutStream as (...a: unknown[]) => Promise<void>)(key, ...rest);
+      };
+      await engine.sync();
+      await upload(local, engine);
 
-    expect(await cloud.db.get(lost)).not.toBeNull();
-    expect(await cloud.storage.has(lostKey)).toBe(false);
-    expect(
-      Object.keys(await syncState.getRepairFloors()),
-      "the floor is the only thing still asking for this file",
-    ).toHaveLength(1);
+      expect(await cloud.db.get(lost)).not.toBeNull();
+      expect(await cloud.storage.has(lostKey)).toBe(false);
+      expect(await syncState.getRepairFloors()).toEqual({});
+      expect(engine.uploader.stats().queued.full.count, "the queue still owes the file").toBe(1);
 
-    // And when the transfer recovers, the still-armed floor completes the job.
-    cloud.storage.putStream = realPutStream as typeof cloud.storage.putStream;
-    await engine.sync();
-    expect(await cloud.storage.has(lostKey)).toBe(true);
-    expect(await syncState.getRepairFloors()).toEqual({});
-  });
+      // When the transfer recovers, the queue completes the job.
+      cloud.storage.putStream = realPutStream as typeof cloud.storage.putStream;
+      await upload(local, engine);
+      expect(await cloud.storage.has(lostKey)).toBe(true);
+    },
+  );
 
   it("re-sends a file the peer lost along with its row", { timeout: 30_000 }, async () => {
     // The cloud's bytes watermark sits above a hole exactly as its rows
-    // watermark does. Without the floor lowering where the upload pass starts,
-    // the repair would put the row back and leave its file missing for good.
+    // watermark does. Without the floor lowering the watermark the uploader
+    // reads, the repair would put the row back and leave its file missing.
     const { local, cloud } = await twoSides();
     const ids: StarkeepId[] = [];
     for (let i = 0; i < 4; i += 1) ids.push(await seedBlobRecord(local, 1 * MB));
     const syncState = createMemorySyncStateStore();
     const engine = engineFor(local, cloud, syncState, { maxBytes: 100 * MB });
-    await engine.sync();
+    await syncAndUpload(local, engine);
 
     const lostKey = (await local.db.get(ids[1]!))!.objectStorageKey;
     await loseFromMiddle(cloud, ids[1]!);
     await engine.verify();
-    await engine.sync();
+    await syncAndUpload(local, engine);
 
     expect(await cloud.db.get(ids[1]!)).not.toBeNull();
     expect(await cloud.storage.has(lostKey)).toBe(true);
@@ -1020,7 +1035,7 @@ describe("repair floor retirement", () => {
 
     const syncState = createMemorySyncStateStore();
     const engine = engineFor(local, cloud, syncState, { maxItems: 2 });
-    await engine.sync();
+    await syncAndUpload(local, engine);
 
     // Arm a repair spanning the author's whole history, the widest a floor gets.
     await syncState.setRepairFloors({ aaa: { wallTime: 0, counter: 0, nodeId: "aaa" } });
@@ -1036,41 +1051,27 @@ describe("repair floor retirement", () => {
     expect(result.shipped).toBeLessThanOrEqual(8);
   });
 
-  it(
-    "retires only the authors whose repaired files all uploaded",
-    { timeout: 30_000 },
-    async () => {
-      // Retirement is per author because failure is. One device's failed upload
-      // must not discard a repair armed for another's.
-      const { local, cloud } = await twoSides();
-      const aaa: StarkeepId[] = [];
-      const bbb: StarkeepId[] = [];
-      for (let i = 0; i < 3; i += 1) {
-        aaa.push(await seedAuthored(local, "aaa", 10 + i));
-        bbb.push(await seedAuthored(local, "bbb", 50 + i));
-      }
-      const syncState = createMemorySyncStateStore();
-      const engine = engineFor(local, cloud, syncState, { maxBytes: 100 * MB });
-      await engine.sync();
+  it("holds a floor while the peer's bytes watermark is below it", async () => {
+    // The files half of a repair waits only on the watermark the round saves.
+    // A floor above a file the cloud still lacks stays, so the watermark the
+    // uploader reads stays lowered until that file lands.
+    const { local, cloud } = await twoSides();
+    const ids: StarkeepId[] = [];
+    for (let i = 0; i < 3; i += 1) ids.push(await seedAuthored(local, "aaa", 10 + i));
+    const syncState = createMemorySyncStateStore();
+    const engine = engineFor(local, cloud, syncState, { maxBytes: 100 * MB });
+    // Rows only: no file has reached the cloud, so its bytes watermark for
+    // `aaa` is below every row.
+    await engine.sync();
+    const floor = { wallTime: 11, counter: 0, nodeId: "aaa" };
+    await syncState.setRepairFloors({ aaa: floor });
 
-      const aaaLostKey = (await local.db.get(aaa[1]!))!.objectStorageKey;
-      await loseFromMiddle(cloud, aaa[1]!);
-      await loseFromMiddle(cloud, bbb[1]!);
-      await engine.verify();
-      expect(Object.keys(await syncState.getRepairFloors()).sort()).toEqual(["aaa", "bbb"]);
+    await engine.sync();
+    expect(await syncState.getRepairFloors()).toEqual({ aaa: floor });
 
-      // Only aaa's re-ship fails.
-      const realPutStream = cloud.storage.putStream.bind(cloud.storage);
-      cloud.storage.putStream = async (key: string, ...rest: unknown[]) => {
-        if (key === aaaLostKey) throw new Error("[test] upload failure");
-        return (realPutStream as (...a: unknown[]) => Promise<void>)(key, ...rest);
-      };
-      await engine.sync();
-
-      expect(Object.keys(await syncState.getRepairFloors())).toEqual(["aaa"]);
-      expect(await cloud.db.get(bbb[1]!)).not.toBeNull();
-    },
-  );
+    await syncAndUpload(local, engine);
+    expect(await syncState.getRepairFloors()).toEqual({});
+  });
 });
 
 /**

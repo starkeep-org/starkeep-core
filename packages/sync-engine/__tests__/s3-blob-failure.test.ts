@@ -26,7 +26,10 @@ describe("S3 — blob × failure (SR, single)", () => {
     expect(peer[w.local.nodeId]).toBeDefined();
     // The cloud says it lacks the file, so the upload is still owed.
     expect(peerBytes?.[w.local.nodeId]).toBeUndefined();
-    expect(results.every((r) => r.blocked)).toBe(true);
+    // Uploads run beside the round: the round is not blocked by one, and the
+    // file waits in the uploader's queue for its next attempt.
+    expect(results.every((r) => !r.blocked)).toBe(true);
+    expect(w.engine.uploader.stats().queued.full.count).toBe(1);
   });
 
   it("S3-002: lb + transient upload-fails / 2r — round 2 succeeds; convergence reached", async () => {
@@ -100,9 +103,11 @@ describe("S3 — blob × failure (SR, single)", () => {
     const { peer, peerBytes } = await w.watermarks();
     expect(peer[w.local.nodeId]).toBeDefined();
     expect(peerBytes?.[w.local.nodeId]).toBeUndefined();
-    // Nothing failed here: this node never held the file to send.
+    // Nothing failed here: this node never held the file to send, so the
+    // uploader never queued it.
     expect(r1!.blocked).toBe(false);
-    expect(r1!.uploaded).toBe(0);
+    const stats = w.engine.uploader.stats();
+    expect(stats.queued.fast.count + stats.queued.full.count + stats.sent.count).toBe(0);
   });
 
   it("S3-010: bb (both have blob) + no-failure / 1r — both Resident; no transfer needed", async () => {

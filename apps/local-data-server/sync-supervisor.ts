@@ -9,6 +9,7 @@ import {
   HttpObjectStorageAdapter,
   blobCandidateForRecord,
   createHttpSyncTransport,
+  createSqliteUploadQueueStore,
   createSyncEngine,
 } from "../../packages/sync-engine/src/index.js";
 import type {
@@ -22,6 +23,7 @@ import type {
   ResidencyHooks,
   VerifyResult,
 } from "../../packages/sync-engine/src/types.js";
+import type { UploaderStats } from "../../packages/sync-engine/src/uploader.js";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
 import type { StarkeepSdk } from "../../packages/sdk/src/types.js";
 import type { ReplicaProbe } from "../../packages/sync-engine/src/durability.js";
@@ -161,6 +163,8 @@ export interface SyncSupervisorStatus {
     lastExchangeAt: string | null;
     lastError: string | null;
     backoffMs: number;
+    /** The channel's uploader: what is queued, blocked, in flight and sent. */
+    uploads: UploaderStats;
   }>;
   /** Aggregated across all engines — null if no exchange has succeeded yet. */
   readonly lastExchangeAt: string | null;
@@ -306,6 +310,16 @@ function narrowNamespaceStore(
  */
 const SYNC_NOW_MAX_ROUNDS = 50;
 
+/**
+ * How long one `/sync/now` waits for an engine's uploads after its rounds.
+ *
+ * Uploads run beside the rounds, so a drained sync says nothing about the
+ * files. The request waits a little for them and answers `complete: false`
+ * while any remain queued or in flight, and the caller asks again, as for
+ * rounds.
+ */
+const SYNC_NOW_UPLOAD_MS = 10_000;
+
 export function createSyncSupervisor(options: SyncSupervisorOptions): SyncSupervisor {
   const {
     sdk,
@@ -401,6 +415,9 @@ export function createSyncSupervisor(options: SyncSupervisorOptions): SyncSuperv
     };
     engines.set(appId, entry);
     scheduleTick(entry);
+    // Uploads run beside the rounds, continuously, with the engine's defaults:
+    // small stand-ins first, the same order and lanes as a phone.
+    if (!paused) engine.uploader.start();
     // Drain any pending local writes that accumulated before this engine
     // existed (server restart, install race).
     scheduleNudge(appId);
@@ -445,6 +462,9 @@ export function createSyncSupervisor(options: SyncSupervisorOptions): SyncSuperv
       maxBytes,
       maxItems,
       ...(residency ? { residency } : {}),
+      // The upload queue lives beside the records it names, one channel per
+      // engine.
+      uploadQueue: createSqliteUploadQueueStore({ db: localDb, channel: DRIVE_APP_ID }),
       // No appSyncableSource: the Drive channel never carries app-specific rows.
     });
     makeEngineEntry(DRIVE_APP_ID, engine, syncState, baseUrl);
@@ -487,6 +507,7 @@ export function createSyncSupervisor(options: SyncSupervisorOptions): SyncSuperv
       maxBytes,
       maxItems,
       ...(residency ? { residency } : {}),
+      uploadQueue: createSqliteUploadQueueStore({ db: localDb, channel: appId }),
       appSyncableSource: {
         namespaces: narrowedNamespaces,
         applier: appApplier,
@@ -505,6 +526,7 @@ export function createSyncSupervisor(options: SyncSupervisorOptions): SyncSuperv
     // — issuing requests against a channel that no longer exists and writing
     // `sync_state` for an app that has been uninstalled.
     entry.stopped = true;
+    entry.engine.uploader.stop();
     if (entry.tickTimer) clearTimeout(entry.tickTimer);
     if (entry.nudgeTimer) clearTimeout(entry.nudgeTimer);
     entry.unsubscribeForwarding();
@@ -570,14 +592,12 @@ export function createSyncSupervisor(options: SyncSupervisorOptions): SyncSuperv
     return (result, round) => {
       const elapsedMs = Date.now() - roundStartedAt;
       roundStartedAt = Date.now();
-      const moved =
-        result.applied + result.shipped + result.elided + result.landed + result.uploaded;
+      const moved = result.applied + result.shipped + result.elided + result.landed;
       if (moved === 0 && !result.blocked) return;
       console.log(
         `[sync] app=${entry.appId} round=${round} elapsedMs=${elapsedMs} ` +
           `applied=${result.applied} landed=${result.landed} landedBytes=${result.landedBytes} ` +
-          `elided=${result.elided} shipped=${result.shipped} uploaded=${result.uploaded} ` +
-          `uploadedBytes=${result.uploadedBytes} blocked=${result.blocked} ` +
+          `elided=${result.elided} shipped=${result.shipped} blocked=${result.blocked} ` +
           `hasMore=${result.hasMore} outboundHasMore=${result.outboundHasMore} ` +
           `bytesHasMore=${result.bytesHasMore}`,
       );
@@ -660,6 +680,8 @@ export function createSyncSupervisor(options: SyncSupervisorOptions): SyncSuperv
     if (paused) return;
     const targetAppId = event.originAppId ?? DRIVE_APP_ID;
     scheduleNudge(targetAppId);
+    // A local write may name a new file: an import, a derived stand-in.
+    engines.get(targetAppId)?.engine.uploader.nudge();
   });
 
   function rescan(): void {
@@ -806,6 +828,7 @@ export function createSyncSupervisor(options: SyncSupervisorOptions): SyncSuperv
     pause() {
       paused = true;
       for (const entry of engines.values()) {
+        entry.engine.uploader.stop();
         if (entry.tickTimer) {
           clearTimeout(entry.tickTimer);
           entry.tickTimer = null;
@@ -819,6 +842,7 @@ export function createSyncSupervisor(options: SyncSupervisorOptions): SyncSuperv
 
     async resume() {
       paused = false;
+      for (const entry of engines.values()) entry.engine.uploader.start();
       await Promise.all(
         Array.from(engines.values()).map(async (entry) => {
           await withEngine(entry, async () => {
@@ -858,6 +882,28 @@ export function createSyncSupervisor(options: SyncSupervisorOptions): SyncSuperv
           applied += r.applied;
           shipped += r.shipped;
           if (!r.complete) complete = false;
+          // "Sync now" is a person asking to try again: lift a network pause,
+          // look for new files, and wait a little for the uploads. Stops early
+          // on a pause, which a request cannot outwait.
+          const uploader = entry.engine.uploader;
+          uploader.nudge();
+          const uploadDeadline = Date.now() + SYNC_NOW_UPLOAD_MS;
+          const engineSignal = signalFor(entry);
+          const uploads = await uploader.drain({
+            signal: {
+              get aborted() {
+                return (
+                  engineSignal.aborted ||
+                  Date.now() > uploadDeadline ||
+                  uploader.stats().state === "paused"
+                );
+              },
+            },
+            deadlineAt: uploadDeadline,
+          });
+          if (uploads.queued.fast.count + uploads.queued.full.count + uploads.inFlight.count > 0) {
+            complete = false;
+          }
           if (r.stalled) {
             // Not an error — the watermarks are intact and the next attempt
             // resumes — but it is the difference between "done" and "wedged",
@@ -936,6 +982,7 @@ export function createSyncSupervisor(options: SyncSupervisorOptions): SyncSuperv
         lastExchangeAt: e.lastExchangeAt,
         lastError: e.lastError,
         backoffMs: e.backoffMs,
+        uploads: e.engine.uploader.stats(),
       }));
       const lastExchangeAt = perApp.reduce<string | null>(
         (acc, e) => (e.lastExchangeAt && (!acc || e.lastExchangeAt > acc) ? e.lastExchangeAt : acc),
