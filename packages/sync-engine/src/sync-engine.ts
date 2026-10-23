@@ -174,11 +174,11 @@ const NOT_VERIFIED: VerifyResult = {
 };
 
 /**
- * How many owed files `verify()` counts before it stops. Enough to tell "a
- * few" from "many"; a person reading "10000+ files still to upload" needs no
- * exact figure.
+ * How many owed files `verify()` counts before it stops, unless the options
+ * say otherwise. Enough to tell "a few" from "many"; a person reading "10000+
+ * files still to upload" needs no exact figure.
  */
-const FILES_OWED_CAP = 10_000;
+const DEFAULT_FILES_OWED_CAP = 10_000;
 
 /**
  * Sync engine: drives one version-vector exchange round per tick.
@@ -216,6 +216,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
   // is enough.
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
   const maxItems = options.maxItems ?? DEFAULT_MAX_ITEMS;
+  const filesOwedCap = options.filesOwedCap ?? DEFAULT_FILES_OWED_CAP;
   const transferConcurrency = Math.max(
     1,
     options.transferConcurrency ?? DEFAULT_TRANSFER_CONCURRENCY,
@@ -653,7 +654,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     peerBytes: Watermarks,
   ): Promise<{ readonly count: number; readonly capped: boolean } | null> {
     const from = lowerBytesToFloors(peerBytes, await loadRepairFloors());
-    const scan = await scanFileRows(localFileRows, from, FILES_OWED_CAP);
+    const scan = await scanFileRows(localFileRows, from, filesOwedCap);
     if (!scan.readable) return null;
     const held: FileRow[] = [];
     for (const row of scan.rows) {
@@ -670,8 +671,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         .map((row) => row.manifest!.objectStorageKey),
     );
     // Rows past where the scan stopped may name more: the count is a floor.
-    const capped = owed.size >= FILES_OWED_CAP || scan.ceilings.size > 0;
-    return { count: Math.min(owed.size, FILES_OWED_CAP), capped };
+    const capped = owed.size >= filesOwedCap || scan.ceilings.size > 0;
+    return { count: Math.min(owed.size, filesOwedCap), capped };
   }
 
   /**
