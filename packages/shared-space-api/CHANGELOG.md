@@ -1,5 +1,13 @@
 # @starkeep/shared-space-api
 
+## 0.6.1
+
+### Patch Changes
+
+- Updated dependencies [80c9a42]
+- Updated dependencies [5247eda]
+  - @starkeep/sync-engine@0.9.0
+
 ## 0.6.0
 
 ### Minor Changes
