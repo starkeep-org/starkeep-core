@@ -323,6 +323,11 @@ describe("deviceMayCall", () => {
     expect(deviceMayCall("GET", "/files/shared/image/ab/cd")).toBe(false);
   });
 
+  it("asks about a batch of uploads in one request", () => {
+    expect(deviceMayCall("POST", "/files/presign-batch")).toBe(true);
+    expect(deviceMayCall("GET", "/files/presign-batch")).toBe(false);
+  });
+
   it("sends a large file as a multipart upload, and nothing else under that path", () => {
     expect(deviceMayCall("POST", "/files/multipart/presign")).toBe(true);
     expect(deviceMayCall("POST", "/files/multipart/complete")).toBe(true);
@@ -357,6 +362,19 @@ describe("deviceWriteRefusal", () => {
     ]) {
       expect(deviceWriteRefusal("POST", route, body), route).not.toBeNull();
     }
+  });
+
+  it("refuses a batch that names a platform file in any item, by key or by type", () => {
+    const byKey = Buffer.from(
+      JSON.stringify({
+        items: [{ key: "shared/u/image/ab/cd" }, { key: "shared/u/starkeep/ab/cd" }],
+      }),
+    );
+    expect(deviceWriteRefusal("POST", "/files/presign-batch", byKey)).not.toBeNull();
+    const byType = Buffer.from(JSON.stringify({ type: "starkeep/settings", contentHash: "ab" }));
+    expect(deviceWriteRefusal("POST", "/files/presign", byType)).not.toBeNull();
+    const ordinary = Buffer.from(JSON.stringify({ items: [{ key: "shared/u/image/ab/cd" }] }));
+    expect(deviceWriteRefusal("POST", "/files/presign-batch", ordinary)).toBeNull();
   });
 
   it("ignores records with no type, such as app-syncable rows", () => {
