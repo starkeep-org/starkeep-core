@@ -1165,6 +1165,12 @@ export interface SyncEngineOptions {
    */
   readonly maxItems?: number;
   /**
+   * How many owed files {@link SyncEngine.verify} counts before it stops and
+   * reports {@link VerifyResult.filesOwedCapped}. Default 10,000. Tests use a
+   * small value to reach the cap without seeding ten thousand records.
+   */
+  readonly filesOwedCap?: number;
+  /**
    * How many blobs transfer at once within a round. Default 4.
    *
    * Exists because a single-stream upload does not saturate a fast link, so a

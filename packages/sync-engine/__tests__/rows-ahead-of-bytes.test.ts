@@ -111,7 +111,12 @@ function engine(
   node: Side,
   cloud: Side,
   transport: SyncTransport,
-  options: { syncState?: SyncStateStore; maxBytes?: number; residency?: ResidencyHooks } = {},
+  options: {
+    syncState?: SyncStateStore;
+    maxBytes?: number;
+    residency?: ResidencyHooks;
+    filesOwedCap?: number;
+  } = {},
 ) {
   return createSyncEngine({
     localDatabaseAdapter: node.db,
@@ -123,6 +128,7 @@ function engine(
     syncSharedRecords: true,
     ...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}),
     ...(options.residency ? { residency: options.residency } : {}),
+    ...(options.filesOwedCap !== undefined ? { filesOwedCap: options.filesOwedCap } : {}),
   });
 }
 
@@ -545,6 +551,17 @@ describe("verify() and owed files", () => {
     // verify()'s own exchange walks the peer's watermark past the uploads.
     const after = await node.verify();
     expect(after.filesOwed).toBe(0);
+  });
+
+  it("stops counting at the cap and says the count is a floor", async () => {
+    const [cloud, phone] = await sides("C", "P");
+    for (let i = 0; i < 3; i += 1) await seedFile(phone!, 10);
+    flakyCloud(cloud!);
+    const node = engine(phone!, cloud!, responder(cloud!), { filesOwedCap: 2 });
+    await node.exchange();
+    const result = await node.verify();
+    expect(result.filesOwed).toBe(2);
+    expect(result.filesOwedCapped).toBe(true);
   });
 
   it("does not count a file this node does not hold", async () => {
