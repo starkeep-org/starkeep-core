@@ -3064,6 +3064,148 @@ describe("POST /files/presign pins the expected checksum", () => {
   });
 });
 
+// ---- The uploader's batch presign ----
+//
+// One request answers presence and signs every PUT for up to 32 files. Each
+// item gets the single route's checks, so the batch cannot widen what a caller
+// may write; it only removes the HEAD and the per-file round trip.
+describe("POST /files/presign-batch", () => {
+  const noRecordAtKey = /from "shared"\."records" where "object_storage_key" =/;
+  const hashOf = (c: string) => c.repeat(64);
+  const keyOf = (c: string) => `shared/test-user/image/${c}${c}/${hashOf(c)}`;
+
+  it("answers present, signed, refused, error and absent in the request's order", async () => {
+    const present = keyOf("1");
+    const missing = keyOf("2");
+    const excluded = keyOf("3");
+    const foreign = `shared/someone-else/image/44/${hashOf("4")}`;
+    const parts = keyOf("5");
+    const db = fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }])
+      .on(noRecordAtKey, (q) =>
+        q.values.includes(excluded)
+          ? [recordRow({ id: "rec-nc", type: "image/jpeg", object_storage_key: excluded })]
+          : [],
+      )
+      .on(/from "shared"\."record_labels" where "record_id" in/, [
+        {
+          record_id: "rec-nc",
+          app_id: "starkeep",
+          key: "no-cloud",
+          value: "",
+          record_type: "image/jpeg",
+          created_at: serializeHLC({ wallTime: 1, counter: 0, nodeId: "n" }),
+          updated_at: serializeHLC({ wallTime: 1, counter: 0, nodeId: "n" }),
+          node_id: "n",
+          deleted_at: null,
+        },
+      ]);
+    setDbFactory(db);
+    s3Mock
+      .on(HeadObjectCommand)
+      .rejects(Object.assign(new Error("NotFound"), { name: "NotFound" }));
+    s3Mock.on(HeadObjectCommand, { Key: present }).resolves({});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "POST",
+        subPath: "/files/presign-batch",
+        body: {
+          items: [
+            { key: present, contentType: "image/jpeg", sizeBytes: 10 },
+            { key: missing, contentType: "image/jpeg", sizeBytes: 20 },
+            { key: excluded, sizeBytes: 30 },
+            { key: foreign, sizeBytes: 40 },
+            { key: parts, sizeBytes: 50, sign: false },
+          ],
+          report: { state: "running", queue: { fast: 1, full: 4, blocked: 0 } },
+        },
+      }),
+      context,
+    );
+
+    expect(res.statusCode).toBe(200);
+    const answers = (bodyOf(res) as { answers: Array<Record<string, unknown>> }).answers;
+    expect(answers.map((a) => [a["key"], a["status"]])).toEqual([
+      [present, "present"],
+      [missing, "signed"],
+      [excluded, "refused"],
+      [foreign, "error"],
+      [parts, "absent"],
+    ]);
+    // Signed exactly as the single route signs: the checksum pinned into the
+    // URL, and returned so the uploader can echo it.
+    expect(answers[1]!["checksumSha256"]).toBe(Buffer.from(hashOf("2"), "hex").toString("base64"));
+    expect(String(answers[1]!["url"])).toContain("x-amz-checksum-sha256");
+    expect(String(answers[2]!["reason"])).toMatch(/no-cloud/);
+
+    const line = log.mock.calls
+      .map((c) => String(c[0]))
+      .find((text) => text.includes('"upload-batch"'));
+    log.mockRestore();
+    expect(JSON.parse(line!)).toMatchObject({
+      event: "upload-batch",
+      appId: "app1",
+      items: 5,
+      answered: { present: 1, signed: 1, refused: 1, error: 1, absent: 1 },
+      bytesSigned: 20,
+      report: { state: "running", queue: { fast: 1, full: 4, blocked: 0 } },
+    });
+  });
+
+  it("answers a key it found present from memory on the next batch", async () => {
+    const key = keyOf("6");
+    setDbFactory(
+      fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
+    );
+    s3Mock.on(HeadObjectCommand).resolves({});
+    const ask = () =>
+      handler(
+        signedEvent({
+          appId: "app1",
+          method: "POST",
+          subPath: "/files/presign-batch",
+          body: { items: [{ key }] },
+        }),
+        context,
+      );
+    expect((bodyOf(await ask()) as { answers: Array<{ status: string }> }).answers[0]!.status).toBe(
+      "present",
+    );
+    s3Mock.reset();
+    expect((bodyOf(await ask()) as { answers: Array<{ status: string }> }).answers[0]!.status).toBe(
+      "present",
+    );
+    expect(s3Mock.commandCalls(HeadObjectCommand)).toHaveLength(0);
+  });
+
+  it("refuses a batch it cannot read whole", async () => {
+    setDbFactory(
+      fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
+    );
+    const tooMany = Array.from({ length: 33 }, (_, i) => ({ key: `${keyOf("7")}-${i}` }));
+    for (const items of [
+      [],
+      tooMany,
+      [{ key: keyOf("8") }, { key: keyOf("8") }],
+      [{}],
+      [{ key: keyOf("9"), sign: true }],
+    ]) {
+      const res = await handler(
+        signedEvent({
+          appId: "app1",
+          method: "POST",
+          subPath: "/files/presign-batch",
+          body: { items },
+        }),
+        context,
+      );
+      expect(res.statusCode, JSON.stringify(items).slice(0, 80)).toBe(400);
+    }
+  });
+});
+
 describe("the shared-plane query routes", () => {
   const IMAGE_METADATA_SELECT = /from "shared"\."record_image_metadata"/;
   const LABELS_SELECT = /from "shared"\."record_labels" where/;

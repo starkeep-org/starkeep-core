@@ -39,6 +39,7 @@ import {
   createHLCClock,
   serializeHLC,
   deserializeHLC,
+  type HLCTimestamp,
   appSyncableObjectKey,
   categoryFromSharedObjectKey,
   contentHashFromDataRecordObjectKey,
@@ -91,7 +92,9 @@ import {
   createLibrarySettings,
   reapDeleted,
   sanitizeExchangeRequest,
+  shortKey,
   InvalidExchangeRequest,
+  type ByteWalkReport,
   type RetentionWindow,
 } from "@starkeep/sync-engine";
 import {
@@ -135,7 +138,12 @@ import {
   type StandInWriteError,
   type WireStandInSummary,
 } from "@starkeep/shared-space-api";
-import { createBytePresence, createPresentKeyCache, type BytePresence } from "./byte-presence.js";
+import {
+  createBytePresence,
+  createPresentKeyCache,
+  PRESENCE_CONCURRENCY,
+  type BytePresence,
+} from "./byte-presence.js";
 import type { AppSpecificOperations } from "@starkeep/shared-space-api";
 import type {
   DatabaseClientFactory,
@@ -285,9 +293,96 @@ export function deviceMayCall(method: string, subPath: string): boolean {
  */
 const UPLOAD_WRITE_ROUTES: ReadonlySet<string> = new Set([
   "/files/presign",
+  "/files/presign-batch",
   "/files/multipart/presign",
   "/files/multipart/complete",
 ]);
+
+/**
+ * A walk report in the shape a log line carries: HLCs serialized, keys
+ * shortened to their first characters.
+ */
+export function walkSummary(walk: ByteWalkReport | null): unknown {
+  if (walk === null) return null;
+  const marks = (w: Record<string, HLCTimestamp>) =>
+    Object.fromEntries(Object.entries(w).map(([author, hlc]) => [author, serializeHLC(hlc)]));
+  return {
+    from: marks(walk.from),
+    to: marks(walk.to),
+    pins: Object.fromEntries(
+      Object.entries(walk.pins).map(([author, pin]) => [
+        author,
+        { key: shortKey(pin.key), hlc: serializeHLC(pin.hlc) },
+      ]),
+    ),
+  };
+}
+
+/** Items in one presign batch; the uploader sends at most this many. */
+export const MAX_PRESIGN_BATCH = 32;
+
+/** One item of a presign batch, as the route reads it. */
+export interface PresignBatchItem {
+  readonly key: string;
+  readonly contentType?: string;
+  readonly contentHash?: string;
+  readonly sizeBytes?: number;
+  /** False asks only whether the cloud holds the file. */
+  readonly sign: boolean;
+}
+
+/** The items a presign batch names, or why the list is refused. */
+export function parsePresignBatchItems(value: unknown): PresignBatchItem[] | string {
+  if (!Array.isArray(value) || value.length === 0) return "items must be a non-empty array";
+  if (value.length > MAX_PRESIGN_BATCH) return `at most ${MAX_PRESIGN_BATCH} items per batch`;
+  const items: PresignBatchItem[] = [];
+  const seen = new Set<string>();
+  for (const raw of value as unknown[]) {
+    const item = (raw ?? {}) as Record<string, unknown>;
+    if (typeof item.key !== "string" || item.key.length === 0) return "every item needs a key";
+    if (seen.has(item.key)) return `${item.key} is named twice`;
+    seen.add(item.key);
+    if (item.contentType !== undefined && typeof item.contentType !== "string") {
+      return "contentType must be a string";
+    }
+    if (item.contentHash !== undefined && typeof item.contentHash !== "string") {
+      return "contentHash must be a string";
+    }
+    if (
+      item.sizeBytes !== undefined &&
+      (typeof item.sizeBytes !== "number" || !Number.isFinite(item.sizeBytes) || item.sizeBytes < 0)
+    ) {
+      return "sizeBytes must be a non-negative number";
+    }
+    if (item.sign !== undefined && item.sign !== false) return "sign may only be false";
+    items.push({
+      key: item.key,
+      ...(item.contentType !== undefined ? { contentType: item.contentType as string } : {}),
+      ...(item.contentHash !== undefined ? { contentHash: item.contentHash as string } : {}),
+      ...(item.sizeBytes !== undefined ? { sizeBytes: item.sizeBytes as number } : {}),
+      sign: item.sign !== false,
+    });
+  }
+  return items;
+}
+
+/**
+ * The uploader's report on a presign batch, bounded before it reaches a log
+ * line. The cloud logs it and never acts on it, so a report that is not an
+ * object, or is too large, is replaced by a note rather than refusing the
+ * batch.
+ */
+export function boundedUploadReport(value: unknown): unknown {
+  if (value === undefined) return null;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { dropped: "not an object" };
+  }
+  const text = JSON.stringify(value);
+  return text.length > MAX_UPLOAD_REPORT_CHARS ? { dropped: `${text.length} characters` } : value;
+}
+
+/** Longest report one `upload-batch` line carries. */
+const MAX_UPLOAD_REPORT_CHARS = 8_000;
 
 /** S3's base64 SHA-256 of one part: 32 bytes, so 43 characters and one pad. */
 const PART_CHECKSUM = /^[A-Za-z0-9+/]{43}=$/;
@@ -411,10 +506,21 @@ export function deviceWriteRefusal(method: string, subPath: string, body: Buffer
     });
     return touchesPlatform ? refusal : null;
   }
-  const key = (parsed as { key?: unknown }).key;
-  return typeof key === "string" && categoryFromSharedObjectKey(key) === PLATFORM_CATEGORY
-    ? refusal
-    : null;
+  // A batch names its keys per item; the single routes name one key, or a
+  // type the broker builds the key from.
+  const named: Array<{ key?: unknown; type?: unknown }> =
+    subPath === "/files/presign-batch"
+      ? Array.isArray((parsed as { items?: unknown }).items)
+        ? ((parsed as { items: unknown[] }).items as Array<{ key?: unknown; type?: unknown }>)
+        : []
+      : [parsed as { key?: unknown; type?: unknown }];
+  const touchesPlatform = named.some(
+    (item) =>
+      (typeof item?.key === "string" &&
+        categoryFromSharedObjectKey(item.key) === PLATFORM_CATEGORY) ||
+      (typeof item?.type === "string" && typeCategory(item.type) === PLATFORM_CATEGORY),
+  );
+  return touchesPlatform ? refusal : null;
 }
 
 /**
@@ -3558,11 +3664,13 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       body: UploadRequestBody,
     ): Promise<
       | { ok: true; key: string; contentHash: string; intent: RetrievalIntent }
-      | { ok: false; response: ReturnType<typeof clientErr> }
+      | { ok: false; response: ReturnType<typeof clientErr>; message: string; status: number }
     > => {
       const refuse = (message: string, status: number) => ({
         ok: false as const,
         response: clientErr(message, status),
+        message,
+        status,
       });
       let key = body.key;
       if (!key && body.type && body.contentHash) {
@@ -3636,6 +3744,138 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         storageClass: WRITE_STORAGE_CLASS,
         ...(Object.keys(tagging).length > 0 ? { tagging } : {}),
       });
+    }
+
+    // POST /apps/{appId}/files/presign-batch — the uploader's one request per
+    // batch of up to 32 files. Body: { items: [{ key, contentType?,
+    // contentHash?, sizeBytes?, sign? }], report? }.
+    //
+    // Each item gets the single presign's checks (`uploadTarget`, which
+    // includes the no-cloud refusal), then a presence check, then a URL signed
+    // exactly as the single route signs one. One request in place of a HEAD
+    // and a presign per file, which is the difference that matters under a
+    // Lambda concurrency cap shared with the cloud web.
+    //
+    // The answers come back in the request's order: `present`, `refused` with
+    // the reason, `error` for an item the checks reject, `absent` for an item
+    // that asked only about presence (`sign: false`: it goes up in parts, and
+    // the parts route signs its own URLs), or the signed PUT.
+    //
+    // Presence asks storage directly, with the warm Lambda's positive cache in
+    // front for shared keys, which are content-addressed and so never change.
+    // A failed check signs anyway: a re-upload of bytes the cloud holds costs
+    // bandwidth, and refusing would strand the file.
+    if (method === "POST" && subPath === "/files/presign-batch") {
+      const body = readJsonBody() as { items?: unknown; report?: unknown };
+      const items = parsePresignBatchItems(body.items);
+      if (typeof items === "string") return clientErr(items, 400);
+      const batchStartedAt = Date.now();
+
+      type Answer =
+        | { key: string; status: "present" | "absent" }
+        | { key: string; status: "refused"; reason: string }
+        | { key: string; status: "error"; error: string }
+        | {
+            key: string;
+            status: "signed";
+            url: string;
+            checksumSha256: string;
+            storageClass: string;
+            tagging?: Record<string, string>;
+          };
+      const answers: Answer[] = new Array(items.length);
+      const targets = await Promise.all(items.map((item) => uploadTarget(item)));
+      const toCheck: Array<{
+        index: number;
+        key: string;
+        contentHash: string;
+        intent: RetrievalIntent;
+      }> = [];
+      for (const [index, target] of targets.entries()) {
+        const key = items[index]!.key;
+        if (target.ok) {
+          // A key the request names is the key answered for, even where the
+          // broker resolved it from a type and hash.
+          toCheck.push({
+            index,
+            key: target.key,
+            contentHash: target.contentHash,
+            intent: target.intent,
+          });
+        } else if (target.message === NO_CLOUD_REFUSAL) {
+          answers[index] = { key, status: "refused", reason: target.message };
+        } else {
+          answers[index] = { key, status: "error", error: target.message };
+        }
+      }
+
+      for (let start = 0; start < toCheck.length; start += PRESENCE_CONCURRENCY) {
+        await Promise.all(
+          toCheck.slice(start, start + PRESENCE_CONCURRENCY).map(async (entry) => {
+            const item = items[entry.index]!;
+            const shared = entry.key.startsWith("shared/");
+            let held = shared && presentKeyCache.has(entry.key);
+            if (!held) {
+              try {
+                held = await storage.has(entry.key);
+              } catch (err) {
+                console.warn(
+                  `[presign-batch] could not check ${entry.key}; signing it: ${(err as Error).message}`,
+                );
+              }
+              if (held && shared) presentKeyCache.add(entry.key);
+            }
+            if (held) {
+              answers[entry.index] = { key: item.key, status: "present" };
+              return;
+            }
+            if (!item.sign) {
+              answers[entry.index] = { key: item.key, status: "absent" };
+              return;
+            }
+            const checksumSha256 = sha256HexToBase64(entry.contentHash);
+            const tagging = tagsForIntent(entry.intent);
+            const url = await storage.getSignedPutUrl!(entry.key, {
+              expiresIn: 3600,
+              ...(item.contentType ? { contentType: item.contentType } : {}),
+              checksumSha256,
+              storageClass: WRITE_STORAGE_CLASS,
+              ...(Object.keys(tagging).length > 0 ? { tagging } : {}),
+            });
+            answers[entry.index] = {
+              key: item.key,
+              status: "signed",
+              url,
+              checksumSha256,
+              storageClass: WRITE_STORAGE_CLASS,
+              ...(Object.keys(tagging).length > 0 ? { tagging } : {}),
+            };
+          }),
+        );
+      }
+
+      // One structured line per batch: what the cloud answered, and the
+      // uploader's own account of what happened since its previous request.
+      // Together with the `sync-exchange` line, a phone's session reads as a
+      // timeline from the cloud logs alone.
+      const counts = { present: 0, absent: 0, refused: 0, error: 0, signed: 0 };
+      for (const answer of answers) counts[answer.status] += 1;
+      console.log(
+        JSON.stringify({
+          event: "upload-batch",
+          appId,
+          caller: signedInDevice ? { device: subject.userId } : { app: appId },
+          items: items.length,
+          answered: counts,
+          bytesSigned: items.reduce(
+            (sum, item, i) => sum + (answers[i]!.status === "signed" ? (item.sizeBytes ?? 0) : 0),
+            0,
+          ),
+          report: boundedUploadReport(body.report),
+          durationMs: Date.now() - batchStartedAt,
+        }),
+      );
+      return ok({ answers });
     }
 
     // POST /apps/{appId}/files/multipart/presign — start a multipart upload if
@@ -4675,6 +4915,12 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // installed: the Drive channel always exists, so shared data always has
       // an authorized cloud writer.
       const isDriveChannel = appId === DRIVE_APP_ID;
+      // What this exchange's walk over the bytes watermark found, for the log
+      // line below.
+      let walk: ByteWalkReport | null = null;
+      const onWalk = (report: ByteWalkReport) => {
+        walk = report;
+      };
       let transport;
       if (isDriveChannel) {
         // An original arriving without a stamp is judged by the deployment's
@@ -4692,6 +4938,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           // never hold — the upload route refuses it — so the walk counts it
           // as held rather than stopping there forever.
           byteCoverage: db.byteCoverageStore(DRIVE_APP_ID),
+          onWalk,
           declinesBlob: (key) => keyIsCloudExcluded(db, key),
           // A canonical stand-in's row lands before its bytes, so the archive
           // decision `onApplied` takes for it finds no bytes and declines.
@@ -4749,6 +4996,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           // In this app's schema, under this app's role, over the same
           // connection the applier uses.
           byteCoverage: createDsqlByteCoverageStore(source.client, appId, subject.userId),
+          onWalk,
         });
       }
       const exchangeStartedAt = Date.now();
@@ -4775,6 +5023,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           hasMore: response.hasMore,
           // False means requesters stop pushing; see `walkByteCoverage`.
           bytesReported: response.responderByteWatermarks !== undefined,
+          // The walk, per author: where the bytes watermark started and ended,
+          // and the first missing file, where a requester's uploads are waited
+          // on. Absent when the walk did not run.
+          bytes: walkSummary(walk),
           haltedAuthors: response.haltedAuthors ?? [],
           durationMs: Date.now() - exchangeStartedAt,
         }),
