@@ -13,10 +13,10 @@
   "infraRequirements": {
     "fileAccess": [
       {
-        "types": ["image/png", "image/jpeg"],
+        "types": ["image/png", "image/jpeg", "image/avif"],
         "access": "readwrite",
         "metadataWrite": true,
-        "rationale": "The fixture creates, reads and derives raster images so the platform's shared-record, blob and metadata paths all have a caller. PNG and JPEG only: the fixture asserts platform behavior, and a wider grant would test the grant list rather than the platform."
+        "rationale": "The fixture creates, reads and derives raster images so the platform's shared-record, blob and metadata paths all have a caller. PNG and JPEG for originals, and AVIF because the platform accepts no other type for an image stand-in. Nothing wider: the fixture asserts platform behavior, and a wider grant would test the grant list rather than the platform."
       }
     ],
     "labelKeys": [

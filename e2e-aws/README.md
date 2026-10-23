@@ -64,12 +64,23 @@ registry database, which must not land in a checkout you do not own.
    the thing the step tests.
 9. Drift a local creds file, re-run the Drive cloud install, and assert sync
    still validates — the todo-39 regression.
-   - **Rows ahead of bytes, Drive channel.** A record loses its local bytes
-     before sync. Its row must reach the cloud anyway, S3 must lack the file,
-     and the cloud's bytes watermark must stop below the row. Once the bytes
-     return, the file must reach S3 and the watermark must pass the row. This
-     is the only coverage of `_starkeep_byte_coverage` on real DSQL and of
-     the cloud's walk against real S3.
+   - **Rows ahead of bytes, Drive channel.** A photograph and its 320 px
+     smaller stand-in lose their local bytes before sync. Both rows must reach
+     the cloud anyway, S3 must lack both files, and the cloud's bytes
+     watermark must stop below the original. Once the bytes return, both
+     files must reach S3 and the watermark must pass both rows. This is the
+     only coverage of `_starkeep_byte_coverage` on real DSQL and of the
+     cloud's walk against real S3. While a file is owed, the detail route,
+     the `stand-in-urls` listing's size summary, `file-url` and the batch
+     `file-urls` sign no URL for it and report it as awaiting upload, and
+     `/sync/verify` counts it in `filesOwed`. Afterwards every read signs a
+     URL that fetches the bytes, and `filesOwed` reads 0.
+   - **A file in S3 ahead of the cloud's walk.** The bytes land through the
+     cloud's own upload route while the desktop is paused, so no exchange
+     moves the watermark. They land in the phone's order. Once the stand-in
+     lands, the reads must find it with a real S3 HEAD and serve it while
+     the original still reads as awaiting upload, and the watermark must stay
+     below the original. Once the original lands, every read serves both.
    - **Rows ahead of bytes, the app's own channel.** The same property for an
      app-private file in `_starkeep_sync_records`, through the per-app
      handler and the app's own role. Skipped for an app whose manifest
