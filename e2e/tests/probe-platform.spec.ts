@@ -94,7 +94,7 @@ test("install through the admin consent flow, with the manifest's grants shown",
   await expect(consent).toBeVisible();
   // The manifest's own order — the dialog renders `types.join(", ")`, so this
   // asserts the declared list reached the dialog rather than that some list did.
-  await expect(consent.getByText("image/png, image/jpeg")).toBeVisible();
+  await expect(consent.getByText("image/png, image/jpeg, image/avif")).toBeVisible();
   await expect(consent.getByText("records: read + write")).toBeVisible();
   await expect(consent.getByText("metadata: read + write")).toBeVisible();
 
