@@ -1,2 +1,8 @@
 # pnpm writes the lockfile; formatting it only churns the next install.
 pnpm-lock.yaml
+
+# The AWS journey's run state, written per run and ignored by
+# e2e-aws/.gitignore. Prettier reads only the root ignore files, so without
+# this line a machine that has run the journey fails `pnpm format:check`, and
+# with it `pnpm release:publish`.
+e2e-aws/.run/
