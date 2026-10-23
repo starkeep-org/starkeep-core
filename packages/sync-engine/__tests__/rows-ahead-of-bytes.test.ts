@@ -32,11 +32,18 @@ import {
 } from "../src/transports/in-process-transport.js";
 import { buildSide } from "./sync-test-harness/side.js";
 import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
+import {
+  createTestUploaderClock,
+  uploadAfterRound,
+  type TestUploaderClock,
+} from "./sync-test-harness/uploader-clock.js";
 import { makeMockAppSource } from "./sync-test-harness/mock-app-source.js";
+import type { ByteWalkReport } from "../src/transports/in-process-transport.js";
 import type {
   ByteCoverageStore,
   ResidencyHooks,
   SyncExchangeRequest,
+  SyncEngine,
   SyncExchangeResponse,
   SyncStateStore,
   SyncTransport,
@@ -129,7 +136,24 @@ function engine(
     ...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}),
     ...(options.residency ? { residency: options.residency } : {}),
     ...(options.filesOwedCap !== undefined ? { filesOwedCap: options.filesOwedCap } : {}),
+    uploaderTimers: uploaderClockFor(node),
   });
+}
+
+/** One uploader clock per side, so a test can move time for its uploads. */
+const uploaderClocks = new WeakMap<Side, TestUploaderClock>();
+function uploaderClockFor(node: Side): TestUploaderClock {
+  let clock = uploaderClocks.get(node);
+  if (!clock) {
+    clock = createTestUploaderClock();
+    uploaderClocks.set(node, clock);
+  }
+  return clock;
+}
+
+/** Run the uploads the last exchange made owed, as a round once did. */
+async function upload(node: Side, sync: SyncEngine): Promise<void> {
+  await uploadAfterRound(sync, uploaderClockFor(node));
 }
 
 /** Counts storage checks, so a test can see how much a walk did. */
@@ -205,6 +229,32 @@ describe("the responder's bytes watermark", () => {
       limit: 0,
     });
     expect(response.responderByteWatermarks?.["C"]).toEqual(await hlcOf(cloud!, kept));
+  });
+
+  it("reports where its walk started, ended, and stopped", async () => {
+    const [cloud, phone] = await sides("C", "P");
+    const first = await seedFile(phone!, 10);
+    const missing = await seedFile(phone!, 10, { withFile: false });
+    await seedFile(phone!, 10);
+    for (const id of [first, missing]) await cloud!.db.put((await phone!.db.get(id))!);
+    await cloud!.storage.put(await keyOf(phone!, first), new Uint8Array(8));
+    const walks: ByteWalkReport[] = [];
+    const transport = createInProcessSyncTransport({
+      databaseAdapter: cloud!.db,
+      clock: cloud!.clock,
+      objectStorage: cloud!.storage,
+      syncSharedRecords: true,
+      onWalk: (walk) => walks.push(walk),
+    });
+
+    await transport.exchange({ watermarks: {}, limit: 0 });
+
+    expect(walks).toHaveLength(1);
+    expect(walks[0]!.from).toEqual({});
+    expect(walks[0]!.to).toEqual({ P: await hlcOf(phone!, first) });
+    expect(walks[0]!.pins).toEqual({
+      P: { key: await keyOf(phone!, missing), hlc: await hlcOf(phone!, missing) },
+    });
   });
 
   it("counts a file it declines as held", async () => {
@@ -362,12 +412,15 @@ describe("pushing rows ahead of files", () => {
 
     const first = await node.exchange();
     expect(first.shipped).toBe(1);
-    expect(first.uploaded).toBe(0);
+    await upload(phone!, node);
+    expect(node.uploader.stats().sent.count).toBe(0);
+    expect(node.uploader.stats().queued.full.count).toBe(1);
 
     failing = false;
     const second = await node.exchange();
     expect(second.shipped).toBe(0);
-    expect(second.uploaded).toBe(1);
+    await upload(phone!, node);
+    expect(node.uploader.stats().sent.count).toBe(1);
     expect(await cloud!.storage.has(key)).toBe(true);
   });
 
@@ -397,13 +450,14 @@ describe("pushing rows ahead of files", () => {
     );
 
     await node.exchange();
+    await upload(phone!, node);
     await node.exchange();
     // The second file is in the cloud, but the watermark stops at the first.
     expect(await cloud!.storage.has(await keyOf(phone!, second))).toBe(true);
     expect(held).toEqual([]);
 
     failing = false;
-    await node.exchange(); // uploads the first file
+    await upload(phone!, node); // uploads the first file
     await node.exchange(); // the walk finds both
     await node.exchange(); // and reports neither again
     expect([...held].sort()).toEqual([first, second].sort());
@@ -465,6 +519,7 @@ describe("a phone's video and a desktop, end to end", () => {
     const desktopSync = engine(desktop!, cloud!, transport, { syncState: desktopState });
 
     await phoneSync.sync({ maxRounds: 10 });
+    await upload(phone!, phoneSync);
     const desktopRound = await desktopSync.sync({ maxRounds: 10 });
 
     // Every row is on the desktop already: the video holds back nothing.
@@ -484,6 +539,8 @@ describe("a phone's video and a desktop, end to end", () => {
 
     // The upload finishes; the next syncs on each side bring it across.
     videoLinkUp = true;
+    await phoneSync.sync({ maxRounds: 10 });
+    await upload(phone!, phoneSync);
     await phoneSync.sync({ maxRounds: 10 });
     await desktopSync.sync({ maxRounds: 10 });
     expect(await desktop!.storage.has(videoKey)).toBe(true);
@@ -538,7 +595,8 @@ describe("verify() and owed files", () => {
 
     const first = await node.exchange();
     expect(first.shipped).toBe(3);
-    expect(first.uploaded).toBe(0);
+    await upload(phone!, node);
+    expect(node.uploader.stats().sent.count).toBe(0);
     const before = await node.verify();
     expect(before.supported).toBe(true);
     expect(before.divergentBuckets).toBe(0);
@@ -547,6 +605,7 @@ describe("verify() and owed files", () => {
     expect(before.filesOwedCapped).toBe(false);
 
     link.restore();
+    await upload(phone!, node);
     await node.exchange();
     // verify()'s own exchange walks the peer's watermark past the uploads.
     const after = await node.verify();

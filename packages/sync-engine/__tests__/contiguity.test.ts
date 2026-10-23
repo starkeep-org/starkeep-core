@@ -207,13 +207,14 @@ describe("contiguous prefix across streams", () => {
       maxItems: 2,
     });
     for (let i = 0; i < 5; i += 1) await engine.sync({ maxRounds: 5 });
+    await engine.uploader.drain();
 
     // Rows no longer wait for files, so `aaa`'s row reaches the cloud; its
     // file is what is stuck.
     expect(await cloud.db.get(stuck)).not.toBeNull();
     expect(await cloud.storage.has(failingKey)).toBe(false);
     // `bbb` shares no author with it, so neither its row nor its file waits:
-    // the head allotment takes files round-robin across authors.
+    // the uploader's queue holds a failed file back by itself alone.
     expect(await cloud.db.get(healthy), "bbb must not be starved by aaa").not.toBeNull();
     const healthyKey = (await local.db.get(healthy))!.objectStorageKey;
     expect(await cloud.storage.has(healthyKey), "bbb's file must not wait for aaa's").toBe(true);

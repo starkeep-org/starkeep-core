@@ -94,6 +94,7 @@ export { residencyOf, type RecordResidency, type RecordResidencyState } from "./
 export {
   createInProcessSyncTransport,
   createMemoryByteCoverageStore,
+  type ByteWalkReport,
 } from "./transports/in-process-transport.js";
 export {
   createHttpSyncTransport,
@@ -170,3 +171,30 @@ export {
 export { createSqliteDeploymentSettingsCache } from "./deployment-settings-cache-sqlite.js";
 export { advanceBytesWatermark, clampToRows } from "./file-rows.js";
 export { planByteWindow, type ByteWindowPlan, type ByteWindowItem } from "./byte-window.js";
+export {
+  createUploader,
+  createUploadTarget,
+  uploadTierOf,
+  shortKey,
+  FAST_TIER_MAX_BYTES,
+  UPLOAD_BATCH_SIZE,
+  type Uploader,
+  type UploaderStats,
+  type UploaderTierStats,
+  type UploaderTimers,
+  type UploadTarget,
+  type UploadItem,
+  type UploadAnswer,
+  type UploadBatchReport,
+  type PresignedPut,
+  type PresignUploadItem,
+  type PresignUploadAnswer,
+} from "./uploader.js";
+export {
+  createMemoryUploadQueueStore,
+  createSqliteUploadQueueStore,
+  type UploadQueueStore,
+  type UploadQueueEntry,
+  type QueuedFile,
+  type UploadTier,
+} from "./upload-queue-store.js";

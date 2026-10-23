@@ -97,6 +97,8 @@ import type {
 } from "./types.js";
 import { SHARED_DIGEST_SCOPE } from "./types.js";
 import { createChangeNotifier } from "./change-notifier.js";
+import { createMemoryUploadQueueStore } from "./upload-queue-store.js";
+import { createUploadTarget, createUploader } from "./uploader.js";
 import { createFileSyncEngine } from "./file-sync-engine.js";
 import {
   applyRecordMetadata,
@@ -424,17 +426,28 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
   };
 
   /**
-   * Keys an upload found at the peer, or sent there, during the current
-   * `sync()`.
-   *
-   * A file above a stuck one stays above the peer's bytes watermark, so every
-   * round would offer it again, and the smallest-first pick would offer the
-   * same already-uploaded files every round and never reach the rest. Skipping
-   * them for the rest of the sync fixes both. Cleared when a sync starts, so
-   * the next sync asks the peer again and a file the peer has since lost is
-   * owed again: the peer's watermark, not this set, decides what is owed.
+   * Uploads, beside the round. The uploader reads the watermark the round
+   * saves — lowered to any repair floor, so a repair offers the files above
+   * the floor again — and writes only its own tables. See `uploader.ts`.
    */
-  const peerHolds = new Set<string>();
+  // The uploader's clock, so the time an exchange began and the time a file
+  // was sent compare on one scale.
+  const uploaderClock = options.uploaderTimers
+    ? () => options.uploaderTimers!.now()
+    : () => Date.now();
+  const uploads = createUploader({
+    sources: localFileRows,
+    records: syncSharedRecords ? localDatabaseAdapter : null,
+    localObjectStorage,
+    target: createUploadTarget(remoteObjectStorage),
+    store: options.uploadQueue ?? createMemoryUploadQueueStore(),
+    loadCloudBytes: async () => {
+      const peer = await loadPeerByteWatermarks();
+      return peer === null ? null : lowerBytesToFloors(peer, await loadRepairFloors());
+    },
+    ...(options.uploaderTimers ? { timers: options.uploaderTimers } : {}),
+  });
+
   /**
    * Keys a "not yet" download found missing at the peer, with when. Skipped
    * for {@link PEER_LACKS_RETRY_MS}, for the mirror of the reason above:
@@ -443,10 +456,9 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
    */
   const peerLacks = new Map<string, number>();
 
-  function rememberBounded<T>(store: Set<T> | Map<T, number>, key: T, at?: number): void {
+  function rememberBounded<T>(store: Map<T, number>, key: T): void {
     if (store.size >= TRANSFER_MEMORY_LIMIT) store.clear();
-    if (store instanceof Set) store.add(key);
-    else store.set(key, at ?? Date.now());
+    store.set(key, Date.now());
   }
 
   async function localHas(key: string): Promise<boolean> {
@@ -645,10 +657,9 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
   }
 
   /**
-   * Count the files the upload pass would still owe the peer, without
-   * sending any. The same selection as {@link uploadOwedFiles}: rows above
-   * the peer's bytes watermark (lowered to any repair floor) whose file this
-   * node holds and may send to the cloud.
+   * Count the files this node still owes the peer: rows above the peer's
+   * bytes watermark (lowered to any repair floor) whose file this node holds
+   * and may send to the cloud. The uploader's discovery takes the same rows.
    */
   async function countOwedFiles(
     peerBytes: Watermarks,
@@ -673,134 +684,6 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     // Rows past where the scan stopped may name more: the count is a floor.
     const capped = owed.size >= filesOwedCap || scan.ceilings.size > 0;
     return { count: Math.min(owed.size, filesOwedCap), capped };
-  }
-
-  /**
-   * Upload the files of this node's rows that the peer says it lacks.
-   *
-   * Works from the peer's bytes watermark, which is the peer's own statement of
-   * what it holds. Nothing on this node records an upload as done: an upload
-   * the peer lost is owed again as soon as the peer's watermark says so.
-   *
-   * Takes only files this node holds. A file whose bytes live on another node
-   * is that node's to send. Takes no file marked `starkeep/no-cloud`: the peer
-   * is always the cloud, and the cloud refuses those bytes and counts them as
-   * held.
-   */
-  async function uploadOwedFiles(peerBytes: Watermarks): Promise<FilePassResult> {
-    // An outbound repair re-ships rows the peer lost, and the peer may have
-    // lost their files with them. Its bytes watermark sits above the hole by
-    // construction, exactly as its rows watermark does, so the upload pass
-    // starts no higher than the repair floor and offers those files again. A
-    // file the peer still holds costs one HEAD.
-    const from = lowerBytesToFloors(peerBytes, await loadRepairFloors());
-    const scan = await scanFileRows(localFileRows, from, maxItems);
-    if (!scan.readable) return { ...EMPTY_FILE_PASS, failed: true };
-
-    const owed: FileRow[] = [];
-    for (const row of scan.rows) {
-      if (!row.manifest) continue;
-      if (!(await localHas(row.manifest.objectStorageKey))) continue;
-      owed.push(row);
-    }
-    let excluded: ReadonlySet<StarkeepId>;
-    try {
-      excluded = await cloudExcludedRecords(
-        localDatabaseAdapter,
-        owed.flatMap((row) => (row.recordId === null ? [] : [row.recordId])),
-      );
-    } catch (err) {
-      // An unread label might be the one that forbids the upload. Sending
-      // nothing this round is the side that cannot leak.
-      console.warn(
-        `[sync] could not read no-cloud labels; uploading nothing this round: ${(err as Error).message}`,
-      );
-      return { ...EMPTY_FILE_PASS, failed: true };
-    }
-    const sendable = owed.filter((row) => row.recordId === null || !excluded.has(row.recordId));
-
-    const plan = planByteWindow(
-      sendable.map((row) => ({ value: row, hlc: row.hlc, bytes: row.manifest!.sizeBytes })),
-      {
-        headBytes: maxBytes,
-        opportunisticBytes: maxBytes,
-        opportunisticMaxFiles: OPPORTUNISTIC_MAX_FILES,
-        skip: (row) => peerHolds.has(row.manifest!.objectStorageKey),
-      },
-    );
-
-    let transferred = 0;
-    let transferredBytes = 0;
-    let failed = false;
-    const failedAuthors = new Set<string>();
-    // Authors with files this pass did not get to: left for budget, or past
-    // where the scan stopped. A repair floor must not retire over them.
-    const taken = new Set<FileRow>([...plan.head, ...plan.opportunistic]);
-    const pendingAuthors = new Set<string>(scan.ceilings.keys());
-    for (const row of sendable) {
-      if (!taken.has(row) && !peerHolds.has(row.manifest!.objectStorageKey)) {
-        pendingAuthors.add(row.hlc.nodeId);
-      }
-    }
-    const byKey = groupByKey(
-      [...plan.head, ...plan.opportunistic],
-      (row) => row.manifest!.objectStorageKey,
-    );
-    await forEachConcurrent([...byKey.values()], transferConcurrency, async (sharing) => {
-      const first = sharing[0]!;
-      const manifest = first.manifest!;
-      const outcome = await transferOutcomeSafe(
-        manifest,
-        localObjectStorage,
-        remoteObjectStorage,
-        fileSyncEngine,
-        "upload",
-        first.itemId,
-        false,
-      );
-      if (outcome === "failed") {
-        failed = true;
-        for (const row of sharing) failedAuthors.add(row.hlc.nodeId);
-        return;
-      }
-      rememberBounded(peerHolds, manifest.objectStorageKey);
-      if (outcome === "transferred") {
-        transferred += 1;
-        transferredBytes += manifest.sizeBytes;
-      }
-    });
-
-    // How far, per author, every file from `from` up is accounted for: sent,
-    // found at the peer, not this node's to send, or not allowed there. A
-    // repair floor advances over this, so a repair wider than one window
-    // still moves forward.
-    const owedSet = new Set(owed);
-    const accountedFor = advanceBytesWatermark(
-      from,
-      scan.rows.map((row) => ({
-        hlc: row.hlc,
-        satisfied:
-          !row.manifest ||
-          !owedSet.has(row) ||
-          (row.recordId !== null && excluded.has(row.recordId)) ||
-          peerHolds.has(row.manifest.objectStorageKey),
-      })),
-      scan.ceilings,
-    );
-
-    return {
-      transferred,
-      transferredBytes,
-      elided: 0,
-      failed,
-      failedAuthors,
-      pendingAuthors,
-      accountedFor,
-      moved: false,
-      // A sent file moves the peer's bytes watermark only when the peer next
-      // reports it, so one more exchange is needed to learn what is still owed.
-      hasMore: transferred > 0 || plan.leftOver > 0,
-    };
   }
 
   async function exchange(options?: ExchangeOptions): Promise<ExchangeResult> {
@@ -833,7 +716,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     // Rows go ahead of their files only to a peer that reports which files it
     // holds. A peer that cannot would accept rows whose uploads nothing then
     // remembers: this node's scan starts above the peer's rows watermark, and
-    // the upload pass works from a bytes watermark the peer never sends. So
+    // the uploader works from a bytes watermark the peer never sends. So
     // the first push to a peer asks first, with an exchange that carries and
     // returns no rows (`limit: 0`; see `verify()` for why that ships nothing).
     // The answer is stored, so the question is asked once per peer.
@@ -910,7 +793,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
             value: { kind: "record", record: rec },
             hlc: rec.updatedAt,
             // Rows travel ahead of their files, so a row costs no byte
-            // budget: its upload is the upload pass's business, budgeted
+            // budget: its upload is the uploader's business, paced
             // there. Charging rows for their files is what made a row wait
             // behind every earlier file from its author.
             bytes: 0,
@@ -1009,7 +892,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       }
       // Every row ships. A row no longer waits for its file: the file is
       // owed to the peer until the peer's bytes watermark passes it, and the
-      // upload pass after the exchange works from that watermark. See
+      // uploader works from that watermark. See
       // `SyncExchangeResponse.responderByteWatermarks`.
       for (const item of items) {
         if (item.kind === "record") {
@@ -1056,6 +939,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       }
     }
 
+    const exchangeStartedAt = uploaderClock();
     const response = await transport.exchange({
       watermarks: advertisedWatermarks,
       records: outboundItems.length > 0 ? outboundItems : undefined,
@@ -1309,18 +1193,14 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     // report has ever arrived, and every download is then expected to work.
     const peerByteWatermarks = response.responderByteWatermarks ?? priorPeerByteWatermarks;
 
-    // Files after rows, downloads before uploads. Each pass spends its own
-    // byte budget, so a phone fetching stand-ins still uploads this round.
+    // Files after rows. Downloads only: uploads run in the uploader, beside
+    // the round, and learn from the watermark saved here.
     const download = await downloadOwedFiles(peerByteWatermarks, ownWatermarks);
-    const upload =
-      push && peerByteWatermarks !== null
-        ? await uploadOwedFiles(peerByteWatermarks)
-        : EMPTY_FILE_PASS;
     if (response.responderByteWatermarks) {
       await savePeerByteWatermarks(response.responderByteWatermarks);
     } else if (push && (outboundRecords.length > 0 || outboundAppRows.length > 0)) {
       console.warn(
-        "[sync] peer stopped reporting a bytes watermark after rows were shipped; their uploads continue from its last report",
+        "[sync] peer stopped reporting a bytes watermark after rows were shipped; uploads continue from its last report",
       );
     }
     elidedCount += download.elided;
@@ -1368,7 +1248,6 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       elidedCount > 0 ||
       download.transferred > 0 ||
       download.moved ||
-      upload.transferred > 0 ||
       peerBytesMoved;
 
     if (syncState) {
@@ -1412,15 +1291,20 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // is under it — so a watermark comparison reads as "already covered"
       // from the very first round and retires the floor before it has
       // re-shipped anything. Nor on a pull-only round, which ships nothing
-      // and so proves nothing. And not on an author with a file that failed
-      // to upload: rows ship ahead of their files, but a repaired range's
-      // files are offered again only while the floor lowers where the upload
-      // pass starts, so retiring early would abandon them.
+      // and so proves nothing.
       //
       // Nor on an author the *peer* dropped. A repair round whose rows shipped
       // fine and were then discarded on arrival is the same event as a failed
       // upload — the hole is still a hole — and only `haltedAuthors` says so,
       // because every local signal reports a clean round.
+      //
+      // The files half of a repair belongs to the uploader. A floor lowers the
+      // watermark the uploader reads, so the uploader forgets what it sent
+      // above the floor and offers those files again (rule 1 in `uploader.ts`).
+      // The floor waits, per author, only until the peer's bytes watermark has
+      // reached it, which the round saves and which needs nothing from the
+      // uploader.
+      //
       // A floor that survives the round **advances to what this round
       // actually shipped**, because a fixed mark cannot repair a hole bigger
       // than one round.
@@ -1448,35 +1332,17 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
             next[nodeId] = floor;
             continue;
           }
-          // The floor also lowers where the upload pass starts, so it has to
-          // stay until the repaired range's files are accounted for too.
-          const filesDone =
-            !upload.failedAuthors?.has(nodeId) && !upload.pendingAuthors?.has(nodeId);
-          // How far each half of the repair has got. `null` means that half
-          // is done and holds the floor nowhere.
+          const peerBytes = peerByteWatermarks?.[nodeId];
+          const filesDone = peerBytes !== undefined && compareHLC(peerBytes, floor) >= 0;
           const shipped = shippedHighWater[nodeId];
-          const rowsTo = !outboundHasMore
-            ? null
-            : shipped !== undefined && compareHLC(shipped, floor) > 0
+          // Drained, and the peer holds the files up to the floor: done.
+          if (!outboundHasMore && filesDone) continue;
+          // No further than the files half allows: a floor past a file the
+          // peer lacks would stop the uploader offering it.
+          next[nodeId] =
+            outboundHasMore && filesDone && shipped !== undefined && compareHLC(shipped, floor) > 0
               ? shipped
               : floor;
-          const files = upload.accountedFor?.[nodeId];
-          const filesTo = filesDone
-            ? null
-            : files !== undefined && compareHLC(files, floor) > 0
-              ? files
-              : floor;
-          // Drained, and nothing was left behind: the repair is done.
-          if (rowsTo === null && filesTo === null) continue;
-          // No further than the slower half: a floor past an unsent row or an
-          // unsent file would stop the scan offering it.
-          const advanced =
-            rowsTo === null
-              ? filesTo!
-              : filesTo === null || compareHLC(rowsTo, filesTo) <= 0
-                ? rowsTo
-                : filesTo;
-          next[nodeId] = advanced;
         }
         if (!sameWatermarks(floors, next)) {
           progressed = true;
@@ -1511,13 +1377,15 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       }
     }
 
+    // Every watermark this round moves is saved. The uploader reconciles
+    // against them in the background and never holds the round up.
+    uploads.afterExchange(exchangeStartedAt);
+
     return {
       applied: appliedIds.length,
       landed: download.transferred,
       landedBytes: download.transferredBytes,
-      uploaded: upload.transferred,
-      uploadedBytes: upload.transferredBytes,
-      bytesHasMore: download.hasMore || upload.hasMore,
+      bytesHasMore: download.hasMore,
       // All three streams, including labels. Counting two of the three made
       // `shipped` unusable as a progress signal on a label-heavy round — the
       // caller sees a frozen counter while the round is doing real work — and
@@ -1553,7 +1421,6 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       blocked:
         pushWithheld ||
         download.failed ||
-        upload.failed ||
         inboundBrokeFor.size > 0 ||
         haltedByPeer.size > 0 ||
         suppressedThisRound.size > 0,
@@ -1703,9 +1570,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // caller that had already gone away.
       if (options?.signal?.aborted) return totals;
 
-      // Each sync asks the peer afresh which files it holds and lacks. The two
-      // memories only stop one sync from offering the same file every round.
-      peerHolds.clear();
+      // Each sync asks the peer afresh which files it lacks. The memory only
+      // stops one sync from asking for the same missing file every round.
       peerLacks.clear();
 
       // Highest position shipped per author across this whole sync, for the
@@ -1990,6 +1856,9 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           await syncState.setRepairFloors(
             applyRepairFloors(await loadRepairFloors(), repairFloorsFor(missing)),
           );
+          // The floor lowers the watermark the uploader reads, and the uploader
+          // has to see it before a sync retires it.
+          uploads.afterExchange(null);
         }
         if (missingHere.length > 0 && inboundDrained) {
           // The symmetric repair, and it works the same way from the other end:
@@ -2042,6 +1911,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     },
 
     changeNotifier,
+
+    uploader: uploads.uploader,
   };
 }
 
@@ -2267,7 +2138,7 @@ async function transferBlobSafe(
   }
 }
 
-/** What one transfer pass did. */
+/** What one download pass did. */
 interface FilePassResult {
   /** Files whose bytes actually moved, and their size. */
   readonly transferred: number;
@@ -2276,12 +2147,6 @@ interface FilePassResult {
   readonly elided: number;
   /** A file that should have moved did not, or a step would not run. */
   readonly failed: boolean;
-  /** Authors with a file that failed to upload. Uploads only. */
-  readonly failedAuthors?: ReadonlySet<string>;
-  /** Authors with files this upload pass did not reach. Uploads only. */
-  readonly pendingAuthors?: ReadonlySet<string>;
-  /** Per author, how far every file is accounted for. Uploads only. */
-  readonly accountedFor?: Watermarks;
   /** This node's bytes watermark advanced. */
   readonly moved: boolean;
   /** Work remains that another round can do. */
@@ -2298,7 +2163,7 @@ const EMPTY_FILE_PASS: FilePassResult = {
 };
 
 /**
- * Most files the opportunistic allotment takes per round, in each direction.
+ * Most files the opportunistic allotment takes per round.
  *
  * Bounds the round's requests rather than its bytes: the allotment exists for
  * thumbnails, which are small enough that a byte budget alone would let one
@@ -2309,7 +2174,7 @@ const OPPORTUNISTIC_MAX_FILES = 64;
 /** How long a file found missing at the peer waits before it is tried again. */
 const PEER_LACKS_RETRY_MS = 30_000;
 
-/** Cap on either transfer memory, which is cleared outright when reached. */
+/** Cap on the transfer memory, which is cleared outright when reached. */
 const TRANSFER_MEMORY_LIMIT = 10_000;
 
 function groupByKey<T>(items: readonly T[], keyOf: (item: T) => string): Map<string, T[]> {

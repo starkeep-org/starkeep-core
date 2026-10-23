@@ -166,7 +166,9 @@ describe("AR — app-record rows", () => {
     expect(await w.blobExists("cloud")).toBe(false);
     const { peerBytes } = await w.watermarks();
     expect(peerBytes?.[w.local.nodeId]).toBeUndefined();
-    expect(results.every((r) => r.blocked)).toBe(true);
+    // The round is not blocked by an upload; the file waits in the queue.
+    expect(results.every((r) => !r.blocked)).toBe(true);
+    expect(w.engine.uploader.stats().queued.full.count).toBe(1);
   });
 
   it("S3-012: AR cb + transient download-fails / 2r — round 2 pulls blob", async () => {

@@ -137,6 +137,8 @@ export interface FakeCloud {
   uninstallApp(appId: string): void;
   /** All exchanges served, in order. */
   exchangeLog: FakeCloudExchangeLogEntry[];
+  /** The key of every blob PUT the stand-in S3 stored, in order. */
+  blobPutLog: string[];
   clearExchangeLog(): void;
   /** Mutate to inject failures; counters self-decrement as they fire. */
   failures: FakeCloudFailures;
@@ -232,6 +234,7 @@ export async function startFakeCloud(): Promise<FakeCloud> {
   });
 
   const exchangeLog: FakeCloudExchangeLogEntry[] = [];
+  const blobPutLog: string[] = [];
   const latency: FakeCloudLatency = { exchangeDelayMs: 0 };
   const inFlightExchanges = new Map<string, number>();
   const peakExchanges = new Map<string, number>();
@@ -438,6 +441,7 @@ export async function startFakeCloud(): Promise<FakeCloud> {
           contentType: typeof contentType === "string" ? contentType : undefined,
           ...(expected ? { checksumSha256: sha256HexToBase64(expected) } : {}),
         });
+        blobPutLog.push(key);
         res.writeHead(200);
         res.end();
         return;
@@ -579,6 +583,37 @@ export async function startFakeCloud(): Promise<FakeCloud> {
       return;
     }
 
+    // The uploader's batch: presence and a signed PUT per item, in the
+    // request's order, as `POST /files/presign-batch` answers. An injected
+    // blob-put failure fails the whole request, which the uploader reads as an
+    // outage.
+    if (rest === "/files/presign-batch" && req.method === "POST") {
+      if (failures.blobPuts > 0) {
+        failures.blobPuts -= 1;
+        sendJson(res, 500, { error: "injected blob-put failure" });
+        return;
+      }
+      const { items } = JSON.parse(rawBody.toString("utf8")) as {
+        items: Array<{ key: string; sign?: false }>;
+      };
+      const answers = await Promise.all(
+        items.map(async ({ key, sign }) => {
+          if (await objectStorage.has(key)) return { key, status: "present" };
+          if (sign === false) return { key, status: "absent" };
+          const contentHash = contentHashFromDataRecordObjectKey(key);
+          const checksumSha256 = contentHash ? sha256HexToBase64(contentHash) : undefined;
+          return {
+            key,
+            status: "signed",
+            url: blobUrl(key),
+            ...(checksumSha256 ? { checksumSha256 } : {}),
+          };
+        }),
+      );
+      sendJson(res, 200, { answers });
+      return;
+    }
+
     // No `/files/confirm`, deliberately. This fake used to answer it and no real
     // server ever has, so the suite was green while every real upload took a
     // 404. A fake more capable than the thing it stands in for hides exactly
@@ -697,6 +732,7 @@ export async function startFakeCloud(): Promise<FakeCloud> {
     installApp: (manifest) => installLocal(db, manifest),
     uninstallApp: (appId) => uninstallLocal(db, appId),
     exchangeLog,
+    blobPutLog,
     clearExchangeLog: () => {
       exchangeLog.length = 0;
       peakExchanges.clear();
