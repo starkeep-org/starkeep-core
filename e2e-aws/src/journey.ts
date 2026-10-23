@@ -444,6 +444,15 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
     return (out.Contents ?? []).some((object) => object.Key === key);
   }
 
+  /** When S3 stored an object, from the same listing `inS3` reads. */
+  async function s3LastModified(key: string): Promise<Date | null> {
+    const s3 = new S3Client({ region: REGION });
+    const out = await s3.send(
+      new ListObjectsV2Command({ Bucket: config.s3Bucket!, Prefix: key, MaxKeys: 1 }),
+    );
+    return (out.Contents ?? []).find((object) => object.Key === key)?.LastModified ?? null;
+  }
+
   /**
    * Assert where the cloud's bytes watermark stands against one row on one
    * channel. `"below"`: the cloud holds the row and says the row's file is
@@ -1235,10 +1244,10 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // only when an exchange arrives. The lazy reads must find the file
         // with a HEAD rather than wait for the walk.
         //
-        // The desktop's own upload pass always runs ahead of a further
-        // exchange in the same sync, so it cannot hold that window open. The
-        // bytes go up through the cloud's own upload route instead, with the
-        // desktop paused, so no exchange reaches the cloud in between. They go
+        // The desktop's own uploader could close that window at any moment
+        // with an exchange. The bytes go up through the cloud's own upload
+        // route instead, with the desktop paused, so no exchange reaches the
+        // cloud in between. They go
         // up in the phone's order: the stand-in first, then the original.
         const files = await rowAheadOfItsFile(randomBytes(56_000));
         const { original, standIn } = files;
@@ -1269,6 +1278,58 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
           expect(resume.status, await resume.clone().text()).toBe(200);
         }
         expect(await driveFilesOwed(), "files still owed once the walk passed every row").toBe(0);
+      });
+
+      it("sends a stand-in before the larger original it stands in for, authored earlier", async () => {
+        // The uploader's order: another node's photo list paints from
+        // stand-ins, so the fast tier goes first. Written while sync is paused,
+        // so both files are queued before the uploader looks, and the original
+        // is the older row of the two.
+        const pause = await drive.fetch("/sync/pause", { method: "POST" });
+        expect(pause.status, await pause.clone().text()).toBe(200);
+        let originalKey: string;
+        let standInKey: string;
+        try {
+          const original = await writeRecord(appUnderTest, {
+            type: "image/jpeg",
+            contentType: "image/jpeg",
+            bytes: randomBytes(8 * 1024 * 1024),
+            fidelity: 480,
+          });
+          expectCreated(original, "the original");
+          const standIn = await writeRecord(appUnderTest, {
+            type: "image/avif",
+            contentType: "image/avif",
+            bytes: randomBytes(40_000),
+            parentId: original.body.record!.id,
+            standIn: { role: "smaller", fidelity: 320 },
+          });
+          expectCreated(standIn, "the stand-in");
+          originalKey = (original.body.record as unknown as { object_storage_key: string })
+            .object_storage_key;
+          standInKey = (standIn.body.record as unknown as { object_storage_key: string })
+            .object_storage_key;
+        } finally {
+          const resume = await drive.fetch("/sync/resume", { method: "POST" });
+          expect(resume.status, await resume.clone().text()).toBe(200);
+        }
+
+        await eventually(
+          async () => {
+            await syncDesktop();
+            for (const key of [originalKey, standInKey]) {
+              if (!(await inS3(key))) throw new Error(`${key} has not reached S3`);
+            }
+          },
+          { timeoutMs: 180_000, intervalMs: 3_000 },
+        );
+        // S3 stamps an object when its PUT completes, to the second. The
+        // stand-in's PUT starts first and is a fraction of the size.
+        const [standInAt, originalAt] = await Promise.all([
+          s3LastModified(standInKey),
+          s3LastModified(originalKey),
+        ]);
+        expect(standInAt!.getTime()).toBeLessThanOrEqual(originalAt!.getTime());
       });
 
       // The same property on the app's own channel, which carries the app's
