@@ -40,11 +40,14 @@ async function sha256Hex(buf) {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// Builds every tile before touching the grid, then swaps them in at once. The
+// grid used to be emptied first and refilled one awaited file-url at a time, so
+// a reader that counted tiles mid-render saw none.
 async function render() {
   const res = await fetch(api + "/data/records?limit=200&include=metadata");
-  if (!res.ok) { statusEl.textContent = "Data server GET /data/records → " + res.status; return; }
+  if (!res.ok) { statusEl.textContent = "Data server GET /data/records → " + res.status; return false; }
   const { records } = await res.json();
-  grid.replaceChildren();
+  const imgs = [];
   for (const r of records) {
     if (!r.original_filename) continue;
     const img = document.createElement("img");
@@ -52,8 +55,10 @@ async function render() {
     img.width = 64;
     const u = await fetch(api + "/data/records/" + r.id + "/file-url");
     if (u.ok) img.src = (await u.json()).url;
-    grid.appendChild(img);
+    imgs.push(img);
   }
+  grid.replaceChildren(...imgs);
+  return true;
 }
 
 async function upload(file) {
@@ -96,10 +101,12 @@ async function upload(file) {
   });
   if (!reg.ok) { statusEl.textContent = "register → " + reg.status; return; }
   const body = await reg.json();
+  // The outcome is reported only once the grid shows it, so the status line
+  // doubles as the signal that the list has settled.
+  if (!(await render())) return;
   statusEl.textContent = body.deduped
     ? file.name + " is already in your library"
     : "Uploaded " + file.name;
-  await render();
 }
 
 document.getElementById("file").addEventListener("change", (e) => {
