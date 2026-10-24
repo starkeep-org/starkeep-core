@@ -99,7 +99,7 @@ test("install through the admin consent flow, with the manifest's grants shown",
   await expect(consent.getByText("metadata: read + write")).toBeVisible();
 
   await page.getByRole("button", { name: "Approve & Install" }).click();
-  await expect(card.getByText("Installed")).toBeVisible({ timeout: 60_000 });
+  await expect(card.getByText("Installed", { exact: true })).toBeVisible({ timeout: 60_000 });
 });
 
 test("start from the admin UI and reach the app on its allocated port", async ({ page }) => {
@@ -193,7 +193,10 @@ test("reinstall re-exposes shared records; app-private rows are gone", async ({ 
   const card = probeCard(page);
   await card.getByRole("button", { name: /^Install / }).click();
   await page.getByRole("button", { name: "Approve & Install" }).click();
-  await expect(card.getByText("Installed")).toBeVisible({ timeout: 60_000 });
+  // Exact, because a substring match also finds the "Not installed" badge and
+  // passes before the install returns. The install route stops the app's
+  // daemon as its last step, so a daemon started early gets that SIGTERM.
+  await expect(card.getByText("Installed", { exact: true })).toBeVisible({ timeout: 60_000 });
 
   const { url } = await startAppDaemonViaAdmin(adminUrl(), "probe");
   probeUrl = url;

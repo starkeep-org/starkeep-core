@@ -182,7 +182,7 @@ test.afterAll(async () => {
 test("a daemon that dies at startup surfaces its log tail on the Dashboard", async ({ page }) => {
   await page.goto(adminUrl());
   const card = appCard(page, "Crash App");
-  await expect(card.getByText("Installed")).toBeVisible();
+  await expect(card.getByText("Installed", { exact: true })).toBeVisible();
 
   await clickStart(page, card);
 
