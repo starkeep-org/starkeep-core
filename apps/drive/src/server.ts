@@ -37,6 +37,27 @@ import {
 
 export const DEFAULT_PORT = 9830;
 
+/**
+ * Loopback only. Local data carries no sign-in gate, which is safe only while
+ * whoever reaches this server is the person at this machine: the server reads
+ * the library for any caller. Binding every interface let any device on the
+ * LAN read it (found 2026-10-24).
+ *
+ * The bind keeps other devices out. The `Host` check keeps out a DNS-rebinding
+ * page in this machine's own browser, the same way the local data server does;
+ * `apps/local-data-server/loopback-host.ts` explains why. A request with no
+ * `Host` did not come from a browser and passes.
+ */
+const LISTEN_HOST = "127.0.0.1";
+const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+function isLoopbackHost(host: string | undefined): boolean {
+  if (host === undefined) return true;
+  const lower = host.trim().toLowerCase();
+  const end = lower.startsWith("[") ? lower.indexOf("]") + 1 : lower.indexOf(":");
+  return LOOPBACK_HOSTNAMES.has(end > 0 ? lower.slice(0, end) : lower);
+}
+
 function portFromArgv(argv: string[]): number {
   const at = argv.findIndex((a) => a === "--port" || a === "-p");
   const value =
@@ -120,12 +141,17 @@ async function main(): Promise<void> {
   // here rather than inside the Hono app is what lets Vite own the client in
   // development without Hono having to know Vite exists.
   const server = createServer((req, res) => {
+    if (!isLoopbackHost(req.headers.host)) {
+      res.writeHead(403, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "Drive answers on its loopback address only" }));
+      return;
+    }
     const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
     if (isServerPath(pathname)) apiListener(req, res);
     else client(req, res);
   });
 
-  server.listen(port, () => {
+  server.listen(port, LISTEN_HOST, () => {
     console.log(`drive listening on http://localhost:${port}${dev ? " (dev)" : ""}`);
   });
 }
