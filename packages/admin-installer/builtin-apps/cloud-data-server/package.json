@@ -18,6 +18,10 @@
     "@aws-sdk/cloudfront-signer": "^3.700.0",
     "@aws-sdk/dsql-signer": "^3.700.0",
     "@aws-sdk/s3-request-presigner": "^3.700.0",
+    "@peculiar/asn1-android": "2.10.0",
+    "@peculiar/asn1-schema": "2.10.0",
+    "@peculiar/asn1-x509": "2.10.0",
+    "@starkeep/app-client": "workspace:*",
     "@starkeep/protocol-primitives": "workspace:*",
     "@starkeep/shared-space-api": "workspace:*",
     "@starkeep/storage-adapter": "workspace:*",
@@ -29,7 +33,6 @@
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.4",
     "@noble/curves": "^2.2.0",
-    "@starkeep/app-client": "workspace:*",
     "@types/aws-lambda": "^8.10.0",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.11.0",

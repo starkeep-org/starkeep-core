@@ -1,84 +1,38 @@
 /**
- * Cookie mechanics for a cloud app session.
- *
- * The browser never holds a Cognito credential. Sign-in runs server-side and
- * the refresh token comes back only as an `HttpOnly` cookie, so an XSS on the
- * page has nothing durable to steal. What it can reach — the minted ID token —
- * is good for an hour and is itself `HttpOnly`.
+ * A cloud app session at request time: verify `sk_token`, and re-mint it from
+ * `sk_session` as it nears expiry. The cookies themselves are `cookies.ts`,
+ * which the broker shares.
  */
 import { getRuntimeConfig } from "../runtime-config.js";
 import type { MinimalRequest } from "../data-proxy.js";
 import type { PoolConfig } from "./cognito.js";
 import { refreshTokens } from "./cognito.js";
 import { verifyIdToken, unsafeDecodeExp, type VerifiedClaims } from "./verify.js";
+import { SESSION_COOKIE, TOKEN_COOKIE, parseCookieHeader, tokenCookie } from "./cookies.js";
 
-/** The Cognito refresh token. Lives as long as Cognito says it does. */
-export const SESSION_COOKIE = "sk_session";
-/** A minted Cognito ID token, re-minted from `sk_session` as it nears expiry. */
-export const TOKEN_COOKIE = "sk_token";
+export {
+  SESSION_COOKIE,
+  TOKEN_COOKIE,
+  SESSION_MAX_AGE_S,
+  type CookieOptions,
+  cookiePath,
+  parseCookieHeader,
+  setCookie,
+  clearCookies,
+  sessionCookie,
+  tokenCookie,
+  signInAddress,
+  signOutAddress,
+  SIGN_IN_START_PATH,
+  SIGN_OUT_PATH,
+} from "./cookies.js";
 
 // Re-mint this far ahead of `exp`, so a token accepted by the middleware is
 // not rejected by the gateway a moment later.
 const REMINT_WINDOW_S = 60;
 
-/**
- * Cookies are scoped to the app's own mount. Two apps on one CloudFront
- * distribution do not see each other's sessions, and a cookie set by one is
- * not sent to the other.
- */
-export function cookiePath(appId: string): string {
-  return `/apps/${appId}`;
-}
-
-export function parseCookieHeader(header: string | null): Record<string, string> {
-  const out: Record<string, string> = {};
-  if (!header) return out;
-  for (const part of header.split(";")) {
-    const eq = part.indexOf("=");
-    if (eq < 0) continue;
-    const name = part.slice(0, eq).trim();
-    if (!name) continue;
-    out[name] = decodeURIComponent(part.slice(eq + 1).trim());
-  }
-  return out;
-}
-
 export function readCookie(req: MinimalRequest, name: string): string | null {
   return parseCookieHeader(req.headers.get("cookie"))[name] ?? null;
-}
-
-export interface CookieOptions {
-  path: string;
-  maxAge?: number;
-  httpOnly?: boolean;
-  secure?: boolean;
-  sameSite?: "Lax" | "Strict" | "None";
-}
-
-export function setCookie(name: string, value: string, opts: CookieOptions): string {
-  const parts = [`${name}=${encodeURIComponent(value)}`, `Path=${opts.path}`];
-  if (opts.maxAge !== undefined) parts.push(`Max-Age=${opts.maxAge}`);
-  if (opts.httpOnly ?? true) parts.push("HttpOnly");
-  if (opts.secure ?? true) parts.push("Secure");
-  parts.push(`SameSite=${opts.sameSite ?? "Lax"}`);
-  return parts.join("; ");
-}
-
-/** Both cookies, expired. Sign-out sends these; it does not revoke the token. */
-export function clearCookies(appId: string): string[] {
-  const path = cookiePath(appId);
-  return [
-    setCookie(SESSION_COOKIE, "", { path, maxAge: 0 }),
-    setCookie(TOKEN_COOKIE, "", { path, maxAge: 0 }),
-  ];
-}
-
-export function sessionCookie(appId: string, refreshToken: string, maxAge: number): string {
-  return setCookie(SESSION_COOKIE, refreshToken, { path: cookiePath(appId), maxAge });
-}
-
-export function tokenCookie(appId: string, idToken: string, maxAge: number): string {
-  return setCookie(TOKEN_COOKIE, idToken, { path: cookiePath(appId), maxAge });
 }
 
 /**

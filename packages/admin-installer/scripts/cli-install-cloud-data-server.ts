@@ -56,6 +56,12 @@ interface StarkeepConfig {
   userPoolClientId: string;
   /** The bootstrap's DeviceUserPoolClientId output. */
   deviceUserPoolClientId?: string;
+  /** The bootstrap's CognitoDomain output: the managed login page's host name. */
+  cognitoDomain?: string;
+  /** Written by this script: the client cloud app sessions sign in with. */
+  cloudAppsUserPoolClientId?: string;
+  /** Written by this script: the client mobile apps sign in with. */
+  mobileAppsUserPoolClientId?: string;
   identityPoolId: string;
   permissionsBoundaryArn?: string;
   foundationalPermissionsBoundaryArn?: string;
@@ -101,7 +107,7 @@ const nonInteractive = flags.includes("--non-interactive");
 const config = loadConfig();
 const region = regionFromUserPoolId(config.userPoolId);
 const stackPrefix = config.stackPrefix;
-// Desktops and phones sign in through the bootstrap's device client, and the
+// Desktops sign in through the bootstrap's device client, and the
 // broker accepts their tokens only with its id. A config from before the client
 // existed needs the bootstrap stack updated and the new output copied in.
 const deviceUserPoolClientId = config.deviceUserPoolClientId;
@@ -109,6 +115,18 @@ if (!deviceUserPoolClientId) {
   console.error("Error: ~/.starkeep/config.json has no deviceUserPoolClientId.");
   console.error(
     "Update the bootstrap stack, then copy its DeviceUserPoolClientId output into admin-web's Cognito step.",
+  );
+  process.exit(1);
+}
+
+// Cloud apps and mobile apps sign in on the managed login page, at the
+// bootstrap's Cognito domain. A config from before the domain existed needs the
+// bootstrap stack updated and the new output copied in.
+const cognitoDomain = config.cognitoDomain;
+if (!cognitoDomain) {
+  console.error("Error: ~/.starkeep/config.json has no cognitoDomain.");
+  console.error(
+    "Update the bootstrap stack, then copy its CognitoDomain output into admin-web's Cognito step.",
   );
   process.exit(1);
 }
@@ -216,8 +234,8 @@ const outputs = await installCloudDataServer({
   managerRoleArn,
   pulumiStateBucket,
   userPoolId: config.userPoolId,
-  userPoolClientId: config.userPoolClientId,
   deviceUserPoolClientId,
+  cognitoDomain,
   // The cloud e2e harness passes --ephemeral to provision disposable infra and
   // skip the production data-protection hardening (versioning/SSE/PAB/deletion-
   // protect). A CLI flag — not an env var — so it can't leak in via the
@@ -251,6 +269,8 @@ const updated: StarkeepConfig = {
   sessionAuthorizerId: outputs.sessionAuthorizerId,
   s3Bucket: outputs.bucketName,
   auroraEndpoint: outputs.auroraHostname,
+  cloudAppsUserPoolClientId: outputs.cloudAppsUserPoolClientId,
+  mobileAppsUserPoolClientId: outputs.mobileAppsUserPoolClientId,
 };
 mkdirSync(STARKEEP_DIR, { recursive: true });
 writeFileSync(CONFIG_PATH, JSON.stringify(updated, null, 2), "utf-8");

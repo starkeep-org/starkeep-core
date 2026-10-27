@@ -83,7 +83,9 @@ function makeCtx(ephemeral: boolean): CloudDataServerProgramContext {
     distZipPath,
     bundleHash: "abc123hash",
     userPoolId: "us-east-2_pool",
-    userPoolClientId: "client123",
+    cloudAppsUserPoolClientId: "client123",
+    mobileAppsUserPoolClientId: "mobileclient789",
+    cognitoDomain: "teststack-123.auth.us-east-1.amazoncognito.com",
     deviceUserPoolClientId: "deviceclient456",
     ephemeral,
   };
@@ -491,7 +493,7 @@ describe("device sign-in wiring", () => {
   // device client's id, and a member's machine can reach `/auth/config` with
   // no credential. Step 9 of the multi-user cutover runbook recorded what an
   // undeclared gateway route costs: the route answers 404 at the edge.
-  it("keeps the JWT authorizer on the admin client, and hands the broker the device client", async () => {
+  it("puts the JWT authorizer on the cloud-apps client, and hands the broker the device client", async () => {
     await run(false);
 
     const authorizers = byTypeSuffix("apigatewayv2/authorizer:Authorizer");
@@ -509,6 +511,50 @@ describe("device sign-in wiring", () => {
       return env?.STARKEEP_DEVICE_USER_POOL_CLIENT_ID === "deviceclient456";
     });
     expect(withDeviceClient.map((f) => f.name)).toHaveLength(1);
+  });
+
+  it("verifies cloud app tokens against the cloud-apps client, never the admin client", async () => {
+    await run(false);
+    const functions = byTypeSuffix("lambda/function:Function");
+    const clientIds = functions
+      .map(
+        (f) =>
+          (f.inputs.environment as { variables?: Record<string, string> } | undefined)?.variables
+            ?.STARKEEP_USER_POOL_CLIENT_ID,
+      )
+      .filter((id): id is string => id !== undefined);
+    // The broker and the session authorizer.
+    expect(clientIds).toEqual(["client123", "client123"]);
+  });
+
+  it("hands the broker the mobile-apps client and the sign-in page's domain", async () => {
+    await run(false);
+    const broker = byTypeSuffix("lambda/function:Function").find(
+      (f) =>
+        (f.inputs.environment as { variables?: Record<string, string> } | undefined)?.variables
+          ?.STARKEEP_DEVICE_USER_POOL_CLIENT_ID,
+    );
+    const env = (broker!.inputs.environment as { variables: Record<string, string> }).variables;
+    expect(env.STARKEEP_MOBILE_USER_POOL_CLIENT_ID).toBe("mobileclient789");
+    expect(env.STARKEEP_COGNITO_DOMAIN).toBe("teststack-123.auth.us-east-1.amazoncognito.com");
+  });
+
+  it("declares the sign-in pages and the key registration on the gateway with no authorizer", async () => {
+    await run(false);
+    const keys = byTypeSuffix("apigatewayv2/route:Route").map((r) => r.inputs.routeKey);
+    for (const routeKey of [
+      "GET /auth/start",
+      "GET /auth/callback",
+      "GET /auth/sign-out",
+      "GET /auth/signed-out",
+      "POST /apps/{appId}/mobile/keys",
+    ]) {
+      const routes = byTypeSuffix("apigatewayv2/route:Route").filter(
+        (r) => r.inputs.routeKey === routeKey,
+      );
+      expect(routes, `${routeKey} among ${keys.join(", ")}`).toHaveLength(1);
+      expect(routes[0]!.inputs.authorizerId).toBeUndefined();
+    }
   });
 
   it("declares GET /auth/config on the gateway with no authorizer", async () => {

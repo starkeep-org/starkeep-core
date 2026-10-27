@@ -1,7 +1,8 @@
 /**
- * The session endpoints. These are the only place in the system that turns a
- * password into a durable credential, so what they set — and, on the challenge
- * and failure paths, what they deliberately do not set — is the contract.
+ * The session endpoints an app mounts. They re-mint and clear the cookies the
+ * platform's sign-in page set, and never see a password, so what they set —
+ * and, on the failure paths, what they deliberately do not set — is the
+ * contract.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createSessionRoutes } from "../src/auth/routes.js";
@@ -41,7 +42,7 @@ function req(
   if (opts.origin !== null) headers.origin = opts.origin ?? ORIGIN;
   return {
     method: opts.method ?? "POST",
-    url: `${ORIGIN}/apps/memo/api/session/sign-in`,
+    url: `${ORIGIN}/apps/memo/api/session/refresh`,
     headers: { get: (n) => headers[n.toLowerCase()] ?? null },
     text: async () => (opts.body === undefined ? "" : JSON.stringify(opts.body)),
     arrayBuffer: async () => new ArrayBuffer(0),
@@ -99,116 +100,28 @@ afterEach(() => {
   process.env = { ...saved };
 });
 
-describe("POST sign-in", () => {
-  it("sets both cookies on success and returns no token to the page", async () => {
-    const res = await routes.POST(
-      req({ body: { email: "a@example.com", password: "pw" } }),
-      ctx("sign-in"),
-    );
-    expect(res.status).toBe(200);
-
-    const cookies = cookiesOf(res);
-    const session = cookies.find((c) => c.startsWith(`${SESSION_COOKIE}=`));
-    const token = cookies.find((c) => c.startsWith(`${TOKEN_COOKIE}=`));
-    expect(session).toContain("HttpOnly");
-    expect(session).toContain("refresh-abc");
-    expect(token).toContain("HttpOnly");
-
-    // The refresh token must not reach the page in the body either — the
-    // cookie being HttpOnly buys nothing if the JSON hands it over.
-    const body = await res.text();
-    expect(body).not.toContain("refresh-abc");
-    expect(JSON.parse(body)).toEqual({ signedIn: true, email: "a@example.com" });
-  });
-
-  it("uses the USER_PASSWORD_AUTH flow against the configured client", async () => {
-    await routes.POST(req({ body: { email: "a@example.com", password: "pw" } }), ctx("sign-in"));
-    expect(cognitoCalls[0].target).toBe("AWSCognitoIdentityProviderService.InitiateAuth");
-    expect(cognitoCalls[0].body).toMatchObject({
-      AuthFlow: "USER_PASSWORD_AUTH",
-      ClientId: CLIENT,
-    });
-  });
-
-  it("returns NEW_PASSWORD_REQUIRED without setting any cookie", async () => {
-    stubCognito(
-      () =>
-        new Response(
-          JSON.stringify({ ChallengeName: "NEW_PASSWORD_REQUIRED", Session: "sess-1" }),
-          { status: 200 },
-        ),
-    );
-    const res = await routes.POST(
-      req({ body: { email: "a@example.com", password: "temp" } }),
-      ctx("sign-in"),
-    );
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ challenge: "NEW_PASSWORD_REQUIRED", session: "sess-1" });
-    expect(cookiesOf(res)).toEqual([]);
-  });
-
-  it("reports a bad password as 401, not as a server error", async () => {
-    stubCognito(
-      () =>
-        new Response(
-          JSON.stringify({
-            __type: "NotAuthorizedException",
-            message: "Incorrect username or password.",
-          }),
-          { status: 400 },
-        ),
-    );
-    const res = await routes.POST(
-      req({ body: { email: "a@example.com", password: "wrong" } }),
-      ctx("sign-in"),
-    );
-    expect(res.status).toBe(401);
-    expect(cookiesOf(res)).toEqual([]);
-  });
-
-  it("reports a Cognito outage as 502, so it is not read as a rejected sign-in", async () => {
-    stubCognito(() => new Response(JSON.stringify({ message: "boom" }), { status: 500 }));
-    const res = await routes.POST(
-      req({ body: { email: "a@example.com", password: "pw" } }),
-      ctx("sign-in"),
-    );
-    expect(res.status).toBe(502);
-  });
-
-  it("requires both fields", async () => {
-    expect((await routes.POST(req({ body: { email: "a@e.com" } }), ctx("sign-in"))).status).toBe(
-      400,
-    );
-    expect((await routes.POST(req({ body: {} }), ctx("sign-in"))).status).toBe(400);
-  });
-
-  it("answers 503 when the deployment has no user pool", async () => {
-    delete process.env.STARKEEP_USER_POOL_ID;
-    const res = await routes.POST(
-      req({ body: { email: "a@example.com", password: "pw" } }),
-      ctx("sign-in"),
-    );
-    expect(res.status).toBe(503);
-  });
-});
-
-describe("POST new-password", () => {
-  it("sets both cookies once the challenge is answered", async () => {
-    const res = await routes.POST(
-      req({ body: { session: "sess-1", email: "a@example.com", newPassword: "N3w!" } }),
-      ctx("new-password"),
-    );
-    expect(res.status).toBe(200);
-    expect(cognitoCalls[0].target).toBe("AWSCognitoIdentityProviderService.RespondToAuthChallenge");
-    expect(cookiesOf(res)).toHaveLength(2);
+describe("password sign-in", () => {
+  // App code never receives a password: the managed login page takes it, and
+  // the platform's /auth/callback sets the cookies. A route that took one
+  // would hand an untrusted app every user's password.
+  it("is not offered, and nothing reaches Cognito", async () => {
+    for (const action of ["sign-in", "new-password"]) {
+      const res = await routes.POST(
+        req({ body: { email: "a@example.com", password: "pw" } }),
+        ctx(action),
+      );
+      expect(res.status).toBe(404);
+      expect(cookiesOf(res)).toEqual([]);
+    }
+    expect(cognitoCalls).toEqual([]);
   });
 });
 
 describe("cross-origin", () => {
   it("refuses a state-changing request from a foreign origin", async () => {
     const res = await routes.POST(
-      req({ body: { email: "a@example.com", password: "pw" }, origin: "https://evil.example.com" }),
-      ctx("sign-in"),
+      req({ cookie: `${SESSION_COOKIE}=refresh-abc`, origin: "https://evil.example.com" }),
+      ctx("refresh"),
     );
     expect(res.status).toBe(403);
     expect(cognitoCalls).toEqual([]);
@@ -216,8 +129,8 @@ describe("cross-origin", () => {
 
   it("allows a request with no Origin at all — curl and the e2e suite send none", async () => {
     const res = await routes.POST(
-      req({ body: { email: "a@example.com", password: "pw" }, origin: null }),
-      ctx("sign-in"),
+      req({ cookie: `${SESSION_COOKIE}=refresh-abc`, origin: null }),
+      ctx("refresh"),
     );
     expect(res.status).toBe(200);
   });
@@ -226,16 +139,13 @@ describe("cross-origin", () => {
     // The case a live browser found and no unit test could: behind CloudFront,
     // `Origin` is the distribution the person is on while `req.url` is the
     // origin server the gateway forwarded to. Comparing only those two refuses
-    // every real sign-in while letting every Origin-less caller through.
+    // every real browser request while letting every Origin-less caller through.
     const saved = process.env.STARKEEP_API_GATEWAY_URL;
     process.env.STARKEEP_API_GATEWAY_URL = "https://cdn.example.net";
     try {
       const res = await routes.POST(
-        req({
-          body: { email: "a@example.com", password: "pw" },
-          origin: "https://cdn.example.net",
-        }),
-        ctx("sign-in"),
+        req({ cookie: `${SESSION_COOKIE}=refresh-abc`, origin: "https://cdn.example.net" }),
+        ctx("refresh"),
       );
       expect(res.status).toBe(200);
     } finally {
@@ -249,11 +159,8 @@ describe("cross-origin", () => {
     process.env.STARKEEP_API_GATEWAY_URL = "https://cdn.example.net";
     try {
       const res = await routes.POST(
-        req({
-          body: { email: "a@example.com", password: "pw" },
-          origin: "https://evil.example.com",
-        }),
-        ctx("sign-in"),
+        req({ cookie: `${SESSION_COOKIE}=refresh-abc`, origin: "https://evil.example.com" }),
+        ctx("refresh"),
       );
       expect(res.status).toBe(403);
       expect(cognitoCalls).toEqual([]);
@@ -268,11 +175,8 @@ describe("cross-origin", () => {
     process.env.STARKEEP_API_GATEWAY_URL = "not a url";
     try {
       const res = await routes.POST(
-        req({
-          body: { email: "a@example.com", password: "pw" },
-          origin: "https://evil.example.com",
-        }),
-        ctx("sign-in"),
+        req({ cookie: `${SESSION_COOKIE}=refresh-abc`, origin: "https://evil.example.com" }),
+        ctx("refresh"),
       );
       expect(res.status).toBe(403);
     } finally {
@@ -306,10 +210,11 @@ describe("POST refresh", () => {
 });
 
 describe("POST sign-out", () => {
-  it("clears both cookies", async () => {
+  it("clears both cookies, and names the platform's sign-out page", async () => {
     const res = await routes.POST(req({ cookie: `${SESSION_COOKIE}=x` }), ctx("sign-out"));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ signedIn: false });
+    // The page visits it next, which ends the managed login session too.
+    expect(await res.json()).toEqual({ signedIn: false, signOutUrl: "/auth/sign-out?app=memo" });
     expect(cookiesOf(res)).toHaveLength(2);
     expect(cookiesOf(res).every((c) => c.includes("Max-Age=0"))).toBe(true);
   });

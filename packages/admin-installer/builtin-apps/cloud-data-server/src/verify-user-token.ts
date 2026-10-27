@@ -39,7 +39,11 @@ interface Jwk {
 
 let keySetPromise: Promise<Map<string, CryptoKey>> | null = null;
 
-/** Pool ids come from the Lambda env, which the installer already populates. */
+/**
+ * The cloud-apps client: the client cloud app sessions sign in with on the
+ * managed login page. The HMAC branch and the session authorizer accept only
+ * its tokens. Pool ids come from the Lambda env, which the installer populates.
+ */
 export function userPoolConfig(): PoolConfig | null {
   const region = process.env.AWS_REGION;
   const userPoolId = process.env.STARKEEP_USER_POOL_ID;
@@ -49,14 +53,26 @@ export function userPoolConfig(): PoolConfig | null {
 }
 
 /**
- * The pool's device client: the one client whose tokens a desktop or phone may
- * present with no app signature. Null when the deployment predates it, which
- * leaves device sign-in off.
+ * The pool's device client: the one client whose tokens a desktop may present
+ * with no app signature. Null when the deployment predates it, which leaves
+ * device sign-in off.
  */
 export function devicePoolConfig(): PoolConfig | null {
   const region = process.env.AWS_REGION;
   const userPoolId = process.env.STARKEEP_USER_POOL_ID;
   const userPoolClientId = process.env.STARKEEP_DEVICE_USER_POOL_CLIENT_ID;
+  if (!region || !userPoolId || !userPoolClientId) return null;
+  return { region, userPoolId, userPoolClientId };
+}
+
+/**
+ * The pool's mobile-apps client. Its tokens pass only with a signature by a
+ * key attested to an installed app. Null leaves mobile sign-in off.
+ */
+export function mobilePoolConfig(): PoolConfig | null {
+  const region = process.env.AWS_REGION;
+  const userPoolId = process.env.STARKEEP_USER_POOL_ID;
+  const userPoolClientId = process.env.STARKEEP_MOBILE_USER_POOL_CLIENT_ID;
   if (!region || !userPoolId || !userPoolClientId) return null;
   return { region, userPoolId, userPoolClientId };
 }

@@ -46,13 +46,10 @@ import {
   type LdsApp,
 } from "@starkeep/e2e";
 import type { AppCredentials } from "@starkeep/app-client";
-import {
-  cognitoPasswordAuthTokens,
-  getIdentityPoolCredentials,
-  regionFromUserPoolId,
-} from "@starkeep/admin-installer";
+import { getIdentityPoolCredentials, regionFromUserPoolId } from "@starkeep/admin-installer";
 import { createCognitoClient, USER_TOKEN_HEADER } from "@starkeep/protocol-primitives";
 import { REGION } from "./env.js";
+import { cloudAppTokens } from "./cloud-app-session.js";
 import type { AdminSession } from "./installers.js";
 import type { RunPaths, TestStackConfig } from "./run-state.js";
 
@@ -101,9 +98,9 @@ export function defineMemberSteps(m: MemberStepsContext): void {
   /** The member's own address for the cloud: what the admin sends. */
   const cloudAddress = () => m.config().publicBaseUrl ?? m.config().apiGatewayUrl!;
 
-  /** The ID token cloud Photos would hold for the member: the admin client's. */
+  /** The ID token cloud Photos would hold for the member: the cloud-apps client's. */
   async function memberAppToken(): Promise<string> {
-    return (await cognitoPasswordAuthTokens(m.config(), MEMBER_EMAIL, chosenPassword)).idToken;
+    return (await cloudAppTokens(m.config(), MEMBER_EMAIL, chosenPassword)).idToken;
   }
 
   /** A sign-in through the pool's device client, as a desktop or phone makes it. */
@@ -185,6 +182,8 @@ export function defineMemberSteps(m: MemberStepsContext): void {
         region: regionFromUserPoolId(config.userPoolId),
         userPoolId: config.userPoolId,
         deviceClientId: config.deviceUserPoolClientId,
+        cognitoDomain: config.cognitoDomain,
+        mobileClientId: config.mobileAppsUserPoolClientId,
       });
     }
   });

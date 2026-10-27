@@ -788,3 +788,43 @@ describe("staticAssetPaths", () => {
     expect(result.valid).toBe(false);
   });
 });
+
+describe("mobile builds", () => {
+  const ANDROID = {
+    package: "app.starkeep.photos",
+    signingCertSha256: ["a".repeat(64)],
+    callbackScheme: "starkeep-photos",
+  };
+
+  it("accepts an Android identity on a cloud app", () => {
+    const result = validateManifest(minimal({ targets: ["cloud"], mobile: { android: ANDROID } }));
+    expect(result.errors).toEqual([]);
+    expect(result.manifest?.mobile?.android).toEqual(ANDROID);
+  });
+
+  it("refuses a mobile build of an app with no cloud install", () => {
+    const result = validateManifest(minimal({ targets: ["local"], mobile: { android: ANDROID } }));
+    expect(result.errors.join("\n")).toMatch(/targets omits "cloud"/);
+  });
+
+  it("refuses a malformed package, digest or scheme", () => {
+    for (const android of [
+      { ...ANDROID, package: "photos" },
+      { ...ANDROID, signingCertSha256: ["AB:CD"] },
+      { ...ANDROID, signingCertSha256: ["A".repeat(64)] },
+      { ...ANDROID, signingCertSha256: [] },
+      { ...ANDROID, callbackScheme: "Starkeep Photos" },
+    ]) {
+      expect(validateManifest(minimal({ targets: ["cloud"], mobile: { android } })).valid).toBe(
+        false,
+      );
+    }
+  });
+
+  it("refuses a web scheme as the callback", () => {
+    const result = validateManifest(
+      minimal({ targets: ["cloud"], mobile: { android: { ...ANDROID, callbackScheme: "https" } } }),
+    );
+    expect(result.errors.join("\n")).toMatch(/callbackScheme may not be "https"/);
+  });
+});

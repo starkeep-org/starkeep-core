@@ -30,7 +30,7 @@
  */
 
 import { Hono } from "hono";
-import { createSessionRoutes } from "@starkeep/app-client/auth";
+import { createSessionRoutes, SIGN_IN_START_PATH } from "@starkeep/app-client/auth";
 import { createDataProxyHandler, sessionAuth } from "@starkeep/app-client";
 import { appBasePath, honoOriginGate } from "@starkeep/app-client/hono";
 import manifest from "../starkeep.manifest.json" with { type: "json" };
@@ -72,30 +72,21 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
-/** The sign-in page. Plain HTML and no hydration step, so it is interactive as soon as it parses. */
+/**
+ * The sign-in page: one button to the platform's sign-in page. The password goes
+ * to the managed login page, never to this app.
+ */
 function signInPage(base: string): string {
+  // A plain GET form, so the button works with no script at all.
   return `<!doctype html>
 <html><head><title>Probe — Sign in</title><meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body>
 <h1>Probe</h1>
-<form id="f">
-  <input type="email" name="email" placeholder="Email" required>
-  <input type="password" name="password" placeholder="Password" required>
+<form method="get" action="${SIGN_IN_START_PATH}">
+  <input type="hidden" name="app" value="${APP_ID}">
+  <input type="hidden" name="return" value="${base}/">
   <button type="submit">Sign in</button>
-  <p id="err" role="alert"></p>
 </form>
-<script>
-document.getElementById("f").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const email = e.target.email.value, password = e.target.password.value;
-  const res = await fetch(${JSON.stringify(base)} + "/api/session/sign-in", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password }),
-  });
-  if (res.ok) { location.href = ${JSON.stringify(base || "/")}; return; }
-  document.getElementById("err").textContent = "Sign-in failed: " + res.status;
-});
-</script>
 </body></html>`;
 }
 
@@ -150,7 +141,7 @@ app.get(
 
 app.get("/sign-in", () => html(signInPage(appBasePath())));
 
-// Session sign-in / sign-out / refresh, straight from the platform library.
+// Session probe / sign-out / refresh, straight from the platform library.
 app.all("/api/session/*", (c) => {
   const action = c.req.path.slice("/api/session/".length).split("/").filter(Boolean);
   const ctx = { params: Promise.resolve({ action }) };

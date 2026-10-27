@@ -44,6 +44,9 @@ const fakeRegistry = {
   },
   registerApp: vi.fn(async () => {}),
   deleteAppRegistryEntry: vi.fn(async () => {}),
+  registerMobileApp: vi.fn(async () => {}),
+  unregisterMobileApp: vi.fn(async () => {}),
+  listMobileApps: vi.fn(async () => []),
   listInstalledApps: vi.fn(async () => []),
   close: vi.fn(async () => {}),
 };
@@ -91,12 +94,22 @@ vi.mock("../src/s3", () => ({
   deleteAppArtifactsObjects: vi.fn(async () => {}),
 }));
 
+vi.mock("../src/app-sign-in-clients", () => ({
+  setMobileAppCallback: vi.fn(async () => {}),
+}));
+
 vi.mock("../src/compute-stack", () => ({
   installComputeStack: vi.fn(async () => ({ outputs: {} })),
   uninstallComputeStack: vi.fn(async () => {}),
 }));
 
-import { installApp, uninstallApp, type InstallerConfig } from "../src/orchestrator";
+import {
+  installApp,
+  uninstallApp,
+  registerMobileApp,
+  unregisterMobileApp,
+  type InstallerConfig,
+} from "../src/orchestrator";
 import {
   createAppRole,
   createAppExecRole,
@@ -109,6 +122,7 @@ import { putAppCredsParameter } from "../src/app-creds";
 import { runAppInstallDdl } from "../src/dsql-ddl";
 import { putAppKeepFile, uploadAppBundle } from "../src/s3";
 import { installComputeStack } from "../src/compute-stack";
+import { setMobileAppCallback } from "../src/app-sign-in-clients";
 import { validateManifest, type AppManifest } from "@starkeep/admin-manifest";
 import { readFileSync as rf } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -577,5 +591,127 @@ describe("uninstall", () => {
     });
     // Uninstall ran fully even though install's ledger was complete.
     expect(doneSteps("uninstall")).toHaveLength(12);
+  });
+});
+
+describe("an app that ships a mobile build", () => {
+  const mobileManifest: AppManifest = {
+    ...photosManifest,
+    mobile: {
+      android: {
+        package: "app.starkeep.photos",
+        signingCertSha256: ["a".repeat(64)],
+        callbackScheme: "starkeep-photos",
+      },
+    },
+  };
+  const mobileSignIn = { userPoolId: "us-east-1_pool", mobileAppsClientId: "mobile1" };
+
+  it("registers the build's callback on the mobile-apps client before registering the app", async () => {
+    await installApp({
+      appId: "photos",
+      manifest: mobileManifest,
+      version: "0.1.0",
+      config: { ...config, mobileSignIn },
+      registryCredentials,
+    });
+    expect(setMobileAppCallback).toHaveBeenCalledWith(
+      { region: "us-east-1", ...mobileSignIn },
+      "starkeep-photos",
+      true,
+    );
+    const steps = doneSteps("install");
+    expect(steps.indexOf("add_mobile_callback")).toBe(steps.indexOf("register_app") - 1);
+  });
+
+  it("refuses to install on a deployment with no mobile-apps client", async () => {
+    await expect(
+      installApp({
+        appId: "photos",
+        manifest: mobileManifest,
+        version: "0.1.0",
+        config,
+        registryCredentials,
+      }),
+    ).rejects.toThrow(/Reinstall the cloud data server/);
+  });
+
+  it("keeps the mobile build registered through an uninstall that asks to", async () => {
+    vi.mocked(setMobileAppCallback).mockClear();
+    await uninstallApp({
+      appId: "photos",
+      manifest: mobileManifest,
+      config: { ...config, mobileSignIn },
+      registryCredentials,
+      keepMobileRegistration: true,
+    });
+    const steps = doneSteps("uninstall");
+    expect(steps).not.toContain("remove_mobile_callback");
+    // After the registry delete, which took the identity with it.
+    expect(steps.indexOf("keep_mobile_registration")).toBe(
+      steps.indexOf("delete_app_registry") + 1,
+    );
+    expect(fakeRegistry.registerMobileApp).toHaveBeenCalledWith(mobileManifest, "photos");
+    expect(setMobileAppCallback).not.toHaveBeenCalled();
+  });
+
+  it("registers and unregisters a mobile build with no compute at all", async () => {
+    vi.mocked(setMobileAppCallback).mockClear();
+    vi.mocked(createAppRole).mockClear();
+    const input = {
+      appId: "photos",
+      manifest: mobileManifest,
+      config: {
+        stackPrefix: "starkeep",
+        region: "us-east-1",
+        dsqlHostname: "fake.dsql",
+        mobileSignIn,
+      },
+      registryCredentials,
+    };
+    await registerMobileApp(input);
+    expect(fakeRegistry.registerMobileApp).toHaveBeenCalledWith(mobileManifest, "photos");
+    expect(setMobileAppCallback).toHaveBeenLastCalledWith(
+      { region: "us-east-1", ...mobileSignIn },
+      "starkeep-photos",
+      true,
+    );
+    // No role, no compute, no ledger.
+    expect(createAppRole).not.toHaveBeenCalled();
+    expect(installComputeStack).not.toHaveBeenCalled();
+
+    await unregisterMobileApp(input);
+    expect(fakeRegistry.unregisterMobileApp).toHaveBeenCalledWith("photos");
+    expect(setMobileAppCallback).toHaveBeenLastCalledWith(
+      { region: "us-east-1", ...mobileSignIn },
+      "starkeep-photos",
+      false,
+    );
+  });
+
+  it("refuses to register an app whose manifest declares no mobile build", async () => {
+    await expect(
+      registerMobileApp({
+        appId: "photos",
+        manifest: photosManifest,
+        config: { stackPrefix: "starkeep", region: "us-east-1", dsqlHostname: "x", mobileSignIn },
+        registryCredentials,
+      }),
+    ).rejects.toThrow(/declares no mobile build/);
+  });
+
+  it("removes the callback at uninstall", async () => {
+    await uninstallApp({
+      appId: "photos",
+      manifest: mobileManifest,
+      config: { ...config, mobileSignIn },
+      registryCredentials,
+    });
+    expect(setMobileAppCallback).toHaveBeenCalledWith(
+      { region: "us-east-1", ...mobileSignIn },
+      "starkeep-photos",
+      false,
+    );
+    expect(doneSteps("uninstall")).toContain("remove_mobile_callback");
   });
 });

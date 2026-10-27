@@ -14,6 +14,7 @@ import {
   PostgresQueryCompiler,
 } from "kysely";
 import { OwnerScopePlugin } from "./owner-scope.js";
+import { RecordTypeScopePlugin } from "./type-scope.js";
 
 // Compile-only Kysely instance (DummyDriver never executes). The dialect's
 // PostgresQueryCompiler produces `$1`-style placeholders that `pg.Client`
@@ -56,6 +57,16 @@ export type PostgresCompiler = Kysely<DB>;
  */
 export function ownerScopedCompiler(userId: string): PostgresCompiler {
   return compiler.withPlugin(new OwnerScopePlugin(userId));
+}
+
+/**
+ * The compiler for one user's rows of the given types only: `userId`'s records
+ * whose type is in `types`, and the labels on them. See `type-scope.ts`.
+ */
+export function typeScopedCompiler(userId: string, types: readonly string[]): PostgresCompiler {
+  return compiler
+    .withPlugin(new RecordTypeScopePlugin(types))
+    .withPlugin(new OwnerScopePlugin(userId));
 }
 
 export function buildPostgresQuery(

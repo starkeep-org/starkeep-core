@@ -116,6 +116,24 @@ describe("the discovery route", () => {
     });
   });
 
+  it("adds the sign-in page and the mobile-apps client once the cloud has them", async () => {
+    process.env.STARKEEP_MOBILE_USER_POOL_CLIENT_ID = "test-mobile-client";
+    process.env.STARKEEP_COGNITO_DOMAIN = "teststack-1.auth.us-east-1.amazoncognito.com";
+    try {
+      const res = await handler(event({ method: "GET", path: "/auth/config" }), context);
+      expect(JSON.parse(res.body)).toEqual({
+        region: TEST_REGION,
+        userPoolId: TEST_POOL_ID,
+        deviceClientId: DEVICE_CLIENT_ID,
+        mobileClientId: "test-mobile-client",
+        cognitoDomain: "teststack-1.auth.us-east-1.amazoncognito.com",
+      });
+    } finally {
+      delete process.env.STARKEEP_MOBILE_USER_POOL_CLIENT_ID;
+      delete process.env.STARKEEP_COGNITO_DOMAIN;
+    }
+  });
+
   it("says so when the deployment has no device client", async () => {
     const saved = process.env.STARKEEP_DEVICE_USER_POOL_CLIENT_ID;
     delete process.env.STARKEEP_DEVICE_USER_POOL_CLIENT_ID;

@@ -83,7 +83,9 @@ const ctx: CloudDataServerProgramContext = {
   distZipPath,
   bundleHash: "abc123hash",
   userPoolId: "us-east-2_pool",
-  userPoolClientId: "client123",
+  cloudAppsUserPoolClientId: "client123",
+  mobileAppsUserPoolClientId: "mobileclient789",
+  cognitoDomain: "teststack-123.auth.us-east-1.amazoncognito.com",
   deviceUserPoolClientId: "deviceclient456",
   ephemeral: false,
 };

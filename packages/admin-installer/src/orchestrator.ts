@@ -57,6 +57,31 @@ import {
   type InstallReceipt,
 } from "./compute-stack";
 import { createDsqlRegistry, type Registry } from "./registry";
+import { setMobileAppCallback } from "./app-sign-in-clients";
+
+/**
+ * The mobile build's callback on the mobile-apps client, for an app that ships
+ * one, or null when nothing needs doing. Throws for a mobile build on a
+ * deployment with no mobile-apps client, which a reinstall of the cloud data
+ * server creates.
+ */
+function mobileCallbackTarget(
+  manifest: AppManifest,
+  config: InstallerConfig,
+): {
+  scheme: string;
+  pool: { region: string; userPoolId: string; mobileAppsClientId: string };
+} | null {
+  const scheme = manifest.mobile?.android?.callbackScheme;
+  if (!scheme) return null;
+  if (!config.mobileSignIn) {
+    throw new Error(
+      `${manifest.id} ships a mobile build, but this deployment has no mobile-apps client. ` +
+        "Reinstall the cloud data server first.",
+    );
+  }
+  return { scheme, pool: { region: config.region, ...config.mobileSignIn } };
+}
 
 export interface InstallerConfig {
   stackPrefix: string;
@@ -89,6 +114,13 @@ export interface InstallerConfig {
   managerRoleArn: string;
   installDdlRoleArn: string;
   installInfraRoleArn: string;
+  /**
+   * The user pool and its mobile-apps client, for an app that ships a mobile
+   * build: install registers the build's callback on the client, and
+   * uninstall removes it. Absent for a deployment whose cloud data server
+   * install predates the client.
+   */
+  mobileSignIn?: { userPoolId: string; mobileAppsClientId: string };
 }
 
 export interface InstallInput {
@@ -124,6 +156,25 @@ export interface UninstallInput {
   appId: string;
   manifest: AppManifest;
   config: InstallerConfig;
+  registryCredentials: RegistryCredentials;
+  /**
+   * Remove the app's cloud compute and private data but keep its mobile
+   * build registered, so the mobile app keeps syncing. Only meaningful for a
+   * manifest that declares a mobile build.
+   */
+  keepMobileRegistration?: boolean;
+}
+
+/**
+ * What a mobile registration needs: the registry, and the user pool's
+ * mobile-apps client. No IAM role, compute or app schema is involved.
+ */
+export interface MobileRegistrationInput {
+  appId: string;
+  manifest: AppManifest;
+  config: Pick<InstallerConfig, "stackPrefix" | "region" | "dsqlHostname"> & {
+    mobileSignIn: { userPoolId: string; mobileAppsClientId: string };
+  };
   registryCredentials: RegistryCredentials;
 }
 
@@ -449,11 +500,80 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
     );
   }
 
+  // alwaysRun: the read-modify-write leaves every other app's callback alone,
+  // and a cloud data server reinstall keeps the list, so re-adding is cheap
+  // and repairs a callback a console edit removed.
+  const mobileCallback = mobileCallbackTarget(manifest, config);
+  if (mobileCallback) {
+    await runStep(
+      registry,
+      appId,
+      "install",
+      "add_mobile_callback",
+      done,
+      () => setMobileAppCallback(mobileCallback.pool, mobileCallback.scheme, true),
+      { alwaysRun: true },
+    );
+  }
+
   await runStep(registry, appId, "install", "register_app", done, () =>
     registry.registerApp(manifest, appId),
   );
 
   return { appRoleArn, receipt };
+}
+
+/**
+ * Register an app's mobile build with no cloud compute (decision 6 in
+ * `plan-mobile-app-scope-and-managed-login-2026-10-27.md`). A mobile app
+ * syncs through the Drive channel under Drive's role, scoped to its manifest's
+ * grants, so the cloud needs only the grants, the declared label keys, the
+ * Android identity and the sign-in callback. Idempotent; a later full install
+ * of the app adds compute on top of the same rows.
+ */
+export async function registerMobileApp(input: MobileRegistrationInput): Promise<void> {
+  const { appId, manifest, config } = input;
+  assertCloudInstallableAppId(appId);
+  assertNotReservedAppId(appId);
+  const scheme = manifest.mobile?.android?.callbackScheme;
+  if (!scheme) throw new Error(`${appId}'s manifest declares no mobile build`);
+  const registry = createDsqlRegistry({
+    hostname: config.dsqlHostname,
+    region: config.region,
+    stackPrefix: config.stackPrefix,
+    credentials: input.registryCredentials,
+  });
+  try {
+    await registry.registerMobileApp(manifest, appId);
+  } finally {
+    await registry.close();
+  }
+  await setMobileAppCallback({ region: config.region, ...config.mobileSignIn }, scheme, true);
+}
+
+/**
+ * Remove an app's mobile build: its identity and sign-in callback, and its
+ * grants unless a full cloud install of the app still uses them. Every key
+ * attested to the app stops registering at once; keys already registered stop
+ * at the next request, because the broker re-reads the identity per request.
+ */
+export async function unregisterMobileApp(input: MobileRegistrationInput): Promise<void> {
+  const { appId, manifest, config } = input;
+  const registry = createDsqlRegistry({
+    hostname: config.dsqlHostname,
+    region: config.region,
+    stackPrefix: config.stackPrefix,
+    credentials: input.registryCredentials,
+  });
+  try {
+    await registry.unregisterMobileApp(appId);
+  } finally {
+    await registry.close();
+  }
+  const scheme = manifest.mobile?.android?.callbackScheme;
+  if (scheme) {
+    await setMobileAppCallback({ region: config.region, ...config.mobileSignIn }, scheme, false);
+  }
 }
 
 export async function uninstallApp(input: UninstallInput): Promise<void> {
@@ -557,9 +677,26 @@ async function uninstallAppInner(input: UninstallInput, registry: Registry): Pro
     detachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
   );
 
+  const mobileCallback = config.mobileSignIn ? mobileCallbackTarget(manifest, config) : null;
+  const keepMobile = input.keepMobileRegistration === true && mobileCallback !== null;
+  if (mobileCallback && !keepMobile) {
+    await runStep(registry, appId, "uninstall", "remove_mobile_callback", done, () =>
+      setMobileAppCallback(mobileCallback.pool, mobileCallback.scheme, false),
+    );
+  }
+
   await runStep(registry, appId, "uninstall", "delete_app_registry", done, () =>
     registry.deleteAppRegistryEntry(appId),
   );
+
+  // The uninstall DDL and the registry delete above removed the grants and
+  // the Android identity with the rest of the app. Kept mobile builds get
+  // both back as a compute-less registration; the callback was never removed.
+  if (keepMobile) {
+    await runStep(registry, appId, "uninstall", "keep_mobile_registration", done, () =>
+      registry.registerMobileApp(manifest, appId),
+    );
+  }
 
   await runStep(registry, appId, "uninstall", "delete_iam_role", done, () =>
     // The app role carries inline policies (runtime, broker-power); DeleteRole

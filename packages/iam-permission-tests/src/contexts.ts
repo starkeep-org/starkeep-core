@@ -123,6 +123,13 @@ function brokerPowerPolicy(stackPrefix: string, accountId: string): PolicyDoc {
           Action: "ssm:GetParameter",
           Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/platform/*`,
         },
+        {
+          // Matches iam.ts `BrokerWriteMobileKeys`.
+          Sid: "BrokerWriteMobileKeys",
+          Effect: "Allow",
+          Action: "ssm:PutParameter",
+          Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/platform/mobile-keys/*`,
+        },
       ],
     },
   };
@@ -301,6 +308,7 @@ const CONTEXTS: Record<string, ContextBuilder> = {
       const passphraseArn = `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/pulumi/passphrase`;
       const managerRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-manager-role`;
       const ssmViaService = `ssm.${region}.amazonaws.com`;
+      const userPoolArn = `arn:aws:cognito-idp:${region}:${accountId}:userpool/${region}_example`;
       return [
         {
           action: "sts:GetCallerIdentity",
@@ -337,6 +345,21 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           contextVariables: { "kms:ViaService": ssmViaService },
           why: "PutParameter Type=SecureString during initial creation encrypts via KMS via SSM.",
         },
+        ...[
+          "cognito-idp:ListUserPoolClients",
+          "cognito-idp:DescribeUserPoolClient",
+          "cognito-idp:CreateUserPoolClient",
+          "cognito-idp:UpdateUserPoolClient",
+          "cognito-idp:DescribeManagedLoginBrandingByClient",
+          "cognito-idp:CreateManagedLoginBranding",
+        ].map((action) => ({
+          action,
+          resource: userPoolArn,
+          why:
+            "ensureAppSignInClients finds, creates or updates the cloud-apps and mobile-apps " +
+            "clients and gives each a managed login branding style, as admin-app, before the " +
+            "Manager hop. App installs rewrite the mobile-apps client's callbacks.",
+        })),
         {
           action: "sts:AssumeRole",
           resource: managerRoleArn,
@@ -471,6 +494,16 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           action: "ssm:GetParameter",
           resource: `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/platform/deployment-settings`,
           why: "GET /deployment/settings reads the deployment's settings document for every node and the phone.",
+        },
+        {
+          action: "ssm:PutParameter",
+          resource: `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/platform/mobile-keys/${"a".repeat(64)}`,
+          why: "POST /apps/starkeep-drive/mobile/keys stores a mobile app's attested key once verified.",
+        },
+        {
+          action: "ssm:GetParameter",
+          resource: `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/platform/mobile-keys/${"a".repeat(64)}`,
+          why: "The mobile branch reads the attested key a request names, to verify its signature.",
         },
         {
           action: "logs:CreateLogStream",

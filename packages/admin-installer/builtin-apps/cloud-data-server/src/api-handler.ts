@@ -70,6 +70,7 @@ import {
   SETTINGS_TYPE_ID,
   DEPLOYMENT_SETTINGS_ROUTE,
   AUTH_CONFIG_ROUTE,
+  MOBILE_KEYS_ROUTE,
   DATA_GROUP,
   stampFor,
   hasMetadataTable,
@@ -167,7 +168,21 @@ import {
 } from "@starkeep/storage-adapter";
 import type { StoredAvailability } from "@starkeep/storage-adapter";
 import { ok, clientErr, type APIGatewayEvent, type LambdaContext } from "./handler-utils.js";
-import { devicePoolConfig, userPoolConfig, verifyUserToken } from "./verify-user-token.js";
+import { handleSignInRoute, isSignInRoute } from "./sign-in-routes.js";
+import {
+  loadMobileKey,
+  registerMobileKey,
+  revokedSerials,
+  verifyMobileSignature,
+  type MobileKeyRecord,
+} from "./mobile-keys.js";
+import type { MobileIdentity } from "./mobile-attestation.js";
+import {
+  devicePoolConfig,
+  mobilePoolConfig,
+  userPoolConfig,
+  verifyUserToken,
+} from "./verify-user-token.js";
 import {
   loadAccessGrants,
   loadDeclaredLabelKeys,
@@ -901,6 +916,114 @@ class AppDsqlClientFactory implements DatabaseClientFactory {
 // DatabaseClientFactory (the records adapter, the grants/clock client, and the
 // app-syncable source all call createClient on the factory makeAdapters
 // returns), so swapping the factory here is sufficient to fake DSQL entirely.
+/**
+ * Test seams for the mobile key route: a test root to trust in place of
+ * Google's, and a revocation list in place of Google's. Never set in a Lambda.
+ */
+let attestationRootsOverride: readonly string[] | null = null;
+let revokedSerialsOverride: Set<string> | null = null;
+export function __setAttestationForTests(
+  roots: readonly string[] | null,
+  revoked: Set<string> | null = null,
+): void {
+  attestationRootsOverride = roots;
+  revokedSerialsOverride = revoked;
+}
+
+/** Every app with a registered Android build, read as Starkeep Drive. */
+async function loadMobileIdentities(accountId: string, userId: string): Promise<MobileIdentity[]> {
+  const creds = await getAppCreds(DRIVE_APP_ID, accountId, userId);
+  const { clientFactory, auroraEndpoint, region } = makeConnection(DRIVE_APP_ID, creds);
+  const client = await clientFactory.createClient({ hostname: auroraEndpoint, region });
+  try {
+    const q = postgresCompiler
+      .selectFrom("shared.app_mobile_identities")
+      .select(["app_id", "android_package", "android_cert_digests"])
+      .compile();
+    const result = await client.query(q.sql, [...q.parameters]);
+    return (result.rows as Array<Record<string, string>>).map((r) => ({
+      appId: r["app_id"]!,
+      androidPackage: r["android_package"]!,
+      certDigests: JSON.parse(r["android_cert_digests"]!) as string[],
+    }));
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
+/** Whether `appId` still has its Android build registered. */
+async function mobileAppRegistered(client: DatabaseClient, appId: string): Promise<boolean> {
+  const q = postgresCompiler
+    .selectFrom("shared.app_mobile_identities")
+    .select("app_id")
+    .where("app_id", "=", appId)
+    .compile();
+  return (await client.query(q.sql, [...q.parameters])).rows.length > 0;
+}
+
+/**
+ * Why a mobile app's exchange push is refused, or null. The push is refused
+ * whole: dropping rows from it would leave the phone believing they landed.
+ *
+ * Every pushed record must be of a type the app may write, and its file must
+ * sit in that type's category. A record id that already names a row of a type
+ * the app may not write is refused too, because the write would overwrite it.
+ * Every pushed label must be the app's own, on a declared key, and on a record
+ * the app may read. A mobile app has no app-private rows on this channel.
+ */
+async function mobilePushRefusal(
+  body: {
+    readonly records?: ReadonlyArray<{
+      readonly id: string;
+      readonly type: string;
+      readonly objectStorageKey?: string | null;
+    }>;
+    readonly labels?: ReadonlyArray<{
+      readonly recordId: string;
+      readonly appId: string;
+      readonly key: string;
+    }>;
+    readonly appSyncableRows?: ReadonlyArray<unknown>;
+  },
+  scope: { appId: string; grants: AccessGrants; declaredKeys: ReadonlySet<string> },
+  existingTypes: (ids: string[]) => Promise<Map<string, string>>,
+): Promise<string | null> {
+  const records = body.records ?? [];
+  for (const record of records) {
+    if (!canWrite(scope.grants, record.type)) {
+      return `${scope.appId} may not write ${record.type} records`;
+    }
+    const key = record.objectStorageKey;
+    if (key && categoryFromSharedObjectKey(key) !== typeCategory(record.type)) {
+      return `A pushed ${record.type} record names a file in another category`;
+    }
+  }
+  if ((body.appSyncableRows?.length ?? 0) > 0) {
+    return "A mobile app pushes no app-private rows on the Drive channel";
+  }
+  const pushedTypes = new Map(records.map((r) => [r.id, r.type]));
+  const labels = body.labels ?? [];
+  const ids = [...new Set([...records.map((r) => r.id), ...labels.map((l) => l.recordId)])];
+  const existing = ids.length > 0 ? await existingTypes(ids) : new Map<string, string>();
+  for (const record of records) {
+    const current = existing.get(record.id);
+    if (current !== undefined && !canWrite(scope.grants, current)) {
+      return `A pushed record would overwrite a ${current} record`;
+    }
+  }
+  for (const label of labels) {
+    if (label.appId !== scope.appId) return `${scope.appId} may not write ${label.appId}'s labels`;
+    if (!scope.declaredKeys.has(label.key)) {
+      return `${scope.appId}'s manifest declares no label key ${label.key}`;
+    }
+    const type = pushedTypes.get(label.recordId) ?? existing.get(label.recordId);
+    if (type === undefined || !canRead(scope.grants, type)) {
+      return `A pushed label names a record ${scope.appId} may not read`;
+    }
+  }
+  return null;
+}
+
 let databaseClientFactoryOverride: DatabaseClientFactory | null = null;
 export function __setDatabaseClientFactoryForTests(factory: DatabaseClientFactory | null): void {
   databaseClientFactoryOverride = factory;
@@ -1173,6 +1296,16 @@ const presentKeyCache = createPresentKeyCache();
 // broker policies restrict the broker to; kept in sync by hand because this
 // handler is a separately-deployed artifact.
 const SESSION_USER_TAG = "starkeep:userId";
+
+/**
+ * The request's cookies as one header. HTTP API payload v2 moves them out of
+ * `headers` into a `cookies` array, so both places are read.
+ */
+function signInCookieHeader(event: APIGatewayEvent): string | undefined {
+  if (event.cookies && event.cookies.length > 0) return event.cookies.join("; ");
+  const headers = event.headers ?? {};
+  return headers["cookie"] ?? headers["Cookie"];
+}
 
 export function parseAppPath(rawPath: string): { appId: string; subPath: string } | null {
   const match = rawPath.match(/^\/apps\/([a-z0-9][a-z0-9._-]*)(\/.*)?$/);
@@ -2500,17 +2633,40 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       return ok({ status: "ok" });
     }
 
-    // GET /auth/config — how a device signs in, for a desktop or phone that
+    // GET /auth/config — how a desktop or a mobile app signs in, for one that
     // knows only this cloud's address. Public: a region, a pool id and a
-    // client id are in every token the pool issues, and none is a secret.
+    // client id are in every token the pool issues, the sign-in page's host
+    // name is in its address bar, and none is a secret.
     if (method === "GET" && rawPath === AUTH_CONFIG_ROUTE) {
       const pool = devicePoolConfig();
       if (!pool) return clientErr("Device sign-in is not set up on this cloud", 503);
+      const mobile = mobilePoolConfig();
+      const cognitoDomain = process.env.STARKEEP_COGNITO_DOMAIN;
       return ok({
         region: pool.region,
         userPoolId: pool.userPoolId,
         deviceClientId: pool.userPoolClientId,
+        ...(cognitoDomain ? { cognitoDomain } : {}),
+        ...(mobile ? { mobileClientId: mobile.userPoolClientId } : {}),
       });
+    }
+
+    // GET /auth/{start,callback,sign-out,signed-out} — the platform's sign-in
+    // pages for cloud apps. Public: each one redirects to the managed login
+    // page or back to an app, and sets or clears that app's session cookies.
+    if (isSignInRoute(method, rawPath)) {
+      return await handleSignInRoute(
+        {
+          method,
+          rawPath,
+          query: event.queryStringParameters ?? {},
+          cookieHeader: signInCookieHeader(event),
+        },
+        {
+          publicBaseUrl: async () => `https://${(await loadCloudFrontSigningConfig()).domain}`,
+          isInstalled: async (appId) => (await loadAppHmacSecret(appId)) !== null,
+        },
+      );
     }
 
     // All other routes require /apps/{appId}/...
@@ -2540,13 +2696,106 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // is refused must be denied, not given a second chance at a shared secret
     // it should not have.
     const userTokenHeader = normalizedHeaders["x-starkeep-user-token"];
-    const signedInDevice = !!userTokenHeader && !normalizedHeaders["x-starkeep-app-sig"];
+
+    // POST /apps/starkeep-drive/mobile/keys — a mobile app registers the
+    // Keystore key it will sign requests with, attested to the app. Answered
+    // before the gate, which needs a registered key to admit a mobile app.
+    if (method === "POST" && subPath === MOBILE_KEYS_ROUTE) {
+      if (appId !== DRIVE_APP_ID) return clientErr("Not found", 404);
+      const pool = mobilePoolConfig();
+      if (!pool) return clientErr("Mobile sign-in is not set up on this cloud", 503);
+      const claims = userTokenHeader ? await verifyUserToken(userTokenHeader, pool) : null;
+      if (!claims) return clientErr("Invalid or expired mobile token", 401);
+      if (!groupsMayUseData(claims.groups)) {
+        return clientErr("This account has no data library on this cloud", 403);
+      }
+      if (!USER_SEGMENT_PATTERN.test(claims.sub))
+        return clientErr("This request names no user", 401);
+      let parsedBody: unknown;
+      try {
+        parsedBody = JSON.parse(bodyBytes.toString("utf8"));
+      } catch {
+        return clientErr("Body is not valid JSON", 400);
+      }
+      const accountId = getAccountId(context.invokedFunctionArn);
+      const result = await registerMobileKey(claims.sub, userTokenHeader!, parsedBody, {
+        ssm: getSsmClient(),
+        stackPrefix: process.env.STACK_PREFIX ?? "starkeep",
+        loadIdentities: () => loadMobileIdentities(accountId, claims.sub),
+        ...(attestationRootsOverride ? { roots: attestationRootsOverride } : {}),
+        revoked: async () => revokedSerialsOverride ?? (await revokedSerials()),
+      });
+      return result.ok
+        ? ok({ keyId: result.keyId, appId: result.appId })
+        : clientErr(result.message, result.status);
+    }
+
+    // Three callers. A *mobile app* presents a mobile-apps token and a
+    // signature by its attested key; a *signed-in desktop* presents a device
+    // token and nothing else; a *server* presents the HMAC and the user's
+    // token. A request naming a key takes the mobile branch and never falls
+    // back: a mobile app whose key is refused must not get a second chance on
+    // another branch.
+    const mobileKeyId = normalizedHeaders["x-starkeep-key-id"];
+    const signedInDevice =
+      !mobileKeyId && !!userTokenHeader && !normalizedHeaders["x-starkeep-app-sig"];
+    /** The attested key a mobile request signed with; its app's grants apply. */
+    let mobileKey: MobileKeyRecord | null = null;
     /**
      * The user the request acts for: the token's `sub`. Null only for the
      * app-scoped health check, which needs no token.
      */
     let subjectUserId: string | null = null;
-    if (signedInDevice) {
+    if (mobileKeyId) {
+      // A mobile app. The token says who; the attested key says which app,
+      // and the app's manifest grants then bound what the request may do.
+      //
+      // Drive's channel only: the phone syncs shared records through it, as
+      // a desktop does, but scoped to the app's types. No mobile app has a
+      // private channel yet.
+      if (appId !== DRIVE_APP_ID) {
+        return clientErr("A mobile app syncs through the Drive channel only", 403);
+      }
+      const pool = mobilePoolConfig();
+      if (!pool) return clientErr("Mobile sign-in is not set up on this cloud", 401);
+      const claims = userTokenHeader ? await verifyUserToken(userTokenHeader, pool) : null;
+      if (!claims) return clientErr("Invalid or expired mobile token", 401);
+      const record = await loadMobileKey(mobileKeyId, {
+        ssm: getSsmClient(),
+        stackPrefix: process.env.STACK_PREFIX ?? "starkeep",
+      });
+      if (!record || record.userId !== claims.sub) {
+        return clientErr("Unknown key for this user", 401);
+      }
+      const tsMs = Number(normalizedHeaders["x-starkeep-app-ts"]);
+      if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > APP_SIG_MAX_SKEW_MS) {
+        return clientErr("Stale or invalid signature timestamp", 401);
+      }
+      const signature = normalizedHeaders["x-starkeep-key-sig"];
+      if (
+        !signature ||
+        !verifyMobileSignature(record, {
+          appId,
+          method,
+          subPath,
+          timestampMs: tsMs,
+          body: bodyBytes,
+          signature,
+        })
+      ) {
+        return clientErr("Invalid key signature", 401);
+      }
+      if (!deviceMayCall(method, subPath)) {
+        return clientErr(`A mobile app may not call ${method} ${subPath}`, 403);
+      }
+      const writeRefusal = deviceWriteRefusal(method, subPath, bodyBytes);
+      if (writeRefusal) return clientErr(writeRefusal, 403);
+      if (!groupsMayUseData(claims.groups)) {
+        return clientErr("This account has no data library on this cloud", 403);
+      }
+      subjectUserId = claims.sub;
+      mobileKey = record;
+    } else if (signedInDevice) {
       // A signed-in desktop or phone: an ID token alone, with no app signature.
       //
       // What makes a bare token safe here is its `aud`. Only the pool's device
@@ -2732,7 +2981,17 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // whose fake client keeps answering after `end()`.
     const grantClient = await clientFactory.createClient({ hostname: auroraEndpoint, region });
     toClose.push(() => grantClient.end());
-    const grants: AccessGrants = await loadAccessGrants(grantClient, appId);
+    // A mobile app acts on Drive's channel with its own app's grants, never
+    // Drive's: every route below checks types and categories against these,
+    // so the app reaches only what its manifest declared. Its build must
+    // still be registered; unregistering stops its keys at once.
+    if (mobileKey && !(await mobileAppRegistered(grantClient, mobileKey.appId))) {
+      return clientErr(`${mobileKey.appId}'s mobile app is no longer registered`, 403);
+    }
+    const grants: AccessGrants = await loadAccessGrants(
+      grantClient,
+      mobileKey ? mobileKey.appId : appId,
+    );
     const clock: HLCClock = await makeCloudClock(grantClient, subject.userId);
 
     // The deployment's settings, read by the request that needs them through
@@ -3864,7 +4123,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         JSON.stringify({
           event: "upload-batch",
           appId,
-          caller: signedInDevice ? { device: subject.userId } : { app: appId },
+          caller: mobileKey
+            ? { mobile: mobileKey.appId, user: subject.userId }
+            : signedInDevice
+              ? { device: subject.userId }
+              : { app: appId },
           items: items.length,
           answered: counts,
           bytesSigned: items.reduce(
@@ -4908,6 +5171,44 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const keyRefusal = exchangeKeyRefusal(body, subject.userId);
       if (keyRefusal) return clientErr(keyRefusal, 403);
 
+      // A mobile app's exchange sees only its app's readable types: the rows
+      // it is sent, the watermarks and the digest are all computed over the
+      // same narrowed library, so the phone and the cloud agree. Its pushes
+      // are checked first and refused whole.
+      let exchangeDb: DatabaseAdapter = db;
+      if (mobileKey) {
+        const refusal = await mobilePushRefusal(
+          body,
+          {
+            appId: mobileKey.appId,
+            grants,
+            declaredKeys: await loadDeclaredLabelKeys(grantClient, mobileKey.appId),
+          },
+          async (ids) => {
+            const q = ownerScopedCompiler(subject.userId)
+              .selectFrom("shared.records")
+              .select(["id", "type"])
+              .where("id", "in", ids)
+              .compile();
+            const rows = (await grantClient.query(q.sql, [...q.parameters])).rows as Array<{
+              id: string;
+              type: string;
+            }>;
+            return new Map(rows.map((r) => [r.id, r.type]));
+          },
+        );
+        if (refusal) return clientErr(refusal, 403);
+        const scoped = new AuroraDsqlDatabaseAdapter(
+          { hostname: auroraEndpoint, region },
+          clientFactory,
+          subject.userId,
+          [...grants.readableTypes],
+        );
+        await scoped.init();
+        toClose.push(() => scoped.close());
+        exchangeDb = scoped;
+      }
+
       // Channel split. The Starkeep Drive channel carries *all* shared
       // records (and nothing app-specific); every per-app channel carries only
       // that app's app-specific rows (and no shared records). This makes
@@ -4927,7 +5228,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         // value during the apply and stamped with it after.
         if (body.records?.some(awaitsStamp)) await readLibrarySettings();
         transport = createInProcessSyncTransport({
-          databaseAdapter: db,
+          databaseAdapter: exchangeDb,
+          // The bytes watermark is the channel's, shared with every desktop,
+          // so the walk reads the whole library even for a narrowed exchange.
+          ...(exchangeDb !== db ? { fileRecords: db } : {}),
           clock,
           objectStorage: storage,
           syncSharedRecords: true,
@@ -5008,7 +5312,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         JSON.stringify({
           event: "sync-exchange",
           appId,
-          caller: signedInDevice ? { device: subject.userId } : { app: appId },
+          caller: mobileKey
+            ? { mobile: mobileKey.appId, user: subject.userId }
+            : signedInDevice
+              ? { device: subject.userId }
+              : { app: appId },
           in: {
             records: body.records?.length ?? 0,
             labels: body.labels?.length ?? 0,

@@ -47,6 +47,7 @@ const DEPLOYED_CONFIG = {
   userPoolId: "us-east-2_abc123",
   userPoolClientId: "client",
   deviceUserPoolClientId: "deviceclient",
+  cognitoDomain: "sktest-123456789012.auth.us-east-2.amazoncognito.com",
   identityPoolId: "us-east-2:pool",
   s3Bucket: "sktest-files",
   auroraEndpoint: "abc.dsql.us-east-2.on.aws",
@@ -167,6 +168,19 @@ describe("resuming onto the last step", () => {
       await screen.findByLabelText("DeviceUserPoolClientId", {}, { timeout: 5_000 }),
     ).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Deploy Starkeep cloud" })).toBeNull();
+  });
+});
+
+describe("a config from before the Cognito domain existed", () => {
+  it("reopens the stack-outputs step to ask for it", async () => {
+    const { cognitoDomain: _dropped, ...older } = DEPLOYED_CONFIG;
+    vi.stubGlobal("fetch", stubFetch({ "/api/config": () => Response.json({ config: older }) }));
+    render(
+      <MemoryRouter initialEntries={["/cloud-setup"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByLabelText("CognitoDomain", {}, { timeout: 5_000 })).toBeTruthy();
   });
 });
 

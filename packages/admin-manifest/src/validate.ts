@@ -277,6 +277,22 @@ export function validateManifest(raw: unknown): ValidationResult {
     );
   }
 
+  // A mobile app syncs through the cloud, which holds its grants and its
+  // private channel, and attests its key against the identity the cloud
+  // install recorded. A local-only app has neither.
+  const android = manifest.mobile?.android;
+  if (android && !manifest.targets.includes("cloud")) {
+    errors.push(
+      'mobile.android is declared but targets omits "cloud" — a mobile build signs in ' +
+        "and syncs through the app's cloud install",
+    );
+  }
+  // The managed login page returns the code to this scheme. A web scheme
+  // would send it to a browser page instead of the app.
+  if (android && ["http", "https"].includes(android.callbackScheme)) {
+    errors.push(`mobile.android.callbackScheme may not be "${android.callbackScheme}"`);
+  }
+
   return {
     valid: errors.length === 0,
     manifest: errors.length === 0 ? manifest : null,

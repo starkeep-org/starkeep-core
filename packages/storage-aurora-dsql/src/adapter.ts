@@ -90,6 +90,7 @@ import {
   buildPostgresQuery,
   buildPostgresTypeCountsQuery,
   ownerScopedCompiler,
+  typeScopedCompiler,
   type PostgresCompiler,
 } from "./query-builder.js";
 import { withOccRetry, isRetryableDsqlConflict } from "./occ-retry.js";
@@ -138,10 +139,18 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     clientFactory: DatabaseClientFactory,
     /** The user whose rows this adapter reads and writes. */
     readonly ownerId: string,
+    /**
+     * When set, the record types this adapter sees: every read of records and
+     * labels is narrowed to them. A mobile app's exchange runs on such an
+     * adapter, so its scans, watermarks and digests agree. See `type-scope.ts`.
+     */
+    readonly readableTypes?: readonly string[],
   ) {
     this.options = options;
     this.clientFactory = clientFactory;
-    this.qb = ownerScopedCompiler(ownerId);
+    this.qb = readableTypes
+      ? typeScopedCompiler(ownerId, readableTypes)
+      : ownerScopedCompiler(ownerId);
   }
 
   async init(): Promise<void> {

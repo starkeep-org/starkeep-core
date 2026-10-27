@@ -79,6 +79,12 @@ export async function createSharedSchema(pg: PGlite): Promise<void> {
       description text,
       PRIMARY KEY (app_id, key)
     );
+    CREATE TABLE shared.app_mobile_identities (
+      app_id text PRIMARY KEY,
+      android_package text NOT NULL,
+      android_cert_digests text NOT NULL,
+      callback_scheme text NOT NULL
+    );
     CREATE TABLE shared.app_syncable_namespaces (
       app_id text PRIMARY KEY,
       tables_json text NOT NULL,

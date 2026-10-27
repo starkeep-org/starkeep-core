@@ -9,6 +9,8 @@ export interface APIGatewayEvent {
     };
   };
   headers?: Record<string, string>;
+  /** HTTP API payload v2 carries the request's cookies here, not in `headers`. */
+  cookies?: string[];
   body?: string;
   isBase64Encoded?: boolean;
   queryStringParameters?: Record<string, string>;

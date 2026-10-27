@@ -23,6 +23,16 @@ export interface StarkeepCliConfig {
   userPoolId: string;
   userPoolClientId: string;
   identityPoolId: string;
+  /**
+   * The client cloud app sessions sign in with, written by the cloud data
+   * server install. Each app's Lambdas verify and refresh tokens against it.
+   */
+  cloudAppsUserPoolClientId?: string;
+  /**
+   * The client mobile apps sign in with, written by the cloud data server
+   * install. An app that ships a mobile build registers its callback on it.
+   */
+  mobileAppsUserPoolClientId?: string;
   permissionsBoundaryArn?: string;
   foundationalPermissionsBoundaryArn?: string;
   userDataOwnerPermissionsBoundaryArn?: string;

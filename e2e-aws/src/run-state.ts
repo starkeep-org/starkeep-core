@@ -57,8 +57,14 @@ export interface TestStackConfig {
   accountId?: string;
   userPoolId: string;
   userPoolClientId: string;
-  /** The client desktops and phones sign in with to sync. */
+  /** The client desktops sign in with to sync. */
   deviceUserPoolClientId: string;
+  /** Host name of the managed login page. */
+  cognitoDomain?: string;
+  /** Written by the cloud data server install: the client cloud apps sign in with. */
+  cloudAppsUserPoolClientId?: string;
+  /** Written by the cloud data server install: the client mobile apps sign in with. */
+  mobileAppsUserPoolClientId?: string;
   identityPoolId: string;
   permissionsBoundaryArn?: string;
   foundationalPermissionsBoundaryArn?: string;

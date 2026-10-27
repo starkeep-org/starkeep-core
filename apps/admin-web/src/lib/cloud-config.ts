@@ -16,8 +16,14 @@ export interface StarkeepConfig {
   stage: string;
   userPoolId: string;
   userPoolClientId: string;
-  /** The bootstrap's device client, which desktops and phones sign in with to sync. */
+  /** The bootstrap's device client, which desktops sign in with to sync. */
   deviceUserPoolClientId?: string;
+  /** The bootstrap's CognitoDomain output: the managed login page's host name. */
+  cognitoDomain?: string;
+  /** Written by the cloud data server install: the client cloud apps sign in with. */
+  cloudAppsUserPoolClientId?: string;
+  /** Written by the cloud data server install: the client mobile apps sign in with. */
+  mobileAppsUserPoolClientId?: string;
   identityPoolId: string;
   accountId?: string;
   permissionsBoundaryArn?: string;

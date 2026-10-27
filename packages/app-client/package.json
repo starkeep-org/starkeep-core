@@ -22,6 +22,11 @@
       "import": "./dist/auth/index.js",
       "require": "./dist/auth/index.cjs"
     },
+    "./session-cookies": {
+      "types": "./dist/auth/cookies.d.ts",
+      "import": "./dist/auth/cookies.js",
+      "require": "./dist/auth/cookies.cjs"
+    },
     "./edge": {
       "types": "./dist/edge.d.ts",
       "import": "./dist/edge.js",

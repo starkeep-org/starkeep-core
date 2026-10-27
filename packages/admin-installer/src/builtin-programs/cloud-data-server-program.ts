@@ -26,6 +26,11 @@ import {
   ARCHIVE_SIZE_FLOOR_BYTES,
   DEPLOYMENT_SETTINGS_ROUTE,
   AUTH_CONFIG_ROUTE,
+  AUTH_START_ROUTE,
+  AUTH_CALLBACK_ROUTE,
+  AUTH_SIGN_OUT_ROUTE,
+  AUTH_SIGNED_OUT_ROUTE,
+  MOBILE_KEYS_ROUTE,
   INTENT_TAG_KEY,
   LADDER_TAG_KEY,
   LADDER_TAG_COMPLETE,
@@ -74,13 +79,26 @@ export interface CloudDataServerProgramContext {
   bundleHash: string;
   /** Cognito user-pool resources from bootstrap, needed to wire the JWT authorizer. */
   userPoolId: string;
-  userPoolClientId: string;
   /**
-   * The client desktops and phones sign in with. The broker accepts its
-   * tokens with no app signature, on the device-token branch, and serves its
-   * id to devices from `GET /auth/config`.
+   * The client cloud app sessions sign in with, on the managed login page.
+   * The broker's HMAC branch, the session authorizer and the JWT authorizer
+   * accept only its tokens, so an admin-client token reaches the identity
+   * pool and nothing on the data plane.
+   */
+  cloudAppsUserPoolClientId: string;
+  /**
+   * The client mobile apps sign in with. The broker accepts its tokens only
+   * with a signature by an attested key, on the mobile branch.
+   */
+  mobileAppsUserPoolClientId: string;
+  /**
+   * The client desktops sign in with. The broker accepts its tokens with no
+   * app signature, on the device-token branch, and serves its id from
+   * `GET /auth/config`.
    */
   deviceUserPoolClientId: string;
+  /** Host name of the managed login page, which `/auth/*` redirects to. */
+  cognitoDomain: string;
   /**
    * When true, this install provisions *disposable* infrastructure (the cloud
    * e2e suite) and the production data-protection hardening is skipped:
@@ -451,10 +469,15 @@ export function buildCloudDataServerProgram(
             // these unset it cannot verify anyone, and it refuses rather than
             // admitting — so a missing value here is an outage, not a hole.
             STARKEEP_USER_POOL_ID: ctx.userPoolId,
-            STARKEEP_USER_POOL_CLIENT_ID: ctx.userPoolClientId,
+            STARKEEP_USER_POOL_CLIENT_ID: ctx.cloudAppsUserPoolClientId,
             // The device client, whose tokens alone admit a signed-in
-            // desktop or phone. Unset turns device sign-in off, never on.
+            // desktop. Unset turns device sign-in off, never on.
             STARKEEP_DEVICE_USER_POOL_CLIENT_ID: ctx.deviceUserPoolClientId,
+            // The mobile-apps client, whose tokens need an attested key's
+            // signature. Unset turns mobile sign-in off, never on.
+            STARKEEP_MOBILE_USER_POOL_CLIENT_ID: ctx.mobileAppsUserPoolClientId,
+            // Where /auth/start sends a browser to sign in.
+            STARKEEP_COGNITO_DOMAIN: ctx.cognitoDomain,
             // Part B: SSM SecureString holding { keyPairId, domain, privateKey }
             // for signing shared-file CloudFront URLs. Name only — the Lambda
             // reads and caches the value once per warm container.
@@ -563,6 +586,7 @@ export function buildCloudDataServerProgram(
     //   - GET     /health               (public liveness check)
     //   - GET     /apps/{appId}/health  (per-app authenticated health)
     //   - GET     /auth/config, /apps/{appId}/deployment/settings
+    //   - GET     /auth/start, /auth/callback, /auth/sign-out, /auth/signed-out
     //   - ANY     /apps/{appId}/data/{proxy+}
     //   - ANY     /apps/{appId}/files/{proxy+}
     //   - ANY     /apps/{appId}/sync/{proxy+}
@@ -616,7 +640,7 @@ export function buildCloudDataServerProgram(
       authorizerType: "JWT",
       identitySources: ["$request.header.Authorization"],
       jwtConfiguration: {
-        audiences: [ctx.userPoolClientId],
+        audiences: [ctx.cloudAppsUserPoolClientId],
         issuer: `https://cognito-idp.${ctx.region}.amazonaws.com/${ctx.userPoolId}`,
       },
       name: "cognitoJwt",
@@ -668,7 +692,7 @@ export function buildCloudDataServerProgram(
         environment: {
           variables: {
             STARKEEP_USER_POOL_ID: ctx.userPoolId,
-            STARKEEP_USER_POOL_CLIENT_ID: ctx.userPoolClientId,
+            STARKEEP_USER_POOL_CLIENT_ID: ctx.cloudAppsUserPoolClientId,
           },
         },
         tags: { "starkeep:managed": "true", "starkeep:appId": "cloud-data-server" },
@@ -745,6 +769,32 @@ export function buildCloudDataServerProgram(
     new aws.apigatewayv2.Route("route-auth-config", {
       apiId: api.id,
       routeKey: `GET ${AUTH_CONFIG_ROUTE}`,
+      target: pulumi.interpolate`integrations/${integration.id}`,
+    });
+
+    // The platform's sign-in pages for cloud apps. Public, like /auth/config:
+    // each one only redirects, to the managed login page or back to an app,
+    // and sets or clears that app's session cookies. Outside /apps/*, so no
+    // app's own routes can shadow them.
+    for (const [name, path] of [
+      ["route-auth-start", AUTH_START_ROUTE],
+      ["route-auth-callback", AUTH_CALLBACK_ROUTE],
+      ["route-auth-sign-out", AUTH_SIGN_OUT_ROUTE],
+      ["route-auth-signed-out", AUTH_SIGNED_OUT_ROUTE],
+    ] as const) {
+      new aws.apigatewayv2.Route(name, {
+        apiId: api.id,
+        routeKey: `GET ${path}`,
+        target: pulumi.interpolate`integrations/${integration.id}`,
+      });
+    }
+
+    // A mobile app registers its attested key here. Drive's path, because the
+    // key then signs Drive-channel requests; the handler answers it before
+    // the gate.
+    new aws.apigatewayv2.Route("route-mobile-keys", {
+      apiId: api.id,
+      routeKey: `POST /apps/{appId}${MOBILE_KEYS_ROUTE}`,
       target: pulumi.interpolate`integrations/${integration.id}`,
     });
 

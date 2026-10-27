@@ -153,6 +153,16 @@ describe("refuses", () => {
     expect((await handler(event(`sk_token=${token}`))).isAuthorized).toBe(false);
   });
 
+  it("an admin-client or mobile-client token", async () => {
+    // Only the cloud-apps client's tokens are a cloud app session. An admin's
+    // converts into AdminAppRole; a mobile app's needs an attested key.
+    process.env.STARKEEP_MOBILE_USER_POOL_CLIENT_ID = "mobile-client";
+    for (const aud of ["admin-client", "mobile-client"]) {
+      const token = await signJwt(key, claims({ aud, "cognito:groups": ["starkeep-users"] }));
+      expect((await handler(event(`sk_token=${token}`))).isAuthorized, aud).toBe(false);
+    }
+  });
+
   it("a wrong-issuer token", async () => {
     const token = await signJwt(key, claims({ iss: "https://evil.example.com/pool" }));
     expect((await handler(event(`sk_token=${token}`))).isAuthorized).toBe(false);
