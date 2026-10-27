@@ -1,12 +1,16 @@
 /**
- * The three Cognito operations a sign-in flow needs, as plain `fetch` calls.
+ * The one Cognito operation a cloud app session needs, as a plain `fetch` call:
+ * exchanging the session's refresh token for a fresh ID token.
  *
- * `InitiateAuth` and `RespondToAuthChallenge` are unauthenticated Cognito IDP
- * operations: they carry no SigV4 signature, so there is nothing the AWS SDK
- * does for them that a JSON POST does not. Doing it by hand keeps
+ * Sign-in itself happens on the managed login page, which the platform's
+ * `/auth/start` route sends the browser to. App code never receives a
+ * password, so nothing here starts a password flow.
+ *
+ * `InitiateAuth` with `REFRESH_TOKEN_AUTH` is an unauthenticated Cognito IDP
+ * operation: it carries no SigV4 signature, so there is nothing the AWS SDK
+ * does for it that a JSON POST does not. Doing it by hand keeps
  * `@aws-sdk/client-cognito-identity-provider` — a large dependency — out of
- * this package and out of both apps that would otherwise pull it in to render
- * a login form.
+ * this package and out of every app that uses it.
  */
 
 export interface PoolConfig {
@@ -23,10 +27,6 @@ export interface Tokens {
   expiresIn: number;
 }
 
-export type InitiateResult =
-  | { tokens: Tokens }
-  | { challenge: "NEW_PASSWORD_REQUIRED"; session: string };
-
 interface AuthenticationResult {
   AccessToken?: string;
   IdToken?: string;
@@ -36,8 +36,6 @@ interface AuthenticationResult {
 
 interface CognitoResponse {
   AuthenticationResult?: AuthenticationResult;
-  ChallengeName?: string;
-  Session?: string;
   message?: string;
   __type?: string;
 }
@@ -87,59 +85,6 @@ async function callCognito(
     );
   }
   return parsed;
-}
-
-function makeTokens(result: AuthenticationResult | undefined): Tokens {
-  if (!result?.AccessToken || !result.IdToken || !result.RefreshToken) {
-    throw new CognitoError("Incomplete auth result from Cognito", undefined, 502);
-  }
-  return {
-    accessToken: result.AccessToken,
-    idToken: result.IdToken,
-    refreshToken: result.RefreshToken,
-    expiresIn: result.ExpiresIn ?? 3600,
-  };
-}
-
-export async function initiateAuth(
-  cfg: PoolConfig,
-  email: string,
-  password: string,
-): Promise<InitiateResult> {
-  const res = await callCognito(cfg, "InitiateAuth", {
-    AuthFlow: "USER_PASSWORD_AUTH",
-    ClientId: cfg.userPoolClientId,
-    AuthParameters: { USERNAME: email, PASSWORD: password },
-  });
-
-  if (res.AuthenticationResult) return { tokens: makeTokens(res.AuthenticationResult) };
-
-  // A first sign-in against an admin-created user always lands here. Every
-  // other challenge is one this deployment does not configure, so treating it
-  // as an error is honest rather than lossy.
-  if (res.ChallengeName === "NEW_PASSWORD_REQUIRED" && res.Session) {
-    return { challenge: "NEW_PASSWORD_REQUIRED", session: res.Session };
-  }
-  throw new CognitoError(
-    `Unsupported Cognito challenge: ${res.ChallengeName ?? "none"}`,
-    res.ChallengeName,
-    502,
-  );
-}
-
-export async function respondNewPassword(
-  cfg: PoolConfig,
-  session: string,
-  email: string,
-  newPassword: string,
-): Promise<Tokens> {
-  const res = await callCognito(cfg, "RespondToAuthChallenge", {
-    ChallengeName: "NEW_PASSWORD_REQUIRED",
-    ClientId: cfg.userPoolClientId,
-    Session: session,
-    ChallengeResponses: { USERNAME: email, NEW_PASSWORD: newPassword },
-  });
-  return makeTokens(res.AuthenticationResult);
 }
 
 /**

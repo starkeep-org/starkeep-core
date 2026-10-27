@@ -5,6 +5,7 @@ export default defineConfig({
     "src/index.ts",
     "src/load-env-auto.ts",
     "src/auth/index.ts",
+    "src/auth/cookies.ts",
     "src/edge.ts",
     "src/lambda.ts",
     "src/web.ts",

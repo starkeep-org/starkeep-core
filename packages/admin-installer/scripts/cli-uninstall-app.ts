@@ -21,7 +21,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { appManifestSchema } from "@starkeep/admin-manifest";
-import { uninstallApp } from "../src/orchestrator";
+import { uninstallApp, unregisterMobileApp } from "../src/orchestrator";
 import { exitOnInstallFailure } from "../src/cli-exit";
 import {
   regionFromUserPoolId,
@@ -38,10 +38,16 @@ import {
 
 const flags = process.argv.slice(2);
 const nonInteractive = flags.includes("--non-interactive");
+// Remove only the mobile registration, leaving any cloud compute in place.
+const mobileOnly = flags.includes("--mobile-only");
+// Remove the cloud app but keep its mobile build registered.
+const keepMobile = flags.includes("--keep-mobile");
 const appId = flags.find((f) => !f.startsWith("--"));
 
 if (!appId) {
-  console.error("Usage: cli:uninstall-app <appId> [--non-interactive]");
+  console.error(
+    "Usage: cli:uninstall-app <appId> [--non-interactive] [--mobile-only | --keep-mobile]",
+  );
   process.exit(1);
 }
 
@@ -142,10 +148,34 @@ const registryCredentials = {
   sessionToken: process.env.AWS_SESSION_TOKEN!,
 };
 
+if (mobileOnly) {
+  if (!config.mobileAppsUserPoolClientId) {
+    console.error(`Error: ${starkeepConfigPath()} has no mobileAppsUserPoolClientId.`);
+    process.exit(1);
+  }
+  await unregisterMobileApp({
+    appId,
+    manifest,
+    config: {
+      stackPrefix,
+      region,
+      dsqlHostname: config.auroraEndpoint,
+      mobileSignIn: {
+        userPoolId: config.userPoolId,
+        mobileAppsClientId: config.mobileAppsUserPoolClientId,
+      },
+    },
+    registryCredentials,
+  }).catch(exitOnInstallFailure);
+  console.log(`\n${appId}'s mobile build is no longer registered.`);
+  process.exit(0);
+}
+
 await uninstallApp({
   appId,
   manifest,
   registryCredentials,
+  keepMobileRegistration: keepMobile,
   config: {
     stackPrefix,
     region,
@@ -164,6 +194,14 @@ await uninstallApp({
     managerRoleArn,
     installDdlRoleArn,
     installInfraRoleArn,
+    ...(config.mobileAppsUserPoolClientId
+      ? {
+          mobileSignIn: {
+            userPoolId: config.userPoolId,
+            mobileAppsClientId: config.mobileAppsUserPoolClientId,
+          },
+        }
+      : {}),
   },
 }).catch(exitOnInstallFailure);
 

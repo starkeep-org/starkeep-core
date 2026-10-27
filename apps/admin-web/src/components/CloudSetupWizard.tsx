@@ -83,6 +83,11 @@ function validateUserPoolId(v: string) {
 function validateUserPoolClientId(v: string) {
   return /^[A-Za-z0-9]+$/.test(v) ? null : "Must be an alphanumeric string";
 }
+function validateCognitoDomain(v: string) {
+  return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(v)
+    ? null
+    : "Format: starkeep-123456789012.auth.us-east-1.amazoncognito.com";
+}
 function validateIdentityPoolId(v: string) {
   return /^[a-z]+-[a-z]+-\d+:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(v)
     ? null
@@ -380,6 +385,7 @@ function Step2Outputs({
   fallbackRegion,
   initialCognitoConfig,
   initialDeviceUserPoolClientId,
+  initialCognitoDomain,
   onContinue,
   onBack,
 }: {
@@ -387,9 +393,11 @@ function Step2Outputs({
   fallbackRegion: string;
   initialCognitoConfig: Partial<CognitoConfig>;
   initialDeviceUserPoolClientId?: string;
+  initialCognitoDomain?: string;
   onContinue: (
     config: Pick<CognitoConfig, "userPoolId" | "userPoolClientId" | "identityPoolId"> & {
       deviceUserPoolClientId: string;
+      cognitoDomain: string;
     },
   ) => void;
   onBack: () => void;
@@ -401,6 +409,7 @@ function Step2Outputs({
   const [deviceUserPoolClientId, setDeviceUserPoolClientId] = useState(
     initialDeviceUserPoolClientId ?? "",
   );
+  const [cognitoDomain, setCognitoDomain] = useState(initialCognitoDomain ?? "");
   const [identityPoolId, setIdentityPoolId] = useState(initialCognitoConfig.identityPoolId ?? "");
   const [touched, setTouched] = useState<Record<string, boolean>>({});
 
@@ -410,6 +419,7 @@ function Step2Outputs({
     userPoolId: validateUserPoolId(userPoolId),
     userPoolClientId: validateUserPoolClientId(userPoolClientId),
     deviceUserPoolClientId: validateUserPoolClientId(deviceUserPoolClientId),
+    cognitoDomain: validateCognitoDomain(cognitoDomain),
     identityPoolId: validateIdentityPoolId(identityPoolId),
   };
   const isValid = Object.values(errors).every((e) => e === null);
@@ -431,12 +441,30 @@ function Step2Outputs({
         ) : (
           "CloudFormation stack"
         )}{" "}
-        <strong>Outputs</strong> tab and copy the four values below.
+        <strong>Outputs</strong> tab and copy the five values below.
       </p>
 
       <p className="text-sm text-muted-foreground">The outputs are listed in alphabetical order.</p>
 
       <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-1.5">
+          <label className="text-sm font-medium" htmlFor="cognitoDomain">
+            CognitoDomain
+          </label>
+          <Input
+            id="cognitoDomain"
+            placeholder="starkeep-123456789012.auth.us-east-1.amazoncognito.com"
+            value={cognitoDomain}
+            onChange={(e) => setCognitoDomain(e.currentTarget.value.trim())}
+            onBlur={() => touch("cognitoDomain")}
+            aria-invalid={touched.cognitoDomain && !!errors.cognitoDomain}
+            className={cn(touched.cognitoDomain && errors.cognitoDomain && "border-destructive")}
+          />
+          {touched.cognitoDomain && errors.cognitoDomain && (
+            <p className="text-xs text-destructive">{errors.cognitoDomain}</p>
+          )}
+        </div>
+
         <div className="flex flex-col gap-1.5">
           <label className="text-sm font-medium" htmlFor="deviceUserPoolClientId">
             DeviceUserPoolClientId
@@ -522,7 +550,13 @@ function Step2Outputs({
         </Button>
         <Button
           onClick={() =>
-            onContinue({ userPoolId, userPoolClientId, identityPoolId, deviceUserPoolClientId })
+            onContinue({
+              userPoolId,
+              userPoolClientId,
+              identityPoolId,
+              deviceUserPoolClientId,
+              cognitoDomain,
+            })
           }
           disabled={!isValid}
         >
@@ -1235,13 +1269,15 @@ export function CloudSetupWizard({ onComplete }: Props) {
 
       const done = new Set<StepId>();
       if (cfg?.stackPrefix) done.add(1);
-      // A config from before the device client existed reopens this step, so
-      // the operator copies the new output in after updating the stack.
+      // A config from before the device client or the Cognito domain existed
+      // reopens this step, so the operator copies the new output in after
+      // updating the stack.
       const hasCognito = !!(
         cfg?.userPoolId &&
         cfg?.userPoolClientId &&
         cfg?.identityPoolId &&
-        cfg?.deviceUserPoolClientId
+        cfg?.deviceUserPoolClientId &&
+        cfg?.cognitoDomain
       );
       if (hasCognito) done.add(2);
 
@@ -1358,6 +1394,9 @@ export function CloudSetupWizard({ onComplete }: Props) {
                   userPoolClientId: null,
                   identityPoolId: null,
                   deviceUserPoolClientId: null,
+                  cognitoDomain: null,
+                  cloudAppsUserPoolClientId: null,
+                  mobileAppsUserPoolClientId: null,
                   accountId: null,
                   permissionsBoundaryArn: null,
                   foundationalPermissionsBoundaryArn: null,
@@ -1391,6 +1430,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
             fallbackRegion={bootstrapRegion}
             initialCognitoConfig={cognitoConfig}
             initialDeviceUserPoolClientId={cloudConfig?.deviceUserPoolClientId}
+            initialCognitoDomain={cloudConfig?.cognitoDomain}
             onContinue={async (config) => {
               const isChanging =
                 !!cloudConfig?.userPoolId && cloudConfig.userPoolId !== config.userPoolId;
@@ -1405,6 +1445,9 @@ export function CloudSetupWizard({ onComplete }: Props) {
                   userPoolClientId: config.userPoolClientId,
                   identityPoolId: config.identityPoolId,
                   deviceUserPoolClientId: config.deviceUserPoolClientId,
+                  cognitoDomain: config.cognitoDomain,
+                  cloudAppsUserPoolClientId: null,
+                  mobileAppsUserPoolClientId: null,
                   s3Bucket: null,
                   auroraEndpoint: null,
                   apiGatewayUrl: null,
@@ -1426,6 +1469,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
                   userPoolClientId: config.userPoolClientId,
                   identityPoolId: config.identityPoolId,
                   deviceUserPoolClientId: config.deviceUserPoolClientId,
+                  cognitoDomain: config.cognitoDomain,
                 });
                 setCloudConfig(updated);
               }

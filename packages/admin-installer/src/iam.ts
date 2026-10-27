@@ -277,6 +277,15 @@ export async function createAppRole(input: CreateAppRoleInput): Promise<string> 
               Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/platform/*`,
             },
             {
+              // A mobile app's attested key, registered once per install of
+              // the app on a phone and read on each of its requests. Public
+              // keys and ids only, so a plain String parameter.
+              Sid: "BrokerWriteMobileKeys",
+              Effect: "Allow",
+              Action: "ssm:PutParameter",
+              Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/platform/mobile-keys/*`,
+            },
+            {
               // SecureString — decrypt via the SSM service key.
               Sid: "BrokerReadAppCredsKmsDecrypt",
               Effect: "Allow",

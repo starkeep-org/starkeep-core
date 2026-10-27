@@ -22,6 +22,11 @@
  * Usage:
  *   pnpm --filter @starkeep/admin-installer cli:install-app <appId>
  *   pnpm --filter @starkeep/admin-installer cli:install-app <appId> --non-interactive
+ *   pnpm --filter @starkeep/admin-installer cli:install-app <appId> --mobile-only
+ *
+ * `--mobile-only` registers the app's mobile build and nothing else: its type
+ * grants, label keys, Android identity and sign-in callback. The mobile app
+ * then syncs through the Drive channel with no cloud compute for the app.
  */
 
 // TEMP (iam-permission-tests POC): if IAM_SDK_TRACE_PATH is set, record
@@ -41,7 +46,7 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { validateManifest } from "@starkeep/admin-manifest";
-import { installApp } from "../src/orchestrator";
+import { installApp, registerMobileApp } from "../src/orchestrator";
 import { formatAnonymousRouteReport } from "../src/anonymous-route-report";
 import { formatProbeReport, probeAnonymousSurface } from "../src/post-install-probe";
 import { exitOnInstallFailure } from "../src/cli-exit";
@@ -97,10 +102,11 @@ function buildAppBundle(appDir: string, appBasePath: string): Buffer {
 
 const flags = process.argv.slice(2);
 const nonInteractive = flags.includes("--non-interactive");
+const mobileOnly = flags.includes("--mobile-only");
 const appId = flags.find((f) => !f.startsWith("--"));
 
 if (!appId) {
-  console.error("Usage: cli:install-app <appId> [--non-interactive]");
+  console.error("Usage: cli:install-app <appId> [--non-interactive] [--mobile-only]");
   process.exit(1);
 }
 
@@ -201,6 +207,44 @@ if (!validation.manifest) {
 }
 const manifest = validation.manifest;
 
+if (mobileOnly) {
+  if (!manifest.mobile?.android) {
+    console.error(`Error: ${appId}'s manifest declares no mobile build (mobile.android).`);
+    process.exit(1);
+  }
+  if (!config.mobileAppsUserPoolClientId) {
+    console.error(
+      `Error: ${starkeepConfigPath()} has no mobileAppsUserPoolClientId. ` +
+        "Reinstall the cloud data server first; it creates the client mobile apps sign in with.",
+    );
+    process.exit(1);
+  }
+  console.log(`\nRegistering ${appId}'s mobile build (no cloud compute)…`);
+  await registerMobileApp({
+    appId,
+    manifest,
+    config: {
+      stackPrefix,
+      region,
+      dsqlHostname: config.auroraEndpoint,
+      mobileSignIn: {
+        userPoolId: config.userPoolId,
+        mobileAppsClientId: config.mobileAppsUserPoolClientId,
+      },
+    },
+    registryCredentials: {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+      sessionToken: process.env.AWS_SESSION_TOKEN!,
+    },
+  }).catch(exitOnInstallFailure);
+  const android = manifest.mobile.android;
+  console.log(
+    `Registered ${android.package}, signing in at ${android.callbackScheme}://auth/callback.`,
+  );
+  process.exit(0);
+}
+
 console.log(`\nStarkeep ${appId} cloud install`);
 console.log(`  Region : ${region}`);
 console.log(`  Stage  : ${stackPrefix}`);
@@ -218,6 +262,17 @@ if (anonymousReport) {
   console.log("");
 }
 
+// Cloud app sessions sign in on the managed login page through the cloud-apps
+// client, which the cloud data server install creates.
+const cloudAppsUserPoolClientId = config.cloudAppsUserPoolClientId;
+if (!cloudAppsUserPoolClientId) {
+  console.error(
+    `Error: ${starkeepConfigPath()} has no cloudAppsUserPoolClientId. ` +
+      "Reinstall the cloud data server first; it creates the client cloud apps sign in with.",
+  );
+  process.exit(1);
+}
+
 // Patch handler env with live platform config. Handlers declare the keys they
 // want by listing them (placeholder-empty) in the manifest; the installer fills
 // any empty value whose key it recognizes. App-agnostic: no handler-name or
@@ -231,7 +286,9 @@ const platformEnv: Record<string, string> = {
   // raw gateway URL for pre-CloudFront configs.
   STARKEEP_API_GATEWAY_URL: config.publicBaseUrl ?? config.apiGatewayUrl ?? "",
   STARKEEP_USER_POOL_ID: config.userPoolId,
-  STARKEEP_USER_POOL_CLIENT_ID: config.userPoolClientId,
+  // The cloud-apps client, never the admin client: the broker and both
+  // gateway authorizers accept only its tokens.
+  STARKEEP_USER_POOL_CLIENT_ID: cloudAppsUserPoolClientId,
   STARKEEP_IDENTITY_POOL_ID: config.identityPoolId,
   // The account's invocation ceiling, so an app that fans out on a user's
   // behalf can size that fan-out against the real number rather than a literal
@@ -288,6 +345,14 @@ await installApp({
     managerRoleArn,
     installDdlRoleArn,
     installInfraRoleArn,
+    ...(config.mobileAppsUserPoolClientId
+      ? {
+          mobileSignIn: {
+            userPoolId: config.userPoolId,
+            mobileAppsClientId: config.mobileAppsUserPoolClientId,
+          },
+        }
+      : {}),
   },
 }).catch(exitOnInstallFailure);
 

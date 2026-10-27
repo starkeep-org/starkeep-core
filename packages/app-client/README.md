@@ -225,13 +225,18 @@ considered separately.
 
 ## The session layer
 
-A cloud app gets sign-in, sign-out, refresh and an origin gate from this
-package rather than writing them. The division is deliberate: the app owns the
-sign-in _page_ — its route, markup, copy and styling — and the platform owns
-everything the page talks to, because cookie names, flags, path scoping, the
-Cognito flow and token verification are properties of the deployment rather
-than of any app. The operational rule is that this package ships no React and
-names no app; a component appearing in it means the boundary has been crossed.
+A cloud app gets sign-in, sign-out, refresh and an origin gate from the
+platform rather than writing them. A person signs in on Cognito's managed login
+page, never in app code: the app's sign-in page links to the platform's
+`/auth/start` (`signInAddress(appId)`), the managed login page takes the
+password, and the platform's `/auth/callback` sets the app's cookies. App code
+is untrusted, and a password it held would sign in to every other app and, for
+an admin, to the deployment itself. The app owns the sign-in _page_ — its
+route, markup, copy and styling — and the platform owns everything the page
+talks to, because cookie names, flags, path scoping, the Cognito flow and token
+verification are properties of the deployment rather than of any app. The
+operational rule is that this package ships no React and names no app; a
+component appearing in it means the boundary has been crossed.
 
 Three entry points:
 
@@ -244,11 +249,14 @@ signInPath, basePath })`, one function of `Request -> Response | undefined`.
   Hono middleware. The gate is a cloud gate — its first line returns
   `undefined` unless `STARKEEP_APP_CLIENT_MODE` is `cloud`.
 - **`@starkeep/app-client/auth`** — `createSessionRoutes({ appId })`, mounted
-  at `app/api/session/[[...action]]/route.ts`. It serves `sign-in`,
-  `new-password`, `refresh`, `sign-out`, a `GET` probe, and `GET token` for the
-  one case a cookie cannot serve (a call made directly against the gateway,
-  where a bearer token is required). Also exports `verifyIdToken`,
-  `requireSession` and the cookie helpers.
+  at `app/api/session/[[...action]]/route.ts`. It serves `refresh`, `sign-out`
+  (which answers with the platform's `/auth/sign-out` address for the page to
+  visit next), a `GET` probe, and `GET token` for the one case a cookie cannot
+  serve (a call made directly against the gateway, where a bearer token is
+  required). Also exports `verifyIdToken`, `requireSession`, `signInAddress`,
+  `signOutAddress` and the cookie helpers.
+- **`@starkeep/app-client/session-cookies`** — the cookie helpers alone, with
+  no imports, so the broker can set an app's cookies at `/auth/callback`.
 - **`sessionAuth()`** from the root entry, for the proxy's `endUserAuth`.
 
 Two cookies, both `HttpOnly; Secure; SameSite=Lax; Path=/apps/<appId>`:
@@ -258,7 +266,8 @@ Cognito credential at any point, so an XSS on the page has nothing durable to
 take.
 
 This package does **not** depend on `@aws-sdk/client-cognito-identity-provider`
-and must not grow that dependency. `InitiateAuth` and `RespondToAuthChallenge`
-are unauthenticated operations that need no SigV4, so they are a plain `fetch` —
+and must not grow that dependency. The refresh (`InitiateAuth` with
+`REFRESH_TOKEN_AUTH`) is an unauthenticated operation that needs no SigV4, so it
+is a plain `fetch` —
 which is also what keeps the verifier loadable in an edge runtime, where the
 origin gate can be deployed.

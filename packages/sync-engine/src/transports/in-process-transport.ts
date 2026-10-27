@@ -116,6 +116,16 @@ export interface InProcessTransportOptions {
    */
   readonly byteCoverage?: ByteCoverageStore;
   /**
+   * The shared records the bytes watermark walks, when they differ from
+   * `databaseAdapter`'s. A mobile app's exchange runs on an adapter narrowed to
+   * the app's types, but the bytes watermark is stored per channel and every
+   * caller of the Drive channel shares it: a walk over the narrowed rows would
+   * step past files of other types it never checked, and save that for
+   * everyone. With this set, the walk reads the whole library and the reply's
+   * bytes watermark is cut back to the narrowed rows watermark.
+   */
+  readonly fileRecords?: DatabaseAdapter;
+  /**
    * True when this side declines the file under an object key, so the walk
    * counts it as held. The cloud declines `starkeep/no-cloud` files, which it
    * also refuses to accept.
@@ -182,7 +192,7 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
   // channel, each app's reserved file table on a per-app channel.
   const scanCapableApplier = appSyncableSource?.applier as ScanCapableApplier | undefined;
   const fileRowSources: FileRowSources = {
-    records: syncSharedRecords ? databaseAdapter : null,
+    records: syncSharedRecords ? (options.fileRecords ?? databaseAdapter) : null,
     fileTables:
       appSyncableSource && typeof scanCapableApplier?.scanSince === "function"
         ? appSyncableSource.namespaces
@@ -212,6 +222,30 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
   async function walkByteCoverage(rowsWatermarks: Watermarks): Promise<Watermarks | undefined> {
     // A channel with no file-bearing table owes no file for any row.
     if (!carriesFiles(fileRowSources)) return { ...rowsWatermarks };
+    if (!options.fileRecords) return walkFrom(rowsWatermarks);
+    // The walk runs over the whole library, clamped by the whole library's
+    // rows; the reply never claims more than the narrowed rows hold.
+    let wholeRows: Watermarks;
+    try {
+      wholeRows = {};
+      for (const hlc of Object.values(await options.fileRecords.getNodeWatermarks())) {
+        advanceWatermark(wholeRows, hlc);
+      }
+      for (const hlc of Object.values(await options.fileRecords.getLabelNodeWatermarks())) {
+        advanceWatermark(wholeRows, hlc);
+      }
+    } catch (err) {
+      console.warn(
+        `[sync] could not read the library's rows watermark for the bytes walk: ${(err as Error).message}`,
+      );
+      return undefined;
+    }
+    const walked = await walkFrom(wholeRows);
+    return walked === undefined ? undefined : clampToRows(walked, rowsWatermarks);
+  }
+
+  /** The walk itself, clamped by `rowsWatermarks`. See {@link walkByteCoverage}. */
+  async function walkFrom(rowsWatermarks: Watermarks): Promise<Watermarks | undefined> {
     let stored: Watermarks;
     try {
       stored = await byteCoverage.load();

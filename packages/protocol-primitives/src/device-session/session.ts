@@ -34,14 +34,17 @@ export interface StoredSession {
  * issued it. A pool revokes only its own tokens and refuses any other with a
  * 4xx, which reads as "already revoked". So a retry has to reach the issuing
  * pool, whichever cloud the device uses by then.
+ *
+ * `A` is how the host names the pool and client: a desktop keeps the device
+ * client's {@link DeviceAuthConfig}, a mobile app the mobile-apps client's.
  */
-export interface PendingRevocation {
+export interface PendingRevocation<A = DeviceAuthConfig> {
   readonly refreshToken: string;
-  readonly auth: DeviceAuthConfig;
+  readonly auth: A;
 }
 
-/** A Cognito client for a pool's device client. */
-export type CognitoClientFor = (auth: DeviceAuthConfig) => CognitoClient;
+/** A Cognito client for a pool's client, as the host names it. */
+export type CognitoClientFor<A = DeviceAuthConfig> = (auth: A) => CognitoClient;
 
 /**
  * Where a device keeps its session: a `0600` file on a desktop, the secure
@@ -49,13 +52,13 @@ export type CognitoClientFor = (auth: DeviceAuthConfig) => CognitoClient;
  * are re-obtained on demand, so writing them down would only leave more copies
  * of a bearer credential at rest.
  */
-export interface SessionStore {
+export interface SessionStore<A = DeviceAuthConfig> {
   read(): Promise<StoredSession | null>;
   write(session: StoredSession): Promise<void>;
   clear(): Promise<void>;
   /** A refresh token signed out of locally but not yet revoked at its pool. */
-  readPendingRevocation(): Promise<PendingRevocation | null>;
-  writePendingRevocation(pending: PendingRevocation): Promise<void>;
+  readPendingRevocation(): Promise<PendingRevocation<A> | null>;
+  writePendingRevocation(pending: PendingRevocation<A>): Promise<void>;
   clearPendingRevocation(): Promise<void>;
 }
 
@@ -85,7 +88,7 @@ export type RefreshOutcome =
   | { readonly kind: "superseded" };
 
 /** The session this device already has. Never touches the network. */
-export async function loadStoredSession(store: SessionStore): Promise<ActiveSession | null> {
+export async function loadStoredSession<A>(store: SessionStore<A>): Promise<ActiveSession | null> {
   const stored = await store.read();
   if (!stored) return null;
   return { email: stored.email, refreshToken: stored.refreshToken, tokens: null };
@@ -101,7 +104,10 @@ export function sessionFromTokens(tokens: AuthTokens): ActiveSession {
 }
 
 /** Keep a completed sign-in, so the device stays signed in across restarts. */
-export async function storeSignIn(store: SessionStore, tokens: AuthTokens): Promise<ActiveSession> {
+export async function storeSignIn<A>(
+  store: SessionStore<A>,
+  tokens: AuthTokens,
+): Promise<ActiveSession> {
   const session = sessionFromTokens(tokens);
   await store.write({ refreshToken: session.refreshToken, email: session.email });
   return session;
@@ -121,10 +127,10 @@ export async function storeSignIn(store: SessionStore, tokens: AuthTokens): Prom
  * reach through the sign-in, which only a move to another cloud allows, the
  * replaced session takes the slot.
  */
-export async function endReplacedSession(
-  clientFor: CognitoClientFor,
-  store: SessionStore,
-  previousAuth: DeviceAuthConfig | null,
+export async function endReplacedSession<A>(
+  clientFor: CognitoClientFor<A>,
+  store: SessionStore<A>,
+  previousAuth: A | null,
 ): Promise<void> {
   await revokePendingSignOut(clientFor, store).catch(() => undefined);
   const previous = await store.read();
@@ -134,7 +140,7 @@ export async function endReplacedSession(
 }
 
 /** Whether the store still holds the session a slow call started from. */
-async function stillCurrent(store: SessionStore, session: ActiveSession): Promise<boolean> {
+async function stillCurrent<A>(store: SessionStore<A>, session: ActiveSession): Promise<boolean> {
   return (await store.read())?.refreshToken === session.refreshToken;
 }
 
@@ -143,9 +149,9 @@ export function isRejection(err: unknown): boolean {
   return err instanceof CognitoError && err.status >= 400 && err.status < 500;
 }
 
-export async function refreshSession(
+export async function refreshSession<A>(
   client: CognitoClient,
-  store: SessionStore,
+  store: SessionStore<A>,
   session: ActiveSession,
 ): Promise<RefreshOutcome> {
   try {
@@ -201,11 +207,11 @@ export type RevocationOutcome =
  * so a process killed in between leaves a token still to revoke rather than
  * one forgotten while valid.
  */
-export async function signOut(
-  clientFor: CognitoClientFor,
-  store: SessionStore,
+export async function signOut<A>(
+  clientFor: CognitoClientFor<A>,
+  store: SessionStore<A>,
   session: StoredSession,
-  auth: DeviceAuthConfig,
+  auth: A,
 ): Promise<RevocationOutcome> {
   await store.writePendingRevocation({ refreshToken: session.refreshToken, auth });
   await store.clear();
@@ -222,9 +228,9 @@ export async function signOut(
  * token — revoked now, or already revoked or expired — and either way there is
  * nothing left to do. Anything else is the pool not answering.
  */
-export async function revokePendingSignOut(
-  clientFor: CognitoClientFor,
-  store: SessionStore,
+export async function revokePendingSignOut<A>(
+  clientFor: CognitoClientFor<A>,
+  store: SessionStore<A>,
 ): Promise<RevocationOutcome> {
   const pending = await store.readPendingRevocation();
   if (!pending) return "none";

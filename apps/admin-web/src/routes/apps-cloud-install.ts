@@ -21,6 +21,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
     region: string;
     reattach?: boolean;
     resumeFrom?: string;
+    /** Register only the app's mobile build: grants and identity, no compute. */
+    mobileOnly?: boolean;
   };
 
   if (!body.accessKeyId || !body.secretAccessKey || !body.sessionToken || !body.region) {
@@ -57,7 +59,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
     key: "app",
     noun: "deploy",
     command: "pnpm",
-    args: ["--filter", "@starkeep/admin-installer", "cli:install-app", appId, "--non-interactive"],
+    args: [
+      "--filter",
+      "@starkeep/admin-installer",
+      "cli:install-app",
+      appId,
+      "--non-interactive",
+      ...(body.mobileOnly === true ? ["--mobile-only"] : []),
+    ],
     cwd: REPO_ROOT,
     env: spawnEnv,
     reattach: body.reattach === true,

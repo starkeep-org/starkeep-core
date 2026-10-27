@@ -4,7 +4,12 @@
  * reaches a sign-in request.
  */
 import { describe, expect, it } from "vitest";
-import { AUTH_CONFIG_ROUTE, fetchDeviceAuthConfig, parseDeviceAuthConfig } from "../src/index.js";
+import {
+  AUTH_CONFIG_ROUTE,
+  fetchDeviceAuthConfig,
+  parseDeviceAuthConfig,
+  parseMobileAuthConfig,
+} from "../src/index.js";
 
 const GOOD = {
   region: "us-east-2",
@@ -55,5 +60,37 @@ describe("fetchDeviceAuthConfig", () => {
     await expect(fetchDeviceAuthConfig("https://d1.cloudfront.net", fetchImpl)).rejects.toThrow(
       /404/,
     );
+  });
+});
+
+describe("parseMobileAuthConfig", () => {
+  const MOBILE = {
+    ...GOOD,
+    mobileClientId: "7m0b1lec11ent0000000000000",
+    cognitoDomain: "starkeep-123456789012.auth.us-east-2.amazoncognito.com",
+  };
+
+  it("reads the mobile half of a complete answer", () => {
+    expect(parseMobileAuthConfig(MOBILE)).toEqual({
+      region: MOBILE.region,
+      userPoolId: MOBILE.userPoolId,
+      mobileClientId: MOBILE.mobileClientId,
+      cognitoDomain: MOBILE.cognitoDomain,
+    });
+  });
+
+  it("answers null for a cloud with no mobile-apps client yet", () => {
+    expect(parseMobileAuthConfig(GOOD)).toBeNull();
+  });
+
+  it("refuses a sign-in domain that is not a bare host name", () => {
+    for (const cognitoDomain of [
+      "https://login.example.com",
+      "login.example.com/steal",
+      "login.example.com:8443",
+      "",
+    ]) {
+      expect(parseMobileAuthConfig({ ...MOBILE, cognitoDomain })).toBeNull();
+    }
   });
 });

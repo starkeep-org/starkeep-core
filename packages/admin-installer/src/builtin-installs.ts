@@ -39,6 +39,7 @@ import { pulumiUpInline, pulumiDestroyInline } from "./compute-stack";
 import { initializeSharedSchema } from "./dsql-schema-init";
 import { buildCloudDataServerProgram } from "./builtin-programs/cloud-data-server-program";
 import { putCloudFrontSigningParameter, putDeploymentSettingsParameter } from "./app-creds";
+import { configureAppSignInClients, findOrCreateAppSignInClients } from "./app-sign-in-clients";
 import {
   checkDeploymentSettings,
   serializeDeploymentSettings,
@@ -95,9 +96,10 @@ export interface CloudDataServerInstallConfig {
   pulumiStateBucket: string;
   /** Cognito user-pool resources from the bootstrap CFN stack. */
   userPoolId: string;
-  userPoolClientId: string;
-  /** The bootstrap's device client, which desktops and phones sign in with. */
+  /** The bootstrap's device client, which desktops sign in with. */
   deviceUserPoolClientId: string;
+  /** Host name of the managed login page, the bootstrap's CognitoDomain output. */
+  cognitoDomain: string;
   /**
    * When true, provision disposable infrastructure and skip the production
    * data-protection hardening (files-bucket versioning/SSE/public-access-block
@@ -152,6 +154,10 @@ export interface CloudDataServerInstallOutputs {
   sessionAuthorizerId: string;
   functionArn: string;
   region: string;
+  /** The client cloud app sessions sign in with, on the managed login page. */
+  cloudAppsUserPoolClientId: string;
+  /** The client mobile apps sign in with, in the system browser. */
+  mobileAppsUserPoolClientId: string;
 }
 
 /**
@@ -275,6 +281,17 @@ export async function installCloudDataServer(
 
   const managerCreds = await roleChain([config.managerRoleArn]);
 
+  // Step 0: Find or create the two sign-in clients, as admin-app. The broker's
+  // environment and the gateway's authorizers name both, so their ids must
+  // exist before Pulumi runs; their callbacks follow in step 4.4, once the
+  // CloudFront domain exists.
+  console.log("Finding or creating the cloud-apps and mobile-apps sign-in clients…");
+  const signInClients = await findOrCreateAppSignInClients({
+    stackPrefix: config.stackPrefix,
+    region: config.region,
+    userPoolId: config.userPoolId,
+  });
+
   // Step 1: Create the cloud-data-server role, or bring an existing one up to
   // date. createAppRole refreshes the trust policy of a role that exists and
   // rewrites both inline policies, so a reinstall carries the broker's new
@@ -348,8 +365,10 @@ export async function installCloudDataServer(
       distZipPath,
       bundleHash,
       userPoolId: config.userPoolId,
-      userPoolClientId: config.userPoolClientId,
+      cloudAppsUserPoolClientId: signInClients.cloudAppsClientId,
+      mobileAppsUserPoolClientId: signInClients.mobileAppsClientId,
       deviceUserPoolClientId: config.deviceUserPoolClientId,
+      cognitoDomain: config.cognitoDomain,
       ephemeral: config.ephemeral ?? false,
     });
 
@@ -374,6 +393,19 @@ export async function installCloudDataServer(
     const sessionAuthorizerId = String(outputs.sessionAuthorizerId);
     const functionArn = String(outputs.functionArn);
     const region = String(outputs.region);
+
+    // Step 4.4: Give both sign-in clients their full settings now that the
+    // CloudFront domain is known: the cloud-apps client's callback and logout
+    // address on the shared origin, and each client's branding style. As
+    // admin-app, the only role with Cognito client grants.
+    console.log("Configuring the sign-in clients' callbacks and branding…");
+    await configureAppSignInClients({
+      stackPrefix: config.stackPrefix,
+      region: config.region,
+      userPoolId: config.userPoolId,
+      publicBaseUrl,
+      clients: signInClients,
+    });
 
     // Step 4.5: Persist the CloudFront URL-signing config (Part B) as a
     // SecureString under Manager creds. The CDS Pulumi stack generates the key
@@ -464,6 +496,8 @@ export async function installCloudDataServer(
       sessionAuthorizerId,
       functionArn,
       region,
+      cloudAppsUserPoolClientId: signInClients.cloudAppsClientId,
+      mobileAppsUserPoolClientId: signInClients.mobileAppsClientId,
     };
   } catch (err) {
     console.warn(

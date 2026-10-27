@@ -46,13 +46,13 @@ import { USER_DATA_OWNER_APP_ID } from "./temp-policies";
  * writes no per-type grant rows — its read/write authority is granted in the
  * runtime path by app-id — but it does imply every grantable category.
  */
-interface TypeGrant {
+export interface TypeGrant {
   type: string;
   access: "read" | "readwrite";
   metadataWrite: boolean;
 }
 
-function flattenFileAccess(fileAccess: FileAccess[]): TypeGrant[] {
+export function flattenFileAccess(fileAccess: FileAccess[]): TypeGrant[] {
   const out: TypeGrant[] = [];
   for (const entry of fileAccess) {
     for (const type of entry.types) {

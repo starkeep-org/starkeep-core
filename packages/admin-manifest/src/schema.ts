@@ -380,6 +380,39 @@ export const localRunSchema = z.object({
   cwd: z.string().default("."),
 });
 
+/**
+ * One Android build of the app: the identity Android Key Attestation reports
+ * for it. The cloud maps an attested key to the app whose package name and
+ * signing certificate match, and then lets the key act only within that app's
+ * grants.
+ *
+ * `signingCertSha256` lists every certificate any build in use is signed with,
+ * the debug keystore included, as lowercase hex without separators.
+ * `callbackScheme` is the custom URL scheme the managed login page returns to
+ * (`<scheme>://auth/callback`).
+ */
+export const androidIdentitySchema = z.object({
+  package: z.string().regex(/^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$/, {
+    message: "package must be an Android application id, such as app.starkeep.photos",
+  }),
+  signingCertSha256: z
+    .array(
+      z.string().regex(/^[0-9a-f]{64}$/, {
+        message: "signingCertSha256 entries must be 64 lowercase hex characters",
+      }),
+    )
+    .min(1)
+    .max(8),
+  callbackScheme: z.string().regex(/^[a-z][a-z0-9+.-]{1,62}$/, {
+    message: "callbackScheme must be a lowercase URL scheme",
+  }),
+});
+
+/** The mobile builds an app ships. Only Android is attestable today. */
+export const mobileSchema = z.object({
+  android: androidIdentitySchema.optional(),
+});
+
 export const appManifestSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
@@ -394,6 +427,7 @@ export const appManifestSchema = z.object({
   optionalPermissions: z.array(permissionEntrySchema).default([]),
   infraRequirements: infraRequirementsSchema.default({}),
   localRun: localRunSchema.optional(),
+  mobile: mobileSchema.optional(),
   homepage: z.string().url().optional(),
   author: z.string().optional(),
   license: z.string().optional(),
@@ -412,4 +446,6 @@ export type AppSpecificSyncable = z.infer<typeof appSpecificSyncableSchema>;
 export type LocalRun = z.infer<typeof localRunSchema>;
 export type PermissionEntry = z.infer<typeof permissionEntrySchema>;
 export type InfraRequirements = z.infer<typeof infraRequirementsSchema>;
+export type AndroidIdentity = z.infer<typeof androidIdentitySchema>;
+export type MobileBuilds = z.infer<typeof mobileSchema>;
 export type AppManifest = z.infer<typeof appManifestSchema>;

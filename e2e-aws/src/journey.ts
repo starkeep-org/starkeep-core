@@ -51,6 +51,7 @@ import { AWS_TESTS_ENABLED, STACK_PREFIX, REGION, TEARDOWN } from "./env.js";
 import { ensureBootstrapStack, type BootstrapOutputs } from "./bootstrap-stack.js";
 import { ensureAdminUser } from "./admin-user.js";
 import { signInThisMachine, signInAdmin, runInstallCli, type AdminSession } from "./installers.js";
+import { cloudAppTokens, sessionCookieHeader } from "./cloud-app-session.js";
 import {
   runPaths,
   readConfig,
@@ -173,37 +174,16 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
   }
 
   /**
-   * Sign in through an app's own session route and return the `Cookie` header a
-   * browser would send afterwards.
+   * The `Cookie` header a browser sends to an app after signing in.
    *
-   * This is deliberately the same round trip the browser makes: a POST to the
-   * app's `/api/session/sign-in`, which runs the Cognito flow server-side and
-   * hands back `sk_session` (the refresh token) and `sk_token` (a minted ID
-   * token) as HttpOnly cookies. The suite holds neither credential itself, which
-   * is the property under test — the page cannot read them either.
-   *
-   * `/api/session/*` is a declared public path, so this request needs no prior
-   * authentication; everything the session gates is reached with what it returns.
+   * A browser signs in on the managed login page, and the platform's
+   * `/auth/callback` sets `sk_session` (the refresh token) and `sk_token` (an
+   * ID token) at the app's mount. The non-browser steps take the same two
+   * tokens from the cloud-apps client's admin password flow and send them as
+   * those cookies. The browser step drives the real page.
    */
-  async function signInToApp(appId: string): Promise<string> {
-    const res = await fetch(
-      `${config.apiGatewayUrl}/apps/${encodeURIComponent(appId)}/api/session/sign-in`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: admin.email, password: admin.password }),
-      },
-    );
-    const body = await res.text();
-    expect(res.status, `sign-in to ${appId} answered ${res.status}: ${body}`).toBe(200);
-
-    const cookies = res.headers.getSetCookie();
-    const jar = cookiesToHeader(cookies);
-    expect(jar, `sign-in to ${appId} set no session cookie: ${cookies.join(" | ")}`).toContain(
-      "sk_session=",
-    );
-    expect(jar).toContain("sk_token=");
-    return jar;
+  async function signInToApp(_appId: string): Promise<string> {
+    return sessionCookieHeader(await cloudAppTokens(config, admin.email, admin.password));
   }
 
   /** `Set-Cookie` response headers → the `Cookie` request header they produce. */
@@ -825,6 +805,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
           userPoolId: outputs.userPoolId,
           userPoolClientId: outputs.userPoolClientId,
           deviceUserPoolClientId: outputs.deviceUserPoolClientId,
+          cognitoDomain: outputs.cognitoDomain,
           identityPoolId: outputs.identityPoolId,
           managerRoleArn: outputs.managerRoleArn,
           permissionsBoundaryArn: outputs.appPermissionsBoundaryArn,

@@ -48,6 +48,14 @@ export function adminAppPolicyStatements(stackPrefix: string): IamStatement[] {
         "cognito-idp:AdminDisableUser",
         "cognito-idp:AdminEnableUser",
         "cognito-idp:AdminUserGlobalSignOut",
+        // The cloud-apps and mobile-apps clients, which the cloud data server
+        // install creates because their callbacks name the CloudFront domain,
+        // and which each app install updates with its mobile callback.
+        "cognito-idp:CreateUserPoolClient",
+        "cognito-idp:UpdateUserPoolClient",
+        "cognito-idp:ListUserPoolClients",
+        "cognito-idp:CreateManagedLoginBranding",
+        "cognito-idp:DescribeManagedLoginBrandingByClient",
       ],
       Resource: { GetAtt: "UserPool.Arn" },
     },

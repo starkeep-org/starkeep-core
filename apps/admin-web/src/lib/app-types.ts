@@ -21,6 +21,10 @@ export interface ManifestSummary {
     fileAccess?: FileAccess[];
     fileAccessAll?: boolean;
   };
+  /** The mobile builds the app ships; see the manifest's `mobile` field. */
+  mobile?: {
+    android?: { package: string; callbackScheme: string };
+  };
 }
 
 export interface LocalAppEntry {

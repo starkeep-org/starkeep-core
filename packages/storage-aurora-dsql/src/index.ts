@@ -3,6 +3,7 @@ export {
   buildPostgresQuery,
   compiler as postgresCompiler,
   ownerScopedCompiler,
+  typeScopedCompiler,
   type PostgresCompiler,
 } from "./query-builder.js";
 export {
@@ -12,6 +13,7 @@ export {
   isOwnedTable,
   withoutOwner,
 } from "./owner-scope.js";
+export { RecordTypeScopePlugin } from "./type-scope.js";
 export type { BuiltPostgresQuery } from "./query-builder.js";
 export type {
   AuroraDsqlDatabaseAdapterOptions,

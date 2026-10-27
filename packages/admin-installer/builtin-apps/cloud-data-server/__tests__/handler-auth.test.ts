@@ -414,6 +414,34 @@ describe("the end-user gate", () => {
     expect(res.statusCode).toBe(401);
   });
 
+  it("refuses admin-client, device-client and mobile-client tokens, even under a good HMAC", async () => {
+    // STARKEEP_USER_POOL_CLIENT_ID names the cloud-apps client. An admin's
+    // token converts into AdminAppRole through the identity pool, a device
+    // token carries the desktop's scope, and a mobile token needs an attested
+    // key: none of them may pass here as a cloud app's session.
+    process.env.STARKEEP_DEVICE_USER_POOL_CLIENT_ID = "device-client";
+    process.env.STARKEEP_MOBILE_USER_POOL_CLIENT_ID = "mobile-client";
+    try {
+      for (const aud of ["admin-client", "device-client", "mobile-client"]) {
+        scriptSecret("app-otherclients", "secret-app-otherclients");
+        scriptAssumeRole();
+        const res = await handler(
+          makeEvent({
+            method: "GET",
+            path: "/apps/app-otherclients/data/records",
+            headers: signedFor("app-otherclients", "/data/records"),
+            userToken: await mintTestUserToken({ aud }),
+          }),
+          context,
+        );
+        expect(res.statusCode, aud).toBe(401);
+      }
+    } finally {
+      delete process.env.STARKEEP_DEVICE_USER_POOL_CLIENT_ID;
+      delete process.env.STARKEEP_MOBILE_USER_POOL_CLIENT_ID;
+    }
+  });
+
   it("refuses an access token where an id token is required", async () => {
     scriptSecret("app-accesstok", "secret-app-accesstok");
     scriptAssumeRole();

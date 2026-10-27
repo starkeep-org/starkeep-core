@@ -1,12 +1,4 @@
-export {
-  type PoolConfig,
-  type Tokens,
-  type InitiateResult,
-  CognitoError,
-  initiateAuth,
-  respondNewPassword,
-  refreshTokens,
-} from "./cognito.js";
+export { type PoolConfig, type Tokens, CognitoError, refreshTokens } from "./cognito.js";
 export {
   type VerifiedClaims,
   verifyIdToken,
@@ -17,6 +9,7 @@ export {
 export {
   SESSION_COOKIE,
   TOKEN_COOKIE,
+  SESSION_MAX_AGE_S,
   type CookieOptions,
   type MintedToken,
   cookiePath,
@@ -26,6 +19,10 @@ export {
   clearCookies,
   sessionCookie,
   tokenCookie,
+  signInAddress,
+  signOutAddress,
+  SIGN_IN_START_PATH,
+  SIGN_OUT_PATH,
   poolConfig,
   mintIdToken,
   requireSession,

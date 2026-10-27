@@ -272,6 +272,25 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
       .raw(`GRANT INSERT, UPDATE, DELETE ON shared.access_grants TO "${installer}"`)
       .execute(db);
 
+    // shared.app_mobile_identities — the Android build each installed app
+    // ships, from its manifest's `mobile.android`. The broker reads it when a
+    // mobile app registers an attested key, to learn which app the key speaks
+    // for, so every role may read it, as with access_grants. Written at the
+    // install's register step and removed with the registry row.
+    await db.schema
+      .createTable("shared.app_mobile_identities")
+      .ifNotExists()
+      .addColumn("app_id", "text", (c) => c.notNull().primaryKey())
+      .addColumn("android_package", "text", (c) => c.notNull())
+      // A JSON array of lowercase hex SHA-256 digests.
+      .addColumn("android_cert_digests", "text", (c) => c.notNull())
+      .addColumn("callback_scheme", "text", (c) => c.notNull())
+      .execute();
+    await sql.raw(`GRANT SELECT ON shared.app_mobile_identities TO PUBLIC`).execute(db);
+    await sql
+      .raw(`GRANT INSERT, UPDATE, DELETE ON shared.app_mobile_identities TO "${installer}"`)
+      .execute(db);
+
     // shared.record_labels — cross-app assertions about shared records.
     //
     // app_id is a column, never a client-supplied prefix: both data servers

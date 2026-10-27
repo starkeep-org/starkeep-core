@@ -28,6 +28,20 @@ import { signRequest } from "@starkeep/app-client";
 import type { APIGatewayEvent, LambdaContext } from "../../src/handler-utils.js";
 import { installUserTokenFixture, mintTestUserToken } from "../user-token.js";
 import { createSharedSchema } from "../../../../../storage-aurora-dsql/__tests__/pg-shared-schema.js";
+import { createHash, sign } from "node:crypto";
+import { PutParameterCommand, ParameterAlreadyExists } from "@aws-sdk/client-ssm";
+import {
+  mobileSignedMessage,
+  serializeHLC,
+  type HLCTimestamp,
+} from "@starkeep/protocol-primitives";
+import { resetMobileKeyCaches } from "../../src/mobile-keys.js";
+import {
+  TEST_CERT_DIGEST,
+  TEST_PACKAGE,
+  testAuthority,
+  type KeyPair,
+} from "../attestation-chain.js";
 
 const ssmMock = mockClient(SSMClient);
 const stsMock = mockClient(STSClient);
@@ -51,6 +65,13 @@ const HASH = "c".repeat(64);
 type HandlerModule = typeof import("../../src/api-handler.js");
 let handler: HandlerModule["handler"];
 let setDbFactory: HandlerModule["__setDatabaseClientFactoryForTests"];
+let setAttestation: HandlerModule["__setAttestationForTests"];
+/** Each user's token from the mobile-apps client, as Photos Mobile holds it. */
+const mobileTokens: Record<string, string> = {};
+const MOBILE_CLIENT_ID = "test-mobile-client";
+const authority = testAuthority();
+/** SSM parameters the broker wrote: the mobile keys. */
+let ssmWrites: Map<string, string>;
 const tokens: Record<string, string> = {};
 /** Each user's token from the device client, as a signed-in desktop or phone holds it. */
 const deviceTokens: Record<string, string> = {};
@@ -68,12 +89,16 @@ beforeAll(async () => {
   const mod = await import("../../src/api-handler.js");
   handler = mod.handler;
   setDbFactory = mod.__setDatabaseClientFactoryForTests;
+  setAttestation = mod.__setAttestationForTests;
+  setAttestation([authority.rootPem], new Set());
   await installUserTokenFixture();
   tokens[A] = await mintTestUserToken({ sub: A });
   tokens[B] = await mintTestUserToken({ sub: B });
   process.env.STARKEEP_DEVICE_USER_POOL_CLIENT_ID = DEVICE_CLIENT_ID;
+  process.env.STARKEEP_MOBILE_USER_POOL_CLIENT_ID = MOBILE_CLIENT_ID;
   for (const user of [A, B]) {
     deviceTokens[user] = await mintTestUserToken({ sub: user, aud: DEVICE_CLIENT_ID });
+    mobileTokens[user] = await mintTestUserToken({ sub: user, aud: MOBILE_CLIENT_ID });
   }
 });
 
@@ -108,7 +133,18 @@ beforeEach(async () => {
   ssmMock.reset();
   stsMock.reset();
   s3Mock.reset();
+  resetMobileKeyCaches();
+  ssmWrites = new Map();
+  ssmMock.on(PutParameterCommand).callsFake(async (input: { Name: string; Value: string }) => {
+    if (ssmWrites.has(input.Name)) {
+      throw new ParameterAlreadyExists({ message: "exists", $metadata: {} });
+    }
+    ssmWrites.set(input.Name, input.Value);
+    return {};
+  });
   ssmMock.on(GetParameterCommand).callsFake(async (input: { Name?: string }) => {
+    const written = ssmWrites.get(input.Name!);
+    if (written !== undefined) return { Parameter: { Value: written } };
     if (input.Name === CF_SIGNING_PARAM) {
       return {
         Parameter: {
@@ -308,5 +344,166 @@ describe("two users through the broker", () => {
     expect(record.object_storage_key).toBe(`shared/${B}/image/cc/${HASH}`);
     const { rows } = await pg.query("SELECT user_id FROM shared.records ORDER BY user_id");
     expect(rows).toEqual([{ user_id: A }, { user_id: B }]);
+  });
+});
+
+describe("a mobile app through the broker", () => {
+  const PHOTOS = "photos";
+
+  /** Photos' mobile build registered with no cloud compute: grants, keys, identity. */
+  async function registerPhotosMobile(): Promise<void> {
+    await pg.exec(`
+      INSERT INTO shared.access_grants (app_id, type_id, access) VALUES ('${PHOTOS}', 'image/jpeg', 'readwrite');
+      INSERT INTO shared.app_label_keys (app_id, key, description) VALUES ('${PHOTOS}', 'album', null);
+      INSERT INTO shared.app_mobile_identities (app_id, android_package, android_cert_digests, callback_scheme)
+        VALUES ('${PHOTOS}', '${TEST_PACKAGE}', '${JSON.stringify([TEST_CERT_DIGEST])}', 'starkeep-photos');
+    `);
+  }
+
+  /** Register a key for `userId`'s phone, and return a signer for it. */
+  async function phoneOf(userId: string) {
+    const token = mobileTokens[userId]!;
+    const challenge = createHash("sha256").update(token).digest();
+    const { chain, key } = authority.chain({ challenge });
+    const res = await handler(
+      {
+        rawPath: `/apps/${DRIVE}/mobile/keys`,
+        requestContext: { http: { method: "POST" } },
+        headers: { "X-Starkeep-User-Token": token },
+        body: JSON.stringify({ chain: chain.map((c) => c.toString("base64")) }),
+      },
+      context,
+    );
+    expect(res.statusCode, res.body).toBe(200);
+    const keyId = (JSON.parse(res.body) as { keyId: string }).keyId;
+    return {
+      async call(method: string, subPath: string, body?: unknown) {
+        const bodyStr = body === undefined ? "" : JSON.stringify(body);
+        const ts = Date.now();
+        const message = mobileSignedMessage(DRIVE, method, subPath, ts, Buffer.from(bodyStr));
+        const out = await handler(
+          {
+            rawPath: `/apps/${DRIVE}${subPath}`,
+            requestContext: { http: { method } },
+            headers: {
+              "X-Starkeep-User-Token": token,
+              "X-Starkeep-Key-Id": keyId,
+              "X-Starkeep-Key-Sig": sign("sha256", message, (key as KeyPair).privateKey).toString(
+                "base64",
+              ),
+              "X-Starkeep-App-Ts": String(ts),
+            },
+            ...(body === undefined ? {} : { body: bodyStr }),
+          },
+          context,
+        );
+        return {
+          status: out.statusCode,
+          body: out.body ? (JSON.parse(out.body) as Record<string, unknown>) : {},
+        };
+      },
+    };
+  }
+
+  /** A's markdown note, registered by hash through Drive. */
+  async function aWritesANote(): Promise<string> {
+    const res = await call(A, "POST", "/data/records", {
+      type: "document/markdown",
+      contentType: "text/markdown",
+      contentHash: "d".repeat(64),
+      sizeBytes: 3,
+      fileName: "note.md",
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    return (res.body["record"] as { id: string }).id;
+  }
+
+  it("syncs only the types the app's manifest grants, with no cloud compute for the app", async () => {
+    await registerPhotosMobile();
+    const photo = await aWritesAPhoto();
+    await aWritesANote();
+
+    const phone = await phoneOf(A);
+    const pulled = await phone.call("POST", "/sync/exchange", { watermarks: {} });
+    expect(pulled.status, JSON.stringify(pulled.body)).toBe(200);
+    expect((pulled.body["records"] as Array<{ id: string }>).map((r) => r.id)).toEqual([photo]);
+
+    // The desktop, on the same channel, still sees both.
+    const desktop = await callAsDevice(A, "POST", "/sync/exchange", { watermarks: {} });
+    expect((desktop.body["records"] as unknown[]).length).toBe(2);
+  });
+
+  it("reports a digest over exactly the rows the phone holds, so the two agree", async () => {
+    await registerPhotosMobile();
+    await aWritesAPhoto();
+    await aWritesANote();
+    const phone = await phoneOf(A);
+
+    const res = await phone.call("POST", "/sync/exchange", {
+      watermarks: {},
+      requestDigest: true,
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const records = res.body["records"] as Array<{ updatedAt: HLCTimestamp }>;
+    expect(records).toHaveLength(1);
+    // What the phone's own digest counts: the rows it received, per author
+    // and time bucket, over the serialized timestamp.
+    const width = res.body["digestPrefixLength"] as number;
+    const expected = new Map<string, number>();
+    for (const r of records) {
+      const key = `${r.updatedAt.nodeId}|${serializeHLC(r.updatedAt).slice(0, width)}`;
+      expected.set(key, (expected.get(key) ?? 0) + 1);
+    }
+    const digest = res.body["digest"] as Array<{ nodeId: string; bucket: string; count: number }>;
+    expect(new Map(digest.map((d) => [`${d.nodeId}|${d.bucket}`, d.count]))).toEqual(expected);
+    // And the coverage watermark names the phone's rows alone.
+    const watermarks = res.body["responderWatermarks"] as Record<string, HLCTimestamp>;
+    expect(Object.values(watermarks).map(serializeHLC)).toEqual(
+      records.map((r) => serializeHLC(r.updatedAt)),
+    );
+  });
+
+  it("refuses a push carrying one record of a type the app may not write, whole", async () => {
+    await registerPhotosMobile();
+    const phone = await phoneOf(A);
+    const res = await phone.call("POST", "/sync/exchange", {
+      watermarks: {},
+      records: [
+        {
+          id: "r-note",
+          type: "document/markdown",
+          createdAt: "2026-10-27T00:00:00.000Z",
+          updatedAt: { wallTime: Date.now(), counter: 0, nodeId: "phone-1" },
+          deletedAt: null,
+          version: 1,
+          contentHash: "d".repeat(64),
+          objectStorageKey: `shared/${A}/document/dd/${"d".repeat(64)}`,
+          sizeBytes: 3,
+          originAppId: PHOTOS,
+        },
+      ],
+    });
+    expect(res.status).toBe(403);
+    const { rows } = await pg.query("SELECT id FROM shared.records");
+    expect(rows).toEqual([]);
+  });
+
+  it("presigns its own categories and refuses every other", async () => {
+    await registerPhotosMobile();
+    const phone = await phoneOf(A);
+    const imageKey = `shared/${A}/image/cc/${HASH}`;
+    const noteKey = `shared/${A}/document/dd/${"d".repeat(64)}`;
+    expect((await phone.call("GET", `/files/${imageKey}/stat`)).status).not.toBe(403);
+    expect((await phone.call("GET", `/files/${noteKey}/stat`)).status).toBe(403);
+    expect((await phone.call("POST", "/files/presign", { key: noteKey })).status).toBe(403);
+  });
+
+  it("B's phone, with B's key, syncs none of A's photos", async () => {
+    await registerPhotosMobile();
+    await aWritesAPhoto();
+    const phone = await phoneOf(B);
+    const res = await phone.call("POST", "/sync/exchange", { watermarks: {} });
+    expect(res.status).toBe(200);
+    expect(res.body["records"]).toEqual([]);
   });
 });

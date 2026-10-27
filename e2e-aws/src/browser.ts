@@ -53,58 +53,66 @@ export interface BrowserSignInOptions {
 }
 
 /**
- * Load a cloud-served app in a real browser, sign in through Cognito, and wait
- * for the control that proves the app considers the caller signed in.
+ * Load a cloud-served app in a real browser, sign in on Cognito's managed login
+ * page, and wait for the control that proves the app considers the caller
+ * signed in.
  *
- * The form is the platform's — `createSessionRoutes` serves it and Cognito
- * answers it — so this drives it directly and asks the caller only which control
- * appears afterwards.
+ * The gateway sends a signed-out document request to the app's own sign-in
+ * page, whose "Sign in" button goes to the platform's `/auth/start`. That
+ * redirects to the managed login page, which takes the password; the
+ * platform's `/auth/callback` sets the app's cookies and returns the browser to
+ * the app. The app's code never sees the password, which is the property this
+ * step exercises end to end.
  *
- * `load`, not `domcontentloaded`. The sign-in form is server-rendered, so its
- * fields exist in the initial HTML and can be filled before a framework has
- * hydrated — and that desync is permanent, not a race that settles: the
- * framework attaches with its own empty state, the DOM keeps the typed text, and
- * the submit button stays disabled forever because it enables on state.
- * Re-filling does not recover it. Measured against this deployment, `load` and
- * `networkidle` both hydrate reliably before the first fill and
- * `domcontentloaded` reliably does not.
- *
- * The gateway sends a signed-out document request to the app's own sign-in page,
- * so this lands on /sign-in and drives the real form with the
- * permanent-password admin user.
+ * The managed login page asks for the email and the password either on one
+ * screen or on two, depending on the pool's sign-in settings, so each field is
+ * waited for in turn and the page's primary button is pressed after each.
  */
 export async function signInWithBrowser(options: BrowserSignInOptions): Promise<void> {
   const { page, appUrl, email, password, signedInControl, problemReport } = options;
   await page.goto(appUrl, { waitUntil: "load" });
 
-  const emailField = page.locator('input[type="email"]');
-  const passwordField = page.locator('input[type="password"]');
-  const signIn = page.getByRole("button", { name: "Sign in" });
-  // Filled once and then waited on. Re-filling is not a recovery: if the first
-  // fill landed before hydration, every later one lands on a framework that has
-  // already decided the field is empty. The failure mode is a 30s click timeout
-  // on a page that looks correct in a screenshot.
-  await emailField.fill(email);
-  await passwordField.fill(password);
-  const deadline = Date.now() + 30_000;
-  let interactive = false;
-  while (Date.now() < deadline) {
-    if (await signIn.isEnabled()) {
-      interactive = true;
-      break;
-    }
-    await page.waitForTimeout(200);
-  }
-  if (!interactive) {
+  const startSignIn = page.getByRole("button", { name: "Sign in" });
+  try {
+    await startSignIn.waitFor({ state: "visible", timeout: 30_000 });
+  } catch (err) {
     throw new Error(
-      "sign-in form never became interactive: the submit button stayed disabled " +
-        `for 30s after filling both fields. Landed on ${page.url()}; ` +
-        `email field holds ${JSON.stringify(await emailField.inputValue())}.` +
-        problemReport(),
+      `the app's sign-in page showed no "Sign in" button. Landed on ${page.url()}.${problemReport()}`,
+      { cause: err },
     );
   }
-  await signIn.click();
-  await page
-    .getByRole("button", { name: signedInControl })
-    .waitFor({ state: "visible", timeout: 120_000 });
+  await startSignIn.click();
+
+  try {
+    await page.waitForURL(/\.amazoncognito\.com\//, { timeout: 30_000 });
+  } catch (err) {
+    throw new Error(
+      `"Sign in" did not reach the managed login page. Landed on ${page.url()}.${problemReport()}`,
+      { cause: err },
+    );
+  }
+  const emailField = page.locator('input[name="username"], input[type="email"]').first();
+  const passwordField = page.locator('input[type="password"]').first();
+  const submit = page.locator('button[type="submit"], input[type="submit"]').first();
+
+  await emailField.waitFor({ state: "visible", timeout: 30_000 });
+  await emailField.fill(email);
+  if (!(await passwordField.isVisible())) {
+    await submit.click();
+    await passwordField.waitFor({ state: "visible", timeout: 30_000 });
+  }
+  await passwordField.fill(password);
+  await submit.click();
+
+  try {
+    await page
+      .getByRole("button", { name: signedInControl })
+      .waitFor({ state: "visible", timeout: 120_000 });
+  } catch (err) {
+    throw new Error(
+      `the app never showed "${signedInControl}" after the managed login page. ` +
+        `Landed on ${page.url()}.${problemReport()}`,
+      { cause: err },
+    );
+  }
 }

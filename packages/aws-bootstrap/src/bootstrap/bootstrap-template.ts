@@ -85,6 +85,8 @@ Resources:
     Type: AWS::Cognito::UserPool
     Properties:
       UserPoolName: !Sub '\${StackPrefix}-auth'
+      # Essentials: managed login and passkeys. The live pool already runs it.
+      UserPoolTier: ESSENTIALS
       AdminCreateUserConfig:
         AllowAdminCreateUserOnly: true
         InviteMessageTemplate:
@@ -128,9 +130,12 @@ Resources:
       RefreshTokenValidity: 30
       PreventUserExistenceErrors: ENABLED
 
-  # The device client: desktops (through the local data server) and phones
-  # sign in here and sync with the ID token alone, on the cloud data server's
-  # device-token branch. The identity pool below does NOT trust this client, so
+  # The device client: desktops, through the local data server, sign in here
+  # and sync with the ID token alone, on the cloud data server's device-token
+  # branch. Phones sign in through the mobile-apps client instead, which the
+  # cloud data server install creates. The client has no OAuth flow, so no
+  # phone app can obtain a device token without the password. The identity
+  # pool below does NOT trust this client, so
   # a device token is no route to an AWS role. Ten-year refresh tokens, because
   # an expired one stops background sync silently; fifteen-minute ID tokens,
   # because they bound how long a disabled or ungrouped user keeps syncing.
@@ -154,6 +159,19 @@ Resources:
       RefreshTokenValidity: 3650
       EnableTokenRevocation: true
       PreventUserExistenceErrors: ENABLED
+
+  # The managed login page's domain. Cloud apps and mobile apps sign in on it,
+  # so no app code ever receives a password. The prefix carries the account
+  # id because prefixes are unique per region across every AWS account. The
+  # cloud data server install creates the two clients that use the page,
+  # because their callbacks name the CloudFront domain, which exists only
+  # after that install.
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub '\${StackPrefix}-\${AWS::AccountId}'
+      UserPoolId: !Ref UserPool
+      ManagedLoginVersion: 2
 
   # ---------------------------------------------------------------------------
   # Cognito Identity Pool — exchanges Cognito ID tokens for STS credentials
@@ -475,8 +493,12 @@ Outputs:
     Value: !Ref UserPoolClient
 
   DeviceUserPoolClientId:
-    Description: Cognito app client that desktops and phones sign in with to sync
+    Description: Cognito app client that desktops sign in with to sync
     Value: !Ref DeviceUserPoolClient
+
+  CognitoDomain:
+    Description: Host name of the managed login page
+    Value: !Sub '\${UserPoolDomain}.auth.\${AWS::Region}.amazoncognito.com'
 
   IdentityPoolId:
     Description: Cognito Identity Pool ID

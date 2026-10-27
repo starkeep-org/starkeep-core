@@ -57,7 +57,9 @@ export interface CloudTokenSource {
 
 export interface CloudTokenSourceOptions {
   readonly client: CognitoClient;
-  readonly store: SessionStore;
+  // The token source reads and refreshes the session; which client issued it
+  // is the host's business, so any session store will do.
+  readonly store: SessionStore<unknown>;
   readonly now?: () => number;
   /**
    * Called when the pool rejects the stored refresh token and the session

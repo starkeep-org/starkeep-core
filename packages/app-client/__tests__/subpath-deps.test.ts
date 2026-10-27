@@ -67,6 +67,16 @@ function sourceGraph(entry: string): { files: string[]; external: string[] } {
 
 const NODE_BUILTIN = /^node:/;
 
+describe("the session-cookies subpath imports nothing", () => {
+  // The broker bundles it to set a cloud app's cookies at /auth/callback, and
+  // must not pull the rest of app-client into its Lambda.
+  it("has no import at all in src/auth/cookies.ts", () => {
+    const { files, external } = sourceGraph(resolve(PKG_DIR, "src", "auth", "cookies.ts"));
+    expect(files.map((f) => f.slice(PKG_DIR.length + 1))).toEqual(["src/auth/cookies.ts"]);
+    expect(external).toEqual([]);
+  });
+});
+
 describe("the lambda and web subpaths carry no runtime dependencies", () => {
   it("imports nothing outside node builtins from src/lambda.ts", () => {
     const { files, external } = sourceGraph(resolve(PKG_DIR, "src", "lambda.ts"));

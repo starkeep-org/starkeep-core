@@ -35,6 +35,8 @@ export function CloudAppsSection({
     appId: string;
     appName: string;
     endpoint: string;
+    /** Register only the app's mobile build: grants and identity, no compute. */
+    mobileOnly: boolean;
   } | null>(null);
   const [credentials, setCredentials] = useState<(STSCredentials & { region?: string }) | null>(
     null,
@@ -43,6 +45,10 @@ export function CloudAppsSection({
   // `shared.app_registry` via POST /api/apps/cloud/list; refreshed after
   // every successful install. null = not yet loaded / cloud not configured.
   const [installedIds, setInstalledIds] = useState<Set<string> | null>(null);
+  // Apps whose mobile build is registered in the cloud, with or without
+  // compute: a mobile app syncs through Drive with its manifest's grants and
+  // needs no cloud compute of its own.
+  const [mobileIds, setMobileIds] = useState<Set<string> | null>(null);
 
   // Resolve the browser-facing base URL from the persisted cloud config so each
   // app's Open ↗ link (`${browserBaseUrl}/apps/${appId}/`) survives a reload.
@@ -85,8 +91,12 @@ export function CloudAppsSection({
         const body = (await res.json().catch(() => null)) as { error?: string } | null;
         throw new Error(body?.error ?? `cloud registry list failed: ${res.status}`);
       }
-      const body = (await res.json()) as { apps: Array<{ appId: string }> };
+      const body = (await res.json()) as {
+        apps: Array<{ appId: string }>;
+        mobileApps?: string[];
+      };
       setInstalledIds(new Set(body.apps.map((a) => a.appId)));
+      setMobileIds(new Set(body.mobileApps ?? []));
     } catch (err) {
       // The registry read is best-effort: a failure just means no "Installed"
       // badges. Don't surface it as a section-level error.
@@ -98,7 +108,12 @@ export function CloudAppsSection({
     refreshRegistry();
   }, [refreshRegistry]);
 
-  const handleInstall = async (appId: string, appName: string, endpoint: string) => {
+  const handleInstall = async (
+    appId: string,
+    appName: string,
+    endpoint: string,
+    mobileOnly = false,
+  ) => {
     setCredError(null);
     const cfg = await readCloudConfig();
     if (!cfg) {
@@ -124,7 +139,7 @@ export function CloudAppsSection({
     }
 
     setCredentials({ ...creds, region: cfg.region });
-    setInstalling({ appId, appName, endpoint });
+    setInstalling({ appId, appName, endpoint, mobileOnly });
   };
 
   return (
@@ -154,6 +169,8 @@ export function CloudAppsSection({
           // (user not signed in, cloud not set up, or the read errored). In
           // that case render no "Installed" badge rather than guessing.
           const installed = installedIds !== null && installedIds.has(entry.appId);
+          const shipsMobile = !!entry.manifest.mobile?.android;
+          const mobileRegistered = mobileIds !== null && mobileIds.has(entry.appId);
 
           // An installed app opens; anything else deploys. Redeploy is the
           // secondary action once a deployment already exists.
@@ -162,6 +179,16 @@ export function CloudAppsSection({
             actions.push({
               label: `Redeploy ${name}`,
               onSelect: () => handleInstall(entry.appId, name, endpoint),
+              disabled: !cloudReady,
+              title: cloudReady ? undefined : "Set up cloud before installing apps",
+            });
+          }
+          // A full install registers the mobile build too, so this is for an
+          // app whose mobile app should sync without its cloud compute.
+          if (shipsMobile && !installed && !mobileRegistered && mobileIds !== null) {
+            actions.push({
+              label: `Register the ${name} mobile app only`,
+              onSelect: () => handleInstall(entry.appId, name, endpoint, true),
               disabled: !cloudReady,
               title: cloudReady ? undefined : "Set up cloud before installing apps",
             });
@@ -181,6 +208,10 @@ export function CloudAppsSection({
                     className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
                   >
                     Installed
+                  </Badge>
+                ) : mobileRegistered ? (
+                  <Badge variant="outline" className="text-xs">
+                    Mobile app only
                   </Badge>
                 ) : (
                   <Badge variant="outline" className="text-xs">
@@ -223,6 +254,7 @@ export function CloudAppsSection({
         appId={installing?.appId ?? null}
         appName={installing?.appName ?? null}
         endpoint={installing?.endpoint ?? null}
+        mobileOnly={installing?.mobileOnly ?? false}
         credentials={credentials}
         onClose={() => {
           setInstalling(null);
@@ -240,6 +272,7 @@ function CloudAppInstallModal({
   opened,
   appName,
   endpoint,
+  mobileOnly,
   credentials,
   onClose,
   onSuccess,
@@ -248,6 +281,7 @@ function CloudAppInstallModal({
   appId: string | null;
   appName: string | null;
   endpoint: string | null;
+  mobileOnly: boolean;
   credentials: STSCredentials | null;
   onClose: () => void;
   onSuccess?: () => void;
@@ -275,6 +309,7 @@ function CloudAppInstallModal({
           secretAccessKey: credentials!.secretAccessKey,
           sessionToken: credentials!.sessionToken,
           region: (credentials as STSCredentials & { region?: string }).region ?? "",
+          ...(mobileOnly ? { mobileOnly: true } : {}),
         },
         { onLine: (line) => setLines((l) => [...l, line]), isAborted: () => aborted },
       );
@@ -292,7 +327,7 @@ function CloudAppInstallModal({
     return () => {
       aborted = true;
     };
-  }, [opened, credentials, endpoint, retryNonce]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [opened, credentials, endpoint, mobileOnly, retryNonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <Dialog
@@ -303,7 +338,11 @@ function CloudAppInstallModal({
     >
       <DialogContent className="sm:max-w-4xl">
         <DialogHeader>
-          <DialogTitle>Install {appName ?? "app"} in cloud</DialogTitle>
+          <DialogTitle>
+            {mobileOnly
+              ? `Register the ${appName ?? "app"} mobile app`
+              : `Install ${appName ?? "app"} in cloud`}
+          </DialogTitle>
         </DialogHeader>
         <CommandOutput lines={lines} status={status} />
         {status !== "running" && (

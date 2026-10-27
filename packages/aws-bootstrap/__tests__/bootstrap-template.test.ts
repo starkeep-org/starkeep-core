@@ -173,6 +173,28 @@ describe("trust policies (who can assume which role)", () => {
   });
 });
 
+describe("the managed login page", () => {
+  it("runs the pool on the Essentials tier, which managed login needs", () => {
+    expect(resources.UserPool!.Properties.UserPoolTier).toBe("ESSENTIALS");
+  });
+
+  it("gives the pool a prefix domain on the managed login version", () => {
+    const domain = resources.UserPoolDomain!;
+    expect(domain.Type).toBe("AWS::Cognito::UserPoolDomain");
+    expect(domain.Properties).toEqual({
+      Domain: { "Fn::Sub": "${StackPrefix}-${AWS::AccountId}" },
+      UserPoolId: { Ref: "UserPool" },
+      ManagedLoginVersion: 2,
+    });
+  });
+
+  it("outputs the page's full host name", () => {
+    expect((template.Outputs.CognitoDomain as { Value: unknown }).Value).toEqual({
+      "Fn::Sub": "${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com",
+    });
+  });
+});
+
 describe("the device client", () => {
   const props = () => resources.DeviceUserPoolClient!.Properties as Record<string, unknown>;
 
@@ -216,6 +238,7 @@ describe("stack outputs", () => {
         "UserPoolId",
         "UserPoolClientId",
         "DeviceUserPoolClientId",
+        "CognitoDomain",
         "IdentityPoolId",
         "AdminAppRoleArn",
         "ManagerRoleArn",

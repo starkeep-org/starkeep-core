@@ -197,3 +197,14 @@ describe("mintIdToken", () => {
     expect(await requireSession(request(`${TOKEN_COOKIE}=${foreign}`))).toBeNull();
   });
 });
+
+describe("the platform's sign-in addresses", () => {
+  it("names the app and a return path under its mount", async () => {
+    const { signInAddress, signOutAddress } = await import("../src/auth/cookies.js");
+    expect(signInAddress("photos")).toBe("/auth/start?app=photos&return=%2Fapps%2Fphotos%2F");
+    expect(signInAddress("photos", "/apps/photos/album/1?x=y")).toBe(
+      "/auth/start?app=photos&return=%2Fapps%2Fphotos%2Falbum%2F1%3Fx%3Dy",
+    );
+    expect(signOutAddress("memo")).toBe("/auth/sign-out?app=memo");
+  });
+});

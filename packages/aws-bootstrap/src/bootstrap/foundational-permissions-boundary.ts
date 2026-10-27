@@ -180,6 +180,13 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       ],
     },
     {
+      // cloud-data-server registers each mobile app's attested key here.
+      Sid: "FoundationalWriteMobileKeys",
+      Effect: "Allow",
+      Action: "ssm:PutParameter",
+      Resource: `arn:aws:ssm:*:*:parameter/${stackPrefix}/platform/mobile-keys/*`,
+    },
+    {
       // SecureString decrypt for the two SSM SecureStrings this role reads
       // (both parameters in FoundationalReadSsmParameters — the Pulumi state
       // passphrase and the per-app HMAC creds). Both decrypt via the SSM

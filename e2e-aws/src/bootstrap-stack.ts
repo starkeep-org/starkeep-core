@@ -24,6 +24,7 @@ export interface BootstrapOutputs {
   userPoolId: string;
   userPoolClientId: string;
   deviceUserPoolClientId: string;
+  cognitoDomain: string;
   identityPoolId: string;
   adminAppRoleArn: string;
   managerRoleArn: string;
@@ -40,6 +41,7 @@ const REQUIRED_OUTPUT_KEYS: Record<keyof BootstrapOutputs, string> = {
   userPoolId: "UserPoolId",
   userPoolClientId: "UserPoolClientId",
   deviceUserPoolClientId: "DeviceUserPoolClientId",
+  cognitoDomain: "CognitoDomain",
   identityPoolId: "IdentityPoolId",
   adminAppRoleArn: "AdminAppRoleArn",
   managerRoleArn: "ManagerRoleArn",
