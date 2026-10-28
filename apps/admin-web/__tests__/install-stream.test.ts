@@ -234,6 +234,37 @@ describe("an app install", () => {
     expect(JSON.parse(events.at(-1)!.data)).toEqual({ appId: "memo" });
   });
 
+  it.each([
+    [["web"], ["--web"]],
+    [["mobile"], ["--mobile"]],
+    [
+      ["web", "mobile"],
+      ["--web", "--mobile"],
+    ],
+    [[], []],
+  ])("passes surfaces %j to the installer as %j", async (surfaces, flags) => {
+    const res = await appInstall({ appId: "photos", surfaces });
+    const child = lastChild();
+    expect(child.args.slice(5)).toEqual(flags);
+    await finish(res, child);
+  });
+
+  it("passes no surface flag when the body names none, so the installer installs every surface", async () => {
+    const res = await appInstall({ appId: "photos" });
+    const child = lastChild();
+    expect(
+      child.args.filter((a) => a.startsWith("--") && a !== "--filter" && a !== "--non-interactive"),
+    ).toEqual([]);
+    await finish(res, child);
+  });
+
+  it("ignores a surface it does not know rather than passing it on", async () => {
+    const res = await appInstall({ appId: "photos", surfaces: ["desktop", "mobile"] });
+    const child = lastChild();
+    expect(child.args.slice(5)).toEqual(["--mobile"]);
+    await finish(res, child);
+  });
+
   it("uses the region from the body rather than deriving one", async () => {
     const res = await appInstall({ region: "eu-west-1" });
     const child = lastChild();

@@ -56,7 +56,7 @@ import {
   type ComputeContext,
   type InstallReceipt,
 } from "./compute-stack";
-import { createDsqlRegistry, type Registry } from "./registry";
+import { createDsqlRegistry, type AppSurface, type Registry } from "./registry";
 import { setMobileAppCallback } from "./app-sign-in-clients";
 
 /**
@@ -144,6 +144,12 @@ export interface InstallInput {
    * reserved ids.
    */
   allowReservedAppId?: boolean;
+  /**
+   * The surfaces to install on top of the data side. Omitted, every surface
+   * the manifest offers ({@link manifestSurfaces}); empty, the data side
+   * alone. A surface the manifest does not offer is refused.
+   */
+  surfaces?: readonly AppSurface[];
 }
 
 export interface RegistryCredentials {
@@ -158,24 +164,44 @@ export interface UninstallInput {
   config: InstallerConfig;
   registryCredentials: RegistryCredentials;
   /**
-   * Remove the app's cloud compute and private data but keep its mobile
-   * build registered, so the mobile app keeps syncing. Only meaningful for a
-   * manifest that declares a mobile build.
+   * Remove only these surfaces and keep the data side, which the other
+   * surface or the desktop's sync may still use. Omitted, uninstall removes
+   * the app entirely: every surface, the data side and the registry row.
    */
-  keepMobileRegistration?: boolean;
+  surfaces?: readonly AppSurface[];
 }
 
+export type { AppSurface };
+
 /**
- * What a mobile registration needs: the registry, and the user pool's
- * mobile-apps client. No IAM role, compute or app schema is involved.
+ * The surfaces a manifest offers: the web app when it declares compute, the
+ * mobile app when it declares an Android build. Drive offers neither.
  */
-export interface MobileRegistrationInput {
-  appId: string;
-  manifest: AppManifest;
-  config: Pick<InstallerConfig, "stackPrefix" | "region" | "dsqlHostname"> & {
-    mobileSignIn: { userPoolId: string; mobileAppsClientId: string };
-  };
-  registryCredentials: RegistryCredentials;
+export function manifestSurfaces(manifest: AppManifest): AppSurface[] {
+  const out: AppSurface[] = [];
+  if (manifest.infraRequirements.compute.enabled) out.push("web");
+  if (manifest.mobile?.android) out.push("mobile");
+  return out;
+}
+
+/** `requested`, or every surface the manifest offers; throws on one it does not. */
+function resolveSurfaces(
+  appId: string,
+  manifest: AppManifest,
+  requested: readonly AppSurface[] | undefined,
+): readonly AppSurface[] {
+  const offered = manifestSurfaces(manifest);
+  if (requested === undefined) return offered;
+  for (const surface of requested) {
+    if (!offered.includes(surface)) {
+      throw new Error(
+        surface === "web"
+          ? `${appId}'s manifest declares no compute, so it has no web app to install`
+          : `${appId}'s manifest declares no mobile build`,
+      );
+    }
+  }
+  return requested;
 }
 
 export interface InstallResult {
@@ -230,6 +256,17 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
 async function installAppInner(input: InstallInput, registry: Registry): Promise<InstallResult> {
   const { appId, manifest, zipBuffer, config } = input;
   const ir = manifest.infraRequirements;
+  // Every install creates the data side: the HMAC secret when the operator's
+  // machine holds one, the data role, the DDL, the `.keep` marker and the
+  // registry row. The web app adds the exec role, the bundle and the compute
+  // stack; the mobile app adds the Android identity and the callback.
+  const surfaces = resolveSurfaces(appId, manifest, input.surfaces);
+  const web = surfaces.includes("web");
+  // Resolved before any step, so a mobile app on a deployment with no
+  // mobile-apps client fails before it changes anything.
+  const mobileCallback = surfaces.includes("mobile")
+    ? mobileCallbackTarget(manifest, config)
+    : null;
   const done = await registry.getCompletedSteps(appId, "install");
 
   const managerCreds = await roleChain([config.managerRoleArn]);
@@ -243,33 +280,46 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
   // /${stackPrefix}/app-creds/${appId}. The cloud-data-server verifier reads
   // from here; the sync supervisor (locally) signs with the *local registry's*
   // hmac_secret (makeSignerFor → shared_app_registry), so SSM must hold that
-  // exact value. `resolveLocalHmacSecret` reads it straight from the registry
+  // exact value. `readLocalHmacSecret` reads it straight from the registry
   // — the single source of truth — rather than a separately-minted creds file,
   // which is how the cloud verifier used to end up on a key no local signer
   // held (todo 39: built-in Drive's registry secret was minted at LDS startup,
   // yet cloud install minted a *different* secret into SSM → every signed
   // request 401'd "Invalid signature").
-  const hmacSecret = resolveLocalHmacSecret(appId);
-  // alwaysRun: reconcile SSM to the current local secret every time. A
-  // completed record doesn't guarantee SSM still matches — if the local secret
-  // was re-minted, a skipped mirror would leave the cloud verifier on a stale
-  // key and every signed request would 401. The put is idempotent.
-  await runStep(
-    registry,
-    appId,
-    "install",
-    "put_app_creds_parameter",
-    done,
-    () =>
-      putAppCredsParameter({
-        stackPrefix: config.stackPrefix,
-        appId,
-        hmacSecret,
-        region: config.region,
-        awsCreds: managerCreds,
-      }).then(() => undefined),
-    { alwaysRun: true },
-  );
+  //
+  // Two parties sign with the secret: the desktop's sync supervisor, on the
+  // app's channel, and the cloud web app's Lambdas. The web app therefore
+  // needs it, and its install fails without a local install to mirror from.
+  // Without the web app the step runs only when the operator's machine holds
+  // the app, because a phone-only operator may have no desktop app at all; the
+  // phone signs with its attested key and never uses the secret. An operator
+  // who installs the desktop app later re-runs the install, and this step
+  // mirrors the secret then.
+  const local = readLocalHmacSecret(appId);
+  if ("missing" in local && web) throw new Error(local.missing);
+  if ("secret" in local) {
+    const hmacSecret = local.secret;
+    // alwaysRun: reconcile SSM to the current local secret every time. A
+    // completed record doesn't guarantee SSM still matches — if the local
+    // secret was re-minted, a skipped mirror would leave the cloud verifier on
+    // a stale key and every signed request would 401. The put is idempotent.
+    await runStep(
+      registry,
+      appId,
+      "install",
+      "put_app_creds_parameter",
+      done,
+      () =>
+        putAppCredsParameter({
+          stackPrefix: config.stackPrefix,
+          appId,
+          hmacSecret,
+          region: config.region,
+          awsCreds: managerCreds,
+        }).then(() => undefined),
+      { alwaysRun: true },
+    );
+  }
 
   // alwaysRun: a role made by an older install keeps that install's trust and
   // inline policies until something rewrites them. createAppRole rewrites
@@ -302,10 +352,10 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
   // functions — no S3, no DSQL, no sts:AssumeRole. The data role keeps its
   // powers, but only the broker can reach them now.
   //
-  // Only for an app that has compute. An app with `compute.enabled: false`
-  // (Starkeep Drive today) has no Lambda to run, and a role that can read its
-  // HMAC credential existing for nothing to use is surface with no purpose.
-  if (ir.compute.enabled) {
+  // Only for the web app. Without it (and Starkeep Drive has none) there is
+  // no Lambda to run, and a role that can read the HMAC credential existing
+  // for nothing to use is surface with no purpose.
+  if (web) {
     await runStep(registry, appId, "install", "create_iam_exec_role", done, async () => {
       await createAppExecRole({
         stackPrefix: config.stackPrefix,
@@ -384,7 +434,7 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
   );
 
   let receipt: InstallReceipt | null = null;
-  if (ir.compute.enabled) {
+  if (web) {
     // install-infra owns the install-time AWS-provisioning grants (bundle
     // upload + Pulumi up). Attach the per-app temp policy on install-infra,
     // run upload + compute stack as install-infra, then detach. A bundle
@@ -442,48 +492,46 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
       );
     }
 
-    if (ir.compute.enabled) {
-      // alwaysRun: Pulumi up is the reconcile that actually pushes new code and
-      // routes. Skipping it on a redeploy (because the first install recorded
-      // it "done") is why Redeploy never updated the app. Idempotent: a
-      // no-change up is a cheap no-op; a changed bundleHash/manifest updates the
-      // Lambda code and API Gateway routes.
-      await runStep(
-        registry,
-        appId,
-        "install",
-        "install_compute_stack",
-        done,
-        async () => {
-          const bundleHash = zipBuffer
-            ? createHash("sha256").update(zipBuffer).digest("base64")
-            : undefined;
-          const computeCtx: ComputeContext = {
-            stackPrefix: config.stackPrefix,
-            appId,
-            appRoleArn,
-            appExecRoleArn,
-            apiGatewayId: config.apiGatewayId,
-            apiGatewayExecutionArn: config.apiGatewayExecutionArn,
-            apiGatewayUrl: config.apiGatewayUrl,
-            authorizerId: config.authorizerId,
-            ...(config.sessionAuthorizerId
-              ? { sessionAuthorizerId: config.sessionAuthorizerId }
-              : {}),
-            region: config.region,
-            accountId: config.accountId,
-            pulumiStateBucket: config.pulumiStateBucket,
-            artifactsBucket: config.artifactsBucket,
-            dsqlHostname: config.dsqlHostname,
-            filesBucket: config.filesBucket,
-            infraCreds,
-            bundleHash,
-          };
-          receipt = await installComputeStack(manifest, computeCtx);
-        },
-        { alwaysRun: true },
-      );
-    }
+    // alwaysRun: Pulumi up is the reconcile that actually pushes new code and
+    // routes. Skipping it on a redeploy (because the first install recorded
+    // it "done") is why Redeploy never updated the app. Idempotent: a
+    // no-change up is a cheap no-op; a changed bundleHash/manifest updates the
+    // Lambda code and API Gateway routes.
+    await runStep(
+      registry,
+      appId,
+      "install",
+      "install_compute_stack",
+      done,
+      async () => {
+        const bundleHash = zipBuffer
+          ? createHash("sha256").update(zipBuffer).digest("base64")
+          : undefined;
+        const computeCtx: ComputeContext = {
+          stackPrefix: config.stackPrefix,
+          appId,
+          appRoleArn,
+          appExecRoleArn,
+          apiGatewayId: config.apiGatewayId,
+          apiGatewayExecutionArn: config.apiGatewayExecutionArn,
+          apiGatewayUrl: config.apiGatewayUrl,
+          authorizerId: config.authorizerId,
+          ...(config.sessionAuthorizerId
+            ? { sessionAuthorizerId: config.sessionAuthorizerId }
+            : {}),
+          region: config.region,
+          accountId: config.accountId,
+          pulumiStateBucket: config.pulumiStateBucket,
+          artifactsBucket: config.artifactsBucket,
+          dsqlHostname: config.dsqlHostname,
+          filesBucket: config.filesBucket,
+          infraCreds,
+          bundleHash,
+        };
+        receipt = await installComputeStack(manifest, computeCtx);
+      },
+      { alwaysRun: true },
+    );
 
     // alwaysRun: mirror the attach above — the policy is re-attached on every
     // run, so it must be torn down on every run too (never left dangling on
@@ -503,7 +551,6 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
   // alwaysRun: the read-modify-write leaves every other app's callback alone,
   // and a cloud data server reinstall keeps the list, so re-adding is cheap
   // and repairs a callback a console edit removed.
-  const mobileCallback = mobileCallbackTarget(manifest, config);
   if (mobileCallback) {
     await runStep(
       registry,
@@ -516,64 +563,19 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
     );
   }
 
-  await runStep(registry, appId, "install", "register_app", done, () =>
-    registry.registerApp(manifest, appId),
+  // alwaysRun: the row records which surfaces are installed, and an install
+  // that adds a surface to an installed app must record it.
+  await runStep(
+    registry,
+    appId,
+    "install",
+    "register_app",
+    done,
+    () => registry.registerApp(manifest, appId, surfaces),
+    { alwaysRun: true },
   );
 
   return { appRoleArn, receipt };
-}
-
-/**
- * Register an app's mobile build with no cloud compute (decision 6 in
- * `plan-mobile-app-scope-and-managed-login-2026-10-27.md`). A mobile app
- * syncs through the Drive channel under Drive's role, scoped to its manifest's
- * grants, so the cloud needs only the grants, the declared label keys, the
- * Android identity and the sign-in callback. Idempotent; a later full install
- * of the app adds compute on top of the same rows.
- */
-export async function registerMobileApp(input: MobileRegistrationInput): Promise<void> {
-  const { appId, manifest, config } = input;
-  assertCloudInstallableAppId(appId);
-  assertNotReservedAppId(appId);
-  const scheme = manifest.mobile?.android?.callbackScheme;
-  if (!scheme) throw new Error(`${appId}'s manifest declares no mobile build`);
-  const registry = createDsqlRegistry({
-    hostname: config.dsqlHostname,
-    region: config.region,
-    stackPrefix: config.stackPrefix,
-    credentials: input.registryCredentials,
-  });
-  try {
-    await registry.registerMobileApp(manifest, appId);
-  } finally {
-    await registry.close();
-  }
-  await setMobileAppCallback({ region: config.region, ...config.mobileSignIn }, scheme, true);
-}
-
-/**
- * Remove an app's mobile build: its identity and sign-in callback, and its
- * grants unless a full cloud install of the app still uses them. Every key
- * attested to the app stops registering at once; keys already registered stop
- * at the next request, because the broker re-reads the identity per request.
- */
-export async function unregisterMobileApp(input: MobileRegistrationInput): Promise<void> {
-  const { appId, manifest, config } = input;
-  const registry = createDsqlRegistry({
-    hostname: config.dsqlHostname,
-    region: config.region,
-    stackPrefix: config.stackPrefix,
-    credentials: input.registryCredentials,
-  });
-  try {
-    await registry.unregisterMobileApp(appId);
-  } finally {
-    await registry.close();
-  }
-  const scheme = manifest.mobile?.android?.callbackScheme;
-  if (scheme) {
-    await setMobileAppCallback({ region: config.region, ...config.mobileSignIn }, scheme, false);
-  }
 }
 
 export async function uninstallApp(input: UninstallInput): Promise<void> {
@@ -598,56 +600,13 @@ async function uninstallAppInner(input: UninstallInput, registry: Registry): Pro
 
   const managerCreds = await roleChain([config.managerRoleArn]);
   const appRoleArn = `arn:aws:iam::${config.accountId}:role/${config.stackPrefix}-app-${appId}-role`;
-  // What the app's Lambdas actually run as. The data role above is what the
-  // broker assumes into on their behalf — see createAppExecRole.
-  const appExecRoleArn = `arn:aws:iam::${config.accountId}:role/${appExecRoleName(config.stackPrefix, appId)}`;
 
-  if (ir.compute.enabled) {
-    await runStep(registry, appId, "uninstall", "attach_temp_uninstall_infra_policy", done, () =>
-      attachTempUninstallInfraPolicy(
-        config.stackPrefix,
-        appId,
-        config.accountId,
-        config.region,
-        managerCreds,
-      ),
-    );
-
-    const infraCreds: AwsCredentials = await roleChain([
-      config.managerRoleArn,
-      config.installInfraRoleArn,
-    ]);
-
-    await runStep(registry, appId, "uninstall", "uninstall_compute_stack", done, () => {
-      const computeCtx: ComputeContext = {
-        stackPrefix: config.stackPrefix,
-        appId,
-        appRoleArn,
-        appExecRoleArn,
-        apiGatewayId: config.apiGatewayId,
-        apiGatewayExecutionArn: config.apiGatewayExecutionArn,
-        apiGatewayUrl: config.apiGatewayUrl,
-        authorizerId: config.authorizerId,
-        ...(config.sessionAuthorizerId ? { sessionAuthorizerId: config.sessionAuthorizerId } : {}),
-        region: config.region,
-        accountId: config.accountId,
-        pulumiStateBucket: config.pulumiStateBucket,
-        artifactsBucket: config.artifactsBucket,
-        dsqlHostname: config.dsqlHostname,
-        filesBucket: config.filesBucket,
-        infraCreds,
-      };
-      return uninstallComputeStack(computeCtx);
-    });
-
-    await runStep(registry, appId, "uninstall", "delete_s3_artifacts", done, () =>
-      deleteAppArtifactsObjects(appId, config.artifactsBucket, config.region, infraCreds),
-    );
-
-    await runStep(registry, appId, "uninstall", "detach_temp_uninstall_infra_policy", done, () =>
-      detachTempUninstallInfraPolicy(config.stackPrefix, appId, managerCreds),
-    );
+  if (input.surfaces !== undefined) {
+    await removeSurfacesInner(input, input.surfaces, registry, done, managerCreds);
+    return;
   }
+
+  if (ir.compute.enabled) await removeComputeSteps(appId, config, registry, done, managerCreds);
 
   // Files-bucket cleanup runs under the app's role (its runtime policy +
   // permissions boundary scope it to apps/<appId>/*).
@@ -678,25 +637,16 @@ async function uninstallAppInner(input: UninstallInput, registry: Registry): Pro
   );
 
   const mobileCallback = config.mobileSignIn ? mobileCallbackTarget(manifest, config) : null;
-  const keepMobile = input.keepMobileRegistration === true && mobileCallback !== null;
-  if (mobileCallback && !keepMobile) {
+  if (mobileCallback) {
     await runStep(registry, appId, "uninstall", "remove_mobile_callback", done, () =>
       setMobileAppCallback(mobileCallback.pool, mobileCallback.scheme, false),
     );
   }
 
+  // Takes the Android identity with the row.
   await runStep(registry, appId, "uninstall", "delete_app_registry", done, () =>
     registry.deleteAppRegistryEntry(appId),
   );
-
-  // The uninstall DDL and the registry delete above removed the grants and
-  // the Android identity with the rest of the app. Kept mobile builds get
-  // both back as a compute-less registration; the callback was never removed.
-  if (keepMobile) {
-    await runStep(registry, appId, "uninstall", "keep_mobile_registration", done, () =>
-      registry.registerMobileApp(manifest, appId),
-    );
-  }
 
   await runStep(registry, appId, "uninstall", "delete_iam_role", done, () =>
     // The app role carries inline policies (runtime, broker-power); DeleteRole
@@ -723,6 +673,106 @@ async function uninstallAppInner(input: UninstallInput, registry: Registry): Pro
 }
 
 /**
+ * Remove `surfaces` and keep the data side: the role, the schema, the grants,
+ * the namespace, the files and the HMAC secret, which the other surface or the
+ * desktop's sync may still use. The web app takes its compute stack, bundle
+ * and exec role with it; the mobile app takes its callback and its Android
+ * identity, so the broker refuses its keys at once.
+ *
+ * Not checked against the manifest, so a surface whose declaration the
+ * manifest has since dropped can still be removed.
+ */
+async function removeSurfacesInner(
+  input: UninstallInput,
+  surfaces: readonly AppSurface[],
+  registry: Registry,
+  done: Set<string>,
+  managerCreds: AwsCredentials,
+): Promise<void> {
+  const { appId, manifest, config } = input;
+  if (surfaces.includes("web")) {
+    await removeComputeSteps(appId, config, registry, done, managerCreds);
+    await runStep(registry, appId, "uninstall", "delete_iam_exec_role", done, () =>
+      deleteAppExecRoleWithPolicies(config.stackPrefix, appId, managerCreds),
+    );
+  }
+  if (surfaces.includes("mobile")) {
+    const mobileCallback = config.mobileSignIn ? mobileCallbackTarget(manifest, config) : null;
+    if (mobileCallback) {
+      await runStep(registry, appId, "uninstall", "remove_mobile_callback", done, () =>
+        setMobileAppCallback(mobileCallback.pool, mobileCallback.scheme, false),
+      );
+    }
+  }
+  await runStep(registry, appId, "uninstall", "remove_surfaces", done, () =>
+    registry.removeSurfaces(appId, surfaces),
+  );
+  // Both ledgers now describe surfaces that are gone: the install ledger
+  // would skip re-creating the exec role, and the uninstall ledger would skip
+  // tearing down a compute stack installed again later.
+  await registry.clearSteps(appId);
+}
+
+/** Tear down the web app's compute stack and bundle, under install-infra. */
+async function removeComputeSteps(
+  appId: string,
+  config: InstallerConfig,
+  registry: Registry,
+  done: Set<string>,
+  managerCreds: AwsCredentials,
+): Promise<void> {
+  const appRoleArn = `arn:aws:iam::${config.accountId}:role/${config.stackPrefix}-app-${appId}-role`;
+  // What the app's Lambdas actually run as. The data role above is what the
+  // broker assumes into on their behalf — see createAppExecRole.
+  const appExecRoleArn = `arn:aws:iam::${config.accountId}:role/${appExecRoleName(config.stackPrefix, appId)}`;
+
+  await runStep(registry, appId, "uninstall", "attach_temp_uninstall_infra_policy", done, () =>
+    attachTempUninstallInfraPolicy(
+      config.stackPrefix,
+      appId,
+      config.accountId,
+      config.region,
+      managerCreds,
+    ),
+  );
+
+  const infraCreds: AwsCredentials = await roleChain([
+    config.managerRoleArn,
+    config.installInfraRoleArn,
+  ]);
+
+  await runStep(registry, appId, "uninstall", "uninstall_compute_stack", done, () => {
+    const computeCtx: ComputeContext = {
+      stackPrefix: config.stackPrefix,
+      appId,
+      appRoleArn,
+      appExecRoleArn,
+      apiGatewayId: config.apiGatewayId,
+      apiGatewayExecutionArn: config.apiGatewayExecutionArn,
+      apiGatewayUrl: config.apiGatewayUrl,
+      authorizerId: config.authorizerId,
+      ...(config.sessionAuthorizerId ? { sessionAuthorizerId: config.sessionAuthorizerId } : {}),
+      region: config.region,
+      accountId: config.accountId,
+      pulumiStateBucket: config.pulumiStateBucket,
+      artifactsBucket: config.artifactsBucket,
+      dsqlHostname: config.dsqlHostname,
+      filesBucket: config.filesBucket,
+      infraCreds,
+    };
+    return uninstallComputeStack(computeCtx);
+  });
+
+  await runStep(registry, appId, "uninstall", "delete_s3_artifacts", done, () =>
+    deleteAppArtifactsObjects(appId, config.artifactsBucket, config.region, infraCreds),
+  );
+
+  await runStep(registry, appId, "uninstall", "detach_temp_uninstall_infra_policy", done, () =>
+    detachTempUninstallInfraPolicy(config.stackPrefix, appId, managerCreds),
+  );
+}
+
+/**
  * Resolve the per-app HMAC secret to mirror to cloud SSM, sourced from the
  * local registry (`shared_app_registry.hmac_secret`).
  *
@@ -742,20 +792,22 @@ async function uninstallAppInner(input: UninstallInput, registry: Registry): Pro
  * hold one key. Built-in apps never go through admin-web's local-install route,
  * so this is also where their creds file first gets written.
  *
- * If the app has no local registry row the supervisor can't sign for it at all;
- * minting a secret for the cloud side would only recreate the drift, so we fail
- * loudly and direct the operator to install the app locally first.
+ * If the app has no local registry row the supervisor can't sign for it at all,
+ * and minting a secret for the cloud side would only recreate the drift. The
+ * result then says why, and an install that needs the secret fails with it,
+ * directing the operator to install the app locally first.
  */
-function resolveLocalHmacSecret(appId: string): string {
+function readLocalHmacSecret(appId: string): { secret: string } | { missing: string } {
   // The local-data-server stores its sqlite DB at `${STARKEEP_DIR}/data.db`
   // (server.ts). `dataDbPath()` resolves the same root, so we open the same file.
   const dbPath = dataDbPath();
   if (!existsSync(dbPath)) {
-    throw new Error(
-      `Cannot mirror the HMAC secret for "${appId}" to SSM: local data store ` +
+    return {
+      missing:
+        `Cannot mirror the HMAC secret for "${appId}" to SSM: local data store ` +
         `${dbPath} not found. Start the local-data-server and install "${appId}" ` +
         `locally before installing it in the cloud.`,
-    );
+    };
   }
 
   // The LDS holds this DB open; we only need a single SELECT. A busy timeout
@@ -775,16 +827,17 @@ function resolveLocalHmacSecret(appId: string): string {
     db.close();
   }
   if (!secret) {
-    throw new Error(
-      `Cannot mirror the HMAC secret for "${appId}" to SSM: no ` +
+    return {
+      missing:
+        `Cannot mirror the HMAC secret for "${appId}" to SSM: no ` +
         `shared_app_registry row for "${appId}". Install "${appId}" locally ` +
         `first so the secret the sync supervisor signs with is the one mirrored ` +
         `to the cloud.`,
-    );
+    };
   }
 
   reconcileLocalCredsFile(appId, secret);
-  return secret;
+  return { secret };
 }
 
 /**

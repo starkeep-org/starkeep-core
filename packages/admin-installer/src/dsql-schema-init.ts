@@ -275,8 +275,10 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
     // shared.app_mobile_identities — the Android build each installed app
     // ships, from its manifest's `mobile.android`. The broker reads it when a
     // mobile app registers an attested key, to learn which app the key speaks
-    // for, so every role may read it, as with access_grants. Written at the
-    // install's register step and removed with the registry row.
+    // for, so every role may read it, as with access_grants. Written when the
+    // mobile app is installed, in the same transaction as the registry's
+    // `mobile_app`, and removed with it; the broker admits an attested key
+    // only while the row exists.
     await db.schema
       .createTable("shared.app_mobile_identities")
       .ifNotExists()
@@ -463,6 +465,10 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
     // app_registry — one row per installed cloud app. Source of truth for
     // "which apps are currently installed in this cloud stack" so the UI
     // can surface install state without probing AWS resources.
+    //
+    // A row means the app's data side exists. `web_app` and `mobile_app` say
+    // which surfaces the operator installed on top; a row may have neither,
+    // as Drive does, whose registration serves the desktop's sync alone.
     await db.schema
       .createTable("shared.app_registry")
       .ifNotExists()
@@ -471,10 +477,49 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
       .addColumn("name", "text")
       .addColumn("installed_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
       .addColumn("updated_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .addColumn("web_app", "boolean", (c) => c.notNull().defaultTo(false))
+      .addColumn("mobile_app", "boolean", (c) => c.notNull().defaultTo(false))
       .execute();
     await sql
       .raw(`GRANT INSERT, UPDATE, DELETE, SELECT ON shared.app_registry TO "${installer}"`)
       .execute(db);
+    // The surface columns, for a registry that predates them. Nullable on an
+    // upgraded table (limitation 6), so each is filled once from what the
+    // install left behind: a completed compute stack is the web app, and an
+    // Android identity row is the mobile app.
+    for (const column of ["web_app", "mobile_app"]) {
+      await sql
+        .raw(`ALTER TABLE shared.app_registry ADD COLUMN IF NOT EXISTS ${column} boolean`)
+        .execute(db);
+    }
+    const registry = db as unknown as Kysely<Record<string, Record<string, unknown>>>;
+    await registry
+      .updateTable("shared.app_registry")
+      .set((eb) => ({
+        web_app: eb.exists(
+          eb
+            .selectFrom("shared.app_install_steps")
+            .select(sql`1`.as("one"))
+            .whereRef("shared.app_install_steps.app_id", "=", "shared.app_registry.app_id")
+            .where("shared.app_install_steps.operation", "=", "install")
+            .where("shared.app_install_steps.step", "=", "install_compute_stack")
+            .where("shared.app_install_steps.status", "=", "done"),
+        ),
+      }))
+      .where("web_app", "is", null)
+      .execute();
+    await registry
+      .updateTable("shared.app_registry")
+      .set((eb) => ({
+        mobile_app: eb.exists(
+          eb
+            .selectFrom("shared.app_mobile_identities")
+            .select(sql`1`.as("one"))
+            .whereRef("shared.app_mobile_identities.app_id", "=", "shared.app_registry.app_id"),
+        ),
+      }))
+      .where("mobile_app", "is", null)
+      .execute();
 
     // App-specific syncable namespace registry. Mirrors the local SQLite
     // app_syncable_namespaces table. One row per installed app that declared

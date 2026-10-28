@@ -21,8 +21,11 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
     region: string;
     reattach?: boolean;
     resumeFrom?: string;
-    /** Register only the app's mobile build: grants and identity, no compute. */
-    mobileOnly?: boolean;
+    /**
+     * The surfaces to install on top of the app's data side; omitted, every
+     * surface its manifest offers. See admin-installer's `AppSurface`.
+     */
+    surfaces?: string[];
   };
 
   if (!body.accessKeyId || !body.secretAccessKey || !body.sessionToken || !body.region) {
@@ -65,7 +68,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
       "cli:install-app",
       appId,
       "--non-interactive",
-      ...(body.mobileOnly === true ? ["--mobile-only"] : []),
+      ...(body.surfaces?.includes("web") ? ["--web"] : []),
+      ...(body.surfaces?.includes("mobile") ? ["--mobile"] : []),
     ],
     cwd: REPO_ROOT,
     env: spawnEnv,

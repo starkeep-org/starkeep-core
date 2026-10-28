@@ -25,7 +25,6 @@ type RegistryDb = Record<string, Record<string, unknown>>;
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import type { AppManifest } from "@starkeep/admin-manifest";
 import { installerPgUser } from "./dsql-schema-init";
-import { flattenFileAccess } from "./dsql-ddl";
 import { isRetryableDsqlConflict, isTransientConnectionError } from "./retry-on-access-denied";
 
 export type Operation = "install" | "uninstall";
@@ -42,12 +41,26 @@ export interface RegistryOptions {
   };
 }
 
+/**
+ * What an operator installs of an app in the cloud. Every install creates the
+ * app's data side (role, schema, grants, namespace), which the desktop's sync
+ * uses too; a surface adds its own parts on top.
+ *
+ * - `web`: the cloud web app, the exec role, the bundle and the compute stack.
+ * - `mobile`: the mobile app, its Android identity and its sign-in callback.
+ */
+export type AppSurface = "web" | "mobile";
+
 export interface InstalledApp {
   appId: string;
   version: string;
   name: string | null;
   installedAt: string;
   updatedAt: string;
+  /** Whether the cloud web app is installed. */
+  webApp: boolean;
+  /** Whether the mobile app is installed; the broker admits its keys only then. */
+  mobileApp: boolean;
 }
 
 export interface Registry {
@@ -59,24 +72,26 @@ export interface Registry {
     error?: string,
   ): Promise<void>;
   getCompletedSteps(appId: string, operation: Operation): Promise<Set<string>>;
-  registerApp(manifest: AppManifest, appId: string): Promise<void>;
+  /**
+   * Record the app as installed, with `surfaces` added to whatever it already
+   * had. Installing the mobile app writes its Android identity in the same
+   * transaction as `mobile_app`, so the two always agree: the broker reads the
+   * identity, and admin-web and the CLI read the column.
+   */
+  registerApp(manifest: AppManifest, appId: string, surfaces: readonly AppSurface[]): Promise<void>;
+  /**
+   * Clear `surfaces` from the app's row and remove their registry parts: the
+   * mobile app's Android identity. The row and the data side stay.
+   */
+  removeSurfaces(appId: string, surfaces: readonly AppSurface[]): Promise<void>;
+  /**
+   * Forget both step ledgers for the app, so the next install or uninstall
+   * runs every step. A surface removal calls it: the install ledger otherwise
+   * says the removed surface's one-shot steps are done.
+   */
+  clearSteps(appId: string): Promise<void>;
   deleteAppRegistryEntry(appId: string): Promise<void>;
   listInstalledApps(): Promise<InstalledApp[]>;
-  /**
-   * Register an app's mobile build with no cloud compute: its type grants, its
-   * declared label keys and its Android identity. A mobile app syncs through
-   * the Drive channel under Drive's role, scoped to these grants, so it needs
-   * nothing else in the cloud. A full cloud install of the same app writes the
-   * same rows and adds compute on top.
-   */
-  registerMobileApp(manifest: AppManifest, appId: string): Promise<void>;
-  /**
-   * Remove a mobile registration: the Android identity, and the grants and
-   * label keys too unless a full cloud install of the app still needs them.
-   */
-  unregisterMobileApp(appId: string): Promise<void>;
-  /** The apps with a mobile build registered, whether or not they have compute. */
-  listMobileApps(): Promise<string[]>;
   close(): Promise<void>;
 }
 
@@ -186,47 +201,92 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
       });
     },
 
-    async registerApp(manifest, appId) {
+    async registerApp(manifest, appId, surfaces) {
+      const web = surfaces.includes("web");
+      const android = manifest.mobile?.android;
+      const mobile = surfaces.includes("mobile");
+      if (mobile && !android) throw new Error(`${appId}'s manifest declares no mobile build`);
       await withRetry(async (k) => {
-        await k
-          .insertInto("shared.app_registry")
-          .values({
-            app_id: appId,
-            version: manifest.version,
-            name: manifest.name ?? null,
-          })
-          .onConflict((oc) =>
-            oc.column("app_id").doUpdateSet((eb) => ({
-              version: eb.ref("excluded.version"),
-              name: eb.ref("excluded.name"),
-              updated_at: sql`now()`,
-            })),
-          )
-          .execute();
-        // The app's Android build, which a mobile key attests against. A
-        // reinstall whose manifest drops the build drops the row, so no key
-        // can register for a build the app no longer ships.
-        const android = manifest.mobile?.android;
-        if (android) {
-          await k
-            .insertInto("shared.app_mobile_identities")
+        await k.transaction().execute(async (trx) => {
+          await trx
+            .insertInto("shared.app_registry")
             .values({
               app_id: appId,
-              android_package: android.package,
-              android_cert_digests: JSON.stringify(android.signingCertSha256),
-              callback_scheme: android.callbackScheme,
+              version: manifest.version,
+              name: manifest.name ?? null,
+              web_app: web,
+              mobile_app: mobile,
             })
             .onConflict((oc) =>
               oc.column("app_id").doUpdateSet((eb) => ({
-                android_package: eb.ref("excluded.android_package"),
-                android_cert_digests: eb.ref("excluded.android_cert_digests"),
-                callback_scheme: eb.ref("excluded.callback_scheme"),
+                version: eb.ref("excluded.version"),
+                name: eb.ref("excluded.name"),
+                updated_at: sql`now()`,
+                // Installing a surface never removes another one.
+                ...(web ? { web_app: true } : {}),
+                // A manifest that no longer ships a mobile build leaves no
+                // mobile app installed.
+                ...(mobile ? { mobile_app: true } : android ? {} : { mobile_app: false }),
               })),
             )
             .execute();
-        } else {
-          await k.deleteFrom("shared.app_mobile_identities").where("app_id", "=", appId).execute();
-        }
+          // The app's Android build, which a mobile key attests against. A
+          // reinstall whose manifest drops the build drops the row, so no key
+          // can register for a build the app no longer ships.
+          if (mobile && android) {
+            await trx
+              .insertInto("shared.app_mobile_identities")
+              .values({
+                app_id: appId,
+                android_package: android.package,
+                android_cert_digests: JSON.stringify(android.signingCertSha256),
+                callback_scheme: android.callbackScheme,
+              })
+              .onConflict((oc) =>
+                oc.column("app_id").doUpdateSet((eb) => ({
+                  android_package: eb.ref("excluded.android_package"),
+                  android_cert_digests: eb.ref("excluded.android_cert_digests"),
+                  callback_scheme: eb.ref("excluded.callback_scheme"),
+                })),
+              )
+              .execute();
+          } else if (!android) {
+            await trx
+              .deleteFrom("shared.app_mobile_identities")
+              .where("app_id", "=", appId)
+              .execute();
+          }
+        });
+      });
+    },
+
+    async removeSurfaces(appId, surfaces) {
+      const web = surfaces.includes("web");
+      const mobile = surfaces.includes("mobile");
+      await withRetry(async (k) => {
+        await k.transaction().execute(async (trx) => {
+          await trx
+            .updateTable("shared.app_registry")
+            .set({
+              ...(web ? { web_app: false } : {}),
+              ...(mobile ? { mobile_app: false } : {}),
+              updated_at: sql`now()`,
+            })
+            .where("app_id", "=", appId)
+            .execute();
+          if (mobile) {
+            await trx
+              .deleteFrom("shared.app_mobile_identities")
+              .where("app_id", "=", appId)
+              .execute();
+          }
+        });
+      });
+    },
+
+    async clearSteps(appId) {
+      await withRetry(async (k) => {
+        await k.deleteFrom("shared.app_install_steps").where("app_id", "=", appId).execute();
       });
     },
 
@@ -234,7 +294,15 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
       return await withRetry(async (k) => {
         const rows = (await k
           .selectFrom("shared.app_registry")
-          .select(["app_id", "version", "name", "installed_at", "updated_at"])
+          .select([
+            "app_id",
+            "version",
+            "name",
+            "installed_at",
+            "updated_at",
+            "web_app",
+            "mobile_app",
+          ])
           .orderBy("installed_at", "asc")
           .execute()) as unknown as Array<{
           app_id: string;
@@ -242,6 +310,8 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
           name: string | null;
           installed_at: Date | string;
           updated_at: Date | string;
+          web_app: boolean | null;
+          mobile_app: boolean | null;
         }>;
         return rows.map((r) => ({
           appId: r.app_id,
@@ -250,107 +320,9 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
           installedAt:
             r.installed_at instanceof Date ? r.installed_at.toISOString() : r.installed_at,
           updatedAt: r.updated_at instanceof Date ? r.updated_at.toISOString() : r.updated_at,
+          webApp: r.web_app === true,
+          mobileApp: r.mobile_app === true,
         }));
-      });
-    },
-
-    async registerMobileApp(manifest, appId) {
-      const android = manifest.mobile?.android;
-      if (!android) throw new Error(`${appId}'s manifest declares no mobile build`);
-      const grants = flattenFileAccess(manifest.infraRequirements.fileAccess);
-      const labelKeys = manifest.infraRequirements.labelKeys;
-      await withRetry(async (k) => {
-        // The same rows the install DDL writes, so a later full install, or
-        // a full uninstall that keeps the mobile build, finds them as they are.
-        for (const g of grants) {
-          await k
-            .insertInto("shared.access_grants")
-            .values({
-              app_id: appId,
-              type_id: g.type,
-              access: g.access,
-              metadata_write: g.metadataWrite,
-            })
-            .onConflict((oc) =>
-              oc.columns(["app_id", "type_id"]).doUpdateSet((eb) => ({
-                access: eb.ref("excluded.access"),
-                metadata_write: eb.ref("excluded.metadata_write"),
-              })),
-            )
-            .execute();
-        }
-        let staleGrants = k.deleteFrom("shared.access_grants").where("app_id", "=", appId);
-        if (grants.length > 0) {
-          staleGrants = staleGrants.where(
-            "type_id",
-            "not in",
-            grants.map((g) => g.type),
-          );
-        }
-        await staleGrants.execute();
-        for (const entry of labelKeys) {
-          await k
-            .insertInto("shared.app_label_keys")
-            .values({ app_id: appId, key: entry.key, description: entry.description })
-            .onConflict((oc) =>
-              oc.columns(["app_id", "key"]).doUpdateSet((eb) => ({
-                description: eb.ref("excluded.description"),
-              })),
-            )
-            .execute();
-        }
-        let staleKeys = k.deleteFrom("shared.app_label_keys").where("app_id", "=", appId);
-        if (labelKeys.length > 0) {
-          staleKeys = staleKeys.where(
-            "key",
-            "not in",
-            labelKeys.map((e) => e.key),
-          );
-        }
-        await staleKeys.execute();
-        await k
-          .insertInto("shared.app_mobile_identities")
-          .values({
-            app_id: appId,
-            android_package: android.package,
-            android_cert_digests: JSON.stringify(android.signingCertSha256),
-            callback_scheme: android.callbackScheme,
-          })
-          .onConflict((oc) =>
-            oc.column("app_id").doUpdateSet((eb) => ({
-              android_package: eb.ref("excluded.android_package"),
-              android_cert_digests: eb.ref("excluded.android_cert_digests"),
-              callback_scheme: eb.ref("excluded.callback_scheme"),
-            })),
-          )
-          .execute();
-      });
-    },
-
-    async unregisterMobileApp(appId) {
-      await withRetry(async (k) => {
-        await k.deleteFrom("shared.app_mobile_identities").where("app_id", "=", appId).execute();
-        const installed = await k
-          .selectFrom("shared.app_registry")
-          .select("app_id")
-          .where("app_id", "=", appId)
-          .executeTakeFirst();
-        // A full install's compute reads through the same grants, so they
-        // stay until that install is removed too.
-        if (installed) return;
-        await k.deleteFrom("shared.access_grants").where("app_id", "=", appId).execute();
-        await k.deleteFrom("shared.app_label_keys").where("app_id", "=", appId).execute();
-      });
-    },
-
-    async listMobileApps() {
-      return await withRetry(async (k) => {
-        const rows = await k
-          .selectFrom("shared.app_mobile_identities")
-          .select("app_id")
-          .orderBy("app_id", "asc")
-          .execute();
-        return rows.map((r) => r.app_id as string);
       });
     },
 

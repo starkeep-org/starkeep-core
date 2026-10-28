@@ -482,6 +482,9 @@ importers:
         specifier: ^8.0.0
         version: 8.20.0
     devDependencies:
+      '@electric-sql/pglite':
+        specifier: ^0.5.4
+        version: 0.5.4
       '@starkeep/aws-bootstrap':
         specifier: workspace:*
         version: link:../aws-bootstrap

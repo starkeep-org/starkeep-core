@@ -13,6 +13,13 @@
  * Usage:
  *   pnpm --filter @starkeep/admin-installer cli:uninstall-app <appId>
  *   pnpm --filter @starkeep/admin-installer cli:uninstall-app <appId> --non-interactive
+ *   pnpm --filter @starkeep/admin-installer cli:uninstall-app <appId> --web
+ *   pnpm --filter @starkeep/admin-installer cli:uninstall-app <appId> --mobile
+ *
+ * `--web` removes only the cloud web app (its compute), and `--mobile` only the
+ * mobile app (its Android identity and sign-in callback). Either keeps the
+ * app's data side, which the other surface and the desktop's sync may still
+ * use. With neither flag, the uninstall removes the app entirely.
  */
 
 // First import: load repo-root .env / .env.local so STARKEEP_DIR is populated.
@@ -21,7 +28,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { appManifestSchema } from "@starkeep/admin-manifest";
-import { uninstallApp, unregisterMobileApp } from "../src/orchestrator";
+import { uninstallApp, type AppSurface } from "../src/orchestrator";
 import { exitOnInstallFailure } from "../src/cli-exit";
 import {
   regionFromUserPoolId,
@@ -38,16 +45,15 @@ import {
 
 const flags = process.argv.slice(2);
 const nonInteractive = flags.includes("--non-interactive");
-// Remove only the mobile registration, leaving any cloud compute in place.
-const mobileOnly = flags.includes("--mobile-only");
-// Remove the cloud app but keep its mobile build registered.
-const keepMobile = flags.includes("--keep-mobile");
+// The surfaces to remove; none named removes the app entirely.
+const surfaces: AppSurface[] = [
+  ...(flags.includes("--web") ? (["web"] as const) : []),
+  ...(flags.includes("--mobile") ? (["mobile"] as const) : []),
+];
 const appId = flags.find((f) => !f.startsWith("--"));
 
 if (!appId) {
-  console.error(
-    "Usage: cli:uninstall-app <appId> [--non-interactive] [--mobile-only | --keep-mobile]",
-  );
+  console.error("Usage: cli:uninstall-app <appId> [--non-interactive] [--web] [--mobile]");
   process.exit(1);
 }
 
@@ -148,34 +154,11 @@ const registryCredentials = {
   sessionToken: process.env.AWS_SESSION_TOKEN!,
 };
 
-if (mobileOnly) {
-  if (!config.mobileAppsUserPoolClientId) {
-    console.error(`Error: ${starkeepConfigPath()} has no mobileAppsUserPoolClientId.`);
-    process.exit(1);
-  }
-  await unregisterMobileApp({
-    appId,
-    manifest,
-    config: {
-      stackPrefix,
-      region,
-      dsqlHostname: config.auroraEndpoint,
-      mobileSignIn: {
-        userPoolId: config.userPoolId,
-        mobileAppsClientId: config.mobileAppsUserPoolClientId,
-      },
-    },
-    registryCredentials,
-  }).catch(exitOnInstallFailure);
-  console.log(`\n${appId}'s mobile build is no longer registered.`);
-  process.exit(0);
-}
-
 await uninstallApp({
   appId,
   manifest,
   registryCredentials,
-  keepMobileRegistration: keepMobile,
+  ...(surfaces.length > 0 ? { surfaces } : {}),
   config: {
     stackPrefix,
     region,
@@ -205,4 +188,8 @@ await uninstallApp({
   },
 }).catch(exitOnInstallFailure);
 
-console.log(`\n${appId} cloud uninstall complete.`);
+console.log(
+  surfaces.length > 0
+    ? `\n${appId}'s ${surfaces.join(" and ")} app removed; its data stays installed.`
+    : `\n${appId} cloud uninstall complete.`,
+);

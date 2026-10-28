@@ -18,7 +18,8 @@
     "debug:dsql-as-app": "tsx scripts/debug-dsql-as-app.ts",
     "debug:dsql-capabilities": "tsx scripts/debug-dsql-capabilities.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --project unit",
+    "test:integration": "vitest run --project integration"
   },
   "dependencies": {
     "@aws-sdk/client-cloudwatch-logs": "^3.0.0",
@@ -43,6 +44,7 @@
     "pg": "^8.0.0"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.4",
     "@starkeep/aws-bootstrap": "workspace:*",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.0.0",

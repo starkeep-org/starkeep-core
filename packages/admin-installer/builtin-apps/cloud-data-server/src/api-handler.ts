@@ -539,6 +539,36 @@ export function deviceWriteRefusal(method: string, subPath: string, body: Buffer
 }
 
 /**
+ * Why a mobile app's exchange on its own app's channel is refused, or null.
+ *
+ * That channel carries the app's private rows and no shared records. The
+ * per-app transport would drop pushed records and labels unread, so a push
+ * carrying any is refused whole rather than dropped: shared data reaches the
+ * cloud through the Drive channel's scoped checks (`mobilePushRefusal`) or
+ * not at all. Checked in the gate from the raw body, like
+ * {@link deviceWriteRefusal}; a body that does not parse is left to the route.
+ */
+export function appChannelPushRefusal(
+  method: string,
+  subPath: string,
+  body: Buffer,
+): string | null {
+  if (method !== "POST" || subPath !== "/sync/exchange") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.toString("utf8") || "{}");
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const { records, labels } = parsed as { records?: unknown; labels?: unknown };
+  const carries = (list: unknown) => Array.isArray(list) && list.length > 0;
+  return carries(records) || carries(labels)
+    ? "A mobile app pushes shared records and labels on the Drive channel only"
+    : null;
+}
+
+/**
  * Why an exchange is refused for naming another user's objects, or null.
  *
  * A pushed record or file-index row names its blob by key, and the key
@@ -951,7 +981,13 @@ async function loadMobileIdentities(accountId: string, userId: string): Promise<
   }
 }
 
-/** Whether `appId` still has its Android build registered. */
+/**
+ * Whether `appId`'s mobile app is installed. The registry writes and deletes
+ * the identity row in the same transaction as `shared.app_registry.mobile_app`,
+ * so the row exists exactly while the column is true. The broker reads the
+ * row because every role may read it, and only the installer may read the
+ * registry.
+ */
 async function mobileAppRegistered(client: DatabaseClient, appId: string): Promise<boolean> {
   const q = postgresCompiler
     .selectFrom("shared.app_mobile_identities")
@@ -962,8 +998,9 @@ async function mobileAppRegistered(client: DatabaseClient, appId: string): Promi
 }
 
 /**
- * Why a mobile app's exchange push is refused, or null. The push is refused
- * whole: dropping rows from it would leave the phone believing they landed.
+ * Why a mobile app's exchange push on the Drive channel is refused, or null.
+ * The push is refused whole: dropping rows from it would leave the phone
+ * believing they landed.
  *
  * Every pushed record must be of a type the app may write, and its file must
  * sit in that type's category. A record id that already names a row of a type
@@ -999,7 +1036,7 @@ async function mobilePushRefusal(
     }
   }
   if ((body.appSyncableRows?.length ?? 0) > 0) {
-    return "A mobile app pushes no app-private rows on the Drive channel";
+    return "A mobile app pushes its app-private rows on its own channel only";
   }
   const pushedTypes = new Map(records.map((r) => [r.id, r.type]));
   const labels = body.labels ?? [];
@@ -2750,12 +2787,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // A mobile app. The token says who; the attested key says which app,
       // and the app's manifest grants then bound what the request may do.
       //
-      // Drive's channel only: the phone syncs shared records through it, as
-      // a desktop does, but scoped to the app's types. No mobile app has a
-      // private channel yet.
-      if (appId !== DRIVE_APP_ID) {
-        return clientErr("A mobile app syncs through the Drive channel only", 403);
-      }
+      // Two channels: Drive's, where the phone syncs shared records as a
+      // desktop does but scoped to the app's types, and the attested app's
+      // own, where it syncs that app's private rows under the app's role.
+      // Every other app's channel is refused once the key names its app.
       const pool = mobilePoolConfig();
       if (!pool) return clientErr("Mobile sign-in is not set up on this cloud", 401);
       const claims = userTokenHeader ? await verifyUserToken(userTokenHeader, pool) : null;
@@ -2766,6 +2801,12 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       });
       if (!record || record.userId !== claims.sub) {
         return clientErr("Unknown key for this user", 401);
+      }
+      if (appId !== DRIVE_APP_ID && appId !== record.appId) {
+        return clientErr(
+          `A mobile app syncs through the Drive channel and ${record.appId}'s own only`,
+          403,
+        );
       }
       const tsMs = Number(normalizedHeaders["x-starkeep-app-ts"]);
       if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > APP_SIG_MAX_SKEW_MS) {
@@ -2790,6 +2831,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       }
       const writeRefusal = deviceWriteRefusal(method, subPath, bodyBytes);
       if (writeRefusal) return clientErr(writeRefusal, 403);
+      if (appId !== DRIVE_APP_ID) {
+        const appChannelRefusal = appChannelPushRefusal(method, subPath, bodyBytes);
+        if (appChannelRefusal) return clientErr(appChannelRefusal, 403);
+      }
       if (!groupsMayUseData(claims.groups)) {
         return clientErr("This account has no data library on this cloud", 403);
       }
@@ -2981,10 +3026,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // whose fake client keeps answering after `end()`.
     const grantClient = await clientFactory.createClient({ hostname: auroraEndpoint, region });
     toClose.push(() => grantClient.end());
-    // A mobile app acts on Drive's channel with its own app's grants, never
-    // Drive's: every route below checks types and categories against these,
-    // so the app reaches only what its manifest declared. Its build must
-    // still be registered; unregistering stops its keys at once.
+    // A mobile app acts with its own app's grants, never Drive's: every route
+    // below checks types and categories against these, so the app reaches
+    // only what its manifest declared. Its mobile app must still be
+    // installed; removing it stops its keys at once, on either channel.
     if (mobileKey && !(await mobileAppRegistered(grantClient, mobileKey.appId))) {
       return clientErr(`${mobileKey.appId}'s mobile app is no longer registered`, 403);
     }
@@ -5171,12 +5216,14 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       const keyRefusal = exchangeKeyRefusal(body, subject.userId);
       if (keyRefusal) return clientErr(keyRefusal, 403);
 
-      // A mobile app's exchange sees only its app's readable types: the rows
-      // it is sent, the watermarks and the digest are all computed over the
-      // same narrowed library, so the phone and the cloud agree. Its pushes
-      // are checked first and refused whole.
+      // A mobile app's exchange on Drive's channel sees only its app's
+      // readable types: the rows it is sent, the watermarks and the digest
+      // are all computed over the same narrowed library, so the phone and the
+      // cloud agree. Its pushes are checked first and refused whole.
+      // On the app's own channel, the gate has already refused any push
+      // carrying shared rows (`appChannelPushRefusal`).
       let exchangeDb: DatabaseAdapter = db;
-      if (mobileKey) {
+      if (mobileKey && appId === DRIVE_APP_ID) {
         const refusal = await mobilePushRefusal(
           body,
           {
