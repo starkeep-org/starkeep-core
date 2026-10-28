@@ -746,8 +746,9 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
 
     // ---------------------------------------------------------------------
     // Outbound: gather SR records and AR/AW rows the peer hasn't seen, then
-    // walk per nodeId in HLC order with a contiguous-prefix rule. Blobs
-    // (SR or AR) are pushed before their owning item is allowed to ship.
+    // walk per nodeId in HLC order with a contiguous-prefix rule. Rows ship
+    // without waiting for their files: the uploader sends files beside the
+    // round, against the peer's bytes watermark.
     // ---------------------------------------------------------------------
     //
     // Every scan below is a **delta scan**: the per-nodeId watermark filter
@@ -918,10 +919,9 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     // Attach each shipping record's metadata row, read once for the whole
     // shipment rather than per record.
     //
-    // Read here, after the cut and after the transfers, rather than at scan
-    // time: only the records that actually ship need a row, and a round whose
-    // uploads failed part-way would otherwise have paid for metadata it is
-    // not sending. A read failure is not allowed to fail the round — the
+    // Read here, after the cut, rather than at scan time: only the records that
+    // actually ship need a row, and reading at scan time would pay for metadata
+    // of records the round's budget cut off. A read failure is not allowed to fail the round — the
     // record row is the thing that must move, and metadata that missed this
     // round rides the next one.
     let outboundItems: SyncRecordItem[] = outboundRecords;
@@ -951,10 +951,9 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
 
     // Authors the responder stopped applying part-way through. Our shipment
     // for them left this node fine and was then discarded, so it is a failure
-    // this side has no other way to see: the scans both report drained, every
-    // upload succeeded, and the round nonetheless landed nothing. Treated
-    // exactly like a failed upload from here on — it is the same event with
-    // the failure at the other end of the wire.
+    // this side has no other way to see: the scans both report drained and the
+    // round nonetheless landed nothing. Treated as a blocked shipment from here
+    // on: the floors hold, and the round reports `blocked`.
     const haltedByPeer = new Set(response.haltedAuthors ?? []);
     if (haltedByPeer.size > 0) {
       console.warn(
@@ -1038,13 +1037,14 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           // failure inside it takes the record out of the round rather than
           // the round out of the exchange.
           //
-          // This is what `inboundBrokeFor` says it collects — "a blob that
-          // would not download, a row that would not apply" — and until now
-          // only the blob half was true. An unguarded throw here escapes
-          // `exchange()`, so no watermark advances, no other author's items
-          // are processed, the peer re-ships the same row next round and the
-          // failure repeats until someone reads a log: one row stops all sync
-          // for the app, in both directions, permanently.
+          // This is what `inboundBrokeFor` collects: a row that would not
+          // apply. A file that would not download is not in it, because files
+          // download after every row has applied, against the bytes
+          // watermark. An unguarded throw here escapes `exchange()`, so no
+          // watermark advances, no other author's items are processed, the
+          // peer re-ships the same row next round and the failure repeats
+          // until someone reads a log: one row stops all sync for the app, in
+          // both directions, permanently.
           //
           // No cause is enumerated deliberately. The known one — two nodes
           // minting different ids for one file — is gone, and the point of
@@ -1360,7 +1360,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // answer, and the repair never gets past its first roundful.
       //
       // So the floor climbs to wherever this round's contiguous run reached.
-      // `ownSafeAdvance` already stops at the first item that did not land,
+      // `ownSafeAdvance` already stops at the first row that did not apply,
       // which is exactly where the next request should resume.
       const inbound = await loadInboundFloors();
       if (Object.keys(inbound).length > 0) {
@@ -1396,16 +1396,18 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       elided: elidedCount,
       progressed,
       // Something this round *selected* could not be moved — a row that
-      // would not apply, a file that would not transfer although the other
-      // end had it or this node held it — so work is stuck in one direction
-      // or the other. A file still on its way up from another node is not a
-      // failure and does not count.
+      // would not apply, a file that would not download although the peer
+      // held it — so work is stuck in one direction or the other. A file
+      // still on its way up from another node is not a failure and does not
+      // count. Uploads do not count either: they run in the uploader, beside
+      // the round.
       //
-      // Kept separate from `outboundHasMore`, which describes only the scan
-      // and is therefore false in exactly this case: the scan fit the budget,
-      // the shipment did not survive. Without this the loop below reads a
-      // permanently failing upload as "both directions drained" and reports
-      // the sync complete with the record still not in the cloud.
+      // Kept separate from the `hasMore` fields, which describe only the scans
+      // and are therefore false in exactly this case: the scans fit the
+      // budget, and what they selected did not all move. Without this the
+      // loop below reads a permanently failing download as "both directions
+      // drained" and reports the sync complete with the file still missing
+      // here.
       //
       // The third term is the peer's half of the same observation. A round
       // whose rows the responder threw away drains both scans and fails no
@@ -1632,14 +1634,15 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
         // side, no file work another round could do, *and* nothing this round
         // selected was left behind.
         //
-        // `blocked` is the third term and it is not redundant. `hasMore` and
-        // `outboundHasMore` describe scans; a round whose scan fit the budget
-        // and whose upload then failed reports both false while shipping
-        // nothing, and without the third term takes this exit — returning
-        // `complete: true, stalled: false` for a record that is not in the
-        // cloud and never will be. That is the value `/sync/now` hands back and
-        // the one the phone's "Sync now" button reads, so it is the difference
-        // between a silent success and "something could not transfer".
+        // `blocked` is the last term and it is not redundant. `hasMore` and
+        // `outboundHasMore` describe scans; a round whose scans fit the budget
+        // and whose download then failed reports both false, and without the
+        // last term takes this exit — returning `complete: true, stalled:
+        // false` for a file this node does not hold. The same goes for a
+        // shipment the peer discarded part-way. That is the value `/sync/now`
+        // hands back and the one the phone's "Sync now" button reads, so it is
+        // the difference between a silent success and "something could not
+        // transfer".
         if (!result.hasMore && !result.outboundHasMore && !result.bytesHasMore && !result.blocked) {
           totals.complete = true;
           break;
@@ -1647,13 +1650,12 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
 
         // Stop when a round achieves nothing.
         //
-        // `hasMore` and `outboundHasMore` are *predictions* — "there is more
-        // owed" — and neither is monotone under failure. A blob that will never
-        // upload is swallowed into a `false` return (deliberately: the
-        // contiguous-prefix rule needs it swallowed, so it is not an error at
-        // this layer and "break on error" never fires), leaving a round that
-        // scans a backlog, ships nothing, and reports more owed — identically,
-        // forever. Before the loop existed the poll interval bounded that to
+        // The scan signals are *predictions* — "there is more owed" — and none
+        // is monotone under failure. A file that will never download is
+        // swallowed into a `false` return (deliberately: it must hold only the
+        // bytes watermark while its row applies, so it is not an error at this
+        // layer and "break on error" never fires), leaving a round that retries
+        // it, lands nothing, and reports it still owed — identically, forever. Before the loop existed the poll interval bounded that to
         // one retry per tick; the loop removed the bound without replacing it.
         //
         // So terminate on an *observation* instead: a round that applied

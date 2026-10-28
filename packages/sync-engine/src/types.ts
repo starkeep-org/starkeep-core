@@ -633,10 +633,11 @@ export interface SyncStateStore {
    * scan take `min(peerWatermarks, repairFloors)` and re-ship a range with no
    * second code path and no branch through the scan itself.
    *
-   * Cleared per author once a **pushing** round has drained the outbound side
-   * without that author's shipment being cut short by a failed transfer. Not on
-   * the peer's coverage watermark, which sits *above* the floor by construction
-   * and so reads "already covered" from the first round.
+   * Cleared per author once a **pushing** round has drained the outbound side,
+   * the peer has not halted that author's shipment part-way, and the peer's
+   * bytes watermark has reached the floor, so the peer holds the files too. Not
+   * on the peer's coverage watermark, which sits *above* the floor by
+   * construction and so reads "already covered" from the first round.
    */
   getRepairFloors(): Promise<Watermarks>;
   setRepairFloors(floors: Watermarks): Promise<void>;
@@ -732,15 +733,24 @@ export interface ExchangeResult {
    */
   readonly outboundHasMore: boolean;
   /**
-   * An author's run was cut short by something that would not move — a blob
-   * that failed to download, or a row that would not apply.
+   * Something this round selected could not be moved: a row that would not
+   * apply, a file that would not download, a shipment the peer discarded
+   * part-way (`haltedAuthors`), an author this node has stopped pushing, or a
+   * push withheld from a peer that reports no bytes watermark.
+   *
+   * **A failed download does not hold back rows.** A round applies every row
+   * it receives before it downloads any file, and a file that fails holds only
+   * the bytes watermark, so its row and every later row still apply. A caller
+   * that needs the rows alone reads {@link hasMore}: false means the responder
+   * sent every row it had. Only a row that would not apply leaves one out, and
+   * this flag cannot tell that case from a failed download.
    *
    * Distinct from both `hasMore` fields, which describe **scans**. A round can
-   * scan a backlog that fits the budget, select it, fail every transfer, and
-   * report `hasMore: false, outboundHasMore: false` while shipping nothing —
-   * the two predictions are about what is owed, and this is an observation
-   * about what happened. `sync()` needs all three: a drained scan with a
-   * blocked shipment is not a completed sync.
+   * scan a backlog that fits the budget, select it, fail to move part of it,
+   * and report `hasMore: false, outboundHasMore: false` — the two predictions
+   * are about what is owed, and this is an observation about what happened.
+   * `sync()` needs all three: a drained scan with a blocked round is not a
+   * completed sync.
    */
   readonly blocked: boolean;
   /**
@@ -778,9 +788,10 @@ export interface ExchangeResult {
   /**
    * Highest position actually **shipped** per author this round.
    *
-   * Read from what left this node rather than from what the scan selected, so a
-   * shipment cut short by a failed transfer is not credited with the part that
-   * never went. `sync()` compares it against the peer's coverage to notice a
+   * Read from what left this node rather than from what the scan selected, so
+   * the part of a scan the round's budget cut off, or an author this node has
+   * stopped pushing, is not credited as shipped. Rows ship without waiting for
+   * their files, so a failed upload does not cut a shipment short. `sync()` compares it against the peer's coverage to notice a
    * range being re-shipped forever; see `RESHIP_STRIKES_BEFORE_REFUSAL`.
    */
   readonly shippedHighWater?: Readonly<Record<string, HLCTimestamp>>;
@@ -1056,24 +1067,30 @@ export interface SyncResult {
   elided: number;
   /**
    * True when the loop ended because both directions were drained **and
-   * nothing was left behind** — no scan had more to give and no transfer or
-   * apply failed. False when it ended on `maxRounds`, an abort, a stall, or a
-   * round that could not move what it had selected. False is not an error — it
-   * means work remains, and the next call picks it up.
+   * nothing was left behind** — no scan had more to give, no download is still
+   * owed, and no download or apply failed. False when it ended on `maxRounds`,
+   * an abort, a stall, or a round that could not move what it had selected.
+   * False is not an error — it means work remains, and the next call picks it
+   * up.
    *
-   * The "nothing was left behind" half is load-bearing and used not to be: a
-   * permanently failing upload drains both scans, so on the scan signals alone
-   * this reported a finished sync for a record that was not in the cloud.
+   * It covers files as well as rows, so it is the wrong signal for a caller
+   * that needs only the rows: those have all arrived once a round reports
+   * `hasMore: false`, often long before the files finish. Uploads do not count
+   * at all. They run in {@link SyncEngine.uploader}, beside the loop.
+   *
+   * The "nothing was left behind" half is load-bearing: a round whose download
+   * failed, or whose shipment the peer discarded, drains both scans, so on the
+   * scan signals alone this reported a finished sync while work was stuck.
    */
   complete: boolean;
   /**
    * The loop stopped because a round achieved nothing while still reporting
    * work outstanding — applied nothing, shipped nothing, declined nothing.
    *
-   * Almost always a transfer that will not succeed: blob failures are swallowed
-   * into a contiguous-prefix truncation by design, so they never surface as an
-   * error, and without this the loop would reissue a byte-identical request
-   * until `maxRounds`. Worth surfacing rather than hiding — it is the
+   * Almost always a download that will not succeed. A failed download is not an
+   * error at this layer by design: it holds only the bytes watermark and is
+   * retried the next round, while its row has already applied. Without this the
+   * loop would reissue a byte-identical request until `maxRounds`. Worth surfacing rather than hiding — it is the
    * difference between "sync finished" and "sync is stuck".
    */
   stalled: boolean;
