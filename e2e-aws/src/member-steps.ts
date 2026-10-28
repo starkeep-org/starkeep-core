@@ -65,10 +65,7 @@ export interface MemberStepsContext {
   /** The admin's record from the journey's sync step. */
   readonly adminRecordId: () => string;
   /** A cloud app's compute acting for the person whose ID token this is. */
-  readonly cloudAppAs: (
-    local: AppCredentials,
-    idToken: () => string | Promise<string>,
-  ) => LdsApp;
+  readonly cloudAppAs: (local: AppCredentials, idToken: () => string | Promise<string>) => LdsApp;
   /** The admin's ID token from the cloud-apps client, as cloud Photos would hold it. */
   readonly adminAppToken: () => Promise<string>;
 }
