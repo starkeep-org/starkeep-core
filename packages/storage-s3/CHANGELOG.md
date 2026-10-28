@@ -1,5 +1,11 @@
 # @starkeep/storage-s3
 
+## 0.5.2
+
+### Patch Changes
+
+- @starkeep/storage-adapter@0.7.1
+
 ## 0.5.1
 
 ### Patch Changes

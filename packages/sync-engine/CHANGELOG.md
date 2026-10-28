@@ -1,5 +1,14 @@
 # @starkeep/sync-engine
 
+## 0.9.1
+
+### Patch Changes
+
+- 18b7a5f: The in-process transport takes `fileRecords`, the adapter that holds the library's file rows when it differs from the channel's own. The bytes walk then starts from the whole library's rows watermark and clamps to the channel's, as the cloud does for a type-scoped mobile exchange.
+- Updated dependencies [18b7a5f]
+  - @starkeep/protocol-primitives@0.7.0
+  - @starkeep/storage-adapter@0.7.1
+
 ## 0.9.0
 
 ### Minor Changes

@@ -1,5 +1,20 @@
 # @starkeep/storage-aurora-dsql
 
+## 0.5.0
+
+### Minor Changes
+
+- 18b7a5f: `RecordTypeScopePlugin` narrows every records and labels read on a Kysely instance to a set of record types, so a mobile app's exchange sees only the types its manifest grants. Scans, watermarks and digests all compile through it and agree. `typeScopedCompiler` exposes the same narrowing to the adapter's raw queries.
+
+### Patch Changes
+
+- Updated dependencies [18b7a5f]
+- Updated dependencies [18b7a5f]
+  - @starkeep/protocol-primitives@0.7.0
+  - @starkeep/sync-engine@0.9.1
+  - @starkeep/shared-space-api@0.6.2
+  - @starkeep/storage-adapter@0.7.1
+
 ## 0.4.3
 
 ### Patch Changes

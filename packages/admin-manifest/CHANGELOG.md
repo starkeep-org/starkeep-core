@@ -1,5 +1,16 @@
 # @starkeep/admin-manifest
 
+## 0.7.0
+
+### Minor Changes
+
+- 18b7a5f: A manifest can declare its mobile builds. `mobile.android` names the package, its signing-certificate SHA-256 digests and the sign-in callback scheme, and validation checks each. `mobileSchema`, `androidIdentitySchema`, `MobileBuilds` and `AndroidIdentity` are exported.
+
+### Patch Changes
+
+- Updated dependencies [18b7a5f]
+  - @starkeep/protocol-primitives@0.7.0
+
 ## 0.6.1
 
 ### Patch Changes
