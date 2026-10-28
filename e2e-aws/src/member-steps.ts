@@ -65,7 +65,12 @@ export interface MemberStepsContext {
   /** The admin's record from the journey's sync step. */
   readonly adminRecordId: () => string;
   /** A cloud app's compute acting for the person whose ID token this is. */
-  readonly cloudAppAs: (local: AppCredentials, idToken: () => string) => LdsApp;
+  readonly cloudAppAs: (
+    local: AppCredentials,
+    idToken: () => string | Promise<string>,
+  ) => LdsApp;
+  /** The admin's ID token from the cloud-apps client, as cloud Photos would hold it. */
+  readonly adminAppToken: () => Promise<string>;
 }
 
 /** The slice of admin-web's Users routes these steps drive. */
@@ -320,7 +325,7 @@ export function defineMemberSteps(m: MemberStepsContext): void {
     );
 
     // The admin's view of the same cloud holds none of it.
-    const asAdmin = m.cloudAppAs(m.adminDrive(), () => m.session().idToken);
+    const asAdmin = m.cloudAppAs(m.adminDrive(), m.adminAppToken);
     expect((await asAdmin.fetch(`/data/records/${memberRecordId}`)).status).toBe(404);
     const adminList = (await (await asAdmin.fetch("/data/records")).json()) as {
       records: Array<{ id: string }>;

@@ -115,4 +115,9 @@ export async function signInWithBrowser(options: BrowserSignInOptions): Promise<
       { cause: err },
     );
   }
+  // The control paints before the page's scripts run, so an input set now can
+  // fire its change event at no listener. On a cold CloudFront cache the probe's
+  // script arrives seconds late and the upload is lost with no request and no
+  // error. `load` waits for every script the document names.
+  await page.waitForLoadState("load");
 }
