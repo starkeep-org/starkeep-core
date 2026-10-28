@@ -76,13 +76,17 @@ export class NoAttestedKeyError extends Error {
   }
 }
 
-async function bodyBytes(input: RequestInfo | URL, init: RequestInit | undefined): Promise<Uint8Array> {
+async function bodyBytes(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+): Promise<Uint8Array> {
   const body = init?.body ?? (input instanceof Request ? await input.clone().arrayBuffer() : null);
   if (body === null || body === undefined) return new Uint8Array(0);
   if (typeof body === "string") return new TextEncoder().encode(body);
   if (body instanceof Uint8Array) return body;
   if (body instanceof ArrayBuffer) return new Uint8Array(body);
-  if (ArrayBuffer.isView(body)) return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+  if (ArrayBuffer.isView(body))
+    return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
   // A stream or form body cannot be signed without consuming it. The data
   // plane sends neither; refusing beats signing something other than what goes.
   throw new Error("A mobile request body must be a string or bytes to be signed");
@@ -110,7 +114,9 @@ export function withMobileKeySignature(
     if (!url.startsWith(`${base}/`)) return fetchImpl(input, init);
     const keyId = await signer.keyId();
     if (!keyId) throw new NoAttestedKeyError();
-    const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+    const method = (
+      init?.method ?? (input instanceof Request ? input.method : "GET")
+    ).toUpperCase();
     // By slicing rather than `new URL(...).pathname`, which React Native's
     // URL does not implement on every version the phone runs.
     const subPath = url.slice(base.length).split(/[?#]/, 1)[0] || "/";

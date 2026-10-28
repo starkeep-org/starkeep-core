@@ -56,7 +56,11 @@ describe("withMobileKeySignature", () => {
 
   it("signs a data-plane request with the path below the channel", async () => {
     const { calls, fetchImpl } = recordingFetch();
-    await withMobileKeySignature(fetchImpl, CHANNEL, signer)(`${CHANNEL}/sync/exchange?x=1`, {
+    await withMobileKeySignature(
+      fetchImpl,
+      CHANNEL,
+      signer,
+    )(`${CHANNEL}/sync/exchange?x=1`, {
       method: "POST",
       body: "{}",
     });
@@ -68,7 +72,11 @@ describe("withMobileKeySignature", () => {
 
   it("keeps the caller's own headers", async () => {
     const { calls, fetchImpl } = recordingFetch();
-    await withMobileKeySignature(fetchImpl, CHANNEL, signer)(`${CHANNEL}/health`, {
+    await withMobileKeySignature(
+      fetchImpl,
+      CHANNEL,
+      signer,
+    )(`${CHANNEL}/health`, {
       headers: { "X-Starkeep-User-Token": "t" },
     });
     expect(calls[0]!.headers.get("X-Starkeep-User-Token")).toBe("t");
@@ -85,9 +93,12 @@ describe("withMobileKeySignature", () => {
 
   it("refuses to send a data-plane request with no registered key", async () => {
     const { fetchImpl } = recordingFetch();
-    const wrapped = withMobileKeySignature(fetchImpl, CHANNEL, { ...signer, keyId: async () => null });
-    await expect(wrapped(`${CHANNEL}/sync/exchange`, { method: "POST", body: "{}" })).rejects.toThrow(
-      NoAttestedKeyError,
-    );
+    const wrapped = withMobileKeySignature(fetchImpl, CHANNEL, {
+      ...signer,
+      keyId: async () => null,
+    });
+    await expect(
+      wrapped(`${CHANNEL}/sync/exchange`, { method: "POST", body: "{}" }),
+    ).rejects.toThrow(NoAttestedKeyError);
   });
 });

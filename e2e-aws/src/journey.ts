@@ -154,10 +154,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
   }
 
   /** {@link cloudApp}, acting for the person whose ID token `idToken` reads. */
-  function cloudAppAs(
-    local: AppCredentials,
-    idToken: () => string | Promise<string>,
-  ): LdsApp {
+  function cloudAppAs(local: AppCredentials, idToken: () => string | Promise<string>): LdsApp {
     const creds: AppCredentials = {
       appId: local.appId,
       hmacSecret: local.hmacSecret,
