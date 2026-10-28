@@ -147,17 +147,17 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
    * data-plane call, with no route carve-out and nothing an app can declare to opt
    * out. Standing in for an app's server-side compute, this helper presents what
    * that compute presents — the signature saying which app is calling, and the
-   * admin's ID token saying which person it is calling for.
-   *
-   * Read from `session` at call time rather than captured, because the token is
-   * minted in step 2 and this helper is defined before it.
+   * admin's cloud-apps ID token saying which person it is calling for.
    */
   function cloudApp(local: AppCredentials): LdsApp {
-    return cloudAppAs(local, () => session.idToken);
+    return cloudAppAs(local, adminAppToken);
   }
 
   /** {@link cloudApp}, acting for the person whose ID token `idToken` reads. */
-  function cloudAppAs(local: AppCredentials, idToken: () => string): LdsApp {
+  function cloudAppAs(
+    local: AppCredentials,
+    idToken: () => string | Promise<string>,
+  ): LdsApp {
     const creds: AppCredentials = {
       appId: local.appId,
       hmacSecret: local.hmacSecret,
@@ -165,12 +165,31 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
     };
     return {
       ...creds,
-      fetch: (path, init) =>
+      fetch: async (path, init) =>
         signedFetch(creds, path, {
           ...init,
-          headers: { ...(init?.headers ?? {}), [USER_TOKEN_HEADER]: idToken() },
+          headers: { ...(init?.headers ?? {}), [USER_TOKEN_HEADER]: await idToken() },
         }),
     };
+  }
+
+  /**
+   * The admin's ID token from the cloud-apps client, the token cloud app
+   * compute mints from its session cookie. The broker accepts no other client's
+   * token beside an app signature, so `session.idToken` (the admin client's)
+   * would be refused. Signed in again shortly before expiry, because a run
+   * outlasts one token.
+   */
+  let adminAppSession: { idToken: string; expiresAt: number } | undefined;
+  async function adminAppToken(): Promise<string> {
+    if (!adminAppSession || Date.now() > adminAppSession.expiresAt - 5 * 60_000) {
+      const tokens = await cloudAppTokens(config, admin.email, admin.password);
+      adminAppSession = {
+        idToken: tokens.idToken,
+        expiresAt: Date.now() + tokens.expiresIn * 1000,
+      };
+    }
+    return adminAppSession.idToken;
   }
 
   /**
@@ -1808,12 +1827,14 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // failure: both legs failing implicates the authorizer or the handler,
         // only the edge leg failing implicates header forwarding.
         const route = app.jwtRoute;
+        // The authorizer's audience is the cloud-apps client alone.
+        const idToken = await adminAppToken();
         const post = (base: string) =>
           fetchWhenReady(`${base}/apps/${app.appId}${route.path}`, {
             method: route.method ?? "POST",
             headers: {
               "Content-Type": "application/json",
-              Authorization: `Bearer ${session.idToken}`,
+              Authorization: `Bearer ${idToken}`,
             },
             body: JSON.stringify(route.body(syncedRecordId)),
           });
@@ -2167,6 +2188,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         adminDrive: () => drive,
         adminRecordId: () => syncedRecordId,
         cloudAppAs,
+        adminAppToken,
       });
 
       it(`uninstalls ${app.appId}: app plane gone, shared records persist`, async () => {
