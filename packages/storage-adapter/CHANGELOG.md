@@ -1,5 +1,12 @@
 # @starkeep/storage-adapter
 
+## 0.7.1
+
+### Patch Changes
+
+- Updated dependencies [18b7a5f]
+  - @starkeep/protocol-primitives@0.7.0
+
 ## 0.7.0
 
 ### Minor Changes

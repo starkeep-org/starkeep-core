@@ -1,5 +1,18 @@
 # @starkeep/storage-sqlite
 
+## 0.6.0
+
+### Minor Changes
+
+- 18b7a5f: The code that creates an app's syncable tables from its manifest moves here from admin-installer, so a phone can run it. `createAppSyncableTables`, `createReservedFileRecordsTable`, `appSyncableNamespaceTables` and `registerAppSyncableNamespace` are exported, with the `AppSyncableDeclaration` and `SyncableTableDeclaration` types.
+
+### Patch Changes
+
+- Updated dependencies [18b7a5f]
+  - @starkeep/protocol-primitives@0.7.0
+  - @starkeep/shared-space-api@0.6.2
+  - @starkeep/storage-adapter@0.7.1
+
 ## 0.5.3
 
 ### Patch Changes
