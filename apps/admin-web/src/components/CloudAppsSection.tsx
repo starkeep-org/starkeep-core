@@ -13,7 +13,7 @@ import {
 import { refreshTokens, getIdentityPoolCredentials, type STSCredentials } from "@/lib/cognito-auth";
 import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
 import { ACTION_OCCASIONAL, ACTION_OPEN } from "@/lib/action-colors";
-import type { LocalAppEntry } from "@/lib/app-types";
+import type { AppSurface, LocalAppEntry } from "@/lib/app-types";
 import { runInstallStream } from "@/lib/install-stream-client";
 
 export function CloudAppsSection({
@@ -35,19 +35,22 @@ export function CloudAppsSection({
     appId: string;
     appName: string;
     endpoint: string;
-    /** Register only the app's mobile build: grants and identity, no compute. */
-    mobileOnly: boolean;
+    /**
+     * The surfaces to install on top of the data side; undefined installs
+     * every surface the manifest offers.
+     */
+    surfaces?: AppSurface[];
   } | null>(null);
   const [credentials, setCredentials] = useState<(STSCredentials & { region?: string }) | null>(
     null,
   );
-  // Apps that the cloud registry reports as installed. Loaded from
+  // Apps whose cloud web app the registry reports as installed. Loaded from
   // `shared.app_registry` via POST /api/apps/cloud/list; refreshed after
   // every successful install. null = not yet loaded / cloud not configured.
   const [installedIds, setInstalledIds] = useState<Set<string> | null>(null);
-  // Apps whose mobile build is registered in the cloud, with or without
-  // compute: a mobile app syncs through Drive with its manifest's grants and
-  // needs no cloud compute of its own.
+  // Apps whose mobile app the registry reports as installed, with or without
+  // the web app. Either one comes with the app's data side, which the mobile
+  // app's private channel syncs against.
   const [mobileIds, setMobileIds] = useState<Set<string> | null>(null);
 
   // Resolve the browser-facing base URL from the persisted cloud config so each
@@ -92,11 +95,10 @@ export function CloudAppsSection({
         throw new Error(body?.error ?? `cloud registry list failed: ${res.status}`);
       }
       const body = (await res.json()) as {
-        apps: Array<{ appId: string }>;
-        mobileApps?: string[];
+        apps: Array<{ appId: string; webApp: boolean; mobileApp: boolean }>;
       };
-      setInstalledIds(new Set(body.apps.map((a) => a.appId)));
-      setMobileIds(new Set(body.mobileApps ?? []));
+      setInstalledIds(new Set(body.apps.filter((a) => a.webApp).map((a) => a.appId)));
+      setMobileIds(new Set(body.apps.filter((a) => a.mobileApp).map((a) => a.appId)));
     } catch (err) {
       // The registry read is best-effort: a failure just means no "Installed"
       // badges. Don't surface it as a section-level error.
@@ -112,7 +114,7 @@ export function CloudAppsSection({
     appId: string,
     appName: string,
     endpoint: string,
-    mobileOnly = false,
+    surfaces?: AppSurface[],
   ) => {
     setCredError(null);
     const cfg = await readCloudConfig();
@@ -139,7 +141,7 @@ export function CloudAppsSection({
     }
 
     setCredentials({ ...creds, region: cfg.region });
-    setInstalling({ appId, appName, endpoint, mobileOnly });
+    setInstalling({ appId, appName, endpoint, ...(surfaces ? { surfaces } : {}) });
   };
 
   return (
@@ -171,6 +173,8 @@ export function CloudAppsSection({
           const installed = installedIds !== null && installedIds.has(entry.appId);
           const shipsMobile = !!entry.manifest.mobile?.android;
           const mobileRegistered = mobileIds !== null && mobileIds.has(entry.appId);
+          // A redeploy keeps the surfaces installed now, and adds none.
+          const redeploySurfaces: AppSurface[] = mobileRegistered ? ["web", "mobile"] : ["web"];
 
           // An installed app opens; anything else deploys. Redeploy is the
           // secondary action once a deployment already exists.
@@ -178,17 +182,17 @@ export function CloudAppsSection({
           if (installed) {
             actions.push({
               label: `Redeploy ${name}`,
-              onSelect: () => handleInstall(entry.appId, name, endpoint),
+              onSelect: () => handleInstall(entry.appId, name, endpoint, redeploySurfaces),
               disabled: !cloudReady,
               title: cloudReady ? undefined : "Set up cloud before installing apps",
             });
           }
-          // A full install registers the mobile build too, so this is for an
-          // app whose mobile app should sync without its cloud compute.
+          // A full install adds the mobile app too, so this is for an app
+          // whose mobile app should sync without the cloud web app.
           if (shipsMobile && !installed && !mobileRegistered && mobileIds !== null) {
             actions.push({
               label: `Register the ${name} mobile app only`,
-              onSelect: () => handleInstall(entry.appId, name, endpoint, true),
+              onSelect: () => handleInstall(entry.appId, name, endpoint, ["mobile"]),
               disabled: !cloudReady,
               title: cloudReady ? undefined : "Set up cloud before installing apps",
             });
@@ -254,7 +258,7 @@ export function CloudAppsSection({
         appId={installing?.appId ?? null}
         appName={installing?.appName ?? null}
         endpoint={installing?.endpoint ?? null}
-        mobileOnly={installing?.mobileOnly ?? false}
+        surfaces={installing?.surfaces}
         credentials={credentials}
         onClose={() => {
           setInstalling(null);
@@ -272,7 +276,7 @@ function CloudAppInstallModal({
   opened,
   appName,
   endpoint,
-  mobileOnly,
+  surfaces,
   credentials,
   onClose,
   onSuccess,
@@ -281,7 +285,7 @@ function CloudAppInstallModal({
   appId: string | null;
   appName: string | null;
   endpoint: string | null;
-  mobileOnly: boolean;
+  surfaces: AppSurface[] | undefined;
   credentials: STSCredentials | null;
   onClose: () => void;
   onSuccess?: () => void;
@@ -309,7 +313,7 @@ function CloudAppInstallModal({
           secretAccessKey: credentials!.secretAccessKey,
           sessionToken: credentials!.sessionToken,
           region: (credentials as STSCredentials & { region?: string }).region ?? "",
-          ...(mobileOnly ? { mobileOnly: true } : {}),
+          ...(surfaces ? { surfaces } : {}),
         },
         { onLine: (line) => setLines((l) => [...l, line]), isAborted: () => aborted },
       );
@@ -327,7 +331,7 @@ function CloudAppInstallModal({
     return () => {
       aborted = true;
     };
-  }, [opened, credentials, endpoint, mobileOnly, retryNonce]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [opened, credentials, endpoint, surfaces, retryNonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <Dialog
@@ -339,7 +343,7 @@ function CloudAppInstallModal({
       <DialogContent className="sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle>
-            {mobileOnly
+            {surfaces?.length === 1 && surfaces[0] === "mobile"
               ? `Register the ${appName ?? "app"} mobile app`
               : `Install ${appName ?? "app"} in cloud`}
           </DialogTitle>

@@ -17,6 +17,14 @@ export {
 export type { AppSyncableNamespace, AppSyncableTableInfo } from "./app-syncable/namespace.js";
 export { SqliteAppSyncableApplier } from "./app-syncable/apply.js";
 export {
+  createAppSyncableTables,
+  createReservedFileRecordsTable,
+  appSyncableNamespaceTables,
+  registerAppSyncableNamespace,
+  type AppSyncableDeclaration,
+  type SyncableTableDeclaration,
+} from "./app-syncable/tables.js";
+export {
   boundUserId,
   libraryUserSegment,
   checkLibraryBindable,

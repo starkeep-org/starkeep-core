@@ -4,6 +4,13 @@
 
 export type AppTarget = "local" | "cloud";
 
+/**
+ * What an operator installs of an app in the cloud, on top of the app's data
+ * side: the cloud web app, or the mobile app. Mirrors admin-installer's
+ * `AppSurface`, which admin-web cannot import (see apps-cloud-list.ts).
+ */
+export type AppSurface = "web" | "mobile";
+
 export interface FileAccess {
   types: string[];
   access: "read" | "readwrite";

@@ -22,11 +22,14 @@
  * Usage:
  *   pnpm --filter @starkeep/admin-installer cli:install-app <appId>
  *   pnpm --filter @starkeep/admin-installer cli:install-app <appId> --non-interactive
- *   pnpm --filter @starkeep/admin-installer cli:install-app <appId> --mobile-only
+ *   pnpm --filter @starkeep/admin-installer cli:install-app <appId> --mobile
+ *   pnpm --filter @starkeep/admin-installer cli:install-app <appId> --web
  *
- * `--mobile-only` registers the app's mobile build and nothing else: its type
- * grants, label keys, Android identity and sign-in callback. The mobile app
- * then syncs through the Drive channel with no cloud compute for the app.
+ * Every install creates the app's data side: its role, schema, tables, grants
+ * and namespace. `--web` adds the cloud web app (its compute), and `--mobile`
+ * adds the mobile app (its Android identity and sign-in callback). With
+ * neither flag, the install adds every surface the manifest offers. A surface
+ * already installed stays installed.
  */
 
 // TEMP (iam-permission-tests POC): if IAM_SDK_TRACE_PATH is set, record
@@ -46,7 +49,7 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { validateManifest } from "@starkeep/admin-manifest";
-import { installApp, registerMobileApp } from "../src/orchestrator";
+import { installApp, manifestSurfaces, type AppSurface } from "../src/orchestrator";
 import { formatAnonymousRouteReport } from "../src/anonymous-route-report";
 import { formatProbeReport, probeAnonymousSurface } from "../src/post-install-probe";
 import { exitOnInstallFailure } from "../src/cli-exit";
@@ -96,17 +99,80 @@ function buildAppBundle(appDir: string, appBasePath: string): Buffer {
   }
 }
 
+function prepareWebApp(): Buffer {
+  // Print the anonymous surface before doing any work, so it is visible whether
+  // or not the install goes on to succeed. `validateManifest` has already
+  // refused an undeclared anonymous catch-all, so anything printed here is
+  // something the manifest author declared on purpose.
+  const anonymousReport = formatAnonymousRouteReport(manifest);
+  if (anonymousReport) {
+    console.log(anonymousReport);
+    console.log("");
+  }
+
+  // Cloud app sessions sign in on the managed login page through the cloud-apps
+  // client, which the cloud data server install creates.
+  const cloudAppsUserPoolClientId = config.cloudAppsUserPoolClientId;
+  if (!cloudAppsUserPoolClientId) {
+    console.error(
+      `Error: ${starkeepConfigPath()} has no cloudAppsUserPoolClientId. ` +
+        "Reinstall the cloud data server first; it creates the client cloud apps sign in with.",
+    );
+    process.exit(1);
+  }
+
+  // Patch handler env with live platform config. Handlers declare the keys they
+  // want by listing them (placeholder-empty) in the manifest; the installer fills
+  // any empty value whose key it recognizes. App-agnostic: no handler-name or
+  // app-name coupling.
+  const platformEnv: Record<string, string> = {
+    // Browser-facing base URL points at the CloudFront distribution (publicBaseUrl)
+    // so the whole browser fan-out — runtime-config → SPA data-client / cloud-config
+    // / admin-web, all of which derive their origin from this env value — routes
+    // through the edge cache. Server-to-server HMAC calls keep using apiGatewayUrl
+    // directly (STARKEEP_CLOUD_DATA_BASE in pulumi-program.ts). Falls back to the
+    // raw gateway URL for pre-CloudFront configs.
+    STARKEEP_API_GATEWAY_URL: config.publicBaseUrl ?? config.apiGatewayUrl ?? "",
+    STARKEEP_USER_POOL_ID: config.userPoolId,
+    // The cloud-apps client, never the admin client: the broker and both
+    // gateway authorizers accept only its tokens.
+    STARKEEP_USER_POOL_CLIENT_ID: cloudAppsUserPoolClientId,
+    STARKEEP_IDENTITY_POOL_ID: config.identityPoolId,
+    // The account's invocation ceiling, so an app that fans out on a user's
+    // behalf can size that fan-out against the real number rather than a literal
+    // somebody guessed once. Ten is the unraised account limit.
+    STARKEEP_LAMBDA_CONCURRENCY: String(config.lambdaConcurrency ?? 10),
+  };
+  for (const handler of manifest.infraRequirements.compute.handlers) {
+    for (const key of Object.keys(handler.env)) {
+      if (handler.env[key] === "" && key in platformEnv) {
+        handler.env[key] = platformEnv[key];
+      }
+    }
+  }
+
+  // Build the app bundle via the app's own `pnpm bundle` script. The base path
+  // /apps/<appId> is the platform's routing convention (the shared API Gateway
+  // forwards requests under it; see pulumi-program).
+  const zip = buildAppBundle(appDir, `/apps/${appId}`);
+  console.log(`\nBundle size: ${(zip.length / 1024 / 1024).toFixed(1)} MB`);
+  return zip;
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 const flags = process.argv.slice(2);
 const nonInteractive = flags.includes("--non-interactive");
-const mobileOnly = flags.includes("--mobile-only");
+const requestedSurfaces: AppSurface[] = [
+  ...(flags.includes("--web") ? (["web"] as const) : []),
+  ...(flags.includes("--mobile") ? (["mobile"] as const) : []),
+];
 const appId = flags.find((f) => !f.startsWith("--"));
 
 if (!appId) {
-  console.error("Usage: cli:install-app <appId> [--non-interactive] [--mobile-only]");
+  console.error("Usage: cli:install-app <appId> [--non-interactive] [--web] [--mobile]");
   process.exit(1);
 }
 
@@ -207,42 +273,25 @@ if (!validation.manifest) {
 }
 const manifest = validation.manifest;
 
-if (mobileOnly) {
-  if (!manifest.mobile?.android) {
-    console.error(`Error: ${appId}'s manifest declares no mobile build (mobile.android).`);
-    process.exit(1);
-  }
-  if (!config.mobileAppsUserPoolClientId) {
+const offered = manifestSurfaces(manifest);
+const surfaces = requestedSurfaces.length > 0 ? requestedSurfaces : offered;
+for (const surface of surfaces) {
+  if (!offered.includes(surface)) {
     console.error(
-      `Error: ${starkeepConfigPath()} has no mobileAppsUserPoolClientId. ` +
-        "Reinstall the cloud data server first; it creates the client mobile apps sign in with.",
+      surface === "web"
+        ? `Error: ${appId}'s manifest declares no compute, so it has no web app.`
+        : `Error: ${appId}'s manifest declares no mobile build (mobile.android).`,
     );
     process.exit(1);
   }
-  console.log(`\nRegistering ${appId}'s mobile build (no cloud compute)…`);
-  await registerMobileApp({
-    appId,
-    manifest,
-    config: {
-      stackPrefix,
-      region,
-      dsqlHostname: config.auroraEndpoint,
-      mobileSignIn: {
-        userPoolId: config.userPoolId,
-        mobileAppsClientId: config.mobileAppsUserPoolClientId,
-      },
-    },
-    registryCredentials: {
-      accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
-      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
-      sessionToken: process.env.AWS_SESSION_TOKEN!,
-    },
-  }).catch(exitOnInstallFailure);
-  const android = manifest.mobile.android;
-  console.log(
-    `Registered ${android.package}, signing in at ${android.callbackScheme}://auth/callback.`,
+}
+const installsWeb = surfaces.includes("web");
+if (surfaces.includes("mobile") && !config.mobileAppsUserPoolClientId) {
+  console.error(
+    `Error: ${starkeepConfigPath()} has no mobileAppsUserPoolClientId. ` +
+      "Reinstall the cloud data server first; it creates the client mobile apps sign in with.",
   );
-  process.exit(0);
+  process.exit(1);
 }
 
 console.log(`\nStarkeep ${appId} cloud install`);
@@ -250,64 +299,12 @@ console.log(`  Region : ${region}`);
 console.log(`  Stage  : ${stackPrefix}`);
 console.log(`  Account: ${accountId}`);
 console.log(`  App dir: ${appDir}`);
+console.log(`  Adds   : ${surfaces.length > 0 ? surfaces.join(", ") : "the data side only"}`);
 console.log("");
 
-// Print the anonymous surface before doing any work, so it is visible whether
-// or not the install goes on to succeed. `validateManifest` has already
-// refused an undeclared anonymous catch-all, so anything printed here is
-// something the manifest author declared on purpose.
-const anonymousReport = formatAnonymousRouteReport(manifest);
-if (anonymousReport) {
-  console.log(anonymousReport);
-  console.log("");
-}
-
-// Cloud app sessions sign in on the managed login page through the cloud-apps
-// client, which the cloud data server install creates.
-const cloudAppsUserPoolClientId = config.cloudAppsUserPoolClientId;
-if (!cloudAppsUserPoolClientId) {
-  console.error(
-    `Error: ${starkeepConfigPath()} has no cloudAppsUserPoolClientId. ` +
-      "Reinstall the cloud data server first; it creates the client cloud apps sign in with.",
-  );
-  process.exit(1);
-}
-
-// Patch handler env with live platform config. Handlers declare the keys they
-// want by listing them (placeholder-empty) in the manifest; the installer fills
-// any empty value whose key it recognizes. App-agnostic: no handler-name or
-// app-name coupling.
-const platformEnv: Record<string, string> = {
-  // Browser-facing base URL points at the CloudFront distribution (publicBaseUrl)
-  // so the whole browser fan-out — runtime-config → SPA data-client / cloud-config
-  // / admin-web, all of which derive their origin from this env value — routes
-  // through the edge cache. Server-to-server HMAC calls keep using apiGatewayUrl
-  // directly (STARKEEP_CLOUD_DATA_BASE in pulumi-program.ts). Falls back to the
-  // raw gateway URL for pre-CloudFront configs.
-  STARKEEP_API_GATEWAY_URL: config.publicBaseUrl ?? config.apiGatewayUrl ?? "",
-  STARKEEP_USER_POOL_ID: config.userPoolId,
-  // The cloud-apps client, never the admin client: the broker and both
-  // gateway authorizers accept only its tokens.
-  STARKEEP_USER_POOL_CLIENT_ID: cloudAppsUserPoolClientId,
-  STARKEEP_IDENTITY_POOL_ID: config.identityPoolId,
-  // The account's invocation ceiling, so an app that fans out on a user's
-  // behalf can size that fan-out against the real number rather than a literal
-  // somebody guessed once. Ten is the unraised account limit.
-  STARKEEP_LAMBDA_CONCURRENCY: String(config.lambdaConcurrency ?? 10),
-};
-for (const handler of manifest.infraRequirements.compute.handlers) {
-  for (const key of Object.keys(handler.env)) {
-    if (handler.env[key] === "" && key in platformEnv) {
-      handler.env[key] = platformEnv[key];
-    }
-  }
-}
-
-// Build the app bundle via the app's own `pnpm bundle` script. The base path
-// /apps/<appId> is the platform's routing convention (the shared API Gateway
-// forwards requests under it; see pulumi-program).
-const zipBuffer = buildAppBundle(appDir, `/apps/${appId}`);
-console.log(`\nBundle size: ${(zipBuffer.length / 1024 / 1024).toFixed(1)} MB`);
+// The web app's preparation: its anonymous surface, its handlers' platform
+// env and its bundle. A data-side or mobile install needs none of it.
+const zipBuffer = installsWeb ? prepareWebApp() : undefined;
 
 console.log(`\nInstalling ${appId} app…\n`);
 // Registry writes authenticate to DSQL as the admin-app IAM role (mapped to
@@ -323,7 +320,8 @@ const registryCredentials = {
 await installApp({
   appId,
   manifest,
-  zipBuffer,
+  surfaces,
+  ...(zipBuffer ? { zipBuffer } : {}),
   version: manifest.version,
   registryCredentials,
   config: {
@@ -355,6 +353,19 @@ await installApp({
       : {}),
   },
 }).catch(exitOnInstallFailure);
+
+if (!installsWeb) {
+  console.log(
+    `\n${appId} is installed${surfaces.length > 0 ? ` with its ${surfaces.join(" and ")} app` : ""}.`,
+  );
+  const android = surfaces.includes("mobile") ? manifest.mobile?.android : undefined;
+  if (android) {
+    console.log(
+      `Registered ${android.package}, signing in at ${android.callbackScheme}://auth/callback.`,
+    );
+  }
+  process.exit(0);
+}
 
 const browserBaseForProbe = config.publicBaseUrl ?? config.apiGatewayUrl;
 

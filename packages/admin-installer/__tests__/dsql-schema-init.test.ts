@@ -219,6 +219,43 @@ describe("every table in `shared` is granted to something", () => {
   });
 });
 
+describe("shared.app_registry surfaces", () => {
+  it("declares web_app and mobile_app, false by default, in CREATE TABLE", async () => {
+    const create = find(await init(), 'create table if not exists "shared"."app_registry"')!;
+    expect(create).toMatch(/"web_app" boolean default false not null/);
+    expect(create).toMatch(/"mobile_app" boolean default false not null/);
+  });
+
+  it("adds both columns to an existing table, then fills them from what the install left", async () => {
+    const statements = await init();
+    const at = (pattern: RegExp) => statements.findIndex((s) => pattern.test(s));
+    for (const column of ["web_app", "mobile_app"]) {
+      expect(
+        at(
+          new RegExp(
+            `ALTER TABLE shared\\.app_registry ADD COLUMN IF NOT EXISTS ${column} boolean`,
+          ),
+        ),
+        column,
+      ).toBeGreaterThan(at(/create table if not exists "shared"\."app_registry"/));
+    }
+    const fillWeb = statements.find((s) =>
+      /^update "shared"\."app_registry" set "web_app"/.test(s),
+    )!;
+    expect(fillWeb).toMatch(/"step" = \$\d/);
+    expect(fillWeb).toMatch(/where "web_app" is null$/);
+    const fillMobile = statements.find((s) =>
+      /^update "shared"\."app_registry" set "mobile_app"/.test(s),
+    )!;
+    expect(fillMobile).toMatch(/from "shared"\."app_mobile_identities"/);
+    expect(fillMobile).toMatch(/where "mobile_app" is null$/);
+    // Each fill runs after the ADD COLUMN that makes its column exist.
+    expect(at(/^update "shared"\."app_registry" set "web_app"/)).toBeGreaterThan(
+      at(/ADD COLUMN IF NOT EXISTS mobile_app/),
+    );
+  });
+});
+
 describe("shared.records stand-in columns", () => {
   it("declares the role, the fidelity and the slot in CREATE TABLE", async () => {
     const create = find(await init(), 'create table if not exists "shared"."records"')!;

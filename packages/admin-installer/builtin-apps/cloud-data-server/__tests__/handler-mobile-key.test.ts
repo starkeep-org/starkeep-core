@@ -313,9 +313,24 @@ describe("a signed request", () => {
     expect(res.statusCode).toBe(401);
   });
 
-  it("refuses every app's own channel, its attested app's included", async () => {
+  it("passes the gate for its attested app's own exchange", async () => {
     const { token, keyId, key } = await registered();
-    for (const appId of ["photos", "memo"]) {
+    const res = await handler(
+      event({
+        method: "POST",
+        path: "/apps/photos/sync/exchange",
+        headers: signed(token, keyId, key, { ...EXCHANGE, appId: "photos" }),
+        body: "{}",
+      }),
+      context,
+    );
+    // Past the gate and the registration check: the exchange reached the database.
+    expect(res.statusCode).toBe(500);
+  });
+
+  it("refuses every other app's channel", async () => {
+    const { token, keyId, key } = await registered();
+    for (const appId of ["memo", "probe"]) {
       const res = await handler(
         event({
           method: "POST",
@@ -327,6 +342,36 @@ describe("a signed request", () => {
       );
       expect(res.statusCode, appId).toBe(403);
     }
+  });
+
+  it("refuses a signature made for another channel", async () => {
+    const { token, keyId, key } = await registered();
+    const res = await handler(
+      event({
+        method: "POST",
+        path: "/apps/photos/sync/exchange",
+        headers: signed(token, keyId, key, EXCHANGE),
+        body: "{}",
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("refuses a push carrying shared records on its app's own channel", async () => {
+    const { token, keyId, key } = await registered();
+    const body = JSON.stringify({ watermarks: {}, records: [{ id: "r1", type: "image/jpeg" }] });
+    const res = await handler(
+      event({
+        method: "POST",
+        path: "/apps/photos/sync/exchange",
+        headers: signed(token, keyId, key, { ...EXCHANGE, appId: "photos", body }),
+        body,
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(403);
+    expect(errorOf(res)).toMatch(/Drive channel only/);
   });
 
   it("never falls back to the device branch when its key is refused", async () => {
@@ -353,6 +398,25 @@ describe("a signed request", () => {
       context,
     );
     expect(res.statusCode).toBe(403);
+  });
+
+  it("refuses a key, on either channel, once the app's mobile_app is false", async () => {
+    const { token, keyId, key } = await registered();
+    // Clearing mobile_app deletes the identity row in the same transaction.
+    identities = [];
+    for (const appId of ["starkeep-drive", "photos"]) {
+      const res = await handler(
+        event({
+          method: "POST",
+          path: `/apps/${appId}/sync/exchange`,
+          headers: signed(token, keyId, key, { ...EXCHANGE, appId }),
+          body: "{}",
+        }),
+        context,
+      );
+      expect(res.statusCode, appId).toBe(403);
+      expect(errorOf(res)).toMatch(/no longer registered/);
+    }
   });
 
   it("stops at once when the app's mobile build is unregistered", async () => {

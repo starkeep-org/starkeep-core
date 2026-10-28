@@ -44,9 +44,11 @@ const fakeRegistry = {
   },
   registerApp: vi.fn(async () => {}),
   deleteAppRegistryEntry: vi.fn(async () => {}),
-  registerMobileApp: vi.fn(async () => {}),
-  unregisterMobileApp: vi.fn(async () => {}),
-  listMobileApps: vi.fn(async () => []),
+  removeSurfaces: vi.fn(async () => {}),
+  clearSteps: vi.fn(async (appId: string) => {
+    for (let i = ledger.length - 1; i >= 0; i--)
+      if (ledger[i]!.appId === appId) ledger.splice(i, 1);
+  }),
   listInstalledApps: vi.fn(async () => []),
   close: vi.fn(async () => {}),
 };
@@ -103,25 +105,21 @@ vi.mock("../src/compute-stack", () => ({
   uninstallComputeStack: vi.fn(async () => {}),
 }));
 
-import {
-  installApp,
-  uninstallApp,
-  registerMobileApp,
-  unregisterMobileApp,
-  type InstallerConfig,
-} from "../src/orchestrator";
+import { installApp, uninstallApp, type InstallerConfig } from "../src/orchestrator";
 import {
   createAppRole,
   createAppExecRole,
+  deleteAppExecRoleWithPolicies,
+  deleteAppRoleWithPolicies,
   attachTempInstallInfraPolicy,
   detachTempInstallInfraPolicy,
   attachTempInstallDdlPolicy,
   detachTempInstallDdlPolicy,
 } from "../src/iam";
-import { putAppCredsParameter } from "../src/app-creds";
-import { runAppInstallDdl } from "../src/dsql-ddl";
+import { deleteAppCredsParameter, putAppCredsParameter } from "../src/app-creds";
+import { runAppInstallDdl, runAppUninstallDdl } from "../src/dsql-ddl";
 import { putAppKeepFile, uploadAppBundle } from "../src/s3";
-import { installComputeStack } from "../src/compute-stack";
+import { installComputeStack, uninstallComputeStack } from "../src/compute-stack";
 import { setMobileAppCallback } from "../src/app-sign-in-clients";
 import { validateManifest, type AppManifest } from "@starkeep/admin-manifest";
 import { readFileSync as rf } from "node:fs";
@@ -240,7 +238,7 @@ describe("install", () => {
       const entries = ledger.filter((e) => e.step === step).map((e) => e.status);
       expect(entries, step).toEqual(["pending", "done"]);
     }
-    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(photosManifest, "photos");
+    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(photosManifest, "photos", ["web"]);
     expect(fakeRegistry.close).toHaveBeenCalled();
   });
 
@@ -606,15 +604,27 @@ describe("an app that ships a mobile build", () => {
     },
   };
   const mobileSignIn = { userPoolId: "us-east-1_pool", mobileAppsClientId: "mobile1" };
+  const COMPUTE_STEPS = [
+    "create_iam_exec_role",
+    "attach_temp_install_infra_policy",
+    "upload_bundle",
+    "install_compute_stack",
+    "detach_temp_install_infra_policy",
+  ];
 
-  it("registers the build's callback on the mobile-apps client before registering the app", async () => {
+  it("installs every surface the manifest offers when none is named", async () => {
     await installApp({
       appId: "photos",
       manifest: mobileManifest,
+      zipBuffer: Buffer.from("zip"),
       version: "0.1.0",
       config: { ...config, mobileSignIn },
       registryCredentials,
     });
+    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(mobileManifest, "photos", [
+      "web",
+      "mobile",
+    ]);
     expect(setMobileAppCallback).toHaveBeenCalledWith(
       { region: "us-east-1", ...mobileSignIn },
       "starkeep-photos",
@@ -624,7 +634,122 @@ describe("an app that ships a mobile build", () => {
     expect(steps.indexOf("add_mobile_callback")).toBe(steps.indexOf("register_app") - 1);
   });
 
-  it("refuses to install on a deployment with no mobile-apps client", async () => {
+  it("installs the mobile app with the whole data side and no compute", async () => {
+    await installApp({
+      appId: "photos",
+      manifest: mobileManifest,
+      version: "0.1.0",
+      config: { ...config, mobileSignIn },
+      registryCredentials,
+      surfaces: ["mobile"],
+    });
+    expect(doneSteps("install")).toEqual([
+      "put_app_creds_parameter",
+      "create_iam_role",
+      "attach_temp_install_ddl_policy",
+      "run_dsql_ddl",
+      "detach_temp_install_ddl_policy",
+      "put_s3_keep_file",
+      "add_mobile_callback",
+      "register_app",
+    ]);
+    expect(runAppInstallDdl).toHaveBeenCalledWith(
+      expect.anything(),
+      "photos",
+      mobileManifest.infraRequirements.fileAccess,
+      mobileManifest.infraRequirements.fileAccessAll,
+      mobileManifest.infraRequirements.appSpecificSyncable.tables,
+      mobileManifest.infraRequirements.appSpecificSyncable.files,
+      mobileManifest.infraRequirements.labelKeys,
+    );
+    expect(createAppExecRole).not.toHaveBeenCalled();
+    expect(installComputeStack).not.toHaveBeenCalled();
+    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(mobileManifest, "photos", ["mobile"]);
+  });
+
+  it("installs the mobile app with no HMAC secret when the operator's machine has no local app", async () => {
+    const db = new DatabaseSync(join(dataDir, "data.db"));
+    db.exec(sqliteCompiler.deleteFrom("shared_app_registry").compile().sql);
+    db.close();
+
+    await installApp({
+      appId: "photos",
+      manifest: mobileManifest,
+      version: "0.1.0",
+      config: { ...config, mobileSignIn },
+      registryCredentials,
+      surfaces: ["mobile"],
+    });
+    expect(putAppCredsParameter).not.toHaveBeenCalled();
+    expect(doneSteps("install")).not.toContain("put_app_creds_parameter");
+    expect(doneSteps("install")).toContain("run_dsql_ddl");
+  });
+
+  it("mirrors the HMAC secret on a mobile install when the operator's machine has the app", async () => {
+    await installApp({
+      appId: "photos",
+      manifest: mobileManifest,
+      version: "0.1.0",
+      config: { ...config, mobileSignIn },
+      registryCredentials,
+      surfaces: ["mobile"],
+    });
+    expect(putAppCredsParameter).toHaveBeenCalledWith(
+      expect.objectContaining({ appId: "photos", hmacSecret: PHOTOS_REGISTRY_SECRET }),
+    );
+  });
+
+  it("adds the web app to an installed mobile app, and records it", async () => {
+    const install = (surfaces: Array<"web" | "mobile">) =>
+      installApp({
+        appId: "photos",
+        manifest: mobileManifest,
+        zipBuffer: Buffer.from("zip"),
+        version: "0.1.0",
+        config: { ...config, mobileSignIn },
+        registryCredentials,
+        surfaces,
+      });
+    await install(["mobile"]);
+    await install(["web"]);
+    for (const step of COMPUTE_STEPS) expect(doneSteps("install"), step).toContain(step);
+    expect(createAppExecRole).toHaveBeenCalledTimes(1);
+    // register_app runs again, so the row records the web app too.
+    expect(fakeRegistry.registerApp).toHaveBeenLastCalledWith(mobileManifest, "photos", ["web"]);
+  });
+
+  it("refuses a surface the manifest does not offer, before any step", async () => {
+    await expect(
+      installApp({
+        appId: "photos",
+        manifest: photosManifest,
+        version: "0.1.0",
+        config: { ...config, mobileSignIn },
+        registryCredentials,
+        surfaces: ["mobile"],
+      }),
+    ).rejects.toThrow(/declares no mobile build/);
+    const computeLess: AppManifest = {
+      ...mobileManifest,
+      infraRequirements: {
+        ...mobileManifest.infraRequirements,
+        compute: { enabled: false, handlers: [] },
+      },
+    };
+    await expect(
+      installApp({
+        appId: "photos",
+        manifest: computeLess,
+        version: "0.1.0",
+        config: { ...config, mobileSignIn },
+        registryCredentials,
+        surfaces: ["web"],
+      }),
+    ).rejects.toThrow(/no web app/);
+    expect(ledger).toEqual([]);
+  });
+
+  it("refuses the mobile app on a deployment with no mobile-apps client, before any step", async () => {
     await expect(
       installApp({
         appId: "photos",
@@ -634,73 +759,67 @@ describe("an app that ships a mobile build", () => {
         registryCredentials,
       }),
     ).rejects.toThrow(/Reinstall the cloud data server/);
+    expect(ledger).toEqual([]);
   });
 
-  it("keeps the mobile build registered through an uninstall that asks to", async () => {
-    vi.mocked(setMobileAppCallback).mockClear();
+  it("installs the web app alone on a deployment with no mobile-apps client", async () => {
+    await installApp({
+      appId: "photos",
+      manifest: mobileManifest,
+      version: "0.1.0",
+      config,
+      registryCredentials,
+      surfaces: ["web"],
+    });
+    expect(setMobileAppCallback).not.toHaveBeenCalled();
+    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(mobileManifest, "photos", ["web"]);
+  });
+
+  it("removes the web app alone and keeps the data side", async () => {
     await uninstallApp({
       appId: "photos",
       manifest: mobileManifest,
       config: { ...config, mobileSignIn },
       registryCredentials,
-      keepMobileRegistration: true,
+      surfaces: ["web"],
     });
-    const steps = doneSteps("uninstall");
-    expect(steps).not.toContain("remove_mobile_callback");
-    // After the registry delete, which took the identity with it.
-    expect(steps.indexOf("keep_mobile_registration")).toBe(
-      steps.indexOf("delete_app_registry") + 1,
-    );
-    expect(fakeRegistry.registerMobileApp).toHaveBeenCalledWith(mobileManifest, "photos");
+    expect(uninstallComputeStack).toHaveBeenCalled();
+    expect(deleteAppExecRoleWithPolicies).toHaveBeenCalled();
+    expect(fakeRegistry.removeSurfaces).toHaveBeenCalledWith("photos", ["web"]);
+    // The data side stays: role, schema, files, secret and registry row.
+    expect(deleteAppRoleWithPolicies).not.toHaveBeenCalled();
+    expect(runAppUninstallDdl).not.toHaveBeenCalled();
+    expect(deleteAppCredsParameter).not.toHaveBeenCalled();
+    expect(fakeRegistry.deleteAppRegistryEntry).not.toHaveBeenCalled();
+    // The mobile app's parts stay too.
     expect(setMobileAppCallback).not.toHaveBeenCalled();
+    // Both ledgers are forgotten, so a later install re-creates the exec role.
+    expect(fakeRegistry.clearSteps).toHaveBeenCalledWith("photos");
+    expect(ledger).toEqual([]);
   });
 
-  it("registers and unregisters a mobile build with no compute at all", async () => {
-    vi.mocked(setMobileAppCallback).mockClear();
-    vi.mocked(createAppRole).mockClear();
-    const input = {
+  it("removes the mobile app alone and keeps the data side and the web app", async () => {
+    await uninstallApp({
       appId: "photos",
       manifest: mobileManifest,
-      config: {
-        stackPrefix: "starkeep",
-        region: "us-east-1",
-        dsqlHostname: "fake.dsql",
-        mobileSignIn,
-      },
+      config: { ...config, mobileSignIn },
       registryCredentials,
-    };
-    await registerMobileApp(input);
-    expect(fakeRegistry.registerMobileApp).toHaveBeenCalledWith(mobileManifest, "photos");
-    expect(setMobileAppCallback).toHaveBeenLastCalledWith(
-      { region: "us-east-1", ...mobileSignIn },
-      "starkeep-photos",
-      true,
-    );
-    // No role, no compute, no ledger.
-    expect(createAppRole).not.toHaveBeenCalled();
-    expect(installComputeStack).not.toHaveBeenCalled();
-
-    await unregisterMobileApp(input);
-    expect(fakeRegistry.unregisterMobileApp).toHaveBeenCalledWith("photos");
-    expect(setMobileAppCallback).toHaveBeenLastCalledWith(
+      surfaces: ["mobile"],
+    });
+    expect(setMobileAppCallback).toHaveBeenCalledWith(
       { region: "us-east-1", ...mobileSignIn },
       "starkeep-photos",
       false,
     );
+    expect(fakeRegistry.removeSurfaces).toHaveBeenCalledWith("photos", ["mobile"]);
+    expect(uninstallComputeStack).not.toHaveBeenCalled();
+    expect(deleteAppExecRoleWithPolicies).not.toHaveBeenCalled();
+    expect(deleteAppRoleWithPolicies).not.toHaveBeenCalled();
+    expect(runAppUninstallDdl).not.toHaveBeenCalled();
+    expect(fakeRegistry.deleteAppRegistryEntry).not.toHaveBeenCalled();
   });
 
-  it("refuses to register an app whose manifest declares no mobile build", async () => {
-    await expect(
-      registerMobileApp({
-        appId: "photos",
-        manifest: photosManifest,
-        config: { stackPrefix: "starkeep", region: "us-east-1", dsqlHostname: "x", mobileSignIn },
-        registryCredentials,
-      }),
-    ).rejects.toThrow(/declares no mobile build/);
-  });
-
-  it("removes the callback at uninstall", async () => {
+  it("removes everything, the callback included, on a plain uninstall", async () => {
     await uninstallApp({
       appId: "photos",
       manifest: mobileManifest,
@@ -713,5 +832,10 @@ describe("an app that ships a mobile build", () => {
       false,
     );
     expect(doneSteps("uninstall")).toContain("remove_mobile_callback");
+    expect(uninstallComputeStack).toHaveBeenCalled();
+    expect(runAppUninstallDdl).toHaveBeenCalled();
+    expect(deleteAppRoleWithPolicies).toHaveBeenCalled();
+    expect(fakeRegistry.deleteAppRegistryEntry).toHaveBeenCalledWith("photos");
+    expect(fakeRegistry.removeSurfaces).not.toHaveBeenCalled();
   });
 });

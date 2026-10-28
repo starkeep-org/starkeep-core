@@ -2,10 +2,10 @@
  * Cloud install registry read endpoint.
  *
  * POST with the user's STS credentials in the body; returns the list of
- * currently-installed cloud apps from `shared.app_registry`, and the apps whose
- * mobile build is registered from `shared.app_mobile_identities`. This is the
- * single source of truth for "which apps are installed in this cloud
- * stack" — the orchestrator's register_app step writes to it on install
+ * currently-installed cloud apps from `shared.app_registry`, each with the
+ * surfaces installed on top of its data side: the web app and the mobile app.
+ * This is the single source of truth for "which apps are installed in this
+ * cloud stack" — the orchestrator's register_app step writes to it on install
  * completion, and delete_app_registry removes the row on uninstall.
  *
  * Credentials must be the admin-app session creds (the same ones the
@@ -140,7 +140,7 @@ export async function POST(req: Request) {
   try {
     const listQuery = compiler
       .selectFrom("shared.app_registry")
-      .select(["app_id", "version", "name", "installed_at", "updated_at"])
+      .select(["app_id", "version", "name", "installed_at", "updated_at", "web_app", "mobile_app"])
       .orderBy("installed_at", "asc")
       .compile();
     const result = await pool.query<{
@@ -149,21 +149,9 @@ export async function POST(req: Request) {
       name: string | null;
       installed_at: Date;
       updated_at: Date;
+      web_app: boolean | null;
+      mobile_app: boolean | null;
     }>(listQuery.sql, [...listQuery.parameters]);
-    // Apps whose mobile build is registered, with or without compute. A
-    // deployment from before the table existed has none.
-    const mobileQuery = compiler
-      .selectFrom("shared.app_mobile_identities")
-      .select("app_id")
-      .orderBy("app_id", "asc")
-      .compile();
-    const mobileApps = await pool
-      .query<{ app_id: string }>(mobileQuery.sql, [...mobileQuery.parameters])
-      .then((r) => r.rows.map((row) => row.app_id))
-      .catch((err: { code?: string }) => {
-        if (err.code === "42P01") return [];
-        throw err;
-      });
     return Response.json({
       apps: result.rows.map((r) => ({
         appId: r.app_id,
@@ -171,8 +159,9 @@ export async function POST(req: Request) {
         name: r.name,
         installedAt: r.installed_at.toISOString(),
         updatedAt: r.updated_at.toISOString(),
+        webApp: r.web_app === true,
+        mobileApp: r.mobile_app === true,
       })),
-      mobileApps,
     });
   } catch (err) {
     return Response.json(

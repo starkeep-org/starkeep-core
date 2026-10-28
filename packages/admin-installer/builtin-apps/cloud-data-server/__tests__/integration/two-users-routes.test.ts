@@ -32,9 +32,15 @@ import { createHash, sign } from "node:crypto";
 import { PutParameterCommand, ParameterAlreadyExists } from "@aws-sdk/client-ssm";
 import {
   mobileSignedMessage,
+  pgColumnType,
   serializeHLC,
   type HLCTimestamp,
 } from "@starkeep/protocol-primitives";
+import {
+  FILE_RECORDS_COLUMNS,
+  FILE_RECORDS_TABLE,
+  FILE_RECORDS_TABLE_INFO,
+} from "@starkeep/shared-space-api";
 import { resetMobileKeyCaches } from "../../src/mobile-keys.js";
 import {
   TEST_CERT_DIGEST,
@@ -174,18 +180,24 @@ afterEach(async () => {
   await pg.close();
 });
 
-function as(userId: string, method: string, subPath: string, body?: unknown): APIGatewayEvent {
+function as(
+  userId: string,
+  method: string,
+  subPath: string,
+  body?: unknown,
+  appId: string = DRIVE,
+): APIGatewayEvent {
   const bodyless = method === "GET" || method === "HEAD" || method === "DELETE";
   const bodyStr = body === undefined ? undefined : JSON.stringify(body);
   const headers = signRequest({
-    appId: DRIVE,
-    hmacSecret: `secret-${DRIVE}`,
+    appId,
+    hmacSecret: `secret-${appId}`,
     method,
     path: subPath,
     ...(bodyless ? {} : { body: bodyStr }),
   });
   return {
-    rawPath: `/apps/${DRIVE}${subPath}`,
+    rawPath: `/apps/${appId}${subPath}`,
     requestContext: { http: { method } },
     headers: { ...headers, "X-Starkeep-User-Token": tokens[userId]! },
     ...(bodyStr !== undefined ? { body: bodyStr } : {}),
@@ -210,8 +222,14 @@ async function callAsDevice(userId: string, method: string, subPath: string, bod
   };
 }
 
-async function call(userId: string, method: string, subPath: string, body?: unknown) {
-  const res = await handler(as(userId, method, subPath, body), context);
+async function call(
+  userId: string,
+  method: string,
+  subPath: string,
+  body?: unknown,
+  appId: string = DRIVE,
+) {
+  const res = await handler(as(userId, method, subPath, body, appId), context);
   return {
     status: res.statusCode,
     body: res.body ? (JSON.parse(res.body) as Record<string, unknown>) : {},
@@ -377,13 +395,13 @@ describe("a mobile app through the broker", () => {
     expect(res.statusCode, res.body).toBe(200);
     const keyId = (JSON.parse(res.body) as { keyId: string }).keyId;
     return {
-      async call(method: string, subPath: string, body?: unknown) {
+      async call(method: string, subPath: string, body?: unknown, appId: string = DRIVE) {
         const bodyStr = body === undefined ? "" : JSON.stringify(body);
         const ts = Date.now();
-        const message = mobileSignedMessage(DRIVE, method, subPath, ts, Buffer.from(bodyStr));
+        const message = mobileSignedMessage(appId, method, subPath, ts, Buffer.from(bodyStr));
         const out = await handler(
           {
-            rawPath: `/apps/${DRIVE}${subPath}`,
+            rawPath: `/apps/${appId}${subPath}`,
             requestContext: { http: { method } },
             headers: {
               "X-Starkeep-User-Token": token,
@@ -496,6 +514,306 @@ describe("a mobile app through the broker", () => {
     expect((await phone.call("GET", `/files/${imageKey}/stat`)).status).not.toBe(403);
     expect((await phone.call("GET", `/files/${noteKey}/stat`)).status).toBe(403);
     expect((await phone.call("POST", "/files/presign", { key: noteKey })).status).toBe(403);
+  });
+
+  /**
+   * Photos' private schema and its namespace row, as the install DDL leaves
+   * them. Photos' manifest declares `files: true`, so its real namespace also
+   * has the reserved file table; `filesEnabled: false` is the narrower shape.
+   */
+  async function createPhotosPrivateTables({ filesEnabled = false } = {}): Promise<void> {
+    const columns = [
+      { name: "record_id", type: "text", notNull: true, primaryKey: true },
+      { name: "caption", type: "text", notNull: false, primaryKey: false },
+      { name: "title", type: "text", notNull: false, primaryKey: false },
+      { name: "date_taken_override", type: "text", notNull: false, primaryKey: false },
+    ];
+    // The install DDL appends the reserved table to the namespace's tables.
+    const tables = [
+      { name: "image_enriched", pkColumns: ["record_id"], columns },
+      ...(filesEnabled ? [FILE_RECORDS_TABLE_INFO] : []),
+    ];
+    await pg.exec(`
+      CREATE SCHEMA app_photos;
+      CREATE TABLE app_photos.image_enriched (
+        user_id text NOT NULL,
+        record_id text NOT NULL,
+        caption text,
+        title text,
+        date_taken_override text,
+        updated_at text NOT NULL,
+        node_id text NOT NULL,
+        deleted_at text,
+        PRIMARY KEY (user_id, record_id)
+      );
+      CREATE TABLE app_photos._starkeep_byte_coverage (
+        user_id text NOT NULL,
+        node_id text NOT NULL,
+        hlc text NOT NULL,
+        PRIMARY KEY (user_id, node_id)
+      );
+      INSERT INTO shared.app_syncable_namespaces (app_id, tables_json, files_enabled)
+        VALUES ('${PHOTOS}', '${JSON.stringify(tables)}', ${filesEnabled});
+    `);
+    if (filesEnabled) {
+      // Column for column what `dsql-ddl.ts` creates for the reserved table.
+      const reserved = FILE_RECORDS_COLUMNS.map(
+        (c) => `${c.name} ${pgColumnType(c.type)}${c.notNull || c.primaryKey ? " NOT NULL" : ""}`,
+      );
+      const pks = FILE_RECORDS_COLUMNS.filter((c) => c.primaryKey).map((c) => c.name);
+      await pg.exec(`
+        CREATE TABLE app_photos.${FILE_RECORDS_TABLE} (
+          user_id text NOT NULL,
+          ${reserved.join(",\n          ")},
+          updated_at text NOT NULL,
+          node_id text NOT NULL,
+          deleted_at text,
+          PRIMARY KEY (user_id, ${pks.join(", ")})
+        );
+      `);
+    }
+  }
+
+  /** A caption row as the phone's engine ships it. */
+  function captionRow(recordId: string, caption: string, nodeId: string) {
+    const timestamp = { wallTime: Date.now(), counter: 0, nodeId };
+    return {
+      timestamp,
+      appId: PHOTOS,
+      table: "image_enriched",
+      op: "insert" as const,
+      row: {
+        record_id: recordId,
+        caption,
+        title: null,
+        date_taken_override: null,
+        updated_at: serializeHLC(timestamp),
+        deleted_at: null,
+      },
+    };
+  }
+
+  it("syncs its own app's private rows on the app's channel, for its own user only", async () => {
+    await registerPhotosMobile();
+    await createPhotosPrivateTables();
+    const phoneA = await phoneOf(A);
+
+    const pushed = await phoneA.call(
+      "POST",
+      "/sync/exchange",
+      { watermarks: {}, appSyncableRows: [captionRow("r1", "A's cat", "phone-a")] },
+      PHOTOS,
+    );
+    expect(pushed.status, JSON.stringify(pushed.body)).toBe(200);
+    const { rows } = await pg.query<{ user_id: string; caption: string }>(
+      "SELECT user_id, caption FROM app_photos.image_enriched",
+    );
+    expect(rows).toEqual([{ user_id: A, caption: "A's cat" }]);
+
+    // A second phone of A's pulls the row; B's phone pulls nothing.
+    const pulledA = await (
+      await phoneOf(A)
+    ).call("POST", "/sync/exchange", { watermarks: {} }, PHOTOS);
+    expect(pulledA.status, JSON.stringify(pulledA.body)).toBe(200);
+    const rowsA = pulledA.body["appSyncableRows"] as Array<{ row: { caption: string } }>;
+    expect(rowsA.map((r) => r.row.caption)).toEqual(["A's cat"]);
+    expect(pulledA.body["records"]).toEqual([]);
+
+    const pulledB = await (
+      await phoneOf(B)
+    ).call("POST", "/sync/exchange", { watermarks: {} }, PHOTOS);
+    expect(pulledB.status, JSON.stringify(pulledB.body)).toBe(200);
+    expect(pulledB.body["appSyncableRows"]).toEqual([]);
+  });
+
+  it("refuses shared records and labels on the app's own channel, whole", async () => {
+    await registerPhotosMobile();
+    await createPhotosPrivateTables();
+    const phone = await phoneOf(A);
+    const res = await phone.call(
+      "POST",
+      "/sync/exchange",
+      {
+        watermarks: {},
+        appSyncableRows: [captionRow("r1", "smuggled", "phone-a")],
+        labels: [
+          {
+            recordId: "r1",
+            appId: PHOTOS,
+            key: "album",
+            value: "x",
+            updatedAt: { wallTime: Date.now(), counter: 0, nodeId: "phone-a" },
+            deletedAt: null,
+          },
+        ],
+      },
+      PHOTOS,
+    );
+    expect(res.status).toBe(403);
+    expect((await pg.query("SELECT 1 FROM app_photos.image_enriched")).rows).toEqual([]);
+  });
+
+  /** A file row in Photos' reserved table, as the desktop's engine ships it. */
+  function fileRow(userId: string, name: string, nodeId: string) {
+    const timestamp = { wallTime: Date.now(), counter: 0, nodeId };
+    const key = `apps/${PHOTOS}/${userId}/syncable/covers/${name}`;
+    return {
+      timestamp,
+      appId: PHOTOS,
+      table: FILE_RECORDS_TABLE,
+      op: "insert" as const,
+      row: {
+        id: key,
+        object_storage_key: key,
+        content_hash: "e".repeat(64),
+        mime_type: "image/jpeg",
+        size_bytes: 3,
+        original_filename: name,
+        origin_app_id: PHOTOS,
+        created_at: "2026-10-27T00:00:00.000Z",
+        updated_at: serializeHLC(timestamp),
+        deleted_at: null,
+      },
+    };
+  }
+
+  it("syncs captions on Photos' real namespace, files and all", async () => {
+    await registerPhotosMobile();
+    await createPhotosPrivateTables({ filesEnabled: true });
+
+    // A's desktop, on the Photos channel, ships a cover image and a caption.
+    const desktop = await call(
+      A,
+      "POST",
+      "/sync/exchange",
+      {
+        watermarks: {},
+        appSyncableRows: [
+          fileRow(A, "cover.jpg", "desk-a"),
+          captionRow("r1", "from desk", "desk-a"),
+        ],
+      },
+      PHOTOS,
+    );
+    expect(desktop.status, JSON.stringify(desktop.body)).toBe(200);
+    // A row that does not apply halts its author and still answers 200.
+    expect(desktop.body["haltedAuthors"]).toBeUndefined();
+
+    // A's phone pushes its own caption, then a second phone pulls everything.
+    const pushed = await (
+      await phoneOf(A)
+    ).call(
+      "POST",
+      "/sync/exchange",
+      { watermarks: {}, appSyncableRows: [captionRow("r2", "from phone", "phone-a")] },
+      PHOTOS,
+    );
+    expect(pushed.status, JSON.stringify(pushed.body)).toBe(200);
+    expect(pushed.body["haltedAuthors"]).toBeUndefined();
+
+    const pulled = await (
+      await phoneOf(A)
+    ).call("POST", "/sync/exchange", { watermarks: {} }, PHOTOS);
+    expect(pulled.status, JSON.stringify(pulled.body)).toBe(200);
+    const rows = pulled.body["appSyncableRows"] as Array<{
+      table: string;
+      row: Record<string, unknown>;
+    }>;
+    expect(
+      rows
+        .filter((r) => r.table === "image_enriched")
+        .map((r) => r.row["caption"])
+        .sort(),
+    ).toEqual(["from desk", "from phone"]);
+    expect(rows.filter((r) => r.table === FILE_RECORDS_TABLE).map((r) => r.row["id"])).toEqual([
+      `apps/${PHOTOS}/${A}/syncable/covers/cover.jpg`,
+    ]);
+    // The walk over the channel's bytes watermark ran, in Photos' schema.
+    expect(pulled.body["responderByteWatermarks"]).toBeDefined();
+
+    // B's phone, on the same namespace, pulls none of it.
+    const forB = await (
+      await phoneOf(B)
+    ).call("POST", "/sync/exchange", { watermarks: {} }, PHOTOS);
+    expect(forB.status, JSON.stringify(forB.body)).toBe(200);
+    expect(forB.body["appSyncableRows"]).toEqual([]);
+  });
+
+  it("refuses a file row naming another user's key on the app's channel", async () => {
+    await registerPhotosMobile();
+    await createPhotosPrivateTables({ filesEnabled: true });
+    const res = await (
+      await phoneOf(A)
+    ).call(
+      "POST",
+      "/sync/exchange",
+      { watermarks: {}, appSyncableRows: [fileRow(B, "theirs.jpg", "phone-a")] },
+      PHOTOS,
+    );
+    expect(res.status).toBe(403);
+    expect((await pg.query(`SELECT 1 FROM app_photos.${FILE_RECORDS_TABLE}`)).rows).toEqual([]);
+  });
+
+  it("refuses a labels-only push on the app's own channel", async () => {
+    await registerPhotosMobile();
+    await createPhotosPrivateTables();
+    const res = await (
+      await phoneOf(A)
+    ).call(
+      "POST",
+      "/sync/exchange",
+      {
+        watermarks: {},
+        labels: [
+          {
+            recordId: "r1",
+            appId: PHOTOS,
+            key: "album",
+            value: "x",
+            updatedAt: { wallTime: Date.now(), counter: 0, nodeId: "phone-a" },
+            deletedAt: null,
+          },
+        ],
+      },
+      PHOTOS,
+    );
+    expect(res.status).toBe(403);
+    expect((await pg.query("SELECT 1 FROM shared.record_labels")).rows).toEqual([]);
+  });
+
+  it("bounds the file and record routes on the app's channel by the app's grants", async () => {
+    await registerPhotosMobile();
+    await createPhotosPrivateTables({ filesEnabled: true });
+    const photo = await aWritesAPhoto();
+    await aWritesANote();
+    const phone = await phoneOf(A);
+    const on = (method: string, subPath: string, body?: unknown) =>
+      phone.call(method, subPath, body, PHOTOS);
+    const imageKey = `shared/${A}/image/cc/${HASH}`;
+    const noteKey = `shared/${A}/document/dd/${"d".repeat(64)}`;
+
+    expect((await on("GET", `/files/${imageKey}/stat`)).status).not.toBe(403);
+    expect((await on("GET", `/files/${imageKey}/presign`)).status).not.toBe(403);
+    expect((await on("GET", `/files/${noteKey}/stat`)).status).toBe(403);
+    expect((await on("GET", `/files/${noteKey}/presign`)).status).toBe(403);
+    expect((await on("POST", "/files/presign", { key: noteKey })).status).toBe(403);
+
+    // The record list is the app's readable types, for its own user.
+    const listed = await on("GET", "/data/records");
+    expect(listed.status, JSON.stringify(listed.body)).toBe(200);
+    expect((listed.body["records"] as Array<{ id: string }>).map((r) => r.id)).toEqual([photo]);
+    // And a record write is no route a mobile app may call.
+    expect(
+      (
+        await on("POST", "/data/records", {
+          type: "image/jpeg",
+          contentType: "image/jpeg",
+          contentHash: HASH,
+          sizeBytes: 3,
+          fileName: "cat.jpg",
+        })
+      ).status,
+    ).toBe(403);
   });
 
   it("B's phone, with B's key, syncs none of A's photos", async () => {

@@ -4,8 +4,6 @@ import { validateManifest, type AppManifest } from "@starkeep/admin-manifest";
 import {
   appRegistryRow,
   clearStepLedger,
-  createAppSyncableTables,
-  createReservedFileRecordsTable,
   deleteAccessGrants,
   deleteAppLabelKeys,
   deleteAppRegistry,
@@ -20,11 +18,13 @@ import {
   type Operation,
 } from "./registry.js";
 import {
+  appSyncableNamespaceTables,
+  createAppSyncableTables,
+  createReservedFileRecordsTable,
   deleteAppSyncableNamespace,
   getAppSyncableNamespace,
   upsertAppSyncableNamespace,
 } from "@starkeep/storage-sqlite";
-import { FILE_RECORDS_TABLE_INFO, appSyncableTableInfo } from "@starkeep/shared-space-api";
 
 export interface InstallLocalResult {
   appId: string;
@@ -156,9 +156,7 @@ export function installLocal(db: RawDatabase, rawManifest: unknown): InstallLoca
       // Column types travel with the registry row for the same reason they do on
       // the DSQL side: the query parser validates a filter value against its
       // column, and it runs in the data server, which never sees a manifest.
-      const declaredTables = syncable.tables.map((t) => appSyncableTableInfo(t.name, t.columns));
-      const tables = syncable.files ? [...declaredTables, FILE_RECORDS_TABLE_INFO] : declaredTables;
-      upsertAppSyncableNamespace(db, appId, tables, syncable.files);
+      upsertAppSyncableNamespace(db, appId, appSyncableNamespaceTables(syncable), syncable.files);
     },
     alwaysRun,
   );
