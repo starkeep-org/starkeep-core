@@ -35,120 +35,13 @@ For now, we provide an example "Photos" app available in a separate repo, [`star
 
 For the full picture of the parts and how data moves between them, see [`system-design.md`](system-design.md). For the trust boundaries between those parts, see [`data-roles-and-permissions.md`](data-roles-and-permissions.md).
 
-## Prerequisites
+## Getting started
 
-- **Node.js 22+**
-- **pnpm 10.20**
-
----
-
-# Getting started
-
-## Part A — Local install
-
-Everything in Part A runs on your machine. No AWS account is required.
-
-### 1. Install dependencies
-
-```bash
-pnpm install
-```
-
-This also builds the workspace packages the apps depend on (a `postinstall` runs `turbo run build`). To rebuild later without reinstalling, run `pnpm build`.
-
-### 2. Run the admin app
-
-The admin app is the command center, allowing you to install and start other apps and monitor status.
-
-```bash
-pnpm --filter admin-web dev
-```
-
-The admin app is meant to be opened from the same machine (`http://localhost:3000`). It listens on `127.0.0.1` and refuses any request whose `Host` is not a loopback name. To reach it from another device on your LAN, set `STARKEEP_ADMIN_DEV_ORIGINS` (comma-separated hostnames/IPs as the other device sees this host, e.g. `STARKEEP_ADMIN_DEV_ORIGINS=192.168.1.51`) in the repo-root `.env` and restart. admin-web then listens on every interface and accepts those names too. Any device on the network can then reach it, so set the variable only on a network you trust.
-
-### 3. Start the local data-server
-
-The data-server is the on-device hub for all data operations: every app on the machine shares its database, type registry, and (later) sync connection. In the **Local** column of the admin console, find the **Data Server** card and click **Start Data Server**. The data-server listens on port **9820**.
-
-The data-server creates `~/.starkeep/` on first boot (SQLite db, object store, config with a generated `nodeId`). Set `STARKEEP_DIR` to relocate it.
-
-### 4. Add files from a local folder
-
-A local folder is a directory on this machine the data server indexes and keeps current. Every file under a local folder becomes a record other apps can see, and the data server picks up additions and changes as they happen.
-
-Create a folder and drop a few files into it (any mix of images and other types). On the **Data Server** card, click **Add Local Folder** — the button reads **Manage Local Folders** once at least one folder exists. Enter the path in the **Local folders** dialog and click **Add folder**. The card then summarizes progress as a folder count and a file count, for example `1 folder · 12/12 files`.
-
-### 5. Start the Drive app and confirm the files landed
-
-Drive is the built-in, general-purpose storage app and can see and sync every file type. On the **Starkeep Drive** card, click **Start Drive**, then click **Open Drive ↗**. The files you dropped into the local folder appear as records, confirming the data-server indexed them.
-
-### 6. Install the Photos app locally
-
-Apps are discovered from parent directories you register with the admin console. Each subdirectory holding a `starkeep.manifest.json` counts as an app. `starkeep-apps/` is registered by default.
-
-1. If Photos isn't listed, make sure you have a local checkout of the `starkeep-apps` repo. Click **Discover apps** in the header and add the absolute path to `starkeep-apps/` in the **App discovery** dialog.
-2. Run `pnpm install` in the `starkeep-apps` checkout — installed apps run out of their source checkout, so their dependencies must be installed before the app can start.
-3. Click **Install Photos** on the Photos card. Admin reads and validates the app's `starkeep.manifest.json`, prompts you to approve the file-type grants it requests, and registers the app with the data-server.
-
-### 7. Start the Photos app
-
-On the Photos card, click **Start Photos**, then click **Open Photos ↗**. For now, the photos app is an example app primarily meant to showcase Starkeep's system functionality.
-
----
-
-## Part B — Cloud install
-
-The cloud path provisions a data plane in **your own AWS account** and turns on sync, so the same data is available across machines. Local install is not a prerequisite for cloud, but it's the easiest way to confirm the apps work before adding AWS.
-
-The admin console's **Cloud Setup Wizard** drives steps 1 through 5. Reach the wizard from the **Deploy Starkeep Cloud** button under the **Cloud** heading, and afterwards from **Manage deployment…** in the cloud **Data Server** card's menu. Step 6 happens back on the console, in the **Cloud** column.
-
-### 1. Deploy the bootstrap stack
-
-A CloudFormation stack creates the identities, permission boundaries, and supporting resources needed for subsequent steps.
-
-### 2. Enter the bootstrap stack **outputs**
-
-These config values are needed to support sign-in with the user account you're about to create.
-
-### 3. Create a **Cognito user** account
-
-This is the account you'll use to sign in to your Starkeep.
-
-### 4. **Sign in** to your account
-
-You'll need to update the temp password.
-
-### 5. Deploy Starkeep cloud
-
-The cloud data server enables cloud backup and sync, and is the only service in the cloud that touches shared data — every app request runs under the calling app's assumed identity.
-
-With the Cloud Data Server installed, sync starts working automatically. Open the Drive app to see the sync status of files you've added locally.
-
-### 6. Install the Photos example app to the cloud
-
-The Photos cloud app is a simple proof of concept. On the Photos card in the **Cloud** column, click **Install Photos in cloud**, then click **Open Photos ↗** and sign in to see your photos in the cloud. The card is only populated once the `starkeep-apps` checkout is registered, as described in Part A step 6.
-
-### 7. Sync
-
-Once cloud config and Cognito credentials are present, the local data-server syncs automatically in the background — pulling remote changes on an interval and pushing local changes shortly after they occur. Shared records (your photos) flow over Drive's channel and show up on any other device signed into the same account, even one running a different app that holds an image grant. No manual trigger is needed.
-
-### Tearing down
-
-`scripts/teardown-cloud-apps.sh`, `scripts/teardown-cloud-data-server.sh`, and `scripts/teardown-bootstrap.sh` remove the cloud resources (the last covers the non-CloudFormation pieces — state bucket, SSM SecureString, Cognito). `scripts/reset-local-data.sh` wipes `~/.starkeep` for a clean local slate.
-
----
-
-## Running tests
-
-Three tiers:
-
-1. `pnpm test` — unit tests (turbo), fast, run by default
-2. `pnpm test:e2e` — local Playwright e2e (see [`e2e/README.md`](e2e/README.md)); requires `pnpm exec playwright install chromium` once
-3. `pnpm test:aws` — cloud e2e against real AWS; inert unless `STARKEEP_AWS_TESTS=1`. ~15 min, real account + (trivial) cost. See [`e2e-aws/README.md`](e2e-aws/README.md) for the full environment contract.
+[`getting-started.md`](getting-started.md) walks through running Starkeep on your computer, installing the Photos example app, deploying Starkeep to your own AWS account, adding phones, computers and people, removing Starkeep, and running the tests.
 
 ## Security
 
-Starkeep's cloud-side security posture has been assessed in a written threat model: [`SECURITY.md`](SECURITY.md). It covers the cloud data server (broker, DSQL, files bucket, API Gateway), cloud apps and their install/uninstall lifecycle, the Cognito + IAM bootstrap, and the cloud sync path, working from the single-account, single-tenant trust boundary. Each threat carries an honest posture label — Strong, Adequate, Partial, Deferred by design, or Out of scope / accepted.
+Starkeep's cloud-side security posture has been assessed in a written threat model: [`SECURITY.md`](SECURITY.md). It covers the cloud data server (broker, DSQL, files bucket, API Gateway), cloud apps and their install/uninstall lifecycle, the Cognito + IAM bootstrap, sign-in for cloud apps, computers and phones, the isolation between people on one deployment, and the cloud sync path, working from the boundary of the operator's own AWS account. Each threat carries an honest posture label — Strong, Adequate, Partial, Deferred by design, or Out of scope / accepted.
 
 A companion breadth-first evaluation against the OWASP ASVS 5.0 standard — every chapter, high level — lives in [`owasp-asvs-evaluation.md`](owasp-asvs-evaluation.md).
 
