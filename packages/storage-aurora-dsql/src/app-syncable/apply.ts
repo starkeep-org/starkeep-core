@@ -20,6 +20,7 @@ import {
   buildScanSinceForNode,
   collectSince,
   planNodeScans,
+  readNodeWatermarks,
   requireKeyedWhere,
   rowToWireEntry,
   toDigestBuckets,
@@ -239,7 +240,10 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
     // understating only causes a re-ship. That case is settled *here*, by
     // getNodeWatermarks returning {} so no author is planned — which is why
     // nothing below needs a catch for it.
-    const scans = planNodeScans(await this.getNodeWatermarks(appId, table), peerWatermarks);
+    const scans = planNodeScans(
+      await this.getNodeWatermarks(appId, table, peerWatermarks),
+      peerWatermarks,
+    );
     const pkColumns =
       this.namespace.get(appId)?.tables.find((t) => t.name === table)?.pkColumns ?? [];
     try {
@@ -317,16 +321,18 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
    * every author complete" — the exact silent-loss shape `scanSince`'s own catch
    * was written to prevent, reached one frame earlier.
    */
-  async getNodeWatermarks(appId: string, table: string): Promise<Record<string, HLCTimestamp>> {
+  async getNodeWatermarks(
+    appId: string,
+    table: string,
+    floor?: Record<string, HLCTimestamp>,
+  ): Promise<Record<string, HLCTimestamp>> {
     const schemaTable = `app_${appId.replace(/-/g, "_")}.${table}`;
-    let result: { rows: Record<string, unknown>[] };
     try {
-      result = await this.run(
-        this.qb
-          .selectFrom(schemaTable)
-          .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])
-          .groupBy("node_id")
-          .compile(),
+      return await readNodeWatermarks(
+        this.qb,
+        schemaTable,
+        floor,
+        async (q) => (await this.run(q)).rows,
       );
     } catch (err) {
       // The app isn't installed on this instance. Omitting its nodes only
@@ -335,11 +341,6 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
       if (isMissingRelation(err)) return {};
       throw err;
     }
-    const out: Record<string, HLCTimestamp> = {};
-    for (const row of result.rows) {
-      out[row["node_id"] as string] = deserializeHLC(row["max_updated_at"] as string);
-    }
-    return out;
   }
 
   /**

@@ -163,9 +163,11 @@ export {
 } from "./database/digest-queries.js";
 
 export {
+  buildNodeWatermarks,
   buildScanSinceForNode,
   collectSince,
   planNodeScans,
+  readNodeWatermarks,
   type NodeScan,
   type SinceDb,
   type SincePage,

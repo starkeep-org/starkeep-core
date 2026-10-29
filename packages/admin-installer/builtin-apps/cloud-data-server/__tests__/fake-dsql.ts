@@ -144,8 +144,14 @@ export function fakeDsqlWithGrants(
       // Drive's bytes watermark. None by default, so every key takes a HEAD,
       // which the S3 mock answers.
       .otherwise(/from "app_starkeep_drive"\."_starkeep_byte_coverage"/, [])
+      // A watermark read relative to the requester's watermarks. No row makes
+      // the read fall back to the grouped one, which is what tests script.
+      .otherwise(FLOORED_WATERMARKS, [])
   );
 }
+
+/** The one-statement watermark read a floor turns the grouped one into. */
+export const FLOORED_WATERMARKS = /^select \(select max\("updated_at"\) as "m" from /;
 
 /** The page-wide stand-in lookup behind every listing's size summary. */
 export const STAND_INS_OF_PAGE =

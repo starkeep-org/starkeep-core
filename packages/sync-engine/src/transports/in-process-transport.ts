@@ -207,6 +207,62 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
   };
 
   /**
+   * The channel's coverage watermark: the union of every table's per-author
+   * maximum, and the scopes that would not read. With a `floor`, each table may
+   * omit authors below it; see the caller in `exchange` for when that is safe.
+   */
+  async function readCoverage(
+    floor: Watermarks | undefined,
+  ): Promise<{ watermarks: Watermarks; unreadable: string[] }> {
+    const watermarks: Watermarks = {};
+    const unreadable: string[] = [];
+    if (syncSharedRecords) {
+      // A union over BOTH tables on this channel. Missing the label half
+      // would let the watermark overstate coverage — the requester would
+      // stop re-shipping labels the responder never received.
+      //
+      // Caught, where it used to be bare. The identical fault threw out of the
+      // exchange here and was swallowed four lines below, so one of the two
+      // was wrong by inspection; now both report through the same field.
+      try {
+        for (const hlc of Object.values(await databaseAdapter.getNodeWatermarks(floor))) {
+          advanceWatermark(watermarks, hlc);
+        }
+        for (const hlc of Object.values(await databaseAdapter.getLabelNodeWatermarks(floor))) {
+          advanceWatermark(watermarks, hlc);
+        }
+      } catch (err) {
+        console.warn(
+          `[sync] in-process transport getNodeWatermarks failed for shared records: ${(err as Error).message}`,
+        );
+        unreadable.push(SHARED_DIGEST_SCOPE);
+      }
+    }
+    if (appSyncableSource && typeof scanCapableApplier?.getNodeWatermarks === "function") {
+      for (const ns of appSyncableSource.namespaces.list()) {
+        for (const tableInfo of ns.tables) {
+          try {
+            const tableWatermarks = await scanCapableApplier.getNodeWatermarks(
+              ns.appId,
+              tableInfo.name,
+              floor,
+            );
+            for (const hlc of Object.values(tableWatermarks)) {
+              advanceWatermark(watermarks, hlc);
+            }
+          } catch (err) {
+            console.warn(
+              `[sync] in-process transport getNodeWatermarks failed for ${ns.appId}.${tableInfo.name}: ${(err as Error).message}`,
+            );
+            unreadable.push(`${ns.appId}.${tableInfo.name}`);
+          }
+        }
+      }
+    }
+    return { watermarks, unreadable };
+  }
+
+  /**
    * Advance this side's bytes watermark over the files now in its storage.
    *
    * Starts from the stored value, lowered to the rows watermark wherever rows
@@ -686,53 +742,20 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
       //    direction still works and this side still applied what it was sent.
       //    Refusing would convert a degraded report into a total sync outage for
       //    that app. Report the degradation; do not weaponize it.
-      const responderWatermarks: Watermarks = {};
-      const unreadableCoverage: string[] = [];
-      if (syncSharedRecords) {
-        // A union over BOTH tables on this channel. Missing the label half
-        // would let the watermark overstate coverage — the requester would
-        // stop re-shipping labels the responder never received.
-        //
-        // Caught, where it used to be bare. The identical fault threw out of the
-        // exchange here and was swallowed four lines below, so one of the two
-        // was wrong by inspection; now both report through the same field.
-        try {
-          for (const hlc of Object.values(await databaseAdapter.getNodeWatermarks())) {
-            advanceWatermark(responderWatermarks, hlc);
-          }
-          for (const hlc of Object.values(await databaseAdapter.getLabelNodeWatermarks())) {
-            advanceWatermark(responderWatermarks, hlc);
-          }
-        } catch (err) {
-          console.warn(
-            `[sync] in-process transport getNodeWatermarks failed for shared records: ${(err as Error).message}`,
-          );
-          unreadableCoverage.push(SHARED_DIGEST_SCOPE);
-        }
+      //
+      //    Read relative to the requester's watermarks first. Each table may
+      //    then omit an author whose maximum sits below the requester's
+      //    watermark, which is free to omit only while some other table on the
+      //    channel holds that author at or above it: the union's value comes
+      //    from there. When no table does, this side is behind on that author
+      //    and the union cannot say by how much, so it is read again whole.
+      //    An idle tick never takes the second read; see `readNodeWatermarks`.
+      let coverage = await readCoverage(request.watermarks);
+      if (!coversFloor(coverage.watermarks, request.watermarks)) {
+        coverage = await readCoverage(undefined);
       }
-      if (appSyncableSource) {
-        const scanCapable = appSyncableSource.applier as ScanCapableApplier;
-        if (typeof scanCapable.getNodeWatermarks === "function") {
-          for (const ns of appSyncableSource.namespaces.list()) {
-            for (const tableInfo of ns.tables) {
-              try {
-                const tableWatermarks = await scanCapable.getNodeWatermarks(
-                  ns.appId,
-                  tableInfo.name,
-                );
-                for (const hlc of Object.values(tableWatermarks)) {
-                  advanceWatermark(responderWatermarks, hlc);
-                }
-              } catch (err) {
-                console.warn(
-                  `[sync] in-process transport getNodeWatermarks failed for ${ns.appId}.${tableInfo.name}: ${(err as Error).message}`,
-                );
-                unreadableCoverage.push(`${ns.appId}.${tableInfo.name}`);
-              }
-            }
-          }
-        }
-      }
+      const responderWatermarks = coverage.watermarks;
+      const unreadableCoverage = coverage.unreadable;
 
       // 5b. The bytes watermark, over the same post-apply state. Never above
       //     the rows watermark just computed. Computed even when that map is
@@ -855,6 +878,18 @@ const BYTE_WALK_MAX_CHECKS = 256;
 
 /** Storage checks in flight at once during a walk. */
 const BYTE_WALK_CONCURRENCY = 16;
+
+/**
+ * Whether a union read with `floor` is exact: every author the floor names came
+ * back at or above it. A table omits only authors below the floor, so where the
+ * union holds an author at or above it, the omitted tables held less.
+ */
+function coversFloor(watermarks: Watermarks, floor: Watermarks): boolean {
+  return Object.entries(floor).every(([nodeId, hlc]) => {
+    const held = watermarks[nodeId];
+    return held !== undefined && compareHLC(held, hlc) >= 0;
+  });
+}
 
 /** A bytes-watermark store held in memory. See `byteCoverage`. */
 export function createMemoryByteCoverageStore(initial: Watermarks = {}): ByteCoverageStore {
