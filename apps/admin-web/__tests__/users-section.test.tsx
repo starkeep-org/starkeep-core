@@ -93,7 +93,6 @@ afterEach(() => {
 async function open() {
   const user = userEvent.setup();
   render(<UsersSection />);
-  await user.click(screen.getByRole("button", { name: /Users/ }));
   return user;
 }
 

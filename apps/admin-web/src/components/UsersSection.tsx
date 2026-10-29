@@ -143,50 +143,61 @@ export function UsersSection() {
     );
 
   return (
-    <Collapsible className="rounded-lg border p-4">
-      <CollapsibleTrigger className="group flex w-full items-center gap-2 text-left">
-        <h3 className="font-medium">Users</h3>
-        <ChevronDownIcon className="ml-auto size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
+    <Collapsible defaultOpen className="flex flex-col gap-4">
+      <CollapsibleTrigger className="group flex items-center gap-2 self-start text-left">
+        <h2 className="text-lg font-medium">Cloud Users</h2>
+        <ChevronDownIcon className="size-4 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
       </CollapsibleTrigger>
 
-      <CollapsibleContent className="space-y-4 pt-4">
-        <p className="text-muted-foreground text-sm">
-          An admin manages users, cloud apps and settings. A user with data has a library that
-          syncs. An account can be either or both.
-        </p>
-
-        <div className="space-y-2">
-          <div className="flex gap-2">
+      <CollapsibleContent className="space-y-4">
+        <form
+          className="space-y-3 rounded-lg border bg-card p-4"
+          aria-label="Add a user"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (email.trim() !== "") void create();
+          }}
+        >
+          <h3 className="text-sm font-medium">Add a user</h3>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
             <Input
+              className="min-w-56 flex-1"
               placeholder="Email address"
               value={email}
               aria-label="New user's email"
               onChange={(e) => setEmail(e.target.value)}
               disabled={busy}
             />
-            <Button onClick={() => void create()} disabled={busy || email.trim() === ""}>
+            <div
+              className="flex items-center gap-3 text-sm"
+              role="group"
+              aria-label="New user's roles"
+            >
+              <span className="text-muted-foreground">Roles:</span>
+              <label className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={newAdmin}
+                  onChange={(e) => setNewAdmin(e.target.checked)}
+                  disabled={busy}
+                />
+                Admin
+              </label>
+              <label className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  checked={newData}
+                  onChange={(e) => setNewData(e.target.checked)}
+                  disabled={busy}
+                />
+                Data
+              </label>
+            </div>
+            <Button type="submit" disabled={busy || email.trim() === ""}>
               Add user
             </Button>
           </div>
-          <div className="flex gap-4 text-sm">
-            <label className="flex items-center gap-1">
-              <input
-                type="checkbox"
-                checked={newAdmin}
-                onChange={(e) => setNewAdmin(e.target.checked)}
-              />{" "}
-              Admin
-            </label>
-            <label className="flex items-center gap-1">
-              <input
-                type="checkbox"
-                checked={newData}
-                onChange={(e) => setNewData(e.target.checked)}
-              />{" "}
-              Has data
-            </label>
-          </div>
-        </div>
+        </form>
 
         {message && (
           <p
@@ -205,7 +216,7 @@ export function UsersSection() {
             <AlertDescription>{list.message}</AlertDescription>
           </Alert>
         ) : (
-          <ul className="divide-y rounded-md border" aria-label="Users">
+          <ul className="divide-y rounded-lg border bg-card" aria-label="Users">
             {list.users.map((user) => (
               <li key={user.username} className="flex flex-wrap items-center gap-3 p-3">
                 <div className="min-w-0 flex-1">
@@ -237,7 +248,7 @@ export function UsersSection() {
                     aria-label={`${user.email ?? user.username} has data`}
                     onChange={(e) => void setGroup(user, "starkeep-users", e.target.checked)}
                   />
-                  Has data
+                  Data
                 </label>
                 <Button
                   size="sm"
@@ -267,11 +278,6 @@ export function UsersSection() {
             ))}
           </ul>
         )}
-
-        <p className="text-muted-foreground text-xs">
-          Each user signs in on their own devices to sync. A user who forgets their password gets a
-          new temporary one here.
-        </p>
       </CollapsibleContent>
     </Collapsible>
   );

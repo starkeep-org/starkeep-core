@@ -71,7 +71,7 @@ describe("a signed-out machine", () => {
 
     expect(
       await screen.findByText(
-        /This machine syncs with https:\/\/d1.cloudfront.net as sam@example.com/,
+        /Local apps sync with https:\/\/d1.cloudfront.net as sam@example.com/,
       ),
     ).toBeTruthy();
     expect(calls.find((c) => c.url === "/api/this-machine/sign-in")!.body).toEqual({
@@ -100,7 +100,7 @@ describe("a signed-out machine", () => {
     await user.type(screen.getByLabelText("Confirm new password"), "Chosen-password-2");
     await user.click(screen.getByRole("button", { name: "Set password and sign in" }));
 
-    expect(await screen.findByText(/This machine syncs with/)).toBeTruthy();
+    expect(await screen.findByText(/Local apps sync with/)).toBeTruthy();
     const sent = calls.filter((c) => c.url === "/api/this-machine/sign-in").map((c) => c.body);
     expect(sent).toEqual([
       { email: "sam@example.com", password: "Temp-1" },
@@ -172,35 +172,17 @@ describe("a machine with no cloud", () => {
   });
 });
 
-describe("the address other devices sign in with", () => {
+describe("the administering machine", () => {
   const GATEWAY = "https://abc123.execute-api.us-east-2.amazonaws.com";
 
-  it("names the cloud's public address on the administering machine, not the gateway it syncs through", async () => {
+  it("names this cloud rather than the gateway it syncs through, with a sign-out link", async () => {
     machine = { ...SIGNED_IN, cloudUrl: GATEWAY };
-    render(<ThisMachineSection deviceAddress="https://d1.cloudfront.net" />);
+    render(<ThisMachineSection administering />);
     expect(
-      await screen.findByText(/This machine syncs with this cloud as sam@example.com/),
+      await screen.findByText(/Local apps sync with this cloud as sam@example.com/),
     ).toBeTruthy();
-    expect(screen.getByText("https://d1.cloudfront.net")).toBeTruthy();
     expect(screen.queryByText(new RegExp(GATEWAY))).toBeNull();
-  });
-
-  it("copies the address", async () => {
-    machine = SIGNED_IN;
-    const user = userEvent.setup();
-    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
-    render(<ThisMachineSection deviceAddress="https://d1.cloudfront.net" />);
-    await user.click(await screen.findByRole("button", { name: "Copy" }));
-    expect(writeText).toHaveBeenCalledWith("https://d1.cloudfront.net");
-    expect(await screen.findByRole("button", { name: "Copied" })).toBeTruthy();
-  });
-
-  it("is not offered by a machine that joined someone else's cloud", async () => {
-    machine = SIGNED_IN;
-    render(<ThisMachineSection />);
-    expect(
-      await screen.findByText(/This machine syncs with https:\/\/d1.cloudfront.net/),
-    ).toBeTruthy();
-    expect(screen.queryByLabelText("Address for other devices")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "This machine" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeTruthy();
   });
 });
