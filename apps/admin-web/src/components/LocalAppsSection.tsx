@@ -3,6 +3,8 @@ import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { ChevronDownIcon } from "lucide-react";
 import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
 import { ACTION_OCCASIONAL, ACTION_OPEN, ACTION_START } from "@/lib/action-colors";
 import type { DaemonStatus, InstallStep, LocalAppEntry, ManifestSummary } from "@/lib/app-types";
@@ -504,6 +506,20 @@ function InstallStepsDialog({ appId, onClose }: { appId: string | null; onClose:
   );
 }
 
+/** A grant's file categories, named in the plural for the install prompt. */
+const CATEGORY_NAMES: Record<string, string> = {
+  image: "Images",
+  video: "Videos",
+  audio: "Audio",
+  document: "Documents",
+  other: "Other files",
+};
+
+function categoriesOf(types: readonly string[]): string {
+  const prefixes = [...new Set(types.map((t) => t.split("/")[0] ?? t))];
+  return prefixes.map((p) => CATEGORY_NAMES[p] ?? p).join(", ");
+}
+
 function ConsentModal({
   entry,
   onApprove,
@@ -533,12 +549,10 @@ function ConsentModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="bg-background rounded-lg border shadow-lg max-w-lg w-full flex flex-col gap-4 p-5">
+      <div className="bg-background rounded-lg border shadow-lg max-w-lg w-full max-h-full overflow-y-auto flex flex-col gap-4 p-5">
         <h3 className="text-lg font-semibold">Install {entry.manifest.name ?? entry.appId}?</h3>
         <p className="text-sm text-muted-foreground">
-          This app is requesting the following access to your shared data. Other apps with grants on
-          the same file types will see records this app creates; records persist if the app is
-          uninstalled.
+          {entry.manifest.name ?? entry.appId} asks for access to these files.
         </p>
 
         {allAccess && (
@@ -552,7 +566,7 @@ function ConsentModal({
         {grants.length === 0 ? (
           !allAccess && <p className="text-sm">No file-type grants requested.</p>
         ) : (
-          <ul className="flex flex-col gap-3">
+          <ul className="flex flex-col gap-2">
             {grants.map((g, i) => {
               // Per design: any access (read or readwrite) implicitly grants
               // SELECT on the per-category metadata table. metadataWrite adds
@@ -560,18 +574,28 @@ function ConsentModal({
               const dataPermissions = g.access === "readwrite" ? "read + write" : "read";
               const metadataPermissions = g.metadataWrite ? "read + write" : "read";
               return (
-                <li key={i} className="border rounded-md p-3 flex flex-col gap-1">
-                  <div className="flex items-center gap-2 text-sm flex-wrap">
-                    <span className="font-mono">{g.types.join(", ")}</span>
-                    <Badge variant="secondary" className="text-xs">
-                      records: {dataPermissions}
-                    </Badge>
-                    <Badge variant="secondary" className="text-xs">
-                      metadata: {metadataPermissions}
-                    </Badge>
-                  </div>
-                  <p className="text-xs text-muted-foreground">{g.rationale}</p>
-                </li>
+                <Collapsible key={i} asChild>
+                  <li className="border rounded-md p-3 flex flex-col gap-2">
+                    <div className="flex items-center gap-2 text-sm flex-wrap">
+                      <span className="font-medium">{categoriesOf(g.types)}</span>
+                      <Badge variant="secondary" className="text-xs">
+                        files: {dataPermissions}
+                      </Badge>
+                      <Badge variant="secondary" className="text-xs">
+                        metadata: {metadataPermissions}
+                      </Badge>
+                      <CollapsibleTrigger className="group ml-auto flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
+                        {g.types.length} {g.types.length === 1 ? "type" : "types"}
+                        <ChevronDownIcon className="size-3.5 transition-transform group-data-[state=open]:rotate-180" />
+                      </CollapsibleTrigger>
+                    </div>
+                    <CollapsibleContent>
+                      <p className="font-mono text-xs text-muted-foreground">
+                        {g.types.map((t) => t.split("/")[1] ?? t).join(", ")}
+                      </p>
+                    </CollapsibleContent>
+                  </li>
+                </Collapsible>
               );
             })}
           </ul>
@@ -581,9 +605,8 @@ function ConsentModal({
           <div className="border-t pt-4 flex flex-col gap-3">
             <h4 className="text-sm font-medium">Quality kept when originals archive</h4>
             <p className="text-xs text-muted-foreground">
-              Choose this before the app adds anything. An original larger than this archives to
-              deep storage, and a copy at this size stays instantly available. The defaults suit
-              most libraries, and you can change this later on the Storage page.
+              Larger originals archive to deep storage, and a copy at this size stays available. You
+              can change this later on the Storage page.
             </p>
             <LibraryStandardsFields
               state={quality.state}
