@@ -11,11 +11,11 @@
  * A machine that does not run the cloud joins one first, by the address its
  * admin sent.
  *
- * On the machine that administers the cloud, the section also names the address
- * phones and other computers sign in with. This machine reaches the cloud through
- * the API gateway directly, and the CloudFront address fronts that same gateway,
- * so showing the gateway's address here left the person choosing between two
- * addresses with nothing to say which one a phone needs.
+ * On the machine that administers the cloud, the sign-in sits as a line under
+ * the Local heading rather than in a card of its own, because signing in is
+ * how the local apps start to sync. This machine reaches that cloud through the
+ * API gateway directly, so the line says "this cloud" instead of the gateway's
+ * address, which is not the address other devices sign in with.
  */
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
@@ -47,10 +47,10 @@ async function post(path: string, body?: unknown): Promise<Record<string, unknow
 }
 
 export function ThisMachineSection({
-  deviceAddress = null,
+  administering = false,
 }: {
-  /** The address other devices sign in with, when this machine administers the cloud. */
-  deviceAddress?: string | null;
+  /** This machine administers the cloud, and the section sits under the Local heading. */
+  administering?: boolean;
 } = {}) {
   const [load, setLoad] = useState<Load>({ kind: "loading" });
   const [cloudUrl, setCloudUrl] = useState("");
@@ -62,7 +62,6 @@ export function ThisMachineSection({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [restarting, setRestarting] = useState(false);
-  const [copied, setCopied] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -140,15 +139,27 @@ export function ThisMachineSection({
       await refresh();
     });
 
-  const copyAddress = (address: string) => {
-    void navigator.clipboard.writeText(address).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2_000);
-    });
-  };
+  const signOutLink = (
+    <Button
+      variant="link"
+      size="sm"
+      className="h-auto p-0"
+      onClick={() => void signOut()}
+      disabled={busy}
+    >
+      Sign out
+    </Button>
+  );
 
   if (load.kind === "loading") return null;
   if (load.kind === "offline") {
+    if (administering) {
+      return (
+        <p className="text-sm text-muted-foreground">
+          Start the local data server to sign this machine in.
+        </p>
+      );
+    }
     return (
       <section className="rounded-lg border p-4 space-y-2" aria-label="This machine">
         <h3 className="font-medium">This machine</h3>
@@ -161,11 +172,14 @@ export function ThisMachineSection({
   const v = load.view;
   // On the administering machine, "this cloud" names it; a joined machine names
   // the address it joined with, which is the one its admin sent.
-  const cloudName = deviceAddress ? "this cloud" : v.cloudUrl;
+  const cloudName = administering ? "this cloud" : v.cloudUrl;
 
   return (
-    <section className="rounded-lg border p-4 space-y-3" aria-label="This machine">
-      <h3 className="font-medium">This machine</h3>
+    <section
+      className={administering ? "space-y-3" : "rounded-lg border p-4 space-y-3"}
+      aria-label="This machine"
+    >
+      {!administering && <h3 className="font-medium">This machine</h3>}
 
       {restarting ? (
         <p className="text-sm text-muted-foreground" role="status">
@@ -195,27 +209,23 @@ export function ThisMachineSection({
             <AlertTitle>This machine does not sync</AlertTitle>
             <AlertDescription>{v.message}</AlertDescription>
           </Alert>
-          <Button variant="outline" onClick={() => void signOut()} disabled={busy}>
-            Sign out
-          </Button>
+          {signOutLink}
         </>
       ) : v.state === "signed-in" || v.state === "connecting" ? (
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="text-sm" role="status">
+        <p className="text-sm">
+          <span role="status">
             {v.state === "signed-in"
-              ? `This machine syncs with ${cloudName} as ${v.email ?? "you"}.`
+              ? `Local apps sync with ${cloudName} as ${v.email ?? "you"}.`
               : `Signed in as ${v.email ?? "you"}. Connecting to ${cloudName}…`}
-          </p>
-          <Button variant="outline" size="sm" onClick={() => void signOut()} disabled={busy}>
-            Sign out
-          </Button>
-        </div>
+          </span>{" "}
+          {signOutLink}
+        </p>
       ) : (
         <form className="space-y-2" onSubmit={signIn} aria-label="Sign in to sync">
           <p className="text-sm text-muted-foreground">
             {needsNewPassword
               ? "This is the account's first sign-in. Choose a new password to replace the temporary one."
-              : `Sign in with your Starkeep account to sync this machine with ${cloudName}.`}
+              : `Sign in with your Starkeep account to sync local apps with ${cloudName}.`}
           </p>
           <Input
             type="email"
@@ -273,19 +283,6 @@ export function ThisMachineSection({
                 : "Sign in to sync"}
           </Button>
         </form>
-      )}
-
-      {deviceAddress && !restarting && v.cloudUrl !== null && (
-        <div
-          className="flex flex-wrap items-center gap-2 text-sm"
-          aria-label="Address for other devices"
-        >
-          <span className="text-muted-foreground">Phones and other computers sign in with</span>
-          <span className="font-mono break-all">{deviceAddress}</span>
-          <Button variant="outline" size="sm" onClick={() => copyAddress(deviceAddress)}>
-            {copied ? "Copied" : "Copy"}
-          </Button>
-        </div>
       )}
 
       {error && (

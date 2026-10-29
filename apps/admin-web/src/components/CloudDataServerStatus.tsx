@@ -154,16 +154,13 @@ export function CloudDataServerStatus({
         </>
       }
       description={
-        !configured ? (
-          "Set up cloud to sync this machine's data beyond it."
-        ) : state.status === "offline" ? (
-          `Could not reach the cloud data server: ${state.reason}`
-        ) : (
-          <>
-            <span className="block">Syncs data beyond this machine.</span>
-            {signedIn && cognitoSession?.userEmail}
-          </>
-        )
+        !configured
+          ? "Set up cloud to sync this machine's data beyond it."
+          : state.status === "offline"
+            ? `Could not reach the cloud data server: ${state.reason}`
+            : signedIn
+              ? cognitoSession?.userEmail
+              : undefined
       }
       primary={primary}
       actions={actions}

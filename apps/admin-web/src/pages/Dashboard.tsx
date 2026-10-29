@@ -34,6 +34,7 @@ import { LocalAppsSection } from "../components/LocalAppsSection";
 import { CloudAppsSection } from "../components/CloudAppsSection";
 import { ThisMachineSection } from "../components/ThisMachineSection";
 import { UsersSection } from "../components/UsersSection";
+import { CloudAddress } from "../components/CloudAddress";
 import { LocalFoldersModal, type Watch } from "../components/LocalFoldersModal";
 import { CommandOutputModal } from "../components/CommandOutputModal";
 import { targetsOf, type LocalAppEntry } from "../lib/app-types";
@@ -339,7 +340,7 @@ export function DashboardPage() {
         if (mtd === null) {
           setCosts("no-data");
         } else {
-          setCosts(mtd);
+          setCosts([...mtd].sort((a, b) => b.amount - a.amount));
           setCostProjection(projectFullMonth(mtd));
         }
       } catch {
@@ -517,6 +518,10 @@ export function DashboardPage() {
         <div className="flex flex-col gap-4">
           <h2 className="text-lg font-medium">Local</h2>
 
+          {/* On the machine that administers the cloud, signing in is how local
+              apps start to sync, so the sign-in sits with them. */}
+          {cloudAdministered && <ThisMachineSection administering />}
+
           <LocalAppsSection
             apps={localApps}
             refresh={refreshApps}
@@ -633,6 +638,10 @@ export function DashboardPage() {
             <ThisMachineSection />
           ) : (
             <>
+              <CloudAddress
+                address={cloudConfig?.publicBaseUrl ?? cloudConfig?.apiGatewayUrl ?? null}
+              />
+
               <CloudAppsSection
                 apps={cloudApps}
                 leading={
@@ -645,75 +654,73 @@ export function DashboardPage() {
                   />
                 }
               />
-
-              <ThisMachineSection
-                deviceAddress={cloudConfig?.publicBaseUrl ?? cloudConfig?.apiGatewayUrl ?? null}
-              />
-
-              {cognitoSession && <UsersSection />}
-
-              {/* The cloud Data Server card's View Costs button targets this. */}
-              <div id="costs" className="flex flex-col gap-2 scroll-mt-4">
-                <h3 className="font-medium">Costs</h3>
-                {/* The report bills the whole AWS account, not the stack, so a
-                    number here can come from something Starkeep never created. */}
-                <p className="text-xs text-muted-foreground">
-                  Includes both Starkeep and non-Starkeep service costs.
-                </p>
-
-                <div className="rounded-lg border p-4">
-                  {costs === "loading" ? (
-                    <div className="flex flex-col gap-2">
-                      <Skeleton className="h-4 w-full" />
-                      <Skeleton className="h-4 w-3/4" />
-                    </div>
-                  ) : costs === "not-signed-in" ? (
-                    <p className="text-sm text-muted-foreground">Sign in to view cost data.</p>
-                  ) : costs === "error" ? (
-                    <p className="text-sm text-muted-foreground">Could not load cost data.</p>
-                  ) : costs === "no-data" ? (
-                    <p className="text-sm text-muted-foreground">
-                      Cost report configured — data arrives within 24 hours.
-                    </p>
-                  ) : (
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>Service</TableHead>
-                          <TableHead className="text-right">Month-to-date</TableHead>
-                          <TableHead className="text-right">Projected</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {costs.map((row) => {
-                          const proj = costProjection?.find((p) => p.service === row.service);
-                          return (
-                            <TableRow key={row.service}>
-                              <TableCell>{row.service}</TableCell>
-                              <TableCell className="text-right">${row.amount.toFixed(2)}</TableCell>
-                              <TableCell className="text-right text-muted-foreground">
-                                ${(proj?.amount ?? 0).toFixed(2)}
-                              </TableCell>
-                            </TableRow>
-                          );
-                        })}
-                        <TableRow className="font-medium">
-                          <TableCell>Total</TableCell>
-                          <TableCell className="text-right">
-                            ${costs.reduce((s, r) => s + r.amount, 0).toFixed(2)}
-                          </TableCell>
-                          <TableCell className="text-right text-muted-foreground">
-                            ${(costProjection ?? []).reduce((s, r) => s + r.amount, 0).toFixed(2)}
-                          </TableCell>
-                        </TableRow>
-                      </TableBody>
-                    </Table>
-                  )}
-                </div>
-              </div>
             </>
           )}
         </div>
+
+        {cloudAdministered && cognitoSession && <UsersSection />}
+
+        {/* The cloud Data Server card's View Costs button targets this. */}
+        {cloudAdministered && (
+          <div id="costs" className="flex flex-col gap-2 scroll-mt-4">
+            <h2 className="text-lg font-medium">Costs</h2>
+            {/* The report bills the whole AWS account, not the stack, so a
+                number here can come from something Starkeep never created. */}
+            <p className="text-xs text-muted-foreground">
+              Includes both Starkeep and non-Starkeep service costs.
+            </p>
+
+            <div className="rounded-lg border bg-card p-4">
+              {costs === "loading" ? (
+                <div className="flex flex-col gap-2">
+                  <Skeleton className="h-4 w-full" />
+                  <Skeleton className="h-4 w-3/4" />
+                </div>
+              ) : costs === "not-signed-in" ? (
+                <p className="text-sm text-muted-foreground">Sign in to view cost data.</p>
+              ) : costs === "error" ? (
+                <p className="text-sm text-muted-foreground">Could not load cost data.</p>
+              ) : costs === "no-data" ? (
+                <p className="text-sm text-muted-foreground">
+                  Cost report configured — data arrives within 24 hours.
+                </p>
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Service</TableHead>
+                      <TableHead className="text-right">Month-to-date</TableHead>
+                      <TableHead className="text-right">Projected</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {costs.map((row) => {
+                      const proj = costProjection?.find((p) => p.service === row.service);
+                      return (
+                        <TableRow key={row.service}>
+                          <TableCell>{row.service}</TableCell>
+                          <TableCell className="text-right">${row.amount.toFixed(2)}</TableCell>
+                          <TableCell className="text-right text-muted-foreground">
+                            ${(proj?.amount ?? 0).toFixed(2)}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                    <TableRow className="font-medium">
+                      <TableCell>Total</TableCell>
+                      <TableCell className="text-right">
+                        ${costs.reduce((s, r) => s + r.amount, 0).toFixed(2)}
+                      </TableCell>
+                      <TableCell className="text-right text-muted-foreground">
+                        ${(costProjection ?? []).reduce((s, r) => s + r.amount, 0).toFixed(2)}
+                      </TableCell>
+                    </TableRow>
+                  </TableBody>
+                </Table>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Sign-in dialog */}
