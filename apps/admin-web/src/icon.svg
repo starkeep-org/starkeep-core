@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Starkeep Admin">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4098ff"/>
+      <stop offset="0.5" stop-color="#6366f1"/>
+      <stop offset="1" stop-color="#b23bff"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(32 32) rotate(43) scale(0.94) translate(-33.59 -30.41)">
+    <path d="M 17.50 22.20 L 18.61 1.00 L 36.42 12.56 L 56.93 7.07 L 51.44 27.58 L 63.00 45.39 L 41.80 46.50 L 28.43 63.00 L 20.82 43.18 L 1.00 35.57 Z" fill="url(#g)"/>
+    <path d="M 51.44 27.58 L 41.80 46.50 L 20.82 43.18 L 17.50 22.20 L 36.42 12.56 Z" fill="none" stroke="#000" stroke-width="1.4" stroke-linejoin="round"/>
+  </g>
+</svg>
