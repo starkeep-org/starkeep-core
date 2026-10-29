@@ -883,6 +883,44 @@ function Step4SignIn({
 // Step 5 — Deploy
 // ---------------------------------------------------------------------------
 
+/** The deploy's two passes, in order. */
+type DeployPass = "cloud-data-server" | "drive";
+
+/**
+ * The pass a deploy in this tab had reached, kept across a page reload. In
+ * development the cloud data server pass restarts admin-web, and the page
+ * reloads with it. A pass can end during the reload, which the server's
+ * running state alone would miss, and the deploy would then stop short of its
+ * Drive pass.
+ */
+const DEPLOY_MARKER = "starkeep.cloud-deploy";
+
+/** A marker older than this belongs to a deploy long over. */
+const DEPLOY_MARKER_MAX_AGE_MS = 60 * 60_000;
+
+function readDeployMarker(): DeployPass | null {
+  try {
+    const raw = sessionStorage.getItem(DEPLOY_MARKER);
+    if (!raw) return null;
+    const marker = JSON.parse(raw) as { pass?: DeployPass; at?: number };
+    if (!marker.pass || !marker.at || Date.now() - marker.at > DEPLOY_MARKER_MAX_AGE_MS) {
+      return null;
+    }
+    return marker.pass;
+  } catch {
+    return null;
+  }
+}
+
+function writeDeployMarker(pass: DeployPass | null): void {
+  try {
+    if (pass) sessionStorage.setItem(DEPLOY_MARKER, JSON.stringify({ pass, at: Date.now() }));
+    else sessionStorage.removeItem(DEPLOY_MARKER);
+  } catch {
+    // Without storage, a reload mid-deploy falls back to the server's running state.
+  }
+}
+
 interface DeployOutputs {
   s3Bucket: string;
   auroraEndpoint: string;
@@ -926,7 +964,15 @@ function Step5Deploy({
   const alreadyDeployed = !!(cloudConfig?.s3Bucket && cloudConfig?.auroraEndpoint);
   const showStatusCard = status !== "running" && (deployResult !== null || alreadyDeployed);
 
-  function handleInstall() {
+  const handleInstall = () => deploy(null);
+
+  /**
+   * Run the deploy's passes. `resumeAt` follows a deploy already under way,
+   * after a reload: the cloud data server pass reattaches, which replays its
+   * output and reports its outputs even when it has ended, and the Drive pass
+   * reattaches only when the deploy had reached it.
+   */
+  function deploy(resumeAt: DeployPass | null) {
     setInstalling(true);
     setLines([]);
     setStatus("running");
@@ -939,7 +985,11 @@ function Step5Deploy({
     // (cloud-data-server returns its outputs; Drive returns `{}`).
     type PassResult = InstallOutcome;
 
-    async function runPass(url: string, creds: STSCredentials): Promise<PassResult> {
+    async function runPass(
+      url: string,
+      creds: STSCredentials,
+      reattach: boolean,
+    ): Promise<PassResult> {
       // The installer runs detached on the server, so a dropped stream (an
       // admin-web restart, which the cloud-data-server pass itself causes in
       // development) reconnects to the run instead of failing the pass.
@@ -949,6 +999,7 @@ function Step5Deploy({
           accessKeyId: creds.accessKeyId,
           secretAccessKey: creds.secretAccessKey,
           sessionToken: creds.sessionToken,
+          ...(reattach ? { reattach: true } : {}),
         },
         { onLine: (line) => setLines((l) => [...l, line]), isAborted: () => aborted },
       );
@@ -981,7 +1032,8 @@ function Step5Deploy({
           return;
         }
         setLines((l) => [...l, "── Deploying cloud-data-server ──"]);
-        const r1 = await runPass("/api/cloud-data-server/install", creds1);
+        writeDeployMarker("cloud-data-server");
+        const r1 = await runPass("/api/cloud-data-server/install", creds1, resumeAt !== null);
         if (aborted) return;
         if (r1.kind !== "done") {
           failPass(r1);
@@ -1015,7 +1067,8 @@ function Step5Deploy({
           return;
         }
         setLines((l) => [...l, "", "── Deploying Starkeep Drive ──"]);
-        const r2 = await runPass("/api/drive/install", creds2);
+        writeDeployMarker("drive");
+        const r2 = await runPass("/api/drive/install", creds2, resumeAt === "drive");
         if (aborted) return;
         if (r2.kind !== "done") {
           failPass(r2);
@@ -1067,6 +1120,7 @@ function Step5Deploy({
           setStatus("failure");
         }
       } finally {
+        writeDeployMarker(null);
         setInstalling(false);
       }
     }
@@ -1076,6 +1130,28 @@ function Step5Deploy({
       aborted = true;
     };
   }
+
+  // A deploy under way when the page loaded shows its progress at once. The
+  // Redeploy button would otherwise be the only way back to the output, and
+  // pressing it after the deploy ended starts another one.
+  const resumeChecked = useRef(false);
+  useEffect(() => {
+    if (resumeChecked.current) return;
+    resumeChecked.current = true;
+    void (async () => {
+      let running: DeployPass | null = null;
+      try {
+        const resp = await fetch("/api/cloud-deploy/status", { cache: "no-store" });
+        const state = (await resp.json()) as { cloudDataServer?: string; drive?: string };
+        if (state.drive === "running") running = "drive";
+        else if (state.cloudDataServer === "running") running = "cloud-data-server";
+      } catch {
+        // admin-web not answering: fall back to this tab's own marker.
+      }
+      const resumeAt = running ?? readDeployMarker();
+      if (resumeAt) deploy(resumeAt);
+    })();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="flex flex-col gap-5">

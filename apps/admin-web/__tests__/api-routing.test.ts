@@ -45,6 +45,7 @@ vi.mock("../src/routes/apps-install-status", () => spy("apps-install-status", ["
 vi.mock("../src/routes/cloud-data-server-install", () =>
   spy("cloud-data-server-install", ["POST"]),
 );
+vi.mock("../src/routes/cloud-deploy-status", () => spy("cloud-deploy-status", ["GET"]));
 vi.mock("../src/routes/config", () => spy("config", ["GET", "PATCH"]));
 vi.mock("../src/routes/costs", () => spy("costs", ["POST"]));
 vi.mock("../src/routes/this-machine", () =>
@@ -113,6 +114,7 @@ const ROUTES: Array<[string, string, string, string]> = [
   ["POST", "/api/this-machine/sign-out", "this-machine", "POST_SIGN_OUT"],
   ["POST", "/api/this-machine/cloud", "this-machine", "POST_CLOUD"],
   ["POST", "/api/drive/install", "drive-install", "POST"],
+  ["GET", "/api/cloud-deploy/status", "cloud-deploy-status", "GET"],
   ["POST", "/api/exec/daemon", "exec-daemon", "POST"],
   ["GET", "/api/exec/daemon/status", "exec-daemon-status", "GET"],
   ["GET", "/api/exec/deploy-outputs", "exec-deploy-outputs", "GET"],

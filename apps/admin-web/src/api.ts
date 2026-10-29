@@ -32,6 +32,7 @@ import * as thisMachine from "./routes/this-machine";
 import * as users from "./routes/users";
 import * as deploymentSettings from "./routes/deployment-settings";
 import * as driveInstall from "./routes/drive-install";
+import * as cloudDeployStatus from "./routes/cloud-deploy-status";
 import * as execDaemon from "./routes/exec-daemon";
 import * as execDaemonStatus from "./routes/exec-daemon-status";
 import * as execDeployOutputs from "./routes/exec-deploy-outputs";
@@ -59,6 +60,7 @@ api.get("/apps/:appId/install-status", (c) =>
 // Cloud setup: the two installs the wizard runs, and the config they write.
 api.post("/cloud-data-server/install", (c) => cloudDataServerInstall.POST(c.req.raw));
 api.post("/drive/install", (c) => driveInstall.POST(c.req.raw));
+api.get("/cloud-deploy/status", () => cloudDeployStatus.GET());
 api.get("/config", () => config.GET());
 api.patch("/config", (c) => config.PATCH(c.req.raw));
 api.get("/exec/deploy-outputs", () => execDeployOutputs.GET());
