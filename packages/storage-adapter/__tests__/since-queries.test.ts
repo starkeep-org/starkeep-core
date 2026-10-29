@@ -10,8 +10,21 @@
  */
 
 import { describe, it, expect } from "vitest";
+import {
+  DummyDriver,
+  Kysely,
+  PostgresAdapter,
+  PostgresIntrospector,
+  PostgresQueryCompiler,
+} from "kysely";
 import { serializeHLC, type HLCTimestamp } from "@starkeep/protocol-primitives";
-import { collectSince, planNodeScans, type NodeScan } from "../src/database/since-queries.js";
+import {
+  buildNodeWatermarks,
+  collectSince,
+  planNodeScans,
+  type NodeScan,
+  type SinceDb,
+} from "../src/database/since-queries.js";
 
 function hlc(wallTime: number, nodeId: string): HLCTimestamp {
   return { wallTime, counter: 0, nodeId };
@@ -251,5 +264,25 @@ describe("collectSince — a scan never stops inside one author's timestamp", ()
     const page = await collectSince(soloScan, 3, s.run, (r) => r.hlc);
     expect(s.asked).toEqual([3]);
     expect(page.truncated["A"]).toEqual(hlc(3, "A"));
+  });
+});
+
+describe("buildNodeWatermarks", () => {
+  const postgres = new Kysely<SinceDb>({
+    dialect: {
+      createAdapter: () => new PostgresAdapter(),
+      createDriver: () => new DummyDriver(),
+      createIntrospector: (db) => new PostgresIntrospector(db),
+      createQueryCompiler: () => new PostgresQueryCompiler(),
+    },
+  });
+
+  it("folds max(updated_at) per node over every row", () => {
+    const q = buildNodeWatermarks(postgres, "shared.record_labels");
+    expect(q.sql).toMatch(/max\("updated_at"\)/);
+    expect(q.sql).toMatch(/group by "node_id"/);
+    // Tombstones count: the responder's coverage watermark is a union over
+    // every table, and a retraction is the latest thing a node may have done.
+    expect(q.sql).not.toMatch(/"deleted_at" is null/);
   });
 });

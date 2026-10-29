@@ -3,15 +3,15 @@
  *
  * The floored read is a statement of bounded seeks, one per author the floor
  * names and one per gap between them, and it falls back to the grouped read
- * when a gap holds an author. Whether a gap is empty depends on the owner and
- * type scopes reaching the nested selects, and on Postgres ordering `node_id`
+ * when a gap holds an author. Whether a gap is empty depends on the owner
+ * scope reaching the nested selects, and on Postgres ordering `node_id`
  * the way the gaps are bounded, so those are exercised here rather than with a
  * fake client. PGlite stands in for DSQL for the reason
  * `app-syncable-conformance.test.ts` gives.
  *
  * See `readNodeWatermarks` in `@starkeep/storage-adapter`.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import {
   createDataRecord,
@@ -159,7 +159,15 @@ describe("records", () => {
     const { a, full } = await library();
     const from = statements.length;
     const floor = { "node-a": full["node-a"]!, "node-c": full["node-c"]! };
-    expect(await a.getNodeWatermarks(floor)).toEqual(full);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(await a.getNodeWatermarks(floor)).toEqual(full);
+      expect(warn).toHaveBeenCalledWith(
+        "[watermarks] shared.records: floor misses author node-b; reading whole",
+      );
+    } finally {
+      warn.mockRestore();
+    }
     expect(grouped(from)).toBe(true);
   });
 
@@ -178,7 +186,9 @@ describe("records", () => {
     expect(grouped(from)).toBe(false);
   });
 
-  it("does not count authors of types outside a narrowed adapter's scope as gaps", async () => {
+  it("reads whole on a narrowed adapter, and leaves out types outside its scope", async () => {
+    // A type predicate turns DSQL's probes into primary-key scans, so a
+    // narrowed adapter ignores the floor. See `probeFloor` in the adapter.
     const { a } = await library();
     await a.put(record(A, "node-bb", "text/plain"));
     const scoped = await adapterFor(A, ["image/jpeg"]);
@@ -186,7 +196,8 @@ describe("records", () => {
     expect(full["node-bb"]).toBeUndefined();
     const from = statements.length;
     expect(await scoped.getNodeWatermarks(full)).toEqual(full);
-    expect(grouped(from)).toBe(false);
+    expect(await scoped.getLabelNodeWatermarks(full)).toEqual({});
+    expect(statements.slice(from).every((s) => /group by/i.test(s))).toBe(true);
   });
 
   it("plans the delta scan the same way with or without the floor's omissions", async () => {

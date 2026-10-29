@@ -34,13 +34,13 @@ describe("reads of records", () => {
 });
 
 describe("reads of labels", () => {
-  it("narrow labels to records of the scope's types, of the same user", () => {
+  it("narrow labels by their denormalized record type, and keep the owner", () => {
     const q = qb.selectFrom("shared.record_labels").selectAll().compile();
     expect(q.sql).toBe(
-      'select * from "shared"."record_labels" where "shared"."record_labels"."record_id" in ' +
-        '(select "shared"."records"."id" from "shared"."records" where "shared"."records"."type" in ($1, $2) and "shared"."records"."user_id" = $3) ' +
-        'and "shared"."record_labels"."user_id" = $4',
+      'select * from "shared"."record_labels" where "shared"."record_labels"."record_type" in ($1, $2) ' +
+        'and "shared"."record_labels"."user_id" = $3',
     );
+    expect(q.parameters).toEqual(["image/jpeg", "video/mp4", USER]);
   });
 });
 
@@ -53,7 +53,7 @@ describe("writes", () => {
       .compile();
     expect(update.sql).toContain('"shared"."records"."type" in');
     const del = qb.deleteFrom("shared.record_labels").where("record_id", "=", "r1").compile();
-    expect(del.sql).toContain('"shared"."record_labels"."record_id" in (select');
+    expect(del.sql).toContain('"shared"."record_labels"."record_type" in');
   });
 
   it("leave inserts alone; the caller checks a push before writing it", () => {

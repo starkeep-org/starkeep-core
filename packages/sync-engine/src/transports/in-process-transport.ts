@@ -751,7 +751,11 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
       //    and the union cannot say by how much, so it is read again whole.
       //    An idle tick never takes the second read; see `readNodeWatermarks`.
       let coverage = await readCoverage(request.watermarks);
-      if (!coversFloor(coverage.watermarks, request.watermarks)) {
+      const behind = authorsBelowFloor(coverage.watermarks, request.watermarks);
+      if (behind.length > 0) {
+        console.warn(
+          `[watermarks] coverage behind the requester on ${behind.length} author(s) (${behind.join(", ")}); reading whole`,
+        );
         coverage = await readCoverage(undefined);
       }
       const responderWatermarks = coverage.watermarks;
@@ -880,15 +884,18 @@ const BYTE_WALK_MAX_CHECKS = 256;
 const BYTE_WALK_CONCURRENCY = 16;
 
 /**
- * Whether a union read with `floor` is exact: every author the floor names came
- * back at or above it. A table omits only authors below the floor, so where the
- * union holds an author at or above it, the omitted tables held less.
+ * The authors that make a union read with `floor` inexact: each one the floor
+ * names that came back absent or below it. A table omits only authors below
+ * the floor, so where the union holds an author at or above it, the omitted
+ * tables held less. An empty result means the union is exact.
  */
-function coversFloor(watermarks: Watermarks, floor: Watermarks): boolean {
-  return Object.entries(floor).every(([nodeId, hlc]) => {
-    const held = watermarks[nodeId];
-    return held !== undefined && compareHLC(held, hlc) >= 0;
-  });
+function authorsBelowFloor(watermarks: Watermarks, floor: Watermarks): string[] {
+  return Object.entries(floor)
+    .filter(([nodeId, hlc]) => {
+      const held = watermarks[nodeId];
+      return held === undefined || compareHLC(held, hlc) < 0;
+    })
+    .map(([nodeId]) => nodeId);
 }
 
 /** A bytes-watermark store held in memory. See `byteCoverage`. */

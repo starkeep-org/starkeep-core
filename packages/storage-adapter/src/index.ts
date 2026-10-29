@@ -137,7 +137,6 @@ export {
   buildLabelsByRecordIds,
   buildGetLabel,
   buildQueryLabels,
-  buildLabelNodeWatermarks,
   paginateLabelScan,
   groupLabelsByRecordId,
   DEFAULT_SCAN_LIMIT,

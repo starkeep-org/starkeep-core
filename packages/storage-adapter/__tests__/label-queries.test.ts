@@ -28,7 +28,6 @@ import {
 import { createHLCClock, type StarkeepId } from "@starkeep/protocol-primitives";
 import {
   buildGetLabel,
-  buildLabelNodeWatermarks,
   buildLabelRetraction,
   buildLabelSnapshotUpsert,
   buildLabelUpsert,
@@ -275,17 +274,6 @@ describe("the sync-facing queries", () => {
     // and looking up without it compares an incoming row against whichever
     // sibling was found first.
     expect(dsql.parameters).toEqual(["rec1", "alpha", "k", "v"]);
-  });
-
-  it("the watermark query folds max(updated_at) per node over every row", () => {
-    const { sqlite: s, dsql: d } = both((k, dialect) => buildLabelNodeWatermarks(k, dialect));
-    for (const q of [s, d]) {
-      expect(q.sql).toMatch(/max\("updated_at"\)/);
-      expect(q.sql).toMatch(/group by "node_id"/);
-      // Tombstones count: the responder's coverage watermark is a union over
-      // both tables, and a retraction is the latest thing a node may have done.
-      expect(q.sql).not.toMatch(/"deleted_at" is null/);
-    }
   });
 
   it("the forward hydration query is a primary-key IN-list over live rows only", () => {

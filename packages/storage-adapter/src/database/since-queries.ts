@@ -217,8 +217,20 @@ function buildFlooredNodeWatermarks(
  * and one too wide to probe. Those are a new device, a new cloud container and
  * a first sync: rare, and no more expensive than before.
  *
+ * Each fallback logs one `[watermarks]` warning with the table and the reason.
+ * A new author logs once per table and then goes quiet, so a warning that
+ * repeats every tick means the savings have stopped.
+ *
  * Implementations of the watermark methods may ignore the floor and return
  * every author; the contract above allows extra exact entries.
+ *
+ * ## Collation
+ *
+ * The gaps partition the key space only if the database orders `node_id` by
+ * code point, as the C collation does. Under any other order an author can
+ * fall outside every gap, and the read omits it without falling back: silent
+ * loss, not extra cost. DSQL supports only C. Writing `COLLATE "C"` into the
+ * probes is no substitute: DSQL then sorts instead of seeking.
  */
 export async function readNodeWatermarks(
   k: Kysely<SinceDb>,
@@ -228,16 +240,27 @@ export async function readNodeWatermarks(
 ): Promise<Record<string, HLCTimestamp>> {
   const out: Record<string, HLCTimestamp> = {};
   const authors = Object.keys(floor ?? {}).sort(compareCodePoints);
-  if (floor && authors.length > 0 && authors.length <= MAX_PROBED_AUTHORS) {
+  if (authors.length > MAX_PROBED_AUTHORS) {
+    console.warn(`[watermarks] ${table}: floor names ${authors.length} authors; reading whole`);
+  } else if (floor && authors.length > 0) {
     const [row] = await run(buildFlooredNodeWatermarks(k, table, authors, floor));
-    const gapsEmpty = row !== undefined && authors.every((_, i) => row[`g${i}`] == null);
-    if (gapsEmpty && row[`g${authors.length}`] == null) {
+    // One gap more than authors: before the first, between each pair, after the last.
+    const gapAuthor =
+      row === undefined
+        ? undefined
+        : Array.from({ length: authors.length + 1 }, (_, i) => row[`g${i}`]).find((g) => g != null);
+    if (row !== undefined && gapAuthor === undefined) {
       authors.forEach((nodeId, i) => {
         const max = row[`a${i}`];
         if (typeof max === "string") out[nodeId] = deserializeHLC(max);
       });
       return out;
     }
+    console.warn(
+      row === undefined
+        ? `[watermarks] ${table}: floored read returned no row; reading whole`
+        : `[watermarks] ${table}: floor misses author ${String(gapAuthor)}; reading whole`,
+    );
   }
   for (const row of await run(buildNodeWatermarks(k, table))) {
     out[row["node_id"] as string] = deserializeHLC(row["max_updated_at"] as string);

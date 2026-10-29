@@ -451,6 +451,36 @@ describe("a mobile app through the broker", () => {
     expect((desktop.body["records"] as unknown[]).length).toBe(2);
   });
 
+  it("refuses a label whose record type differs from its record's", async () => {
+    await registerPhotosMobile();
+    const photo = await aWritesAPhoto();
+    const phone = await phoneOf(A);
+    const pushLabel = (recordType: string) =>
+      phone.call("POST", "/sync/exchange", {
+        watermarks: {},
+        labels: [
+          {
+            recordId: photo,
+            appId: PHOTOS,
+            key: "album",
+            value: "x",
+            recordType,
+            createdAt: { wallTime: Date.now(), counter: 0, nodeId: "phone-a" },
+            updatedAt: { wallTime: Date.now(), counter: 0, nodeId: "phone-a" },
+            nodeId: "phone-a",
+            deletedAt: null,
+          },
+        ],
+      });
+
+    // A phone's exchange narrows labels by their record type, so a forged one
+    // would reach phones whose grants exclude the record.
+    expect((await pushLabel("document/markdown")).status).toBe(403);
+    expect((await pg.query("SELECT 1 FROM shared.record_labels")).rows).toEqual([]);
+    const ok = await pushLabel("image/jpeg");
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+  });
+
   it("reports a digest over exactly the rows the phone holds, so the two agree", async () => {
     await registerPhotosMobile();
     await aWritesAPhoto();

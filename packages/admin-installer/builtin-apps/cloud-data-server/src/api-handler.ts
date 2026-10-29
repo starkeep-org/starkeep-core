@@ -1006,7 +1006,10 @@ async function mobileAppRegistered(client: DatabaseClient, appId: string): Promi
  * sit in that type's category. A record id that already names a row of a type
  * the app may not write is refused too, because the write would overwrite it.
  * Every pushed label must be the app's own, on a declared key, and on a record
- * the app may read. A mobile app has no app-private rows on this channel.
+ * the app may read, and must carry that record's type. The type scope narrows
+ * labels by their `recordType`, so a forged one would hand the label to a
+ * phone whose grants exclude the record. A mobile app has no app-private rows
+ * on this channel.
  */
 async function mobilePushRefusal(
   body: {
@@ -1019,6 +1022,7 @@ async function mobilePushRefusal(
       readonly recordId: string;
       readonly appId: string;
       readonly key: string;
+      readonly recordType?: string;
     }>;
     readonly appSyncableRows?: ReadonlyArray<unknown>;
   },
@@ -1056,6 +1060,9 @@ async function mobilePushRefusal(
     const type = pushedTypes.get(label.recordId) ?? existing.get(label.recordId);
     if (type === undefined || !canRead(scope.grants, type)) {
       return `A pushed label names a record ${scope.appId} may not read`;
+    }
+    if (label.recordType !== type) {
+      return `A pushed label claims type ${String(label.recordType)} for a ${type} record`;
     }
   }
   return null;

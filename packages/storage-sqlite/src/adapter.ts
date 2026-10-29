@@ -49,9 +49,9 @@ import {
   type WhereClause,
   type SoftDeletedScope,
   buildGetLabel,
-  buildLabelNodeWatermarks,
   buildBucketDigest,
   buildScanSinceForNode,
+  buildNodeWatermarks,
   collectSince,
   mergeDigestBuckets,
   planNodeScans,
@@ -289,14 +289,8 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
   }
 
   async getNodeWatermarks(): Promise<Record<string, HLCTimestamp>> {
-    // Within one node_id group, updated_at is fixed-width hex up to the
-    // nodeId suffix, so lexicographic MAX equals HLC MAX. The
-    // (node_id, updated_at) index makes this an index-only scan.
-    const watermarksQuery = qb
-      .selectFrom("shared_records")
-      .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])
-      .groupBy("node_id")
-      .compile();
+    // Index-only on (node_id, updated_at). See `buildNodeWatermarks`.
+    const watermarksQuery = buildNodeWatermarks(qb, RECORDS);
     const rows = this.allRows<{ node_id: string; max_updated_at: string }>(watermarksQuery.sql);
     const out: Record<string, HLCTimestamp> = {};
     for (const row of rows) {
@@ -648,7 +642,7 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
   }
 
   async getLabelNodeWatermarks(): Promise<Record<string, HLCTimestamp>> {
-    const query = buildLabelNodeWatermarks(qb, LABELS);
+    const query = buildNodeWatermarks(qb, LABELS.table);
     const rows = this.allRows<{ node_id: string; max_updated_at: string }>(query.sql);
     const out: Record<string, HLCTimestamp> = {};
     for (const row of rows) out[row.node_id] = deserializeHLC(row.max_updated_at);

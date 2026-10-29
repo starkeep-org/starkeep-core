@@ -17,7 +17,7 @@
  *
  * A label tombstone carries the same obligation by a different route. Label sync
  * derives each author's watermark from the label rows this host holds
- * (`buildLabelNodeWatermarks`), so destroying an author's newest rows lowers its
+ * (`buildNodeWatermarks`), so destroying an author's newest rows lowers its
  * watermark, and the next round asks a peer for the very tombstones the reaper
  * just destroyed. Row compaction, for both tables, is separate, later work with a
  * protocol obligation attached. Byte reclamation has none.
