@@ -262,6 +262,82 @@ describe("responderWatermarks — coverage computation", () => {
   });
 });
 
+describe("responderWatermarks — read relative to the requester's watermarks", () => {
+  /** An app source whose watermark reads record the floor each was given. */
+  function spiedAppSource(tables: string[]) {
+    const appSource = makeMockAppSource(
+      "test-app",
+      tables.map((name) => ({ name, pkColumns: ["id"] })),
+    );
+    const floors: Array<Watermarks | undefined> = [];
+    const applier: typeof appSource.applier = {
+      ...appSource.applier,
+      async getNodeWatermarks(appId, table, floor) {
+        floors.push(floor);
+        return appSource.applier.getNodeWatermarks(appId, table, floor);
+      },
+    };
+    return { appSource: { ...appSource, applier }, floors };
+  }
+
+  it("an idle exchange reads coverage with the requester's watermarks and never without", async () => {
+    const { appSource, floors } = spiedAppSource(["test_rows"]);
+    const dev = makeClock("device-1");
+    const row = appRow("test-app", "test_rows", "r1", dev.now());
+    await appSource.applier.apply(row);
+    const cloud = await makeCloud(appSource, false);
+    floors.length = 0;
+
+    const res = await cloud.transport.exchange({ watermarks: { "device-1": row.timestamp } });
+
+    expect(serializeHLC(res.responderWatermarks["device-1"]!)).toBe(serializeHLC(row.timestamp));
+    expect(floors.length).toBeGreaterThan(0);
+    expect(floors.every((floor) => floor !== undefined)).toBe(true);
+  });
+
+  it("an author whose latest row is in another table is still covered at its latest", async () => {
+    const { appSource } = spiedAppSource(["first_rows", "second_rows"]);
+    const dev = makeClock("device-1");
+    await appSource.applier.apply(appRow("test-app", "first_rows", "f1", dev.now()));
+    const latest = appRow("test-app", "second_rows", "s1", dev.now());
+    await appSource.applier.apply(latest);
+    const cloud = await makeCloud(appSource, false);
+
+    // `first_rows` alone sits below the floor and omits the author; the union
+    // takes its value from `second_rows`.
+    const res = await cloud.transport.exchange({ watermarks: { "device-1": latest.timestamp } });
+    expect(serializeHLC(res.responderWatermarks["device-1"]!)).toBe(serializeHLC(latest.timestamp));
+  });
+
+  it("an author the responder is behind on is reported at what it holds, not omitted", async () => {
+    const { appSource, floors } = spiedAppSource(["test_rows"]);
+    const dev = makeClock("device-1");
+    const held = appRow("test-app", "test_rows", "r1", dev.now());
+    await appSource.applier.apply(held);
+    const unpushed = dev.now();
+    const cloud = await makeCloud(appSource, false);
+    floors.length = 0;
+
+    // An omitted author reads to the requester as "holds nothing from it",
+    // which would re-ship the author's whole history.
+    const res = await cloud.transport.exchange({ watermarks: { "device-1": unpushed } });
+    expect(serializeHLC(res.responderWatermarks["device-1"]!)).toBe(serializeHLC(held.timestamp));
+    expect(floors).toContain(undefined);
+  });
+
+  it("an author the requester has never heard of is reported", async () => {
+    const cloud = await makeCloud();
+    const known = makeRecord(makeClock("node-a"));
+    const unknown = makeRecord(makeClock("node-b"));
+    await cloud.db.put(known);
+    await cloud.db.put(unknown);
+
+    const res = await cloud.transport.exchange({ watermarks: { "node-a": known.updatedAt } });
+    expect(serializeHLC(res.responderWatermarks["node-b"]!)).toBe(serializeHLC(unknown.updatedAt));
+    expect(res.records.map((r) => r.id)).toEqual([unknown.id]);
+  });
+});
+
 describe("responderWatermarks — false-ack and contiguity (Defect C)", () => {
   // Shared with `responder-failure.test.ts`, which covers the other two halves
   // of the same event: this file pins that a failed apply stays out of the

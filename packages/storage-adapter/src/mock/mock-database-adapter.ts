@@ -117,7 +117,9 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     this.store.set(id, { ...existing, deletedAt: hlc, updatedAt: hlc });
   }
 
-  async getNodeWatermarks(): Promise<Record<string, HLCTimestamp>> {
+  async getNodeWatermarks(
+    floor?: Record<string, HLCTimestamp>,
+  ): Promise<Record<string, HLCTimestamp>> {
     // In-memory reference fold — the behavior SQL adapters implement with the
     // node_id column + (node_id, updated_at) index.
     const out: Record<string, HLCTimestamp> = {};
@@ -132,7 +134,7 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
         out[hlc.nodeId] = hlc;
       }
     }
-    return out;
+    return omitBelowFloor(out, floor);
   }
 
   /**
@@ -698,7 +700,9 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     };
   }
 
-  async getLabelNodeWatermarks(): Promise<Record<string, HLCTimestamp>> {
+  async getLabelNodeWatermarks(
+    floor?: Record<string, HLCTimestamp>,
+  ): Promise<Record<string, HLCTimestamp>> {
     const out: Record<string, HLCTimestamp> = {};
     for (const label of this.labels.values()) {
       const hlc = label.updatedAt;
@@ -711,7 +715,7 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
         out[hlc.nodeId] = hlc;
       }
     }
-    return out;
+    return omitBelowFloor(out, floor);
   }
 
   async restoreLabelsForRecord(
@@ -904,5 +908,22 @@ function isHlcTimestamp(value: unknown): value is HLCTimestamp {
     typeof (value as HLCTimestamp).wallTime === "number" &&
     typeof (value as HLCTimestamp).counter === "number" &&
     typeof (value as HLCTimestamp).nodeId === "string"
+  );
+}
+
+/**
+ * Drop the authors a floored watermark read may omit: those the floor names
+ * whose maximum sits below it. The mock takes the omission the contract allows
+ * so callers are exercised against it; see `readNodeWatermarks`.
+ */
+function omitBelowFloor(
+  watermarks: Record<string, HLCTimestamp>,
+  floor: Record<string, HLCTimestamp> | undefined,
+): Record<string, HLCTimestamp> {
+  if (!floor) return watermarks;
+  return Object.fromEntries(
+    Object.entries(watermarks).filter(
+      ([nodeId, hlc]) => floor[nodeId] === undefined || compareHLC(hlc, floor[nodeId]!) >= 0,
+    ),
   );
 }
