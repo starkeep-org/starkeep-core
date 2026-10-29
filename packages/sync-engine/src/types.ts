@@ -324,6 +324,18 @@ export interface SyncExchangeRequest {
    * refuse to compare rather than compare wrongly.
    */
   readonly digestPrefixLength?: number;
+  /**
+   * The {@link SyncExchangeResponse.changeToken} from the exchange that last
+   * set this requester's peer watermarks, sent only when this round has
+   * nothing to push and no repair outstanding.
+   *
+   * A responder whose channel still holds this token has not written anything
+   * since, so it answers {@link SyncExchangeResponse.unchanged} without reading
+   * its watermarks. An idle tick is most of what a sync channel ever does, and
+   * those reads were most of what it cost. Any other value runs the exchange
+   * in full.
+   */
+  readonly changeToken?: string;
 }
 
 export interface SyncExchangeResponse {
@@ -490,6 +502,26 @@ export interface SyncExchangeResponse {
    * skips the check rather than failing it.
    */
   readonly digestScopes?: readonly string[];
+  /**
+   * The responder's change token for this channel, read before any of its
+   * data, so a write that commits during the exchange leaves it stale rather
+   * than hiding. The requester stores it beside the peer watermarks this
+   * response sets and echoes it as {@link SyncExchangeRequest.changeToken}.
+   *
+   * Sent only when the response says everything the requester needs: coverage
+   * complete, nothing halted, no `hasMore`, and no file left for this side's
+   * bytes walk to check. A file still uploading advances the bytes watermark
+   * with no row write, so the token could not see it.
+   */
+  readonly changeToken?: string;
+  /**
+   * The requester's token still matched, so nothing on this channel has been
+   * written since the exchange that issued it. The response then carries no
+   * rows and an empty `responderWatermarks` that the requester ignores: it
+   * keeps the peer watermarks it stored with the token, which are still the
+   * responder's coverage.
+   */
+  readonly unchanged?: boolean;
 }
 
 /**
@@ -691,6 +723,19 @@ export interface SyncStateStore {
 
   getHlcClockState(): Promise<{ wallTime: number; counter: number } | null>;
   setHlcClockState(state: { wallTime: number; counter: number }): Promise<void>;
+
+  /**
+   * The peer's change token from the exchange that last set
+   * {@link getPeerWatermarks}, or `null`. See
+   * {@link SyncExchangeRequest.changeToken}.
+   *
+   * Set after the peer watermarks it belongs to, and cleared whenever they are
+   * set without one, so a stored token never vouches for watermarks it did
+   * not come with. Optional: a store without it never sends a token, which
+   * costs a full exchange every round and nothing else.
+   */
+  getChangeToken?(): Promise<string | null>;
+  setChangeToken?(token: string | null): Promise<void>;
 }
 
 export interface ExchangeResult {

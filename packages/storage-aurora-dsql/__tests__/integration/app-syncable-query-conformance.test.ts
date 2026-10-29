@@ -22,6 +22,7 @@ import { pgColumnType } from "@starkeep/protocol-primitives";
 import { PG_RAW_PARSERS } from "../../src/pg-timestamps.js";
 import { DsqlAppSyncableApplier } from "../../src/app-syncable/apply.js";
 import type { DatabaseClient } from "../../src/types.js";
+import { createChangeHeads } from "../pg-shared-schema.js";
 
 const APP = "query-conformance-app";
 const TABLE = "rows_under_test";
@@ -71,6 +72,7 @@ async function makeHarness(): Promise<QueryConformanceHarness> {
   // `deleted_at`. Created from the same declared list the case reads, so the
   // suite cannot be checking a table shape the schema never describes.
   const metadataColumns = withOwner(METADATA_SHAPED_COLUMNS);
+  await createChangeHeads(pg);
   await pg.exec(`
     CREATE SCHEMA ${SCHEMA};
     CREATE TABLE ${SCHEMA}.${TABLE} (${columns});

@@ -29,6 +29,7 @@ import {
 import { sql, type CompiledQuery } from "kysely";
 import type { DatabaseClient } from "../types.js";
 import { withOccRetry } from "../occ-retry.js";
+import { appChannel, buildChangeHeadReplace, readChangeHead } from "../change-heads.js";
 import { isMissingRelation } from "../missing-relation.js";
 import { ownerScopedCompiler, type PostgresCompiler } from "../query-builder.js";
 import { fromPgRows, pgConvertersFor, withAggregateOutputs } from "../pg-timestamps.js";
@@ -61,7 +62,11 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
 
   // Each branch is a single LWW-guarded statement (upsert / conditional
   // update / soft-delete keyed on `updated_at`), so replaying the whole
-  // dispatch on an OCC conflict is idempotent.
+  // dispatch on an OCC conflict is idempotent. The statement shares a
+  // transaction with the replacement of the app's change head, so an idle
+  // exchange's "unchanged" can never miss it; see `change-heads.ts`. The head
+  // is replaced even when the LWW guard writes nothing, which costs a
+  // requester one full exchange and nothing else.
   async apply(entry: AppSyncableRowEntry): Promise<void> {
     const ns = this.namespace.get(entry.appId);
     if (!ns) {
@@ -80,14 +85,29 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
     const { pkColumns } = tableInfo;
 
     await withOccRetry(`applier.apply(${entry.op})`, async () => {
-      if (entry.op === "insert") {
-        await this.applyInsert(schemaTable, pkColumns, entry);
-      } else if (entry.op === "update") {
-        await this.applyUpdate(schemaTable, pkColumns, entry);
-      } else {
-        await this.applyDelete(schemaTable, pkColumns, entry);
+      await this.client.query("BEGIN");
+      try {
+        if (entry.op === "insert") {
+          await this.applyInsert(schemaTable, pkColumns, entry);
+        } else if (entry.op === "update") {
+          await this.applyUpdate(schemaTable, pkColumns, entry);
+        } else {
+          await this.applyDelete(schemaTable, pkColumns, entry);
+        }
+        await this.run(buildChangeHeadReplace(this.qb, appChannel(entry.appId)));
+        await this.client.query("COMMIT");
+      } catch (error) {
+        await this.client.query("ROLLBACK");
+        throw error;
       }
     });
+  }
+
+  /** The app channel's change token, or `null` before its first write. */
+  async changeHead(appId: string): Promise<string | null> {
+    return withOccRetry("changeHead", () =>
+      readChangeHead(this.client, this.qb, appChannel(appId)),
+    );
   }
 
   private async applyInsert(

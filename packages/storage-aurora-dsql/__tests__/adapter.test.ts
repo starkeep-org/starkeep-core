@@ -46,6 +46,16 @@ class FakeClient implements DatabaseClient {
   texts(): string[] {
     return this.calls.map((c) => c.text);
   }
+
+  /**
+   * The data statements alone: what a write wrote, without the transaction
+   * around it or the change head it replaced. See `change-heads.ts`.
+   */
+  written(): { text: string; values?: unknown[] }[] {
+    return this.calls.filter(
+      (c) => !/^(BEGIN|COMMIT|ROLLBACK)$/.test(c.text) && !c.text.includes('"change_heads"'),
+    );
+  }
 }
 
 function factoryOf(client: FakeClient): DatabaseClientFactory {
@@ -105,7 +115,7 @@ describe("put / get / delete", () => {
   it("put issues an upsert over every column with ON CONFLICT(id)", async () => {
     const record = sampleRecord();
     await adapter.put(record);
-    const [call] = client.calls;
+    const [call] = client.written();
     expect(call.text).toMatch(/^insert into "shared"\."records" \(/);
     expect(call.text).toContain('on conflict ("user_id", "id") do update set');
     expect(call.text).toContain('"updated_at" = "excluded"."updated_at"');
@@ -130,7 +140,7 @@ describe("put / get / delete", () => {
     const record = sampleRecord();
     const hlc = clock.now();
     await adapter.delete(record.id, hlc);
-    const [call] = client.calls;
+    const [call] = client.written();
     expect(call.text).toBe(
       'update "shared"."records" set "deleted_at" = $1, "updated_at" = $2, "node_id" = $3, "stand_in_slot" = $4 where "id" = $5 and "shared"."records"."user_id" = $6',
     );
@@ -164,6 +174,52 @@ describe("query pagination", () => {
   });
 });
 
+describe("the shared channel's change head", () => {
+  // An idle exchange answers "unchanged" when the head still matches, so a
+  // write that committed without replacing it would never sync. See
+  // `change-heads.ts`.
+  it("replaces the head in the same transaction as the write it covers", async () => {
+    await adapter.put(sampleRecord());
+    expect(client.texts()).toEqual([
+      "BEGIN",
+      expect.stringMatching(/^insert into "shared"\."records"/),
+      expect.stringMatching(/^insert into "shared"\."change_heads"/),
+      "COMMIT",
+    ]);
+    const head = client.calls[2]!;
+    expect(head.text).toContain("gen_random_uuid()");
+    expect(head.text).toContain('on conflict ("user_id", "channel") do update set');
+    expect(head.values).toEqual(["shared", "user-a"]);
+  });
+
+  it("retries the whole transaction when the head conflicts at COMMIT", async () => {
+    client.conflictOnce(/^COMMIT$/);
+    await adapter.put(sampleRecord());
+    expect(client.texts().filter((t) => t === "BEGIN")).toHaveLength(2);
+    expect(client.texts().filter((t) => t.includes('"change_heads"'))).toHaveLength(2);
+  });
+
+  it("splits a 3,000-row label upsert so the head fits under DSQL's row cap", async () => {
+    const hlc = clock.now();
+    const labels = Array.from({ length: 3000 }, (_, i) => ({
+      recordId: `r${i}`,
+      appId: "photos",
+      key: "faces",
+      value: "",
+      recordType: "image/jpeg",
+      hlc,
+    }));
+    await adapter.upsertLabels(labels as never);
+    expect(client.texts().filter((t) => t === "BEGIN")).toHaveLength(2);
+  });
+
+  it("reads the head for the shared channel", async () => {
+    client.responses.push({ match: /from "shared"\."change_heads"/, rows: [{ token: "t1" }] });
+    expect(await adapter.changeHead()).toBe("t1");
+    expect(client.calls[0]!.values).toEqual(["shared", "user-a"]);
+  });
+});
+
 describe("savepoint transactions (DSQL shape)", () => {
   it("wraps the callback in SAVEPOINT … RELEASE on success", async () => {
     const record = sampleRecord();
@@ -173,6 +229,7 @@ describe("savepoint transactions (DSQL shape)", () => {
     expect(client.texts()).toEqual([
       "SAVEPOINT starkeep_transaction",
       expect.stringContaining('insert into "shared"."records"'),
+      expect.stringContaining('insert into "shared"."change_heads"'),
       "RELEASE SAVEPOINT starkeep_transaction",
     ]);
   });
@@ -262,7 +319,7 @@ describe("metadata tables", () => {
   it("upserts metadata into the category table derived from the type", async () => {
     const record = sampleRecord();
     await adapter.putMetadata("image/jpeg", { recordId: record.id, width: 800, height: 600 });
-    const [call] = client.calls;
+    const [call] = client.written();
     expect(call.text).toContain('insert into "shared"."record_image_metadata"');
     expect(call.text).toContain('on conflict ("user_id", "record_id") do update set');
     expect(call.text).toContain('"width" = "excluded"."width"');
@@ -280,8 +337,10 @@ describe("metadata tables", () => {
     // `record_type` is always a column to update, so the DO NOTHING branch is
     // now unreachable — which is right: an upsert that left the discriminant
     // alone would be an upsert that could leave a stale one behind.
-    expect(client.calls[0].text).toContain('on conflict ("user_id", "record_id") do update set');
-    expect(client.calls[0].values).toEqual([record.id, "image/jpeg", null, "user-a"]);
+    expect(client.written()[0].text).toContain(
+      'on conflict ("user_id", "record_id") do update set',
+    );
+    expect(client.written()[0].values).toEqual([record.id, "image/jpeg", null, "user-a"]);
   });
 
   it("refuses a bare category, which would store an ungated discriminant", async () => {
@@ -309,7 +368,7 @@ describe("metadata tables", () => {
   it("deleteMetadata targets the category table by record id", async () => {
     const record = sampleRecord();
     await adapter.deleteMetadata("image/jpeg", record.id);
-    expect(client.calls[0].text).toBe(
+    expect(client.written()[0].text).toBe(
       'delete from "shared"."record_image_metadata" where "record_id" = $1 and "shared"."record_image_metadata"."user_id" = $2',
     );
   });
@@ -321,18 +380,18 @@ describe("metadata tables", () => {
       counter: 0,
       nodeId: "node-a",
     });
-    expect(client.calls[0].text).toBe(
+    expect(client.written()[0].text).toBe(
       'update "shared"."record_image_metadata" set "deleted_at" = $1 where "record_id" = $2 and "shared"."record_image_metadata"."user_id" = $3',
     );
-    expect(client.calls[0].values[1]).toBe(record.id);
+    expect(client.written()[0].values[1]).toBe(record.id);
   });
 
   it("restoreMetadata clears the column again", async () => {
     const record = sampleRecord();
     await adapter.restoreMetadata("image/jpeg", record.id);
-    expect(client.calls[0].text).toBe(
+    expect(client.written()[0].text).toBe(
       'update "shared"."record_image_metadata" set "deleted_at" = $1 where "record_id" = $2 and "shared"."record_image_metadata"."user_id" = $3',
     );
-    expect(client.calls[0].values).toEqual([null, record.id, "user-a"]);
+    expect(client.written()[0].values).toEqual([null, record.id, "user-a"]);
   });
 });

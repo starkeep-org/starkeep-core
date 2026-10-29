@@ -153,6 +153,26 @@ export interface InProcessTransportOptions {
    * throw is ignored.
    */
   readonly onWalk?: (walk: ByteWalkReport) => void;
+  /**
+   * This channel's change token as stored now, or `null` before the channel's
+   * first write. Every write to the channel's synced tables must replace it in
+   * the write's own transaction; the cloud's storage layer does, and its
+   * database client refuses a write that does not. See
+   * `SyncExchangeRequest.changeToken`.
+   *
+   * Absent, the transport never answers "unchanged" and never sends a token,
+   * so every exchange runs in full.
+   */
+  readonly changeHead?: () => Promise<string | null>;
+}
+
+/**
+ * A walk's result: the bytes watermark, and whether it has caught up, so an
+ * exchange that changes no row cannot move it.
+ */
+interface ByteWalk {
+  readonly watermarks: Watermarks;
+  readonly settled: boolean;
 }
 
 /** What one exchange's walk over the bytes watermark found. */
@@ -219,9 +239,9 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
    * no bytes watermark, and a requester stops pushing rather than ship rows
    * whose uploads nothing would remember.
    */
-  async function walkByteCoverage(rowsWatermarks: Watermarks): Promise<Watermarks | undefined> {
+  async function walkByteCoverage(rowsWatermarks: Watermarks): Promise<ByteWalk | undefined> {
     // A channel with no file-bearing table owes no file for any row.
-    if (!carriesFiles(fileRowSources)) return { ...rowsWatermarks };
+    if (!carriesFiles(fileRowSources)) return { watermarks: { ...rowsWatermarks }, settled: true };
     if (!options.fileRecords) return walkFrom(rowsWatermarks);
     // The walk runs over the whole library, clamped by the whole library's
     // rows; the reply never claims more than the narrowed rows hold.
@@ -241,11 +261,13 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
       return undefined;
     }
     const walked = await walkFrom(wholeRows);
-    return walked === undefined ? undefined : clampToRows(walked, rowsWatermarks);
+    return walked === undefined
+      ? undefined
+      : { watermarks: clampToRows(walked.watermarks, rowsWatermarks), settled: walked.settled };
   }
 
   /** The walk itself, clamped by `rowsWatermarks`. See {@link walkByteCoverage}. */
-  async function walkFrom(rowsWatermarks: Watermarks): Promise<Watermarks | undefined> {
+  async function walkFrom(rowsWatermarks: Watermarks): Promise<ByteWalk | undefined> {
     let stored: Watermarks;
     try {
       stored = await byteCoverage.load();
@@ -255,7 +277,7 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
     }
     const from = clampToRows(stored, rowsWatermarks);
     const scan = await scanFileRows(fileRowSources, from, BYTE_WALK_MAX_ROWS);
-    if (!scan.readable) return from;
+    if (!scan.readable) return { watermarks: from, settled: false };
     const pins: Record<string, { key: string; hlc: HLCTimestamp }> = {};
 
     const byAuthor = new Map<string, { row: FileRow; satisfied: boolean }[]>();
@@ -346,7 +368,14 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
         }
       }
     }
-    return next;
+    return {
+      watermarks: next,
+      // Nothing above the new value is left to check: every file row the scan
+      // read is held, and the scan reached the end of every stream.
+      settled:
+        scan.ceilings.size === 0 &&
+        [...byAuthor.values()].every((run) => run.every((entry) => entry.satisfied)),
+    };
   }
 
   return {
@@ -532,6 +561,44 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
         } catch (err) {
           console.warn(`[sync] in-process transport onApplied failed: ${(err as Error).message}`);
         }
+      }
+
+      // 2c. The change token, read after this request's own writes and before
+      //     any data the reply is built from. A write that commits after this
+      //     read also replaced the token after it, so the token this reply
+      //     carries is already stale for it and the next exchange runs in
+      //     full. Read after the data instead, such a write could land between
+      //     the two reads and be in neither. A token that will not read is no
+      //     token: the exchange runs in full and the reply carries none.
+      let head: string | null = null;
+      if (options.changeHead) {
+        try {
+          head = await options.changeHead();
+        } catch (err) {
+          console.warn(`[sync] could not read the change token: ${(err as Error).message}`);
+        }
+      }
+      if (
+        head !== null &&
+        request.changeToken === head &&
+        !request.requestDigest &&
+        haltedNodes.size === 0
+      ) {
+        // Nothing on this channel has been written since the exchange that
+        // issued the token, and that exchange's reply was whole: the requester
+        // already holds everything here, and the peer watermarks it stored
+        // with the token are still this side's coverage. No watermark read, no
+        // scan and no walk. Rows still uploading would have kept the token
+        // from being issued; see the token's condition below.
+        return {
+          records: [],
+          labels: [],
+          appSyncableRows: [],
+          responderWatermarks: {},
+          hasMore: false,
+          unchanged: true,
+          changeToken: head,
+        };
       }
 
       // 3. Scan what the caller hasn't seen — records, then labels, then
@@ -739,7 +806,8 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
       //     incomplete: clamping to a lower bound only understates which files
       //     this side holds, which costs a requester a redundant upload and
       //     never a lost one.
-      const responderByteWatermarks = await walkByteCoverage(responderWatermarks);
+      const walked = await walkByteCoverage(responderWatermarks);
+      const responderByteWatermarks = walked?.watermarks;
 
       // The integrity check, only when asked: a GROUP BY over the whole index
       // is cheap but not per-round cheap, and it answers a question that only
@@ -839,6 +907,18 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
         // things — a different width, or a different set of tables summed into
         // them.
         ...(digest ? { digest, digestPrefixLength: prefixLength, digestScopes } : {}),
+        // Only for a reply that leaves the requester nothing to come back for.
+        // Rows left behind, a scope that would not read, or a halted author
+        // each need the next exchange in full. So does a file the walk has
+        // still to find: an upload landing writes no row, so the token would
+        // never move for it, and only a walk can raise the bytes watermark.
+        ...(head !== null &&
+        !hasMore &&
+        unreadableCoverage.length === 0 &&
+        haltedNodes.size === 0 &&
+        walked?.settled === true
+          ? { changeToken: head }
+          : {}),
       };
     },
   };

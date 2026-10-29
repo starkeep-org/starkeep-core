@@ -53,6 +53,11 @@ export class FakeDsql implements DatabaseClientFactory {
         for (const route of [...this.routes, ...this.fallbacks]) {
           if (route.match.test(text)) return { rows: route.rows(q) };
         }
+        // Every write runs in a transaction that replaces its channel's change
+        // head, and every exchange reads the head. Answered here rather than
+        // scripted, as a test about the heads can still route them itself:
+        // no stored head, so no exchange is ever answered "unchanged".
+        if (TRANSACTION_CONTROL.test(text) || CHANGE_HEADS.test(text)) return { rows: [] };
         throw new Error(`FakeDsql: unscripted SQL: ${text}`);
       },
       end: async () => {},
@@ -146,6 +151,12 @@ export function fakeDsqlWithGrants(
       .otherwise(/from "app_starkeep_drive"\."_starkeep_byte_coverage"/, [])
   );
 }
+
+/** `BEGIN`, `COMMIT` and `ROLLBACK`, which every write now issues. */
+export const TRANSACTION_CONTROL = /^(BEGIN|COMMIT|ROLLBACK)$/;
+
+/** Any statement on the change heads: a write's replacement, an exchange's read. */
+export const CHANGE_HEADS = /"shared"\."change_heads"/;
 
 /** The page-wide stand-in lookup behind every listing's size summary. */
 export const STAND_INS_OF_PAGE =

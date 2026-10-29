@@ -196,6 +196,17 @@ describe("shared.object_availability", () => {
   });
 });
 
+describe("shared.change_heads", () => {
+  it("is readable and upsertable by every app, and deletable by none", async () => {
+    // Every per-app role writes shared rows on the runtime path, and replaces
+    // the shared channel's change head in the same transaction. Without the
+    // grant every shared write fails at COMMIT; with DELETE a head could go
+    // missing, which reads to a requester as "never written".
+    const statements = await init();
+    expect(statements).toContain("GRANT SELECT, INSERT, UPDATE ON shared.change_heads TO PUBLIC");
+  });
+});
+
 describe("every table in `shared` is granted to something", () => {
   it("leaves no table reachable only by its creator", async () => {
     // The generalisation of the bug above: a CREATE TABLE with no accompanying
@@ -295,7 +306,12 @@ describe("every owned table leads with its owner", () => {
   // tables and puts it first in every conflict target; see storage-aurora-dsql's
   // `owner-scope.ts`. A table or index without it either fails every insert or
   // lets one user's row collide with another's.
-  const OWNED = ["shared.records", "shared.record_labels", "shared.object_availability"];
+  const OWNED = [
+    "shared.records",
+    "shared.record_labels",
+    "shared.object_availability",
+    "shared.change_heads",
+  ];
 
   it.each(OWNED)("%s has the owner column and leads its primary key with it", async (table) => {
     const create = (await init()).find((s) =>

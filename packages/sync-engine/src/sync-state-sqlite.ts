@@ -28,6 +28,7 @@ const PEER_WATERMARKS = "peer_watermarks";
 const BYTE_WATERMARKS = "byte_watermarks";
 const PEER_BYTE_WATERMARKS = "peer_byte_watermarks";
 const HLC_CLOCK = "hlc_clock";
+const CHANGE_TOKEN = "change_token";
 
 export interface SqliteSyncStateStoreOptions {
   readonly db: RawDatabase;
@@ -115,6 +116,12 @@ export function createSqliteSyncStateStore(options: SqliteSyncStateStoreOptions)
     },
     async setPeerByteWatermarks(watermarks: Watermarks): Promise<void> {
       setJson(PEER_BYTE_WATERMARKS, watermarks);
+    },
+    async getChangeToken(): Promise<string | null> {
+      return getJson<string>(CHANGE_TOKEN);
+    },
+    async setChangeToken(token: string | null): Promise<void> {
+      setJson(CHANGE_TOKEN, token);
     },
     async getHlcClockState(): Promise<{ wallTime: number; counter: number } | null> {
       return getJson<{ wallTime: number; counter: number }>(HLC_CLOCK);

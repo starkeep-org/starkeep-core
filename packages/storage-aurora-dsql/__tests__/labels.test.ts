@@ -55,6 +55,13 @@ class FakeClient implements DatabaseClient {
   texts(): string[] {
     return this.calls.map((c) => c.text);
   }
+
+  /** The data statements alone, without the transaction or the change head. */
+  written(): { text: string; values?: unknown[] }[] {
+    return this.calls.filter(
+      (c) => !/^(BEGIN|COMMIT|ROLLBACK)$/.test(c.text) && !c.text.includes('"change_heads"'),
+    );
+  }
 }
 
 function factoryOf(client: FakeClient): DatabaseClientFactory {
@@ -237,7 +244,7 @@ describe("the sync-facing surface", () => {
       nodeId: deletedAt.nodeId,
       deletedAt,
     });
-    const [call] = client.calls;
+    const [call] = client.written();
     expect(call.values).toContain(serializeHLC(deletedAt));
     expect(call.values).toContain(serializeHLC(HLC));
   });
@@ -284,7 +291,7 @@ describe("the sync-facing surface", () => {
 
   it("tombstoneLabelsForRecord is one statement with no app_id predicate", async () => {
     await adapter.tombstoneLabelsForRecord(rid("rec1"), HLC);
-    const [call] = client.calls;
+    const [call] = client.written();
     expect(call.text).toMatch(LABELS_UPDATE);
     expect(call.text).not.toMatch(/"app_id" = /);
     expect(call.values).toContain("rec1");

@@ -32,6 +32,7 @@ import {
   postgresCompiler,
   ownerScopedCompiler,
   assertOwnerScoped,
+  guardChangeHeads,
 } from "@starkeep/storage-aurora-dsql";
 import { S3ObjectStorageAdapter } from "@starkeep/storage-s3";
 import {
@@ -1071,18 +1072,24 @@ export function __setDatabaseClientFactoryForTests(factory: DatabaseClientFactor
  * the user-scoped compiler did not compile. The scoped compiler is the cut
  * between users; this is the tripwire for code that goes around it. See
  * storage-aurora-dsql's `owner-scope.ts`.
+ *
+ * The same clients refuse a write to a synced table that does not replace its
+ * channel's change head in the same transaction, and any other write to the
+ * heads. An idle exchange trusts the head to say nothing changed, so a write
+ * that skipped it would go unsynced until the next one. See
+ * storage-aurora-dsql's `change-heads.ts`.
  */
 function ownerGuardedFactory(inner: DatabaseClientFactory): DatabaseClientFactory {
   return {
     async createClient(options) {
       const client = await inner.createClient(options);
-      return {
+      return guardChangeHeads({
         query(text, values) {
           assertOwnerScoped(text);
           return client.query(text, values);
         },
         end: () => client.end(),
-      };
+      });
     },
   };
 }
@@ -5223,6 +5230,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // On the app's own channel, the gate has already refused any push
       // carrying shared rows (`appChannelPushRefusal`).
       let exchangeDb: DatabaseAdapter = db;
+      // The Drive channel's change token. A narrowed exchange folds its scope
+      // into the token, because a new read grant widens the library the phone
+      // sees without any row being written.
+      let driveChangeHead = () => db.changeHead();
       if (mobileKey && appId === DRIVE_APP_ID) {
         const refusal = await mobilePushRefusal(
           body,
@@ -5254,6 +5265,14 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         await scoped.init();
         toClose.push(() => scoped.close());
         exchangeDb = scoped;
+        const scope = createHash("sha256")
+          .update([...grants.readableTypes].sort().join("\n"))
+          .digest("hex")
+          .slice(0, 16);
+        driveChangeHead = async () => {
+          const token = await db.changeHead();
+          return token === null ? null : `${token}:${scope}`;
+        };
       }
 
       // Channel split. The Starkeep Drive channel carries *all* shared
@@ -5290,6 +5309,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           // as held rather than stopping there forever.
           byteCoverage: db.byteCoverageStore(DRIVE_APP_ID),
           onWalk,
+          changeHead: driveChangeHead,
           declinesBlob: (key) => keyIsCloudExcluded(db, key),
           // A canonical stand-in's row lands before its bytes, so the archive
           // decision `onApplied` takes for it finds no bytes and declines.
@@ -5348,6 +5368,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           // connection the applier uses.
           byteCoverage: createDsqlByteCoverageStore(source.client, appId, subject.userId),
           onWalk,
+          changeHead: () => source.applier.changeHead(appId),
         });
       }
       const exchangeStartedAt = Date.now();
@@ -5376,6 +5397,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           },
           maxBytes: body.maxBytes ?? null,
           hasMore: response.hasMore,
+          // Answered from the change token alone, and whether this reply
+          // issued one. A channel that never issues one runs every idle tick
+          // in full, which is the cost the token exists to remove.
+          unchanged: response.unchanged === true,
+          tokenIssued: response.changeToken !== undefined,
           // False means requesters stop pushing; see `walkByteCoverage`.
           bytesReported: response.responderByteWatermarks !== undefined,
           // The walk, per author: where the bytes watermark started and ended,

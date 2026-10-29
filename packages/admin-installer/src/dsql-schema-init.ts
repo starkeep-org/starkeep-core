@@ -398,6 +398,30 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
       .raw(`GRANT SELECT, INSERT, UPDATE ON shared.object_availability TO PUBLIC`)
       .execute(db);
 
+    // shared.change_heads — one random token per user per sync channel,
+    // replaced in the same transaction as every write to that channel's synced
+    // tables. An exchange whose requester echoes the current token is answered
+    // "unchanged" without reading any watermark. See storage-aurora-dsql's
+    // `change-heads.ts`.
+    //
+    // Granted to PUBLIC like shared.record_labels, because every per-app role
+    // writes shared rows on the runtime path and so must replace the shared
+    // channel's head in the same transaction; a dedicated role would need a
+    // second connection, and the token could then lag a committed write. The
+    // token says only "something changed", so who reads it does not matter.
+    // No DELETE: nothing removes a head. What a writer may put in it is bounded
+    // by the cloud data server's client, which refuses every write here except
+    // the one replacement whose value the database generates.
+    await db.schema
+      .createTable("shared.change_heads")
+      .ifNotExists()
+      .addColumn(OWNER_COLUMN, "text", (c) => c.notNull())
+      .addColumn("channel", "text", (c) => c.notNull())
+      .addColumn("token", "text", (c) => c.notNull())
+      .addPrimaryKeyConstraint("change_heads_pkey", [OWNER_COLUMN, "channel"] as never[])
+      .execute();
+    await sql.raw(`GRANT SELECT, INSERT, UPDATE ON shared.change_heads TO PUBLIC`).execute(db);
+
     // shared.app_label_keys — the manifest-declared key registry.
     //
     // Capping *distinct keys per app* is the limit that actually enforces the

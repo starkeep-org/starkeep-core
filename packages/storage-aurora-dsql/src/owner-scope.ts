@@ -23,7 +23,8 @@
  * {@link assertOwnerScoped} is the tripwire for one that starts to.
  *
  * Owned tables: `shared.records`, `shared.record_labels`,
- * `shared.object_availability`, every `shared.record_<category>_metadata`, and
+ * `shared.object_availability`, `shared.change_heads`, every
+ * `shared.record_<category>_metadata`, and
  * every table in an app's `app_<appId>` schema. The registry, the grants and
  * the label-key declarations belong to the deployment and stay unscoped.
  *
@@ -66,7 +67,12 @@ import { OWNER_COLUMN, USER_SEGMENT_PATTERN } from "@starkeep/protocol-primitive
 
 export { OWNER_COLUMN };
 
-const OWNED_SHARED_TABLES = new Set(["records", "record_labels", "object_availability"]);
+const OWNED_SHARED_TABLES = new Set([
+  "records",
+  "record_labels",
+  "object_availability",
+  "change_heads",
+]);
 
 /** Whether `schema.table` holds one user's rows. */
 export function isOwnedTable(schema: string | undefined, table: string): boolean {
@@ -331,7 +337,7 @@ export class OwnerScopePlugin implements KyselyPlugin {
 
 /** Matches an owned table as compiled SQL names it, quoted. */
 const OWNED_TABLE_SQL =
-  /"shared"\."(records|record_labels|object_availability|record_[a-z0-9_]+_metadata)"|"app_[a-z0-9_]+"\."[^"]+"/;
+  /"shared"\."(records|record_labels|object_availability|change_heads|record_[a-z0-9_]+_metadata)"|"app_[a-z0-9_]+"\."[^"]+"/;
 
 /**
  * Refuse a statement that names an owned table and never mentions the owner

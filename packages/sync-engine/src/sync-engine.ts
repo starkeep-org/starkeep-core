@@ -251,6 +251,11 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     return syncState.getRepairFloors();
   }
 
+  /** See `SyncStateStore.getChangeToken`. A store without it never sends one. */
+  async function loadChangeToken(): Promise<string | null> {
+    return syncState?.getChangeToken ? syncState.getChangeToken() : null;
+  }
+
   async function loadInboundFloors(): Promise<Watermarks> {
     if (!syncState) return {};
     return syncState.getInboundFloors();
@@ -706,7 +711,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     // is recomputed from what lands every round and would swallow the
     // correction immediately. Understating coverage is always safe — it costs
     // a re-ship, and LWW makes the re-ship a no-op.
-    const advertisedWatermarks = applyRepairFloors(ownWatermarks, await loadInboundFloors());
+    const inboundFloors = await loadInboundFloors();
+    const advertisedWatermarks = applyRepairFloors(ownWatermarks, inboundFloors);
     // Repair, when one is outstanding, is expressed by lowering the bound the
     // scan already takes — not by a second scan and not by a branch. The
     // scans below cannot tell a repair from an ordinary round.
@@ -732,7 +738,12 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           probe.coverageComplete === false
             ? mergeWatermarksUpward(priorPeerWatermarks, probe.responderWatermarks)
             : probe.responderWatermarks;
-        if (syncState) await syncState.setPeerWatermarks(priorPeerWatermarks);
+        if (syncState) {
+          await syncState.setPeerWatermarks(priorPeerWatermarks);
+          // A token vouches for the watermarks it was stored with, and these
+          // came from elsewhere.
+          await syncState.setChangeToken?.(null);
+        }
       } else {
         console.warn(
           "[sync] peer does not report a bytes watermark; pushing nothing until it does. Deploy the current cloud data server.",
@@ -742,7 +753,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       }
     }
 
-    const peerWatermarks = applyRepairFloors(priorPeerWatermarks, await loadRepairFloors());
+    const repairFloors = await loadRepairFloors();
+    const peerWatermarks = applyRepairFloors(priorPeerWatermarks, repairFloors);
 
     // ---------------------------------------------------------------------
     // Outbound: gather SR records and AR/AW rows the peer hasn't seen, then
@@ -939,6 +951,19 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       }
     }
 
+    // The peer's change token, echoed only by a round that asks nothing new:
+    // nothing to push and no repair widening either side's range. Such a
+    // round's request is the one the token was issued against, so a peer that
+    // has not written since can answer "unchanged" without reading anything.
+    // See `SyncExchangeRequest.changeToken`.
+    const nothingToAsk =
+      outboundItems.length === 0 &&
+      outboundLabels.length === 0 &&
+      outboundAppRows.length === 0 &&
+      Object.keys(repairFloors).length === 0 &&
+      Object.keys(inboundFloors).length === 0;
+    const sentToken = nothingToAsk ? await loadChangeToken() : null;
+
     const exchangeStartedAt = uploaderClock();
     const response = await transport.exchange({
       watermarks: advertisedWatermarks,
@@ -947,7 +972,11 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       appSyncableRows: outboundAppRows.length > 0 ? outboundAppRows : undefined,
       limit: maxItems,
       maxBytes,
+      ...(sentToken !== null ? { changeToken: sentToken } : {}),
     });
+    // Believed only as an answer to a token this round sent: its empty
+    // `responderWatermarks` must never replace real ones.
+    const unchanged = sentToken !== null && response.unchanged === true;
 
     // Authors the responder stopped applying part-way through. Our shipment
     // for them left this node fine and was then discarded, so it is a failure
@@ -1274,14 +1303,32 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
       // in the harmless direction — an omitted table understates the union, it
       // cannot invent coverage the peer does not have, and if the peer really
       // has lost rows the *next* complete report lowers the map properly.
-      const nextPeerWatermarks =
-        response.coverageComplete === false
-          ? mergeWatermarksUpward(priorPeerWatermarks, response.responderWatermarks)
-          : response.responderWatermarks;
-      if (!sameWatermarks(priorPeerWatermarks, nextPeerWatermarks)) {
-        progressed = true;
+      //
+      // An unchanged peer sends no map at all, and the stored one is still its
+      // coverage: nothing on its side has been written since it reported it.
+      if (!unchanged) {
+        const nextPeerWatermarks =
+          response.coverageComplete === false
+            ? mergeWatermarksUpward(priorPeerWatermarks, response.responderWatermarks)
+            : response.responderWatermarks;
+        if (!sameWatermarks(priorPeerWatermarks, nextPeerWatermarks)) {
+          progressed = true;
+        }
+        await syncState.setPeerWatermarks(nextPeerWatermarks);
+        // The token goes in after the watermarks it vouches for, so a crash
+        // between the two leaves an old token beside new watermarks. The peer
+        // has moved past that token, so it only costs a full exchange.
+        //
+        // Stored only when this side took everything the reply carried: a row
+        // that would not apply here, or rows the peer left behind, need the
+        // next round in full, and a matching token would skip it.
+        const keep =
+          response.changeToken !== undefined &&
+          !response.hasMore &&
+          inboundBrokeFor.size === 0 &&
+          response.coverageComplete !== false;
+        await syncState.setChangeToken?.(keep ? response.changeToken! : null);
       }
-      await syncState.setPeerWatermarks(nextPeerWatermarks);
 
       // Retire repair floors, per author, once a **pushing** round has
       // drained the outbound side *and the peer kept that author's rows*.

@@ -70,10 +70,23 @@ function insertEntry(): AppSyncableRowEntry {
 
 describe("DsqlAppSyncableApplier OCC retry", () => {
   it("retries the LWW upsert past an OCC conflict", async () => {
-    client.conflictOnce(/insert into/, 2);
+    client.conflictOnce(/insert into "app_/, 2);
     await applier.apply(insertEntry());
-    const inserts = client.calls.filter((c) => /insert into/.test(c.text));
+    const inserts = client.calls.filter((c) => /insert into "app_/.test(c.text));
     expect(inserts).toHaveLength(3); // two conflicts + one that committed
+    // Each attempt is its own transaction, and only the one that committed
+    // reached the head.
+    expect(client.calls.filter((c) => c.text === "BEGIN")).toHaveLength(3);
+    expect(client.calls.filter((c) => c.text.includes('"change_heads"'))).toHaveLength(1);
+  });
+
+  it("replaces the app channel's change head in the write's transaction", async () => {
+    await applier.apply(insertEntry());
+    const texts = client.calls.map((c) => c.text);
+    expect(texts[0]).toBe("BEGIN");
+    expect(texts[texts.length - 1]).toBe("COMMIT");
+    const head = client.calls.find((c) => c.text.includes('"change_heads"'))!;
+    expect(head.values?.[0]).toMatch(/^app_/);
   });
 
   it("does not retry a non-OCC error", async () => {

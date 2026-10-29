@@ -32,6 +32,14 @@ export {
   fromPgRows,
 } from "./pg-timestamps.js";
 export {
+  CHANGE_HEADS_TABLE,
+  SHARED_CHANNEL,
+  appChannel,
+  buildChangeHeadReplace,
+  guardChangeHeads,
+  readChangeHead,
+} from "./change-heads.js";
+export {
   BYTE_COVERAGE_TABLE,
   appSchemaName,
   createDsqlByteCoverageStore,

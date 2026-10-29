@@ -94,6 +94,7 @@ import {
   type PostgresCompiler,
 } from "./query-builder.js";
 import { withOccRetry, isRetryableDsqlConflict } from "./occ-retry.js";
+import { SHARED_CHANNEL, buildChangeHeadReplace, readChangeHead } from "./change-heads.js";
 import { fromPgRows, pgConvertersFor, withAggregateOutputs } from "./pg-timestamps.js";
 import { sql, type CompiledQuery } from "kysely";
 
@@ -119,6 +120,9 @@ function numOrNull(value: unknown): number | null {
 const LABELS: LabelDialect = {
   table: "shared.record_labels",
 };
+
+/** DSQL's 3,000 modified rows per transaction, less the change head's one. */
+const LABEL_ROWS_PER_TRANSACTION = 2_999;
 
 /**
  * One user's library in DSQL.
@@ -196,7 +200,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   async put(record: DataRecord): Promise<void> {
-    await withOccRetry("put", () => this.putRaw(record));
+    await this.writeShared("put", () => this.putRaw(record));
   }
 
   // Raw single-statement upsert. Value-independent (the row is built from the
@@ -235,7 +239,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   async delete(id: StarkeepId, hlc: HLCTimestamp): Promise<void> {
-    await withOccRetry("delete", () => this.deleteRaw(id, hlc));
+    await this.writeShared("delete", () => this.deleteRaw(id, hlc));
   }
 
   private async deleteRaw(id: StarkeepId, hlc: HLCTimestamp): Promise<void> {
@@ -432,22 +436,43 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   async batch(operations: BatchOperation[]): Promise<void> {
-    await withOccRetry("batch", async () => {
+    await this.writeShared("batch", async () => {
+      for (const operation of operations) {
+        if (operation.type === "put") {
+          await this.putRaw(operation.record);
+        } else {
+          await this.deleteRaw(operation.id, operation.hlc);
+        }
+      }
+    });
+  }
+
+  /**
+   * Run `body` as one `BEGIN…COMMIT` that also replaces the shared channel's
+   * change head, so an idle exchange's "unchanged" can never miss this write.
+   * The whole transaction is the retry unit: DSQL reports an OCC conflict at
+   * COMMIT, and two writers replacing one head conflict there by design. See
+   * `change-heads.ts`.
+   */
+  private async writeShared(label: string, body: () => Promise<void>): Promise<void> {
+    await withOccRetry(label, async () => {
       await this.getClient().query("BEGIN");
       try {
-        for (const operation of operations) {
-          if (operation.type === "put") {
-            await this.putRaw(operation.record);
-          } else {
-            await this.deleteRaw(operation.id, operation.hlc);
-          }
-        }
+        await body();
+        await this.run(buildChangeHeadReplace(this.qb, SHARED_CHANNEL));
         await this.getClient().query("COMMIT");
       } catch (error) {
         await this.getClient().query("ROLLBACK");
         throw error;
       }
     });
+  }
+
+  /** The shared channel's change token, or `null` before its first write. */
+  async changeHead(): Promise<string | null> {
+    return withOccRetry("changeHead", () =>
+      readChangeHead(this.getClient(), this.qb, SHARED_CHANNEL),
+    );
   }
 
   // The callback is replayed verbatim on an OCC conflict (raised at RELEASE, the
@@ -465,6 +490,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
           query: async (query) => this.queryRaw(query),
         };
         const result = await callback(transaction);
+        await this.run(buildChangeHeadReplace(this.qb, SHARED_CHANNEL));
         await this.getClient().query("RELEASE SAVEPOINT starkeep_transaction");
         return result;
       } catch (error) {
@@ -479,7 +505,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   async putMetadata(recordType: string, row: MetadataRow): Promise<void> {
-    await withOccRetry("putMetadata", () => this.putMetadataRaw(recordType, row));
+    await this.writeShared("putMetadata", () => this.putMetadataRaw(recordType, row));
   }
 
   private async putMetadataRaw(recordType: string, row: MetadataRow): Promise<void> {
@@ -535,20 +561,22 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   async deleteMetadata(typeId: string, recordId: StarkeepId): Promise<void> {
-    await withOccRetry("deleteMetadata", async () => {
+    await this.writeShared("deleteMetadata", async () => {
       const table = pgMetadataTableName(typeId);
       await this.run(this.qb.deleteFrom(table).where("record_id", "=", recordId).compile());
     });
   }
 
   async tombstoneMetadata(typeId: string, recordId: StarkeepId, hlc: HLCTimestamp): Promise<void> {
-    await withOccRetry("tombstoneMetadata", () =>
+    await this.writeShared("tombstoneMetadata", () =>
       this.setMetadataTombstone(typeId, recordId, serializeHLC(hlc)),
     );
   }
 
   async restoreMetadata(typeId: string, recordId: StarkeepId): Promise<void> {
-    await withOccRetry("restoreMetadata", () => this.setMetadataTombstone(typeId, recordId, null));
+    await this.writeShared("restoreMetadata", () =>
+      this.setMetadataTombstone(typeId, recordId, null),
+    );
   }
 
   private async setMetadataTombstone(
@@ -569,29 +597,37 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   // ---- Cross-app record labels -------------------------------------------
   //
   // The SQL for all of these is built in `@starkeep/storage-adapter`, shared
-  // with the SQLite adapter. What is this backend's own business is the OCC
-  // retry wrapping every statement below: DSQL aborts transactions that race
-  // on a row, and these are all replay-safe — the upsert is value-independent
-  // and keyed by primary key, so a retry converges rather than compounding.
+  // with the SQLite adapter. What is this backend's own business is the
+  // transaction wrapping every write below, which replaces the shared change
+  // head and is retried whole on an OCC conflict: DSQL aborts transactions that
+  // race on a row, and these are all replay-safe — the upsert is
+  // value-independent and keyed by primary key, so a retry converges rather
+  // than compounding.
 
   async upsertLabels(labels: LabelUpsert[]): Promise<void> {
     if (labels.length === 0) return;
-    // One multi-row statement, so a whole batch is a single round trip with no
-    // read-modify-write. The caller chunks to DSQL's 3,000-modified-rows limit;
-    // secondary-index entries do not count against it (measured), so the two
-    // indexes on this table don't shrink the usable batch.
-    await withOccRetry("upsertLabels", async () => {
-      await this.run(buildLabelUpsert(this.qb, LABELS, labels));
-    });
+    // One multi-row statement per transaction, so a batch is a single write
+    // with no read-modify-write. DSQL caps a transaction at 3,000 modified
+    // rows and the change head is one of them, so a caller's 3,000-row chunk
+    // is split here. Secondary-index entries do not count against the cap
+    // (measured), so the two indexes on this table don't shrink it.
+    for (let i = 0; i < labels.length; i += LABEL_ROWS_PER_TRANSACTION) {
+      const chunk = labels.slice(i, i + LABEL_ROWS_PER_TRANSACTION);
+      await this.writeShared("upsertLabels", async () => {
+        await this.run(buildLabelUpsert(this.qb, LABELS, chunk));
+      });
+    }
   }
 
   async retractLabels(retractions: LabelRetraction[]): Promise<void> {
     if (retractions.length === 0) return;
-    await withOccRetry("retractLabels", async () => {
-      for (const r of retractions) {
+    // One transaction each: a retraction tombstones every value under its key,
+    // so no count of them is known to fit under DSQL's 3,000-row cap together.
+    for (const r of retractions) {
+      await this.writeShared("retractLabels", async () => {
         await this.run(buildLabelRetraction(this.qb, LABELS, r));
-      }
-    });
+      });
+    }
   }
 
   async replaceLabelValues(replacements: LabelValueReplacement[]): Promise<void> {
@@ -604,32 +640,25 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     // Atomic because the intermediate state is wrong in a way a reader would
     // believe: between the tombstone and the upsert a single-valued key looks
     // unset rather than mid-update.
-    await withOccRetry("replaceLabelValues", async () => {
-      await this.getClient().query("BEGIN");
-      try {
-        for (const r of replacements) {
-          await this.run(buildLabelValueReplacementTombstone(this.qb, LABELS, r));
-          if (r.values.length > 0) {
-            await this.run(
-              buildLabelUpsert(
-                this.qb,
-                LABELS,
-                r.values.map((value) => ({
-                  recordId: r.recordId,
-                  appId: r.appId,
-                  key: r.key,
-                  value,
-                  recordType: r.recordType,
-                  hlc: r.hlc,
-                })),
-              ),
-            );
-          }
+    await this.writeShared("replaceLabelValues", async () => {
+      for (const r of replacements) {
+        await this.run(buildLabelValueReplacementTombstone(this.qb, LABELS, r));
+        if (r.values.length > 0) {
+          await this.run(
+            buildLabelUpsert(
+              this.qb,
+              LABELS,
+              r.values.map((value) => ({
+                recordId: r.recordId,
+                appId: r.appId,
+                key: r.key,
+                value,
+                recordType: r.recordType,
+                hlc: r.hlc,
+              })),
+            ),
+          );
         }
-        await this.getClient().query("COMMIT");
-      } catch (error) {
-        await this.getClient().query("ROLLBACK");
-        throw error;
       }
     });
   }
@@ -668,7 +697,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   // ---- Label sync ---------------------------------------------------------
 
   async putLabel(label: RecordLabel): Promise<void> {
-    await withOccRetry("putLabel", async () => {
+    await this.writeShared("putLabel", async () => {
       await this.run(buildLabelSnapshotUpsert(this.qb, LABELS, label));
     });
   }
@@ -794,7 +823,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   async tombstoneLabelsForRecord(recordId: StarkeepId, hlc: HLCTimestamp): Promise<void> {
-    await withOccRetry("tombstoneLabelsForRecord", async () => {
+    await this.writeShared("tombstoneLabelsForRecord", async () => {
       await this.run(buildTombstoneLabelsForRecord(this.qb, LABELS, recordId, hlc));
     });
   }
@@ -804,7 +833,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     deletedAt: HLCTimestamp,
     hlc: HLCTimestamp,
   ): Promise<void> {
-    await withOccRetry("restoreLabelsForRecord", async () => {
+    await this.writeShared("restoreLabelsForRecord", async () => {
       await this.run(buildRestoreLabelsForRecord(this.qb, LABELS, recordId, deletedAt, hlc));
     });
   }

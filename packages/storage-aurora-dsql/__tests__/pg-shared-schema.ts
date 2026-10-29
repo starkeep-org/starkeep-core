@@ -13,6 +13,22 @@
 import type { PGlite } from "@electric-sql/pglite";
 import { CATEGORIES, hasMetadataTable, pgMetadataDdl } from "@starkeep/protocol-primitives";
 
+/**
+ * The change heads alone, for suites that create only an app's schema: every
+ * applier write replaces its channel's head. See `change-heads.ts`.
+ */
+export async function createChangeHeads(pg: PGlite): Promise<void> {
+  await pg.exec(`
+    CREATE SCHEMA IF NOT EXISTS shared;
+    CREATE TABLE shared.change_heads (
+      user_id text NOT NULL,
+      channel text NOT NULL,
+      token text NOT NULL,
+      PRIMARY KEY (user_id, channel)
+    );
+  `);
+}
+
 export async function createSharedSchema(pg: PGlite): Promise<void> {
   await pg.exec(`
     CREATE SCHEMA IF NOT EXISTS shared;
@@ -94,4 +110,5 @@ export async function createSharedSchema(pg: PGlite): Promise<void> {
   for (const c of CATEGORIES.filter((c) => hasMetadataTable(c.id))) {
     await pg.exec(pgMetadataDdl(c));
   }
+  await createChangeHeads(pg);
 }

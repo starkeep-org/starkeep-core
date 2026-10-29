@@ -188,6 +188,18 @@ function sanitizeExchangeResponse(body: unknown): SyncExchangeResponse {
     }
   }
 
+  // `unchanged` decides whether the peer watermarks are kept or replaced, so
+  // a truthy string must not take the "kept" branch. A token is stored and
+  // echoed, so it has to be a string.
+  const unchanged = raw["unchanged"];
+  if (unchanged !== undefined && unchanged !== null && typeof unchanged !== "boolean") {
+    throw fail('field "unchanged" is not a boolean');
+  }
+  const changeToken = raw["changeToken"];
+  if (changeToken !== undefined && changeToken !== null && typeof changeToken !== "string") {
+    throw fail('field "changeToken" is not a string');
+  }
+
   return {
     ...(raw as unknown as SyncExchangeResponse),
     responderWatermarks,

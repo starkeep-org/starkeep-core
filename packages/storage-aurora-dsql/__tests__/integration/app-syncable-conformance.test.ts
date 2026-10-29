@@ -40,6 +40,7 @@ import {
 import type { AppSyncableNamespace, AppSyncableNamespaceStore } from "@starkeep/sync-engine";
 import { DsqlAppSyncableApplier } from "../../src/app-syncable/apply.js";
 import type { DatabaseClient } from "../../src/types.js";
+import { createChangeHeads } from "../pg-shared-schema.js";
 
 const APP = "conformance-app";
 const TABLE = "test_rows";
@@ -81,6 +82,7 @@ async function makeHarness(): Promise<ConformanceHarness> {
   // The same column set `dsql-ddl.ts` emits for a syncable table: the owner,
   // the app's own columns plus the three the protocol owns, and the index the
   // delta scan and the digest both seek. The owner leads the primary key.
+  await createChangeHeads(pg);
   await pg.exec(`
     CREATE SCHEMA ${SCHEMA};
     CREATE TABLE ${SCHEMA}.${TABLE} (

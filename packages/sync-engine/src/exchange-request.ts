@@ -138,6 +138,13 @@ export function sanitizeExchangeRequest(
   }
   // Anything else is dropped rather than rejected — see the module note.
 
+  // Compared for equality and never stored, so anything but a short string is
+  // simply no token: the exchange then runs in full, which is always correct.
+  const changeToken = raw["changeToken"];
+  if (typeof changeToken === "string" && changeToken.length > 0 && changeToken.length <= 256) {
+    request.changeToken = changeToken;
+  }
+
   return request;
 }
 
