@@ -108,7 +108,7 @@ The savings depend on one invariant: the floor names every author the responder 
 
 Requesters never ask for things they won't be given. Two facts make that hold by construction:
 
-- **The requester's watermark map advances only over rows the responder shipped.** In `sync-engine.ts`, `nextOwnWatermarks` advances only over `ownSafeAdvance`, which holds rows that arrived from the peer and applied. Repair floors only ever *lower* the advertised values.
+- **The requester's watermark map advances only over rows the responder shipped.** In `sync-engine.ts`, `nextOwnWatermarks` advances only over `ownSafeAdvance`, which holds rows that arrived from the peer and applied. Repair floors only ever _lower_ the advertised values.
 - **The system already forbids post-filtering an exchange.** The header of `packages/storage-aurora-dsql/src/type-scope.ts` states the rule: a watermark or digest computed over rows the requester never receives "would make the two sides disagree forever." Narrowing must happen in the read scope (the Kysely plugin), so every read the exchange makes sees the same library. Phone narrowing works this way today.
 
 Withholding rows is therefore not a new restriction that this change introduces. A future post-filter that skipped the read scope would already break the coverage watermark and the digests. The floored read adds one more way for that mistake to show up: silent loss of the savings rather than wrong data. Finding 2 exists so that this symptom gets logged.
