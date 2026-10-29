@@ -61,7 +61,7 @@ export function ownerScopedCompiler(userId: string): PostgresCompiler {
 
 /**
  * The compiler for one user's rows of the given types only: `userId`'s records
- * whose type is in `types`, and the labels on them. See `type-scope.ts`.
+ * and labels whose type is in `types`. See `type-scope.ts`.
  */
 export function typeScopedCompiler(userId: string, types: readonly string[]): PostgresCompiler {
   return compiler

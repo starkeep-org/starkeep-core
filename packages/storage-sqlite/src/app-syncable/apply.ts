@@ -19,6 +19,7 @@ import {
   type ParsedQuery,
   type ParsedQueryResult,
   buildBucketDigest,
+  buildNodeWatermarks,
   buildScanSinceForNode,
   collectSince,
   planNodeScans,
@@ -282,11 +283,7 @@ export class SqliteAppSyncableApplier implements AppSyncableApplier, ScanCapable
     if (!this.tableExists(fullName)) return {};
     const rows = allCompiled<{ node_id: string; max_updated_at: string }>(
       this.db,
-      qb
-        .selectFrom(fullName)
-        .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])
-        .groupBy("node_id")
-        .compile(),
+      buildNodeWatermarks(qb, fullName),
     );
     const out: Record<string, HLCTimestamp> = {};
     for (const row of rows) {

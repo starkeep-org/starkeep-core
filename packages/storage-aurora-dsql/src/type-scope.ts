@@ -12,7 +12,14 @@
  * scope is, and every statement compiled through it sees only:
  *
  * - `shared.records` rows whose `type` is in the scope;
- * - `shared.record_labels` rows whose record is.
+ * - `shared.record_labels` rows whose `record_type` is.
+ *
+ * Labels narrow on their own `record_type` rather than on a semi-join back to
+ * records. The column is denormalized from `records.type`, which is immutable,
+ * so it cannot go stale, and read gating on `idx_record_labels_reverse` already
+ * relies on it. The semi-join cost a phone's grouped label read 0.20 DPU on
+ * DSQL against 0.08 for the column. One difference: an orphan label, whose
+ * record is gone, is in scope when its type is. The schema tolerates orphans.
  *
  * Reads, updates and deletes gain the predicate. Inserts pass through
  * unchanged: what a scoped caller may write is checked before the write, by
@@ -28,8 +35,6 @@ import {
   OperatorNode,
   PrimitiveValueListNode,
   ReferenceNode,
-  SelectQueryNode,
-  SelectionNode,
   TableNode,
   ValueNode,
   WhereNode,
@@ -41,6 +46,7 @@ import {
   type QueryId,
   type QueryResult,
   type RootOperationNode,
+  type SelectQueryNode,
   type UnknownRow,
   type UpdateQueryNode,
 } from "kysely";
@@ -75,8 +81,8 @@ function scopedSource(node: OperationNode): { kind: Scoped; qualifier: TableNode
   return null;
 }
 
-/** `<qualifier>.type IN (...)`, or a predicate no row satisfies for an empty scope. */
-function typeIn(qualifier: TableNode | null, types: readonly string[]): OperationNode {
+/** `<qualifier>.<column> IN (...)`, or a predicate no row satisfies for an empty scope. */
+function typeIn(qualifier: TableNode, column: string, types: readonly string[]): OperationNode {
   if (types.length === 0) {
     return BinaryOperationNode.create(
       ValueNode.createImmediate(1),
@@ -84,31 +90,10 @@ function typeIn(qualifier: TableNode | null, types: readonly string[]): Operatio
       ValueNode.createImmediate(0),
     );
   }
-  const column = ColumnNode.create("type");
   return BinaryOperationNode.create(
-    qualifier ? ReferenceNode.create(column, qualifier) : column,
+    ReferenceNode.create(ColumnNode.create(column), qualifier),
     OperatorNode.create("in"),
     PrimitiveValueListNode.create([...types]),
-  );
-}
-
-/**
- * `<labels>.record_id IN (SELECT id FROM shared.records WHERE type IN (...))`.
- * The subquery goes through the rest of the compiler's plugins, so the owner
- * scope narrows it to the same user.
- */
-function labelRecordIn(qualifier: TableNode, types: readonly string[]): OperationNode {
-  const records = TableNode.createWithSchema(RECORDS.schema, RECORDS.table);
-  const subquery: SelectQueryNode = {
-    ...SelectQueryNode.cloneWithSelections(SelectQueryNode.createFrom([records]), [
-      SelectionNode.create(ReferenceNode.create(ColumnNode.create("id"), records)),
-    ]),
-    where: WhereNode.create(typeIn(records, types)),
-  };
-  return BinaryOperationNode.create(
-    ReferenceNode.create(ColumnNode.create("record_id"), qualifier),
-    OperatorNode.create("in"),
-    subquery,
   );
 }
 
@@ -128,9 +113,7 @@ class TypeScopeTransformer extends OperationNodeTransformer {
       const source = scopedSource(node);
       if (!source) return [];
       return [
-        source.kind === "records"
-          ? typeIn(source.qualifier, this.types)
-          : labelRecordIn(source.qualifier, this.types),
+        typeIn(source.qualifier, source.kind === "records" ? "type" : "record_type", this.types),
       ];
     });
   }
@@ -191,9 +174,8 @@ class TypeScopeTransformer extends OperationNodeTransformer {
 }
 
 /**
- * The plugin that narrows records and labels to `types`. Plugins run in the
- * order they were added, so add this one *before* the owner scope: the owner
- * scope then narrows the subquery this one adds, too.
+ * The plugin that narrows records and labels to `types`. It adds no subquery,
+ * so its order relative to the owner scope does not matter.
  */
 export class RecordTypeScopePlugin implements KyselyPlugin {
   private readonly transformer: TypeScopeTransformer;

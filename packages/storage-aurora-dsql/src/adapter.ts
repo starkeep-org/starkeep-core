@@ -266,9 +266,25 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     return readNodeWatermarks(
       this.qb,
       "shared.records",
-      floor,
+      this.probeFloor(floor),
       async (q) => (await this.run(q)).rows,
     );
+  }
+
+  /**
+   * The floor a watermark read may probe with: none on a type-scoped adapter.
+   *
+   * The type predicate is not in the `(user_id, node_id, updated_at)` index,
+   * and the primary key carries `type`, `node_id` and `updated_at` as payload,
+   * so DSQL plans a narrowed probe as a scan of the whole primary key. Live,
+   * the floored statements cost a phone 1.67 DPU a read against 1.00 for the
+   * grouped reads they replace. The contract lets a read ignore its floor, so
+   * a narrowed exchange reads whole.
+   */
+  private probeFloor(
+    floor: Record<string, HLCTimestamp> | undefined,
+  ): Record<string, HLCTimestamp> | undefined {
+    return this.readableTypes ? undefined : floor;
   }
 
   async querySince(
@@ -786,7 +802,12 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   private async getLabelNodeWatermarksRaw(
     floor?: Record<string, HLCTimestamp>,
   ): Promise<Record<string, HLCTimestamp>> {
-    return readNodeWatermarks(this.qb, LABELS.table, floor, async (q) => (await this.run(q)).rows);
+    return readNodeWatermarks(
+      this.qb,
+      LABELS.table,
+      this.probeFloor(floor),
+      async (q) => (await this.run(q)).rows,
+    );
   }
 
   async tombstoneLabelsForRecord(recordId: StarkeepId, hlc: HLCTimestamp): Promise<void> {

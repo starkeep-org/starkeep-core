@@ -1,5 +1,5 @@
 import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   compareHLC,
   createDataRecord,
@@ -320,9 +320,16 @@ describe("responderWatermarks — read relative to the requester's watermarks", 
 
     // An omitted author reads to the requester as "holds nothing from it",
     // which would re-ship the author's whole history.
-    const res = await cloud.transport.exchange({ watermarks: { "device-1": unpushed } });
-    expect(serializeHLC(res.responderWatermarks["device-1"]!)).toBe(serializeHLC(held.timestamp));
-    expect(floors).toContain(undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const res = await cloud.transport.exchange({ watermarks: { "device-1": unpushed } });
+      expect(serializeHLC(res.responderWatermarks["device-1"]!)).toBe(serializeHLC(held.timestamp));
+      expect(floors).toContain(undefined);
+      // The fallback is the one sign the savings stopped, so it must say so.
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/^\[watermarks\].*device-1/));
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("an author the requester has never heard of is reported", async () => {

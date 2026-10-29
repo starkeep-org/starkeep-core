@@ -345,23 +345,6 @@ export function buildQueryLabels(
     .compile();
 }
 
-/**
- * Per-nodeId `MAX(updated_at)` over every label row, tombstones included — the
- * label half of the responder's coverage watermark, which is a union over both
- * tables on the Drive channel.
- *
- * Within one node_id group `updated_at` is fixed-width hex up to the nodeId
- * suffix, so a lexicographic MAX equals the HLC MAX. Backed by
- * `(node_id, updated_at)`.
- */
-export function buildLabelNodeWatermarks(k: Kysely<LabelDb>, dialect: LabelDialect): CompiledQuery {
-  return k
-    .selectFrom(dialect.table)
-    .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])
-    .groupBy("node_id")
-    .compile();
-}
-
 // ---- Shared result shaping -------------------------------------------------
 
 /**
