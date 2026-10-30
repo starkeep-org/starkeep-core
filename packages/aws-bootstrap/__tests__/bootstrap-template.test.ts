@@ -259,6 +259,28 @@ describe("the first admin", () => {
   });
 });
 
+describe("the invitation email", () => {
+  const message = (
+    resources.UserPool!.Properties.AdminCreateUserConfig as {
+      InviteMessageTemplate: { EmailSubject: string; EmailMessage: string };
+    }
+  ).InviteMessageTemplate;
+
+  it("puts the temporary password alone in its own paragraph", () => {
+    // A tap or a double-click then selects exactly the password. The old
+    // template ended the sentence with a period right after the password.
+    expect(message.EmailMessage).toContain(
+      '<p style="font-family: monospace; font-size: 18px">{####}</p>',
+    );
+    expect(message.EmailMessage).not.toMatch(/\{####\}[^<]/);
+    expect(message.EmailMessage).not.toMatch(/[^>]\{####\}/);
+  });
+
+  it("is titled the way the wizard tells the operator to look for it", () => {
+    expect(message.EmailSubject).toBe("Your Starkeep account");
+  });
+});
+
 describe("the managed login page", () => {
   it("runs the pool on the Essentials tier, which managed login needs", () => {
     expect(resources.UserPool!.Properties.UserPoolTier).toBe("ESSENTIALS");
