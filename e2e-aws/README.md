@@ -55,57 +55,62 @@ registry database, which must not land in a checkout you do not own.
    DSQL cluster, Lambda, API Gateway).
 4. Boot a local-data-server (testkit) pointed at the real cloud.
 5. Sign in through the LDS `/auth/tokens` handoff (real Cognito→STS exchange).
-6. Install Drive, then 7. the app under test, via the real install CLIs.
-7. Create a record locally, `POST /sync/now`, assert the row + blob landed in the
+6. Install Drive via the real install CLI. Its cloud secret is read back from
+   SSM and must differ from the local one: the cloud install creates its own.
+7. Install the app under test in the cloud **before** any local install, and
+   have the cloud app write an app-private row. Then sign the machine out,
+   install the app locally (it works at once; its sync channel does not
+   start), sign back in, and assert the channel starts and pulls the row down.
+8. Create a record locally, `POST /sync/now`, assert the row + blob landed in the
    cloud under Drive with the app as origin.
-8. Cross-app labels against real DSQL: write, hydrate, reverse query, retract.
+9. Cross-app labels against real DSQL: write, hydrate, reverse query, retract.
    The keys come from the app's manifest, because the broker rejects an
    undeclared key with a 400 and an invented one would fail here rather than at
    the thing the step tests.
-9. Drift a local creds file, re-run the Drive cloud install, and assert sync
-   still validates — the todo-39 regression.
-   - **Rows ahead of bytes, Drive channel.** A photograph and its 320 px
-     smaller stand-in lose their local bytes before sync. Both rows must reach
-     the cloud anyway, S3 must lack both files, and the cloud's bytes
-     watermark must stop below the original. Once the bytes return, both
-     files must reach S3 and the watermark must pass both rows. This is the
-     only coverage of `_starkeep_byte_coverage` on real DSQL and of the
-     cloud's walk against real S3. While a file is owed, the detail route,
-     the `stand-in-urls` listing's size summary, `file-url` and the batch
-     `file-urls` sign no URL for it and report it as awaiting upload, and
-     `/sync/verify` counts it in `filesOwed`. Afterwards every read signs a
-     URL that fetches the bytes, and `filesOwed` reads 0.
-   - **A file in S3 ahead of the cloud's walk.** The bytes land through the
-     cloud's own upload route while the desktop is paused, so no exchange
-     moves the watermark. They land in the phone's order. Once the stand-in
-     lands, the reads must find it with a real S3 HEAD and serve it while
-     the original still reads as awaiting upload, and the watermark must stay
-     below the original. Once the original lands, every read serves both.
-   - **Rows ahead of bytes, the app's own channel.** The same property for an
-     app-private file in `_starkeep_sync_records`, through the per-app
-     handler and the app's own role. Skipped for an app whose manifest
-     declares no private files.
-10. Static handler; 12. the app root's trailing-slash spelling is gated (a
+10. Re-run the Drive cloud install and assert the cloud secret did not rotate
+    and sync still validates.
+    - **Rows ahead of bytes, Drive channel.** A photograph and its 320 px
+      smaller stand-in lose their local bytes before sync. Both rows must reach
+      the cloud anyway, S3 must lack both files, and the cloud's bytes
+      watermark must stop below the original. Once the bytes return, both
+      files must reach S3 and the watermark must pass both rows. This is the
+      only coverage of `_starkeep_byte_coverage` on real DSQL and of the
+      cloud's walk against real S3. While a file is owed, the detail route,
+      the `stand-in-urls` listing's size summary, `file-url` and the batch
+      `file-urls` sign no URL for it and report it as awaiting upload, and
+      `/sync/verify` counts it in `filesOwed`. Afterwards every read signs a
+      URL that fetches the bytes, and `filesOwed` reads 0.
+    - **A file in S3 ahead of the cloud's walk.** The bytes land through the
+      cloud's own upload route while the desktop is paused, so no exchange
+      moves the watermark. They land in the phone's order. Once the stand-in
+      lands, the reads must find it with a real S3 HEAD and serve it while
+      the original still reads as awaiting upload, and the watermark must stay
+      below the original. Once the original lands, every read serves both.
+    - **Rows ahead of bytes, the app's own channel.** The same property for an
+      app-private file in `_starkeep_sync_records`, through the per-app
+      handler and the app's own role. Skipped for an app whose manifest
+      declares no private files.
+11. Static handler; 12. the app root's trailing-slash spelling is gated (a
     platform limit, pinned so a change is deliberate).
-11. The cloud-served `/api/local-data` proxy (list + a write verb).
-12. The **negative** case: every app in the cloud registry, probed on both its
+12. The cloud-served `/api/local-data` proxy (list + a write verb).
+13. The **negative** case: every app in the cloud registry, probed on both its
     broker mount and its proxy mount with no token, no cookie and no prior state,
     must answer `401`/`403`. It names no app — the list comes from the registry.
-13. A valid app signature is not enough; the broker demands an end user too.
-14. One URL that answers `200` with a session cookie and `401` without it.
-15. A full **browser** journey in real Chromium (Cognito sign-in → upload through
+14. A valid app signature is not enough; the broker demands an end user too.
+15. One URL that answers `200` with a session cookie and `401` without it.
+16. A full **browser** journey in real Chromium (Cognito sign-in → upload through
     the live file input → see it), exercising presign → S3 PUT →
     `POST /data/records` end-to-end. This is the only coverage of S3 CORS on a
     real presigned PUT. Skipped for an app that declares no browser surface.
-16. The cloud-origin browser upload syncs back **down** to the local data server.
-17. The app's JWT-gated route on the gateway **and** through CloudFront (proving
+17. The cloud-origin browser upload syncs back **down** to the local data server.
+18. The app's JWT-gated route on the gateway **and** through CloudFront (proving
     `Authorization` survives the edge).
-18. An app-private row through the cloud `/app-data` plane.
-19. Part A: shell + `_immutable` assets through the CloudFront distribution (edge hit).
+19. An app-private row through the cloud `/app-data` plane.
+20. Part A: shell + `_immutable` assets through the CloudFront distribution (edge hit).
     Part B: shared bytes via CloudFront signed URL — edge hit, tamper rejected,
     `apps/*` isolated.
-20. The app's own steps (`extraSteps`), if it has any.
-21. Uninstall; assert the app plane is gone but shared records survive.
+21. The app's own steps (`extraSteps`), if it has any.
+22. Uninstall; assert the app plane is gone but shared records survive.
 
 ## Environment contract (`src/env.ts`)
 
@@ -155,19 +160,21 @@ disposable test stack.
 
 ## Gotchas learned bringing this green
 
-- **App secrets rotate per run.** The ephemeral local-data-server re-mints each
-  app's HMAC secret on every boot, so the cloud install must _reconcile_ it to
-  SSM every run (`put_app_creds_parameter` is an `alwaysRun` orchestrator step,
-  not skip-if-done) and the uploaded content must be unique per run (the cloud
-  dedupes identical content on live rows, otherwise `shipped: 0`).
+- **Two secrets per app.** The ephemeral local-data-server re-mints each app's
+  local HMAC secret on every boot, and the cloud install creates a separate one
+  in SSM. Steps that stand in for an app's cloud compute (`cloudApp`) sign with
+  the SSM secret, read back with ambient credentials; steps against the local
+  data server sign with the local one. The uploaded content must be unique per
+  run (the cloud dedupes identical content on live rows, otherwise `shipped: 0`).
 - **Two auth models.** The broker's data/sync/app-data planes are HMAC-signed
   (app identity); an app's _own_ routes sit behind the gateway's Cognito JWT
   authorizer (user identity, `Authorization: Bearer`).
-- **A locally-run app needs `dataServerUrl` in its creds file.** `cli-install-app`
-  mirrors the registry secret into `app-creds/<appId>.json` but leaves the URL
-  unset, and `@starkeep/app-client` then falls back to the production port 9820.
-  admin-web writes the URL at local install; this suite has no admin-web, so a
-  step that boots the app locally writes the file itself first.
+- **A locally-run app needs its creds file.** admin-web writes
+  `app-creds/<appId>.json` (the local secret and `dataServerUrl`) at local
+  install; this suite has no admin-web, and the cloud install writes nothing
+  locally, so a step that boots the app locally writes the file itself first.
+  Without `dataServerUrl`, `@starkeep/app-client` falls back to the production
+  port 9820.
 - **Playwright must be loaded once.** `src/browser.ts` owns the single instance
   and exports `chromium` plus the sign-in and diagnostic helpers. A consumer
   importing `@playwright/test` out of its own `node_modules` while the harness

@@ -6,20 +6,9 @@
  * re-drive.
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import {
-  mkdtempSync,
-  rmSync,
-  readFileSync,
-  writeFileSync,
-  mkdirSync,
-  statSync,
-  existsSync,
-} from "node:fs";
-import { DatabaseSync } from "node:sqlite";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initializeLocalSchema, sqliteCompiler } from "@starkeep/storage-sqlite";
-import { insertAppRegistry } from "../src/local/registry";
 
 interface LedgerEntry {
   appId: string;
@@ -80,7 +69,7 @@ vi.mock("../src/iam", async (importOriginal) => {
 
 vi.mock("../src/app-creds", () => ({
   appCredsParameterName: (p: string, a: string) => `/${p}/app-creds/${a}`,
-  putAppCredsParameter: vi.fn(async () => {}),
+  ensureAppCredsParameter: vi.fn(async () => true),
   deleteAppCredsParameter: vi.fn(async () => {}),
 }));
 
@@ -116,7 +105,7 @@ import {
   attachTempInstallDdlPolicy,
   detachTempInstallDdlPolicy,
 } from "../src/iam";
-import { deleteAppCredsParameter, putAppCredsParameter } from "../src/app-creds";
+import { deleteAppCredsParameter, ensureAppCredsParameter } from "../src/app-creds";
 import { runAppInstallDdl, runAppUninstallDdl } from "../src/dsql-ddl";
 import { putAppKeepFile, uploadAppBundle } from "../src/s3";
 import { installComputeStack, uninstallComputeStack } from "../src/compute-stack";
@@ -158,32 +147,15 @@ const config: InstallerConfig = {
 
 const registryCredentials = { accessKeyId: "AK", secretAccessKey: "SK" };
 
-// The HMAC secret the local sync supervisor would sign with — the value that
-// must reach SSM (todo 39). Seeded into a real local registry below.
-const PHOTOS_REGISTRY_SECRET = "a".repeat(64);
-
 let dataDir: string;
-
-// Seed a local-data-server-shaped sqlite DB with one app registry row, so the
-// install path's `resolveLocalHmacSecret` reads a real secret to mirror.
-function seedLocalRegistry(appId: string, hmacSecret: string): void {
-  const db = new DatabaseSync(join(dataDir, "data.db"));
-  try {
-    initializeLocalSchema(db);
-    insertAppRegistry(db, appId, photosManifest, hmacSecret);
-  } finally {
-    db.close();
-  }
-}
 
 beforeEach(() => {
   ledger.length = 0;
   vi.clearAllMocks();
+  // An empty Starkeep directory: no data.db, no creds files. A cloud install
+  // must need nothing from a local install and write nothing beside one.
   dataDir = mkdtempSync(join(tmpdir(), "orchestrator-test-"));
-  // The creds dir and the data.db both resolve from STARKEEP_DIR (via
-  // @starkeep/app-client). Point it at the temp dir.
   process.env.STARKEEP_DIR = dataDir;
-  seedLocalRegistry("photos", PHOTOS_REGISTRY_SECRET);
   return () => {
     rmSync(dataDir, { recursive: true, force: true });
     delete process.env.STARKEEP_DIR;
@@ -242,12 +214,11 @@ describe("install", () => {
     expect(fakeRegistry.close).toHaveBeenCalled();
   });
 
-  // Regression for todo 39: the secret mirrored to SSM must be the one the
-  // local sync supervisor signs with — i.e. the local registry's hmac_secret —
-  // not a separately-minted creds-file value. The old code minted its own
-  // secret when the creds file was absent, so the cloud verifier ended up on a
-  // key no local signer held and every signed request 401'd.
-  it("mirrors the local registry secret to SSM and reconciles the creds file", async () => {
+  // A cloud install once required a local install first, to mirror the local
+  // registry's secret: the desktop's sync supervisor signed cloud requests with
+  // it. The supervisor now presents the device token, so the cloud install
+  // creates its own secret and touches nothing under STARKEEP_DIR.
+  it("creates the HMAC secret in SSM with no local install, and writes nothing locally", async () => {
     await installApp({
       appId: "photos",
       manifest: photosManifest,
@@ -257,36 +228,11 @@ describe("install", () => {
       registryCredentials,
     });
 
-    expect(vi.mocked(putAppCredsParameter)).toHaveBeenCalledWith(
-      expect.objectContaining({ appId: "photos", hmacSecret: PHOTOS_REGISTRY_SECRET }),
+    expect(vi.mocked(ensureAppCredsParameter)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(ensureAppCredsParameter)).toHaveBeenCalledWith(
+      expect.objectContaining({ appId: "photos", stackPrefix: "starkeep", region: "us-east-1" }),
     );
-
-    // The local creds file (@starkeep/app-client's source, and the app→LDS HMAC
-    // key) is reconciled to the same registry secret, so all three stores agree.
-    const credsPath = join(dataDir, "app-creds", "photos.json");
-    const creds = JSON.parse(readFileSync(credsPath, "utf8")) as { hmacSecret: string };
-    expect(creds.hmacSecret).toBe(PHOTOS_REGISTRY_SECRET);
-  });
-
-  // The other half of "the two stores can't silently diverge": if the app was
-  // never installed locally, there is no signer secret to mirror. Minting one
-  // for the cloud side would just recreate the drift, so install fails loudly.
-  it("fails when the app has no local registry row instead of minting a divergent secret", async () => {
-    const db = new DatabaseSync(join(dataDir, "data.db"));
-    db.exec(sqliteCompiler.deleteFrom("shared_app_registry").compile().sql);
-    db.close();
-
-    await expect(
-      installApp({
-        appId: "photos",
-        manifest: photosManifest,
-        zipBuffer: Buffer.from("zip"),
-        version: "0.1.0",
-        config,
-        registryCredentials,
-      }),
-    ).rejects.toThrow(/no shared_app_registry row/);
-    expect(vi.mocked(putAppCredsParameter)).not.toHaveBeenCalled();
+    expect(readdirSync(dataDir)).toEqual([]);
   });
 
   it("records a mid-run failure and resumes from the failed step on re-drive", async () => {
@@ -318,11 +264,11 @@ describe("install", () => {
       registryCredentials,
     });
     expect(vi.mocked(createAppExecRole)).toHaveBeenCalledTimes(1);
-    // put_app_creds_parameter and create_iam_role are alwaysRun steps (they
-    // reconcile SSM and the role's policies), so they run on every drive —
-    // once per drive here, unlike createAppExecRole which is skipped once
-    // recorded done.
-    expect(vi.mocked(putAppCredsParameter)).toHaveBeenCalledTimes(2);
+    // put_app_creds_parameter and create_iam_role are alwaysRun steps (the
+    // create-only put recreates a deleted secret; the role's policies are
+    // rewritten), so they run on every drive — once per drive here, unlike
+    // createAppExecRole which is skipped once recorded done.
+    expect(vi.mocked(ensureAppCredsParameter)).toHaveBeenCalledTimes(2);
     expect(vi.mocked(createAppRole)).toHaveBeenCalledTimes(2);
     expect(vi.mocked(putAppKeepFile)).toHaveBeenCalledTimes(2);
     expect(doneSteps("install")).toEqual(INSTALL_STEPS_WITH_COMPUTE);
@@ -421,9 +367,6 @@ describe("install", () => {
     ).rejects.toThrow(/reserved for a built-in app/);
     expect(ledger).toEqual([]);
 
-    // Built-in Drive is installed locally (registry row + minted secret) at LDS
-    // startup before any cloud install; seed that so the mirror step finds it.
-    seedLocalRegistry("starkeep-drive", "b".repeat(64));
     await installApp({
       appId: "starkeep-drive",
       manifest: {
@@ -439,6 +382,11 @@ describe("install", () => {
       allowReservedAppId: true,
     });
     expect(doneSteps("install").length).toBeGreaterThan(0);
+    // Drive gets its secret whether or not the local-data-server ever ran: the
+    // device branch reads the parameter as "Drive is installed".
+    expect(vi.mocked(ensureAppCredsParameter)).toHaveBeenCalledWith(
+      expect.objectContaining({ appId: "starkeep-drive" }),
+    );
   });
 
   it("rejects non-cloud-installable app ids", async () => {
@@ -494,57 +442,6 @@ describe("install", () => {
     expect(vi.mocked(uploadAppBundle)).not.toHaveBeenCalled();
     expect(vi.mocked(installComputeStack)).toHaveBeenCalled();
     expect(doneSteps("install")).not.toContain("upload_bundle");
-  });
-});
-
-describe("HMAC secret (registry → SSM) provisioning", () => {
-  it("overwrites a stale creds-file secret with the registry secret (the todo-39 drift)", async () => {
-    // A creds file left holding a *different* secret than the registry is the
-    // exact divergence that 401'd the cloud. Install mirrors the registry
-    // secret (what the supervisor signs with) and brings the creds file back in
-    // line, preserving any dataServerUrl admin-web wrote.
-    mkdirSync(join(dataDir, "app-creds"), { recursive: true });
-    writeFileSync(
-      join(dataDir, "app-creds", "photos.json"),
-      JSON.stringify({
-        appId: "photos",
-        hmacSecret: "stale-secret",
-        dataServerUrl: "http://127.0.0.1:9999",
-      }),
-    );
-    await installApp({
-      appId: "photos",
-      manifest: photosManifest,
-      version: "0.1.0",
-      config,
-      registryCredentials,
-    });
-    expect(vi.mocked(putAppCredsParameter)).toHaveBeenCalledWith(
-      expect.objectContaining({ hmacSecret: PHOTOS_REGISTRY_SECRET }),
-    );
-    const written = JSON.parse(readFileSync(join(dataDir, "app-creds", "photos.json"), "utf8")) as {
-      hmacSecret: string;
-      dataServerUrl: string;
-    };
-    expect(written.hmacSecret).toBe(PHOTOS_REGISTRY_SECRET);
-    expect(written.dataServerUrl).toBe("http://127.0.0.1:9999");
-  });
-
-  it("writes a fresh creds file (0600) from the registry secret when none exists", async () => {
-    // The built-in-app path: no admin-web local-install route ran, so there's
-    // no creds file yet — install seeds it from the registry secret.
-    await installApp({
-      appId: "photos",
-      manifest: photosManifest,
-      version: "0.1.0",
-      config,
-      registryCredentials,
-    });
-    const credsPath = join(dataDir, "app-creds", "photos.json");
-    expect(existsSync(credsPath)).toBe(true);
-    expect(statSync(credsPath).mode & 0o777).toBe(0o600);
-    const written = JSON.parse(readFileSync(credsPath, "utf8")) as { hmacSecret: string };
-    expect(written.hmacSecret).toBe(PHOTOS_REGISTRY_SECRET);
   });
 });
 
@@ -667,11 +564,7 @@ describe("an app that ships a mobile build", () => {
     expect(fakeRegistry.registerApp).toHaveBeenCalledWith(mobileManifest, "photos", ["mobile"]);
   });
 
-  it("installs the mobile app with no HMAC secret when the operator's machine has no local app", async () => {
-    const db = new DatabaseSync(join(dataDir, "data.db"));
-    db.exec(sqliteCompiler.deleteFrom("shared_app_registry").compile().sql);
-    db.close();
-
+  it("creates the HMAC secret on a mobile-only install", async () => {
     await installApp({
       appId: "photos",
       manifest: mobileManifest,
@@ -680,23 +573,10 @@ describe("an app that ships a mobile build", () => {
       registryCredentials,
       surfaces: ["mobile"],
     });
-    expect(putAppCredsParameter).not.toHaveBeenCalled();
-    expect(doneSteps("install")).not.toContain("put_app_creds_parameter");
-    expect(doneSteps("install")).toContain("run_dsql_ddl");
-  });
-
-  it("mirrors the HMAC secret on a mobile install when the operator's machine has the app", async () => {
-    await installApp({
-      appId: "photos",
-      manifest: mobileManifest,
-      version: "0.1.0",
-      config: { ...config, mobileSignIn },
-      registryCredentials,
-      surfaces: ["mobile"],
-    });
-    expect(putAppCredsParameter).toHaveBeenCalledWith(
-      expect.objectContaining({ appId: "photos", hmacSecret: PHOTOS_REGISTRY_SECRET }),
+    expect(ensureAppCredsParameter).toHaveBeenCalledWith(
+      expect.objectContaining({ appId: "photos" }),
     );
+    expect(doneSteps("install")).toContain("put_app_creds_parameter");
   });
 
   it("adds the web app to an installed mobile app, and records it", async () => {
