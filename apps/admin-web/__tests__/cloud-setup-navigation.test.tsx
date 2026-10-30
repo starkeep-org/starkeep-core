@@ -23,6 +23,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { App } from "../src/App";
 import { CloudSetupWizard } from "../src/components/CloudSetupWizard";
+import { NOT_AN_ADMIN } from "../src/lib/cognito-auth";
 
 // Cognito is a network call to AWS. What the wizard needs from it is a session
 // that resumes and credentials that mint, so those are what the stub supplies.
@@ -33,8 +34,14 @@ const getIdentityPoolCredentials = vi.fn(async () => ({
   sessionToken: "token",
   expiration: new Date(Date.now() + 3_600_000).toISOString(),
 }));
+// Signing in with a password goes through these two, which each test that
+// signs in primes with the answer Cognito would give.
+const initiateAuth = vi.fn();
+const respondNewPasswordChallenge = vi.fn();
 vi.mock("../src/lib/cognito-auth", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/lib/cognito-auth")>()),
+  initiateAuth: (...args: unknown[]) => initiateAuth(...args),
+  respondNewPasswordChallenge: (...args: unknown[]) => respondNewPasswordChallenge(...args),
   refreshTokens: (...args: unknown[]) => refreshTokens(...(args as [])),
   getIdentityPoolCredentials: (...args: unknown[]) => getIdentityPoolCredentials(...(args as [])),
   extractEmailFromIdToken: () => "operator@example.com",
@@ -114,6 +121,36 @@ function stubFetch(over: Partial<Record<string, () => Response>> = {}) {
     throw new TypeError("fetch failed");
   });
 }
+
+/**
+ * A config that starts as `initial` and keeps whatever the wizard saves into
+ * it, so a step that saves sees its own values on the next read. Returns the
+ * saved patches, in order.
+ */
+function statefulConfig(initial: Record<string, unknown> | null): Array<Record<string, unknown>> {
+  let saved = initial;
+  const patches: Array<Record<string, unknown>> = [];
+  const base = stubFetch({ "/api/config": () => Response.json({ config: saved }) });
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method === "PATCH" && String(input).includes("/api/config")) {
+      const patch = JSON.parse(String(init.body)) as Record<string, unknown>;
+      patches.push(patch);
+      saved = { ...saved, ...patch };
+      return Promise.resolve(Response.json({ config: saved }));
+    }
+    return base(input);
+  });
+  return patches;
+}
+
+/** Radix's Select reaches for pointer capture and scrolling, which jsdom lacks. */
+function supportRadixSelect(): void {
+  Element.prototype.hasPointerCapture = () => false;
+  Element.prototype.releasePointerCapture = () => {};
+  Element.prototype.scrollIntoView = () => {};
+}
+
+const SESSION_KEY = "starkeep:cognito-session";
 
 beforeEach(() => {
   calls = [];
@@ -290,6 +327,8 @@ describe("a deploy that fails", () => {
 
     await user.click(await screen.findByRole("button", { name: /Sign in again/ }));
     expect(await screen.findByRole("heading", { name: "Sign In" })).toBeTruthy();
+    // The form, not the signed-in view, which carries the same heading.
+    expect(screen.getByLabelText("Email")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Cloud Setup" })).toBeTruthy();
   });
 });
@@ -370,23 +409,11 @@ describe("the admin email on step 1", () => {
     // The download goes through an object URL, which jsdom does not implement.
     URL.createObjectURL = vi.fn(() => "blob:template");
     URL.revokeObjectURL = vi.fn();
-    // Radix's Select reaches for pointer capture and scrolling, which jsdom lacks.
-    Element.prototype.hasPointerCapture = () => false;
-    Element.prototype.releasePointerCapture = () => {};
-    Element.prototype.scrollIntoView = () => {};
+    supportRadixSelect();
   });
 
   it("requires a valid email before a new deployment's download, then carries it to sign-in", async () => {
-    // The config starts empty and keeps whatever the wizard saves into it.
-    let saved: Record<string, unknown> | null = null;
-    const base = stubFetch({ "/api/config": () => Response.json({ config: saved }) });
-    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
-      if (init?.method === "PATCH" && String(input).includes("/api/config")) {
-        saved = { ...saved, ...(JSON.parse(String(init.body)) as Record<string, unknown>) };
-        return Promise.resolve(Response.json({ config: saved }));
-      }
-      return base(input);
-    });
+    statefulConfig(null);
     const user = userEvent.setup();
     render(
       <MemoryRouter initialEntries={["/cloud-setup"]}>
@@ -439,8 +466,11 @@ describe("the admin email on step 1", () => {
 });
 
 describe("an operator with an existing deployment and no local config", () => {
-  it("offers to sign in to the existing admin account instead of deploying again", async () => {
-    vi.stubGlobal("fetch", stubFetch({ "/api/config": () => Response.json({ config: null }) }));
+  it("signs in to the existing admin account instead of deploying again", async () => {
+    supportRadixSelect();
+    generatedFor.length = 0;
+    const patches = statefulConfig(null);
+    const user = userEvent.setup();
     render(
       <MemoryRouter initialEntries={["/cloud-setup"]}>
         <App />
@@ -450,6 +480,190 @@ describe("an operator with an existing deployment and no local config", () => {
     expect(
       await screen.findByRole("heading", { name: "Bootstrap Stack" }, { timeout: 5_000 }),
     ).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Sign in to existing admin account" })).toBeTruthy();
+    await user.click(screen.getByRole("combobox"));
+    await user.click(await screen.findByRole("option", { name: /us-east-1/ }));
+    // No email needed: the account already exists.
+    await user.click(screen.getByRole("button", { name: "Sign in to existing admin account" }));
+
+    expect(await screen.findByRole("heading", { name: "Stack Outputs" })).toBeTruthy();
+    expect(patches).toEqual([{ stackPrefix: "starkeep", stage: "starkeep" }]);
+    expect(generatedFor).toEqual([]);
+  });
+});
+
+/**
+ * The first-setup path: the stack emailed a temporary password, Cognito asks
+ * for a permanent one, and the wizard moves on with the session stored. An
+ * account outside `starkeep-admins` signs in to Cognito but gets no AWS
+ * credentials, so the wizard stops there.
+ */
+describe("signing in on the wizard", () => {
+  beforeEach(() => {
+    localStorage.removeItem(SESSION_KEY);
+  });
+
+  it("takes the temporary password, sets a permanent one, and stores the session", async () => {
+    initiateAuth.mockResolvedValueOnce({
+      challengeName: "NEW_PASSWORD_REQUIRED",
+      session: "challenge-session",
+    });
+    respondNewPasswordChallenge.mockResolvedValueOnce({
+      idToken: "new-id-token",
+      accessToken: "new-access-token",
+      refreshToken: "new-refresh-token",
+      expiresIn: 3600,
+    });
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/cloud-setup"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Sign In" }, { timeout: 5_000 }),
+    ).toBeTruthy();
+    await user.type(screen.getByLabelText("Email"), "operator@example.com");
+    await user.type(screen.getByLabelText("Password"), "Temp-pass1{Enter}");
+
+    await user.type(await screen.findByLabelText("New password"), "Perm-pass1");
+    await user.type(screen.getByLabelText("Confirm new password"), "Perm-pass1");
+    await user.click(screen.getByRole("button", { name: "Set password and sign in" }));
+
+    expect(await screen.findByRole("heading", { name: "Deploy Starkeep cloud" })).toBeTruthy();
+    expect(initiateAuth).toHaveBeenLastCalledWith(
+      expect.anything(),
+      "operator@example.com",
+      "Temp-pass1",
+    );
+    expect(respondNewPasswordChallenge).toHaveBeenLastCalledWith(
+      expect.anything(),
+      "challenge-session",
+      "operator@example.com",
+      "Perm-pass1",
+    );
+    expect(JSON.parse(localStorage.getItem(SESSION_KEY)!)).toMatchObject({
+      refreshToken: "new-refresh-token",
+    });
+  });
+
+  it("stops an account outside starkeep-admins on the sign-in step", async () => {
+    initiateAuth.mockResolvedValueOnce({
+      tokens: {
+        idToken: "member-id-token",
+        accessToken: "member-access-token",
+        refreshToken: "member-refresh-token",
+        expiresIn: 3600,
+      },
+    });
+    getIdentityPoolCredentials.mockRejectedValueOnce(new Error(NOT_AN_ADMIN));
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/cloud-setup"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { name: "Sign In" }, { timeout: 5_000 });
+    await user.type(screen.getByLabelText("Email"), "member@example.com");
+    await user.type(screen.getByLabelText("Password"), "Member-pass1{Enter}");
+
+    expect(await screen.findByText(NOT_AN_ADMIN)).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Deploy Starkeep cloud" })).toBeNull();
+    expect(localStorage.getItem(SESSION_KEY)).toBeNull();
+  });
+});
+
+/**
+ * An admin whose stored session no longer refreshes looks, to the wizard, like
+ * no admin at all. The wizard must offer the sign-in form, not the signed-in
+ * view and not a step that needs credentials.
+ */
+describe("a stored session that no longer refreshes", () => {
+  it("lands on the sign-in form", async () => {
+    refreshTokens.mockRejectedValueOnce(new Error("Refresh Token has expired"));
+    render(
+      <MemoryRouter initialEntries={["/cloud-setup"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Sign In" }, { timeout: 5_000 }),
+    ).toBeTruthy();
+    expect(screen.getByLabelText("Email")).toBeTruthy();
+    expect(screen.queryByText(/signed in as an admin/)).toBeNull();
+  });
+
+  it("sends the operator from the deploy step to the sign-in form", async () => {
+    refreshTokens.mockRejectedValueOnce(new Error("Refresh Token has expired"));
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/cloud-setup"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { name: "Sign In" }, { timeout: 5_000 });
+    // The deployment exists, so the step list still opens the deploy step.
+    await user.click(screen.getByRole("button", { name: "Deploy" }));
+    await user.click(await screen.findByRole("button", { name: "Go to Sign In" }));
+
+    expect(await screen.findByRole("heading", { name: "Sign In" })).toBeTruthy();
+    expect(screen.getByLabelText("Email")).toBeTruthy();
+  });
+});
+
+/**
+ * A different user pool means a different deployment. The wizard asks before
+ * it clears the deploy outputs, and it ends the session, which belongs to the
+ * old pool.
+ */
+describe("changing the user pool after a deploy", () => {
+  async function changeUserPool(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+    await renderAtDeployStep();
+    await user.click(screen.getByRole("button", { name: "Stack outputs" }));
+    const userPoolId = await screen.findByLabelText("UserPoolId");
+    await user.clear(userPoolId);
+    await user.type(userPoolId, "us-east-2_other1");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+  }
+
+  it("asks first, then clears the deploy outputs and the session", async () => {
+    const patches = statefulConfig(DEPLOYED_CONFIG);
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    const user = userEvent.setup();
+
+    await changeUserPool(user);
+
+    expect(await screen.findByRole("heading", { name: "Sign In" })).toBeTruthy();
+    expect(screen.getByLabelText("Email")).toBeTruthy();
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(patches.at(-1)).toMatchObject({
+      userPoolId: "us-east-2_other1",
+      s3Bucket: null,
+      auroraEndpoint: null,
+      apiGatewayUrl: null,
+    });
+    // The deploy step is no longer complete, so the step list locks it and shows
+    // its number in place of the check mark.
+    expect((screen.getByRole("button", { name: /Deploy$/ }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+  });
+
+  it("changes nothing when the operator cancels", async () => {
+    const patches = statefulConfig(DEPLOYED_CONFIG);
+    vi.stubGlobal(
+      "confirm",
+      vi.fn(() => false),
+    );
+    const user = userEvent.setup();
+
+    await changeUserPool(user);
+
+    expect(patches).toEqual([]);
+    expect(screen.getByRole("heading", { name: "Stack Outputs" })).toBeTruthy();
   });
 });
