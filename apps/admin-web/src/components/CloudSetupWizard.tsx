@@ -585,7 +585,7 @@ function Step3CreateUser({
     ? regionFromUserPoolId(cognitoConfig.userPoolId)
     : "us-east-1";
   const consoleLink = cognitoConfig.userPoolId
-    ? `https://${region}.console.aws.amazon.com/cognito/v2/idp/user-pools/${cognitoConfig.userPoolId}/users/create`
+    ? `https://${region}.console.aws.amazon.com/cognito/v2/idp/user-pools/${cognitoConfig.userPoolId}/user-management/users/create/user?region=${region}`
     : null;
 
   return (
@@ -640,11 +640,6 @@ function Step3CreateUser({
                   </li>
                   <li>
                     Within a minute you should receive an email with the temporary password
-                    <p className="mt-1.5">
-                      Please note: the email from AWS says: “Your temporary password is{" "}
-                      &lt;password&gt;.” The period at the end of this sentence is NOT part of your
-                      temp password.
-                    </p>
                   </li>
                   <li>
                     Open the new user, choose <strong>Add user to group</strong>, and add it to both{" "}
