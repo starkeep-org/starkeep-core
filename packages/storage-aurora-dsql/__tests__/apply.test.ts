@@ -70,10 +70,17 @@ function insertEntry(): AppSyncableRowEntry {
 
 describe("DsqlAppSyncableApplier OCC retry", () => {
   it("retries the LWW upsert past an OCC conflict", async () => {
-    client.conflictOnce(/insert into/, 2);
+    const write = /^insert into "app_notes"\."note"/;
+    client.conflictOnce(write, 2);
     await applier.apply(insertEntry());
-    const inserts = client.calls.filter((c) => /insert into/.test(c.text));
+    const inserts = client.calls.filter((c) => write.test(c.text));
     expect(inserts).toHaveLength(3); // two conflicts + one that committed
+    // Each attempt is its own transaction, and only the last one raises.
+    expect(client.calls.filter((c) => c.text === "BEGIN")).toHaveLength(3);
+    expect(client.calls.filter((c) => c.text === "ROLLBACK")).toHaveLength(2);
+    const raises = client.calls.filter((c) => /_starkeep_node_watermarks/.test(c.text));
+    expect(raises).toHaveLength(1);
+    expect(raises[0]!.text).toContain(`'note' as "table_name"`);
   });
 
   it("does not retry a non-OCC error", async () => {
@@ -187,10 +194,14 @@ describe("DsqlAppSyncableApplier scanSince", () => {
     client.query = async (text: string, values?: unknown[]) => {
       client.calls.push({ text, values: values ?? [] });
       call += 1;
-      // First call is the grouped watermark read; let it report an author owing
-      // something, then fail the range seek that follows.
+      // First call is the channel's watermark read; let it report an author
+      // owing something, then fail the range seek that follows.
       if (call === 1) {
-        return { rows: [{ node_id: author, max_updated_at: `${"0".repeat(12)}:0000:${author}` }] };
+        return {
+          rows: [
+            { table_name: "note", node_id: author, updated_at: `${"0".repeat(12)}:0000:${author}` },
+          ],
+        };
       }
       throw new Error("read failed mid-scan");
     };
@@ -228,7 +239,7 @@ describe("DsqlAppSyncableApplier — absent vs. unreadable", () => {
   it("answers [] and {} when the app is simply not installed here", async () => {
     failWith(missingRelation());
     expect(await applier.bucketDigest("notes", "note")).toEqual([]);
-    expect(await applier.getNodeWatermarks("notes", "note")).toEqual({});
+    expect(await applier.getNodeWatermarks("absent", "note")).toEqual({});
   });
 
   it("answers [] and {} for a missing schema too", async () => {
@@ -236,7 +247,14 @@ describe("DsqlAppSyncableApplier — absent vs. unreadable", () => {
     // app that was never installed here fails one level up.
     failWith(Object.assign(new Error('schema "app_notes" does not exist'), { code: "3F000" }));
     expect(await applier.bucketDigest("notes", "note")).toEqual([]);
-    expect(await applier.getNodeWatermarks("notes", "note")).toEqual({});
+    expect(await applier.getNodeWatermarks("absent", "note")).toEqual({});
+  });
+
+  it("throws when an installed app has no watermark table, rather than reporting no coverage", async () => {
+    // Empty coverage would make every requester ship its whole history. A
+    // throw makes the transport report incomplete coverage instead.
+    failWith(missingRelation());
+    await expect(applier.getNodeWatermarks("notes", "note")).rejects.toThrow(/reinstall/);
   });
 
   it("throws rather than reporting an unreadable table as an empty one", async () => {

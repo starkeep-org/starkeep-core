@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { createDataRecord, createHLCClock } from "@starkeep/protocol-primitives";
+import { createDataRecord, createHLCClock, serializeHLC } from "@starkeep/protocol-primitives";
 import { StorageError, TransactionError } from "@starkeep/storage-adapter";
 import { AuroraDsqlDatabaseAdapter } from "../src/adapter.js";
 import { recordToRow } from "../src/serialization.js";
@@ -105,7 +105,16 @@ describe("put / get / delete", () => {
   it("put issues an upsert over every column with ON CONFLICT(id)", async () => {
     const record = sampleRecord();
     await adapter.put(record);
-    const [call] = client.calls;
+    const [begin, call, raise, commit] = client.calls;
+    expect([begin.text, commit.text]).toEqual(["BEGIN", "COMMIT"]);
+    // The node watermark rises in the write's own transaction, from the row.
+    expect(raise.text).toMatch(/^insert into "shared"\."node_watermarks_records" .* select /);
+    expect(raise.values).toEqual([
+      "user-a",
+      record.updatedAt.nodeId,
+      serializeHLC(record.updatedAt),
+      "user-a",
+    ]);
     expect(call.text).toMatch(/^insert into "shared"\."records" \(/);
     expect(call.text).toContain('on conflict ("user_id", "id") do update set');
     expect(call.text).toContain('"updated_at" = "excluded"."updated_at"');
@@ -130,7 +139,8 @@ describe("put / get / delete", () => {
     const record = sampleRecord();
     const hlc = clock.now();
     await adapter.delete(record.id, hlc);
-    const [call] = client.calls;
+    const [, call, raise] = client.calls;
+    expect(raise.values).toEqual(["user-a", hlc.nodeId, serializeHLC(hlc), "user-a"]);
     expect(call.text).toBe(
       'update "shared"."records" set "deleted_at" = $1, "updated_at" = $2, "node_id" = $3, "stand_in_slot" = $4 where "id" = $5 and "shared"."records"."user_id" = $6',
     );

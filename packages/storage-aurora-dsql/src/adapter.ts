@@ -7,6 +7,14 @@ import type {
 } from "@starkeep/protocol-primitives";
 import { createDsqlByteCoverageStore, type DsqlByteCoverageStore } from "./byte-coverage.js";
 import {
+  LABELS_SOURCE,
+  RECORDS_SOURCE,
+  buildWatermarkRaises,
+  readSharedWatermarks,
+  writtenStamp,
+  type WrittenStamp,
+} from "./node-watermarks.js";
+import {
   pgMetadataTableName,
   serializeHLC,
   deserializeHLC,
@@ -52,7 +60,6 @@ import {
   buildLabelsByRecordIds,
   buildQueryLabels,
   buildBucketDigest,
-  buildNodeWatermarks,
   buildScanSinceForNode,
   collectSince,
   mergeDigestBuckets,
@@ -120,6 +127,12 @@ const LABELS: LabelDialect = {
   table: "shared.record_labels",
 };
 
+/** What one write transaction landed, per source table, for its watermark raises. */
+interface Written {
+  readonly records: WrittenStamp[];
+  readonly labels: WrittenStamp[];
+}
+
 /**
  * One user's library in DSQL.
  *
@@ -133,6 +146,19 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   private readonly options: AuroraDsqlDatabaseAdapterOptions;
   private readonly clientFactory: DatabaseClientFactory;
   private readonly qb: PostgresCompiler;
+  /**
+   * The owner-scoped compiler the watermark raises compile with, even on a
+   * type-scoped adapter: a raise must see every row its transaction wrote.
+   */
+  private readonly raiseQb: PostgresCompiler;
+  /**
+   * This instance's last read of each watermark table, so one exchange reads
+   * each once: the delta scans and the coverage report answer from it. Every
+   * write through the instance clears both. The broker builds an adapter per
+   * request, so nothing here outlives one exchange.
+   */
+  private recordWatermarks: Record<string, HLCTimestamp> | null = null;
+  private labelWatermarks: Record<string, HLCTimestamp> | null = null;
 
   constructor(
     options: AuroraDsqlDatabaseAdapterOptions,
@@ -148,9 +174,8 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   ) {
     this.options = options;
     this.clientFactory = clientFactory;
-    this.qb = readableTypes
-      ? typeScopedCompiler(ownerId, readableTypes)
-      : ownerScopedCompiler(ownerId);
+    this.raiseQb = ownerScopedCompiler(ownerId);
+    this.qb = readableTypes ? typeScopedCompiler(ownerId, readableTypes) : this.raiseQb;
   }
 
   async init(): Promise<void> {
@@ -195,13 +220,50 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     return this.getClient().query(compiled.sql, [...compiled.parameters]);
   }
 
+  /**
+   * Run `write` in one transaction, then raise the node watermarks for what
+   * it reports writing before the commit. See `node-watermarks.ts`.
+   *
+   * The whole BEGIN…COMMIT is one retry unit, by the caller's `withOccRetry`:
+   * DSQL reports an OCC conflict at COMMIT, so retrying anything narrower is
+   * wrong. Every write and raise is replay-safe, so replaying from BEGIN
+   * converges.
+   */
+  private async writeTransaction(write: (written: Written) => Promise<void>): Promise<void> {
+    const written: Written = { records: [], labels: [] };
+    try {
+      await this.getClient().query("BEGIN");
+      try {
+        await write(written);
+        for (const q of buildWatermarkRaises(this.raiseQb, RECORDS_SOURCE, written.records)) {
+          await this.run(q);
+        }
+        for (const q of buildWatermarkRaises(this.raiseQb, LABELS_SOURCE, written.labels)) {
+          await this.run(q);
+        }
+        await this.getClient().query("COMMIT");
+      } catch (error) {
+        await this.getClient().query("ROLLBACK");
+        throw error;
+      }
+    } finally {
+      this.recordWatermarks = null;
+      this.labelWatermarks = null;
+    }
+  }
+
   async put(record: DataRecord): Promise<void> {
-    await withOccRetry("put", () => this.putRaw(record));
+    await withOccRetry("put", () =>
+      this.writeTransaction(async (written) => {
+        await this.putRaw(record);
+        written.records.push(writtenStamp(record.updatedAt));
+      }),
+    );
   }
 
   // Raw single-statement upsert. Value-independent (the row is built from the
   // caller-supplied record, not from a prior read), so replaying it verbatim is
-  // idempotent — safe for both the public `put` retry and inside batch/txn.
+  // idempotent — safe inside any transaction's retry.
   private async putRaw(record: DataRecord): Promise<void> {
     const row = recordToRow(record);
     const updateColumns = Object.keys(row).filter((column) => column !== "id");
@@ -235,7 +297,12 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   }
 
   async delete(id: StarkeepId, hlc: HLCTimestamp): Promise<void> {
-    await withOccRetry("delete", () => this.deleteRaw(id, hlc));
+    await withOccRetry("delete", () =>
+      this.writeTransaction(async (written) => {
+        await this.deleteRaw(id, hlc);
+        written.records.push(writtenStamp(hlc));
+      }),
+    );
   }
 
   private async deleteRaw(id: StarkeepId, hlc: HLCTimestamp): Promise<void> {
@@ -255,25 +322,12 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     return withOccRetry("getNodeWatermarks", () => this.getNodeWatermarksRaw());
   }
 
+  // From `shared.node_watermarks_records`, once per instance between writes.
+  // The entries never decrease, so an author whose rows were all superseded
+  // keeps its entry; see `node-watermarks.ts`.
   private async getNodeWatermarksRaw(): Promise<Record<string, HLCTimestamp>> {
-    {
-      // Within one node_id group, updated_at is fixed-width hex up to the
-      // nodeId suffix, so lexicographic MAX equals HLC MAX. The
-      // (node_id, updated_at) index makes this an index-only scan.
-      const result = await this.run(
-        this.qb
-          .selectFrom("shared.records")
-          .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])
-          .groupBy("node_id")
-          .compile(),
-      );
-      const out: Record<string, HLCTimestamp> = {};
-      for (const raw of result.rows) {
-        const row = raw as Record<string, unknown>;
-        out[row["node_id"] as string] = deserializeHLC(row["max_updated_at"] as string);
-      }
-      return out;
-    }
+    this.recordWatermarks ??= await readSharedWatermarks(this.getClient(), this.qb, RECORDS_SOURCE);
+    return { ...this.recordWatermarks };
   }
 
   async querySince(
@@ -384,11 +438,6 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     });
   }
 
-  // The whole BEGIN…COMMIT is one retry unit: DSQL reports an OCC conflict at
-  // COMMIT, so retrying anything narrower is wrong. `operations` is held in
-  // memory and every op is an idempotent single statement, so replaying the
-  // transaction from BEGIN converges. Inner ops use the raw (unwrapped) helpers
-  // to avoid a redundant nested retry.
   /**
    * See `DatabaseAdapter.queryShared`. Compiled by the same builder the
    * app-syncable plane uses, against the table the target names on this engine.
@@ -431,25 +480,29 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     return collectRowPage(query, fromPgRows(rows, converters));
   }
 
+  // `operations` is held in memory and every op is an idempotent single
+  // statement, so replaying the transaction from BEGIN converges. Inner ops use
+  // the raw (unwrapped) helpers to avoid a redundant nested retry.
   async batch(operations: BatchOperation[]): Promise<void> {
-    await withOccRetry("batch", async () => {
-      await this.getClient().query("BEGIN");
-      try {
+    await withOccRetry("batch", () =>
+      this.writeTransaction(async (written) => {
         for (const operation of operations) {
           if (operation.type === "put") {
             await this.putRaw(operation.record);
+            written.records.push(writtenStamp(operation.record.updatedAt));
           } else {
             await this.deleteRaw(operation.id, operation.hlc);
+            written.records.push(writtenStamp(operation.hlc));
           }
         }
-        await this.getClient().query("COMMIT");
-      } catch (error) {
-        await this.getClient().query("ROLLBACK");
-        throw error;
-      }
-    });
+      }),
+    );
   }
 
+  // Raises no node watermarks, and the broker's guard refuses its SAVEPOINT
+  // (`guardNodeWatermarks`), so it cannot write a synced table there. Nothing
+  // in production calls it; the interface requires it.
+  //
   // The callback is replayed verbatim on an OCC conflict (raised at RELEASE, the
   // COMMIT of the savepoint), so it MUST be idempotent — any non-DB side effects
   // it performs will run on each attempt. Inner ops use the raw helpers so the
@@ -580,18 +633,24 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     // read-modify-write. The caller chunks to DSQL's 3,000-modified-rows limit;
     // secondary-index entries do not count against it (measured), so the two
     // indexes on this table don't shrink the usable batch.
-    await withOccRetry("upsertLabels", async () => {
-      await this.run(buildLabelUpsert(this.qb, LABELS, labels));
-    });
+    await withOccRetry("upsertLabels", () =>
+      this.writeTransaction(async (written) => {
+        await this.run(buildLabelUpsert(this.qb, LABELS, labels));
+        for (const l of labels) written.labels.push(writtenStamp(l.hlc));
+      }),
+    );
   }
 
   async retractLabels(retractions: LabelRetraction[]): Promise<void> {
     if (retractions.length === 0) return;
-    await withOccRetry("retractLabels", async () => {
-      for (const r of retractions) {
-        await this.run(buildLabelRetraction(this.qb, LABELS, r));
-      }
-    });
+    await withOccRetry("retractLabels", () =>
+      this.writeTransaction(async (written) => {
+        for (const r of retractions) {
+          await this.run(buildLabelRetraction(this.qb, LABELS, r));
+          written.labels.push(writtenStamp(r.hlc));
+        }
+      }),
+    );
   }
 
   async replaceLabelValues(replacements: LabelValueReplacement[]): Promise<void> {
@@ -604,11 +663,11 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     // Atomic because the intermediate state is wrong in a way a reader would
     // believe: between the tombstone and the upsert a single-valued key looks
     // unset rather than mid-update.
-    await withOccRetry("replaceLabelValues", async () => {
-      await this.getClient().query("BEGIN");
-      try {
+    await withOccRetry("replaceLabelValues", () =>
+      this.writeTransaction(async (written) => {
         for (const r of replacements) {
           await this.run(buildLabelValueReplacementTombstone(this.qb, LABELS, r));
+          written.labels.push(writtenStamp(r.hlc));
           if (r.values.length > 0) {
             await this.run(
               buildLabelUpsert(
@@ -626,12 +685,8 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
             );
           }
         }
-        await this.getClient().query("COMMIT");
-      } catch (error) {
-        await this.getClient().query("ROLLBACK");
-        throw error;
-      }
-    });
+      }),
+    );
   }
 
   async getLabelsByRecordIds(recordIds: StarkeepId[]): Promise<Map<StarkeepId, RecordLabel[]>> {
@@ -668,9 +723,12 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
   // ---- Label sync ---------------------------------------------------------
 
   async putLabel(label: RecordLabel): Promise<void> {
-    await withOccRetry("putLabel", async () => {
-      await this.run(buildLabelSnapshotUpsert(this.qb, LABELS, label));
-    });
+    await withOccRetry("putLabel", () =>
+      this.writeTransaction(async (written) => {
+        await this.run(buildLabelSnapshotUpsert(this.qb, LABELS, label));
+        written.labels.push(writtenStamp(label.updatedAt));
+      }),
+    );
   }
 
   async getLabel(
@@ -783,20 +841,19 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     return withOccRetry("getLabelNodeWatermarks", () => this.getLabelNodeWatermarksRaw());
   }
 
+  // From `shared.node_watermarks_labels`, as `getNodeWatermarksRaw` reads records.
   private async getLabelNodeWatermarksRaw(): Promise<Record<string, HLCTimestamp>> {
-    const result = await this.run(buildNodeWatermarks(this.qb, LABELS.table));
-    const out: Record<string, HLCTimestamp> = {};
-    for (const raw of result.rows) {
-      const row = raw as Record<string, unknown>;
-      out[row["node_id"] as string] = deserializeHLC(row["max_updated_at"] as string);
-    }
-    return out;
+    this.labelWatermarks ??= await readSharedWatermarks(this.getClient(), this.qb, LABELS_SOURCE);
+    return { ...this.labelWatermarks };
   }
 
   async tombstoneLabelsForRecord(recordId: StarkeepId, hlc: HLCTimestamp): Promise<void> {
-    await withOccRetry("tombstoneLabelsForRecord", async () => {
-      await this.run(buildTombstoneLabelsForRecord(this.qb, LABELS, recordId, hlc));
-    });
+    await withOccRetry("tombstoneLabelsForRecord", () =>
+      this.writeTransaction(async (written) => {
+        await this.run(buildTombstoneLabelsForRecord(this.qb, LABELS, recordId, hlc));
+        written.labels.push(writtenStamp(hlc));
+      }),
+    );
   }
 
   async restoreLabelsForRecord(
@@ -804,9 +861,12 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     deletedAt: HLCTimestamp,
     hlc: HLCTimestamp,
   ): Promise<void> {
-    await withOccRetry("restoreLabelsForRecord", async () => {
-      await this.run(buildRestoreLabelsForRecord(this.qb, LABELS, recordId, deletedAt, hlc));
-    });
+    await withOccRetry("restoreLabelsForRecord", () =>
+      this.writeTransaction(async (written) => {
+        await this.run(buildRestoreLabelsForRecord(this.qb, LABELS, recordId, deletedAt, hlc));
+        written.labels.push(writtenStamp(hlc));
+      }),
+    );
   }
 }
 

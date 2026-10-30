@@ -32,6 +32,9 @@ import {
   postgresCompiler,
   ownerScopedCompiler,
   assertOwnerScoped,
+  guardNodeWatermarks,
+  LABEL_WATERMARKS_TABLE,
+  RECORD_WATERMARKS_TABLE,
 } from "@starkeep/storage-aurora-dsql";
 import { S3ObjectStorageAdapter } from "@starkeep/storage-s3";
 import {
@@ -1075,21 +1078,22 @@ export function __setDatabaseClientFactoryForTests(factory: DatabaseClientFactor
 
 /**
  * A factory whose clients refuse any statement against an owned table that
- * the user-scoped compiler did not compile. The scoped compiler is the cut
- * between users; this is the tripwire for code that goes around it. See
- * storage-aurora-dsql's `owner-scope.ts`.
+ * the user-scoped compiler did not compile, and any write the node watermark
+ * tables would not see. The scoped compiler is the cut between users; this is
+ * the tripwire for code that goes around it. See storage-aurora-dsql's
+ * `owner-scope.ts` and `node-watermarks.ts`.
  */
 function ownerGuardedFactory(inner: DatabaseClientFactory): DatabaseClientFactory {
   return {
     async createClient(options) {
       const client = await inner.createClient(options);
-      return {
+      return guardNodeWatermarks({
         query(text, values) {
           assertOwnerScoped(text);
           return client.query(text, values);
         },
         end: () => client.end(),
-      };
+      });
     },
   };
 }
@@ -1273,8 +1277,16 @@ function makeCloudClock(client: DatabaseClient, userId: string): Promise<HLCCloc
 // Seed the cloud HLC clock from the highest cloud-stamped timestamp visible
 // to the app role of the request that builds it. Serialized HLCs sort lexically
 // because the wall-time and counter components are zero-padded hex (see
-// serializeHLC). Records with no cloud-stamped row return ZERO state; the wall
+// serializeHLC). A user with no cloud-stamped row returns ZERO state; the wall
 // clock will dominate going forward.
+//
+// The stamps come from the node watermarks of records and labels
+// (storage-aurora-dsql's `node-watermarks.ts`), not from the rows: each entry
+// is the highest stamp its author ever landed for one type, so the highest
+// cloud-authored entry is the highest cloud stamp the tables ever held, and the
+// read touches one row per type and author rather than every row the user has.
+// An entry never decreases, so a stamp a later write superseded still counts,
+// which only moves the seed up.
 //
 // The seed runs once per container, not once per request — see the note on
 // makeCloudClock for why one instance per node id is the property that matters.
@@ -1283,30 +1295,34 @@ function makeCloudClock(client: DatabaseClient, userId: string): Promise<HLCCloc
 // keeps its own output monotonic across every table without consulting the
 // database again.
 //
-// What remains fragile is which rows that one seed can see. The query is
-// filtered by the seeding caller's per-extension read grants (rows the assumed
-// app role can SELECT), so an underestimate is possible when the first request
-// in a container has narrower grants than a later one. It is bounded: an
-// underestimate only bites when the container's wall clock is *also* behind the
-// existing stamps, because Date.now() otherwise dominates immediately. Widening
-// the seed beyond shared.records would not remove that bound, which is why it
-// is not worth the extra queries.
+// What remains fragile is which rows that one seed can see. It reads what the
+// assumed app role can SELECT: every per-app role reads both tables, but app
+// tables stay out of the seed, so an underestimate is possible when the
+// highest cloud stamp is on an app's own row. It is bounded: an underestimate
+// only bites when the container's wall clock is *also* behind the existing
+// stamps, because Date.now() otherwise dominates immediately. Widening the
+// seed to every app table would not remove that bound, which is why it is not
+// worth the extra queries.
 //
 // The seed reads the first caller's user's records only, the same bound again:
 // the clock is one per container, and every user's rows are stamped by it.
 async function seedCloudClock(client: DatabaseClient, userId: string): Promise<HLCClock> {
-  const seedQuery = ownerScopedCompiler(userId)
-    .selectFrom("shared.records")
-    .select("updated_at")
-    .where("updated_at", "like", "%:cloud-%")
-    .orderBy("updated_at", "desc")
-    .limit(1)
-    .compile();
-  const result = await client.query(seedQuery.sql, [...seedQuery.parameters]);
+  let highest: string | undefined;
+  for (const table of [RECORD_WATERMARKS_TABLE, LABEL_WATERMARKS_TABLE]) {
+    const seedQuery = ownerScopedCompiler(userId)
+      .selectFrom(table)
+      .select("updated_at")
+      .where("node_id", "like", "cloud-%")
+      .orderBy("updated_at", "desc")
+      .limit(1)
+      .compile();
+    const result = await client.query(seedQuery.sql, [...seedQuery.parameters]);
+    const at = result.rows[0]?.["updated_at"];
+    if (typeof at === "string" && (highest === undefined || at > highest)) highest = at;
+  }
   let initialState: { wallTime: number; counter: number } | undefined;
-  if (result.rows.length > 0) {
-    const row = result.rows[0] as { updated_at: string };
-    const parsed = deserializeHLC(row.updated_at);
+  if (highest !== undefined) {
+    const parsed = deserializeHLC(highest);
     initialState = { wallTime: parsed.wallTime, counter: parsed.counter };
   }
   return createHLCClock({

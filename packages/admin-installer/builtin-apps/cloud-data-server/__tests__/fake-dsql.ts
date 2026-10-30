@@ -62,7 +62,7 @@ export class FakeDsql implements DatabaseClientFactory {
 
 /**
  * A fake pre-scripted with the queries every authenticated request makes: the
- * caller's access_grants rows and the cloud-clock seed scan.
+ * caller's access_grants rows and the cloud-clock seed reads.
  *
  * The two label routes are here rather than per-test because the **sync
  * exchange** scans `record_labels` on every Drive-channel round — labels ride
@@ -116,16 +116,13 @@ export function fakeDsqlWithGrants(
       .on(/count\(.*\) .*from "shared"\."object_availability"/, [])
       // Issuing a restore records the new state.
       .on(/insert into "shared"\."object_availability"/, [])
-      .on(/from "shared"\."records" where "updated_at" like/, [])
+      // The cloud-clock seed, from the records' and labels' node watermarks.
+      .on(/from "shared"\."node_watermarks_(?:records|labels)" where "node_id" like/, [])
       // Record-level dedup runs on every registration now, not just for
       // children. Empty by default: no existing record for these bytes, which is
       // the ordinary case. Tests that exercise dedup override it.
       .on(/from "shared"\."records" where "content_hash" =/, dedupRows)
       .on(/from "shared"\."record_labels" order by "record_id"/, [])
-      .on(
-        /from "shared"\."record_labels" (?:where "shared"\."record_labels"\."user_id" = \$\d+ )?group by "node_id"/,
-        [],
-      )
       // DELETE /data/records/:id cascades to labels on every record delete,
       // since DSQL has no foreign keys to do it. Returns no rows; tests that
       // assert on the cascade read `db.calls(...)`, which logs every statement
@@ -144,8 +141,22 @@ export function fakeDsqlWithGrants(
       // Drive's bytes watermark. None by default, so every key takes a HEAD,
       // which the S3 mock answers.
       .otherwise(/from "app_starkeep_drive"\."_starkeep_byte_coverage"/, [])
+      // Every synced write is a transaction that raises its node watermarks,
+      // and every coverage read comes from them. None by default: no author
+      // has landed anything. A test about coverage answers with `on(...)`.
+      .otherwise(/^(?:BEGIN|COMMIT|ROLLBACK)$/, [])
+      .otherwise(NODE_WATERMARK_RAISE, [])
+      .otherwise(NODE_WATERMARK_READ, [])
   );
 }
+
+/** A node watermark raise, on the shared tables or an app's. */
+export const NODE_WATERMARK_RAISE =
+  /^insert into "(?:shared"\."node_watermarks_(?:records|labels)|app_\w+"\."_starkeep_node_watermarks)" /;
+
+/** A coverage read of the node watermarks, on the shared tables or an app's. */
+export const NODE_WATERMARK_READ =
+  /^select .* from "(?:shared"\."node_watermarks_(?:records|labels)|app_\w+"\."_starkeep_node_watermarks)"/;
 
 /** The page-wide stand-in lookup behind every listing's size summary. */
 export const STAND_INS_OF_PAGE =

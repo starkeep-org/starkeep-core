@@ -141,9 +141,10 @@ const RECORDS_INSERT = /insert into "shared"\."records"/;
 /** The `/data/types` histogram: one `GROUP BY type` over the readable rows. */
 const RECORDS_TYPE_COUNTS =
   /count\(\*\).*from "shared"\."records".*group by "shared"\."records"\."type"/;
-// The responder's coverage-watermark summary, computed on every exchange.
+// The responder's coverage-watermark summary, read from the records' node
+// watermarks on every exchange.
 const RECORDS_NODE_WATERMARKS =
-  /select "node_id", max\("updated_at"\).*from "shared"\."records" (?:where "shared"\."records"\."user_id" = \$\d+ )?group by "node_id"/;
+  /select "node_id", max\("updated_at"\).*from "shared"\."node_watermarks_records" /;
 const VALID_HASH = "b".repeat(64);
 /** Matches `recordRow`'s stamp, so a seeded label deserializes like a real one. */
 const TEST_HLC_FOR_LABELS = serializeHLC({

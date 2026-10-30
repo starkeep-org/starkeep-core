@@ -22,7 +22,8 @@ import { DsqlAppSyncableApplier } from "../../src/app-syncable/apply.js";
 import { createDsqlByteCoverageStore } from "../../src/byte-coverage.js";
 import { assertOwnerScoped } from "../../src/owner-scope.js";
 import type { DatabaseClient } from "../../src/types.js";
-import { createSharedSchema } from "../pg-shared-schema.js";
+import { createAppNodeWatermarks, createSharedSchema } from "../pg-shared-schema.js";
+import { guardNodeWatermarks } from "../../src/node-watermarks.js";
 
 const A = "user-a";
 const B = "user-b";
@@ -31,16 +32,16 @@ const SCHEMA = "app_memo";
 
 let pg: PGlite;
 
-/** The client the adapters talk to, with the broker's tripwire on every statement. */
+/** The client the adapters talk to, with the broker's tripwires on every statement. */
 function client(): DatabaseClient {
-  return {
+  return guardNodeWatermarks({
     async query(text, values) {
       assertOwnerScoped(text);
       const result = await pg.query(text, values as unknown[] | undefined);
       return { rows: result.rows as Record<string, unknown>[] };
     },
     async end() {},
-  };
+  });
 }
 
 async function adapterFor(userId: string): Promise<AuroraDsqlDatabaseAdapter> {
@@ -88,6 +89,7 @@ beforeEach(async () => {
       PRIMARY KEY (user_id, node_id)
     );
   `);
+  await createAppNodeWatermarks(pg, SCHEMA);
 });
 
 afterEach(async () => {

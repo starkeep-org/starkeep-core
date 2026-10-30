@@ -31,6 +31,13 @@ import type { DatabaseClient } from "../types.js";
 import { withOccRetry } from "../occ-retry.js";
 import { isMissingRelation } from "../missing-relation.js";
 import { ownerScopedCompiler, type PostgresCompiler } from "../query-builder.js";
+import {
+  NODE_WATERMARKS_TABLE,
+  appSource,
+  buildWatermarkRaises,
+  readAppWatermarks,
+  type WrittenStamp,
+} from "../node-watermarks.js";
 import { fromPgRows, pgConvertersFor, withAggregateOutputs } from "../pg-timestamps.js";
 
 /**
@@ -40,9 +47,21 @@ import { fromPgRows, pgConvertersFor, withAggregateOutputs } from "../pg-timesta
  * All writes use LWW based on the HLC-serialized `updated_at` column.
  * Deletes are soft: `deleted_at` and `updated_at` are set rather than removing
  * the row so that tombstones propagate to other clients via pull.
+ *
+ * Every write raises the table's node watermark in its own transaction, and
+ * coverage reads come from `app_<appId>._starkeep_node_watermarks`; see
+ * `node-watermarks.ts`.
  */
 export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableApplier {
   private readonly qb: PostgresCompiler;
+  /**
+   * Each channel's node watermarks, by table, as last read: one statement
+   * serves every table's delta scan and coverage in an exchange. Every write
+   * to the channel through this instance clears its entry. The broker builds
+   * an applier per request, so nothing here outlives one exchange. `null`
+   * means the app is not installed.
+   */
+  private readonly watermarks = new Map<string, Map<string, Record<string, HLCTimestamp>> | null>();
 
   constructor(
     private readonly client: DatabaseClient,
@@ -60,8 +79,10 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
   }
 
   // Each branch is a single LWW-guarded statement (upsert / conditional
-  // update / soft-delete keyed on `updated_at`), so replaying the whole
-  // dispatch on an OCC conflict is idempotent.
+  // update / soft-delete keyed on `updated_at`), and the raise after it is
+  // monotonic, so replaying the whole transaction on an OCC conflict is
+  // idempotent. DSQL reports the conflict at COMMIT, so the transaction is the
+  // retry unit.
   async apply(entry: AppSyncableRowEntry): Promise<void> {
     const ns = this.namespace.get(entry.appId);
     if (!ns) {
@@ -79,13 +100,30 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
     const schemaTable = `app_${entry.appId.replace(/-/g, "_")}.${entry.table}`;
     const { pkColumns } = tableInfo;
 
+    // A write that loses LWW lands no row with this stamp, so its raise
+    // records nothing, which understates and is safe.
+    const raises = buildWatermarkRaises(this.qb, appSource(entry.appId, entry.table), [
+      writtenStampOf(entry),
+    ]);
     await withOccRetry(`applier.apply(${entry.op})`, async () => {
-      if (entry.op === "insert") {
-        await this.applyInsert(schemaTable, pkColumns, entry);
-      } else if (entry.op === "update") {
-        await this.applyUpdate(schemaTable, pkColumns, entry);
-      } else {
-        await this.applyDelete(schemaTable, pkColumns, entry);
+      try {
+        await this.client.query("BEGIN");
+        try {
+          if (entry.op === "insert") {
+            await this.applyInsert(schemaTable, pkColumns, entry);
+          } else if (entry.op === "update") {
+            await this.applyUpdate(schemaTable, pkColumns, entry);
+          } else {
+            await this.applyDelete(schemaTable, pkColumns, entry);
+          }
+          for (const raise of raises) await this.run(raise);
+          await this.client.query("COMMIT");
+        } catch (error) {
+          await this.client.query("ROLLBACK");
+          throw error;
+        }
+      } finally {
+        this.watermarks.delete(entry.appId);
       }
     });
   }
@@ -308,38 +346,50 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
   }
 
   /**
-   * See `ScanCapableApplier.getNodeWatermarks`. Missing table → `{}`; a table
-   * that exists and will not read **throws**.
+   * See `ScanCapableApplier.getNodeWatermarks`. An app that is not installed
+   * → `{}`; a watermark table that will not read **throws**.
    *
    * The distinction matters more here than the `{}` return suggests, because
    * `scanSince` plans its authors from this map: an unreadable table that
    * answered `{}` produced no scans, and the scan then reported "nothing owed,
    * every author complete" — the exact silent-loss shape `scanSince`'s own catch
-   * was written to prevent, reached one frame earlier.
+   * was written to prevent, reached one frame earlier. The coverage report
+   * would also say "nothing", and every requester would ship its whole
+   * history. Throwing makes the transport report incomplete coverage instead,
+   * so requesters merge upward.
    */
   async getNodeWatermarks(appId: string, table: string): Promise<Record<string, HLCTimestamp>> {
-    const schemaTable = `app_${appId.replace(/-/g, "_")}.${table}`;
-    let result: { rows: Record<string, unknown>[] };
+    // A table the app never declared holds nothing here.
+    const ns = this.namespace.get(appId);
+    if (ns && !ns.tables.some((t) => t.name === table)) return {};
+    const channel = await this.channelWatermarks(appId);
+    return { ...channel?.get(table) };
+  }
+
+  /** Every table's node watermarks on `appId`'s channel, read once between writes. */
+  private async channelWatermarks(
+    appId: string,
+  ): Promise<Map<string, Record<string, HLCTimestamp>> | null> {
+    if (this.watermarks.has(appId)) return this.watermarks.get(appId)!;
+    let read: Map<string, Record<string, HLCTimestamp>> | null;
     try {
-      result = await this.run(
-        this.qb
-          .selectFrom(schemaTable)
-          .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])
-          .groupBy("node_id")
-          .compile(),
-      );
+      read = await readAppWatermarks(this.client, this.qb, appId);
     } catch (err) {
+      if (!isMissingRelation(err)) throw err;
       // The app isn't installed on this instance. Omitting its nodes only
       // understates the coverage watermark, which is the safe direction
       // (re-ship, idempotent LWW).
-      if (isMissingRelation(err)) return {};
-      throw err;
+      if (!this.namespace.get(appId)) {
+        read = null;
+      } else {
+        throw new Error(
+          `app "${appId}" is installed but has no ${NODE_WATERMARKS_TABLE} table; reinstall it`,
+          { cause: err },
+        );
+      }
     }
-    const out: Record<string, HLCTimestamp> = {};
-    for (const row of result.rows) {
-      out[row["node_id"] as string] = deserializeHLC(row["max_updated_at"] as string);
-    }
-    return out;
+    this.watermarks.set(appId, read);
+    return read;
   }
 
   /**
@@ -407,6 +457,16 @@ function withNodeId(
   entry: AppSyncableRowEntry,
 ): Record<string, unknown> {
   return { ...row, node_id: nodeIdOf(row["updated_at"], entry) };
+}
+
+/**
+ * The stamp an entry's write lands, by the same rules the branches above
+ * write `updated_at`.
+ */
+function writtenStampOf(entry: AppSyncableRowEntry): WrittenStamp {
+  const updatedAt = entry.row?.["updated_at"];
+  const stamp = typeof updatedAt === "string" ? updatedAt : serializeHLC(entry.timestamp);
+  return { nodeId: nodeIdOf(stamp, entry), stamp };
 }
 
 /** nodeId from a serialized-HLC `updated_at`, or the entry timestamp's. */

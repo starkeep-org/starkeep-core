@@ -180,11 +180,11 @@ export interface ScanCapableApplier extends AppSyncableApplier {
   ): Promise<ScanSincePage>;
 
   /**
-   * Per-nodeId MAX(updated_at) over every stored row of one table
-   * (tombstones included) —
-   * the responder-side summary that feeds `responderWatermarks`. Backed by
-   * the denormalized `node_id` column + `(node_id, updated_at)` index so it
-   * doesn't scan the table.
+   * Per-nodeId coverage of one table (tombstones included) — the
+   * responder-side summary that feeds `responderWatermarks`. SQLite answers
+   * with MAX(updated_at) off the `(node_id, updated_at)` index. DSQL answers
+   * from its node watermark table, which holds the highest stamp it ever
+   * incorporated and may sit above every row it still holds.
    *
    * A **missing** table returns `{}` — the app is not installed here, it
    * genuinely holds nothing, and an omitted node only causes a re-ship. A table
@@ -339,11 +339,14 @@ export interface SyncExchangeResponse {
    *
    * Coverage semantics, not "live MAX": `responderWatermarks[n] = h` asserts
    * "I have durably incorporated everything from node `n` up to `h`; anything
-   * at-or-below `h` that I don't hold, I chose to discard." Today no
-   * discard/compaction mechanism exists, so the value is simply the per-node
-   * MAX(updated_at) over live rows — but callers must treat it as coverage so
-   * a future GC can fold a persisted compaction floor into this value
-   * (raising the floor before deleting) without a protocol change.
+   * at-or-below `h` that I don't hold, I chose to discard." SQLite reports the
+   * per-node MAX(updated_at) over its rows. DSQL reports the highest stamp it
+   * ever incorporated, from a watermark table every write raises
+   * (`storage-aurora-dsql/src/node-watermarks.ts`), so an author whose rows
+   * were all superseded keeps its value. Both are coverage. Callers must treat
+   * the value as coverage, so a future GC can fold a persisted compaction
+   * floor into it (raising the floor before deleting) without a protocol
+   * change.
    *
    * The caller replaces (not merges) its `peerWatermarks` with this map.
    * Replacement is what lets the watermark move *down* when the responder

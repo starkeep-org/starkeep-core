@@ -40,6 +40,8 @@ import {
 import type { AppSyncableNamespace, AppSyncableNamespaceStore } from "@starkeep/sync-engine";
 import { DsqlAppSyncableApplier } from "../../src/app-syncable/apply.js";
 import type { DatabaseClient } from "../../src/types.js";
+import { guardNodeWatermarks } from "../../src/node-watermarks.js";
+import { createAppNodeWatermarks } from "../pg-shared-schema.js";
 
 const APP = "conformance-app";
 const TABLE = "test_rows";
@@ -64,13 +66,13 @@ afterEach(async () => {
 
 /** The `DatabaseClient` shape the applier talks to, over PGlite. */
 function clientFor(pg: PGlite): DatabaseClient {
-  return {
+  return guardNodeWatermarks({
     async query(text: string, values?: unknown[]) {
       const result = await pg.query(text, values as unknown[] | undefined);
       return { rows: result.rows as Record<string, unknown>[] };
     },
     async end() {},
-  };
+  });
 }
 
 async function makeHarness(): Promise<ConformanceHarness> {
@@ -107,6 +109,7 @@ async function makeHarness(): Promise<ConformanceHarness> {
     CREATE INDEX idx_${COMPOSITE_TABLE}_node_watermark
       ON ${SCHEMA}.${COMPOSITE_TABLE} (user_id, node_id, updated_at);
   `);
+  await createAppNodeWatermarks(pg, SCHEMA);
 
   const ns: AppSyncableNamespace = {
     appId: APP,
@@ -137,8 +140,10 @@ async function makeHarness(): Promise<ConformanceHarness> {
       // The table still exists — `tableExists` goes on answering true — and
       // every read the applier issues names `node_id`, so each of them now
       // fails. Present, and will not read: the third answer the contract
-      // distinguishes and the one no test could reach before.
+      // distinguishes and the one no test could reach before. Coverage reads
+      // come from the channel's watermark table, so it breaks the same way.
       await pg.exec(`ALTER TABLE ${SCHEMA}.${TABLE} DROP COLUMN node_id CASCADE`);
+      await pg.exec(`ALTER TABLE ${SCHEMA}._starkeep_node_watermarks DROP COLUMN node_id CASCADE`);
     },
     peer: makeHarness,
   };

@@ -237,7 +237,7 @@ describe("the sync-facing surface", () => {
       nodeId: deletedAt.nodeId,
       deletedAt,
     });
-    const [call] = client.calls;
+    const [, call] = client.calls;
     expect(call.values).toContain(serializeHLC(deletedAt));
     expect(call.values).toContain(serializeHLC(HLC));
   });
@@ -282,9 +282,12 @@ describe("the sync-facing surface", () => {
     expect(await adapter.getLabelNodeWatermarks()).toEqual({ "node-test": HLC });
   });
 
-  it("tombstoneLabelsForRecord is one statement with no app_id predicate", async () => {
+  it("tombstoneLabelsForRecord is one write with no app_id predicate, and raises the watermark", async () => {
     await adapter.tombstoneLabelsForRecord(rid("rec1"), HLC);
-    const [call] = client.calls;
+    const [begin, call, raise, commit] = client.calls;
+    expect([begin.text, commit.text]).toEqual(["BEGIN", "COMMIT"]);
+    expect(raise.text).toMatch(/^insert into "shared"\."node_watermarks_labels" /);
+    expect(raise.values).toContain(serializeHLC(HLC));
     expect(call.text).toMatch(LABELS_UPDATE);
     expect(call.text).not.toMatch(/"app_id" = /);
     expect(call.values).toContain("rec1");

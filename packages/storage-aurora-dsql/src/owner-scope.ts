@@ -12,8 +12,9 @@
  *   the `on` for a joined one, so a left join stays a left join.
  * - **Inserts** into an owned table set `user_id` to the user, overriding any
  *   value the row carried, so a row from the wire cannot name its own owner.
- *   An `on conflict` target gains `user_id`, because every owned table's
- *   primary key starts with it.
+ *   An `insert … select` selects the user in the owner column's place. An
+ *   `on conflict` target gains `user_id`, because every owned table's primary
+ *   key starts with it.
  * - **Updates** never change `user_id`: a `set` of it is dropped.
  *
  * Kysely runs plugins when a query compiles, so the compile-only instance this
@@ -23,8 +24,9 @@
  * {@link assertOwnerScoped} is the tripwire for one that starts to.
  *
  * Owned tables: `shared.records`, `shared.record_labels`,
- * `shared.object_availability`, every `shared.record_<category>_metadata`, and
- * every table in an app's `app_<appId>` schema. The registry, the grants and
+ * `shared.object_availability`, the two `shared.node_watermarks_*` tables,
+ * every `shared.record_<category>_metadata`, and every table in an app's
+ * `app_<appId>` schema. The registry, the grants and
  * the label-key declarations belong to the deployment and stay unscoped.
  *
  * See `~/projects/starkeep/plan-multi-user-roles-2026-10-16.md`, steps 4.2–4.4.
@@ -44,6 +46,8 @@ import {
   OperatorNode,
   PrimitiveValueListNode,
   ReferenceNode,
+  SelectQueryNode,
+  SelectionNode,
   TableNode,
   ValueListNode,
   ValueNode,
@@ -58,7 +62,6 @@ import {
   type QueryId,
   type QueryResult,
   type RootOperationNode,
-  type SelectQueryNode,
   type UnknownRow,
   type UpdateQueryNode,
 } from "kysely";
@@ -66,7 +69,13 @@ import { OWNER_COLUMN, USER_SEGMENT_PATTERN } from "@starkeep/protocol-primitive
 
 export { OWNER_COLUMN };
 
-const OWNED_SHARED_TABLES = new Set(["records", "record_labels", "object_availability"]);
+const OWNED_SHARED_TABLES = new Set([
+  "records",
+  "record_labels",
+  "object_availability",
+  "node_watermarks_records",
+  "node_watermarks_labels",
+]);
 
 /** Whether `schema.table` holds one user's rows. */
 export function isOwnedTable(schema: string | undefined, table: string): boolean {
@@ -258,6 +267,9 @@ class OwnerScopeTransformer extends OperationNodeTransformer {
   ): InsertQueryNode {
     const inner = super.transformInsertQuery(node, queryId);
     if (!inner.into || !ownedSource(inner.into)) return inner;
+    if (inner.columns && inner.values && SelectQueryNode.is(inner.values)) {
+      return { ...inner, ...this.scopeInsertSelect(inner.columns, inner.values, inner.onConflict) };
+    }
     if (!inner.columns || !inner.values || !ValuesNode.is(inner.values)) {
       throw new Error(
         "owner scope: an insert into an owned table must list its columns and values",
@@ -277,26 +289,7 @@ class OwnerScopeTransformer extends OperationNodeTransformer {
       else values[at] = ValueNode.create(this.userId);
       return ValueListNode.create(values);
     });
-    let onConflict = inner.onConflict;
-    if (onConflict) {
-      if (onConflict.constraint || onConflict.indexExpression) {
-        throw new Error(
-          "owner scope: an upsert into an owned table must name its conflict columns",
-        );
-      }
-      // A `do nothing` with no target conflicts on any key, which already
-      // includes the owner.
-      if (onConflict.columns && !onConflict.columns.some(isOwnerColumn)) {
-        onConflict = OnConflictNode.cloneWith(onConflict, {
-          columns: [ColumnNode.create(OWNER_COLUMN), ...onConflict.columns],
-        });
-      }
-      if (onConflict.updates) {
-        onConflict = OnConflictNode.cloneWith(onConflict, {
-          updates: onConflict.updates.filter((u) => !isOwnerColumn(u.column)),
-        });
-      }
-    }
+    const onConflict = scopeOnConflict(inner.onConflict);
     return {
       ...inner,
       columns,
@@ -304,6 +297,63 @@ class OwnerScopeTransformer extends OperationNodeTransformer {
       ...(onConflict ? { onConflict } : {}),
     };
   }
+
+  /**
+   * An `insert … select` into an owned table: the select names the owner
+   * column's value, and selects the user there whatever it named. The select
+   * itself was scoped on the way in, so it reads only the user's rows.
+   */
+  private scopeInsertSelect(
+    columns: ReadonlyArray<ColumnNode>,
+    select: SelectQueryNode,
+    onConflict: OnConflictNode | undefined,
+  ): Pick<InsertQueryNode, "columns" | "values" | "onConflict"> {
+    const at = columns.findIndex(isOwnerColumn);
+    const selections = select.selections ?? [];
+    if (at === -1 || selections.length !== columns.length) {
+      throw new Error(
+        "owner scope: an insert … select into an owned table must list the owner column and select one value per column",
+      );
+    }
+    const owner = SelectionNode.create(
+      AliasNode.create(ValueNode.create(this.userId), IdentifierNode.create(OWNER_COLUMN)),
+    );
+    const scoped = scopeOnConflict(onConflict);
+    const values: SelectQueryNode = {
+      ...select,
+      selections: selections.map((s, i) => (i === at ? owner : s)),
+    };
+    return {
+      columns,
+      values,
+      ...(scoped ? { onConflict: scoped } : {}),
+    };
+  }
+}
+
+/**
+ * An upsert's conflict clause on an owned table: the target gains the owner,
+ * and the update never sets it.
+ */
+function scopeOnConflict(onConflict: OnConflictNode | undefined): OnConflictNode | undefined {
+  if (!onConflict) return undefined;
+  if (onConflict.constraint || onConflict.indexExpression) {
+    throw new Error("owner scope: an upsert into an owned table must name its conflict columns");
+  }
+  let scoped = onConflict;
+  // A `do nothing` with no target conflicts on any key, which already
+  // includes the owner.
+  if (scoped.columns && !scoped.columns.some(isOwnerColumn)) {
+    scoped = OnConflictNode.cloneWith(scoped, {
+      columns: [ColumnNode.create(OWNER_COLUMN), ...scoped.columns],
+    });
+  }
+  if (scoped.updates) {
+    scoped = OnConflictNode.cloneWith(scoped, {
+      updates: scoped.updates.filter((u) => !isOwnerColumn(u.column)),
+    });
+  }
+  return scoped;
 }
 
 /**
@@ -331,7 +381,7 @@ export class OwnerScopePlugin implements KyselyPlugin {
 
 /** Matches an owned table as compiled SQL names it, quoted. */
 const OWNED_TABLE_SQL =
-  /"shared"\."(records|record_labels|object_availability|record_[a-z0-9_]+_metadata)"|"app_[a-z0-9_]+"\."[^"]+"/;
+  /"shared"\."(records|record_labels|object_availability|node_watermarks_records|node_watermarks_labels|record_[a-z0-9_]+_metadata)"|"app_[a-z0-9_]+"\."[^"]+"/;
 
 /**
  * Refuse a statement that names an owned table and never mentions the owner
