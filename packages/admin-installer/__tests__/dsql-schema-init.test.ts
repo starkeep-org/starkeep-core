@@ -196,6 +196,41 @@ describe("shared.object_availability", () => {
   });
 });
 
+describe("the shared node watermarks", () => {
+  it("grant the labels' entries to PUBLIC, as the labels are, and the records' entries to no one here", async () => {
+    // The records' entries are granted per app (dsql-ddl.ts), mirroring
+    // shared.records; Drive's role holds them through the default privileges.
+    const statements = await init();
+    expect(statements).toContain(
+      "GRANT SELECT, INSERT, UPDATE, DELETE ON shared.node_watermarks_labels TO PUBLIC",
+    );
+    expect(statements.some((s) => /^GRANT .* shared\.node_watermarks_records /.test(s))).toBe(
+      false,
+    );
+  });
+
+  it("are keyed by owner, the source's type column and author, and backfilled after they exist", async () => {
+    const statements = await init();
+    for (const [table, key, source] of [
+      ["node_watermarks_records", "type", "records"],
+      ["node_watermarks_labels", "record_type", "record_labels"],
+    ] as const) {
+      const create = statements.findIndex((s) =>
+        s.startsWith(`create table if not exists "shared"."${table}"`),
+      );
+      expect(statements[create]).toContain(`primary key ("user_id", "${key}", "node_id")`);
+      const backfill = statements.findIndex((s) => s.startsWith(`insert into "shared"."${table}"`));
+      expect(backfill).toBeGreaterThan(create);
+      expect(statements[backfill]).toContain(
+        `from "shared"."${source}" group by "user_id", "node_id", "${key}"`,
+      );
+      expect(statements[backfill]).toContain(
+        `where "excluded"."updated_at" > "shared"."${table}"."updated_at"`,
+      );
+    }
+  });
+});
+
 describe("every table in `shared` is granted to something", () => {
   it("leaves no table reachable only by its creator", async () => {
     // The generalisation of the bug above: a CREATE TABLE with no accompanying
@@ -204,8 +239,9 @@ describe("every table in `shared` is granted to something", () => {
     const statements = await init();
     // Granted per-app at app-install time instead (dsql-ddl.ts), because the
     // verbs depend on that app's declared fileAccess — SELECT always, writes
-    // only with readwrite. A blanket grant here would flatten that.
-    const grantedPerApp = new Set(["records"]);
+    // only with readwrite. A blanket grant here would flatten that. The
+    // records' node watermarks mirror the records' grants.
+    const grantedPerApp = new Set(["records", "node_watermarks_records"]);
 
     const created = statements
       .map((s) => /create table if not exists "shared"\."([a-z_]+)"/i.exec(s)?.[1])

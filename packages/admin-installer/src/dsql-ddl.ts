@@ -36,6 +36,12 @@ import {
 } from "@starkeep/shared-space-api";
 import type { AppSyncableTableInfo } from "@starkeep/shared-space-api";
 import { retryOnAccessDenied, retryOnTransientDbError } from "./retry-on-access-denied";
+import {
+  NODE_WATERMARKS_TABLE,
+  RECORD_WATERMARKS_TABLE,
+  backfillNodeWatermarks,
+  createNodeWatermarkTable,
+} from "./node-watermark-ddl";
 import { USER_DATA_OWNER_APP_ID } from "./temp-policies";
 
 /**
@@ -243,14 +249,23 @@ export async function runAppInstallDdl(
       GRANT ALL ON TABLES TO ${sql.raw(pgRole)}
     `.execute(db);
 
-      // shared.records access
+      // shared.records access. Its node watermark table's grants mirror it
+      // exactly: only a role that may land a record may raise its entry, and
+      // every role that reads records reads their coverage. See
+      // node-watermark-ddl.ts.
       await sql`GRANT USAGE ON SCHEMA shared TO ${sql.raw(pgRole)}`.execute(db);
       await sql`GRANT SELECT ON shared.records TO ${sql.raw(pgRole)}`.execute(db);
+      await sql`GRANT SELECT ON ${sql.raw(RECORD_WATERMARKS_TABLE)} TO ${sql.raw(pgRole)}`.execute(
+        db,
+      );
 
       const grants = flattenFileAccess(fileAccess);
       const hasWriteAccess = fileAccessAll || grants.some((g) => g.access === "readwrite");
       if (hasWriteAccess) {
         await sql`GRANT INSERT, UPDATE, DELETE ON shared.records TO ${sql.raw(pgRole)}`.execute(db);
+        await sql`GRANT INSERT, UPDATE, DELETE ON ${sql.raw(RECORD_WATERMARKS_TABLE)} TO ${sql.raw(pgRole)}`.execute(
+          db,
+        );
       }
 
       // Per-category metadata table grants. access_grants stays extension-keyed
@@ -477,6 +492,37 @@ export async function runAppInstallDdl(
           .execute(db);
       }
 
+      // Framework-owned table for the cloud's node watermarks on this app's
+      // channel: per user, synced table and author, the highest updated_at
+      // that has landed. The broker raises an entry in every write's
+      // transaction and reads coverage from here instead of grouping every
+      // row. In the app's own schema, under the app's own role, so uninstall's
+      // DROP SCHEMA takes the entries with the rows. Never registered as a
+      // syncable table: it is one node's statement about its own rows.
+      await createNodeWatermarkTable(
+        db,
+        `${schemaName}.${NODE_WATERMARKS_TABLE}`,
+        "table_name",
+        `pk_${schemaName}_${NODE_WATERMARKS_TABLE}`,
+      );
+      await sql
+        .raw(
+          `GRANT SELECT, INSERT, UPDATE, DELETE ON ${schemaName}."${NODE_WATERMARKS_TABLE}" TO ${pgRole}`,
+        )
+        .execute(db);
+      const syncedTables = [
+        ...appSyncableTables.map((t) => t.name),
+        ...(appSyncableFilesEnabled ? [FILE_RECORDS_TABLE] : []),
+      ];
+      for (const table of syncedTables) {
+        await backfillNodeWatermarks(
+          db,
+          `${schemaName}.${NODE_WATERMARKS_TABLE}`,
+          `${schemaName}.${table}`,
+          { tableName: table },
+        );
+      }
+
       // Upsert namespace registry row so the pull path knows which tables exist.
       if (appSyncableTables.length > 0 || appSyncableFilesEnabled) {
         // Column types travel with the registry row because the query parser
@@ -530,6 +576,9 @@ export async function runAppUninstallDdl(
     const db = await makeDb(opts);
     try {
       await sql`REVOKE ALL ON shared.records FROM ${sql.raw(pgRole)}`.execute(db);
+      await sql`REVOKE ALL ON ${sql.raw(RECORD_WATERMARKS_TABLE)} FROM ${sql.raw(pgRole)}`.execute(
+        db,
+      );
 
       const categoryGrants = categoriesFromGrants(flattenFileAccess(fileAccess), fileAccessAll);
       for (const cg of categoryGrants) {

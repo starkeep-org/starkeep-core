@@ -18,8 +18,20 @@ export const FILE_RECORDS_TABLE = "_starkeep_sync_records";
  */
 export const BYTE_COVERAGE_TABLE = "_starkeep_byte_coverage";
 
+/**
+ * Name of the framework-owned table holding the cloud's per-author watermark
+ * for each synced table in the app's namespace, created in every app's
+ * namespace on the cloud. Like {@link BYTE_COVERAGE_TABLE} it never syncs. See
+ * `@starkeep/storage-aurora-dsql`, `node-watermarks.ts`.
+ */
+export const NODE_WATERMARKS_TABLE = "_starkeep_node_watermarks";
+
 /** Tables apps may not declare via the manifest or write to directly. */
-export const RESERVED_TABLE_NAMES = new Set<string>([FILE_RECORDS_TABLE, BYTE_COVERAGE_TABLE]);
+export const RESERVED_TABLE_NAMES = new Set<string>([
+  FILE_RECORDS_TABLE,
+  BYTE_COVERAGE_TABLE,
+  NODE_WATERMARKS_TABLE,
+]);
 
 /**
  * One column of the reserved table.

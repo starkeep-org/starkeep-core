@@ -159,6 +159,15 @@ describe("install DDL for the photos manifest", () => {
     ).toBe(true);
   });
 
+  it("mirrors the shared.records grants on the records' node watermarks", async () => {
+    await installPhotos();
+    const s = stmts();
+    expect(s).toContain("GRANT SELECT ON shared.node_watermarks_records TO starkeep_app_photos");
+    expect(s).toContain(
+      "GRANT INSERT, UPDATE, DELETE ON shared.node_watermarks_records TO starkeep_app_photos",
+    );
+  });
+
   it("grants a metadata table per declared category, and only those", async () => {
     await installPhotos();
     const s = stmts();
@@ -364,6 +373,56 @@ describe("the cloud's bytes-watermark table", () => {
   });
 });
 
+describe("the cloud's node-watermark table", () => {
+  it("is created in the app's own schema, keyed by owner, table and author, for the app's role only", async () => {
+    await installPhotos();
+    const s = stmts();
+    const create = s.find(
+      (t) =>
+        t.startsWith("create table if not exists") &&
+        t.includes('"app_photos"."_starkeep_node_watermarks"'),
+    );
+    expect(create).toMatch(
+      /constraint "pk_app_photos__starkeep_node_watermarks" primary key \("user_id", "table_name", "node_id"\)/,
+    );
+    expect(s).toContain(
+      'GRANT SELECT, INSERT, UPDATE, DELETE ON app_photos."_starkeep_node_watermarks" TO starkeep_app_photos',
+    );
+    expect(s.some((t) => t.includes("_starkeep_node_watermarks") && t.includes("PUBLIC"))).toBe(
+      false,
+    );
+  });
+
+  it("backfills once per synced table, the reserved file table included, after the table exists", async () => {
+    await installPhotos();
+    const s = stmts();
+    const created = s.findIndex((t) =>
+      t.includes('create table if not exists "app_photos"."_starkeep_node_watermarks"'),
+    );
+    const backfills = s
+      .map((t, i) => ({ t, i }))
+      .filter(({ t }) => t.startsWith('insert into "app_photos"."_starkeep_node_watermarks"'));
+    const tables = [
+      ...photosManifest.infraRequirements.appSpecificSyncable.tables.map((t) => t.name),
+      "_starkeep_sync_records",
+    ];
+    expect(backfills.map(({ t }) => /from "app_photos"\."([^"]+)"/.exec(t)?.[1])).toEqual(tables);
+    for (const { t, i } of backfills) {
+      expect(i).toBeGreaterThan(created);
+      expect(t).toContain('group by "user_id", "node_id"');
+      expect(t).toContain(
+        'do update set "updated_at" = "excluded"."updated_at" where "excluded"."updated_at" > "app_photos"."_starkeep_node_watermarks"."updated_at"',
+      );
+    }
+  });
+
+  it("is never registered as a syncable table", async () => {
+    await installPhotos();
+    const q = state.queries.find((x) => x.text.includes('"shared"."app_syncable_namespaces"'));
+    expect(JSON.stringify(q?.params)).not.toContain("_starkeep_node_watermarks");
+  });
+});
+
 describe("install DDL for Drive (fileAccessAll)", () => {
   it("writes zero access_grants rows but grants every category metadata table", async () => {
     await runAppInstallDdl(opts, "starkeep-drive", [], true, [], false);
@@ -398,6 +457,14 @@ describe("read-only app install DDL", () => {
     const s = stmts();
     expect(s.some((t) => t.includes("GRANT SELECT ON shared.records"))).toBe(true);
     expect(s.some((t) => t.includes("GRANT INSERT, UPDATE, DELETE ON shared.records"))).toBe(false);
+    // The records' node watermarks mirror that: a role that cannot land a
+    // record cannot raise its entry at the database layer.
+    expect(s).toContain("GRANT SELECT ON shared.node_watermarks_records TO starkeep_app_viewer");
+    expect(
+      s.some((t) =>
+        /GRANT [^;]*(INSERT|UPDATE|DELETE)[^;]* ON shared\.node_watermarks_records/.test(t),
+      ),
+    ).toBe(false);
     // Metadata: read yes, write no (no readwrite, no metadataWrite)
     expect(s.some((t) => t.includes("GRANT SELECT ON shared.record_document_metadata"))).toBe(true);
     expect(
@@ -496,6 +563,14 @@ describe("uninstall DDL", () => {
     expect(
       s.some((t) => t.includes("REVOKE USAGE ON SCHEMA shared FROM starkeep_app_photos")),
     ).toBe(true);
+    // Before USAGE and DROP ROLE: a grant left in `shared` fails DROP ROLE with 2BP01.
+    const revokeWatermarks = s.indexOf(
+      "REVOKE ALL ON shared.node_watermarks_records FROM starkeep_app_photos",
+    );
+    expect(revokeWatermarks).toBeGreaterThan(-1);
+    expect(revokeWatermarks).toBeLessThan(
+      s.indexOf("REVOKE USAGE ON SCHEMA shared FROM starkeep_app_photos"),
+    );
     expect(s.some((t) => t.includes('delete from "shared"."access_grants" where "app_id" ='))).toBe(
       true,
     );
