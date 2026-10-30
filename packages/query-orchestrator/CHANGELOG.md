@@ -1,5 +1,12 @@
 # @starkeep/query-orchestrator
 
+## 0.4.4
+
+### Patch Changes
+
+- Updated dependencies [317a926]
+  - @starkeep/storage-adapter@0.8.0
+
 ## 0.4.3
 
 ### Patch Changes
