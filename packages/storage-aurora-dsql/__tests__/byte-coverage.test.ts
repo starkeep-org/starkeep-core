@@ -38,15 +38,20 @@ describe("createDsqlByteCoverageStore", () => {
     expect(loaded).toEqual({ phone: hlc("phone", 1_700_000_000_000) });
   });
 
-  it("upserts every entry, so a lowered value replaces a higher one", async () => {
+  it("upserts every entry, so a lowered value replaces a higher one, then drops absent authors", async () => {
     const { client, calls } = recordingClient(() => []);
     await createDsqlByteCoverageStore(client, "photos", "user-a").save({
       a: hlc("a", 5),
       b: hlc("b", 7),
     });
 
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
     expect(calls[0]!.text).toContain('insert into "app_photos"."_starkeep_byte_coverage"');
+    // An author the map omits has no rows left, so its stored value goes.
+    expect(calls[1]!.text).toBe(
+      'delete from "app_photos"."_starkeep_byte_coverage" where "node_id" not in ($1, $2) and "app_photos"."_starkeep_byte_coverage"."user_id" = $3',
+    );
+    expect(calls[1]!.values).toEqual(["a", "b", "user-a"]);
     expect(calls[0]!.text).toContain(
       'on conflict ("user_id", "node_id") do update set "hlc" = "excluded"."hlc"',
     );
@@ -60,10 +65,12 @@ describe("createDsqlByteCoverageStore", () => {
     ]);
   });
 
-  it("writes nothing for an empty map", async () => {
+  it("clears the user's rows for an empty map, and only theirs", async () => {
     const { client, calls } = recordingClient(() => []);
     await createDsqlByteCoverageStore(client, "photos", "user-a").save({});
-    expect(calls).toHaveLength(0);
+    expect(calls.map((c) => c.text)).toEqual([
+      'delete from "app_photos"."_starkeep_byte_coverage" where "app_photos"."_starkeep_byte_coverage"."user_id" = $1',
+    ]);
   });
 
   it("lets a missing table throw, so the responder omits its watermark", async () => {

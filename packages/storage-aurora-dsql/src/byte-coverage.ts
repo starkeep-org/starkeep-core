@@ -44,9 +44,14 @@ export interface DsqlByteCoverageStore {
  * the app is reinstalled — loudly, rather than walking every file from the
  * beginning on every exchange.
  *
- * `save` upserts every entry. An author absent from the map keeps its row;
- * the sync engine lowers a stored value to the rows it still holds on every
- * load, so a stale row cannot claim files.
+ * `save` replaces the stored map, as the memory store does: it upserts every
+ * entry and deletes the rows of authors absent from the map. The sync engine
+ * clamps the stored value to the rows it still holds on every load, so an
+ * absent author is one with no rows left to claim files for, and deleting its
+ * row only lowers what the store says. Keeping it made every walk differ from
+ * the stored value, so each exchange saved again: an author whose rows were
+ * all superseded before the node watermark tables existed has no entry there,
+ * and the clamp drops it on every load.
  */
 export function createDsqlByteCoverageStore(
   client: DatabaseClient,
@@ -68,15 +73,26 @@ export function createDsqlByteCoverageStore(
     },
     async save(watermarks) {
       const entries = Object.entries(watermarks);
-      if (entries.length === 0) return;
       await withOccRetry("byteCoverage.save", async () => {
-        const compiled = qb
-          .insertInto(table)
-          .values(entries.map(([nodeId, hlc]) => ({ node_id: nodeId, hlc: serializeHLC(hlc) })))
-          .onConflict((oc) =>
-            oc.column("node_id").doUpdateSet((eb) => ({ hlc: eb.ref("excluded.hlc") })),
-          )
-          .compile();
+        if (entries.length > 0) {
+          const upsert = qb
+            .insertInto(table)
+            .values(entries.map(([nodeId, hlc]) => ({ node_id: nodeId, hlc: serializeHLC(hlc) })))
+            .onConflict((oc) =>
+              oc.column("node_id").doUpdateSet((eb) => ({ hlc: eb.ref("excluded.hlc") })),
+            )
+            .compile();
+          await client.query(upsert.sql, [...upsert.parameters]);
+        }
+        let absent = qb.deleteFrom(table);
+        if (entries.length > 0) {
+          absent = absent.where(
+            "node_id",
+            "not in",
+            entries.map(([nodeId]) => nodeId),
+          );
+        }
+        const compiled = absent.compile();
         await client.query(compiled.sql, [...compiled.parameters]);
       });
     },
