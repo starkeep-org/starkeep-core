@@ -80,6 +80,12 @@ import {
   hasMetadataTable,
   OWNER_COLUMN,
 } from "@starkeep/protocol-primitives";
+import {
+  LABEL_WATERMARKS_TABLE,
+  RECORD_WATERMARKS_TABLE,
+  backfillNodeWatermarks,
+  createNodeWatermarkTable,
+} from "./node-watermark-ddl";
 
 export interface SchemaInitOptions {
   hostname: string;
@@ -250,6 +256,23 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
         .execute(db);
     }
 
+    // shared.node_watermarks_records — per user, type and author, the highest
+    // updated_at that has landed in shared.records. The broker raises an entry
+    // in every write's transaction and reads sync coverage from these rows
+    // instead of grouping every record the user owns. See node-watermark-ddl.ts.
+    //
+    // Its grants mirror shared.records exactly: Drive's role holds ALL through
+    // the default privileges below, and each per-app role holds SELECT, plus
+    // writes only where it may write shared.records (dsql-ddl.ts). Only a role
+    // that may land a record may raise its entry.
+    await createNodeWatermarkTable(
+      db,
+      RECORD_WATERMARKS_TABLE,
+      "type",
+      "node_watermarks_records_pkey",
+    );
+    await backfillNodeWatermarks(db, RECORD_WATERMARKS_TABLE, "shared.records", { column: "type" });
+
     await sql
       .raw(`ALTER DEFAULT PRIVILEGES IN SCHEMA shared GRANT ALL ON TABLES TO user_data_owner`)
       .execute(db);
@@ -349,6 +372,24 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
     await sql
       .raw(`GRANT SELECT, INSERT, UPDATE, DELETE ON shared.record_labels TO PUBLIC`)
       .execute(db);
+
+    // shared.node_watermarks_labels — the label half of the node watermarks,
+    // keyed by the label's record_type so a type-scoped read narrows it the
+    // way it narrows labels. Granted to PUBLIC, mirroring shared.record_labels:
+    // every app may write labels on types it can read, so every role must be
+    // able to raise their entries.
+    await createNodeWatermarkTable(
+      db,
+      LABEL_WATERMARKS_TABLE,
+      "record_type",
+      "node_watermarks_labels_pkey",
+    );
+    await sql
+      .raw(`GRANT SELECT, INSERT, UPDATE, DELETE ON ${LABEL_WATERMARKS_TABLE} TO PUBLIC`)
+      .execute(db);
+    await backfillNodeWatermarks(db, LABEL_WATERMARKS_TABLE, "shared.record_labels", {
+      column: "record_type",
+    });
 
     // shared.object_availability — whether the cloud can serve an object's
     // bytes right now.
