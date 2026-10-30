@@ -223,9 +223,9 @@ const CRED_REFRESH_BUFFER_MS = 60_000; // refresh 60s before expiry
 // Every /apps/{appId}/* request is HMAC-signed (see packages/app-client/src/
 // sign.ts). The verifier below fetches the secret from
 // /${stackPrefix}/app-creds/${appId} once per warm Lambda instance and caches
-// it. The same SecureString is written by the installer at cloud install
-// (admin-installer/src/app-creds.ts) and mirrored from the local-side hmac
-// secret so the sync supervisor signs with the same key the verifier expects.
+// it. The installer creates the SecureString once, at cloud install
+// (admin-installer/src/app-creds.ts), and the app's own Lambdas sign with it.
+// Its existence also marks the app installed for the device branches below.
 
 interface CachedHmacSecret {
   hmacSecret: string;

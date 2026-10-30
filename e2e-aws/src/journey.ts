@@ -23,7 +23,7 @@
  */
 
 import { describe, it, expect, afterAll, afterEach, beforeAll } from "vitest";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
@@ -45,6 +45,7 @@ import { signedFetch, USER_TOKEN_HEADER, type AppCredentials } from "@starkeep/a
 import { cloudDataServerBundleSha256Base64, createDsqlRegistry } from "@starkeep/admin-installer";
 import { LambdaClient, GetFunctionConfigurationCommand } from "@aws-sdk/client-lambda";
 import { S3Client, GetObjectTaggingCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
+import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import { compareHLC, deserializeHLC, type HLCTimestamp } from "@starkeep/protocol-primitives";
 import { appSyncableTableName, sqliteCompiler } from "@starkeep/storage-sqlite";
 import { AWS_TESTS_ENABLED, STACK_PREFIX, REGION, TEARDOWN } from "./env.js";
@@ -104,6 +105,13 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
   let drive: LdsApp;
   let appUnderTest: LdsApp;
   let syncedRecordId: string;
+  // The app-private row the cloud app writes before any desktop holds the app,
+  // which the desktop's first exchange after its local install must pull down.
+  const cloudFirstRowId = `cloud-first-${randomBytes(6).toString("hex")}`;
+  // The secret each cloud install created, read back from SSM. Not the local
+  // secret: the cloud install creates its own, and nothing on this machine
+  // signs cloud requests with either.
+  const cloudSecrets = new Map<string, string>();
   // What the real browser uploads through the cloud-served UI: its bytes enter
   // the cloud via browser→proxy→broker→S3, never touching the local data
   // server. Captured here so the later cloud→local sync step can assert the
@@ -140,6 +148,31 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
   };
 
   /**
+   * Read back the HMAC secret the cloud install created for `appId` — the one
+   * the app's own Lambdas sign with — and keep it for {@link cloudApp}.
+   * Ambient credentials, as the S3 and Lambda checks use: Manager may only
+   * write this parameter, never read it.
+   */
+  async function loadCloudSecret(appId: string): Promise<string> {
+    const res = await new SSMClient({ region: REGION }).send(
+      new GetParameterCommand({
+        Name: `/${STACK_PREFIX}/app-creds/${appId}`,
+        WithDecryption: true,
+      }),
+    );
+    const { hmacSecret } = JSON.parse(res.Parameter!.Value!) as { hmacSecret: string };
+    cloudSecrets.set(appId, hmacSecret);
+    return hmacSecret;
+  }
+
+  function cloudSecret(appId: string): string {
+    const secret = cloudSecrets.get(appId);
+    if (!secret)
+      throw new Error(`no cloud secret read for ${appId}; read it after its cloud install`);
+    return secret;
+  }
+
+  /**
    * HMAC-signed fetch against the real broker: `${apiGatewayUrl}/apps/{appId}`.
    *
    * The HMAC alone is no longer enough, and that is the point of the change it
@@ -147,18 +180,23 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
    * data-plane call, with no route carve-out and nothing an app can declare to opt
    * out. Standing in for an app's server-side compute, this helper presents what
    * that compute presents — the signature saying which app is calling, and the
-   * admin's cloud-apps ID token saying which person it is calling for.
+   * admin's cloud-apps ID token saying which person it is calling for. It signs
+   * with the cloud secret, as that compute does, so only the app id is read
+   * from `app`.
    */
-  function cloudApp(local: AppCredentials): LdsApp {
-    return cloudAppAs(local, adminAppToken);
+  function cloudApp(app: Pick<AppCredentials, "appId">): LdsApp {
+    return cloudAppAs(app, adminAppToken);
   }
 
   /** {@link cloudApp}, acting for the person whose ID token `idToken` reads. */
-  function cloudAppAs(local: AppCredentials, idToken: () => string | Promise<string>): LdsApp {
+  function cloudAppAs(
+    app: Pick<AppCredentials, "appId">,
+    idToken: () => string | Promise<string>,
+  ): LdsApp {
     const creds: AppCredentials = {
-      appId: local.appId,
-      hmacSecret: local.hmacSecret,
-      dataServerUrl: `${config.apiGatewayUrl}/apps/${encodeURIComponent(local.appId)}`,
+      appId: app.appId,
+      hmacSecret: cloudSecret(app.appId),
+      dataServerUrl: `${config.apiGatewayUrl}/apps/${encodeURIComponent(app.appId)}`,
     };
     return {
       ...creds,
@@ -919,13 +957,11 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
       });
 
       it("installs Drive in the cloud (User-Data-Owner identity)", async () => {
-        // The cloud install mirrors the secret straight from the LDS's local
-        // registry (no creds-file pre-seed): the CLI reads the same data.db the
-        // supervisor signs from, since both share STARKEEP_DIR (the run-state dir).
-        // So a passing /health below is itself the todo-39 regression — local
-        // signer and cloud verifier agree because both derive from the one
-        // registry secret.
+        // The cloud install creates Drive's secret itself. It shares nothing with
+        // the secret the local data server minted for Drive at boot: the desktop
+        // syncs with its device token, so the two keys never need to agree.
         await runInstallCli("cli-install-drive", [], paths, session);
+        expect(await loadCloudSecret(drive.appId)).not.toBe(drive.hmacSecret);
         const res = await cloudApp(drive).fetch("/health");
         expect(res.status).toBe(200);
       });
@@ -939,7 +975,46 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         expect(signedIn.state).toBe("signed-in");
       });
 
-      it(`installs ${app.appId} in the cloud (bundle, Lambda, routes)`, async () => {
+      it(`installs ${app.appId} in the cloud with no local install (bundle, Lambda, routes)`, async () => {
+        // The cloud first, on a machine that has never installed the app. The
+        // cloud install once refused this ("install locally first"), because it
+        // mirrored the local secret; it now creates its own and reads nothing
+        // under STARKEEP_DIR.
+        const local = new DatabaseSync(join(paths.dataDir, "data.db"), { readOnly: true });
+        try {
+          const query = sqliteCompiler
+            .selectFrom("shared_app_registry")
+            .select("app_id")
+            .where("app_id", "=", app.appId)
+            .compile();
+          expect(local.prepare(query.sql).get(...(query.parameters as string[]))).toBeUndefined();
+        } finally {
+          local.close();
+        }
+
+        await runInstallCli("cli-install-app", [app.appId], paths, session);
+        await loadCloudSecret(app.appId);
+        // Nor does it write beside a local install that is not there.
+        expect(existsSync(join(paths.dataDir, "app-creds", `${app.appId}.json`))).toBe(false);
+
+        const res = await cloudApp({ appId: app.appId }).fetch("/health");
+        expect(res.status).toBe(200);
+      });
+
+      it(`the cloud ${app.appId} writes an app-private row before any desktop holds the app`, async () => {
+        const table = app.appTable;
+        const insert = await cloudApp({ appId: app.appId }).fetch(`/app-data/db/${table.name}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ row: table.row(cloudFirstRowId) }),
+        });
+        expect(insert.status).toBe(200);
+      });
+
+      it(`installs ${app.appId} locally while this machine is signed out: the app works, its sync waits`, async () => {
+        const out = await fetch(`${lds!.url}/auth/sign-out`, { method: "POST" });
+        expect(out.status).toBe(200);
+
         // The manifest is read from the app's own directory rather than restated
         // here: the local install and the cloud install must agree about what the
         // app asked for, and a copy in this file could only ever disagree.
@@ -947,10 +1022,38 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
           readFileSync(join(app.appDir, "starkeep.manifest.json"), "utf-8"),
         ) as Record<string, unknown>;
         appUnderTest = await installAppDirect(lds!.url, manifest);
-        await runInstallCli("cli-install-app", [app.appId], paths, session);
+        expect(appUnderTest.hmacSecret).not.toBe(cloudSecret(app.appId));
 
-        const res = await cloudApp(appUnderTest).fetch("/health");
-        expect(res.status).toBe(200);
+        // The app works against the local data server at once; the cloud's row
+        // is not here yet.
+        const rows = await appUnderTest.fetch(`/app-data/db/${app.appTable.name}`);
+        expect(rows.status).toBe(200);
+        expect(await rows.text()).not.toContain(cloudFirstRowId);
+
+        // With no credential, the supervisor's rescan starts no channel for the
+        // app; the next sign-in's rescan is what starts it.
+        const statusRes = await appUnderTest.fetch("/sync/status");
+        const { perApp } = (await statusRes.json()) as { perApp: Array<{ appId: string }> };
+        expect(perApp.map((e) => e.appId)).not.toContain(app.appId);
+      });
+
+      it(`signing back in starts ${app.appId}'s channel, which pulls the row the cloud app wrote`, async () => {
+        const signedIn = await signInThisMachine(lds!.url, admin);
+        expect(signedIn.state).toBe("signed-in");
+
+        await eventually(
+          async () => {
+            await appUnderTest.fetch("/sync/now", { method: "POST" });
+            const rows = await appUnderTest.fetch(`/app-data/db/${app.appTable.name}`);
+            expect(await rows.text()).toContain(cloudFirstRowId);
+          },
+          { timeoutMs: 60_000, intervalMs: 2_000 },
+        );
+        const statusRes = await appUnderTest.fetch("/sync/status");
+        const { perApp } = (await statusRes.json()) as {
+          perApp: Array<{ appId: string; lastError: string | null }>;
+        };
+        expect(perApp.find((e) => e.appId === app.appId)?.lastError).toBeNull();
       });
 
       it(`syncs a record to the cloud: row + blob under Drive, origin ${app.appId}`, async () => {
@@ -1138,45 +1241,17 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         expect(unflagged.records.map((r) => r.id)).not.toContain(syncedRecordId);
       });
 
-      it("reinstall after local creds drift: cloud install re-mirrors the registry secret, sync still validates", async () => {
-        // Reproduce the todo-39 drift directly: leave a local creds file holding a
-        // *different* secret than Drive's local registry (the value the supervisor
-        // signs with). The pre-fix installer read this creds file and mirrored it
-        // to SSM, so the cloud verifier ended up on a key no local signer held —
-        // every signed Drive request then 401'd "Invalid signature".
-        const credsDir = join(paths.dataDir, "app-creds");
-        const driveCredsPath = join(credsDir, "starkeep-drive.json");
-        mkdirSync(credsDir, { recursive: true, mode: 0o700 });
-        writeFileSync(
-          driveCredsPath,
-          JSON.stringify(
-            { appId: "starkeep-drive", hmacSecret: `${drive.hmacSecret}-drifted` },
-            null,
-            2,
-          ),
-          { mode: 0o600 },
-        );
-
-        // Re-run the cloud Drive install. The fix sources the secret from the
-        // local registry (drive.hmacSecret), not the drifted creds file, and the
-        // alwaysRun put_app_creds_parameter step re-mirrors it to SSM.
+      it("re-running a cloud install keeps the secret it created, and sync still validates", async () => {
+        // A reinstall must not rotate the key: the app's warm Lambdas and the
+        // verifier both cache it. The put is create-only, so the parameter the
+        // first install created survives the second untouched.
+        const before = cloudSecret(drive.appId);
         await runInstallCli("cli-install-drive", [], paths, session);
+        expect(await loadCloudSecret(drive.appId)).toBe(before);
 
-        // The creds file is reconciled back to the registry secret (so
-        // @starkeep/app-client and the app→LDS HMAC path also converge).
-        const reconciled = JSON.parse(readFileSync(driveCredsPath, "utf-8")) as {
-          hmacSecret: string;
-        };
-        expect(reconciled.hmacSecret).toBe(drive.hmacSecret);
-
-        // Cloud verifier still agrees with the local signer (HMAC_CACHE_TTL_MS=0
-        // in this suite, so the re-mirror takes effect immediately). Pre-fix this
-        // 401'd because SSM held the drifted secret.
         const health = await cloudApp(drive).fetch("/health");
         expect(health.status).toBe(200);
 
-        // And the sync exchange — signed by the supervisor with the registry
-        // secret — still validates end-to-end.
         const sync = await drive.fetch("/sync/now", { method: "POST" });
         expect(sync.status).toBe(200);
         const statusRes = await drive.fetch("/sync/status");
@@ -1602,7 +1677,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         const signedNoUser = await signedFetch(
           {
             appId: appUnderTest.appId,
-            hmacSecret: appUnderTest.hmacSecret,
+            hmacSecret: cloudSecret(appUnderTest.appId),
             dataServerUrl: `${config.apiGatewayUrl}/apps/${encodeURIComponent(appUnderTest.appId)}`,
           },
           "/data/records?limit=1",
@@ -1616,7 +1691,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         const garbageToken = await signedFetch(
           {
             appId: appUnderTest.appId,
-            hmacSecret: appUnderTest.hmacSecret,
+            hmacSecret: cloudSecret(appUnderTest.appId),
             dataServerUrl: `${config.apiGatewayUrl}/apps/${encodeURIComponent(appUnderTest.appId)}`,
           },
           "/data/records?limit=1",

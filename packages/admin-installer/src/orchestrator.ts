@@ -18,13 +18,7 @@
  * express, and they bootstrap the shared step ledger rather than reading it.
  */
 
-import { DatabaseSync } from "node:sqlite";
-import type { RawDatabase } from "@starkeep/storage-adapter";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
-import { dataDbPath, appCredsPath } from "@starkeep/app-client";
-import { appRegistryRow } from "./local/registry";
 import type { AppManifest } from "@starkeep/admin-manifest";
 import { roleChain, type AwsCredentials } from "./session";
 import {
@@ -42,7 +36,11 @@ import {
   assertCloudInstallableAppId,
   assertNotReservedAppId,
 } from "./iam";
-import { appCredsParameterName, deleteAppCredsParameter, putAppCredsParameter } from "./app-creds";
+import {
+  appCredsParameterName,
+  deleteAppCredsParameter,
+  ensureAppCredsParameter,
+} from "./app-creds";
 import { runAppInstallDdl, runAppUninstallDdl, type DsqlDdlOptions } from "./dsql-ddl";
 import {
   putAppKeepFile,
@@ -256,10 +254,10 @@ export async function installApp(input: InstallInput): Promise<InstallResult> {
 async function installAppInner(input: InstallInput, registry: Registry): Promise<InstallResult> {
   const { appId, manifest, zipBuffer, config } = input;
   const ir = manifest.infraRequirements;
-  // Every install creates the data side: the HMAC secret when the operator's
-  // machine holds one, the data role, the DDL, the `.keep` marker and the
-  // registry row. The web app adds the exec role, the bundle and the compute
-  // stack; the mobile app adds the Android identity and the callback.
+  // Every install creates the data side: the HMAC secret, the data role, the
+  // DDL, the `.keep` marker and the registry row. The web app adds the exec
+  // role, the bundle and the compute stack; the mobile app adds the Android
+  // identity and the callback.
   const surfaces = resolveSurfaces(appId, manifest, input.surfaces);
   const web = surfaces.includes("web");
   // Resolved before any step, so a mobile app on a deployment with no
@@ -276,50 +274,34 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
   // broker assumes into on their behalf — see createAppExecRole.
   const appExecRoleArn = `arn:aws:iam::${config.accountId}:role/${appExecRoleName(config.stackPrefix, appId)}`;
 
-  // SSM provisioning step: mirror the local HMAC secret to a SecureString at
-  // /${stackPrefix}/app-creds/${appId}. The cloud-data-server verifier reads
-  // from here; the sync supervisor (locally) signs with the *local registry's*
-  // hmac_secret (makeSignerFor → shared_app_registry), so SSM must hold that
-  // exact value. `readLocalHmacSecret` reads it straight from the registry
-  // — the single source of truth — rather than a separately-minted creds file,
-  // which is how the cloud verifier used to end up on a key no local signer
-  // held (todo 39: built-in Drive's registry secret was minted at LDS startup,
-  // yet cloud install minted a *different* secret into SSM → every signed
-  // request 401'd "Invalid signature").
+  // SSM provisioning step: create the app's HMAC secret at
+  // /${stackPrefix}/app-creds/${appId}, once. The app's own Lambdas sign with
+  // it and the cloud-data-server verifier checks against it; nothing on the
+  // operator's machine does — the desktop's sync supervisor presents the device
+  // token (2b2cb94a) — so the cloud install needs nothing from a local install.
   //
-  // Two parties sign with the secret: the desktop's sync supervisor, on the
-  // app's channel, and the cloud web app's Lambdas. The web app therefore
-  // needs it, and its install fails without a local install to mirror from.
-  // Without the web app the step runs only when the operator's machine holds
-  // the app, because a phone-only operator may have no desktop app at all; the
-  // phone signs with its attested key and never uses the secret. An operator
-  // who installs the desktop app later re-runs the install, and this step
-  // mirrors the secret then.
-  const local = readLocalHmacSecret(appId);
-  if ("missing" in local && web) throw new Error(local.missing);
-  if ("secret" in local) {
-    const hmacSecret = local.secret;
-    // alwaysRun: reconcile SSM to the current local secret every time. A
-    // completed record doesn't guarantee SSM still matches — if the local
-    // secret was re-minted, a skipped mirror would leave the cloud verifier on
-    // a stale key and every signed request would 401. The put is idempotent.
-    await runStep(
-      registry,
-      appId,
-      "install",
-      "put_app_creds_parameter",
-      done,
-      () =>
-        putAppCredsParameter({
-          stackPrefix: config.stackPrefix,
-          appId,
-          hmacSecret,
-          region: config.region,
-          awsCreds: managerCreds,
-        }).then(() => undefined),
-      { alwaysRun: true },
-    );
-  }
+  // Every surface gets it, not just the web app: the cloud-data-server reads the
+  // parameter's existence as "this app is installed" (the signed-in-device
+  // branch refuses an app without one), so a mobile-only app or Drive without it
+  // would turn the desktop's channel away.
+  //
+  // alwaysRun: the put is create-only, so re-running it keeps the live secret
+  // and only recreates one that was deleted out from under the ledger.
+  await runStep(
+    registry,
+    appId,
+    "install",
+    "put_app_creds_parameter",
+    done,
+    () =>
+      ensureAppCredsParameter({
+        stackPrefix: config.stackPrefix,
+        appId,
+        region: config.region,
+        awsCreds: managerCreds,
+      }).then(() => undefined),
+    { alwaysRun: true },
+  );
 
   // alwaysRun: a role made by an older install keeps that install's trust and
   // inline policies until something rewrites them. createAppRole rewrites
@@ -770,102 +752,6 @@ async function removeComputeSteps(
   await runStep(registry, appId, "uninstall", "detach_temp_uninstall_infra_policy", done, () =>
     detachTempUninstallInfraPolicy(config.stackPrefix, appId, managerCreds),
   );
-}
-
-/**
- * Resolve the per-app HMAC secret to mirror to cloud SSM, sourced from the
- * local registry (`shared_app_registry.hmac_secret`).
- *
- * The registry secret is the single source of truth: it's the exact value the
- * sync supervisor signs cloud-bound requests with (`makeSignerFor` →
- * `appRegistryRow`), so it's the only value that can make the cloud verifier
- * agree. Mirroring anything else is the todo-39 drift: the previous
- * implementation read/minted a *separate* creds file, so a built-in app
- * (Drive) whose registry secret was minted at LDS startup got a freshly-minted,
- * *different* secret in SSM — every signed request then 401'd "Invalid
- * signature", and no reinstall could converge them because the two stores were
- * never tied together.
- *
- * Side effect: reconcile the local creds file (`~/.starkeep/app-creds/
- * ${appId}.json`, what `@starkeep/app-client` and the app→LDS HMAC path read)
- * to the registry value too, so all three stores (registry, creds file, SSM)
- * hold one key. Built-in apps never go through admin-web's local-install route,
- * so this is also where their creds file first gets written.
- *
- * If the app has no local registry row the supervisor can't sign for it at all,
- * and minting a secret for the cloud side would only recreate the drift. The
- * result then says why, and an install that needs the secret fails with it,
- * directing the operator to install the app locally first.
- */
-function readLocalHmacSecret(appId: string): { secret: string } | { missing: string } {
-  // The local-data-server stores its sqlite DB at `${STARKEEP_DIR}/data.db`
-  // (server.ts). `dataDbPath()` resolves the same root, so we open the same file.
-  const dbPath = dataDbPath();
-  if (!existsSync(dbPath)) {
-    return {
-      missing:
-        `Cannot mirror the HMAC secret for "${appId}" to SSM: local data store ` +
-        `${dbPath} not found. Start the local-data-server and install "${appId}" ` +
-        `locally before installing it in the cloud.`,
-    };
-  }
-
-  // The LDS holds this DB open; we only need a single SELECT. A busy timeout
-  // rides out the brief window where the LDS might hold a write lock. (We can't
-  // pass `{ readOnly: true }` — this package pins @types/node 22.10, predating
-  // that option — but existsSync above guarantees we won't create the file, and
-  // the lookup never writes.)
-  // The concrete driver, deliberately. Opening a connection is the one place
-  // that cannot be driver-agnostic — RawDatabase describes what consumers may
-  // use, not how a connection comes into being.
-  const db = new DatabaseSync(dbPath);
-  let secret: string | null;
-  try {
-    db.exec("PRAGMA busy_timeout = 2000");
-    secret = appRegistryRow(db, appId)?.hmacSecret ?? null;
-  } finally {
-    db.close();
-  }
-  if (!secret) {
-    return {
-      missing:
-        `Cannot mirror the HMAC secret for "${appId}" to SSM: no ` +
-        `shared_app_registry row for "${appId}". Install "${appId}" locally ` +
-        `first so the secret the sync supervisor signs with is the one mirrored ` +
-        `to the cloud.`,
-    };
-  }
-
-  reconcileLocalCredsFile(appId, secret);
-  return { secret };
-}
-
-/**
- * Bring the local creds file in line with the registry secret. Preserves an
- * existing `dataServerUrl` (admin-web writes it at local install); a fresh file
- * (e.g. for a built-in app) omits it and `@starkeep/app-client` falls back to
- * its localhost default. No-op when the file already holds the right secret.
- */
-function reconcileLocalCredsFile(appId: string, hmacSecret: string): void {
-  const credsPath = appCredsPath(appId);
-  const credsDir = dirname(credsPath);
-  let dataServerUrl: string | undefined;
-  if (existsSync(credsPath)) {
-    try {
-      const parsed = JSON.parse(readFileSync(credsPath, "utf-8")) as {
-        hmacSecret?: string;
-        dataServerUrl?: string;
-      };
-      if (parsed.hmacSecret === hmacSecret) return; // already converged
-      dataServerUrl = parsed.dataServerUrl;
-    } catch {
-      // Unreadable/corrupt — fall through and rewrite it.
-    }
-  }
-  const payload: Record<string, string> = { appId, hmacSecret };
-  if (dataServerUrl) payload.dataServerUrl = dataServerUrl;
-  mkdirSync(credsDir, { recursive: true, mode: 0o700 });
-  writeFileSync(credsPath, JSON.stringify(payload, null, 2), { mode: 0o600 });
 }
 
 // Re-export so call sites (cli scripts, admin-web) can name the SSM parameter
