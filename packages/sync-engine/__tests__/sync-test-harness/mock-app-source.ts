@@ -253,10 +253,7 @@ export function makeMockAppSource(appId: string, tables: readonly TableSpec[]): 
       // that one method and see the round react. Outside the try below for the
       // same reason they put it there — a watermark read that failed must not
       // become a scan that found nothing.
-      const scans = planNodeScans(
-        await this.getNodeWatermarks(scanAppId, table, peerWatermarks),
-        peerWatermarks,
-      );
+      const scans = planNodeScans(await this.getNodeWatermarks(scanAppId, table), peerWatermarks);
       const page = await collectSince<Record<string, unknown>>(
         scans,
         limit,
@@ -293,18 +290,12 @@ export function makeMockAppSource(appId: string, tables: readonly TableSpec[]): 
       return mergeDigestBuckets(buckets);
     },
 
-    async getNodeWatermarks(scanAppId, table, floor) {
+    async getNodeWatermarks(scanAppId, table) {
       const out: Record<string, HLCTimestamp> = {};
       for (const row of tableRows(scanAppId, table)) {
         const hlc = deserializeHLC(updatedAtOf(row));
         const existing = out[hlc.nodeId];
         if (!existing || compareHLC(hlc, existing) > 0) out[hlc.nodeId] = hlc;
-      }
-      // Take the omission a floor allows, as the DSQL applier does, so the
-      // transport's union is exercised against it.
-      for (const [nodeId, hlc] of Object.entries(out)) {
-        const below = floor?.[nodeId];
-        if (below && compareHLC(hlc, below) < 0) delete out[nodeId];
       }
       return out;
     },

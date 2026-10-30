@@ -38,9 +38,7 @@
  *
  * {@link planNodeScans} is what keeps that cheap: it compares each author's
  * local maximum against the peer's watermark first, so **steady state issues no
- * range queries at all** — one watermark read, no rows owed, done. A backend
- * that bills by rows read takes that read relative to the peer's watermarks
- * ({@link readNodeWatermarks}), so the steady state reads almost nothing.
+ * range queries at all** — one grouped index-only read, no rows owed, done.
  *
  * ## Ordering
  *
@@ -65,7 +63,7 @@
 
 import type { CompiledQuery, Kysely } from "kysely";
 import type { HLCTimestamp } from "@starkeep/protocol-primitives";
-import { compareHLC, deserializeHLC, serializeHLC } from "@starkeep/protocol-primitives";
+import { compareHLC, serializeHLC } from "@starkeep/protocol-primitives";
 
 /** The dynamic (schema-less) row type both adapters' compilers are built on. */
 export type SinceDb = Record<string, Record<string, unknown>>;
@@ -83,11 +81,10 @@ export interface NodeScan {
 /**
  * Work out which authors actually owe the peer something, cheaply.
  *
- * `localWatermarks` is this side's `MAX(updated_at)` per author — one read off
- * the same index the seeks use. An author whose local maximum is at-or-below
- * what the peer reports has nothing to send, and is skipped without touching the
- * table. An author below the peer may therefore be absent from the map, which
- * is what lets {@link readNodeWatermarks} omit it.
+ * `localWatermarks` is this side's `MAX(updated_at)` per author — one grouped
+ * read off the same index the seeks use. An author whose local maximum is
+ * at-or-below what the peer reports has nothing to send, and is skipped without
+ * touching the table.
  *
  * Sorted by nodeId so a scan is deterministic across calls. That matters less
  * than it looks — the caller re-sorts — but a scan that returns different
@@ -113,10 +110,9 @@ export function planNodeScans(
  * Within one author `updated_at` is fixed-width hex up to the nodeId suffix, so
  * the lexicographic maximum is the HLC maximum.
  *
- * Index-only on `(node_id, updated_at)`, but still a read of every index entry:
- * neither Postgres nor DSQL skips between groups. On DSQL that read is what a
- * sync tick pays for, so a responder with a peer's watermarks in hand calls
- * {@link readNodeWatermarks} instead, which falls back to this.
+ * Index-only on `(node_id, updated_at)`, but still a read of every index entry.
+ * SQLite reads coverage this way. DSQL bills by rows read, so it keeps a
+ * per-author watermark table instead (`storage-aurora-dsql/src/node-watermarks.ts`).
  */
 export function buildNodeWatermarks(k: Kysely<SinceDb>, table: string): CompiledQuery {
   return k
@@ -124,148 +120,6 @@ export function buildNodeWatermarks(k: Kysely<SinceDb>, table: string): Compiled
     .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])
     .groupBy("node_id")
     .compile();
-}
-
-/**
- * Most authors a floor may name and still be probed in one statement. Each
- * author costs two columns, and Postgres caps a select list at 1,664. A floor
- * wider than this reads every author instead, which is what it cost before.
- */
-const MAX_PROBED_AUTHORS = 256;
-
-/**
- * Code-point order, which is byte order under the C collation. DSQL supports
- * only C, so this is the order the gaps between authors are bounded in.
- */
-function compareCodePoints(a: string, b: string): number {
-  const ai = a[Symbol.iterator]();
-  const bi = b[Symbol.iterator]();
-  for (;;) {
-    const x = ai.next();
-    const y = bi.next();
-    if (x.done || y.done) return (x.done ? 0 : 1) - (y.done ? 0 : 1);
-    const d = x.value.codePointAt(0)! - y.value.codePointAt(0)!;
-    if (d !== 0) return d;
-  }
-}
-
-/**
- * The floored watermark read as one statement: for each author in `floor`, its
- * maximum at or above its floor, and for each gap between the floor's authors,
- * the first author in it. One row; `a<i>` and `g<i>` columns.
- */
-function buildFlooredNodeWatermarks(
-  k: Kysely<SinceDb>,
-  table: string,
-  authors: readonly string[],
-  floor: Record<string, HLCTimestamp>,
-): CompiledQuery {
-  return k
-    .selectNoFrom((eb) => [
-      ...authors.map((nodeId, i) =>
-        eb
-          .selectFrom(table)
-          .select(({ fn }) => fn.max("updated_at").as("m"))
-          .where("node_id", "=", nodeId)
-          .where("updated_at", ">=", serializeHLC(floor[nodeId]!))
-          .as(`a${i}`),
-      ),
-      ...[null, ...authors].map((after, i) => {
-        const before = authors[i] ?? null;
-        let gap = eb.selectFrom(table).select("node_id");
-        if (after !== null) gap = gap.where("node_id", ">", after);
-        if (before !== null) gap = gap.where("node_id", "<", before);
-        return gap.orderBy("node_id", "asc").limit(1).as(`g${i}`);
-      }),
-    ])
-    .compile();
-}
-
-/**
- * This side's per-author watermarks, read relative to a peer's.
- *
- * ## Why a floor
- *
- * A responder reports its coverage watermark every exchange, and on DSQL the
- * grouped read behind it ({@link buildNodeWatermarks}) reads every row the user
- * has in the table. An idle tick changes nothing, yet paid for the whole
- * library, twice per table: once to plan the delta scan and once for the
- * report. DSQL bills by rows read, so that read was most of what the cloud
- * cost (`~/projects/starkeep/findings-dsql-cost-idle-sync-polling-2026-10-28.md`).
- *
- * The peer's watermarks say where to look. Two seeks bounded by them read
- * almost nothing when the two sides agree:
- *
- * - **Each author the floor names:** its maximum among rows at or above its
- *   floor. A seek with no lower bound would not do: DSQL's storage scan reads a
- *   batch ahead of any seek into an author's range, which costs a large author
- *   nearly as much as the grouped read.
- * - **Each gap between the floor's authors:** whether any author lives there.
- *   An empty bounded range reads nothing.
- *
- * ## What comes back
- *
- * Every entry is the author's exact maximum. An author the floor names is
- * omitted when its maximum sits below its floor: that is the one fact the seek
- * cannot price, and the one a caller does not need — {@link planNodeScans}
- * skips such an author, and a coverage union across tables has the value from
- * the table at or above the floor. A caller that needs the omitted values reads
- * again without a floor.
- *
- * An author in a gap is one the peer has never heard of. Its maximum needs the
- * grouped read anyway, so finding one falls back to it, as do an empty floor
- * and one too wide to probe. Those are a new device, a new cloud container and
- * a first sync: rare, and no more expensive than before.
- *
- * Each fallback logs one `[watermarks]` warning with the table and the reason.
- * A new author logs once per table and then goes quiet, so a warning that
- * repeats every tick means the savings have stopped.
- *
- * Implementations of the watermark methods may ignore the floor and return
- * every author; the contract above allows extra exact entries.
- *
- * ## Collation
- *
- * The gaps partition the key space only if the database orders `node_id` by
- * code point, as the C collation does. Under any other order an author can
- * fall outside every gap, and the read omits it without falling back: silent
- * loss, not extra cost. DSQL supports only C. Writing `COLLATE "C"` into the
- * probes is no substitute: DSQL then sorts instead of seeking.
- */
-export async function readNodeWatermarks(
-  k: Kysely<SinceDb>,
-  table: string,
-  floor: Record<string, HLCTimestamp> | undefined,
-  run: (query: CompiledQuery) => Promise<readonly Record<string, unknown>[]>,
-): Promise<Record<string, HLCTimestamp>> {
-  const out: Record<string, HLCTimestamp> = {};
-  const authors = Object.keys(floor ?? {}).sort(compareCodePoints);
-  if (authors.length > MAX_PROBED_AUTHORS) {
-    console.warn(`[watermarks] ${table}: floor names ${authors.length} authors; reading whole`);
-  } else if (floor && authors.length > 0) {
-    const [row] = await run(buildFlooredNodeWatermarks(k, table, authors, floor));
-    // One gap more than authors: before the first, between each pair, after the last.
-    const gapAuthor =
-      row === undefined
-        ? undefined
-        : Array.from({ length: authors.length + 1 }, (_, i) => row[`g${i}`]).find((g) => g != null);
-    if (row !== undefined && gapAuthor === undefined) {
-      authors.forEach((nodeId, i) => {
-        const max = row[`a${i}`];
-        if (typeof max === "string") out[nodeId] = deserializeHLC(max);
-      });
-      return out;
-    }
-    console.warn(
-      row === undefined
-        ? `[watermarks] ${table}: floored read returned no row; reading whole`
-        : `[watermarks] ${table}: floor misses author ${String(gapAuthor)}; reading whole`,
-    );
-  }
-  for (const row of await run(buildNodeWatermarks(k, table))) {
-    out[row["node_id"] as string] = deserializeHLC(row["max_updated_at"] as string);
-  }
-  return out;
 }
 
 /**

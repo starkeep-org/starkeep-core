@@ -192,12 +192,8 @@ export interface ScanCapableApplier extends AppSyncableApplier {
    * conflated: `scanSince` plans its authors from this map, so a `{}` for an
    * unreadable table becomes a scan that reports "nothing owed, every author
    * complete" — silent loss, one frame above the catch written to prevent it.
-   *
-   * With a `floor` (a peer's watermarks), an author the floor names may be
-   * omitted when its maximum sits below its floor; every entry returned is
-   * still exact. See `DatabaseAdapter.getNodeWatermarks`.
    */
-  getNodeWatermarks(appId: string, table: string, floor?: Watermarks): Promise<Watermarks>;
+  getNodeWatermarks(appId: string, table: string): Promise<Watermarks>;
 
   /**
    * Bucketed row counts for one table — the app-syncable half of
