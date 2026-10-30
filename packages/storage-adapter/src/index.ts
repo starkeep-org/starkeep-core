@@ -166,7 +166,6 @@ export {
   buildScanSinceForNode,
   collectSince,
   planNodeScans,
-  readNodeWatermarks,
   type NodeScan,
   type SinceDb,
   type SincePage,

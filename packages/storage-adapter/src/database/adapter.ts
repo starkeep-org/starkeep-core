@@ -111,14 +111,8 @@ export interface DatabaseAdapter {
    * the responder-side summary the sync exchange reports as its coverage
    * watermark. SQL adapters back this with the denormalized `node_id` column
    * + `(node_id, updated_at)` index so it doesn't scan the table.
-   *
-   * With a `floor` (a peer's watermarks), an author the floor names may be
-   * omitted when its maximum sits below its floor; every entry returned is
-   * still exact. A backend that bills by rows read uses the floor to avoid
-   * reading the whole index; others may ignore it. See `readNodeWatermarks`
-   * in `since-queries.ts`.
    */
-  getNodeWatermarks(floor?: Record<string, HLCTimestamp>): Promise<Record<string, HLCTimestamp>>;
+  getNodeWatermarks(): Promise<Record<string, HLCTimestamp>>;
 
   /**
    * Records the peer hasn't seen: `updated_at > peerWatermarks[node_id]` per
@@ -349,11 +343,9 @@ export interface DatabaseAdapter {
   /**
    * Per-nodeId MAX(updated_at) over every label row, tombstones included —
    * the label half of the responder's coverage watermark, which is a union
-   * over both tables on the Drive channel. `floor` as on {@link getNodeWatermarks}.
+   * over both tables on the Drive channel.
    */
-  getLabelNodeWatermarks(
-    floor?: Record<string, HLCTimestamp>,
-  ): Promise<Record<string, HLCTimestamp>>;
+  getLabelNodeWatermarks(): Promise<Record<string, HLCTimestamp>>;
 
   /**
    * Row counts per author per time bucket, over records and labels together —

@@ -52,11 +52,11 @@ import {
   buildLabelsByRecordIds,
   buildQueryLabels,
   buildBucketDigest,
+  buildNodeWatermarks,
   buildScanSinceForNode,
   collectSince,
   mergeDigestBuckets,
   planNodeScans,
-  readNodeWatermarks,
   toDigestBuckets,
   DEFAULT_BUCKET_PREFIX_LENGTH,
   type DigestBucket,
@@ -251,40 +251,29 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     );
   }
 
-  async getNodeWatermarks(
-    floor?: Record<string, HLCTimestamp>,
-  ): Promise<Record<string, HLCTimestamp>> {
-    return withOccRetry("getNodeWatermarks", () => this.getNodeWatermarksRaw(floor));
+  async getNodeWatermarks(): Promise<Record<string, HLCTimestamp>> {
+    return withOccRetry("getNodeWatermarks", () => this.getNodeWatermarksRaw());
   }
 
-  // Read relative to the peer's watermarks when there are any: the grouped
-  // read behind an unfloored call reads every index entry the user has, and
-  // DSQL bills it. See `readNodeWatermarks`.
-  private async getNodeWatermarksRaw(
-    floor?: Record<string, HLCTimestamp>,
-  ): Promise<Record<string, HLCTimestamp>> {
-    return readNodeWatermarks(
-      this.qb,
-      "shared.records",
-      this.probeFloor(floor),
-      async (q) => (await this.run(q)).rows,
-    );
-  }
-
-  /**
-   * The floor a watermark read may probe with: none on a type-scoped adapter.
-   *
-   * The type predicate is not in the `(user_id, node_id, updated_at)` index,
-   * and the primary key carries `type`, `node_id` and `updated_at` as payload,
-   * so DSQL plans a narrowed probe as a scan of the whole primary key. Live,
-   * the floored statements cost a phone 1.67 DPU a read against 1.00 for the
-   * grouped reads they replace. The contract lets a read ignore its floor, so
-   * a narrowed exchange reads whole.
-   */
-  private probeFloor(
-    floor: Record<string, HLCTimestamp> | undefined,
-  ): Record<string, HLCTimestamp> | undefined {
-    return this.readableTypes ? undefined : floor;
+  private async getNodeWatermarksRaw(): Promise<Record<string, HLCTimestamp>> {
+    {
+      // Within one node_id group, updated_at is fixed-width hex up to the
+      // nodeId suffix, so lexicographic MAX equals HLC MAX. The
+      // (node_id, updated_at) index makes this an index-only scan.
+      const result = await this.run(
+        this.qb
+          .selectFrom("shared.records")
+          .select(({ fn }) => ["node_id", fn.max("updated_at").as("max_updated_at")])
+          .groupBy("node_id")
+          .compile(),
+      );
+      const out: Record<string, HLCTimestamp> = {};
+      for (const raw of result.rows) {
+        const row = raw as Record<string, unknown>;
+        out[row["node_id"] as string] = deserializeHLC(row["max_updated_at"] as string);
+      }
+      return out;
+    }
   }
 
   async querySince(
@@ -292,7 +281,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     limit: number,
   ): Promise<SincePage<DataRecord>> {
     return withOccRetry("querySince", async () => {
-      const scans = planNodeScans(await this.getNodeWatermarksRaw(peerWatermarks), peerWatermarks);
+      const scans = planNodeScans(await this.getNodeWatermarksRaw(), peerWatermarks);
       const { rows, hasMore, truncated } = await collectSince<PostgresRow>(
         scans,
         limit,
@@ -313,10 +302,7 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     limit: number,
   ): Promise<SincePage<RecordLabel>> {
     return withOccRetry("queryLabelsSince", async () => {
-      const scans = planNodeScans(
-        await this.getLabelNodeWatermarksRaw(peerWatermarks),
-        peerWatermarks,
-      );
+      const scans = planNodeScans(await this.getLabelNodeWatermarksRaw(), peerWatermarks);
       const { rows, hasMore, truncated } = await collectSince<LabelRow>(
         scans,
         limit,
@@ -793,21 +779,18 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     };
   }
 
-  async getLabelNodeWatermarks(
-    floor?: Record<string, HLCTimestamp>,
-  ): Promise<Record<string, HLCTimestamp>> {
-    return withOccRetry("getLabelNodeWatermarks", () => this.getLabelNodeWatermarksRaw(floor));
+  async getLabelNodeWatermarks(): Promise<Record<string, HLCTimestamp>> {
+    return withOccRetry("getLabelNodeWatermarks", () => this.getLabelNodeWatermarksRaw());
   }
 
-  private async getLabelNodeWatermarksRaw(
-    floor?: Record<string, HLCTimestamp>,
-  ): Promise<Record<string, HLCTimestamp>> {
-    return readNodeWatermarks(
-      this.qb,
-      LABELS.table,
-      this.probeFloor(floor),
-      async (q) => (await this.run(q)).rows,
-    );
+  private async getLabelNodeWatermarksRaw(): Promise<Record<string, HLCTimestamp>> {
+    const result = await this.run(buildNodeWatermarks(this.qb, LABELS.table));
+    const out: Record<string, HLCTimestamp> = {};
+    for (const raw of result.rows) {
+      const row = raw as Record<string, unknown>;
+      out[row["node_id"] as string] = deserializeHLC(row["max_updated_at"] as string);
+    }
+    return out;
   }
 
   async tombstoneLabelsForRecord(recordId: StarkeepId, hlc: HLCTimestamp): Promise<void> {
