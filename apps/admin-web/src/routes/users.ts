@@ -22,8 +22,9 @@
  *
  * ## What it refuses
  *
- * Removing the last admin, and disabling the signed-in operator. Either would
- * leave nobody able to administer the deployment.
+ * Removing the last enabled admin, disabling it, and disabling the signed-in
+ * operator. Each would leave nobody able to administer the deployment. A
+ * disabled admin cannot sign in, so the count leaves disabled admins out.
  */
 
 import {
@@ -105,6 +106,7 @@ async function membersOf(
   client: CognitoIdentityProviderClient,
   poolId: string,
   group: Group,
+  { enabledOnly = false } = {},
 ): Promise<Set<string>> {
   const members = new Set<string>();
   let token: string | undefined;
@@ -112,11 +114,27 @@ async function membersOf(
     const page = await client.send(
       new ListUsersInGroupCommand({ UserPoolId: poolId, GroupName: group, NextToken: token }),
     );
-    for (const user of page.Users ?? []) if (user.Username) members.add(user.Username);
+    for (const user of page.Users ?? [])
+      if (user.Username && !(enabledOnly && user.Enabled === false)) members.add(user.Username);
     token = page.NextToken;
   } while (token);
   return members;
 }
+
+/** Whether taking `username` out of the enabled admins would leave none. */
+async function isLastEnabledAdmin(
+  client: CognitoIdentityProviderClient,
+  poolId: string,
+  username: string,
+): Promise<boolean> {
+  // A disabled admin cannot sign in, so only enabled admins count.
+  const admins = await membersOf(client, poolId, ADMINS_GROUP, { enabledOnly: true });
+  if (!admins.has(username)) return false;
+  admins.delete(username);
+  return admins.size === 0;
+}
+
+const LAST_ADMIN_ERROR = "This is the last admin. Make someone else an admin first.";
 
 async function listUsers(
   client: CognitoIdentityProviderClient,
@@ -225,15 +243,8 @@ export async function SET_GROUP(req: Request): Promise<Response> {
         }),
       );
     } else {
-      if (group === ADMINS_GROUP) {
-        const admins = await membersOf(client, poolId, ADMINS_GROUP);
-        admins.delete(username);
-        if (admins.size === 0) {
-          return Response.json(
-            { error: "This is the last admin. Make someone else an admin first." },
-            { status: 409 },
-          );
-        }
+      if (group === ADMINS_GROUP && (await isLastEnabledAdmin(client, poolId, username))) {
+        return Response.json({ error: LAST_ADMIN_ERROR }, { status: 409 });
       }
       await client.send(
         new AdminRemoveUserFromGroupCommand({
@@ -298,6 +309,9 @@ export async function SET_ENABLED(req: Request): Promise<Response> {
     if (enabled) {
       await client.send(new AdminEnableUserCommand({ UserPoolId: poolId, Username: username }));
       return Response.json({ users: await listUsers(client, poolId) });
+    }
+    if (await isLastEnabledAdmin(client, poolId, username)) {
+      return Response.json({ error: LAST_ADMIN_ERROR }, { status: 409 });
     }
     await client.send(new AdminDisableUserCommand({ UserPoolId: poolId, Username: username }));
     await client.send(

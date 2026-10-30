@@ -13,11 +13,25 @@ const cfnTags = [
   { tag: "!Sub", resolve: (s: string) => ({ "Fn::Sub": s }) },
   { tag: "!Ref", resolve: (s: string) => ({ Ref: s }) },
   { tag: "!GetAtt", resolve: (s: string) => ({ "Fn::GetAtt": s }) },
+  ...(["Not", "Equals"] as const).map((fn) => ({
+    tag: `!${fn}`,
+    collection: "seq" as const,
+    resolve: (seq: { toJSON(): unknown }) => ({ [`Fn::${fn}`]: seq.toJSON() }),
+  })),
 ];
+
+interface CfnResource {
+  Type: string;
+  Condition?: string;
+  DeletionPolicy?: string;
+  UpdateReplacePolicy?: string;
+  Properties: Record<string, unknown>;
+}
 
 interface CfnTemplate {
   Parameters: Record<string, Record<string, unknown>>;
-  Resources: Record<string, { Type: string; Properties: Record<string, unknown> }>;
+  Conditions: Record<string, unknown>;
+  Resources: Record<string, CfnResource>;
   Outputs: Record<string, unknown>;
 }
 
@@ -173,6 +187,78 @@ describe("trust policies (who can assume which role)", () => {
   });
 });
 
+describe("the first admin", () => {
+  const firstAdminResources = ["FirstAdmin", "FirstAdminInAdmins", "FirstAdminInUsers"];
+
+  it("takes the email from a parameter that defaults to empty", () => {
+    expect(template.Parameters.AdminEmail).toMatchObject({ Type: "String", Default: "" });
+    // A re-download for an existing stack passes no email. A generated default
+    // would carry a different email into a later update and replace the account.
+    expect(parseTemplate("teststk").Parameters.AdminEmail!.Default).toBe("");
+  });
+
+  it("bakes in the email the wizard asked for on a new deployment", () => {
+    const withEmail = (adminEmail: string) =>
+      (
+        parse(generateBootstrapTemplate({ stackPrefix: "teststk", adminEmail }), {
+          customTags: cfnTags,
+        }) as CfnTemplate
+      ).Parameters.AdminEmail!.Default;
+    expect(withEmail("operator@example.com")).toBe("operator@example.com");
+    // An apostrophe is valid in an address and must not end the YAML string.
+    expect(withEmail("o'brien@example.com")).toBe("o'brien@example.com");
+  });
+
+  it("creates the account only when the stack is given an email", () => {
+    expect(template.Conditions.HasAdminEmail).toEqual({
+      "Fn::Not": [{ "Fn::Equals": [{ Ref: "AdminEmail" }, ""] }],
+    });
+    for (const name of firstAdminResources) {
+      expect(resources[name]!.Condition).toBe("HasAdminEmail");
+    }
+  });
+
+  it("retains the account and both memberships when removed or replaced", () => {
+    // Clearing AdminEmail removes all three. Removing an attachment takes the
+    // admin out of the group, past admin-web's last-admin guard.
+    for (const name of firstAdminResources) {
+      expect(resources[name]).toMatchObject({
+        DeletionPolicy: "Retain",
+        UpdateReplacePolicy: "Retain",
+      });
+    }
+  });
+
+  it("pins the account's properties, since any change replaces it in every deployment", () => {
+    // A replacement creates the same email again, which Cognito refuses, and
+    // the whole bootstrap update rolls back.
+    expect(resources.FirstAdmin).toMatchObject({ Type: "AWS::Cognito::UserPoolUser" });
+    expect(resources.FirstAdmin!.Properties).toEqual({
+      UserPoolId: { Ref: "UserPool" },
+      Username: { Ref: "AdminEmail" },
+      UserAttributes: [
+        { Name: "email", Value: { Ref: "AdminEmail" } },
+        { Name: "email_verified", Value: "true" },
+      ],
+      DesiredDeliveryMediums: ["EMAIL"],
+    });
+  });
+
+  it("puts the account in both groups", () => {
+    for (const [name, group] of [
+      ["FirstAdminInAdmins", "AdminsGroup"],
+      ["FirstAdminInUsers", "UsersGroup"],
+    ] as const) {
+      expect(resources[name]!.Type).toBe("AWS::Cognito::UserPoolUserToGroupAttachment");
+      expect(resources[name]!.Properties).toEqual({
+        UserPoolId: { Ref: "UserPool" },
+        GroupName: { Ref: group },
+        Username: { Ref: "FirstAdmin" },
+      });
+    }
+  });
+});
+
 describe("the managed login page", () => {
   it("runs the pool on the Essentials tier, which managed login needs", () => {
     expect(resources.UserPool!.Properties.UserPoolTier).toBe("ESSENTIALS");
@@ -251,13 +337,20 @@ describe("stack outputs", () => {
         "ArtifactsBucketName",
         "Region",
         "StackPrefix",
-        "ConsoleLink",
+        "UsersConsoleLink",
       ].sort(),
     );
   });
 });
 
 describe("console URL helpers", () => {
+  it("links to the pool's accounts, not to the create-user form", () => {
+    expect((template.Outputs.UsersConsoleLink as { Value: { "Fn::Sub": string } }).Value).toEqual({
+      "Fn::Sub":
+        "https://${AWS::Region}.console.aws.amazon.com/cognito/v2/idp/user-pools/${UserPool}/user-management/users?region=${AWS::Region}\n",
+    });
+  });
+
   it("builds the create-stack URL with an optional stack name", () => {
     expect(getCloudFormationCreateStackUrl("us-east-1")).toBe(
       "https://us-east-1.console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/create/template",

@@ -30,6 +30,7 @@ import {
   writeCloudCredentials,
   writeCognitoSession,
   readCognitoSession,
+  clearCloudCredentials,
   regionFromUserPoolId,
   type CloudConfig,
 } from "../lib/cloud-config";
@@ -47,14 +48,13 @@ import {
 // Types & constants
 // ---------------------------------------------------------------------------
 
-type StepId = 1 | 2 | 3 | 4 | 5;
+type StepId = 1 | 2 | 3 | 4;
 
 const STEPS: { id: StepId; label: string }[] = [
   { id: 1, label: "Bootstrap stack" },
   { id: 2, label: "Stack outputs" },
-  { id: 3, label: "Create user" },
-  { id: 4, label: "Sign in" },
-  { id: 5, label: "Deploy" },
+  { id: 3, label: "Sign in" },
+  { id: 4, label: "Deploy" },
 ];
 
 const AWS_REGIONS: { slug: string; label: string }[] = [
@@ -87,6 +87,9 @@ function validateCognitoDomain(v: string) {
   return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(v)
     ? null
     : "Format: starkeep-123456789012.auth.us-east-1.amazoncognito.com";
+}
+function isEmail(v: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
 }
 function validateIdentityPoolId(v: string) {
   return /^[a-z]+-[a-z]+-\d+:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(v)
@@ -153,11 +156,18 @@ function StepToC({
 function Step1Bootstrap({
   initialStackPrefix,
   initialRegion,
+  hasDeployment,
   onContinue,
 }: {
   initialStackPrefix: string;
   initialRegion: string;
-  onContinue: (stackPrefix: string, region: string) => void;
+  /**
+   * The config already holds a user pool, so a download is for a stack update.
+   * The template then carries no admin email: a different email reaching the
+   * update would replace the first admin.
+   */
+  hasDeployment: boolean;
+  onContinue: (stackPrefix: string, region: string, adminEmail: string | null) => void;
 }) {
   // Step 1's region exists only to construct the CloudFormation console URL
   // and the bootstrap template's stack name. It is not persisted: once Step 2
@@ -169,14 +179,23 @@ function Step1Bootstrap({
   // region when the intended deployment was elsewhere.
   const [region, setRegion] = useState(initialRegion || "");
   const [stackPrefix, setStackPrefix] = useState(initialStackPrefix || "starkeep");
+  const [adminEmail, setAdminEmail] = useState("");
+  const [adminEmailTouched, setAdminEmailTouched] = useState(false);
   const [downloaded, setDownloaded] = useState(false);
   const [showInstructions, setShowInstructions] = useState(false);
   const downloadStepRef = useRef<HTMLDivElement>(null);
 
   const canContinue = !!region.trim() && !!stackPrefix.trim();
+  const adminEmailInvalid = !hasDeployment && !isEmail(adminEmail);
+  const canDownload = canContinue && !adminEmailInvalid;
+  const continueWith = () =>
+    onContinue(stackPrefix, region, hasDeployment || adminEmailInvalid ? null : adminEmail);
 
   function handleDownload() {
-    const yaml = generateBootstrapTemplate({ stackPrefix });
+    const yaml = generateBootstrapTemplate({
+      stackPrefix,
+      adminEmail: hasDeployment ? undefined : adminEmail,
+    });
     const blob = new Blob([yaml], { type: "text/yaml" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -233,6 +252,27 @@ function Step1Bootstrap({
             hyphens only ({MAX_STACK_PREFIX_LENGTH} chars max).
           </p>
         </div>
+
+        {!hasDeployment && (
+          <div className="flex flex-col gap-1.5">
+            <label className="text-sm font-medium" htmlFor="adminEmail">
+              Email address for your new Starkeep account
+            </label>
+            <Input
+              id="adminEmail"
+              type="email"
+              placeholder="you@example.com"
+              value={adminEmail}
+              onChange={(e) => setAdminEmail(e.currentTarget.value.trim())}
+              onBlur={() => setAdminEmailTouched(true)}
+              aria-invalid={adminEmailTouched && adminEmailInvalid}
+              className={cn(adminEmailTouched && adminEmailInvalid && "border-destructive")}
+            />
+            <p className="text-xs text-muted-foreground">
+              This address is only submitted to your own AWS account, not to any 3rd party.
+            </p>
+          </div>
+        )}
       </div>
 
       <Separator />
@@ -241,12 +281,7 @@ function Step1Bootstrap({
         <div ref={downloadStepRef} className="flex flex-col gap-1.5 scroll-mt-4">
           <p className="text-sm font-medium">1. Download the bootstrap template</p>
           <div className="flex items-center gap-2">
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={handleDownload}
-              disabled={!stackPrefix || !region}
-            >
+            <Button variant="secondary" size="sm" onClick={handleDownload} disabled={!canDownload}>
               Download bootstrap template
             </Button>
             {downloaded && (
@@ -328,8 +363,10 @@ function Step1Bootstrap({
                 Click <strong>Next</strong>
               </li>
               <li>
-                Click <strong>Next</strong> again without modifying the values (these are preset
-                based on your input during Starkeep Setup)
+                When the next page loads, scroll to the bottom and click <strong>Next</strong>
+              </li>
+              <li>
+                Scroll to the bottom and click <strong>Next</strong>
               </li>
               <li>
                 When the next page loads, scroll to the bottom and check the checkbox “
@@ -351,6 +388,10 @@ function Step1Bootstrap({
                 properties show up.
               </li>
               <li>
+                Look for an email titled &ldquo;Your Starkeep account&rdquo;. It holds the temporary
+                password for the <strong>Sign in</strong> step.
+              </li>
+              <li>
                 Once you see Outputs properties show up, go back to your Starkeep Cloud Setup tab
                 and click <strong>Stack is deployed - Continue</strong>.
               </li>
@@ -367,8 +408,11 @@ function Step1Bootstrap({
         </Alert>
       )}
 
-      <div className="flex justify-end">
-        <Button onClick={() => onContinue(stackPrefix, region)} disabled={!canContinue}>
+      <div className="flex justify-between gap-2">
+        <Button variant="outline" onClick={continueWith} disabled={!canContinue}>
+          Sign in to existing admin account
+        </Button>
+        <Button onClick={continueWith} disabled={!canContinue}>
           Stack is deployed — Continue
         </Button>
       </div>
@@ -444,7 +488,9 @@ function Step2Outputs({
         <strong>Outputs</strong> tab and copy the five values below.
       </p>
 
-      <p className="text-sm text-muted-foreground">The outputs are listed in alphabetical order.</p>
+      <p className="text-sm text-muted-foreground">
+        The outputs are listed in alphabetical order. None of these values are sensitive.
+      </p>
 
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-1.5">
@@ -568,134 +614,33 @@ function Step2Outputs({
 }
 
 // ---------------------------------------------------------------------------
-// Step 3 — Create user
+// Step 3 — Sign in
 // ---------------------------------------------------------------------------
 
-function Step3CreateUser({
+function Step3SignIn({
   cognitoConfig,
-  onContinue,
-  onBack,
-}: {
-  cognitoConfig: Partial<CognitoConfig>;
-  onContinue: () => void;
-  onBack: () => void;
-}) {
-  const [showInstructions, setShowInstructions] = useState(false);
-  const region = cognitoConfig.userPoolId
-    ? regionFromUserPoolId(cognitoConfig.userPoolId)
-    : "us-east-1";
-  const consoleLink = cognitoConfig.userPoolId
-    ? `https://${region}.console.aws.amazon.com/cognito/v2/idp/user-pools/${cognitoConfig.userPoolId}/user-management/users/create/user?region=${region}`
-    : null;
-
-  return (
-    <div className="flex flex-col gap-5">
-      <p className="text-sm text-muted-foreground">
-        Next, you&rsquo;ll create your Starkeep Cloud user account. This user exists within your own
-        AWS account. No one else (including the Starkeep Org) has access.
-      </p>
-
-      {consoleLink ? (
-        <>
-          <Button
-            variant="secondary"
-            size="sm"
-            className="w-fit"
-            onClick={() => {
-              setShowInstructions(true);
-              openUrl(consoleLink);
-            }}
-          >
-            Create user ↗
-          </Button>
-
-          {!showInstructions ? (
-            <button
-              type="button"
-              onClick={() => setShowInstructions(true)}
-              className="text-sm font-medium text-primary hover:underline w-fit"
-            >
-              Show full instructions
-            </button>
-          ) : (
-            <Alert className="p-5">
-              <AlertDescription className="block space-y-3 text-sm text-foreground">
-                <p>Make sure you&rsquo;re signed into your AWS account, then:</p>
-
-                <ol className="list-decimal space-y-1.5 pl-5">
-                  <li>
-                    Click <strong>Create User</strong>
-                  </li>
-                  <li>
-                    Under <strong>User Information / Invitation message</strong>, choose{" "}
-                    <strong>Send an email invitation</strong>
-                  </li>
-                  <li>Enter your email address</li>
-                  <li>
-                    Under <strong>Temporary password</strong>, choose{" "}
-                    <strong>Generate a password</strong>
-                  </li>
-                  <li>
-                    Click <strong>Create user</strong>
-                  </li>
-                  <li>
-                    Within a minute you should receive an email with the temporary password
-                  </li>
-                  <li>
-                    Open the new user, choose <strong>Add user to group</strong>, and add it to both{" "}
-                    <strong>starkeep-admins</strong> and <strong>starkeep-users</strong>. The first
-                    group lets you administer Starkeep; the second gives you a library that syncs.
-                  </li>
-                  <li>
-                    Click <strong>User created - Continue</strong>.
-                  </li>
-                </ol>
-
-                <button
-                  type="button"
-                  onClick={() => setShowInstructions(false)}
-                  className="text-sm font-medium text-primary hover:underline"
-                >
-                  Hide instructions
-                </button>
-              </AlertDescription>
-            </Alert>
-          )}
-        </>
-      ) : (
-        <Alert>
-          <AlertDescription>UserPoolId not set — go back and enter outputs.</AlertDescription>
-        </Alert>
-      )}
-
-      <div className="flex justify-between">
-        <Button variant="ghost" onClick={onBack}>
-          Back to previous step
-        </Button>
-        <Button onClick={onContinue}>User Created — Continue</Button>
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Step 4 — Sign in
-// ---------------------------------------------------------------------------
-
-function Step4SignIn({
-  cognitoConfig,
+  initialEmail,
+  signedIn,
   onSuccess,
+  onContinue,
+  onSignOut,
   onBack,
 }: {
   cognitoConfig: CognitoConfig;
+  /** The address step 1 put in the template, when this session has it. */
+  initialEmail: string | null;
+  /** Whether a live admin session exists, and the email its ID token names. */
+  signedIn: { email: string | null } | null;
   onSuccess: (
     tokens: { idToken: string; refreshToken: string },
     creds: STSCredentials,
     userEmail: string | null,
   ) => void;
+  onContinue: () => void;
+  onSignOut: () => void;
   onBack: () => void;
 }) {
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(initialEmail ?? "");
   const [password, setPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [newPasswordConfirm, setNewPasswordConfirm] = useState("");
@@ -752,6 +697,34 @@ function Step4SignIn({
   };
 
   const signInDisabled = loading;
+
+  if (signedIn) {
+    return (
+      <div className="flex flex-col gap-5">
+        <p className="text-sm text-muted-foreground">
+          You are signed in as an admin of this Starkeep deployment
+          {signedIn.email && (
+            <>
+              {" "}
+              (<strong>{signedIn.email}</strong>)
+            </>
+          )}
+          .
+        </p>
+        <div className="flex justify-between">
+          <Button variant="ghost" onClick={onBack}>
+            Back to previous step
+          </Button>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={onSignOut}>
+              Sign in with a different account
+            </Button>
+            <Button onClick={onContinue}>Continue</Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (session) {
     return (
@@ -816,7 +789,9 @@ function Step4SignIn({
   return (
     <div className="flex flex-col gap-5">
       <p className="text-sm text-muted-foreground">
-        You should receive an email &ldquo;Your Starkeep account&rdquo; with a temp password.
+        Sign in with your Starkeep admin account.
+        <br />
+        <strong>Check your email for your temp password.</strong>
       </p>
       {error && (
         <Alert variant="destructive">
@@ -875,7 +850,7 @@ function Step4SignIn({
 }
 
 // ---------------------------------------------------------------------------
-// Step 5 — Deploy
+// Step 4 — Deploy
 // ---------------------------------------------------------------------------
 
 interface DeployOutputs {
@@ -885,7 +860,7 @@ interface DeployOutputs {
   publicBaseUrl?: string;
 }
 
-function Step5Deploy({
+function Step4Deploy({
   credentials,
   refreshCredentials,
   cloudConfig,
@@ -898,7 +873,7 @@ function Step5Deploy({
   /**
    * Mints a fresh Cognito-Identity-Pool STS session right before the install
    * runs. Cognito's STS creds last ~1 hour from sign-in; if the user paused
-   * between Step 4 and Step 5, refreshing here avoids the common case where
+   * between signing in and deploying, refreshing here avoids the common case where
    * the installer ExpiredTokens partway through. Returns null if no refresh
    * token is available; throws if the refresh itself fails (caller decides
    * whether to send the user back to Sign In).
@@ -908,7 +883,7 @@ function Step5Deploy({
   refreshCloudConfig: () => Promise<void>;
   onSuccess: (result: DeployOutputs) => void;
   onBack: () => void;
-  /** Called when the installer reports EXPIRED_TOKEN — wizard sends the user back to Step 4. */
+  /** Called when the installer reports EXPIRED_TOKEN — wizard sends the user back to sign-in. */
   onTokenExpired: () => void;
 }) {
   const [installing, setInstalling] = useState(false);
@@ -1211,6 +1186,9 @@ export function CloudSetupWizard({ onComplete }: Props) {
   // is captured, region is derived from it), but kept here so step 2 can build
   // the stack-outputs console link before any userPoolId has been entered.
   const [bootstrapRegion, setBootstrapRegion] = useState("");
+  // The address step 1 baked into the template, kept only to fill in the
+  // sign-in form. A reload loses it, and the operator types it there instead.
+  const [bootstrapAdminEmail, setBootstrapAdminEmail] = useState<string | null>(null);
   const stackPrefix = cloudConfig?.stackPrefix ?? "";
   const cognitoConfig: Partial<CognitoConfig> = cloudConfig
     ? {
@@ -1242,18 +1220,24 @@ export function CloudSetupWizard({ onComplete }: Props) {
     if (advance) setCurrentStep((step + 1) as StepId);
   }, []);
 
+  // Moving between steps keeps the session. A live session proves an admin
+  // exists, so revisiting an earlier step must not send the operator through
+  // sign-in again. Only a Cognito change in step 2 or `requireSignIn` ends it.
   const handleNavigate = useCallback((targetStep: StepId) => {
-    if (targetStep <= 4) {
-      setSignInResult(null);
-      setCredentials(null);
-      setCompletedSteps((prev) => {
-        const next = new Set(prev);
-        next.delete(4);
-        next.delete(5);
-        return next;
-      });
-    }
     setCurrentStep(targetStep);
+  }, []);
+
+  // Drops the in-memory session and reopens the sign-in step, for an expired
+  // session or a switch to another account.
+  const requireSignIn = useCallback(() => {
+    setSignInResult(null);
+    setCredentials(null);
+    setCompletedSteps((prev) => {
+      const next = new Set(prev);
+      next.delete(3);
+      return next;
+    });
+    setCurrentStep(3);
   }, []);
 
   // On mount: read the file + cognito session, derive starting step.
@@ -1276,10 +1260,12 @@ export function CloudSetupWizard({ onComplete }: Props) {
       );
       if (hasCognito) done.add(2);
 
-      // Step 3 (create user) leaves no persistent state — it's "done" iff we
-      // have a refresh token, since you can't sign in until the user exists.
+      // Refreshing the session needs only the IDs that sign-in uses. An admin's
+      // session therefore survives a stack update that adds an output: step 2
+      // reopens for the new output, and the wizard then skips sign-in.
+      const canRefresh = !!(cfg?.userPoolId && cfg?.userPoolClientId && cfg?.identityPoolId);
       const session = await readCognitoSession();
-      if (cfg && hasCognito && session?.refreshToken) {
+      if (cfg && canRefresh && session?.refreshToken) {
         try {
           const tokens = await refreshTokens(cfg.cognitoConfig, session.refreshToken);
           const creds = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
@@ -1287,18 +1273,17 @@ export function CloudSetupWizard({ onComplete }: Props) {
           setCredentials(creds);
           await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
           done.add(3);
-          done.add(4);
         } catch {
           // Token expired — user will need to re-sign in.
         }
       }
 
-      if (cfg?.s3Bucket && cfg?.auroraEndpoint) done.add(5);
+      if (cfg?.s3Bucket && cfg?.auroraEndpoint) done.add(4);
 
       setCompletedSteps(done);
 
-      const firstIncomplete = ([1, 2, 3, 4, 5] as StepId[]).find((s) => !done.has(s));
-      setCurrentStep(firstIncomplete ?? 5);
+      const firstIncomplete = ([1, 2, 3, 4] as StepId[]).find((s) => !done.has(s));
+      setCurrentStep(firstIncomplete ?? 4);
       setResuming(false);
     }
 
@@ -1333,9 +1318,8 @@ export function CloudSetupWizard({ onComplete }: Props) {
   const stepTitles: Record<StepId, string> = {
     1: "Bootstrap Stack",
     2: "Stack Outputs",
-    3: "Create User",
-    4: "Sign In",
-    5: "Deploy Starkeep cloud",
+    3: "Sign In",
+    4: "Deploy Starkeep cloud",
   };
 
   const cogCfg = fullCognitoConfig();
@@ -1360,7 +1344,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 mb-5">
           <h2 className="text-base font-semibold">{stepTitles[currentStep]}</h2>
-          {completedSteps.has(currentStep) && currentStep !== 5 && (
+          {completedSteps.has(currentStep) && currentStep !== 4 && (
             <Badge variant="secondary" className="text-xs">
               Completed
             </Badge>
@@ -1373,8 +1357,10 @@ export function CloudSetupWizard({ onComplete }: Props) {
             initialRegion={
               cloudConfig?.userPoolId ? regionFromUserPoolId(cloudConfig.userPoolId) : ""
             }
-            onContinue={async (prefix, region) => {
+            hasDeployment={!!cloudConfig?.userPoolId}
+            onContinue={async (prefix, region, adminEmail) => {
               setBootstrapRegion(region);
+              setBootstrapAdminEmail(adminEmail);
               const isChanging = !!cloudConfig?.stackPrefix && cloudConfig.stackPrefix !== prefix;
               const hasDownstream = !!cloudConfig?.userPoolId;
               if (isChanging && hasDownstream) {
@@ -1429,6 +1415,13 @@ export function CloudSetupWizard({ onComplete }: Props) {
             onContinue={async (config) => {
               const isChanging =
                 !!cloudConfig?.userPoolId && cloudConfig.userPoolId !== config.userPoolId;
+              // A session belongs to one pool, app client and identity pool.
+              // A change to any of the three ends the session.
+              const signInChanged =
+                !!cloudConfig?.userPoolId &&
+                (isChanging ||
+                  cloudConfig.userPoolClientId !== config.userPoolClientId ||
+                  cloudConfig.identityPoolId !== config.identityPoolId);
               const hasDownstream = !!(cloudConfig?.s3Bucket || cloudConfig?.apiGatewayUrl);
               if (isChanging && hasDownstream) {
                 const confirmed = window.confirm(
@@ -1451,11 +1444,9 @@ export function CloudSetupWizard({ onComplete }: Props) {
                   authorizerId: null,
                 });
                 setCloudConfig(updated);
-                setSignInResult(null);
-                setCredentials(null);
                 setCompletedSteps((prev) => {
                   const next = new Set(prev);
-                  ([3, 4, 5] as StepId[]).forEach((s) => next.delete(s));
+                  next.delete(4);
                   return next;
                 });
               } else {
@@ -1468,23 +1459,32 @@ export function CloudSetupWizard({ onComplete }: Props) {
                 });
                 setCloudConfig(updated);
               }
-              markDone(2);
+              const keepsSession = !signInChanged && !!credentials && !!signInResult;
+              if (!keepsSession) {
+                setSignInResult(null);
+                setCredentials(null);
+                setCompletedSteps((prev) => {
+                  const next = new Set(prev);
+                  next.delete(3);
+                  return next;
+                });
+              }
+              markDone(2, false);
+              setCurrentStep(keepsSession ? 4 : 3);
             }}
             onBack={() => handleNavigate(1)}
           />
         )}
 
-        {currentStep === 3 && (
-          <Step3CreateUser
-            cognitoConfig={cognitoConfig}
-            onContinue={() => markDone(3)}
-            onBack={() => handleNavigate(2)}
-          />
-        )}
-
-        {currentStep === 4 && cogCfg && (
-          <Step4SignIn
+        {currentStep === 3 && cogCfg && (
+          <Step3SignIn
             cognitoConfig={cogCfg}
+            initialEmail={bootstrapAdminEmail}
+            signedIn={
+              signInResult && credentials
+                ? { email: extractEmailFromIdToken(signInResult.idToken) }
+                : null
+            }
             onSuccess={async (tokens, creds, userEmail) => {
               setSignInResult(tokens);
               setCredentials(creds);
@@ -1493,14 +1493,19 @@ export function CloudSetupWizard({ onComplete }: Props) {
                 userEmail: userEmail ?? undefined,
               });
               await writeCloudCredentials(creds);
-              markDone(4);
+              markDone(3);
             }}
-            onBack={() => handleNavigate(3)}
+            onContinue={() => handleNavigate(4)}
+            onSignOut={async () => {
+              await clearCloudCredentials();
+              requireSignIn();
+            }}
+            onBack={() => handleNavigate(2)}
           />
         )}
 
-        {currentStep === 5 && credentials && signInResult && cogCfg && (
-          <Step5Deploy
+        {currentStep === 4 && credentials && signInResult && cogCfg && (
+          <Step4Deploy
             credentials={credentials}
             refreshCredentials={async () => {
               if (!signInResult.refreshToken) return null;
@@ -1519,19 +1524,19 @@ export function CloudSetupWizard({ onComplete }: Props) {
             cloudConfig={cloudConfig}
             refreshCloudConfig={refreshCloudConfig}
             onSuccess={handleComplete}
-            onBack={() => handleNavigate(4)}
-            onTokenExpired={() => handleNavigate(4)}
+            onBack={() => handleNavigate(3)}
+            onTokenExpired={requireSignIn}
           />
         )}
 
-        {currentStep === 5 && (!credentials || !signInResult) && (
+        {currentStep === 4 && (!credentials || !signInResult) && (
           <div className="flex flex-col gap-4">
             <Alert variant="destructive">
               <AlertDescription>
-                You need to sign in before deploying. Please complete step 4 first.
+                You need to sign in before deploying. Please complete step 3 first.
               </AlertDescription>
             </Alert>
-            <Button variant="outline" onClick={() => handleNavigate(4)}>
+            <Button variant="outline" onClick={requireSignIn}>
               Go to Sign In
             </Button>
           </div>

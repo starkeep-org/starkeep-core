@@ -1,8 +1,8 @@
 /**
  * /api/users — the deployment's accounts and their two groups.
  *
- * Pins what the route refuses as much as what it does: removing the last
- * admin, and disabling the signed-in operator. Disabling and "Sign out all
+ * Pins what the route refuses as much as what it does: removing or disabling
+ * the last enabled admin, and disabling the signed-in operator. Disabling and "Sign out all
  * devices" both end every sign-in the user holds, so their machines stop
  * syncing; neither reaches SSM, because a device holds no record there.
  */
@@ -82,7 +82,10 @@ beforeEach(() => {
     })),
   }));
   cognito.on(ListUsersInGroupCommand).callsFake(async (input: { GroupName: string }) => ({
-    Users: [...(groups[input.GroupName] ?? [])].map((Username) => ({ Username })),
+    Users: [...(groups[input.GroupName] ?? [])].map((Username) => ({
+      Username,
+      Enabled: users.find((u) => u.Username === Username)?.Enabled ?? true,
+    })),
   }));
   cognito
     .on(AdminAddUserToGroupCommand)
@@ -192,6 +195,33 @@ describe("changing groups", () => {
     expect(groups["starkeep-admins"]!.has("sub-admin")).toBe(true);
   });
 
+  it("refuses to remove the last enabled admin while a disabled admin remains", async () => {
+    // A disabled admin cannot sign in, so it does not count toward the last.
+    groups["starkeep-admins"]!.add("sub-sam");
+    users.find((u) => u.Username === "sub-sam")!.Enabled = false;
+    const res = await post(route.SET_GROUP, {
+      ...SESSION,
+      username: "sub-admin",
+      group: "starkeep-admins",
+      member: false,
+    });
+    expect(res.status).toBe(409);
+    expect(groups["starkeep-admins"]!.has("sub-admin")).toBe(true);
+  });
+
+  it("removes a disabled admin while an enabled admin remains", async () => {
+    groups["starkeep-admins"]!.add("sub-sam");
+    users.find((u) => u.Username === "sub-sam")!.Enabled = false;
+    const res = await post(route.SET_GROUP, {
+      ...SESSION,
+      username: "sub-sam",
+      group: "starkeep-admins",
+      member: false,
+    });
+    expect(res.status).toBe(200);
+    expect(groups["starkeep-admins"]!.has("sub-sam")).toBe(false);
+  });
+
   it("refuses a group that is not one of the two", async () => {
     const res = await post(route.SET_GROUP, {
       ...SESSION,
@@ -222,6 +252,26 @@ describe("disabling an account", () => {
     });
     expect(res.status).toBe(409);
     expect(cognito.commandCalls(AdminDisableUserCommand)).toHaveLength(0);
+  });
+
+  it("refuses to disable the last enabled admin", async () => {
+    // An operator without a recorded sub skips the self-check; the count
+    // still stops the deployment from losing its only admin.
+    const res = await post(route.SET_ENABLED, {
+      ...SESSION,
+      userSub: undefined,
+      username: "sub-admin",
+      enabled: false,
+    });
+    expect(res.status).toBe(409);
+    expect(cognito.commandCalls(AdminDisableUserCommand)).toHaveLength(0);
+  });
+
+  it("disables another admin while the operator stays an enabled admin", async () => {
+    groups["starkeep-admins"]!.add("sub-sam");
+    const res = await post(route.SET_ENABLED, { ...SESSION, username: "sub-sam", enabled: false });
+    expect(res.status).toBe(200);
+    expect(users.find((u) => u.Username === "sub-sam")!.Enabled).toBe(false);
   });
 });
 
