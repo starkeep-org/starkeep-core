@@ -564,6 +564,24 @@ describe("sync exchanges over the entries", () => {
     ).toHaveLength(1);
   });
 
+  it("drops a stored bytes author that no entry covers once, then saves nothing", async () => {
+    // Live, three cloud authors were superseded before the tables existed, so
+    // the backfill has no entry for them while the bytes store still did.
+    const r = record(at("kept", 1));
+    await driveExchange({ watermarks: {}, records: [r] });
+    await pg.query(
+      "INSERT INTO app_starkeep_drive._starkeep_byte_coverage VALUES ($1, 'gone', $2)",
+      [A, s(at("gone", 0))],
+    );
+    const held = { kept: at("kept", 1) };
+
+    const first = await driveExchange({ watermarks: held });
+    expect(first.store.saves).toBe(1);
+    expect(await createDsqlByteCoverageStore(client(), DRIVE, A).load()).toEqual(held);
+    const second = await driveExchange({ watermarks: held });
+    expect(second.store.saves).toBe(0);
+  });
+
   it("reads a per-app channel's watermarks in one statement on an idle tick", async () => {
     await memoExchange({
       watermarks: {},
