@@ -91,9 +91,14 @@ Resources:
         AllowAdminCreateUserOnly: true
         InviteMessageTemplate:
           EmailSubject: 'Your Starkeep account'
-          EmailMessage: >
-            Your Starkeep account has been created. Your temporary password is
-            {####}. Sign in with username {username}.
+          # Cognito sends this as HTML. The password sits alone in its own
+          # paragraph, with no punctuation beside it, so a tap or a
+          # double-click selects exactly the password, on a phone too.
+          EmailMessage: >-
+            <p>Your Starkeep account has been created.</p>
+            <p>Your temporary password:</p>
+            <p style="font-family: monospace; font-size: 18px">{####}</p>
+            <p>Sign in with username {username}</p>
       AutoVerifiedAttributes:
         - email
       UsernameAttributes:
@@ -553,7 +558,7 @@ Outputs:
       Click to create your Starkeep user account in the Cognito console, then
       add it to both the starkeep-admins and starkeep-users groups.
     Value: !Sub >
-      https://\${AWS::Region}.console.aws.amazon.com/cognito/v2/idp/user-pools/\${UserPool}/users/create
+      https://\${AWS::Region}.console.aws.amazon.com/cognito/v2/idp/user-pools/\${UserPool}/user-management/users/create/user?region=\${AWS::Region}
 
 `;
 }
