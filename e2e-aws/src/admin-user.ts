@@ -1,9 +1,9 @@
 /**
  * Ensure the test admin user exists in the bootstrap user pool.
  *
- * Production setup has the operator create this account in the Cognito
- * console (the stack's ConsoleLink output); the runner does the API
- * equivalent: AdminCreateUser with the invite email suppressed, then
+ * Production setup has the bootstrap stack create this account from its
+ * AdminEmail parameter. The runner leaves that parameter blank and does the
+ * API equivalent: AdminCreateUser with the invite email suppressed, then
  * AdminSetUserPassword(Permanent) so sign-in never hits the
  * NEW_PASSWORD_REQUIRED challenge. The password is generated per stack and
  * kept in the run-state dir.

@@ -9,6 +9,12 @@ import { installInfraBoundaryStatements } from "./install-infra-boundary.js";
 
 export interface GenerateBootstrapTemplateInput {
   stackPrefix?: string;
+  /**
+   * The first admin's email, written as the `AdminEmail` default. The wizard
+   * passes it only for a new deployment. A re-download for an existing stack
+   * omits it, so the default stays empty.
+   */
+  adminEmail?: string;
 }
 
 /**
@@ -38,6 +44,8 @@ export const MAX_STACK_PREFIX_LENGTH = 16;
  */
 export function generateBootstrapTemplate(input: GenerateBootstrapTemplateInput = {}): string {
   const stackPrefix = input.stackPrefix ?? "starkeep";
+  // A single-quoted YAML scalar, so an address with an apostrophe stays valid.
+  const adminEmailDefault = `'${(input.adminEmail ?? "").replace(/'/g, "''")}'`;
 
   const adminAppPolicyYaml = renderStatementsYaml(adminAppPolicyStatements(stackPrefix), 14);
   const managerPolicyYaml = renderStatementsYaml(managerPolicyStatements(stackPrefix), 14);
@@ -75,6 +83,19 @@ Parameters:
     MinLength: 1
     MaxLength: ${MAX_STACK_PREFIX_LENGTH}
     AllowedPattern: '^[a-z][a-z0-9-]*$'
+  # The wizard bakes in the email it asked for only when the operator creates a
+  # new deployment. A re-download for an existing stack leaves the default
+  # empty: a different email reaching an update would replace the first admin.
+  AdminEmail:
+    Type: String
+    Default: ${adminEmailDefault}
+    Description: >-
+      Your email address. The stack creates your Starkeep account as its first
+      admin and emails you a temporary password. Leave this as it is after the
+      first deploy, and add other accounts in Starkeep Admin.
+
+Conditions:
+  HasAdminEmail: !Not [!Equals [!Ref AdminEmail, '']]
 
 Resources:
 
@@ -324,6 +345,56 @@ ${adminAppPolicyYaml}
       Description: Has a data library that syncs through the cloud.
 
   # ---------------------------------------------------------------------------
+  # The first admin, in both groups. The operator names the account in the
+  # create-stack form, acting as the AWS account owner, so the pool exists with
+  # an admin from the start. Cognito emails the invitation above.
+  #
+  # Every property of a user and of an attachment forces a replacement, and
+  # clearing AdminEmail turns the condition false, which removes all three.
+  # Retain on all three leaves the account and its memberships in the pool
+  # either way: removing an attachment would take the admin out of the group,
+  # past admin-web's last-admin guard. After setup, admin-web owns these
+  # memberships, and teardown removes the account with the pool. Adding a
+  # property here replaces the user in every deployment, which fails because
+  # the email already exists; bootstrap-template.test.ts pins the properties.
+  # ---------------------------------------------------------------------------
+  FirstAdmin:
+    Type: AWS::Cognito::UserPoolUser
+    Condition: HasAdminEmail
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      UserPoolId: !Ref UserPool
+      Username: !Ref AdminEmail
+      UserAttributes:
+        - Name: email
+          Value: !Ref AdminEmail
+        - Name: email_verified
+          Value: 'true'
+      DesiredDeliveryMediums:
+        - EMAIL
+
+  FirstAdminInAdmins:
+    Type: AWS::Cognito::UserPoolUserToGroupAttachment
+    Condition: HasAdminEmail
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: !Ref AdminsGroup
+      Username: !Ref FirstAdmin
+
+  FirstAdminInUsers:
+    Type: AWS::Cognito::UserPoolUserToGroupAttachment
+    Condition: HasAdminEmail
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      UserPoolId: !Ref UserPool
+      GroupName: !Ref UsersGroup
+      Username: !Ref FirstAdmin
+
+  # ---------------------------------------------------------------------------
   # Manager Role — pure delegation; no data-plane actions
   # ---------------------------------------------------------------------------
   ManagerRole:
@@ -553,12 +624,12 @@ Outputs:
     Description: Stack prefix used for all Starkeep resources
     Value: !Ref StackPrefix
 
-  ConsoleLink:
+  UsersConsoleLink:
     Description: >
-      Click to create your Starkeep user account in the Cognito console, then
-      add it to both the starkeep-admins and starkeep-users groups.
+      The user pool's accounts in the Cognito console, for recovery: an
+      expired invitation, or a pool with no admin who can sign in.
     Value: !Sub >
-      https://\${AWS::Region}.console.aws.amazon.com/cognito/v2/idp/user-pools/\${UserPool}/user-management/users/create/user?region=\${AWS::Region}
+      https://\${AWS::Region}.console.aws.amazon.com/cognito/v2/idp/user-pools/\${UserPool}/user-management/users?region=\${AWS::Region}
 
 `;
 }

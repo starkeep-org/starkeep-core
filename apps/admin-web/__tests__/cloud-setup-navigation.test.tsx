@@ -41,6 +41,19 @@ vi.mock("../src/lib/cognito-auth", async (importOriginal) => ({
   startCredentialRefreshTimer: () => () => {},
 }));
 
+// The template generator is real; the spy records what step 1 asked it for.
+const generatedFor: Array<{ stackPrefix?: string; adminEmail?: string }> = [];
+vi.mock("@starkeep/aws-bootstrap", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@starkeep/aws-bootstrap")>();
+  return {
+    ...actual,
+    generateBootstrapTemplate: (input: { stackPrefix?: string; adminEmail?: string }) => {
+      generatedFor.push(input);
+      return actual.generateBootstrapTemplate(input);
+    },
+  };
+});
+
 const DEPLOYED_CONFIG = {
   stackPrefix: "sktest",
   stage: "sktest",
@@ -48,7 +61,7 @@ const DEPLOYED_CONFIG = {
   userPoolClientId: "client",
   deviceUserPoolClientId: "deviceclient",
   cognitoDomain: "sktest-123456789012.auth.us-east-2.amazoncognito.com",
-  identityPoolId: "us-east-2:pool",
+  identityPoolId: "us-east-2:12345678-1234-1234-1234-123456789012",
   s3Bucket: "sktest-files",
   auroraEndpoint: "abc.dsql.us-east-2.on.aws",
   apiGatewayUrl: "https://gw.execute-api.us-east-2.amazonaws.com",
@@ -278,5 +291,165 @@ describe("a deploy that fails", () => {
     await user.click(await screen.findByRole("button", { name: /Sign in again/ }));
     expect(await screen.findByRole("heading", { name: "Sign In" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Cloud Setup" })).toBeTruthy();
+  });
+});
+
+/**
+ * A live session proves an admin exists, so the wizard never sends that admin
+ * through sign-in again just for revisiting an earlier step. The session ends
+ * only when the Cognito IDs it belongs to change, or when the admin chooses to
+ * switch accounts.
+ */
+describe("the session across steps", () => {
+  it("skips sign-in after the operator revisits the stack outputs", async () => {
+    const user = userEvent.setup();
+    await renderAtDeployStep();
+
+    await user.click(screen.getByRole("button", { name: "Stack outputs" }));
+    await user.click(await screen.findByRole("button", { name: "Continue" }));
+
+    expect(await screen.findByRole("heading", { name: "Deploy Starkeep cloud" })).toBeTruthy();
+  });
+
+  it("resumes the session when a newer output is missing, then skips sign-in", async () => {
+    const { deviceUserPoolClientId: _dropped, ...older } = DEPLOYED_CONFIG;
+    vi.stubGlobal("fetch", stubFetch({ "/api/config": () => Response.json({ config: older }) }));
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/cloud-setup"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await user.type(
+      await screen.findByLabelText("DeviceUserPoolClientId", {}, { timeout: 5_000 }),
+      "deviceclient",
+    );
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(await screen.findByRole("heading", { name: "Deploy Starkeep cloud" })).toBeTruthy();
+    expect(refreshTokens).toHaveBeenCalled();
+  });
+
+  it("asks for sign-in again when the app client changes", async () => {
+    const user = userEvent.setup();
+    await renderAtDeployStep();
+
+    await user.click(screen.getByRole("button", { name: "Stack outputs" }));
+    const clientId = await screen.findByLabelText("UserPoolClientId");
+    await user.clear(clientId);
+    await user.type(clientId, "otherclient");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(await screen.findByRole("heading", { name: "Sign In" })).toBeTruthy();
+    expect(screen.getByLabelText("Email")).toBeTruthy();
+  });
+
+  it("shows the signed-in admin on the sign-in step and lets the admin switch accounts", async () => {
+    const user = userEvent.setup();
+    await renderAtDeployStep();
+
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(await screen.findByText("operator@example.com")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Sign in with a different account" }));
+    expect(await screen.findByLabelText("Email")).toBeTruthy();
+    expect(localStorage.getItem("starkeep:cognito-session")).toBeNull();
+  });
+});
+
+/**
+ * Step 1 asks for the first admin's email only for a new deployment, and the
+ * downloaded template carries it as the `AdminEmail` default. A re-download for
+ * an existing stack carries no email, because a different email reaching a
+ * stack update would replace the first admin.
+ */
+describe("the admin email on step 1", () => {
+  beforeEach(() => {
+    generatedFor.length = 0;
+    // The download goes through an object URL, which jsdom does not implement.
+    URL.createObjectURL = vi.fn(() => "blob:template");
+    URL.revokeObjectURL = vi.fn();
+    // Radix's Select reaches for pointer capture and scrolling, which jsdom lacks.
+    Element.prototype.hasPointerCapture = () => false;
+    Element.prototype.releasePointerCapture = () => {};
+    Element.prototype.scrollIntoView = () => {};
+  });
+
+  it("requires a valid email before a new deployment's download, then carries it to sign-in", async () => {
+    // The config starts empty and keeps whatever the wizard saves into it.
+    let saved: Record<string, unknown> | null = null;
+    const base = stubFetch({ "/api/config": () => Response.json({ config: saved }) });
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "PATCH" && String(input).includes("/api/config")) {
+        saved = { ...saved, ...(JSON.parse(String(init.body)) as Record<string, unknown>) };
+        return Promise.resolve(Response.json({ config: saved }));
+      }
+      return base(input);
+    });
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/cloud-setup"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await user.click(await screen.findByRole("combobox", {}, { timeout: 5_000 }));
+    await user.click(await screen.findByRole("option", { name: /us-east-1/ }));
+    const download = screen.getByRole("button", { name: "Download bootstrap template" });
+    expect((download as HTMLButtonElement).disabled).toBe(true);
+
+    const email = screen.getByLabelText("Email address for your new Starkeep account");
+    await user.type(email, "operator");
+    expect((download as HTMLButtonElement).disabled).toBe(true);
+    await user.type(email, "@example.com");
+    expect((download as HTMLButtonElement).disabled).toBe(false);
+
+    await user.click(download);
+    expect(generatedFor.at(-1)).toEqual({
+      stackPrefix: "starkeep",
+      adminEmail: "operator@example.com",
+    });
+
+    await user.click(screen.getByRole("button", { name: "Stack is deployed — Continue" }));
+    await user.type(await screen.findByLabelText("CognitoDomain"), DEPLOYED_CONFIG.cognitoDomain);
+    await user.type(
+      screen.getByLabelText("DeviceUserPoolClientId"),
+      DEPLOYED_CONFIG.deviceUserPoolClientId,
+    );
+    await user.type(screen.getByLabelText("IdentityPoolId"), DEPLOYED_CONFIG.identityPoolId);
+    await user.type(screen.getByLabelText("UserPoolClientId"), DEPLOYED_CONFIG.userPoolClientId);
+    await user.type(screen.getByLabelText("UserPoolId"), DEPLOYED_CONFIG.userPoolId);
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(await screen.findByRole("heading", { name: "Sign In" })).toBeTruthy();
+    expect((screen.getByLabelText("Email") as HTMLInputElement).value).toBe("operator@example.com");
+  });
+
+  it("asks for no email when the config already holds a deployment, and bakes none in", async () => {
+    const user = userEvent.setup();
+    await renderAtDeployStep();
+
+    await user.click(screen.getByRole("button", { name: "Bootstrap stack" }));
+    expect(screen.queryByLabelText("Email address for your new Starkeep account")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Download bootstrap template" }));
+    expect(generatedFor.at(-1)).toEqual({ stackPrefix: "sktest", adminEmail: undefined });
+  });
+});
+
+describe("an operator with an existing deployment and no local config", () => {
+  it("offers to sign in to the existing admin account instead of deploying again", async () => {
+    vi.stubGlobal("fetch", stubFetch({ "/api/config": () => Response.json({ config: null }) }));
+    render(
+      <MemoryRouter initialEntries={["/cloud-setup"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Bootstrap Stack" }, { timeout: 5_000 }),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Sign in to existing admin account" })).toBeTruthy();
   });
 });
