@@ -48,10 +48,7 @@ beforeAll(async () => {
   configPath = join(dir, "config.json");
   process.env.STARKEEP_DIR = dir;
   daemon = await startStubServer(() => reply);
-  vi.doMock("../../src/lib/runtime-config", () => ({
-    localDataServerUrl: async () => daemon.url,
-    getRuntimeConfig: async () => ({ localDataServerUrl: daemon.url, driveUrl: daemon.url }),
-  }));
+  process.env.STARKEEP_LOCAL_DATA_SERVER_URL = daemon.url;
   route = await import("../../src/routes/deployment-settings");
 });
 

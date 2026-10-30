@@ -113,23 +113,7 @@ async function main(): Promise<void> {
   const app = new Hono();
   app.route("/", api);
 
-  let handleRest: (req: IncomingMessage, res: ServerResponse) => void;
-
-  if (dev) {
-    // Imported here, not at the top: Vite is a devDependency of the browser
-    // half and has no business being loaded by a production start.
-    const { createServer: createViteServer } = await import("vite");
-    const vite = await createViteServer({
-      root: PKG_DIR,
-      appType: "spa",
-      server: { middlewareMode: true },
-    });
-    handleRest = (req, res) => vite.middlewares(req, res, () => res.end());
-  } else {
-    serveBuiltClient(app);
-    const listener = getRequestListener(app.fetch);
-    handleRest = listener;
-  }
+  let handleRest: (req: IncomingMessage, res: ServerResponse) => void = () => {};
 
   // `/api/*` always goes to Hono; everything else is the client's. Splitting
   // here rather than inside the Hono app is what lets Vite own the client in
@@ -151,6 +135,24 @@ async function main(): Promise<void> {
     if (req.url?.startsWith("/api/")) apiListener(req, res);
     else handleRest(req, res);
   });
+
+  if (dev) {
+    // Imported here, not at the top: Vite is a devDependency of the browser
+    // half and has no business being loaded by a production start.
+    const { createServer: createViteServer } = await import("vite");
+    const vite = await createViteServer({
+      root: PKG_DIR,
+      appType: "spa",
+      // HMR shares admin-web's own server. Vite's default is a separate fixed
+      // port, which a second admin-web on this machine cannot bind.
+      server: { middlewareMode: true, hmr: { server } },
+    });
+    handleRest = (req, res) => vite.middlewares(req, res, () => res.end());
+  } else {
+    serveBuiltClient(app);
+    const listener = getRequestListener(app.fetch);
+    handleRest = listener;
+  }
 
   // Loopback only, unless the operator listed other devices' names for this
   // host in STARKEEP_ADMIN_DEV_ORIGINS to reach admin-web from them.

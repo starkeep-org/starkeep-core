@@ -21,7 +21,7 @@ import {
   changeDeploymentSettingsParameter,
   type AwsCredentials,
 } from "@starkeep/admin-installer/app-creds";
-import { localDataServerUrl } from "../lib/runtime-config";
+import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
 import {
   managerCredentials,
   readStarkeepConfig,
@@ -37,7 +37,7 @@ interface ChangeBody {
 }
 
 async function forward(path: string, init: RequestInit): Promise<Response> {
-  const base = await localDataServerUrl();
+  const base = localDataServerUrlFromEnv();
   try {
     const res = await fetch(`${base}${path}`, { ...init, cache: "no-store" });
     return Response.json(await res.json(), { status: res.status });

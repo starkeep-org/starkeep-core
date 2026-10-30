@@ -7,7 +7,7 @@
  * no", because the first is the ordinary state of a fresh machine and the
  * second is a half-failed install the operator has to look at.
  */
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getRequest, makeDataDir, startStubServer, type StubServer } from "../helpers";
 
 type Ctx = { params: Promise<{ appId: string }> };
@@ -73,18 +73,15 @@ describe("what it answers", () => {
 
 describe("when the data server is not running", () => {
   it("answers 502 with the reason rather than throwing", async () => {
-    // The route captures its upstream URL at module load, so pointing it at a
-    // dead port means loading a second copy of the module.
-    vi.resetModules();
+    // The route reads its upstream URL per request, so pointing the environment
+    // at a dead port is enough.
     process.env.STARKEEP_LOCAL_DATA_SERVER_URL = "http://127.0.0.1:1";
-    const { GET: downGET } = (await import("../../src/routes/apps-install-status")) as unknown as {
-      GET: typeof GET;
-    };
-    process.env.STARKEEP_LOCAL_DATA_SERVER_URL = upstream.url;
-
-    const res = await downGET(getRequest("/api/apps/photos/install-status"), {
-      params: Promise.resolve({ appId: "photos" }),
-    });
+    let res: Response;
+    try {
+      res = await call("photos");
+    } finally {
+      process.env.STARKEEP_LOCAL_DATA_SERVER_URL = upstream.url;
+    }
     expect(res.status).toBe(502);
     const body = (await res.json()) as { error: string; detail: string };
     expect(body.error).toContain("Could not reach local-data-server");

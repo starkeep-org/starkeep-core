@@ -1,4 +1,4 @@
-import { localDataServerUrl } from "../lib/runtime-config";
+import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
 
 /**
  * Proxies for the daemon's stand-in routes: this node's sync-down ceilings,
@@ -14,7 +14,7 @@ import { localDataServerUrl } from "../lib/runtime-config";
  */
 
 async function forward(path: string, init: RequestInit): Promise<Response> {
-  const base = await localDataServerUrl();
+  const base = localDataServerUrlFromEnv();
   try {
     const res = await fetch(`${base}${path}`, { ...init, cache: "no-store" });
     return Response.json(await res.json(), { status: res.status });

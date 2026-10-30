@@ -35,7 +35,12 @@ const sqliteCompiler = new Kysely<Record<string, Record<string, unknown>>>({
 
 const DRIVE_APP_ID = "starkeep-drive";
 const DATA_DB_PATH = dataDbPath();
-export const LDS_URL = process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://127.0.0.1:9820";
+// Follows the data server's own port variable, which admin-web passes down when
+// it spawns Drive, so a second Starkeep instance on this machine reaches its own
+// data server. The e2e harness sets the full URL.
+export const LDS_URL =
+  process.env.STARKEEP_LOCAL_DATA_SERVER_URL ??
+  `http://127.0.0.1:${process.env.STARKEEP_PORT || "9820"}`;
 
 /**
  * Read Drive's HMAC secret from the local-data-server's SQLite registry.
