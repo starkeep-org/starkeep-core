@@ -12,7 +12,11 @@
  * scope is, and every statement compiled through it sees only:
  *
  * - `shared.records` rows whose `type` is in the scope;
- * - `shared.record_labels` rows whose `record_type` is.
+ * - `shared.record_labels` rows whose `record_type` is;
+ * - the watermark entries for those rows, in `shared.node_watermarks_records`
+ *   by `type` and in `shared.node_watermarks_labels` by `record_type`. Each
+ *   entry is keyed by the same column as its source table, so the narrowed
+ *   coverage is exactly the coverage of the narrowed rows.
  *
  * Labels narrow on their own `record_type` rather than on a semi-join back to
  * records. The column is denormalized from `records.type`, which is immutable,
@@ -51,20 +55,23 @@ import {
   type UpdateQueryNode,
 } from "kysely";
 
-const RECORDS = { schema: "shared", table: "records" };
-const LABELS = { schema: "shared", table: "record_labels" };
+const SHARED = "shared";
+
+/** The scoped tables, by the kind of row each holds or describes. */
+const SCOPED_TABLES: ReadonlyMap<string, Scoped> = new Map([
+  ["records", "records"],
+  ["record_labels", "labels"],
+  ["node_watermarks_records", "records"],
+  ["node_watermarks_labels", "labels"],
+]);
 
 type Scoped = "records" | "labels";
 
 /** The scoped table a source names, and the name its columns are qualified by. */
 function scopedSource(node: OperationNode): { kind: Scoped; qualifier: TableNode } | null {
   const kindOf = (table: TableNode): Scoped | null => {
-    const schema = table.table.schema?.name;
-    const name = table.table.identifier.name;
-    if (schema !== RECORDS.schema) return null;
-    if (name === RECORDS.table) return "records";
-    if (name === LABELS.table) return "labels";
-    return null;
+    if (table.table.schema?.name !== SHARED) return null;
+    return SCOPED_TABLES.get(table.table.identifier.name) ?? null;
   };
   if (TableNode.is(node)) {
     const kind = kindOf(node);

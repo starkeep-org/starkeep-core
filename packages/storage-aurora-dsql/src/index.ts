@@ -37,3 +37,9 @@ export {
   createDsqlByteCoverageStore,
   type DsqlByteCoverageStore,
 } from "./byte-coverage.js";
+export {
+  LABEL_WATERMARKS_TABLE,
+  NODE_WATERMARKS_TABLE,
+  RECORD_WATERMARKS_TABLE,
+  guardNodeWatermarks,
+} from "./node-watermarks.js";

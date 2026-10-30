@@ -27,7 +27,10 @@ import { PGlite } from "@electric-sql/pglite";
 import { signRequest } from "@starkeep/app-client";
 import type { APIGatewayEvent, LambdaContext } from "../../src/handler-utils.js";
 import { installUserTokenFixture, mintTestUserToken } from "../user-token.js";
-import { createSharedSchema } from "../../../../../storage-aurora-dsql/__tests__/pg-shared-schema.js";
+import {
+  createAppNodeWatermarks,
+  createSharedSchema,
+} from "../../../../../storage-aurora-dsql/__tests__/pg-shared-schema.js";
 import { createHash, sign } from "node:crypto";
 import { PutParameterCommand, ParameterAlreadyExists } from "@aws-sdk/client-ssm";
 import {
@@ -126,6 +129,7 @@ beforeEach(async () => {
       PRIMARY KEY (user_id, node_id)
     );
   `);
+  await createAppNodeWatermarks(pg, "app_starkeep_drive");
   setDbFactory({
     createClient: async () => ({
       async query(text, values) {
@@ -585,6 +589,7 @@ describe("a mobile app through the broker", () => {
       INSERT INTO shared.app_syncable_namespaces (app_id, tables_json, files_enabled)
         VALUES ('${PHOTOS}', '${JSON.stringify(tables)}', ${filesEnabled});
     `);
+    await createAppNodeWatermarks(pg, "app_photos");
     if (filesEnabled) {
       // Column for column what `dsql-ddl.ts` creates for the reserved table.
       const reserved = FILE_RECORDS_COLUMNS.map(

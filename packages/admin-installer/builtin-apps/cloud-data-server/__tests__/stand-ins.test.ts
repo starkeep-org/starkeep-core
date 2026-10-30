@@ -597,10 +597,9 @@ describe("the platform's archiving decision", () => {
       .on(SHARING, [parentRow()])
       .on(LABELS_BY_IDS, [])
       .on(/"app_starkeep_drive"\."_starkeep_byte_coverage"/, [])
-      .on(
-        /select "node_id", max\("updated_at"\).*from "shared"\."records" (?:where "shared"\."records"\."user_id" = \$\d+ )?group by "node_id"/,
-        [{ node_id: "test", max_updated_at: recordStamp }],
-      )
+      .on(/select "node_id", max\("updated_at"\).*from "shared"\."node_watermarks_records" /, [
+        { node_id: "test", max_updated_at: recordStamp },
+      ])
       // The walk's scan above the stored bytes watermark, which is empty.
       .on(/select \* from "shared"\."records"/, [canonicalRow()]);
     setDbFactory(db);

@@ -55,6 +55,20 @@ export async function createSharedSchema(pg: PGlite): Promise<void> {
       deleted_at text,
       PRIMARY KEY (user_id, record_id, app_id, key, value)
     );
+    CREATE TABLE shared.node_watermarks_records (
+      user_id text NOT NULL,
+      type text NOT NULL,
+      node_id text NOT NULL,
+      updated_at text NOT NULL,
+      PRIMARY KEY (user_id, type, node_id)
+    );
+    CREATE TABLE shared.node_watermarks_labels (
+      user_id text NOT NULL,
+      record_type text NOT NULL,
+      node_id text NOT NULL,
+      updated_at text NOT NULL,
+      PRIMARY KEY (user_id, record_type, node_id)
+    );
     CREATE TABLE shared.object_availability (
       user_id text NOT NULL,
       object_storage_key text NOT NULL,
@@ -94,4 +108,20 @@ export async function createSharedSchema(pg: PGlite): Promise<void> {
   for (const c of CATEGORIES.filter((c) => hasMetadataTable(c.id))) {
     await pg.exec(pgMetadataDdl(c));
   }
+}
+
+/**
+ * An app schema's node watermark table, as `admin-installer/src/dsql-ddl.ts`
+ * creates it beside the app's synced tables.
+ */
+export async function createAppNodeWatermarks(pg: PGlite, schema: string): Promise<void> {
+  await pg.exec(`
+    CREATE TABLE ${schema}._starkeep_node_watermarks (
+      user_id text NOT NULL,
+      table_name text NOT NULL,
+      node_id text NOT NULL,
+      updated_at text NOT NULL,
+      PRIMARY KEY (user_id, table_name, node_id)
+    );
+  `);
 }

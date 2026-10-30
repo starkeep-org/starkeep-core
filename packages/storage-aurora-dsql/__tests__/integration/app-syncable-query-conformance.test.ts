@@ -22,6 +22,8 @@ import { pgColumnType } from "@starkeep/protocol-primitives";
 import { PG_RAW_PARSERS } from "../../src/pg-timestamps.js";
 import { DsqlAppSyncableApplier } from "../../src/app-syncable/apply.js";
 import type { DatabaseClient } from "../../src/types.js";
+import { guardNodeWatermarks } from "../../src/node-watermarks.js";
+import { createAppNodeWatermarks } from "../pg-shared-schema.js";
 
 const APP = "query-conformance-app";
 const TABLE = "rows_under_test";
@@ -35,7 +37,7 @@ afterEach(async () => {
 });
 
 function clientFor(pg: PGlite): DatabaseClient {
-  return {
+  return guardNodeWatermarks({
     async query(text: string, values?: unknown[]) {
       // The parsers are part of the connection contract, not test scaffolding:
       // without them the driver turns a `timestamp` into a `Date` using the
@@ -48,7 +50,7 @@ function clientFor(pg: PGlite): DatabaseClient {
       return { rows: result.rows as Record<string, unknown>[] };
     },
     async end() {},
-  };
+  });
 }
 
 async function makeHarness(): Promise<QueryConformanceHarness> {
@@ -77,6 +79,7 @@ async function makeHarness(): Promise<QueryConformanceHarness> {
     CREATE INDEX idx_${TABLE}_node_watermark ON ${SCHEMA}.${TABLE} (user_id, node_id, updated_at);
     CREATE TABLE ${SCHEMA}.${METADATA_TABLE} (${metadataColumns});
   `);
+  await createAppNodeWatermarks(pg, SCHEMA);
 
   const ns: AppSyncableNamespace = {
     appId: APP,
@@ -100,13 +103,14 @@ async function makeHarness(): Promise<QueryConformanceHarness> {
     metadataShapedTable: METADATA_TABLE,
     async seedMetadataShaped(seeded) {
       // Written directly rather than through the applier: the applier's LWW
-      // upsert needs `updated_at`, and this table deliberately has none.
+      // upsert needs `updated_at`, and this table deliberately has none. Past
+      // the guarded client too, which would want a node watermark raised.
       // The owner is the one the applier is scoped to, as the scoped compiler
       // would have written it.
       for (const seed of seeded) {
         const row: Record<string, unknown> = { ...seed, user_id: "user-a" };
         const names = Object.keys(row);
-        await client.query(
+        await pg.query(
           `INSERT INTO ${SCHEMA}.${METADATA_TABLE} (${names.join(", ")}) ` +
             `VALUES (${names.map((_, i) => `$${i + 1}`).join(", ")})`,
           names.map((n) => row[n]),

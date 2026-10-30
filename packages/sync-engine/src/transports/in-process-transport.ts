@@ -170,7 +170,7 @@ export interface ByteWalkReport {
  * Exchange semantics:
  *   - Apply incoming records via `put(snapshot)` with HLC LWW.
  *   - Scan local records the caller hasn't seen (per-nodeId watermark filter).
- *   - Return `responderWatermarks` = MAX(updated_at) per nodeId.
+ *   - Return `responderWatermarks`: this side's coverage per nodeId.
  *
  * Conflict resolution is pure HLC LWW — no rejected[], no OCC.
  */
