@@ -3,8 +3,8 @@ import { starkeepDir } from "@starkeep/app-client";
 import { join } from "node:path";
 import { stopById } from "../lib/daemon-control";
 import { findApp } from "../lib/app-scan";
+import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
 
-const LOCAL_DATA_SERVER = process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://127.0.0.1:9820";
 const STARKEEP_DIR = starkeepDir();
 const APP_CREDS_DIR = join(STARKEEP_DIR, "app-creds");
 
@@ -44,7 +44,7 @@ export async function POST(req: Request) {
 
   let installResp: Response;
   try {
-    installResp = await fetch(`${LOCAL_DATA_SERVER}/admin/apps/install`, {
+    installResp = await fetch(`${localDataServerUrlFromEnv()}/admin/apps/install`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(manifest),
@@ -77,7 +77,11 @@ export async function POST(req: Request) {
   writeFileSync(
     secretPath,
     JSON.stringify(
-      { appId: result.appId, hmacSecret: result.hmacSecret, dataServerUrl: LOCAL_DATA_SERVER },
+      {
+        appId: result.appId,
+        hmacSecret: result.hmacSecret,
+        dataServerUrl: localDataServerUrlFromEnv(),
+      },
       null,
       2,
     ) + "\n",

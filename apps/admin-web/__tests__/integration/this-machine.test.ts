@@ -2,7 +2,7 @@
  * /api/this-machine — this machine's sign-in, forwarded to the local data
  * server's loopback-only `/auth/*` routes, and joining a cloud by address.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { jsonRequest, makeDataDir, startStubServer, type StubServer } from "../helpers";
 
 let daemon: StubServer;
@@ -12,10 +12,7 @@ let route: typeof import("../../src/routes/this-machine");
 beforeAll(async () => {
   process.env.STARKEEP_DIR = makeDataDir("adminweb-this-machine-");
   daemon = await startStubServer(() => reply);
-  vi.doMock("../../src/lib/runtime-config", () => ({
-    localDataServerUrl: async () => daemon.url,
-    getRuntimeConfig: async () => ({ localDataServerUrl: daemon.url, driveUrl: daemon.url }),
-  }));
+  process.env.STARKEEP_LOCAL_DATA_SERVER_URL = daemon.url;
   route = await import("../../src/routes/this-machine");
 });
 
@@ -97,10 +94,7 @@ describe("this machine's sign-in", () => {
       expect(((await res.json()) as { offline: boolean }).offline).toBe(true);
     } finally {
       daemon = await startStubServer(() => reply);
-      vi.doMock("../../src/lib/runtime-config", () => ({
-        localDataServerUrl: async () => daemon.url,
-        getRuntimeConfig: async () => ({ localDataServerUrl: daemon.url, driveUrl: daemon.url }),
-      }));
+      process.env.STARKEEP_LOCAL_DATA_SERVER_URL = daemon.url;
     }
   });
 });

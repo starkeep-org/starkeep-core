@@ -32,7 +32,7 @@ export const DEFAULT_APPS_DIR = resolve(REPO_ROOT, "..", "starkeep-apps");
 // port the daemon actually binds. That disagreement is not theoretical — status
 // would probe the wrong port and report not-running, and Start would then spawn
 // a duplicate that collides with the instance already serving.
-function daemonPort(envVar: string, fallback: number): number {
+export function daemonPort(envVar: string, fallback: number): number {
   const port = parseInt(process.env[envVar] ?? "", 10);
   return Number.isNaN(port) ? fallback : port;
 }

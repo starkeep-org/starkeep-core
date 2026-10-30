@@ -11,7 +11,7 @@
  * every route answers 503 with `offline: true` and the page renders an offline
  * state from it.
  */
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { jsonRequest, makeDataDir, startStubServer, type StubServer } from "../helpers";
 
 let daemon: StubServer;
@@ -23,13 +23,9 @@ beforeAll(async () => {
   process.env.STARKEEP_DIR = makeDataDir("adminweb-residency-");
   daemon = await startStubServer(() => reply);
 
-  // The browser learns the daemon's URL from /api/runtime-config; these routes
-  // run server-side and read the same accessor, so the accessor is what the
-  // test points at the stub. Nothing else in the module is stubbed.
-  vi.doMock("../../src/lib/runtime-config", () => ({
-    localDataServerUrl: async () => daemon.url,
-    getRuntimeConfig: async () => ({ localDataServerUrl: daemon.url, driveUrl: daemon.url }),
-  }));
+  // The routes read the daemon's address from the environment per request, the
+  // same way `/api/runtime-config` serves it to the browser.
+  process.env.STARKEEP_LOCAL_DATA_SERVER_URL = daemon.url;
 
   standIns = await import("../../src/routes/stand-ins");
 });
@@ -90,25 +86,20 @@ describe("when the daemon is not running", () => {
   it("answers 503 with offline: true on every one of the routes", async () => {
     // Not a stack trace and not a 500: the page renders an offline state from
     // this, and a fresh machine reaches it before anything is wrong.
-    vi.resetModules();
-    vi.doMock("../../src/lib/runtime-config", () => ({
-      localDataServerUrl: async () => "http://127.0.0.1:1",
-      getRuntimeConfig: async () => ({
-        localDataServerUrl: "http://127.0.0.1:1",
-        driveUrl: "http://127.0.0.1:1",
-      }),
-    }));
-    const downStandIns = await import("../../src/routes/stand-ins");
-
-    const calls: Array<Promise<Response>> = [
-      downStandIns.GET(),
-      downStandIns.PUT(jsonRequest("/api/residency/stand-ins", {}, "PUT")),
-      downStandIns.POST_FREE_UP_SPACE(jsonRequest("/api/residency/free-up-space", {})),
-    ];
-    for (const call of calls) {
-      const res = await call;
-      expect(res.status).toBe(503);
-      expect((await res.json()) as { offline: boolean }).toMatchObject({ offline: true });
+    process.env.STARKEEP_LOCAL_DATA_SERVER_URL = "http://127.0.0.1:1";
+    try {
+      const calls: Array<Promise<Response>> = [
+        standIns.GET(),
+        standIns.PUT(jsonRequest("/api/residency/stand-ins", {}, "PUT")),
+        standIns.POST_FREE_UP_SPACE(jsonRequest("/api/residency/free-up-space", {})),
+      ];
+      for (const call of calls) {
+        const res = await call;
+        expect(res.status).toBe(503);
+        expect((await res.json()) as { offline: boolean }).toMatchObject({ offline: true });
+      }
+    } finally {
+      process.env.STARKEEP_LOCAL_DATA_SERVER_URL = daemon.url;
     }
   });
 });

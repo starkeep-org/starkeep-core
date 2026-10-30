@@ -1,4 +1,4 @@
-const LOCAL_DATA_SERVER = process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://127.0.0.1:9820";
+import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
 
 /**
  * Proxy the local-data-server's install-step ledger for `appId`. Lets the UI
@@ -11,7 +11,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ appId: 
   let resp: Response;
   try {
     resp = await fetch(
-      `${LOCAL_DATA_SERVER}/admin/apps/${encodeURIComponent(appId)}/install-steps`,
+      `${localDataServerUrlFromEnv()}/admin/apps/${encodeURIComponent(appId)}/install-steps`,
     );
   } catch (err) {
     return Response.json(

@@ -19,6 +19,8 @@ async function freshRoute(): Promise<{ GET: () => Response }> {
 afterEach(() => {
   delete process.env.STARKEEP_LOCAL_DATA_SERVER_URL;
   delete process.env.STARKEEP_DRIVE_URL;
+  delete process.env.STARKEEP_PORT;
+  delete process.env.STARKEEP_DRIVE_PORT;
 });
 
 describe("with no environment set", () => {
@@ -45,5 +47,37 @@ describe("under a harness-booted stack", () => {
   it("answers JSON", async () => {
     const { GET } = await freshRoute();
     expect(GET().headers.get("content-type")).toContain("application/json");
+  });
+});
+
+describe("a second instance on the same machine", () => {
+  it("follows the daemons' own port variables, the ones admin-web spawns them with", async () => {
+    process.env.STARKEEP_PORT = "9821";
+    process.env.STARKEEP_DRIVE_PORT = "9831";
+    const { GET } = await freshRoute();
+    expect(await GET().json()).toEqual({
+      localDataServerUrl: "http://127.0.0.1:9821",
+      driveUrl: "http://localhost:9831",
+    });
+  });
+
+  it("lets an explicit URL win over the port", async () => {
+    process.env.STARKEEP_PORT = "9821";
+    process.env.STARKEEP_LOCAL_DATA_SERVER_URL = "http://127.0.0.1:41111";
+    const { GET } = await freshRoute();
+    expect(((await GET().json()) as { localDataServerUrl: string }).localDataServerUrl).toBe(
+      "http://127.0.0.1:41111",
+    );
+  });
+});
+
+describe("the browser accessor, called from server code", () => {
+  it("throws rather than answering with the defaults", async () => {
+    // Routes once read the daemon's address through this accessor. Its relative
+    // fetch fails in Node, and the fallback quietly sent every such route to
+    // the default daemon, whatever this instance's ports were.
+    vi.resetModules();
+    const { getRuntimeConfig } = await import("../src/lib/runtime-config");
+    expect(() => getRuntimeConfig()).toThrow(/browser-only/);
   });
 });

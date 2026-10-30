@@ -1,6 +1,5 @@
 import { scanApps } from "../lib/app-scan";
-
-const LOCAL_DATA_SERVER = process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://127.0.0.1:9820";
+import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
 
 interface InstalledApp {
   appId: string;
@@ -16,7 +15,7 @@ export async function GET() {
   // server was down, which is the opposite of the truth for installed apps.
   let installed: InstalledApp[] | null = null;
   try {
-    const res = await fetch(`${LOCAL_DATA_SERVER}/admin/apps`);
+    const res = await fetch(`${localDataServerUrlFromEnv()}/admin/apps`);
     if (res.ok) {
       const body = (await res.json()) as { apps: InstalledApp[] };
       installed = body.apps;

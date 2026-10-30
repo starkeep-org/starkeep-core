@@ -13,11 +13,11 @@
  * admin-web's own page for the same reason.
  */
 
-import { localDataServerUrl } from "../lib/runtime-config";
+import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
 import { crossSiteRefusal, fromOwnPage } from "../lib/same-origin";
 
 async function forward(path: string, init: RequestInit = {}): Promise<Response> {
-  const base = await localDataServerUrl();
+  const base = localDataServerUrlFromEnv();
   try {
     const res = await fetch(`${base}${path}`, { ...init, cache: "no-store" });
     return Response.json(await res.json(), { status: res.status });

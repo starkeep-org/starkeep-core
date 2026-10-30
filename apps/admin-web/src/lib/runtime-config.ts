@@ -19,6 +19,12 @@ export const RUNTIME_CONFIG_DEFAULTS: RuntimeConfig = {
 let cached: Promise<RuntimeConfig> | null = null;
 
 export function getRuntimeConfig(): Promise<RuntimeConfig> {
+  // The relative fetch below cannot work in Node, and its fallback would hide
+  // that by answering with the defaults. Server code reads
+  // `lib/local-daemon-urls.ts` instead.
+  if (typeof window === "undefined") {
+    throw new Error("runtime-config is browser-only; server code uses lib/local-daemon-urls.ts");
+  }
   if (!cached) {
     cached = fetch("/api/runtime-config")
       .then((r) => (r.ok ? (r.json() as Promise<RuntimeConfig>) : RUNTIME_CONFIG_DEFAULTS))

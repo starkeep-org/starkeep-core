@@ -2,8 +2,8 @@ import { existsSync, unlinkSync } from "node:fs";
 import { starkeepDir } from "@starkeep/app-client";
 import { join } from "node:path";
 import { stopById } from "../lib/daemon-control";
+import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
 
-const LOCAL_DATA_SERVER = process.env.STARKEEP_LOCAL_DATA_SERVER_URL ?? "http://127.0.0.1:9820";
 const STARKEEP_DIR = starkeepDir();
 const APP_CREDS_DIR = join(STARKEEP_DIR, "app-creds");
 
@@ -23,7 +23,7 @@ export async function POST(req: Request) {
 
   let resp: Response;
   try {
-    resp = await fetch(`${LOCAL_DATA_SERVER}/admin/apps/${encodeURIComponent(appId)}`, {
+    resp = await fetch(`${localDataServerUrlFromEnv()}/admin/apps/${encodeURIComponent(appId)}`, {
       method: "DELETE",
     });
   } catch (err) {
