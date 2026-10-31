@@ -99,9 +99,7 @@ Conditions:
 
 Resources:
 
-  # ---------------------------------------------------------------------------
   # Cognito User Pool
-  # ---------------------------------------------------------------------------
   UserPool:
     Type: AWS::Cognito::UserPool
     Properties:
@@ -156,17 +154,14 @@ Resources:
       RefreshTokenValidity: 30
       PreventUserExistenceErrors: ENABLED
 
-  # The device client: desktops, through the local data server, sign in here
-  # and sync with the ID token alone, on the cloud data server's device-token
-  # branch. Phones sign in through the mobile-apps client instead, which the
-  # cloud data server install creates. The client has no OAuth flow, so no
-  # phone app can obtain a device token without the password. The identity
-  # pool below does NOT trust this client, so
-  # a device token is no route to an AWS role. Ten-year refresh tokens, because
-  # an expired one stops background sync silently; fifteen-minute ID tokens,
-  # because they bound how long a disabled or ungrouped user keeps syncing.
-  # Public (no secret) with revocation on, so a device can revoke its own
-  # sign-in with RevokeToken.
+  # The device client. Desktops sign in here through the local data server and
+  # sync with the ID token alone; phones use the mobile-apps client that the
+  # cloud data server install creates. No OAuth flow, so no app gets a device
+  # token without the password, and the identity pool does NOT trust this
+  # client, so a device token reaches no AWS role. Ten-year refresh tokens,
+  # since an expired one stops background sync silently; fifteen-minute ID
+  # tokens bound how long a disabled or ungrouped user keeps syncing. Public
+  # (no secret) with revocation on, so a device can revoke its own sign-in.
   DeviceUserPoolClient:
     Type: AWS::Cognito::UserPoolClient
     Properties:
@@ -199,9 +194,7 @@ Resources:
       UserPoolId: !Ref UserPool
       ManagedLoginVersion: 2
 
-  # ---------------------------------------------------------------------------
   # Cognito Identity Pool — exchanges Cognito ID tokens for STS credentials
-  # ---------------------------------------------------------------------------
   IdentityPool:
     Type: AWS::Cognito::IdentityPool
     Properties:
@@ -212,9 +205,7 @@ Resources:
           ProviderName: !Sub 'cognito-idp.\${AWS::Region}.amazonaws.com/\${UserPool}'
           ServerSideTokenCheck: false
 
-  # ---------------------------------------------------------------------------
   # App Permissions Boundary — applied to every Manager-minted per-app role
-  # ---------------------------------------------------------------------------
   AppPermissionsBoundary:
     Type: AWS::IAM::ManagedPolicy
     Properties:
@@ -227,12 +218,9 @@ Resources:
         Statement:
 ${boundaryPolicyYaml}
 
-  # ---------------------------------------------------------------------------
-  # Foundational Permissions Boundary — attached only to the cloud-data-server
-  # role, which provisions the foundational cloud resources (DSQL cluster, files
-  # bucket, API Gateway). Wider than the regular boundary but tightly scoped
-  # to \${StackPrefix}-app-cloud-data-server-* resource names.
-  # ---------------------------------------------------------------------------
+  # Foundational Permissions Boundary — only for the cloud-data-server role,
+  # which provisions the DSQL cluster, files bucket and API Gateway. Wider than
+  # the per-app boundary, scoped to \${StackPrefix}-app-cloud-data-server-*.
   AppFoundationalPermissionsBoundary:
     Type: AWS::IAM::ManagedPolicy
     Properties:
@@ -247,15 +235,11 @@ ${boundaryPolicyYaml}
         Statement:
 ${foundationalBoundaryPolicyYaml}
 
-  # ---------------------------------------------------------------------------
-  # User-Data-Owner Permissions Boundary — attached only to the Starkeep Drive
-  # role (app id \`starkeep-drive\`), minted at Drive install (not at bootstrap).
-  # Wider than the per-app boundary only in that it permits read/write across
-  # the whole shared-data prefix (shared/*) — the layer-2 hard floor for
-  # shared-record custody. No Lambda, no API Gateway, no per-app schema, no DSQL
-  # cluster admin, no IAM mutation. A magic-string check in the installer routes
-  # only the \`starkeep-drive\` app id to this boundary.
-  # ---------------------------------------------------------------------------
+  # User-Data-Owner Permissions Boundary — only for the Starkeep Drive role,
+  # minted at Drive install. It adds read/write across shared/*, the layer-2
+  # hard floor for shared-record custody, and nothing else: no Lambda, API
+  # Gateway, per-app schema, DSQL cluster admin or IAM mutation. The installer
+  # routes only the \`starkeep-drive\` app id here.
   UserDataOwnerPermissionsBoundary:
     Type: AWS::IAM::ManagedPolicy
     Properties:
@@ -269,10 +253,8 @@ ${foundationalBoundaryPolicyYaml}
         Statement:
 ${userDataOwnerBoundaryPolicyYaml}
 
-  # ---------------------------------------------------------------------------
   # Admin App Role — federated entry point + admin-app runtime identity
   # NOT under the permissions boundary (it's bootstrap-created).
-  # ---------------------------------------------------------------------------
   AdminAppRole:
     Type: AWS::IAM::Role
     Properties:
@@ -326,10 +308,8 @@ ${adminAppPolicyYaml}
                 Value: starkeep-admins
                 RoleARN: !GetAtt AdminAppRole.Arn
 
-  # ---------------------------------------------------------------------------
   # The two account groups. An admin is in starkeep-admins; a user whose data
   # syncs is in starkeep-users. An admin may be in either or both.
-  # ---------------------------------------------------------------------------
   AdminsGroup:
     Type: AWS::Cognito::UserPoolGroup
     Properties:
@@ -344,20 +324,15 @@ ${adminAppPolicyYaml}
       UserPoolId: !Ref UserPool
       Description: Has a data library that syncs through the cloud.
 
-  # ---------------------------------------------------------------------------
   # The first admin, in both groups. The operator names the account in the
-  # create-stack form, acting as the AWS account owner, so the pool exists with
-  # an admin from the start. Cognito emails the invitation above.
-  #
-  # Every property of a user and of an attachment forces a replacement, and
-  # clearing AdminEmail turns the condition false, which removes all three.
-  # Retain on all three leaves the account and its memberships in the pool
-  # either way: removing an attachment would take the admin out of the group,
-  # past admin-web's last-admin guard. After setup, admin-web owns these
-  # memberships, and teardown removes the account with the pool. Adding a
-  # property here replaces the user in every deployment, which fails because
-  # the email already exists; bootstrap-template.test.ts pins the properties.
-  # ---------------------------------------------------------------------------
+  # create-stack form, so the pool has an admin from the start, and Cognito
+  # emails the invitation above. Every property of a user or an attachment
+  # forces a replacement, and clearing AdminEmail removes all three; Retain
+  # keeps the account and its memberships either way, since removing an
+  # attachment would bypass admin-web's last-admin guard. Admin-web owns the
+  # memberships after setup, and teardown removes the account with the pool.
+  # A new property here replaces the user everywhere, which fails on the
+  # existing email; bootstrap-template.test.ts pins the properties.
   FirstAdmin:
     Type: AWS::Cognito::UserPoolUser
     Condition: HasAdminEmail
@@ -394,9 +369,7 @@ ${adminAppPolicyYaml}
       GroupName: !Ref UsersGroup
       Username: !Ref FirstAdmin
 
-  # ---------------------------------------------------------------------------
   # Manager Role — pure delegation; no data-plane actions
-  # ---------------------------------------------------------------------------
   ManagerRole:
     Type: AWS::IAM::Role
     Properties:
@@ -423,9 +396,7 @@ ${managerPolicyYaml}
         - Key: StackPrefix
           Value: !Ref StackPrefix
 
-  # ---------------------------------------------------------------------------
   # Install-DDL Permissions Boundary — ceiling for the install-ddl-role
-  # ---------------------------------------------------------------------------
   InstallDdlPermissionsBoundary:
     Type: AWS::IAM::ManagedPolicy
     Properties:
@@ -439,10 +410,8 @@ ${managerPolicyYaml}
         Statement:
 ${installDdlBoundaryPolicyYaml}
 
-  # ---------------------------------------------------------------------------
   # Install-DDL Role — the only identity that can connect to DSQL as PG admin.
   # No standing permissions; Manager attaches a per-app temp policy around DDL.
-  # ---------------------------------------------------------------------------
   InstallDdlRole:
     Type: AWS::IAM::Role
     Properties:
@@ -465,9 +434,7 @@ ${installDdlBoundaryPolicyYaml}
         - Key: StackPrefix
           Value: !Ref StackPrefix
 
-  # ---------------------------------------------------------------------------
   # Install-Infra Permissions Boundary — ceiling for the install-infra-role
-  # ---------------------------------------------------------------------------
   InstallInfraPermissionsBoundary:
     Type: AWS::IAM::ManagedPolicy
     Properties:
@@ -482,11 +449,9 @@ ${installDdlBoundaryPolicyYaml}
         Statement:
 ${installInfraBoundaryPolicyYaml}
 
-  # ---------------------------------------------------------------------------
   # Install-Infra Role — centralized identity that runs per-app Pulumi
   # provisioning. Manager attaches a temp policy scoped to the app being
   # installed, then detaches it. No standing permissions at steady state.
-  # ---------------------------------------------------------------------------
   InstallInfraRole:
     Type: AWS::IAM::Role
     Properties:
@@ -509,9 +474,7 @@ ${installInfraBoundaryPolicyYaml}
         - Key: StackPrefix
           Value: !Ref StackPrefix
 
-  # ---------------------------------------------------------------------------
   # Pulumi state bucket for per-app stack state
-  # ---------------------------------------------------------------------------
   PulumiStateBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -524,17 +487,10 @@ ${installInfraBoundaryPolicyYaml}
         - Key: StackPrefix
           Value: !Ref StackPrefix
 
-  # ---------------------------------------------------------------------------
-  # Artifacts bucket — deployment-bundle store
-  # ---------------------------------------------------------------------------
-  # Holds each app's compiled Lambda bundle (apps/<appId>/latest/dist.zip).
-  # install-infra uploads here during install; aws.lambda.Function reads from
-  # here at function create/update; install-infra deletes the prefix on
-  # uninstall. Not data-plane — never holds user data.
-  #
-  # Name is suffixed with account+region to keep it globally unique, matching
-  # the PulumiStateBucket pattern. Policies that grant access use a
-  # \`\${StackPrefix}-artifacts-*\` wildcard to absorb the suffix.
+  # Artifacts bucket — each app's Lambda bundle (apps/<appId>/latest/dist.zip).
+  # install-infra uploads it at install and deletes it at uninstall. Never
+  # holds user data. The account and region suffix keeps the name globally
+  # unique; policies use a \`\${StackPrefix}-artifacts-*\` wildcard for it.
   ArtifactsBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -547,17 +503,11 @@ ${installInfraBoundaryPolicyYaml}
         - Key: StackPrefix
           Value: !Ref StackPrefix
 
-  # The Pulumi state-encryption passphrase lives at
-  # /\${StackPrefix}/pulumi/passphrase as an SSM SecureString, but it is NOT
-  # created here. CloudFormation's AWS::SSM::Parameter resource does not
-  # support Type: SecureString (only String / StringList). Instead, the
-  # admin-installer creates the parameter on first cloud-data-server install
-  # via ensurePulumiPassphrase (create-if-missing; never overwrite — the
-  # passphrase must stay stable once any Pulumi state exists).
-  #
-  # Teardown: scripts/teardown-bootstrap.sh deletes this parameter
-  # explicitly via 'ssm delete-parameter' (it already handles other
-  # resources CF can't clean up, like the versioned state bucket).
+  # The Pulumi passphrase, an SSM SecureString at
+  # /\${StackPrefix}/pulumi/passphrase, is NOT created here: AWS::SSM::Parameter
+  # cannot make a SecureString. ensurePulumiPassphrase in the admin-installer
+  # creates it on the first cloud-data-server install and never overwrites it,
+  # since Pulumi state depends on it. scripts/teardown-bootstrap.sh deletes it.
 
 Outputs:
   UserPoolId:
@@ -633,6 +583,14 @@ Outputs:
 
 `;
 }
+
+/**
+ * CloudFormation's cap on a template sent inline as `TemplateBody`, which is
+ * how the tier-3 suite creates and updates the stack. The template's comments
+ * count toward it, so a long new comment can push the template over; keep them
+ * concise. `bootstrap-template.test.ts` checks the template fits.
+ */
+export const MAX_INLINE_TEMPLATE_BYTES = 51_200;
 
 export function getCloudFormationCreateStackUrl(
   region: string,
