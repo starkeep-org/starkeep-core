@@ -7,7 +7,7 @@
  * written before the stand-in, and a slot conflict at the index becomes the
  * same 409 the planner gives.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 import { mockClient } from "aws-sdk-client-mock";
 import { SSMClient, GetParameterCommand, ParameterNotFound } from "@aws-sdk/client-ssm";
@@ -59,6 +59,7 @@ const settingsReads = (): number =>
 type HandlerModule = typeof import("../src/api-handler.js");
 let handler: HandlerModule["handler"];
 let setDbFactory: HandlerModule["__setDatabaseClientFactoryForTests"];
+let takeOverlapRefusals: HandlerModule["__takeOverlapRefusalsForTests"];
 let resetSettingsCache: HandlerModule["_resetDeploymentSettingsCache"];
 let userToken = "";
 
@@ -72,12 +73,18 @@ beforeAll(async () => {
   const mod = await import("../src/api-handler.js");
   handler = mod.handler;
   setDbFactory = mod.__setDatabaseClientFactoryForTests;
+  takeOverlapRefusals = mod.__takeOverlapRefusalsForTests;
   resetSettingsCache = mod._resetDeploymentSettingsCache;
   ({ token: userToken } = await installUserTokenFixture());
 });
 
 afterAll(() => {
   setDbFactory(null);
+});
+
+afterEach(() => {
+  // A refused overlap on a path that logs and carries on fails nothing else.
+  expect(takeOverlapRefusals()).toEqual([]);
 });
 
 beforeEach(() => {
@@ -628,6 +635,79 @@ describe("the platform's archiving decision", () => {
     expect(tagsWritten()).toEqual([
       { key: PARENT_KEY, tags: { "starkeep:intent": "archive", "starkeep:ladder": "complete" } },
     ]);
+  });
+
+  it("tags every original whose canonical the walk passes", async () => {
+    // Two canonicals pass in one walk, so the files-held hook reads two
+    // records. Reading them concurrently on the request's one client is the
+    // overlap the single-flight guard refuses; the hook swallows the refusal,
+    // and neither original would be tagged. The suite's overlap check fails
+    // that case too.
+    const recordStamp = serializeHLC({
+      wallTime: Date.UTC(2026, 0, 1),
+      counter: 0,
+      nodeId: "test",
+    });
+    const SECOND_PARENT_ID = "01PARENT000000000000000002";
+    const SECOND_PARENT_KEY = `shared/test-user/image/dd/${"d".repeat(64)}`;
+    const secondParent = parentRow({ id: SECOND_PARENT_ID, object_storage_key: SECOND_PARENT_KEY });
+    const secondCanonical = recordRow({
+      id: "01CANONICAL000000000000002",
+      type: "image/avif",
+      parent_id: SECOND_PARENT_ID,
+      stand_in_role: "canonical",
+      fidelity: 4272,
+      object_storage_key: `shared/test-user/image/ff/${"f".repeat(64)}`,
+    });
+    const db = fakeDsqlWithGrants(GRANTS)
+      .on(GET_BY_ID, (q) => {
+        if (q.values.includes(CANONICAL_ID)) return [canonicalRow()];
+        if (q.values.includes(secondCanonical["id"])) return [secondCanonical];
+        if (q.values.includes(SECOND_PARENT_ID)) return [secondParent];
+        return [parentRow()];
+      })
+      .on(LIVE_STAND_IN, (q) =>
+        q.values.includes(SECOND_PARENT_ID) ? [secondCanonical] : [canonicalRow()],
+      )
+      .on(SHARING, (q) => (q.values.includes(SECOND_PARENT_KEY) ? [secondParent] : [parentRow()]))
+      .on(LABELS_BY_IDS, [])
+      .on(/"app_starkeep_drive"\."_starkeep_byte_coverage"/, [])
+      .on(/select "node_id", max\("updated_at"\).*from "shared"\."node_watermarks_records" /, [
+        { node_id: "test", max_updated_at: recordStamp },
+      ])
+      // The walk's scan, and the hook's read of the records it passed.
+      .on(/select \* from "shared"\."records"/, [canonicalRow(), secondCanonical]);
+    setDbFactory(db);
+    s3Mock.on(PutObjectTaggingCommand).resolves({});
+    const bodyStr = JSON.stringify({ watermarks: {}, limit: 0 });
+    const appId = "starkeep-drive";
+    const headers = signRequest({
+      appId,
+      hmacSecret: `secret-${appId}`,
+      method: "POST",
+      path: "/sync/exchange",
+      body: bodyStr,
+    });
+
+    const res = await handler(
+      {
+        rawPath: `/apps/${appId}/sync/exchange`,
+        requestContext: { http: { method: "POST" } },
+        headers: { ...headers, "X-Starkeep-User-Token": userToken },
+        body: bodyStr,
+      },
+      context,
+    );
+
+    expect(res.statusCode, res.body).toBe(200);
+    const complete = { "starkeep:intent": "archive", "starkeep:ladder": "complete" };
+    expect(tagsWritten()).toEqual(
+      expect.arrayContaining([
+        { key: PARENT_KEY, tags: complete },
+        { key: SECOND_PARENT_KEY, tags: complete },
+      ]),
+    );
+    expect(tagsWritten()).toHaveLength(2);
   });
 
   it("tags nothing for a smaller stand-in", async () => {

@@ -6,7 +6,7 @@
  * never touches `shared.records`, and that `app_id` is bound from the
  * authenticated subject rather than anything in the request body.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mockClient } from "aws-sdk-client-mock";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
@@ -28,6 +28,7 @@ const context: LambdaContext = {
 type HandlerModule = typeof import("../src/api-handler.js");
 let handler: HandlerModule["handler"];
 let setDbFactory: HandlerModule["__setDatabaseClientFactoryForTests"];
+let takeOverlapRefusals: HandlerModule["__takeOverlapRefusalsForTests"];
 
 beforeAll(async () => {
   process.env.STACK_PREFIX = "teststack";
@@ -38,10 +39,16 @@ beforeAll(async () => {
   const mod = await import("../src/api-handler.js");
   handler = mod.handler;
   setDbFactory = mod.__setDatabaseClientFactoryForTests;
+  takeOverlapRefusals = mod.__takeOverlapRefusalsForTests;
 });
 
 afterAll(() => {
   setDbFactory(null);
+});
+
+afterEach(() => {
+  // A refused overlap on a path that logs and carries on fails nothing else.
+  expect(takeOverlapRefusals()).toEqual([]);
 });
 
 beforeEach(() => {

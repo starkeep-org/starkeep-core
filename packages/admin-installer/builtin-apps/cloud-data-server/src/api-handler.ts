@@ -36,7 +36,7 @@ import {
   guardSingleFlight,
   LABEL_WATERMARKS_TABLE,
   RECORD_WATERMARKS_TABLE,
-  type OverlapMode,
+  type SingleFlightOptions,
 } from "@starkeep/storage-aurora-dsql";
 import { S3ObjectStorageAdapter } from "@starkeep/storage-s3";
 import {
@@ -1078,6 +1078,17 @@ export function __setDatabaseClientFactoryForTests(factory: DatabaseClientFactor
   databaseClientFactoryOverride = factory;
 }
 
+/** Overlapping statements the test factory's clients refused, with their stacks. */
+const overlapRefusals: string[] = [];
+/**
+ * The overlaps refused since the last call. Many paths catch and log their
+ * errors, so a refusal there fails no assertion by itself; each suite that
+ * installs a factory asserts this is empty after every test.
+ */
+export function __takeOverlapRefusalsForTests(): string[] {
+  return overlapRefusals.splice(0);
+}
+
 /**
  * A factory whose clients refuse any statement against an owned table that
  * the user-scoped compiler did not compile, and any write the node watermark
@@ -1087,12 +1098,14 @@ export function __setDatabaseClientFactoryForTests(factory: DatabaseClientFactor
  * storage-aurora-dsql's `owner-scope.ts`, `node-watermarks.ts` and
  * `single-flight.ts`.
  *
- * A test's factory runs under `"throw"`, so a suite fails on an overlap. The
- * deployed broker only warns, because `pg` 8 still queues the statement.
+ * A test's factory runs under `"throw"` and records each refusal for
+ * `__takeOverlapRefusalsForTests`, so a suite fails on an overlap even where a
+ * `catch` block swallows it. The deployed broker only warns, because `pg` 8
+ * still queues the statement.
  */
 function ownerGuardedFactory(
   inner: DatabaseClientFactory,
-  onOverlap: OverlapMode,
+  singleFlight: SingleFlightOptions,
 ): DatabaseClientFactory {
   return {
     async createClient(options) {
@@ -1105,7 +1118,7 @@ function ownerGuardedFactory(
           },
           end: () => client.end(),
         }),
-        { onOverlap },
+        singleFlight,
       );
     },
   };
@@ -1133,8 +1146,13 @@ function makeConnection(appId: string, creds: CachedCreds) {
   const stackPrefix = process.env.STACK_PREFIX ?? "starkeep";
   if (!auroraEndpoint) throw new Error("AURORA_ENDPOINT env var is required");
   const clientFactory = databaseClientFactoryOverride
-    ? ownerGuardedFactory(databaseClientFactoryOverride, "throw")
-    : ownerGuardedFactory(new AppDsqlClientFactory(appId, creds, stackPrefix), "warn");
+    ? ownerGuardedFactory(databaseClientFactoryOverride, {
+        onOverlap: "throw",
+        onRefuse: (error) => overlapRefusals.push(error.stack ?? error.message),
+      })
+    : ownerGuardedFactory(new AppDsqlClientFactory(appId, creds, stackPrefix), {
+        onOverlap: "warn",
+      });
   return { clientFactory, auroraEndpoint, region };
 }
 

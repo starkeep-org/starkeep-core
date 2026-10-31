@@ -42,6 +42,21 @@ describe("guardSingleFlight", () => {
     expect(ran).toEqual(["SELECT 1"]);
   });
 
+  it("reports each refusal before throwing it, so a swallowed one still shows", async () => {
+    const { client, releaseAll } = slowClient();
+    const refused: Error[] = [];
+    const guarded = guardSingleFlight(client, {
+      onOverlap: "throw",
+      onRefuse: (error) => refused.push(error),
+    });
+    const first = guarded.query("SELECT 1");
+    await guarded.query("SELECT 2").catch(() => {});
+    releaseAll();
+    await first;
+    expect(refused).toHaveLength(1);
+    expect(refused[0]!.message).toMatch(/^refused .*SELECT 2/);
+  });
+
   it("warns with the stack once per call site in warn mode, and still sends the statement", async () => {
     const { client, ran, releaseAll } = slowClient();
     const warnings: string[] = [];

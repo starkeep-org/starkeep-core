@@ -24,6 +24,12 @@ export interface SingleFlightOptions {
   onOverlap: OverlapMode;
   /** Injectable for tests; defaults to `console.warn`. */
   warn?: (message: string) => void;
+  /**
+   * Called in `"throw"` mode with each refusal before it is thrown. A caller
+   * that catches and logs its errors swallows the refusal, so a test suite
+   * collects them here and asserts there were none.
+   */
+  onRefuse?: (error: Error) => void;
 }
 
 export function guardSingleFlight(
@@ -39,7 +45,11 @@ export function guardSingleFlight(
       if (inFlight > 0) {
         const stack = new Error().stack?.split("\n").slice(2).join("\n") ?? "";
         const message = `a statement started while another was running on the same client: ${text.slice(0, 120)}`;
-        if (options.onOverlap === "throw") throw new Error(`refused ${message}`);
+        if (options.onOverlap === "throw") {
+          const error = new Error(`refused ${message}`);
+          options.onRefuse?.(error);
+          throw error;
+        }
         if (!warnedStacks.has(stack)) {
           warnedStacks.add(stack);
           warn(`[pg-overlap] ${message}\n${stack}`);

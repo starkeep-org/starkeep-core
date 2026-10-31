@@ -75,6 +75,7 @@ const HASH = "c".repeat(64);
 type HandlerModule = typeof import("../../src/api-handler.js");
 let handler: HandlerModule["handler"];
 let setDbFactory: HandlerModule["__setDatabaseClientFactoryForTests"];
+let takeOverlapRefusals: HandlerModule["__takeOverlapRefusalsForTests"];
 let setAttestation: HandlerModule["__setAttestationForTests"];
 /** Each user's token from the mobile-apps client, as Photos Mobile holds it. */
 const mobileTokens: Record<string, string> = {};
@@ -99,6 +100,7 @@ beforeAll(async () => {
   const mod = await import("../../src/api-handler.js");
   handler = mod.handler;
   setDbFactory = mod.__setDatabaseClientFactoryForTests;
+  takeOverlapRefusals = mod.__takeOverlapRefusalsForTests;
   setAttestation = mod.__setAttestationForTests;
   setAttestation([authority.rootPem], new Set());
   await installUserTokenFixture();
@@ -183,6 +185,8 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await pg.close();
+  // A refused overlap on a path that logs and carries on fails nothing else.
+  expect(takeOverlapRefusals()).toEqual([]);
 });
 
 function as(
