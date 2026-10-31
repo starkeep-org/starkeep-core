@@ -5368,7 +5368,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           // as held rather than stopping there forever.
           byteCoverage: db.byteCoverageStore(DRIVE_APP_ID),
           onWalk,
-          declinesBlob: (key) => keyIsCloudExcluded(db, key),
+          declinesBlobs: (keys) => cloudExcludedKeys(db, keys),
           // A canonical stand-in's row lands before its bytes, so the archive
           // decision `onApplied` takes for it finds no bytes and declines.
           // Bytes reach S3 through presigned PUTs this handler never sees, and
@@ -5376,9 +5376,12 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           // decision is taken again then. The same holds for an original whose
           // own bytes were still uploading.
           onFilesHeld: async (recordIds) => {
-            const records = (await Promise.all(recordIds.map((id) => db.get(id)))).filter(
-              (record): record is DataRecord => record !== null,
-            );
+            // One read for the batch: the connection runs one statement at a
+            // time. Tombstones included, as `db.get` returns them.
+            const { records } = await db.query({
+              filters: [{ field: "id", operator: "in", value: [...recordIds] }],
+              limit: recordIds.length,
+            });
             await runArchiveTriggers(db, async () => storage, archiveTriggersFor(records, []));
           },
           // The Drive channel is where most stand-ins, originals and labels

@@ -126,11 +126,15 @@ export interface InProcessTransportOptions {
    */
   readonly fileRecords?: DatabaseAdapter;
   /**
-   * True when this side declines the file under an object key, so the walk
-   * counts it as held. The cloud declines `starkeep/no-cloud` files, which it
-   * also refuses to accept.
+   * The object keys among `objectStorageKeys` whose files this side declines,
+   * so the walk counts them as held. The cloud declines `starkeep/no-cloud`
+   * files, which it also refuses to accept.
+   *
+   * Called once per batch of the walk, with the keys object storage lacks, and
+   * never concurrently: an implementation may query the exchange's database
+   * connection.
    */
-  readonly declinesBlob?: (objectStorageKey: string) => Promise<boolean>;
+  readonly declinesBlobs?: (objectStorageKeys: readonly string[]) => Promise<ReadonlySet<string>>;
   /**
    * Called with the shared records whose files this side's bytes watermark has
    * just moved past, after the walk saves the new value. A declined file
@@ -182,7 +186,7 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
     syncSharedRecords = true,
     keepLiveOnTombstone,
     onApplied,
-    declinesBlob,
+    declinesBlobs,
     onFilesHeld,
     onWalk,
   } = options;
@@ -278,8 +282,7 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
           batch.map(async (entry) => {
             const key = entry.row.manifest!.objectStorageKey;
             try {
-              if (await options.objectStorage.has(key)) return true;
-              return declinesBlob ? await declinesBlob(key) : false;
+              return await options.objectStorage.has(key);
             } catch (err) {
               console.warn(
                 `[sync] could not check ${key} for the bytes watermark: ${(err as Error).message}`,
@@ -288,6 +291,24 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
             }
           }),
         );
+        // One call for the batch's missing keys, after the storage checks
+        // settle, so it never overlaps another query on the connection.
+        const missing = batch
+          .filter((_, i) => !held[i])
+          .map((entry) => entry.row.manifest!.objectStorageKey);
+        if (declinesBlobs && missing.length > 0) {
+          let declined: ReadonlySet<string> = new Set();
+          try {
+            declined = await declinesBlobs(missing);
+          } catch (err) {
+            console.warn(
+              `[sync] could not check ${missing.length} key(s) for a declined file: ${(err as Error).message}`,
+            );
+          }
+          for (const [i, entry] of batch.entries()) {
+            if (declined.has(entry.row.manifest!.objectStorageKey)) held[i] = true;
+          }
+        }
         for (const [i, entry] of batch.entries()) {
           if (!held[i]) {
             stopped = true;
