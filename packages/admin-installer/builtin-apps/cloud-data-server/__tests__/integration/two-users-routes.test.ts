@@ -860,3 +860,112 @@ describe("a mobile app through the broker", () => {
     expect(res.body["records"]).toEqual([]);
   });
 });
+
+/**
+ * The `starkeep/no-cloud` refusal over real SQL. The broker lists the marked
+ * records from the labels side and reads their keys by id, so these cases
+ * check what that read must exclude.
+ */
+describe("the no-cloud refusal through the broker", () => {
+  const hashOf = (c: string) => c.repeat(64);
+  const keyOf = (c: string) => `shared/${A}/image/${c}${c}/${hashOf(c)}`;
+  const LABEL_HLC = serializeHLC({ wallTime: Date.UTC(2026, 0, 1), counter: 0, nodeId: "n" });
+
+  /** A's photo under the hash `c` repeated, registered through the route. */
+  async function aRegisters(c: string): Promise<string> {
+    const res = await call(A, "POST", "/data/records", {
+      type: "image/jpeg",
+      contentType: "image/jpeg",
+      contentHash: hashOf(c),
+      sizeBytes: 3,
+      fileName: `${c}.jpg`,
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    return (res.body["record"] as { id: string }).id;
+  }
+
+  async function markNoCloud(recordId: string, options: { retracted?: boolean } = {}) {
+    await pg.query(
+      `INSERT INTO shared.record_labels
+         (user_id, record_id, app_id, key, value, record_type, created_at, updated_at, node_id, deleted_at)
+       VALUES ($1, $2, 'starkeep', 'no-cloud', '', 'image/jpeg', $3, $3, 'n', $4)`,
+      [A, recordId, LABEL_HLC, options.retracted ? LABEL_HLC : null],
+    );
+  }
+
+  /** A second live record naming `recordId`'s key, as content addressing allows. */
+  async function copyRecord(recordId: string, copyId: string) {
+    await pg.query(
+      `INSERT INTO shared.records
+         SELECT user_id, $2, type, created_at, updated_at, node_id, deleted_at, version,
+                content_hash, object_storage_key, mime_type, size_bytes, 'copy.jpg',
+                origin_app_id, parent_id, stand_in_role, fidelity, canonical_threshold,
+                self_canonical, stand_in_slot
+         FROM shared.records WHERE user_id = $1 AND id = $3`,
+      [A, copyId, recordId],
+    );
+  }
+
+  async function presignBatch(keys: string[]) {
+    const res = await call(A, "POST", "/files/presign-batch", {
+      items: keys.map((key) => ({ key })),
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    return Object.fromEntries(
+      (res.body["answers"] as Array<{ key: string; status: string }>).map((a) => [a.key, a.status]),
+    );
+  }
+
+  /** From here on S3 holds no file, so each one is uploaded or declined. */
+  function s3HoldsNothing() {
+    s3Mock
+      .on(HeadObjectCommand)
+      .rejects(Object.assign(new Error("NotFound"), { name: "NotFound" }));
+  }
+
+  it("refuses a key that any one of its live records marks, and only that key", async () => {
+    // Key 1: two records share it, and the copy carries the label.
+    const shared = await aRegisters("1");
+    await copyRecord(shared, "copy-of-1");
+    await markNoCloud("copy-of-1");
+    // Key 2: the marked record is tombstoned.
+    const tombstoned = await aRegisters("2");
+    await markNoCloud(tombstoned);
+    await pg.query(`UPDATE shared.records SET deleted_at = $2 WHERE user_id = $1 AND id = $3`, [
+      A,
+      LABEL_HLC,
+      tombstoned,
+    ]);
+    // Key 3: the label is retracted.
+    await markNoCloud(await aRegisters("3"), { retracted: true });
+    // Key 4: no record at all, and an orphaned label elsewhere.
+    await markNoCloud("no-such-record");
+    s3HoldsNothing();
+
+    expect(await presignBatch([keyOf("1"), keyOf("2"), keyOf("3"), keyOf("4")])).toEqual({
+      [keyOf("1")]: "refused",
+      [keyOf("2")]: "signed",
+      [keyOf("3")]: "signed",
+      [keyOf("4")]: "signed",
+    });
+    expect((await call(A, "POST", "/files/presign", { key: keyOf("1") })).status).toBe(403);
+    expect((await call(A, "POST", "/files/presign", { key: keyOf("3") })).status).toBe(200);
+  });
+
+  it("finds a marked record past the first page of no-cloud labels", async () => {
+    await pg.query(
+      `INSERT INTO shared.record_labels
+         (user_id, record_id, app_id, key, value, record_type, created_at, updated_at, node_id)
+       SELECT $1, 'orphan-' || lpad(n::text, 4, '0'), 'starkeep', 'no-cloud', '', 'image/jpeg', $2, $2, 'n'
+       FROM generate_series(1, 600) AS n`,
+      [A, LABEL_HLC],
+    );
+    const id = await aRegisters("5");
+    // Sorts after every orphan, so it lands on the last page.
+    await copyRecord(id, "zzzz-marked");
+    await markNoCloud("zzzz-marked");
+    s3HoldsNothing();
+
+    expect(await presignBatch([keyOf("5")])).toEqual({ [keyOf("5")]: "refused" });
+  });
+});

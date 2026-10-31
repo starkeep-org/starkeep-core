@@ -144,6 +144,11 @@ export function fakeDsqlWithGrants(
       // Every synced write is a transaction that raises its node watermarks,
       // and every coverage read comes from them. None by default: no author
       // has landed anything. A test about coverage answers with `on(...)`.
+      // Every upload route and every Drive walk over a missing file asks which
+      // records carry `starkeep/no-cloud`. None by default; a test about the
+      // refusal answers with `on(NO_CLOUD_LABELS, [noCloudLabelRow(id)])` and
+      // the marked record by id.
+      .otherwise(NO_CLOUD_LABELS, [])
       .otherwise(/^(?:BEGIN|COMMIT|ROLLBACK)$/, [])
       .otherwise(NODE_WATERMARK_RAISE, [])
       .otherwise(NODE_WATERMARK_READ, [])
@@ -157,6 +162,25 @@ export const NODE_WATERMARK_RAISE =
 /** A coverage read of the node watermarks, on the shared tables or an app's. */
 export const NODE_WATERMARK_READ =
   /^select .* from "(?:shared"\."node_watermarks_(?:records|labels)|app_\w+"\."_starkeep_node_watermarks)"/;
+
+/** The reverse label read that lists the user's `starkeep/no-cloud` records. */
+export const NO_CLOUD_LABELS =
+  /from "shared"\."record_labels" where "deleted_at" is null and "app_id" = \$1 and "key" = \$2/;
+
+/** A live `starkeep/no-cloud` label row on `recordId`. */
+export function noCloudLabelRow(recordId: string): Record<string, unknown> {
+  return {
+    record_id: recordId,
+    app_id: "starkeep",
+    key: "no-cloud",
+    value: "",
+    record_type: "image/jpeg",
+    created_at: TEST_HLC,
+    updated_at: TEST_HLC,
+    node_id: "test",
+    deleted_at: null,
+  };
+}
 
 /** The page-wide stand-in lookup behind every listing's size summary. */
 export const STAND_INS_OF_PAGE =
