@@ -74,6 +74,21 @@ const DEPLOYED_CONFIG = {
   apiGatewayUrl: "https://gw.execute-api.us-east-2.amazonaws.com",
 };
 
+/** A config that holds the three IDs step 2 asks for, and nothing deployed yet. */
+const SIGN_IN_ONLY_CONFIG = {
+  stackPrefix: DEPLOYED_CONFIG.stackPrefix,
+  stage: DEPLOYED_CONFIG.stage,
+  userPoolId: DEPLOYED_CONFIG.userPoolId,
+  userPoolClientId: DEPLOYED_CONFIG.userPoolClientId,
+  identityPoolId: DEPLOYED_CONFIG.identityPoolId,
+};
+
+/** What the pool answers for the two outputs the wizard looks up after sign-in. */
+const LOOKED_UP = {
+  deviceUserPoolClientId: DEPLOYED_CONFIG.deviceUserPoolClientId,
+  cognitoDomain: DEPLOYED_CONFIG.cognitoDomain,
+};
+
 /** One SSE pass, as the route serves it: some log lines, then a terminal event. */
 function sseResponse(event: string, data: unknown, logLines: string[] = []): Response {
   const frames = [
@@ -117,6 +132,7 @@ function stubFetch(over: Partial<Record<string, () => Response>> = {}) {
     }
     if (url.includes("/api/drive/install")) return sseResponse("done", {}, ["Creating role…"]);
     if (url.includes("/api/exec/daemon")) return Response.json({ restarted: true });
+    if (url.includes("/api/cognito-outputs")) return Response.json(LOOKED_UP);
     // The cloud and the local data server, neither reachable from a test.
     throw new TypeError("fetch failed");
   });
@@ -127,10 +143,13 @@ function stubFetch(over: Partial<Record<string, () => Response>> = {}) {
  * it, so a step that saves sees its own values on the next read. Returns the
  * saved patches, in order.
  */
-function statefulConfig(initial: Record<string, unknown> | null): Array<Record<string, unknown>> {
+function statefulConfig(
+  initial: Record<string, unknown> | null,
+  over: Partial<Record<string, () => Response>> = {},
+): Array<Record<string, unknown>> {
   let saved = initial;
   const patches: Array<Record<string, unknown>> = [];
-  const base = stubFetch({ "/api/config": () => Response.json({ config: saved }) });
+  const base = stubFetch({ "/api/config": () => Response.json({ config: saved }), ...over });
   vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
     if (init?.method === "PATCH" && String(input).includes("/api/config")) {
       const patch = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -206,31 +225,207 @@ describe("resuming onto the last step", () => {
     expect(screen.queryByRole("heading", { name: "Bootstrap Stack" })).toBeNull();
   });
 
-  it("reopens the stack-outputs step for a config from before the device client existed", async () => {
-    const { deviceUserPoolClientId: _dropped, ...older } = DEPLOYED_CONFIG;
-    vi.stubGlobal("fetch", stubFetch({ "/api/config": () => Response.json({ config: older }) }));
-    render(
-      <MemoryRouter initialEntries={["/cloud-setup"]}>
-        <App />
-      </MemoryRouter>,
-    );
-    expect(
-      await screen.findByLabelText("DeviceUserPoolClientId", {}, { timeout: 5_000 }),
-    ).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: "Deploy Starkeep cloud" })).toBeNull();
+  it("asks for only the three IDs sign-in uses", async () => {
+    const user = userEvent.setup();
+    await renderAtDeployStep();
+    await user.click(screen.getByRole("button", { name: "Stack outputs" }));
+
+    expect(await screen.findByLabelText("UserPoolId")).toBeTruthy();
+    expect(screen.getByLabelText("UserPoolClientId")).toBeTruthy();
+    expect(screen.getByLabelText("IdentityPoolId")).toBeTruthy();
+    expect(screen.queryByLabelText("DeviceUserPoolClientId")).toBeNull();
+    expect(screen.queryByLabelText("CognitoDomain")).toBeNull();
   });
 });
 
-describe("a config from before the Cognito domain existed", () => {
-  it("reopens the stack-outputs step to ask for it", async () => {
-    const { cognitoDomain: _dropped, ...older } = DEPLOYED_CONFIG;
-    vi.stubGlobal("fetch", stubFetch({ "/api/config": () => Response.json({ config: older }) }));
+/**
+ * Step 2 asks for the three IDs sign-in uses. The wizard reads the device
+ * client and the managed login domain from the pool after every sign-in, so a
+ * config without them, such as one from before a stack update added them,
+ * fills itself in instead of reopening step 2.
+ */
+describe("the outputs the wizard looks up", () => {
+  it("fills in missing outputs once the session resumes, and lands on the deploy step", async () => {
+    const { deviceUserPoolClientId: _d, cognitoDomain: _c, ...older } = DEPLOYED_CONFIG;
+    const patches = statefulConfig(older);
     render(
       <MemoryRouter initialEntries={["/cloud-setup"]}>
         <App />
       </MemoryRouter>,
     );
-    expect(await screen.findByLabelText("CognitoDomain", {}, { timeout: 5_000 })).toBeTruthy();
+
+    expect(
+      await screen.findByRole("heading", { name: "Deploy Starkeep cloud" }, { timeout: 5_000 }),
+    ).toBeTruthy();
+    expect(patches).toEqual([LOOKED_UP]);
+    expect(screen.queryByText(/Looking up/)).toBeNull();
+    expect((screen.getByRole("button", { name: /Redeploy/ }) as HTMLButtonElement).disabled).toBe(
+      false,
+    );
+  });
+
+  it("saves nothing when the config already holds what the pool answers", async () => {
+    const patches = statefulConfig(DEPLOYED_CONFIG);
+    await renderAtDeployStep();
+    expect(calls.filter((u) => u.includes("/api/cognito-outputs"))).toHaveLength(1);
+    expect(patches).toEqual([]);
+  });
+
+  it("blocks the deploy and says why when the lookup fails, then retries", async () => {
+    const { deviceUserPoolClientId: _d, cognitoDomain: _c, ...older } = DEPLOYED_CONFIG;
+    let fail = true;
+    let saved: Record<string, unknown> = older;
+    const base = stubFetch({
+      "/api/config": () => Response.json({ config: saved }),
+      "/api/cognito-outputs": () =>
+        fail
+          ? Response.json(
+              { error: "The user pool has no app client named sktest-devices." },
+              { status: 404 },
+            )
+          : Response.json(LOOKED_UP),
+    });
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "PATCH" && String(input).includes("/api/config")) {
+        saved = { ...saved, ...(JSON.parse(String(init.body)) as Record<string, unknown>) };
+        return Promise.resolve(Response.json({ config: saved }));
+      }
+      return base(input);
+    });
+    const user = userEvent.setup();
+    await renderAtDeployStep();
+
+    expect(screen.getByText(/no app client named sktest-devices/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: /Redeploy/ }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+
+    fail = false;
+    await user.click(screen.getByRole("button", { name: "Look up again" }));
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: /Redeploy/ }) as HTMLButtonElement).disabled).toBe(
+        false,
+      ),
+    );
+    expect(screen.queryByText(/no app client/)).toBeNull();
+  });
+
+  it("says so when saving the looked-up outputs fails, then retries", async () => {
+    let saveFails = true;
+    let saved: Record<string, unknown> = SIGN_IN_ONLY_CONFIG;
+    const base = stubFetch({ "/api/config": () => Response.json({ config: saved }) });
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "PATCH" && String(input).includes("/api/config")) {
+        if (saveFails) return Promise.resolve(new Response("disk full", { status: 500 }));
+        saved = { ...saved, ...(JSON.parse(String(init.body)) as Record<string, unknown>) };
+        return Promise.resolve(Response.json({ config: saved }));
+      }
+      return base(input);
+    });
+    const user = userEvent.setup();
+    await renderAtDeployStep();
+    const deploy = () =>
+      screen.getByRole("button", { name: "Deploy Starkeep cloud" }) as HTMLButtonElement;
+
+    expect(screen.getByText(/Saving the looked-up outputs .* failed/)).toBeTruthy();
+    expect(deploy().disabled).toBe(true);
+
+    saveFails = false;
+    await user.click(screen.getByRole("button", { name: "Look up again" }));
+    await waitFor(() => expect(deploy().disabled).toBe(false));
+    expect(screen.queryByText(/Saving the looked-up outputs/)).toBeNull();
+  });
+
+  it("shows a running lookup as a wait in place of the last error", async () => {
+    let lookups = 0;
+    let answer: (res: Response) => void = () => {};
+    const patches = statefulConfig(SIGN_IN_ONLY_CONFIG);
+    const stateful = globalThis.fetch;
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("/api/cognito-outputs")) {
+        lookups += 1;
+        if (lookups === 1) {
+          return Promise.resolve(
+            Response.json({ error: "TooManyRequestsException" }, { status: 500 }),
+          );
+        }
+        return new Promise<Response>((resolve) => (answer = resolve));
+      }
+      return stateful(input, init);
+    });
+    const user = userEvent.setup();
+    await renderAtDeployStep();
+    const deploy = () =>
+      screen.getByRole("button", { name: "Deploy Starkeep cloud" }) as HTMLButtonElement;
+    expect(screen.getByText("TooManyRequestsException")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Look up again" }));
+
+    expect(await screen.findByText(/Looking up the stack's device client/)).toBeTruthy();
+    expect(screen.queryByText("TooManyRequestsException")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Look up again" })).toBeNull();
+    expect(deploy().disabled).toBe(true);
+
+    answer(Response.json(LOOKED_UP));
+    await waitFor(() => expect(deploy().disabled).toBe(false));
+    expect(screen.queryByText(/Looking up/)).toBeNull();
+    expect(patches).toEqual([LOOKED_UP]);
+  });
+
+  it("clears the looked-up outputs when the user pool changes", async () => {
+    const patches = statefulConfig({
+      ...DEPLOYED_CONFIG,
+      s3Bucket: undefined,
+      auroraEndpoint: undefined,
+      apiGatewayUrl: undefined,
+    });
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/cloud-setup"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Stack outputs" }, { timeout: 5_000 }),
+    );
+    const userPoolId = await screen.findByLabelText("UserPoolId");
+    await user.clear(userPoolId);
+    await user.type(userPoolId, "us-east-2_other1");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(await screen.findByRole("heading", { name: "Sign In" })).toBeTruthy();
+    expect(patches.at(-1)).toMatchObject({
+      userPoolId: "us-east-2_other1",
+      deviceUserPoolClientId: null,
+      cognitoDomain: null,
+    });
+  });
+
+  it("holds a first deploy until the lookup succeeds, then deploys", async () => {
+    let fail = true;
+    statefulConfig(SIGN_IN_ONLY_CONFIG, {
+      "/api/cognito-outputs": () =>
+        fail
+          ? Response.json({ error: "The user pool has no managed login domain." }, { status: 404 })
+          : Response.json(LOOKED_UP),
+    });
+    const user = userEvent.setup();
+    await renderAtDeployStep();
+    const deploy = () =>
+      screen.getByRole("button", { name: "Deploy Starkeep cloud" }) as HTMLButtonElement;
+
+    expect(screen.getByText(/no managed login domain/)).toBeTruthy();
+    expect(deploy().disabled).toBe(true);
+
+    fail = false;
+    await user.click(screen.getByRole("button", { name: "Look up again" }));
+    await waitFor(() => expect(deploy().disabled).toBe(false));
+    await user.click(deploy());
+
+    expect(
+      await screen.findByRole("button", { name: /Continue/ }, { timeout: 5_000 }),
+    ).toBeTruthy();
+    expect(calls.filter((u) => u.includes("/api/cloud-data-server/install"))).toHaveLength(1);
   });
 });
 
@@ -350,26 +545,6 @@ describe("the session across steps", () => {
     expect(await screen.findByRole("heading", { name: "Deploy Starkeep cloud" })).toBeTruthy();
   });
 
-  it("resumes the session when a newer output is missing, then skips sign-in", async () => {
-    const { deviceUserPoolClientId: _dropped, ...older } = DEPLOYED_CONFIG;
-    vi.stubGlobal("fetch", stubFetch({ "/api/config": () => Response.json({ config: older }) }));
-    const user = userEvent.setup();
-    render(
-      <MemoryRouter initialEntries={["/cloud-setup"]}>
-        <App />
-      </MemoryRouter>,
-    );
-
-    await user.type(
-      await screen.findByLabelText("DeviceUserPoolClientId", {}, { timeout: 5_000 }),
-      "deviceclient",
-    );
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-
-    expect(await screen.findByRole("heading", { name: "Deploy Starkeep cloud" })).toBeTruthy();
-    expect(refreshTokens).toHaveBeenCalled();
-  });
-
   it("asks for sign-in again when the app client changes", async () => {
     const user = userEvent.setup();
     await renderAtDeployStep();
@@ -439,12 +614,7 @@ describe("the admin email on step 1", () => {
     });
 
     await user.click(screen.getByRole("button", { name: "Stack is deployed — Continue" }));
-    await user.type(await screen.findByLabelText("CognitoDomain"), DEPLOYED_CONFIG.cognitoDomain);
-    await user.type(
-      screen.getByLabelText("DeviceUserPoolClientId"),
-      DEPLOYED_CONFIG.deviceUserPoolClientId,
-    );
-    await user.type(screen.getByLabelText("IdentityPoolId"), DEPLOYED_CONFIG.identityPoolId);
+    await user.type(await screen.findByLabelText("IdentityPoolId"), DEPLOYED_CONFIG.identityPoolId);
     await user.type(screen.getByLabelText("UserPoolClientId"), DEPLOYED_CONFIG.userPoolClientId);
     await user.type(screen.getByLabelText("UserPoolId"), DEPLOYED_CONFIG.userPoolId);
     await user.click(screen.getByRole("button", { name: "Continue" }));
@@ -497,6 +667,14 @@ describe("an operator with an existing deployment and no local config", () => {
  * account outside `starkeep-admins` signs in to Cognito but gets no AWS
  * credentials, so the wizard stops there.
  */
+/** What Cognito answers an admin's password sign-in with, when no challenge follows. */
+const ADMIN_TOKENS = {
+  idToken: "admin-id-token",
+  accessToken: "admin-access-token",
+  refreshToken: "admin-refresh-token",
+  expiresIn: 3600,
+};
+
 describe("signing in on the wizard", () => {
   beforeEach(() => {
     localStorage.removeItem(SESSION_KEY);
@@ -545,6 +723,57 @@ describe("signing in on the wizard", () => {
     expect(JSON.parse(localStorage.getItem(SESSION_KEY)!)).toMatchObject({
       refreshToken: "new-refresh-token",
     });
+    // The sign-in looks up the outputs step 2 no longer asks for.
+    expect(calls.filter((u) => u.includes("/api/cognito-outputs"))).toHaveLength(1);
+  });
+
+  it("saves the outputs it looks up after the sign-in", async () => {
+    initiateAuth.mockResolvedValueOnce({ tokens: ADMIN_TOKENS });
+    const patches = statefulConfig(SIGN_IN_ONLY_CONFIG);
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/cloud-setup"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { name: "Sign In" }, { timeout: 5_000 });
+    await user.type(screen.getByLabelText("Email"), "operator@example.com");
+    await user.type(screen.getByLabelText("Password"), "Perm-pass1{Enter}");
+
+    expect(await screen.findByRole("heading", { name: "Deploy Starkeep cloud" })).toBeTruthy();
+    expect(patches).toEqual([LOOKED_UP]);
+    expect(
+      (screen.getByRole("button", { name: "Deploy Starkeep cloud" }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it("completes the sign-in when the lookup fails, and says why on the deploy step", async () => {
+    initiateAuth.mockResolvedValueOnce({ tokens: ADMIN_TOKENS });
+    const patches = statefulConfig(SIGN_IN_ONLY_CONFIG, {
+      "/api/cognito-outputs": () =>
+        Response.json({ error: "AccessDeniedException" }, { status: 500 }),
+    });
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/cloud-setup"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { name: "Sign In" }, { timeout: 5_000 });
+    await user.type(screen.getByLabelText("Email"), "operator@example.com");
+    await user.type(screen.getByLabelText("Password"), "Perm-pass1{Enter}");
+
+    expect(await screen.findByRole("heading", { name: "Deploy Starkeep cloud" })).toBeTruthy();
+    expect(JSON.parse(localStorage.getItem(SESSION_KEY)!)).toMatchObject({
+      refreshToken: "admin-refresh-token",
+    });
+    expect(patches).toEqual([]);
+    expect(screen.getByText("AccessDeniedException")).toBeTruthy();
+    expect(
+      (screen.getByRole("button", { name: "Deploy Starkeep cloud" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
   });
 
   it("stops an account outside starkeep-admins on the sign-in step", async () => {

@@ -289,8 +289,10 @@ const CONTEXTS: Record<string, ContextBuilder> = {
     description:
       "Admin-app role (federated Cognito user) at cli-install-cloud-data-server " +
       "start — runs the Pulumi-passphrase rotation (ssm get/put + kms via ssm) " +
-      "and assumes Manager before any provisioning. Bootstrap-created role with " +
-      "no permissions boundary; its inline policy is the entire cap.",
+      "and assumes Manager before any provisioning. Also admin-web's lookup of " +
+      "the device client and the managed login domain after sign-in. " +
+      "Bootstrap-created role with no permissions boundary; its inline policy " +
+      "is the entire cap.",
     build({ stackPrefix, accountId, region }) {
       const roleName = `${stackPrefix}-app-admin-role`;
       return {
@@ -358,8 +360,16 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           why:
             "ensureAppSignInClients finds, creates or updates the cloud-apps and mobile-apps " +
             "clients and gives each a managed login branding style, as admin-app, before the " +
-            "Manager hop. App installs rewrite the mobile-apps client's callbacks.",
+            "Manager hop. App installs rewrite the mobile-apps client's callbacks. " +
+            "admin-web's routes/cognito-outputs.ts lists the clients to find the device client.",
         })),
+        {
+          action: "cognito-idp:DescribeUserPool",
+          resource: userPoolArn,
+          why:
+            "admin-web's routes/cognito-outputs.ts reads the pool's managed login domain " +
+            "after sign-in, since the wizard no longer asks for the CognitoDomain output.",
+        },
         {
           action: "sts:AssumeRole",
           resource: managerRoleArn,

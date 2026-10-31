@@ -32,6 +32,7 @@ import {
   readCognitoSession,
   clearCloudCredentials,
   regionFromUserPoolId,
+  lookupCognitoOutputs,
   type CloudConfig,
 } from "../lib/cloud-config";
 import {
@@ -82,11 +83,6 @@ function validateUserPoolId(v: string) {
 }
 function validateUserPoolClientId(v: string) {
   return /^[A-Za-z0-9]+$/.test(v) ? null : "Must be an alphanumeric string";
-}
-function validateCognitoDomain(v: string) {
-  return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(v)
-    ? null
-    : "Format: starkeep-123456789012.auth.us-east-1.amazoncognito.com";
 }
 function isEmail(v: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
@@ -428,21 +424,14 @@ function Step2Outputs({
   stackPrefix,
   fallbackRegion,
   initialCognitoConfig,
-  initialDeviceUserPoolClientId,
-  initialCognitoDomain,
   onContinue,
   onBack,
 }: {
   stackPrefix: string;
   fallbackRegion: string;
   initialCognitoConfig: Partial<CognitoConfig>;
-  initialDeviceUserPoolClientId?: string;
-  initialCognitoDomain?: string;
   onContinue: (
-    config: Pick<CognitoConfig, "userPoolId" | "userPoolClientId" | "identityPoolId"> & {
-      deviceUserPoolClientId: string;
-      cognitoDomain: string;
-    },
+    config: Pick<CognitoConfig, "userPoolId" | "userPoolClientId" | "identityPoolId">,
   ) => void;
   onBack: () => void;
 }) {
@@ -450,10 +439,6 @@ function Step2Outputs({
   const [userPoolClientId, setUserPoolClientId] = useState(
     initialCognitoConfig.userPoolClientId ?? "",
   );
-  const [deviceUserPoolClientId, setDeviceUserPoolClientId] = useState(
-    initialDeviceUserPoolClientId ?? "",
-  );
-  const [cognitoDomain, setCognitoDomain] = useState(initialCognitoDomain ?? "");
   const [identityPoolId, setIdentityPoolId] = useState(initialCognitoConfig.identityPoolId ?? "");
   const [touched, setTouched] = useState<Record<string, boolean>>({});
 
@@ -462,8 +447,6 @@ function Step2Outputs({
   const errors = {
     userPoolId: validateUserPoolId(userPoolId),
     userPoolClientId: validateUserPoolClientId(userPoolClientId),
-    deviceUserPoolClientId: validateUserPoolClientId(deviceUserPoolClientId),
-    cognitoDomain: validateCognitoDomain(cognitoDomain),
     identityPoolId: validateIdentityPoolId(identityPoolId),
   };
   const isValid = Object.values(errors).every((e) => e === null);
@@ -485,7 +468,8 @@ function Step2Outputs({
         ) : (
           "CloudFormation stack"
         )}{" "}
-        <strong>Outputs</strong> tab and copy the five values below.
+        <strong>Outputs</strong> tab and copy the three values below. Starkeep looks up the rest
+        after you sign in.
       </p>
 
       <p className="text-sm text-muted-foreground">
@@ -493,46 +477,6 @@ function Step2Outputs({
       </p>
 
       <div className="flex flex-col gap-4">
-        <div className="flex flex-col gap-1.5">
-          <label className="text-sm font-medium" htmlFor="cognitoDomain">
-            CognitoDomain
-          </label>
-          <Input
-            id="cognitoDomain"
-            placeholder="starkeep-123456789012.auth.us-east-1.amazoncognito.com"
-            value={cognitoDomain}
-            onChange={(e) => setCognitoDomain(e.currentTarget.value.trim())}
-            onBlur={() => touch("cognitoDomain")}
-            aria-invalid={touched.cognitoDomain && !!errors.cognitoDomain}
-            className={cn(touched.cognitoDomain && errors.cognitoDomain && "border-destructive")}
-          />
-          {touched.cognitoDomain && errors.cognitoDomain && (
-            <p className="text-xs text-destructive">{errors.cognitoDomain}</p>
-          )}
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <label className="text-sm font-medium" htmlFor="deviceUserPoolClientId">
-            DeviceUserPoolClientId
-          </label>
-          <Input
-            id="deviceUserPoolClientId"
-            placeholder="7abc4defghij5klmnopq6rstuv"
-            value={deviceUserPoolClientId}
-            onChange={(e) => setDeviceUserPoolClientId(e.currentTarget.value.trim())}
-            onBlur={() => touch("deviceUserPoolClientId")}
-            aria-invalid={touched.deviceUserPoolClientId && !!errors.deviceUserPoolClientId}
-            className={cn(
-              touched.deviceUserPoolClientId &&
-                errors.deviceUserPoolClientId &&
-                "border-destructive",
-            )}
-          />
-          {touched.deviceUserPoolClientId && errors.deviceUserPoolClientId && (
-            <p className="text-xs text-destructive">{errors.deviceUserPoolClientId}</p>
-          )}
-        </div>
-
         <div className="flex flex-col gap-1.5">
           <label className="text-sm font-medium" htmlFor="identityPoolId">
             IdentityPoolId
@@ -600,8 +544,6 @@ function Step2Outputs({
               userPoolId,
               userPoolClientId,
               identityPoolId,
-              deviceUserPoolClientId,
-              cognitoDomain,
             })
           }
           disabled={!isValid}
@@ -865,6 +807,9 @@ function Step4Deploy({
   refreshCredentials,
   cloudConfig,
   refreshCloudConfig,
+  cognitoOutputsError,
+  cognitoOutputsLookingUp,
+  onRetryCognitoOutputs,
   onSuccess,
   onBack,
   onTokenExpired,
@@ -881,6 +826,10 @@ function Step4Deploy({
   refreshCredentials: () => Promise<STSCredentials | null>;
   cloudConfig: CloudConfig | null;
   refreshCloudConfig: () => Promise<void>;
+  /** Why the device client and the managed login domain could not be looked up. */
+  cognitoOutputsError: string | null;
+  cognitoOutputsLookingUp: boolean;
+  onRetryCognitoOutputs: () => void;
   onSuccess: (result: DeployOutputs) => void;
   onBack: () => void;
   /** Called when the installer reports EXPIRED_TOKEN — wizard sends the user back to sign-in. */
@@ -894,6 +843,8 @@ function Step4Deploy({
   const [statusRefreshKey, setStatusRefreshKey] = useState(0);
 
   const alreadyDeployed = !!(cloudConfig?.s3Bucket && cloudConfig?.auroraEndpoint);
+  // The cloud data server install needs both looked-up outputs.
+  const outputsMissing = !cloudConfig?.deviceUserPoolClientId || !cloudConfig?.cognitoDomain;
   const showStatusCard = status !== "running" && (deployResult !== null || alreadyDeployed);
 
   function handleInstall() {
@@ -1065,8 +1016,28 @@ function Step4Deploy({
         </ul>
       </div>
 
+      {outputsMissing && cognitoOutputsLookingUp && (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <div className="size-4 animate-spin rounded-full border-2 border-border border-t-foreground" />
+          Looking up the stack's device client and sign-in domain…
+        </div>
+      )}
+      {outputsMissing && !cognitoOutputsLookingUp && (
+        <>
+          <Alert variant={cognitoOutputsError ? "destructive" : "default"}>
+            <AlertDescription>
+              {cognitoOutputsError ??
+                "Starkeep has not looked up the stack's device client and sign-in domain yet."}
+            </AlertDescription>
+          </Alert>
+          <Button variant="outline" onClick={onRetryCognitoOutputs}>
+            Look up again
+          </Button>
+        </>
+      )}
+
       {status === "idle" && !alreadyDeployed && (
-        <Button onClick={handleInstall} disabled={installing}>
+        <Button onClick={handleInstall} disabled={installing || outputsMissing}>
           Deploy Starkeep cloud
         </Button>
       )}
@@ -1080,6 +1051,7 @@ function Step4Deploy({
           cloudConfig={cloudConfig}
           refreshKey={statusRefreshKey}
           installing={installing}
+          redeployDisabled={outputsMissing}
           onRedeploy={handleInstall}
         />
       )}
@@ -1105,7 +1077,7 @@ function Step4Deploy({
       )}
 
       {status === "failure" && !tokenExpired && (
-        <Button onClick={handleInstall} variant="outline">
+        <Button onClick={handleInstall} variant="outline" disabled={outputsMissing}>
           Retry install
         </Button>
       )}
@@ -1130,11 +1102,13 @@ function DeploymentSummary({
   cloudConfig,
   refreshKey,
   installing,
+  redeployDisabled,
   onRedeploy,
 }: {
   cloudConfig: CloudConfig | null;
   refreshKey: number;
   installing: boolean;
+  redeployDisabled: boolean;
   onRedeploy: () => void;
 }) {
   const health = useCloudDataServerHealth(cloudConfig, refreshKey);
@@ -1146,7 +1120,12 @@ function DeploymentSummary({
           <h3 className="font-medium">Starkeep cloud</h3>
           <StatusBadge online={healthToOnline(health)} />
         </div>
-        <Button size="sm" variant="outline" onClick={onRedeploy} disabled={installing}>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onRedeploy}
+          disabled={installing || redeployDisabled}
+        >
           {installing && (
             <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
           )}
@@ -1210,6 +1189,37 @@ export function CloudSetupWizard({ onComplete }: Props) {
     setCloudConfig(cfg);
   }, []);
 
+  // Why the last lookup of the device client and the managed login domain
+  // failed, if it did, and whether a lookup is running now.
+  const [cognitoOutputsError, setCognitoOutputsError] = useState<string | null>(null);
+  const [cognitoOutputsLookingUp, setCognitoOutputsLookingUp] = useState(false);
+
+  // Step 2 no longer asks for the device client or the managed login domain,
+  // so the wizard reads both from the pool after every sign-in. A stack update
+  // that adds either then needs no trip back to the console.
+  const lookUpCognitoOutputs = useCallback(async (creds: STSCredentials, cfg: CloudConfig) => {
+    setCognitoOutputsLookingUp(true);
+    try {
+      const found = await lookupCognitoOutputs(creds, cfg.region);
+      if (
+        found.deviceUserPoolClientId !== cfg.deviceUserPoolClientId ||
+        found.cognitoDomain !== cfg.cognitoDomain
+      ) {
+        // A failed save would otherwise leave the deploy blocked with no
+        // error and no way to retry.
+        const updated = await patchCloudConfig(found);
+        if (!updated)
+          throw new Error("Saving the looked-up outputs to ~/.starkeep/config.json failed");
+        setCloudConfig(updated);
+      }
+      setCognitoOutputsError(null);
+    } catch (err) {
+      setCognitoOutputsError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setCognitoOutputsLookingUp(false);
+    }
+  }, []);
+
   // Mark a step done and optionally advance
   const markDone = useCallback((step: StepId, advance = true) => {
     setCompletedSteps((prev) => {
@@ -1248,24 +1258,13 @@ export function CloudSetupWizard({ onComplete }: Props) {
 
       const done = new Set<StepId>();
       if (cfg?.stackPrefix) done.add(1);
-      // A config from before the device client or the Cognito domain existed
-      // reopens this step, so the operator copies the new output in after
-      // updating the stack.
-      const hasCognito = !!(
-        cfg?.userPoolId &&
-        cfg?.userPoolClientId &&
-        cfg?.identityPoolId &&
-        cfg?.deviceUserPoolClientId &&
-        cfg?.cognitoDomain
-      );
+      // Step 2 asks only for the IDs sign-in uses. The other outputs are
+      // looked up after sign-in.
+      const hasCognito = !!(cfg?.userPoolId && cfg?.userPoolClientId && cfg?.identityPoolId);
       if (hasCognito) done.add(2);
 
-      // Refreshing the session needs only the IDs that sign-in uses. An admin's
-      // session therefore survives a stack update that adds an output: step 2
-      // reopens for the new output, and the wizard then skips sign-in.
-      const canRefresh = !!(cfg?.userPoolId && cfg?.userPoolClientId && cfg?.identityPoolId);
       const session = await readCognitoSession();
-      if (cfg && canRefresh && session?.refreshToken) {
+      if (cfg && hasCognito && session?.refreshToken) {
         try {
           const tokens = await refreshTokens(cfg.cognitoConfig, session.refreshToken);
           const creds = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
@@ -1273,6 +1272,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
           setCredentials(creds);
           await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
           done.add(3);
+          await lookUpCognitoOutputs(creds, cfg);
         } catch {
           // Token expired — user will need to re-sign in.
         }
@@ -1288,7 +1288,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
     }
 
     restore();
-  }, []);
+  }, [lookUpCognitoOutputs]);
 
   const fullCognitoConfig = (): CognitoConfig | null => {
     if (!cloudConfig) return null;
@@ -1410,8 +1410,6 @@ export function CloudSetupWizard({ onComplete }: Props) {
             stackPrefix={stackPrefix}
             fallbackRegion={bootstrapRegion}
             initialCognitoConfig={cognitoConfig}
-            initialDeviceUserPoolClientId={cloudConfig?.deviceUserPoolClientId}
-            initialCognitoDomain={cloudConfig?.cognitoDomain}
             onContinue={async (config) => {
               const isChanging =
                 !!cloudConfig?.userPoolId && cloudConfig.userPoolId !== config.userPoolId;
@@ -1432,8 +1430,8 @@ export function CloudSetupWizard({ onComplete }: Props) {
                   userPoolId: config.userPoolId,
                   userPoolClientId: config.userPoolClientId,
                   identityPoolId: config.identityPoolId,
-                  deviceUserPoolClientId: config.deviceUserPoolClientId,
-                  cognitoDomain: config.cognitoDomain,
+                  deviceUserPoolClientId: null,
+                  cognitoDomain: null,
                   cloudAppsUserPoolClientId: null,
                   mobileAppsUserPoolClientId: null,
                   s3Bucket: null,
@@ -1454,8 +1452,9 @@ export function CloudSetupWizard({ onComplete }: Props) {
                   userPoolId: config.userPoolId,
                   userPoolClientId: config.userPoolClientId,
                   identityPoolId: config.identityPoolId,
-                  deviceUserPoolClientId: config.deviceUserPoolClientId,
-                  cognitoDomain: config.cognitoDomain,
+                  // The looked-up outputs belong to the old pool. The next
+                  // sign-in looks them up again.
+                  ...(isChanging ? { deviceUserPoolClientId: null, cognitoDomain: null } : {}),
                 });
                 setCloudConfig(updated);
               }
@@ -1493,6 +1492,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
                 userEmail: userEmail ?? undefined,
               });
               await writeCloudCredentials(creds);
+              if (cloudConfig) await lookUpCognitoOutputs(creds, cloudConfig);
               markDone(3);
             }}
             onContinue={() => handleNavigate(4)}
@@ -1523,6 +1523,11 @@ export function CloudSetupWizard({ onComplete }: Props) {
             }}
             cloudConfig={cloudConfig}
             refreshCloudConfig={refreshCloudConfig}
+            cognitoOutputsError={cognitoOutputsError}
+            cognitoOutputsLookingUp={cognitoOutputsLookingUp}
+            onRetryCognitoOutputs={() => {
+              if (cloudConfig) void lookUpCognitoOutputs(credentials, cloudConfig);
+            }}
             onSuccess={handleComplete}
             onBack={() => handleNavigate(3)}
             onTokenExpired={requireSignIn}

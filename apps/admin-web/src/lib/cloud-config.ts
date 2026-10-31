@@ -16,9 +16,15 @@ export interface StarkeepConfig {
   stage: string;
   userPoolId: string;
   userPoolClientId: string;
-  /** The bootstrap's device client, which desktops sign in with to sync. */
+  /**
+   * The bootstrap's device client, which desktops sign in with to sync. The
+   * wizard looks it up after sign-in (`routes/cognito-outputs.ts`).
+   */
   deviceUserPoolClientId?: string;
-  /** The bootstrap's CognitoDomain output: the managed login page's host name. */
+  /**
+   * The bootstrap's CognitoDomain output: the managed login page's host name.
+   * The wizard looks it up after sign-in, like the device client.
+   */
   cognitoDomain?: string;
   /** Written by the cloud data server install: the client cloud apps sign in with. */
   cloudAppsUserPoolClientId?: string;
@@ -129,6 +135,31 @@ export async function patchCloudConfig(patch: {
   if (!res.ok) return null;
   const body = (await res.json()) as { config: Partial<StarkeepConfig> | null };
   return body.config ? hydrate(body.config) : null;
+}
+
+/**
+ * Ask the server to read the device client and the managed login domain from
+ * the pool, with the signed-in operator's credentials. Throws the route's
+ * message when the pool lacks either.
+ */
+export async function lookupCognitoOutputs(
+  credentials: STSCredentials,
+  region: string,
+): Promise<{ deviceUserPoolClientId: string; cognitoDomain: string }> {
+  const res = await fetch("/api/cognito-outputs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ credentials, region }),
+  });
+  const body = (await res.json().catch(() => ({}))) as {
+    deviceUserPoolClientId?: string;
+    cognitoDomain?: string;
+    error?: string;
+  };
+  if (!res.ok || !body.deviceUserPoolClientId || !body.cognitoDomain) {
+    throw new Error(body.error ?? `Looking up the stack outputs failed (${res.status})`);
+  }
+  return { deviceUserPoolClientId: body.deviceUserPoolClientId, cognitoDomain: body.cognitoDomain };
 }
 
 const CLOUD_CREDENTIALS_KEY = "starkeep:cloud-credentials";

@@ -45,6 +45,7 @@ vi.mock("../src/routes/apps-install-status", () => spy("apps-install-status", ["
 vi.mock("../src/routes/cloud-data-server-install", () =>
   spy("cloud-data-server-install", ["POST"]),
 );
+vi.mock("../src/routes/cognito-outputs", () => spy("cognito-outputs", ["POST"]));
 vi.mock("../src/routes/config", () => spy("config", ["GET", "PATCH"]));
 vi.mock("../src/routes/costs", () => spy("costs", ["POST"]));
 vi.mock("../src/routes/this-machine", () =>
@@ -101,6 +102,7 @@ const ROUTES: Array<[string, string, string, string]> = [
   ["POST", "/api/cloud-data-server/install", "cloud-data-server-install", "POST"],
   ["GET", "/api/config", "config", "GET"],
   ["PATCH", "/api/config", "config", "PATCH"],
+  ["POST", "/api/cognito-outputs", "cognito-outputs", "POST"],
   ["POST", "/api/costs", "costs", "POST"],
   ["GET", "/api/this-machine", "this-machine", "GET"],
   ["POST", "/api/users/list", "users", "LIST"],

@@ -26,6 +26,7 @@ import * as appsCloudList from "./routes/apps-cloud-list";
 import * as appsCloudInstall from "./routes/apps-cloud-install";
 import * as appsInstallStatus from "./routes/apps-install-status";
 import * as cloudDataServerInstall from "./routes/cloud-data-server-install";
+import * as cognitoOutputs from "./routes/cognito-outputs";
 import * as config from "./routes/config";
 import * as costs from "./routes/costs";
 import * as thisMachine from "./routes/this-machine";
@@ -62,6 +63,8 @@ api.post("/drive/install", (c) => driveInstall.POST(c.req.raw));
 api.get("/config", () => config.GET());
 api.patch("/config", (c) => config.PATCH(c.req.raw));
 api.get("/exec/deploy-outputs", () => execDeployOutputs.GET());
+// The two bootstrap outputs the wizard looks up after sign-in.
+api.post("/cognito-outputs", (c) => cognitoOutputs.POST(c.req.raw));
 
 // Cloud operations against the operator's own AWS credentials.
 api.post("/costs", (c) => costs.POST(c.req.raw));
