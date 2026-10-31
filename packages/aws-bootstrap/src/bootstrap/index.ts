@@ -3,6 +3,7 @@ export {
   getCloudFormationCreateStackUrl,
   getBootstrapStackOutputsUrl,
   MAX_STACK_PREFIX_LENGTH,
+  MAX_INLINE_TEMPLATE_BYTES,
   type GenerateBootstrapTemplateInput,
 } from "./bootstrap-template.js";
 

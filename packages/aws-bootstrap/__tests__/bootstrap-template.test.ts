@@ -4,6 +4,7 @@ import {
   generateBootstrapTemplate,
   getCloudFormationCreateStackUrl,
   getBootstrapStackOutputsUrl,
+  MAX_INLINE_TEMPLATE_BYTES,
   MAX_STACK_PREFIX_LENGTH,
 } from "../src/bootstrap/index.js";
 
@@ -98,6 +99,20 @@ describe("bootstrap template structure", () => {
       "arn:aws:s3:::teststk-files-*/shared/${aws:PrincipalTag/starkeep:userId}/*",
     );
     expect(raw).not.toContain("arn:aws:s3:::starkeep-files-*");
+  });
+});
+
+describe("template size", () => {
+  it("fits CloudFormation's inline cap, as the tier-3 suite sends it", () => {
+    // `e2e-aws` creates and updates the stack with `TemplateBody`, which
+    // CloudFormation refuses past 51,200 bytes before creating anything. The
+    // worst case: every `${stackPrefix}` at the longest prefix allowed, and
+    // the longest address an email can have.
+    const raw = generateBootstrapTemplate({
+      stackPrefix: "s".repeat(MAX_STACK_PREFIX_LENGTH),
+      adminEmail: `${"a".repeat(64)}@${"b".repeat(185)}.com`,
+    });
+    expect(Buffer.byteLength(raw, "utf8")).toBeLessThanOrEqual(MAX_INLINE_TEMPLATE_BYTES);
   });
 });
 
