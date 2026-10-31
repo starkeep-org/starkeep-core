@@ -23,6 +23,7 @@ import { PG_RAW_PARSERS } from "../../src/pg-timestamps.js";
 import { DsqlAppSyncableApplier } from "../../src/app-syncable/apply.js";
 import type { DatabaseClient } from "../../src/types.js";
 import { guardNodeWatermarks } from "../../src/node-watermarks.js";
+import { guardSingleFlight } from "../../src/single-flight.js";
 import { createAppNodeWatermarks } from "../pg-shared-schema.js";
 
 const APP = "query-conformance-app";
@@ -37,20 +38,23 @@ afterEach(async () => {
 });
 
 function clientFor(pg: PGlite): DatabaseClient {
-  return guardNodeWatermarks({
-    async query(text: string, values?: unknown[]) {
-      // The parsers are part of the connection contract, not test scaffolding:
-      // without them the driver turns a `timestamp` into a `Date` using the
-      // *process* zone, and a suite that skipped them could not catch the
-      // divergence it exists to catch. The SQLite side says the same thing
-      // about `applyConnectionPragmas`.
-      const result = await pg.query(text, values as unknown[] | undefined, {
-        parsers: PG_RAW_PARSERS,
-      });
-      return { rows: result.rows as Record<string, unknown>[] };
-    },
-    async end() {},
-  });
+  return guardSingleFlight(
+    guardNodeWatermarks({
+      async query(text: string, values?: unknown[]) {
+        // The parsers are part of the connection contract, not test scaffolding:
+        // without them the driver turns a `timestamp` into a `Date` using the
+        // *process* zone, and a suite that skipped them could not catch the
+        // divergence it exists to catch. The SQLite side says the same thing
+        // about `applyConnectionPragmas`.
+        const result = await pg.query(text, values as unknown[] | undefined, {
+          parsers: PG_RAW_PARSERS,
+        });
+        return { rows: result.rows as Record<string, unknown>[] };
+      },
+      async end() {},
+    }),
+    { onOverlap: "throw" },
+  );
 }
 
 async function makeHarness(): Promise<QueryConformanceHarness> {
