@@ -3,9 +3,10 @@
  * its own transaction, coverage reads come from the entries, and the guard
  * refuses anything else. See `src/node-watermarks.ts`.
  *
- * Every client here runs under the broker's two tripwires, the owner-scope
- * assertion and `guardNodeWatermarks`, so a write path that skipped its raise
- * fails here the way it would fail in the cloud. PGlite stands in for DSQL for
+ * Every client here runs under the broker's tripwires, the owner-scope
+ * assertion, `guardNodeWatermarks` and `guardSingleFlight`, so a write path
+ * that skipped its raise fails here the way it would fail in the cloud. The
+ * single-flight guard throws here, where the broker only warns. PGlite stands in for DSQL for
  * the reason `app-syncable-conformance.test.ts` gives.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -36,6 +37,7 @@ import {
   buildWatermarkRaise,
   guardNodeWatermarks,
 } from "../../src/node-watermarks.js";
+import { guardSingleFlight } from "../../src/single-flight.js";
 import { assertOwnerScoped } from "../../src/owner-scope.js";
 import { ownerScopedCompiler } from "../../src/query-builder.js";
 import type { DatabaseClient } from "../../src/types.js";
@@ -54,15 +56,18 @@ let memoInstalled: boolean;
 
 /** A client under the broker's tripwires, as `ownerGuardedFactory` builds one. */
 function client(): DatabaseClient {
-  return guardNodeWatermarks({
-    async query(text, values) {
-      statements.push(text);
-      assertOwnerScoped(text);
-      const result = await pg.query(text, values as unknown[] | undefined);
-      return { rows: result.rows as Record<string, unknown>[] };
-    },
-    async end() {},
-  });
+  return guardSingleFlight(
+    guardNodeWatermarks({
+      async query(text, values) {
+        statements.push(text);
+        assertOwnerScoped(text);
+        const result = await pg.query(text, values as unknown[] | undefined);
+        return { rows: result.rows as Record<string, unknown>[] };
+      },
+      async end() {},
+    }),
+    { onOverlap: "throw" },
+  );
 }
 
 async function adapterFor(

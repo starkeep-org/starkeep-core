@@ -24,6 +24,7 @@ import { assertOwnerScoped } from "../../src/owner-scope.js";
 import type { DatabaseClient } from "../../src/types.js";
 import { createAppNodeWatermarks, createSharedSchema } from "../pg-shared-schema.js";
 import { guardNodeWatermarks } from "../../src/node-watermarks.js";
+import { guardSingleFlight } from "../../src/single-flight.js";
 
 const A = "user-a";
 const B = "user-b";
@@ -34,14 +35,17 @@ let pg: PGlite;
 
 /** The client the adapters talk to, with the broker's tripwires on every statement. */
 function client(): DatabaseClient {
-  return guardNodeWatermarks({
-    async query(text, values) {
-      assertOwnerScoped(text);
-      const result = await pg.query(text, values as unknown[] | undefined);
-      return { rows: result.rows as Record<string, unknown>[] };
-    },
-    async end() {},
-  });
+  return guardSingleFlight(
+    guardNodeWatermarks({
+      async query(text, values) {
+        assertOwnerScoped(text);
+        const result = await pg.query(text, values as unknown[] | undefined);
+        return { rows: result.rows as Record<string, unknown>[] };
+      },
+      async end() {},
+    }),
+    { onOverlap: "throw" },
+  );
 }
 
 async function adapterFor(userId: string): Promise<AuroraDsqlDatabaseAdapter> {

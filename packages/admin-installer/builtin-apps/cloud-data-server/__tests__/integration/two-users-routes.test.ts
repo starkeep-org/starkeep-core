@@ -34,6 +34,7 @@ import {
 import { createHash, sign } from "node:crypto";
 import { PutParameterCommand, ParameterAlreadyExists } from "@aws-sdk/client-ssm";
 import {
+  deserializeHLC,
   mobileSignedMessage,
   pgColumnType,
   serializeHLC,
@@ -864,7 +865,8 @@ describe("a mobile app through the broker", () => {
 /**
  * The `starkeep/no-cloud` refusal over real SQL. The broker lists the marked
  * records from the labels side and reads their keys by id, so these cases
- * check what that read must exclude.
+ * check what that read must exclude. Every client runs under the single-flight
+ * guard in `"throw"` mode, so a route that overlapped its queries fails here.
  */
 describe("the no-cloud refusal through the broker", () => {
   const hashOf = (c: string) => c.repeat(64);
@@ -967,5 +969,24 @@ describe("the no-cloud refusal through the broker", () => {
     s3HoldsNothing();
 
     expect(await presignBatch([keyOf("5")])).toEqual({ [keyOf("5")]: "refused" });
+  });
+
+  it("counts marked files as held in the Drive walk, with one statement at a time", async () => {
+    const marked = [await aRegisters("6"), await aRegisters("7"), await aRegisters("8")];
+    for (const id of marked) await markNoCloud(id);
+    s3HoldsNothing();
+
+    const res = await call(A, "POST", "/sync/exchange", { watermarks: {} });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    // S3 holds none of the three, yet the walk passes all of them.
+    const watermarks = res.body["responderByteWatermarks"] as Record<string, HLCTimestamp>;
+    const { rows } = await pg.query<{ node_id: string; updated_at: string }>(
+      `SELECT node_id, max(updated_at) AS updated_at FROM shared.records
+       WHERE user_id = $1 GROUP BY node_id`,
+      [A],
+    );
+    expect(rows).toHaveLength(1);
+    expect(watermarks).toEqual({ [rows[0]!.node_id]: deserializeHLC(rows[0]!.updated_at) });
   });
 });

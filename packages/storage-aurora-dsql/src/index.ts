@@ -43,3 +43,4 @@ export {
   RECORD_WATERMARKS_TABLE,
   guardNodeWatermarks,
 } from "./node-watermarks.js";
+export { guardSingleFlight, type OverlapMode, type SingleFlightOptions } from "./single-flight.js";

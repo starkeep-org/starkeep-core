@@ -41,6 +41,7 @@ import type { AppSyncableNamespace, AppSyncableNamespaceStore } from "@starkeep/
 import { DsqlAppSyncableApplier } from "../../src/app-syncable/apply.js";
 import type { DatabaseClient } from "../../src/types.js";
 import { guardNodeWatermarks } from "../../src/node-watermarks.js";
+import { guardSingleFlight } from "../../src/single-flight.js";
 import { createAppNodeWatermarks } from "../pg-shared-schema.js";
 
 const APP = "conformance-app";
@@ -66,13 +67,16 @@ afterEach(async () => {
 
 /** The `DatabaseClient` shape the applier talks to, over PGlite. */
 function clientFor(pg: PGlite): DatabaseClient {
-  return guardNodeWatermarks({
-    async query(text: string, values?: unknown[]) {
-      const result = await pg.query(text, values as unknown[] | undefined);
-      return { rows: result.rows as Record<string, unknown>[] };
-    },
-    async end() {},
-  });
+  return guardSingleFlight(
+    guardNodeWatermarks({
+      async query(text: string, values?: unknown[]) {
+        const result = await pg.query(text, values as unknown[] | undefined);
+        return { rows: result.rows as Record<string, unknown>[] };
+      },
+      async end() {},
+    }),
+    { onOverlap: "throw" },
+  );
 }
 
 async function makeHarness(): Promise<ConformanceHarness> {

@@ -33,8 +33,10 @@ import {
   ownerScopedCompiler,
   assertOwnerScoped,
   guardNodeWatermarks,
+  guardSingleFlight,
   LABEL_WATERMARKS_TABLE,
   RECORD_WATERMARKS_TABLE,
+  type OverlapMode,
 } from "@starkeep/storage-aurora-dsql";
 import { S3ObjectStorageAdapter } from "@starkeep/storage-s3";
 import {
@@ -1080,20 +1082,31 @@ export function __setDatabaseClientFactoryForTests(factory: DatabaseClientFactor
  * A factory whose clients refuse any statement against an owned table that
  * the user-scoped compiler did not compile, and any write the node watermark
  * tables would not see. The scoped compiler is the cut between users; this is
- * the tripwire for code that goes around it. See storage-aurora-dsql's
- * `owner-scope.ts` and `node-watermarks.ts`.
+ * the tripwire for code that goes around it. Each client also flags a
+ * statement that starts while another is running on it. See
+ * storage-aurora-dsql's `owner-scope.ts`, `node-watermarks.ts` and
+ * `single-flight.ts`.
+ *
+ * A test's factory runs under `"throw"`, so a suite fails on an overlap. The
+ * deployed broker only warns, because `pg` 8 still queues the statement.
  */
-function ownerGuardedFactory(inner: DatabaseClientFactory): DatabaseClientFactory {
+function ownerGuardedFactory(
+  inner: DatabaseClientFactory,
+  onOverlap: OverlapMode,
+): DatabaseClientFactory {
   return {
     async createClient(options) {
       const client = await inner.createClient(options);
-      return guardNodeWatermarks({
-        query(text, values) {
-          assertOwnerScoped(text);
-          return client.query(text, values);
-        },
-        end: () => client.end(),
-      });
+      return guardSingleFlight(
+        guardNodeWatermarks({
+          query(text, values) {
+            assertOwnerScoped(text);
+            return client.query(text, values);
+          },
+          end: () => client.end(),
+        }),
+        { onOverlap },
+      );
     },
   };
 }
@@ -1119,9 +1132,9 @@ function makeConnection(appId: string, creds: CachedCreds) {
   const auroraEndpoint = process.env.AURORA_ENDPOINT;
   const stackPrefix = process.env.STACK_PREFIX ?? "starkeep";
   if (!auroraEndpoint) throw new Error("AURORA_ENDPOINT env var is required");
-  const clientFactory = ownerGuardedFactory(
-    databaseClientFactoryOverride ?? new AppDsqlClientFactory(appId, creds, stackPrefix),
-  );
+  const clientFactory = databaseClientFactoryOverride
+    ? ownerGuardedFactory(databaseClientFactoryOverride, "throw")
+    : ownerGuardedFactory(new AppDsqlClientFactory(appId, creds, stackPrefix), "warn");
   return { clientFactory, auroraEndpoint, region };
 }
 
