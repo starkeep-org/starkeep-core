@@ -5,8 +5,8 @@
  * replaced through the __setDatabaseClientFactoryForTests seam and S3/SSM/STS
  * mocked with aws-sdk-client-mock. DSQL-specific semantics stay Tier 3.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { generateKeyPairSync } from "node:crypto";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { mockClient } from "aws-sdk-client-mock";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
@@ -17,6 +17,7 @@ import {
   RestoreObjectCommand,
   CreateMultipartUploadCommand,
   CompleteMultipartUploadCommand,
+  PutObjectCommand,
 } from "@aws-sdk/client-s3";
 import { signRequest } from "@starkeep/app-client";
 import { appSyncableTableInfo, FILE_RECORDS_TABLE_INFO } from "@starkeep/shared-space-api";
@@ -55,6 +56,7 @@ const CF_SIGNING_PARAM = "/teststack/app-creds/_cloudfront-signing";
 type HandlerModule = typeof import("../src/api-handler.js");
 let handler: HandlerModule["handler"];
 let setDbFactory: HandlerModule["__setDatabaseClientFactoryForTests"];
+let takeOverlapRefusals: HandlerModule["__takeOverlapRefusalsForTests"];
 let exchangeKeyRefusal: HandlerModule["exchangeKeyRefusal"];
 
 beforeAll(async () => {
@@ -67,11 +69,17 @@ beforeAll(async () => {
   const mod = await import("../src/api-handler.js");
   handler = mod.handler;
   setDbFactory = mod.__setDatabaseClientFactoryForTests;
+  takeOverlapRefusals = mod.__takeOverlapRefusalsForTests;
   exchangeKeyRefusal = mod.exchangeKeyRefusal;
 });
 
 afterAll(() => {
   setDbFactory(null);
+});
+
+afterEach(() => {
+  // A refused overlap on a path that logs and carries on fails nothing else.
+  expect(takeOverlapRefusals()).toEqual([]);
 });
 
 beforeEach(() => {
@@ -1542,8 +1550,10 @@ describe("the cloud's bytes watermark on /sync/exchange", () => {
 
     expect(bodyOf(res)["responderByteWatermarks"]).toEqual({});
     expect(db.calls(COVERAGE_SAVE)).toHaveLength(0);
-    // The missing file asked once whether the cloud declines it.
+    // The missing file asked once whether the cloud declines it. No record
+    // carries the label, so the lookup reads no records by id.
     expect(db.calls(NO_CLOUD_LABELS)).toHaveLength(1);
+    expect(db.calls(RECORDS_BY_IDS)).toHaveLength(0);
   });
 
   it("counts a file marked starkeep/no-cloud as held, since it refuses those bytes", async () => {
@@ -3441,6 +3451,78 @@ describe("the query grammar on /data/records", () => {
 // upload, presigns each part with its own SHA-256 pinned, and completes it.
 // The uploader holds the upload id: nothing here lists uploads, because that
 // permission cannot be scoped to one user's keys.
+// Every blob-write entry point refuses a key a `starkeep/no-cloud` record
+// names, and writes nothing to S3. The single presign and the presign batch
+// are covered with their routes above; these are the other three.
+describe("the no-cloud refusal on the other blob-write routes", () => {
+  const partChecksum = Buffer.from("1".repeat(64), "hex").toString("base64");
+
+  /** A store where the record `rec-nc`, of `type`, carries the label and names `key`. */
+  function markedAt(key: string, type: string) {
+    return fakeDsqlWithGrants([{ type_id: type.split("/")[0]!, access: "readwrite" }])
+      .on(NO_CLOUD_LABELS, [noCloudLabelRow("rec-nc")])
+      .on(RECORDS_BY_IDS, [recordRow({ id: "rec-nc", type, object_storage_key: key })]);
+  }
+
+  it("refuses a direct upload of bytes a marked record names", async () => {
+    const body = "no-cloud bytes";
+    // The route hashes the body it receives, which is the JSON string.
+    const hash = createHash("sha256").update(JSON.stringify(body)).digest("hex");
+    setDbFactory(markedAt(dataRecordObjectKey(TEST_USER_ID, "image/jpeg", hash), "image/jpeg"));
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "POST",
+        subPath: "/data/files",
+        body,
+        query: { type: "image/jpeg" },
+      }),
+      context,
+    );
+    expect(res.statusCode, res.body).toBe(403);
+    expect(String(bodyOf(res)["error"])).toMatch(/no-cloud/);
+    expect(s3Mock.commandCalls(PutObjectCommand)).toHaveLength(0);
+  });
+
+  it("refuses to start a multipart upload for a marked key", async () => {
+    const key = `shared/test-user/video/dd/${"d".repeat(64)}`;
+    setDbFactory(markedAt(key, "video/mp4"));
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "POST",
+        subPath: "/files/multipart/presign",
+        body: { key, parts: [{ partNumber: 1, checksumSha256: partChecksum }] },
+      }),
+      context,
+    );
+    expect(res.statusCode, res.body).toBe(403);
+    expect(String(bodyOf(res)["error"])).toMatch(/no-cloud/);
+    expect(s3Mock.commandCalls(CreateMultipartUploadCommand)).toHaveLength(0);
+  });
+
+  it("refuses to complete a multipart upload for a marked key", async () => {
+    const key = `shared/test-user/video/dd/${"d".repeat(64)}`;
+    setDbFactory(markedAt(key, "video/mp4"));
+    const res = await handler(
+      signedEvent({
+        appId: "app1",
+        method: "POST",
+        subPath: "/files/multipart/complete",
+        body: {
+          key,
+          uploadId: "UP-1",
+          parts: [{ partNumber: 1, etag: '"e1"', checksumSha256: partChecksum }],
+        },
+      }),
+      context,
+    );
+    expect(res.statusCode, res.body).toBe(403);
+    expect(String(bodyOf(res)["error"])).toMatch(/no-cloud/);
+    expect(s3Mock.commandCalls(CompleteMultipartUploadCommand)).toHaveLength(0);
+  });
+});
+
 describe("multipart upload routes", () => {
   const hash = "d".repeat(64);
   const sharedKey = `shared/test-user/video/dd/${hash}`;

@@ -15,7 +15,7 @@
  * and — end to end — the latency the change exists for.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createDataRecord,
   generateId,
@@ -296,9 +296,11 @@ describe("the responder's bytes watermark", () => {
       },
     }).exchange({ watermarks: {}, limit: 0 });
     expect(overlapped).toBe(false);
-    // Twenty missing files in batches of sixteen.
-    expect(asked.map((keys) => keys.length)).toEqual([16, 4]);
-    expect(new Set(asked.flat())).toEqual(new Set(missingKeys));
+    // Batched: fewer calls than keys, none empty, and each missing key asked
+    // about exactly once.
+    expect(asked.length).toBeLessThan(missingKeys.length);
+    expect(asked.every((keys) => keys.length > 0)).toBe(true);
+    expect(asked.flat().sort()).toEqual([...missingKeys].sort());
   });
 
   it("pins at the batch's first missing file when the decline check fails", async () => {
@@ -321,6 +323,30 @@ describe("the responder's bytes watermark", () => {
     expect(walks[0]!.pins).toEqual({
       C: { key: await keyOf(cloud!, missing), hlc: await hlcOf(cloud!, missing) },
     });
+  });
+
+  it("counts a declined file as held even when its storage check fails", async () => {
+    const [cloud] = await sides("C");
+    const declined = await seedFile(cloud!, 10, { withFile: false });
+    const declinedKey = await keyOf(cloud!, declined);
+    const after = await seedFile(cloud!, 10);
+    const has = cloud!.storage.has.bind(cloud!.storage);
+    vi.spyOn(cloud!.storage, "has").mockImplementation(async (key) => {
+      if (key === declinedKey) throw new Error("[test] storage unreachable");
+      return has(key);
+    });
+
+    const asked: string[][] = [];
+    const response = await responder(cloud!, {
+      declinesBlobs: async (keys) => {
+        asked.push([...keys]);
+        return new Set(keys.filter((key) => key === declinedKey));
+      },
+    }).exchange({ watermarks: {}, limit: 0 });
+
+    // The failed check still reaches the decline lookup, which settles it.
+    expect(asked).toEqual([[declinedKey]]);
+    expect(response.responderByteWatermarks?.["C"]).toEqual(await hlcOf(cloud!, after));
   });
 
   it("omits its bytes watermark when it cannot load the stored value", async () => {

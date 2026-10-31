@@ -9,7 +9,7 @@
  * against real SQL.
  */
 import { createHash, sign } from "node:crypto";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mockClient } from "aws-sdk-client-mock";
 import {
   SSMClient,
@@ -43,6 +43,7 @@ type HandlerModule = typeof import("../src/api-handler.js");
 let handler: HandlerModule["handler"];
 let setAttestation: HandlerModule["__setAttestationForTests"];
 let setDbFactory: HandlerModule["__setDatabaseClientFactoryForTests"];
+let takeOverlapRefusals: HandlerModule["__takeOverlapRefusalsForTests"];
 
 /** SSM parameters the broker has written. */
 let parameters: Map<string, string>;
@@ -71,6 +72,7 @@ beforeAll(async () => {
   handler = mod.handler;
   setAttestation = mod.__setAttestationForTests;
   setDbFactory = mod.__setDatabaseClientFactoryForTests;
+  takeOverlapRefusals = mod.__takeOverlapRefusalsForTests;
 });
 
 beforeEach(() => {
@@ -125,6 +127,11 @@ beforeEach(() => {
       parameters.set(input.Name, input.Value);
       return {};
     });
+});
+
+afterEach(() => {
+  // A refused overlap on a path that logs and carries on fails nothing else.
+  expect(takeOverlapRefusals()).toEqual([]);
 });
 
 function event(args: {
