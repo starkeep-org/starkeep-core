@@ -23,7 +23,14 @@ import { appSyncableTableInfo, FILE_RECORDS_TABLE_INFO } from "@starkeep/shared-
 import { installUserTokenFixture, TEST_USER_ID } from "./user-token.js";
 import { dataRecordObjectKey, serializeHLC } from "@starkeep/protocol-primitives";
 import type { APIGatewayEvent, LambdaContext } from "../src/handler-utils.js";
-import { CHILDREN_OF, STAND_INS_OF_PAGE, fakeDsqlWithGrants, recordRow } from "./fake-dsql.js";
+import {
+  CHILDREN_OF,
+  NO_CLOUD_LABELS,
+  STAND_INS_OF_PAGE,
+  fakeDsqlWithGrants,
+  noCloudLabelRow,
+  recordRow,
+} from "./fake-dsql.js";
 
 const ssmMock = mockClient(SSMClient);
 const stsMock = mockClient(STSClient);
@@ -137,6 +144,8 @@ function bodyOf(res: { body: string }): Record<string, unknown> {
 }
 
 const RECORDS_SELECT = /select \* from "shared"\."records"/;
+/** A read of records by id, as the no-cloud lookup reads the marked records. */
+const RECORDS_BY_IDS = /from "shared"\."records" where "id" in/;
 const RECORDS_INSERT = /insert into "shared"\."records"/;
 /** The `/data/types` histogram: one `GROUP BY type` over the readable rows. */
 const RECORDS_TYPE_COUNTS =
@@ -1523,11 +1532,7 @@ describe("the cloud's bytes watermark on /sync/exchange", () => {
   });
 
   it("stops at a file S3 does not have, and stores nothing new", async () => {
-    const db = storeWithOneRecord()
-      .on(COVERAGE_LOAD, [])
-      .on(COVERAGE_SAVE, [])
-      // The no-cloud check on the missing file: a record with no labels.
-      .on(/from "shared"\."record_labels" where "record_id" in/, []);
+    const db = storeWithOneRecord().on(COVERAGE_LOAD, []).on(COVERAGE_SAVE, []);
     setDbFactory(db);
     s3Mock
       .on(HeadObjectCommand)
@@ -1537,25 +1542,16 @@ describe("the cloud's bytes watermark on /sync/exchange", () => {
 
     expect(bodyOf(res)["responderByteWatermarks"]).toEqual({});
     expect(db.calls(COVERAGE_SAVE)).toHaveLength(0);
+    // The missing file asked once whether the cloud declines it.
+    expect(db.calls(NO_CLOUD_LABELS)).toHaveLength(1);
   });
 
   it("counts a file marked starkeep/no-cloud as held, since it refuses those bytes", async () => {
     const db = storeWithOneRecord()
       .on(COVERAGE_LOAD, [])
       .on(COVERAGE_SAVE, [])
-      .on(/from "shared"\."record_labels" where "record_id" in/, [
-        {
-          record_id: "rec-1",
-          app_id: "starkeep",
-          key: "no-cloud",
-          value: "",
-          record_type: "image/jpeg",
-          created_at: TEST_HLC_FOR_LABELS,
-          updated_at: TEST_HLC_FOR_LABELS,
-          node_id: "test",
-          deleted_at: null,
-        },
-      ]);
+      // `RECORDS_SELECT` answers the marked record by id.
+      .on(NO_CLOUD_LABELS, [noCloudLabelRow("rec-1")]);
     setDbFactory(db);
     s3Mock
       .on(HeadObjectCommand)
@@ -2786,18 +2782,12 @@ describe("POST /files/presign pins the expected checksum", () => {
   const sharedKey = `shared/test-user/image/bb/${hash}`;
   const expectedChecksum = Buffer.from(hash, "hex").toString("base64");
 
-  // Every presign first asks whether a live record at this key is marked
-  // no-cloud. Stubbed empty here: the ordinary case is that the bytes are
-  // uploaded before the record is registered, so there is nothing at the key
-  // yet. (Registered per test rather than in `fakeDsqlWithGrants`, because
-  // routes match in registration order and a shared default would shadow the
-  // refusal test's own stub.)
-  const noRecordAtKey = /from "shared"\."records" where "object_storage_key" =/;
+  // Every presign first asks which records are marked no-cloud.
+  // `fakeDsqlWithGrants` answers none by default, the ordinary case; the
+  // refusal test answers with its own label and record.
 
   it("derives the checksum from the content-addressed key and returns it", async () => {
-    setDbFactory(
-      fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
-    );
+    setDbFactory(fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]));
     const res = await handler(
       signedEvent({
         appId: "app1",
@@ -2816,9 +2806,7 @@ describe("POST /files/presign pins the expected checksum", () => {
   });
 
   it("builds the key from a type and a hash, under the caller's user", async () => {
-    setDbFactory(
-      fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
-    );
+    setDbFactory(fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]));
     const res = await handler(
       signedEvent({
         appId: "app1",
@@ -2834,9 +2822,7 @@ describe("POST /files/presign pins the expected checksum", () => {
   });
 
   it("refuses a key under another user's segment", async () => {
-    setDbFactory(
-      fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
-    );
+    setDbFactory(fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]));
     const res = await handler(
       signedEvent({
         appId: "app1",
@@ -2858,21 +2844,9 @@ describe("POST /files/presign pins the expected checksum", () => {
   // advisory — a guarantee only one side of a transfer enforces is not one.
   it("refuses to presign a write for a record marked starkeep/no-cloud", async () => {
     const db = fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }])
-      .on(noRecordAtKey, [
+      .on(NO_CLOUD_LABELS, [noCloudLabelRow("rec-nc")])
+      .on(RECORDS_BY_IDS, [
         recordRow({ id: "rec-nc", type: "image/jpeg", object_storage_key: sharedKey }),
-      ])
-      .on(/from "shared"\."record_labels" where "record_id" in/, [
-        {
-          record_id: "rec-nc",
-          app_id: "starkeep",
-          key: "no-cloud",
-          value: "",
-          record_type: "image/jpeg",
-          created_at: serializeHLC({ wallTime: 1, counter: 0, nodeId: "n" }),
-          updated_at: serializeHLC({ wallTime: 1, counter: 0, nodeId: "n" }),
-          node_id: "n",
-          deleted_at: null,
-        },
       ]);
     setDbFactory(db);
     const res = await handler(
@@ -2895,9 +2869,7 @@ describe("POST /files/presign pins the expected checksum", () => {
   // is about the broker deciding rather than the uploader.
   describe("declared retrieval intent", () => {
     it("defaults to instant when the caller says nothing", async () => {
-      setDbFactory(
-        fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
-      );
+      setDbFactory(fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]));
       const res = await handler(
         signedEvent({
           appId: "app1",
@@ -2914,9 +2886,7 @@ describe("POST /files/presign pins the expected checksum", () => {
     });
 
     it("tags an archive-intent write so a lifecycle rule can find it later", async () => {
-      setDbFactory(
-        fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
-      );
+      setDbFactory(fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]));
       const res = await handler(
         signedEvent({
           appId: "app1",
@@ -2937,9 +2907,7 @@ describe("POST /files/presign pins the expected checksum", () => {
     // which is exactly when the original is the only readable copy.
     it("writes both intents to Intelligent-Tiering, gating the freeze elsewhere", async () => {
       for (const intent of ["instant", "archive"]) {
-        setDbFactory(
-          fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
-        );
+        setDbFactory(fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]));
         const res = await handler(
           signedEvent({
             appId: "app1",
@@ -2954,9 +2922,7 @@ describe("POST /files/presign pins the expected checksum", () => {
     });
 
     it("binds the storage class and tags into the signature", async () => {
-      setDbFactory(
-        fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
-      );
+      setDbFactory(fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]));
       const res = await handler(
         signedEvent({
           appId: "app1",
@@ -2978,9 +2944,7 @@ describe("POST /files/presign pins the expected checksum", () => {
     // costs money quietly, "archive" puts bytes behind a 48-hour thaw nobody
     // asked for. Neither announces itself.
     it("refuses an unrecognized intent rather than defaulting", async () => {
-      setDbFactory(
-        fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
-      );
+      setDbFactory(fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]));
       const res = await handler(
         signedEvent({
           appId: "app1",
@@ -2996,9 +2960,7 @@ describe("POST /files/presign pins the expected checksum", () => {
   });
 
   it("ignores a caller-supplied checksum in favour of the key's", async () => {
-    setDbFactory(
-      fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
-    );
+    setDbFactory(fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]));
     const res = await handler(
       signedEvent({
         appId: "app1",
@@ -3015,9 +2977,7 @@ describe("POST /files/presign pins the expected checksum", () => {
   });
 
   it("refuses a declared hash that disagrees with the one a shared key names", async () => {
-    setDbFactory(
-      fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
-    );
+    setDbFactory(fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]));
     const res = await handler(
       signedEvent({
         appId: "app1",
@@ -3035,7 +2995,7 @@ describe("POST /files/presign pins the expected checksum", () => {
   // hash and it is pinned the same way: every object carries a whole-file
   // SHA-256, which is what a node proves a cloud copy against.
   it("pins the declared hash for a key that does not name its own", async () => {
-    setDbFactory(fakeDsqlWithGrants().on(noRecordAtKey, []));
+    setDbFactory(fakeDsqlWithGrants());
     const appKey = "apps/app1/test-user/syncable/cover";
     const declared = "d".repeat(64);
     const res = await handler(
@@ -3071,7 +3031,6 @@ describe("POST /files/presign pins the expected checksum", () => {
 // item gets the single route's checks, so the batch cannot widen what a caller
 // may write; it only removes the HEAD and the per-file round trip.
 describe("POST /files/presign-batch", () => {
-  const noRecordAtKey = /from "shared"\."records" where "object_storage_key" =/;
   const hashOf = (c: string) => c.repeat(64);
   const keyOf = (c: string) => `shared/test-user/image/${c}${c}/${hashOf(c)}`;
 
@@ -3082,23 +3041,9 @@ describe("POST /files/presign-batch", () => {
     const foreign = `shared/someone-else/image/44/${hashOf("4")}`;
     const parts = keyOf("5");
     const db = fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }])
-      .on(noRecordAtKey, (q) =>
-        q.values.includes(excluded)
-          ? [recordRow({ id: "rec-nc", type: "image/jpeg", object_storage_key: excluded })]
-          : [],
-      )
-      .on(/from "shared"\."record_labels" where "record_id" in/, [
-        {
-          record_id: "rec-nc",
-          app_id: "starkeep",
-          key: "no-cloud",
-          value: "",
-          record_type: "image/jpeg",
-          created_at: serializeHLC({ wallTime: 1, counter: 0, nodeId: "n" }),
-          updated_at: serializeHLC({ wallTime: 1, counter: 0, nodeId: "n" }),
-          node_id: "n",
-          deleted_at: null,
-        },
+      .on(NO_CLOUD_LABELS, [noCloudLabelRow("rec-nc")])
+      .on(RECORDS_BY_IDS, [
+        recordRow({ id: "rec-nc", type: "image/jpeg", object_storage_key: excluded }),
       ]);
     setDbFactory(db);
     s3Mock
@@ -3140,6 +3085,9 @@ describe("POST /files/presign-batch", () => {
     expect(answers[1]!["checksumSha256"]).toBe(Buffer.from(hashOf("2"), "hex").toString("base64"));
     expect(String(answers[1]!["url"])).toContain("x-amz-checksum-sha256");
     expect(String(answers[2]!["reason"])).toMatch(/no-cloud/);
+    // One no-cloud lookup answers the whole batch, and nothing reads records by key.
+    expect(db.calls(NO_CLOUD_LABELS)).toHaveLength(1);
+    expect(db.calls(/from "shared"\."records" where "object_storage_key"/)).toHaveLength(0);
 
     const line = log.mock.calls
       .map((c) => String(c[0]))
@@ -3157,9 +3105,7 @@ describe("POST /files/presign-batch", () => {
 
   it("answers a key it found present from memory on the next batch", async () => {
     const key = keyOf("6");
-    setDbFactory(
-      fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
-    );
+    setDbFactory(fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]));
     s3Mock.on(HeadObjectCommand).resolves({});
     const ask = () =>
       handler(
@@ -3182,9 +3128,7 @@ describe("POST /files/presign-batch", () => {
   });
 
   it("refuses a batch it cannot read whole", async () => {
-    setDbFactory(
-      fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]).on(noRecordAtKey, []),
-    );
+    setDbFactory(fakeDsqlWithGrants([{ type_id: "image", access: "readwrite" }]));
     const tooMany = Array.from({ length: 33 }, (_, i) => ({ key: `${keyOf("7")}-${i}` }));
     for (const items of [
       [],
@@ -3500,12 +3444,9 @@ describe("the query grammar on /data/records", () => {
 describe("multipart upload routes", () => {
   const hash = "d".repeat(64);
   const sharedKey = `shared/test-user/video/dd/${hash}`;
-  const noRecordAtKey = /from "shared"\."records" where "object_storage_key" =/;
   const partChecksum = (c: string) => Buffer.from(c.repeat(64), "hex").toString("base64");
   const grantVideo = () =>
-    setDbFactory(
-      fakeDsqlWithGrants([{ type_id: "video", access: "readwrite" }]).on(noRecordAtKey, []),
-    );
+    setDbFactory(fakeDsqlWithGrants([{ type_id: "video", access: "readwrite" }]));
 
   it("starts an upload when the caller holds none, and pins each part's checksum", async () => {
     grantVideo();

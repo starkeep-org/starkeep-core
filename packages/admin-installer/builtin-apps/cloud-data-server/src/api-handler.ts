@@ -2253,8 +2253,12 @@ const NO_CLOUD_LABEL_KEY = "no-cloud";
 const NO_CLOUD_REFUSAL =
   "This record is marked starkeep/no-cloud; its bytes may not be written to cloud storage.";
 
+/** Label rows per page when listing the `starkeep/no-cloud` records. */
+const NO_CLOUD_LABEL_PAGE = 500;
+
 /**
- * True when a live record at this object key is marked `starkeep/no-cloud`.
+ * The keys among `objectStorageKeys` that a live record marked
+ * `starkeep/no-cloud` names.
  *
  * The residency decision on the cloud node elides such a record's blob, but a
  * fetch-time decision cannot stop an inbound *push* — so without this, any node
@@ -2264,25 +2268,50 @@ const NO_CLOUD_REFUSAL =
  * Keys are content-addressed, so two records can legitimately share one. Any
  * one of them saying no-cloud is enough to refuse: the exclusion is about the
  * *bytes*, and there is no way to store them for one record and not the other.
+ *
+ * Read from the labels side: the reverse label index finds the no-cloud
+ * records with a seek, and there are usually none, so the whole batch costs
+ * one statement. `shared.records` has no index on `object_storage_key`, so a
+ * read from the records side scans every row the user owns, once per key.
  */
-async function keyIsCloudExcluded(db: DatabaseAdapter, objectStorageKey: string): Promise<boolean> {
-  const found = await db.query({
+async function cloudExcludedKeys(
+  db: DatabaseAdapter,
+  objectStorageKeys: Iterable<string>,
+): Promise<Set<string>> {
+  const asked = new Set(objectStorageKeys);
+  const excluded = new Set<string>();
+  if (asked.size === 0) return excluded;
+
+  const recordIds = new Set<StarkeepId>();
+  let cursor: string | undefined;
+  do {
+    const page = await db.findByLabel({
+      appId: STARKEEP_LABEL_APP_ID,
+      key: NO_CLOUD_LABEL_KEY,
+      limit: NO_CLOUD_LABEL_PAGE,
+      ...(cursor ? { cursor } : {}),
+    });
+    for (const label of page.labels) recordIds.add(label.recordId);
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor);
+  if (recordIds.size === 0) return excluded;
+
+  const marked = await db.query({
     filters: [
-      { field: "objectStorageKey", operator: "eq", value: objectStorageKey },
+      { field: "id", operator: "in", value: [...recordIds] },
       { field: "deletedAt", operator: "isNull" },
     ],
-    limit: 100,
+    limit: recordIds.size,
   });
-  if (found.records.length === 0) return false;
-
-  const byId = await db.getLabelsByRecordIds(found.records.map((r) => r.id));
-  for (const labels of byId.values()) {
-    for (const l of labels) {
-      if (l.deletedAt) continue;
-      if (l.appId === STARKEEP_LABEL_APP_ID && l.key === NO_CLOUD_LABEL_KEY) return true;
-    }
+  for (const record of marked.records) {
+    if (asked.has(record.objectStorageKey)) excluded.add(record.objectStorageKey);
   }
-  return false;
+  return excluded;
+}
+
+/** {@link cloudExcludedKeys} for one key. */
+async function keyIsCloudExcluded(db: DatabaseAdapter, objectStorageKey: string): Promise<boolean> {
+  return (await cloudExcludedKeys(db, [objectStorageKey])).has(objectStorageKey);
 }
 
 /**
@@ -3987,27 +4016,34 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
      * SHA-256: it is what lets a node prove the cloud holds a file before
      * letting its own copy go.
      */
-    const uploadTarget = async (
-      body: UploadRequestBody,
-    ): Promise<
+    type UploadRefusal = {
+      ok: false;
+      response: ReturnType<typeof clientErr>;
+      message: string;
+      status: number;
+    };
+    type UploadTarget =
       | { ok: true; key: string; contentHash: string; intent: RetrievalIntent }
-      | { ok: false; response: ReturnType<typeof clientErr>; message: string; status: number }
-    > => {
-      const refuse = (message: string, status: number) => ({
-        ok: false as const,
-        response: clientErr(message, status),
-        message,
-        status,
-      });
+      | UploadRefusal;
+    const refuseUpload = (message: string, status: number): UploadRefusal => ({
+      ok: false,
+      response: clientErr(message, status),
+      message,
+      status,
+    });
+    // Every check that needs no database: the key, its grant and the intent.
+    const uploadKey = (
+      body: UploadRequestBody,
+    ): { ok: true; key: string; intent: RetrievalIntent } | UploadRefusal => {
       let key = body.key;
       if (!key && body.type && body.contentHash) {
         if (!isSha256Hex(body.contentHash))
-          return refuse("contentHash must be a lowercase hex SHA-256", 400);
+          return refuseUpload("contentHash must be a lowercase hex SHA-256", 400);
         key = dataRecordObjectKey(subject.userId, body.type, body.contentHash);
       }
-      if (!key) return refuse("key, or type and contentHash, is required", 400);
+      if (!key) return refuseUpload("key, or type and contentHash, is required", 400);
       const check = parseObjectKey(subject, key, grants, "write");
-      if (!check.ok) return refuse(check.message, check.status);
+      if (!check.ok) return refuseUpload(check.message, check.status);
       // Declared retrieval intent, in the platform's vocabulary — the app says
       // what latency it can tolerate, not which storage class it wants. An
       // unrecognized value is refused rather than defaulted: silently writing
@@ -4015,27 +4051,46 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       // writing `archive` would put bytes behind a 48-hour thaw nobody asked
       // for. Neither failure announces itself.
       if (body.intent !== undefined && !isRetrievalIntent(body.intent)) {
-        return refuse(
+        return refuseUpload(
           `intent must be one of ${RETRIEVAL_INTENTS.join(", ")} (got "${body.intent}")`,
           400,
         );
       }
-      if (await keyIsCloudExcluded(db, key)) return refuse(NO_CLOUD_REFUSAL, 403);
-
-      const keyHash = contentHashFromDataRecordObjectKey(key);
-      const declared = body.contentHash;
-      if (declared !== undefined && !isSha256Hex(declared)) {
-        return refuse("contentHash must be a lowercase hex SHA-256", 400);
-      }
-      if (keyHash && declared !== undefined && declared !== keyHash) {
-        return refuse(`contentHash disagrees with the hash ${key} names`, 400);
-      }
-      const contentHash = keyHash ?? declared;
-      if (!contentHash) {
-        return refuse("contentHash is required for a key that does not name its own hash", 400);
-      }
-      return { ok: true, key, contentHash, intent: body.intent ?? DEFAULT_RETRIEVAL_INTENT };
+      return { ok: true, key, intent: body.intent ?? DEFAULT_RETRIEVAL_INTENT };
     };
+    // The batch's keys go to one no-cloud lookup, after their grants pass.
+    const uploadTargets = async (bodies: readonly UploadRequestBody[]): Promise<UploadTarget[]> => {
+      const keys = bodies.map(uploadKey);
+      const excluded = await cloudExcludedKeys(
+        db,
+        keys.flatMap((resolved) => (resolved.ok ? [resolved.key] : [])),
+      );
+      return bodies.map((body, index): UploadTarget => {
+        const resolved = keys[index]!;
+        if (!resolved.ok) return resolved;
+        const { key, intent } = resolved;
+        if (excluded.has(key)) return refuseUpload(NO_CLOUD_REFUSAL, 403);
+
+        const keyHash = contentHashFromDataRecordObjectKey(key);
+        const declared = body.contentHash;
+        if (declared !== undefined && !isSha256Hex(declared)) {
+          return refuseUpload("contentHash must be a lowercase hex SHA-256", 400);
+        }
+        if (keyHash && declared !== undefined && declared !== keyHash) {
+          return refuseUpload(`contentHash disagrees with the hash ${key} names`, 400);
+        }
+        const contentHash = keyHash ?? declared;
+        if (!contentHash) {
+          return refuseUpload(
+            "contentHash is required for a key that does not name its own hash",
+            400,
+          );
+        }
+        return { ok: true, key, contentHash, intent };
+      });
+    };
+    const uploadTarget = async (body: UploadRequestBody): Promise<UploadTarget> =>
+      (await uploadTargets([body]))[0]!;
 
     // POST /apps/{appId}/files/presign — issue a presigned S3 PUT URL.
     // Body: { key, contentType? }. The local-data-server's HttpObjectStorageAdapter
@@ -4077,8 +4132,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // batch of up to 32 files. Body: { items: [{ key, contentType?,
     // contentHash?, sizeBytes?, sign? }], report? }.
     //
-    // Each item gets the single presign's checks (`uploadTarget`, which
-    // includes the no-cloud refusal), then a presence check, then a URL signed
+    // Each item gets the single presign's checks (`uploadTargets`, which
+    // includes the no-cloud refusal, one lookup for the batch), then a presence check, then a URL signed
     // exactly as the single route signs one. One request in place of a HEAD
     // and a presign per file, which is the difference that matters under a
     // Lambda concurrency cap shared with the cloud web.
@@ -4111,7 +4166,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             tagging?: Record<string, string>;
           };
       const answers: Answer[] = new Array(items.length);
-      const targets = await Promise.all(items.map((item) => uploadTarget(item)));
+      const targets = await uploadTargets(items);
       const toCheck: Array<{
         index: number;
         key: string;
