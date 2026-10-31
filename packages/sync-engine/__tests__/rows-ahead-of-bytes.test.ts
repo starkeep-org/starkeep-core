@@ -101,7 +101,7 @@ function responder(
   cloud: Side,
   extra: {
     byteCoverage?: ByteCoverageStore;
-    declinesBlob?: (key: string) => Promise<boolean>;
+    declinesBlobs?: (keys: readonly string[]) => Promise<ReadonlySet<string>>;
     onFilesHeld?: (recordIds: readonly StarkeepId[]) => Promise<void>;
   } = {},
 ) {
@@ -263,10 +263,64 @@ describe("the responder's bytes watermark", () => {
     const declinedKey = await keyOf(cloud!, declined);
     const after = await seedFile(cloud!, 10);
 
+    const asked: string[][] = [];
     const response = await responder(cloud!, {
-      declinesBlob: async (key) => key === declinedKey,
+      declinesBlobs: async (keys) => {
+        asked.push([...keys]);
+        return new Set(keys.filter((key) => key === declinedKey));
+      },
     }).exchange({ watermarks: {}, limit: 0 });
     expect(response.responderByteWatermarks?.["C"]).toEqual(await hlcOf(cloud!, after));
+    // One call for the batch, naming only the key storage lacks.
+    expect(asked).toEqual([[declinedKey]]);
+  });
+
+  it("asks once per batch, never concurrently, and only about keys storage lacks", async () => {
+    const [cloud] = await sides("C");
+    const missingKeys: string[] = [];
+    for (let i = 0; i < 20; i++) {
+      missingKeys.push(await keyOf(cloud!, await seedFile(cloud!, 10, { withFile: false })));
+    }
+    await seedFile(cloud!, 10);
+    let running = 0;
+    let overlapped = false;
+    const asked: string[][] = [];
+    await responder(cloud!, {
+      declinesBlobs: async (keys) => {
+        if (running > 0) overlapped = true;
+        running++;
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        running--;
+        asked.push([...keys]);
+        return new Set(keys);
+      },
+    }).exchange({ watermarks: {}, limit: 0 });
+    expect(overlapped).toBe(false);
+    // Twenty missing files in batches of sixteen.
+    expect(asked.map((keys) => keys.length)).toEqual([16, 4]);
+    expect(new Set(asked.flat())).toEqual(new Set(missingKeys));
+  });
+
+  it("pins at the batch's first missing file when the decline check fails", async () => {
+    const [cloud] = await sides("C");
+    const held = await seedFile(cloud!, 10);
+    const missing = await seedFile(cloud!, 10, { withFile: false });
+    await seedFile(cloud!, 10, { withFile: false });
+    const walks: ByteWalkReport[] = [];
+    await createInProcessSyncTransport({
+      databaseAdapter: cloud!.db,
+      clock: cloud!.clock,
+      objectStorage: cloud!.storage,
+      syncSharedRecords: true,
+      onWalk: (report) => walks.push(report),
+      declinesBlobs: async () => {
+        throw new Error("[test] lookup failed");
+      },
+    }).exchange({ watermarks: {}, limit: 0 });
+    expect(walks[0]!.to).toEqual({ C: await hlcOf(cloud!, held) });
+    expect(walks[0]!.pins).toEqual({
+      C: { key: await keyOf(cloud!, missing), hlc: await hlcOf(cloud!, missing) },
+    });
   });
 
   it("omits its bytes watermark when it cannot load the stored value", async () => {
@@ -387,7 +441,11 @@ describe("pushing rows ahead of files", () => {
         hlc: phone!.clock.now(),
       },
     ]);
-    const node = engine(phone!, cloud!, responder(cloud!, { declinesBlob: async () => true }));
+    const node = engine(
+      phone!,
+      cloud!,
+      responder(cloud!, { declinesBlobs: async (keys) => new Set(keys) }),
+    );
 
     const result = await node.sync();
 
