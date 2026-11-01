@@ -18,12 +18,15 @@
  * `@starkeep/e2e`.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { getFreePort, startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
+
+const execFileAsync = promisify(execFile);
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 /**
@@ -139,6 +142,21 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
   return { url, port, child, logs: () => output, stop };
 }
 
+/**
+ * Run `vite build` for an app whose server serves its browser half from
+ * `dist/`. Nothing else rebuilds that output before a run, so without this a
+ * suite tests whichever client was last built rather than the checkout's
+ * source.
+ */
+async function buildClient(appDir: string): Promise<void> {
+  try {
+    await execFileAsync(join(appDir, "node_modules/.bin/vite"), ["build"], { cwd: appDir });
+  } catch (err) {
+    const { stdout = "", stderr = "" } = err as { stdout?: string; stderr?: string };
+    throw new Error(`vite build failed in ${appDir}.\n--- output ---\n${stdout}${stderr}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // The platform stack
 // ---------------------------------------------------------------------------
@@ -209,8 +227,10 @@ export async function startPlatformStack(options: PlatformStackOptions): Promise
     // admin-web is the first app off the framework: its server is a plain Node
     // process serving a built client, so the harness starts what an operator
     // starts rather than a dev server. `tsx` runs the TypeScript entry directly,
-    // the way `apps/local-data-server` is run.
+    // the way `apps/local-data-server` is run. The client is rebuilt first so
+    // the run serves this checkout's source rather than a stale `dist/`.
     const adminDir = join(REPO_ROOT, "apps/admin-web");
+    await buildClient(adminDir);
     admin = await startWebServer({
       appDir: adminDir,
       command: join(adminDir, "node_modules/.bin/tsx"),
@@ -225,6 +245,9 @@ export async function startPlatformStack(options: PlatformStackOptions): Promise
     });
     if (options.drive !== false) {
       const driveDir = join(REPO_ROOT, "apps/drive");
+      // Drive's server builds only a *missing* `dist/`, so a stale one needs
+      // the same rebuild.
+      await buildClient(driveDir);
       drive = await startWebServer({
         appDir: driveDir,
         command: join(driveDir, "node_modules/.bin/tsx"),
