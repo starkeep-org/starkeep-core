@@ -27,7 +27,7 @@
     "tsx": "^4.21.0",
     "turbo": "^2.9.14",
     "typescript": "^5.7.0",
-    "vitest": "^3.2.7"
+    "vitest": "^5.0.5"
   },
   "packageManager": "pnpm@10.20.0",
   "engines": {
@@ -57,7 +57,7 @@
       "sigstore": "^4.1.1",
       "tmp": "^0.2.6",
       "undici@6": "^6.29.1",
-      "vite": "^6.4.4",
+      "vite": "^8.3.5",
       "@babel/core": "^7.29.6",
       "esbuild": "^0.28.1",
       "fast-xml-parser": "^5.7.0",

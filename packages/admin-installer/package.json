@@ -46,13 +46,13 @@
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.4",
     "@starkeep/aws-bootstrap": "workspace:*",
-    "@types/node": "^22.0.0",
+    "@types/node": "^22.20.5",
     "@types/pg": "^8.0.0",
     "aws-sdk-client-mock": "^4.1.0",
     "esbuild": "^0.24.0",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0",
-    "vitest": "^3.2.7"
+    "vitest": "^5.0.5"
   },
   "peerDependencies": {
     "@starkeep/admin-manifest": "workspace:*"
