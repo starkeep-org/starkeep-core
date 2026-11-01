@@ -28,13 +28,16 @@ export default defineConfig({
   // browser is on the machine they are already administering, so there is no
   // old-browser audience to lower for — and several dependencies the shell
   // legitimately loads (the AWS SDK's browser build, sonner, react-router) use
-  // destructuring esbuild refuses to transform to the lower target at all.
+  // destructuring that esbuild refused to transform to the lower target at all.
   //
-  // `build.target` alone is not enough: dependency pre-bundling in development
-  // is a separate esbuild pass with its own target, and leaving it at the
-  // default made `--dev` fail to start while `vite build` succeeded.
-  esbuild: { target: BROWSER_TARGET },
-  optimizeDeps: { esbuildOptions: { target: BROWSER_TARGET } },
+  // `build.target` alone is not enough: Oxc's transform of the app's source and
+  // Rolldown's dependency pre-bundle in development each take their own target.
+  // Under Vite 6, leaving the pre-bundle at its default made `--dev` fail to
+  // start while `vite build` succeeded. Vite 8 silently ignores the old
+  // `optimizeDeps.esbuildOptions.target`, so the pre-bundle target lives under
+  // `rolldownOptions.transform`.
+  oxc: { target: BROWSER_TARGET },
+  optimizeDeps: { rolldownOptions: { transform: { target: BROWSER_TARGET } } },
   build: {
     outDir: "dist",
     emptyOutDir: true,

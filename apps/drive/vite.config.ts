@@ -24,13 +24,13 @@ export default defineConfig({
   resolve: {
     alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
   },
-  // Stated in all three places esbuild asks for it. Vite runs esbuild on the
-  // app's source, on the development dependency pre-bundle and on the
-  // production build with three independently configured targets, and a target
-  // set in only one of them fails in the others — silently in the direction
-  // that leaves `vite build` green and `pnpm dev` unable to start.
-  esbuild: { target: BROWSER_TARGET },
-  optimizeDeps: { esbuildOptions: { target: BROWSER_TARGET } },
+  // Stated in all three places Vite asks for it. Vite runs Oxc on the app's
+  // source, Rolldown on the development dependency pre-bundle and Rolldown again
+  // on the production build with three independently configured targets, and a
+  // target set in only one of them fails in the others — silently in the
+  // direction that leaves `vite build` green and `pnpm dev` unable to start.
+  oxc: { target: BROWSER_TARGET },
+  optimizeDeps: { rolldownOptions: { transform: { target: BROWSER_TARGET } } },
   build: {
     outDir: "dist",
     emptyOutDir: true,
