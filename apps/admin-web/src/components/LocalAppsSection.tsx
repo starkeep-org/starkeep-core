@@ -533,7 +533,7 @@ function ConsentModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="bg-background rounded-lg border shadow-lg max-w-lg w-full flex flex-col gap-4 p-5">
+      <div className="bg-background rounded-lg border shadow-lg max-w-lg w-full max-h-full overflow-y-auto flex flex-col gap-4 p-5">
         <h3 className="text-lg font-semibold">Install {entry.manifest.name ?? entry.appId}?</h3>
         <p className="text-sm text-muted-foreground">
           This app is requesting the following access to your shared data. Other apps with grants on
