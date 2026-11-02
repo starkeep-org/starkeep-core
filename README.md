@@ -11,6 +11,8 @@ Starkeep is a modern self-hosting system that allows you to keep your own data, 
 - Enterprise-grade security and built-in file versioning.
 - Easy enough for anyone to set up and run, with limitless potential for developers.
 
+[![Join us on Discord](https://img.shields.io/badge/Join%20us-Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/W2Kt9cPGeA)
+
 # Why Starkeep
 
 Many commercial apps take your data, lightly repackage it, provide your own data back to you using a frontend they control, and then charge you for it. Big Tech's Photos apps are obvious examples, along with many others. The model leaves users helpless and potentially locked out from their own data, whenever the app decides to lock down APIs, increase pricing, or otherwise cripple their product. Not to mention that the "privacy" policies of these apps usually permit all sorts of things being done with your data, especially in the consumer space. AI has dramatically increased the urgency of these problems.
@@ -178,7 +180,7 @@ Photos then shows the photos that synced from this computer.
 
 Starkeep Photos is available as an Android app you can build yourself. (Starkeep Photos for iOS is in the works.)
 
-Until the app is available in the Play Store, see Discord for an APK download link. You can also build the APK from source as described under [Build the APK from source](#build-the-apk-from-source-optional) below.
+Until the app is available in the Play Store, see the [Starkeep Discord](https://discord.gg/W2Kt9cPGeA) for an APK download link. You can also build the APK from source as described under [Build the APK from source](#build-the-apk-from-source-optional) below.
 
 ### 1. Register the Photos mobile app on Starkeep Cloud
 
