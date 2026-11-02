@@ -92,11 +92,14 @@ test("install through the admin consent flow, with the manifest's grants shown",
   // anything is written. The card lists the grants too, so scope to the modal.
   const consent = page.locator("div.fixed").filter({ hasText: "Install Probe?" });
   await expect(consent).toBeVisible();
-  // The manifest's own order — the dialog renders `types.join(", ")`, so this
-  // asserts the declared list reached the dialog rather than that some list did.
-  await expect(consent.getByText("image/png, image/jpeg, image/avif")).toBeVisible();
-  await expect(consent.getByText("records: read + write")).toBeVisible();
+  await expect(consent.getByText("Images", { exact: true })).toBeVisible();
+  await expect(consent.getByText("files: read + write")).toBeVisible();
   await expect(consent.getByText("metadata: read + write")).toBeVisible();
+  // The type list starts collapsed. Its subtypes appear in the manifest's own
+  // order, so this asserts the declared list reached the dialog rather than
+  // that some list did.
+  await consent.getByRole("button", { name: "3 types" }).click();
+  await expect(consent.getByText("png, jpeg, avif")).toBeVisible();
 
   await page.getByRole("button", { name: "Approve & Install" }).click();
   await expect(card.getByText("Installed", { exact: true })).toBeVisible({ timeout: 60_000 });
