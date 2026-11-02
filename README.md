@@ -1,70 +1,238 @@
-# Starkeep
+# Overview
 
-Starkeep is a modern self-hosting system that allows you to keep your own data and run your own apps on your own hardware and (optionally) your own serverless cloud infra. Starkeep's advantages over traditional self-hosting include:
+Starkeep is a modern self-hosting system that allows you to keep your own data, easily build and run your own apps, and do it all on your own hardware and your own serverless cloud infra.
 
-- Ultra-low, scale-to-zero running costs thanks to fully serverless architecture - **Starkeep costs ~$0 to run**, you just (essentially) pay for actual storage and transfer costs.
-- Common data storage and indexing layer makes building apps easy and eliminates unnecessary container silos
-- Common, built-in cloud <-> local sync layer that syncs both user files and app specific data
-- Run apps locally on device and/or in the cloud
-- Enterprise-grade security, backups, and versioning built-in
-- **Easy enough for anyone to set up and run**, with limitless potential for developers
+* Fully serverless cloud architecture provides ultra-low running costs. Most users pay only for storage in their own cloud account, 1TB typically costs \~\$2 / month  
+* Create and run mobile apps, desktop apps, and web apps  
+* Local-first philosophy. Storage, sync, and apps generally work offline by default  
+* Common data storage and content-addressed indexing layer makes building apps easy and eliminates unnecessary data silos  
+* Common, built-in sync layer that syncs both user data files and app specific data  
+* Multi-user support within a deployment, with separate admin and data roles  
+* Enterprise-grade security and built-in file versioning  
+* Easy enough for anyone to set up and run, with limitless potential for developers
 
-## Current Project Status
+# Why Starkeep
 
-Starkeep is currently in alpha, pre-production status. The whole system and all the benefits described above are fully implemented end-to-end, including a proof-of-concept installable Photos app (available in the sister repo starkeep-apps), and extensive automated tests.
+Many commercial apps take your data, lightly repackage it, provide your own data back to you using a frontend they control, and then charge you for it. Big Tech’s Photos apps are obvious examples, along with many others. The model leaves users helpless and potentially locked out from their own data, whenever the app decides to lock down APIs, increase pricing, or otherwise cripple their product. Not to mention that the "privacy" policies of these apps usually permit all sorts of things being done with your data, especially in the consumer space. AI has dramatically increased the urgency of these problems.
 
-However, there are some significant known limitations, making Starkeep probably not yet suitable for "production" (that is personal use), yet:
+Starkeep’s goal is to disrupt \*all\* of these products with a universal solution anyone, even non-technical people, can easily host themselves, with minimal running cost to users and minimal boilerplate for building apps. This is possible because all of these apps have more or less the same shape, and more or less do the same things. They can all handle data in the same way. They really only need different frontends. 
 
-- Starkeep does not yet provide a way to update its foundational bootstrap deployment. Of course, you can update it yourself since it runs on your infra, but there's no out of the box update support yet.
-- Custom DNS support has not been added to the system yet.
-- Starkeep does not yet support non-default Lambda concurrency limits (i.e. beyond the new account default limit of 10). This is because increasing that limit requires making a request to Amazon and could complicate the setup, which we wanted to keep as simple as possible. We'll sort this out soon.
-- The apps - essentially Drive (built-in) and Photos (installable) - are mostly bare bones proof-of-concept level and lack the features you'd likely need to use these apps as real replacements for, say, your current Photos app. We'll get there!
+The breadth and ambition of Starkeep is what makes this different from traditional self-hosting. The traditional server-based containerized approach to self-hosted apps means users have to deal with a variety of different feature sets and paradigms, and there's little or no interoperability among apps. Meanwhile, in order to build apps for traditional self-hosting, developers have to reinvent basic systems like storage, sync, user management, etc that really only need to be solved once.
 
-## Overview
+# Get Started
 
-The Starkeep Core repo includes four built-in system apps:
+This guide installs Starkeep on your computer, adds the Starkeep Photos flagship app, and then optionally deploys Starkeep to your own AWS account so your data syncs across devices.
 
-- **Starkeep Admin**: The management hub. Sign in, discover, install and run apps. Currently, the Admin app runs locally only.
-- **Local Data Server**: A local service responsible for indexing, lookup, enforcing data semantics, and bookkeeping sync on the local side.
-- **Starkeep Drive**: A general purpose storage app with two special powers: it is the only app allowed to operate on all file types (including unknown), and its identity is used to sync data between local and cloud. Currently, the Starkeep Drive app runs locally only.
-- **Cloud Data Server**: The cloud analog of the local data server: responsible for indexing, lookup, enforcing data semantics, and bookkeeping sync on the cloud side. Runs in a Lambda.
+Part A runs entirely on your computer and needs no AWS account. Part B adds the cloud. You can stop after Part A and still use Starkeep's apps locally, offline.
 
-Beyond the core, Starkeep is designed for many "installable" apps to run on top by interacting with the Local and/or Cloud Data Servers. Each installable app declares the file types it can operate on in its manifest, and users accept the type permissions at install time.
+## Before you begin
 
-For now, we provide an example "Photos" app available in a separate repo, [`starkeep-apps`](https://github.com/starkeep-org/starkeep-apps).
+You need the following on your computer:
 
-For the full picture of the parts and how data moves between them, see [`system-design.md`](system-design.md). For the trust boundaries between those parts, see [`data-roles-and-permissions.md`](data-roles-and-permissions.md).
+- Node.js 22 or later.  
+- pnpm 10.20 or later.  
+- A checkout of this repository, `starkeep-core`.  
+- A checkout of [`starkeep-apps`](https://github.com/starkeep-org/starkeep-apps) is optional but highly recommended so you can try out the Starkeep Photos app and examine its implementation.
 
-## Getting started
+The cloud setup (Part B) also needs an AWS account. The setup wizard explains how to create one.
 
-[`getting-started.md`](getting-started.md) walks through running Starkeep on your computer, installing the Photos example app, deploying Starkeep to your own AWS account, adding phones, computers and people, removing Starkeep, and running the tests.
+---
 
-## Security
+## Part A: run Starkeep on your computer
 
-Starkeep's cloud-side security posture has been assessed in a written threat model: [`SECURITY.md`](SECURITY.md). It covers the cloud data server (broker, DSQL, files bucket, API Gateway), cloud apps and their install/uninstall lifecycle, the Cognito + IAM bootstrap, sign-in for cloud apps, computers and phones, the isolation between people on one deployment, and the cloud sync path, working from the boundary of the operator's own AWS account. Each threat carries an honest posture label — Strong, Adequate, Partial, Deferred by design, or Out of scope / accepted.
+### 1\. Install dependencies
 
-A companion breadth-first evaluation against the OWASP ASVS 5.0 standard — every chapter, high level — lives in [`owasp-asvs-evaluation.md`](owasp-asvs-evaluation.md).
+1. Run the following command at the root of `starkeep-core`:  
+     
+   pnpm install  
+     
+   The install also builds the workspace packages. To rebuild later without reinstalling, run `pnpm build`.  
+     
+2. Run the same command at the root of `starkeep-apps`. Installed apps run straight out of their source checkout, so each app's dependencies must be present before admin-web can start the app.
 
-## Further reading
+### 2\. Start Starkeep Admin
 
-- [`system-design.md`](system-design.md) — the major parts, how data is classified (shared vs app-specific), and how it moves and syncs.
-- [`data-roles-and-permissions.md`](data-roles-and-permissions.md) — identities, trust boundaries, and why the admin app never appears on the data path.
-- App READMEs: [`apps/admin-web`](apps/admin-web/README.md), [`apps/local-data-server`](apps/local-data-server/README.md).
+Starkeep Admin is a local web app for starting Starkeep's services, installing apps, and setting up the cloud.
 
-## Repository layout
+1. Start the local Admin web app. From the root of `starkeep-core`:  
+     
+   cd admin-web  
+   pnpm dev  
+     
+2. Open `http://localhost:3000` in your browser. 
 
-```
-starkeep-core/
-  apps/
-    admin-web/           Admin panel — the command center for setup, install, and status
-    local-data-server/   On-device data broker (HTTP); embeds the SDK, runs sync + watches local folders
-    drive/               Starkeep Drive UI — the built-in User-Data-Owner app
-  packages/              SDK, storage adapters, sync engine, access control, installer, bootstrap, …
-    admin-installer/builtin-apps/
-      cloud-data-server/ The cloud-side data broker, deployed as a built-in app
-      starkeep-drive/    The cloud-side Drive built-in
-  scripts/               Teardown + local reset helpers
-  e2e/  e2e-aws/         Platform end-to-end suites (local Playwright / real AWS)
-```
+Admin listens on `127.0.0.1` and refuses any request addressed to a name other than `localhost`, `127.0.0.1` or `[::1]`. To reach it from another device on your network, add its IP address (as a comma-separated list) to the key `STARKEEP_ADMIN_DEV_ORIGINS` in `.env.local` at the root of `starkeep-core`.
 
-First-party _apps_ (e.g. Photos) live in the sibling [`starkeep-apps/`](../starkeep-apps) checkout. They install through the same path a third-party app would — there is no privileged wiring against `starkeep-core`.
+### 3\. Start the local data server
+
+The local data server stores and indexes everything on this computer. Every app on the computer reads and writes through it, and it runs sync once you set up the cloud.
+
+In the **Local** section, find the **Data Server** card and click **Start Data Server**. The data server listens on port 9820\.
+
+On first start, the data server creates `~/.starkeep/` to hold its database, object storage for files and configuration. To keep that state somewhere else, set `STARKEEP_DIR` to an absolute path in `.env.local` at the root of `starkeep-core`. The file `.env.example` lists the supported settings.
+
+### 4\. (Optional) Add a folder of files
+
+The data server can watch folders on your computer. Each file in a watched folder becomes a record that Starkeep apps can see. The data server picks up new and changed files as they appear.
+
+1. Create a folder and copy a few files into it, such as some photos and a document.  
+2. On the **Data Server** card, click **Add Local Folder**.  
+3. Enter the folder's path in the **Local folders** dialog and click **Add folder**.
+
+Starkeep uses symlinks instead of copies locally, so your actual files stay in their original location while becoming accessible to Starkeep apps (and synced to the cloud if you set that up).
+
+You can use a different app (such as Photos) to add files if you prefer.
+
+### 5\. (Optional) Open Drive
+
+Starkeep Drive is a basic local app that lets you see all the files kept in Starkeep.
+
+1. On the **Starkeep Drive** card, click **Start Drive**.  
+2. Click **Open Drive ↗**.
+
+The files from your folder appear in Drive, which confirms that the data server indexed them.
+
+### 6\. (Recommended) Install and open Photos
+
+Admin finds apps by scanning folders that you register. Each folder inside a registered folder that holds a `starkeep.manifest.json` file counts as an app. 
+
+If your starkeep-apps checkout is a sibling directory of starkeep-core, the Photos card will show automatically.
+
+If you don’t see it, click **Discover apps** in the header and add the absolute path of your `starkeep-apps` checkout.
+
+1. On the Photos card, click **Install Photos**.   
+2. Click **Approve & Install** to finish the install. This gives Photos permission to read and write photo and video files to your common storage.  
+3. Click **Start Photos**, then click **Open Photos ↗**.
+
+Photos shows the images from your watched folder, or you can add photos to it directly.
+
+---
+
+## Part B: deploy Starkeep to your AWS account
+
+The cloud stores a copy of your data in your own AWS account and syncs it across your computers and phones. It also enables you to run web apps in the cloud that you can access from anywhere.
+
+Only the accounts you create can sign in to your deployment and reach its data. The Starkeep organization has no access.
+
+Everything below is a one-time setup.
+
+### Prerequisite
+
+Starkeep Cloud runs on your AWS account (support for more providers will come later). If you don’t have an AWS account, you can create one for free
+
+### 1\. Open the setup wizard and deploy the bootstrap stack
+
+In the **Cloud** section of the dashboard, click **Deploy Starkeep Cloud**.
+
+The first step deploys your bootstrap stack. The stack creates the sign-in service and the identities and permission limits that the rest of the deployment uses.
+
+1. Choose an **AWS Region** and keep the default **Stack prefix**, `starkeep`, unless you need several deployments in one account.  
+2. Click **Download bootstrap template**.  
+3. Enter the email address to use for your Starkeep Admin account. This account will be able to manage users and apps in the cloud. This email is private to you, no one else sees it, not even the Starkeep organization.  
+4. Click **Open CloudFormation console ↗** and follow **Show full instructions** to create the stack from the downloaded template.  
+5. Wait about a minuntil the stack's **Outputs** tab lists values, then click **Stack is deployed — Continue**.
+
+### 2\. Copy the stack outputs
+
+1. Open the stack's **Outputs** tab through the **CloudFormation stack** link in the wizard.  
+2. Copy each of the three values into the wizard field with the same name, then click **Continue**:  
+   - **IdentityPoolId**  
+   - **UserPoolClientId**  
+   - **UserPoolId**
+
+Please note that none of these values are credentials and none are sensitive.
+
+### 3\. Sign in to your admin account
+
+1. Check the email you entered in Step 1 for your temp password.  
+2. Enter the email address and the temporary password, and click **Sign in**.  
+3. Cognito then asks for a permanent password. Choose a password of at least eight characters and click **Set password and sign in**.
+
+### 4\. Deploy the Starkeep cloud
+
+1. Click **Deploy Starkeep cloud**. The deployment takes a few minutes to complete.  
+2. When the deployment completes, click **Continue →** to return to the dashboard.
+
+### 5\. Sign this computer in to sync
+
+This computer syncs only after you sign it in. A sign-in form now sits under the dashboard's **Local** heading.
+
+1. Enter the email address and password of your Starkeep account and click **Sign in to sync**.  
+2. Wait for the line under the heading to change from "Signed in as `<email>`. Connecting to this cloud…" to "Local apps sync with this cloud as `<email>`." A **Sign out** link follows the sentence.  
+3. Open Drive to see the sync state of your files.
+
+From now on, the data server syncs your computer’s local Starkeep with your cloud Starkeep in the background. 
+
+### 6\. Install Photos in the cloud
+
+1. In the **Cloud** section, find the Photos card and click **Install Photos in cloud**. The install builds Photos, uploads it and creates its cloud resources. The install takes a few minutes, and a failed install usually succeeds on **Retry**.  
+2. When the card reads **Installed**, click **Open Photos ↗**.  
+3. Sign in on the Starkeep sign-in page with your Starkeep account.
+
+Photos then shows the photos that synced from this computer.
+
+### 7\. Add your phone or another computer (optional)
+
+The **Cloud address** line under the **Cloud** heading shows the address that phones and other computers sign in with. Click the copy icon beside the address to copy the address.
+
+To add another computer:
+
+1. Complete Part A on the other computer.  
+2. In the other computer's **Cloud** section, paste the address into the **This machine** card and click **Join**.  
+3. Sign in with your Starkeep account.
+
+To add a phone, install the Photos Mobile app for Android and sign in with the same address and account. The [`starkeep-apps` README](https://github.com/starkeep-org/starkeep-apps#readme) explains how to build and install the app.
+
+### 8\. Add people (optional)
+
+One deployment can hold several people, and each person gets a separate library. Nobody can see another person's data. The dashboard's **Cloud Users** section appears below the **Cloud** section while admin-web is signed in as an admin.
+
+1. In the section's **Add a user** box, enter the new person's email address.  
+2. Choose the person's **Roles**:  
+   - **Data** gives the user their own data library that syncs with the cloud.  
+   - **Admin** allows this user to manage other users, cloud apps and settings.  
+3. Click **Add user**.
+
+The new user will be emailed a temporary password, and they choose a permanent password at first sign-in.
+
+---
+
+## Removing Starkeep Cloud
+
+The scripts in `scripts/` remove what Starkeep created. Each cloud script removes the layers above it first:
+
+- `scripts/teardown-cloud-apps.sh` removes every cloud app.  
+- **DANGER** `scripts/teardown-cloud-data-server.sh` removes the cloud apps, then it removes the Starkeep S3 bucket, DSQL database, cloud data server Lambda and the Drive role. **All your data will be removed from the cloud.** Local copies are unaffected.  
+- **DANGER** `scripts/teardown-bootstrap.sh` removes everything above, then the bootstrap stack and the resources outside CloudFormation: the state bucket, the stored passphrase and the Cognito resources. **This completely removes Starkeep from the cloud.**
+
+The cloud scripts need the AWS CLI, signed in with administrator credentials for the deployment's AWS account. `teardown-bootstrap.sh` also needs `python3`. The cloud scripts follow three rules:
+
+- Each cloud script requires `--prefix <stack prefix>` and `--region <region>`, so a teardown never guesses which deployment to remove. In an interactive shell, the script asks for a missing value. An unattended run fails instead.  
+- The database has deletion protection. `teardown-cloud-data-server.sh` removes the database only after you confirm at the prompt or pass `--force`.  
+- `teardown-bootstrap.sh` never prompts about the database. Pass `--force` to remove the database. Without `--force`, the database stays in your account.
+
+## Removing Starkeep Locally
+
+`scripts/reset-local-data.sh` deletes the files, the database and the list of watched folders that this machine holds in Starkeep. The script keeps the cloud address and this computer's sign-in. 
+
+This script does not affect cloud data, and your data may re-sync if your local data server is running.
+
+## Run the tests
+
+The repository has four test tiers:
+
+1. `pnpm test` runs the unit tests. CI requires them.  
+2. `pnpm test:integration` runs the suites that start processes, open sockets or boot a database engine. CI runs them as an advisory job, and `pnpm release:publish` runs them before a release.  
+3. `pnpm test:e2e` runs the local browser tests with Playwright. Run `pnpm exec playwright install chromium` once beforehand. CI runs these tests as an advisory job. See [`e2e/README.md`](http://e2e/README.md).  
+4. `pnpm test:aws` runs the full journey against a real AWS account, using a separate disposable test deployment with the prefix `sktest`. The suite does nothing unless `STARKEEP_AWS_TESTS=1` is set. A full run takes about 26 minutes and creates real resources in the account, then tears them down by default upon success. See [`e2e-aws/README.md`](http://e2e-aws/README.md).
+
+# Security
+
+Starkeep's cloud-side security posture has been assessed in a written threat model: [`SECURITY.md`](http://SECURITY.md). It covers the cloud data server (broker, DSQL, files bucket, API Gateway), cloud apps and their install/uninstall lifecycle, the Cognito \+ IAM bootstrap, and the cloud sync path, working from the single-account, single-tenant trust boundary. 
+
+# Further reading
+
+- [`system-design.md`](http://system-design.md) — the major parts, how data is classified (shared vs app-specific), and how it moves and syncs.  
+- [`data-roles-and-permissions.md`](http://data-roles-and-permissions.md) — identities, trust boundaries, and why the admin app never appears on the data path.  
+- App READMEs: [`apps/admin-web`](http://apps/admin-web/README.md), [`apps/local-data-server`](http://apps/local-data-server/README.md).
+
