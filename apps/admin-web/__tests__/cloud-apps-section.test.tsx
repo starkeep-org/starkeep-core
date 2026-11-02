@@ -1,15 +1,15 @@
 /**
  * @vitest-environment jsdom
  *
- * The cloud apps on the dashboard: what each card says is installed, and which
- * surfaces each of its actions asks the installer for.
+ * The cloud apps on the dashboard: one tile per surface an app's manifest
+ * offers, what each tile says is installed, and which surface each of its
+ * actions asks the installer for.
  *
  * The registry reports two surfaces per app, the cloud web app and the mobile
- * app. The badge, the "mobile app only" action and the surfaces a redeploy
- * keeps all follow from those two columns, and the install route turns the
- * surfaces into the installer's `--web` and `--mobile` flags
- * (`install-stream.test.ts`). The Cognito exchange and the install stream are
- * mocked; the section's own logic is real.
+ * app. Each tile reads only its own column and installs only its own surface,
+ * and the install route turns the surface into the installer's `--web` or
+ * `--mobile` flag (`install-stream.test.ts`). The Cognito exchange and the
+ * install stream are mocked; the section's own logic is real.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, within } from "@testing-library/react";
@@ -68,7 +68,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function app(appId: string, name: string, shipsMobile: boolean): LocalAppEntry {
+function app(appId: string, name: string, offers: { web: boolean; mobile: boolean }) {
   return {
     appId,
     sourceDir: `/apps/${appId}`,
@@ -77,7 +77,8 @@ function app(appId: string, name: string, shipsMobile: boolean): LocalAppEntry {
       name,
       version: "0.1.0",
       targets: ["local", "cloud"],
-      ...(shipsMobile
+      infraRequirements: { compute: { enabled: offers.web } },
+      ...(offers.mobile
         ? {
             mobile: {
               android: {
@@ -92,13 +93,20 @@ function app(appId: string, name: string, shipsMobile: boolean): LocalAppEntry {
   } as LocalAppEntry;
 }
 
-const PHOTOS = app("photos", "Photos", true);
-const MEMO = app("memo", "Memo", false);
+const PHOTOS = app("photos", "Photos", { web: true, mobile: true });
+const MEMO = app("memo", "Memo", { web: true, mobile: false });
 
-/** The card for `name`, once the registry has been read. */
-async function card(name: string): Promise<HTMLElement> {
+/** The tile named `name`. */
+async function tile(name: string): Promise<HTMLElement> {
   const heading = await screen.findByText(name, { selector: "[data-slot=card-title] > span" });
   return heading.closest("[data-slot=card]") as HTMLElement;
+}
+
+/** The tile names on screen, in order. */
+function tileNames(): string[] {
+  return Array.from(document.querySelectorAll("[data-slot=card-title] > span:first-child")).map(
+    (el) => el.textContent ?? "",
+  );
 }
 
 async function renderWith(rows: typeof registry, apps: LocalAppEntry[] = [PHOTOS, MEMO]) {
@@ -110,9 +118,9 @@ async function renderWith(rows: typeof registry, apps: LocalAppEntry[] = [PHOTOS
   );
 }
 
-/** The labels in the card's "More actions" menu, or none when it has no menu. */
+/** The labels in the tile's "More actions" menu, or none when it has no menu. */
 async function menuLabels(name: string): Promise<string[]> {
-  const trigger = within(await card(name)).queryByRole("button", {
+  const trigger = within(await tile(name)).queryByRole("button", {
     name: `More actions for ${name}`,
   });
   if (!trigger) return [];
@@ -123,109 +131,152 @@ async function menuLabels(name: string): Promise<string[]> {
   return labels;
 }
 
-describe("badges", () => {
-  it("says Installed for the web app, Mobile app only for the mobile app alone, and Not installed for neither", async () => {
-    await renderWith([
-      { appId: "photos", webApp: false, mobileApp: true },
-      { appId: "memo", webApp: true, mobileApp: false },
-    ]);
-    await vi.waitFor(async () => {
-      expect(within(await card("Photos")).getByText("Mobile app only")).toBeTruthy();
-      expect(within(await card("Memo")).getByText("Installed")).toBeTruthy();
-    });
-  });
+/** Choose `label` from the tile's "More actions" menu. */
+async function chooseFromMenu(name: string, label: string) {
+  const user = userEvent.setup();
+  await user.click(
+    within(await tile(name)).getByRole("button", { name: `More actions for ${name}` }),
+  );
+  await user.click(await screen.findByRole("menuitem", { name: label }));
+}
 
-  it("says Installed for an app with both surfaces", async () => {
-    await renderWith([{ appId: "photos", webApp: true, mobileApp: true }]);
-    await vi.waitFor(async () => {
-      expect(within(await card("Photos")).getByText("Installed")).toBeTruthy();
-    });
-    expect(within(await card("Memo")).getByText("Not installed")).toBeTruthy();
-  });
-
-  it("calls a registered app with neither surface Not installed", async () => {
-    await renderWith([{ appId: "photos", webApp: false, mobileApp: false }]);
-    await vi.waitFor(async () => {
-      expect(within(await card("Photos")).getByText("Not installed")).toBeTruthy();
-    });
-  });
-});
-
-describe("the mobile-app-only action", () => {
-  it("is offered for an app that ships a mobile build and has neither surface", async () => {
+describe("tiles", () => {
+  it("gives an app with compute and an Android build a web tile and a mobile tile", async () => {
     await renderWith([]);
-    await vi.waitFor(async () =>
-      expect(await menuLabels("Photos")).toEqual(["Register the Photos mobile app only"]),
-    );
-    // Memo ships no mobile build.
-    expect(await menuLabels("Memo")).toEqual([]);
+    await tile("Photos Mobile");
+    expect(tileNames()).toEqual(["Photos", "Photos Mobile", "Memo"]);
   });
 
-  it("is not offered once the mobile app is installed", async () => {
-    await renderWith([{ appId: "photos", webApp: false, mobileApp: true }]);
-    await vi.waitFor(async () =>
-      expect(within(await card("Photos")).getByText("Mobile app only")).toBeTruthy(),
-    );
-    expect(await menuLabels("Photos")).toEqual([]);
+  it("gives an app with an Android build and no compute only a mobile tile", async () => {
+    await renderWith([], [app("photos", "Photos", { web: false, mobile: true })]);
+    await tile("Photos Mobile");
+    expect(tileNames()).toEqual(["Photos Mobile"]);
   });
 
-  it("is not offered once the web app is installed, which a full install pairs with the mobile app", async () => {
-    await renderWith([{ appId: "photos", webApp: true, mobileApp: false }]);
-    await vi.waitFor(async () =>
-      expect(within(await card("Photos")).getByText("Installed")).toBeTruthy(),
-    );
-    expect(await menuLabels("Photos")).toEqual(["Redeploy Photos"]);
-  });
-
-  it("asks the installer for the mobile app alone", async () => {
-    const user = userEvent.setup();
-    await renderWith([]);
-    await vi.waitFor(async () =>
-      expect(await menuLabels("Photos")).toEqual(["Register the Photos mobile app only"]),
-    );
-    await user.click(
-      within(await card("Photos")).getByRole("button", { name: "More actions for Photos" }),
-    );
-    await user.click(
-      await screen.findByRole("menuitem", { name: "Register the Photos mobile app only" }),
-    );
-    await vi.waitFor(() => expect(installs).toHaveLength(1));
-    expect(installs[0]).toMatchObject({
-      url: "/api/apps/photos/cloud-install",
-      body: { surfaces: ["mobile"] },
-    });
+  it("describes the mobile tile as the Android app, and the web tile with the manifest's description", async () => {
+    const described = {
+      ...PHOTOS,
+      manifest: { ...PHOTOS.manifest, description: "Your photos." },
+    } as LocalAppEntry;
+    await renderWith([], [described]);
+    expect(within(await tile("Photos")).getByText("Your photos.")).toBeTruthy();
     expect(
-      await screen.findByRole("heading", { name: "Register the Photos mobile app" }),
+      within(await tile("Photos Mobile")).getByText(
+        "The Android app. Registering the app lets phones sign in and sync Photos with this cloud.",
+      ),
     ).toBeTruthy();
   });
 });
 
-describe("the surfaces each install asks for", () => {
-  it("names no surfaces on a first install, so the installer installs every one", async () => {
+describe("badges", () => {
+  it.each([
+    [{ webApp: false, mobileApp: false }, "Not installed", "Not registered"],
+    [{ webApp: true, mobileApp: false }, "Installed", "Not registered"],
+    [{ webApp: false, mobileApp: true }, "Not installed", "Registered"],
+    [{ webApp: true, mobileApp: true }, "Installed", "Registered"],
+  ])("reads each tile's own registry column for %j", async (row, web, mobile) => {
+    await renderWith([{ appId: "photos", ...row }]);
+    await vi.waitFor(async () => {
+      expect(within(await tile("Photos")).getByText(web)).toBeTruthy();
+      expect(within(await tile("Photos Mobile")).getByText(mobile)).toBeTruthy();
+    });
+  });
+
+  it("reads an app the registry does not list as neither installed nor registered", async () => {
+    await renderWith([]);
+    expect(within(await tile("Photos")).getByText("Not installed")).toBeTruthy();
+    expect(within(await tile("Photos Mobile")).getByText("Not registered")).toBeTruthy();
+  });
+});
+
+describe("the actions each tile offers", () => {
+  it("offers only the primary action on tiles that are not installed", async () => {
+    await renderWith([]);
+    const web = await tile("Photos");
+    expect(within(web).getByRole("button", { name: "Install Photos in cloud" })).toBeTruthy();
+    const mobile = await tile("Photos Mobile");
+    expect(within(mobile).getByRole("button", { name: "Register Photos Mobile" })).toBeTruthy();
+    expect(await menuLabels("Photos")).toEqual([]);
+    expect(await menuLabels("Photos Mobile")).toEqual([]);
+  });
+
+  it("opens an installed web app and offers a redeploy from the menu", async () => {
+    await renderWith([{ appId: "photos", webApp: true, mobileApp: false }]);
+    const link = await within(await tile("Photos")).findByRole("link", { name: "Open Photos ↗" });
+    expect(link.getAttribute("href")).toBe("https://d1.cloudfront.net/apps/photos/");
+    expect(await menuLabels("Photos")).toEqual(["Redeploy Photos"]);
+  });
+
+  it("gives a registered mobile app no primary action and offers a re-register from the menu", async () => {
+    await renderWith([{ appId: "photos", webApp: false, mobileApp: true }]);
+    await vi.waitFor(async () =>
+      expect(within(await tile("Photos Mobile")).getByText("Registered")).toBeTruthy(),
+    );
+    expect(await menuLabels("Photos Mobile")).toEqual(["Re-register Photos Mobile"]);
+    expect(
+      within(await tile("Photos Mobile"))
+        .queryAllByRole("button")
+        .map((b) => b.getAttribute("aria-label") ?? b.textContent),
+    ).toEqual(["More actions for Photos Mobile"]);
+  });
+});
+
+describe("the surface each action asks for, and the dialog it opens", () => {
+  it.each([
+    ["Photos", "Install Photos in cloud", ["web"], "Install Photos in cloud"],
+    ["Photos Mobile", "Register Photos Mobile", ["mobile"], "Register Photos Mobile"],
+  ])("%s's %s asks for %j", async (name, button, surfaces, title) => {
     const user = userEvent.setup();
     await renderWith([]);
-    await user.click(
-      await within(await card("Photos")).findByRole("button", { name: "Install Photos in cloud" }),
-    );
+    await user.click(await within(await tile(name)).findByRole("button", { name: button }));
     await vi.waitFor(() => expect(installs).toHaveLength(1));
-    expect(installs[0]!.body).not.toHaveProperty("surfaces");
-    expect(await screen.findByRole("heading", { name: "Install Photos in cloud" })).toBeTruthy();
+    expect(installs[0]).toMatchObject({
+      url: "/api/apps/photos/cloud-install",
+      body: { surfaces },
+    });
+    expect(await screen.findByRole("heading", { name: title })).toBeTruthy();
   });
 
   it.each([
-    [{ webApp: true, mobileApp: true }, ["web", "mobile"]],
-    [{ webApp: true, mobileApp: false }, ["web"]],
-  ])("keeps the installed surfaces on a redeploy of %j", async (surfaces, expected) => {
-    const user = userEvent.setup();
-    await renderWith([{ appId: "photos", ...surfaces }]);
+    ["Photos", "Redeploy Photos", ["web"], "Install Photos in cloud"],
+    ["Photos Mobile", "Re-register Photos Mobile", ["mobile"], "Register Photos Mobile"],
+  ])("%s's %s asks for %j alone", async (name, label, surfaces, title) => {
+    await renderWith([{ appId: "photos", webApp: true, mobileApp: true }]);
     await vi.waitFor(async () =>
-      expect(within(await card("Photos")).getByText("Installed")).toBeTruthy(),
+      expect(within(await tile("Photos Mobile")).getByText("Registered")).toBeTruthy(),
+    );
+    await chooseFromMenu(name, label);
+    await vi.waitFor(() => expect(installs).toHaveLength(1));
+    expect(installs[0]!.body["surfaces"]).toEqual(surfaces);
+    expect(await screen.findByRole("heading", { name: title })).toBeTruthy();
+  });
+});
+
+describe("one run at a time", () => {
+  it("disables every tile's actions while a run is in progress", async () => {
+    const user = userEvent.setup();
+    await renderWith([{ appId: "memo", webApp: true, mobileApp: false }]);
+    await vi.waitFor(async () =>
+      expect(within(await tile("Memo")).getByText("Installed")).toBeTruthy(),
     );
     await user.click(
-      within(await card("Photos")).getByRole("button", { name: "More actions for Photos" }),
+      await within(await tile("Photos")).findByRole("button", { name: "Install Photos in cloud" }),
     );
-    await user.click(await screen.findByRole("menuitem", { name: "Redeploy Photos" }));
-    await vi.waitFor(() => expect(installs).toHaveLength(1));
-    expect(installs[0]!.body["surfaces"]).toEqual(expected);
+    // The mocked install never settles, so the run stays in progress.
+    await screen.findByRole("heading", { name: "Install Photos in cloud" });
+
+    // The open dialog hides the tiles from the accessibility tree.
+    const register = within(await tile("Photos Mobile")).getByRole("button", {
+      name: "Register Photos Mobile",
+      hidden: true,
+    });
+    await vi.waitFor(() => expect((register as HTMLButtonElement).disabled).toBe(true));
+    expect(register.parentElement!.getAttribute("title")).toBe("Another cloud install is running");
+    const install = within(await tile("Photos")).getByRole("button", {
+      name: "Install Photos in cloud",
+      hidden: true,
+    });
+    expect((install as HTMLButtonElement).disabled).toBe(true);
+    expect(installs).toHaveLength(1);
   });
 });

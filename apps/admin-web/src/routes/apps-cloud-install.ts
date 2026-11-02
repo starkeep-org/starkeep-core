@@ -58,8 +58,22 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
       : {}),
   };
 
+  const surfaceFlags = [
+    ...(body.surfaces?.includes("web") ? ["web"] : []),
+    ...(body.surfaces?.includes("mobile") ? ["mobile"] : []),
+  ];
+
   return installStream({
+    // Every cloud app install shares this slot, so each run records which app
+    // and surfaces it installs, and a POST for another one gets a 409.
     key: "app",
+    owner: `${appId} (${
+      body.surfaces === undefined
+        ? "every surface"
+        : surfaceFlags.length > 0
+          ? surfaceFlags.join(", ")
+          : "data side only"
+    })`,
     noun: "deploy",
     command: "pnpm",
     args: [
@@ -68,8 +82,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
       "cli:install-app",
       appId,
       "--non-interactive",
-      ...(body.surfaces?.includes("web") ? ["--web"] : []),
-      ...(body.surfaces?.includes("mobile") ? ["--mobile"] : []),
+      ...surfaceFlags.map((surface) => `--${surface}`),
     ],
     cwd: REPO_ROOT,
     env: spawnEnv,

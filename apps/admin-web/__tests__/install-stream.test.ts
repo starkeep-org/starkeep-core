@@ -273,6 +273,54 @@ describe("an app install", () => {
   });
 });
 
+describe("the one run slot every cloud app install shares", () => {
+  it.each([
+    ["another surface of the same app", { appId: "photos", surfaces: ["mobile"] }],
+    ["another app", { appId: "memo", surfaces: ["web"] }],
+    ["the same app with every surface", { appId: "photos" }],
+  ])(
+    "answers a POST mid-run for %s with a 409 naming the running install",
+    async (_label, body) => {
+      const first = await appInstall({ appId: "photos", surfaces: ["web"] });
+      const child = lastChild();
+      readSse(first);
+
+      const second = await appInstall(body);
+      expect(second.status).toBe(409);
+      expect(((await second.json()) as { error: string }).error).toBe(
+        "Another cloud install is running (photos (web)). Try again once it ends.",
+      );
+      expect(spawnedChildren()).toHaveLength(1);
+      child.exit(0);
+    },
+  );
+
+  it("follows the run for a POST mid-run for the same app and surface", async () => {
+    const first = await appInstall({ appId: "photos", surfaces: ["mobile"] });
+    const child = lastChild();
+    readSse(first);
+
+    const second = await appInstall({ appId: "photos", surfaces: ["mobile"] });
+    expect(second.status).toBe(200);
+    const stream = readSse(second);
+    expect(JSON.parse((await stream.next())!.data)).toBe("[Reconnected to in-progress deploy]");
+    expect(spawnedChildren()).toHaveLength(1);
+    child.exit(0);
+    expect((await stream.rest()).at(-1)!.event).toBe("done");
+  });
+
+  it("starts a run for another surface once the slot's run has ended", async () => {
+    const first = await appInstall({ appId: "photos", surfaces: ["web"] });
+    await finish(first, lastChild());
+
+    const second = await appInstall({ appId: "photos", surfaces: ["mobile"] });
+    expect(second.status).toBe(200);
+    expect(spawnedChildren()).toHaveLength(2);
+    expect(lastChild().args.slice(5)).toEqual(["--mobile"]);
+    await finish(second, lastChild());
+  });
+});
+
 describe("line framing, which is where a long Pulumi log goes wrong", () => {
   it("reassembles a line split across two chunks into one frame", async () => {
     const res = await drive();
