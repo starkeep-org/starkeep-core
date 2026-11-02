@@ -145,7 +145,7 @@ async function main(): Promise<void> {
       appType: "spa",
       // HMR shares admin-web's own server. Vite's default is a separate fixed
       // port, which a second admin-web on this machine cannot bind.
-      server: { middlewareMode: true, hmr: { server } },
+      server: { middlewareMode: true, ws: { server } },
     });
     handleRest = (req, res) => vite.middlewares(req, res, () => res.end());
   } else {
