@@ -230,7 +230,7 @@ export function CloudAppsSection({
                 description={
                   surface === "web"
                     ? entry.manifest.description
-                    : `The Android app. Registering the app lets phones sign in and sync ${name} with this cloud.`
+                    : `The ${name} mobile app can sign in and sync with this cloud.`
                 }
                 actions={actions}
                 badges={
