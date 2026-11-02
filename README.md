@@ -2,7 +2,7 @@
 
 Starkeep is a modern self-hosting system that allows you to keep your own data, easily build and run your own apps, and do it all on your own hardware and your own serverless cloud infra.
 
-* Fully serverless cloud architecture provides ultra-low running costs. Most users pay only for storage in their own cloud account, 1TB typically costs \~\$2 / month  
+* Fully serverless cloud architecture provides ultra-low running costs. Most users pay only for storage in their own cloud account. 1TB of photos and videos can cost less than \$2 / month.  
 * Create and run mobile apps, desktop apps, and web apps  
 * Local-first philosophy. Storage, sync, and apps generally work offline by default  
 * Common data storage and content-addressed indexing layer makes building apps easy and eliminates unnecessary data silos  
@@ -55,10 +55,10 @@ The cloud setup (Part B) also needs an AWS account. The setup wizard explains ho
 Starkeep Admin is a local web app for starting Starkeep's services, installing apps, and setting up the cloud.
 
 1. Start the local Admin web app. From the root of `starkeep-core`:  
-     
-   cd admin-web  
-   pnpm dev  
-     
+   
+
+pnpm \--filter admin-web dev
+
 2. Open `http://localhost:3000` in your browser. 
 
 Admin listens on `127.0.0.1` and refuses any request addressed to a name other than `localhost`, `127.0.0.1` or `[::1]`. To reach it from another device on your network, add its IP address (as a comma-separated list) to the key `STARKEEP_ADMIN_DEV_ORIGINS` in `.env.local` at the root of `starkeep-core`.
@@ -127,8 +127,8 @@ In the **Cloud** section of the dashboard, click **Deploy Starkeep Cloud**.
 The first step deploys your bootstrap stack. The stack creates the sign-in service and the identities and permission limits that the rest of the deployment uses.
 
 1. Choose an **AWS Region** and keep the default **Stack prefix**, `starkeep`, unless you need several deployments in one account.  
-2. Click **Download bootstrap template**.  
-3. Enter the email address to use for your Starkeep Admin account. This account will be able to manage users and apps in the cloud. This email is private to you, no one else sees it, not even the Starkeep organization.  
+2. Enter your email address to create your Starkeep Admin account. This account will be able to manage users and apps in the cloud. This email is private to you, no one else sees it, not even the Starkeep organization.  
+3. Click **Download bootstrap template**.  
 4. Click **Open CloudFormation console ↗** and follow **Show full instructions** to create the stack from the downloaded template.  
 5. Wait about a minuntil the stack's **Outputs** tab lists values, then click **Stack is deployed — Continue**.
 
@@ -165,25 +165,82 @@ From now on, the data server syncs your computer’s local Starkeep with your cl
 
 ### 6\. Install Photos in the cloud
 
+Installing the Photos web app in the cloud allows you to access your photos remotely.
+
 1. In the **Cloud** section, find the Photos card and click **Install Photos in cloud**. The install builds Photos, uploads it and creates its cloud resources. The install takes a few minutes, and a failed install usually succeeds on **Retry**.  
 2. When the card reads **Installed**, click **Open Photos ↗**.  
 3. Sign in on the Starkeep sign-in page with your Starkeep account.
 
 Photos then shows the photos that synced from this computer.
 
-### 7\. Add your phone or another computer (optional)
+## Part C: Install Photos Mobile App
 
-The **Cloud address** line under the **Cloud** heading shows the address that phones and other computers sign in with. Click the copy icon beside the address to copy the address.
+Starkeep Photos is available as an Android app you can build yourself. (Starkeep Photos for iOS is in the works). 
 
-To add another computer:
+Until the app is available in the Play Store, see Discord for an APK download link. You can also build the APK from source as described under “Build the APK from source” below.
 
-1. Complete Part A on the other computer.  
-2. In the other computer's **Cloud** section, paste the address into the **This machine** card and click **Join**.  
-3. Sign in with your Starkeep account.
+### 1\. Register the Photos mobile app on Starkeep Cloud
 
-To add a phone, install the Photos Mobile app for Android and sign in with the same address and account. The [`starkeep-apps` README](https://github.com/starkeep-org/starkeep-apps#readme) explains how to build and install the app.
+In the Admin's **Cloud** section, click **Register Photos Mobile** on the Photos Mobile card.
 
-### 8\. Add people (optional)
+### 2\. Install the app on your Android phone
+
+Download the APK to your phone and install it. You may need to turn on the “Install unknown apps” setting in order to install apps downloaded outside the Play Store.
+
+### 3\. Sign in
+
+1. In the Admin app, copy the address from the **Cloud address** line under the **Cloud** heading.  
+2. Open **Starkeep Photos** on the phone and tap **Sign in to Starkeep Cloud**.  
+3. Enter the cloud address and tap **Sign in**. The phone's browser opens your cloud's sign-in page.  
+4. Sign in with your Starkeep account. The browser returns you to the app.
+
+Now your phone will sync with your Starkeep cloud. The app will sync with the cloud and ingest the most recent 14 days of photos/videos from your camera roll, along with new photos/videos you take.
+
+### Build the APK from source (optional)
+
+You can build the APK yourself (and modify it) if you want.
+
+#### 1\. Prerequisites
+
+You need the following:
+
+- You need starkeep-app’s dependencies. Run `pnpm install` at the root of `starkeep-apps` if you haven’t already.  
+- JDK 17\. Run `java -version` to check.  
+- The Android SDK, with platform tools. Android Studio installs both. Set `ANDROID_HOME` to the SDK folder, such as `~/Library/Android/sdk` on macOS.  
+- An Android phone with USB debugging turned on, connected over USB.  
+- A Starkeep account with the **Data** role. The main cloud account you created in Part B has that role by default.
+
+#### 2\. Generate the Android project
+
+Run the following command at the root of `starkeep-apps` to generate the Android project.
+
+pnpm \--filter @starkeep/photos-mobile prebuild
+
+Run the command again after any change to `app.json`, the app icons or the native dependencies. Add `--clean` to the end of the command to regenerate the project from scratch.
+
+#### 3\. Build the app
+
+cd photos-mobile/android
+
+./gradlew assembleRelease
+
+The first build downloads Gradle and the Android dependencies. The build writes the app to `photos-mobile/android/app/build/outputs/apk/release/app-release.apk`.
+
+#### 4\. Install the app on the phone
+
+1. Run `adb devices` and confirm that the phone appears as `device`. Accept the USB debugging prompt on the phone if one appears.  
+     
+2. From `photos-mobile/android`, install the app:  
+     
+   adb install \-r app/build/outputs/apk/release/app-release.apk
+
+The `-r` flag updates an installed copy and keeps the app's data.
+
+#### About the signing key
+
+The build uses Expo's public debug key, and the Photos manifest declares that key's certificate by default. Anyone can build an app that the cloud accepts as Photos, so treat this build as a development build.
+
+## Add users to your Starkeep deployment (optional)
 
 One deployment can hold several people, and each person gets a separate library. Nobody can see another person's data. The dashboard's **Cloud Users** section appears below the **Cloud** section while admin-web is signed in as an admin.
 
@@ -205,7 +262,7 @@ The scripts in `scripts/` remove what Starkeep created. Each cloud script remove
 - **DANGER** `scripts/teardown-cloud-data-server.sh` removes the cloud apps, then it removes the Starkeep S3 bucket, DSQL database, cloud data server Lambda and the Drive role. **All your data will be removed from the cloud.** Local copies are unaffected.  
 - **DANGER** `scripts/teardown-bootstrap.sh` removes everything above, then the bootstrap stack and the resources outside CloudFormation: the state bucket, the stored passphrase and the Cognito resources. **This completely removes Starkeep from the cloud.**
 
-The cloud scripts need the AWS CLI, signed in with administrator credentials for the deployment's AWS account. `teardown-bootstrap.sh` also needs `python3`. The cloud scripts follow three rules:
+The cloud scripts need `python3` and the AWS CLI, signed in with administrator credentials for the deployment's AWS account. The cloud scripts follow three rules:
 
 - Each cloud script requires `--prefix <stack prefix>` and `--region <region>`, so a teardown never guesses which deployment to remove. In an interactive shell, the script asks for a missing value. An unattended run fails instead.  
 - The database has deletion protection. `teardown-cloud-data-server.sh` removes the database only after you confirm at the prompt or pass `--force`.  
@@ -215,7 +272,7 @@ The cloud scripts need the AWS CLI, signed in with administrator credentials for
 
 `scripts/reset-local-data.sh` deletes the files, the database and the list of watched folders that this machine holds in Starkeep. The script keeps the cloud address and this computer's sign-in. 
 
-This script does not affect cloud data, and your data may re-sync if your local data server is running.
+This script does not affect cloud data. Please note that your data may re-sync down from the cloud if you are syncing with the cloud and your local data server is running.
 
 ## Run the tests
 
@@ -223,12 +280,12 @@ The repository has four test tiers:
 
 1. `pnpm test` runs the unit tests. CI requires them.  
 2. `pnpm test:integration` runs the suites that start processes, open sockets or boot a database engine. CI runs them as an advisory job, and `pnpm release:publish` runs them before a release.  
-3. `pnpm test:e2e` runs the local browser tests with Playwright. Run `pnpm exec playwright install chromium` once beforehand. CI runs these tests as an advisory job. See [`e2e/README.md`](http://e2e/README.md).  
+3. `pnpm test:e2e` runs the local browser tests with Playwright. Run `pnpm --filter @starkeep/e2e exec playwright install chromium` once beforehand. CI runs these tests as an advisory job. See [`e2e/README.md`](http://e2e/README.md).  
 4. `pnpm test:aws` runs the full journey against a real AWS account, using a separate disposable test deployment with the prefix `sktest`. The suite does nothing unless `STARKEEP_AWS_TESTS=1` is set. A full run takes about 26 minutes and creates real resources in the account, then tears them down by default upon success. See [`e2e-aws/README.md`](http://e2e-aws/README.md).
 
 # Security
 
-Starkeep's cloud-side security posture has been assessed in a written threat model: [`SECURITY.md`](http://SECURITY.md). It covers the cloud data server (broker, DSQL, files bucket, API Gateway), cloud apps and their install/uninstall lifecycle, the Cognito \+ IAM bootstrap, and the cloud sync path, working from the single-account, single-tenant trust boundary. 
+Starkeep's cloud-side security posture has been assessed in a written threat model: [`SECURITY.md`](http://SECURITY.md). It covers the cloud data server (broker, DSQL, files bucket, API Gateway), cloud apps and their install/uninstall lifecycle, the Cognito \+ IAM bootstrap, and the cloud sync path. 
 
 # Further reading
 
