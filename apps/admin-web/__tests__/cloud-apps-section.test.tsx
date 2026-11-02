@@ -153,7 +153,7 @@ describe("tiles", () => {
     expect(tileNames()).toEqual(["Photos Mobile"]);
   });
 
-  it("describes the mobile tile as the Android app, and the web tile with the manifest's description", async () => {
+  it("describes the mobile tile as the mobile app, and the web tile with the manifest's description", async () => {
     const described = {
       ...PHOTOS,
       manifest: { ...PHOTOS.manifest, description: "Your photos." },
@@ -162,7 +162,7 @@ describe("tiles", () => {
     expect(within(await tile("Photos")).getByText("Your photos.")).toBeTruthy();
     expect(
       within(await tile("Photos Mobile")).getByText(
-        "The Android app. Registering the app lets phones sign in and sync Photos with this cloud.",
+        "The Photos mobile app can sign in and sync with this cloud.",
       ),
     ).toBeTruthy();
   });
