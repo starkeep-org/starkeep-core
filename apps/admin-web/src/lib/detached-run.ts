@@ -19,6 +19,8 @@
  * - `pid`: the run's process id. The run is its own process group.
  * - `output.log`: everything the installer writes, stdout and stderr together.
  * - `exit`: the installer's exit code, written once it ends.
+ * - `owner`: what the run installs, for a slot that runs more than one kind
+ *   of install. The cloud app slot records the app and its surfaces here.
  *
  * A small `sh` wrapper runs the installer with its output appended to the log,
  * then records the exit code. Neither step needs admin-web, so a run started
@@ -67,6 +69,7 @@ interface RunPaths {
   readonly pid: string;
   readonly log: string;
   readonly exit: string;
+  readonly owner: string;
 }
 
 function pathsFor(key: string): RunPaths {
@@ -77,6 +80,7 @@ function pathsFor(key: string): RunPaths {
     pid: join(dir, "pid"),
     log: join(dir, "output.log"),
     exit: join(dir, "exit"),
+    owner: join(dir, "owner"),
   };
 }
 
@@ -88,7 +92,13 @@ export function runLogPath(key: string): string {
 export type RunStatus =
   /** No run has ever started in this slot. */
   | { readonly state: "none" }
-  | { readonly state: "running"; readonly runId: string; readonly pid: number }
+  | {
+      readonly state: "running";
+      readonly runId: string;
+      readonly pid: number;
+      /** The `owner` the run started with, or null when it gave none. */
+      readonly owner: string | null;
+    }
   /** The run ended. `code` is null when its process died without recording one. */
   | { readonly state: "ended"; readonly runId: string; readonly code: number | null };
 
@@ -105,13 +115,23 @@ function readRunId(path: string): string {
   }
 }
 
+function readOwner(path: string): string | null {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
 export function runStatus(key: string): RunStatus {
   const p = pathsFor(key);
   if (!existsSync(p.pid)) return { state: "none" };
   const runId = readRunId(p.id);
   if (existsSync(p.exit)) return { state: "ended", runId, code: readCode(p.exit) };
   const pid = Number(readFileSync(p.pid, "utf8").trim());
-  if (Number.isInteger(pid) && pid > 0 && isAlive(pid)) return { state: "running", runId, pid };
+  if (Number.isInteger(pid) && pid > 0 && isAlive(pid)) {
+    return { state: "running", runId, pid, owner: readOwner(p.owner) };
+  }
   return { state: "ended", runId, code: null };
 }
 
@@ -120,6 +140,8 @@ export function runStatus(key: string): RunStatus {
  * {@link runStatus} first; starting over a running slot would put two
  * installers on one stack.
  *
+ * `owner` names what the run installs; {@link runStatus} reports it back.
+ *
  * Returns the wrapper's process, whose `error` event reports a spawn that
  * failed outright.
  */
@@ -127,12 +149,14 @@ export function startRun(
   key: string,
   command: string,
   args: readonly string[],
-  options: { cwd: string; env: NodeJS.ProcessEnv },
+  options: { cwd: string; env: NodeJS.ProcessEnv; owner?: string },
 ): ChildProcess {
   const p = pathsFor(key);
   mkdirSync(p.dir, { recursive: true, mode: 0o700 });
   rmSync(p.exit, { force: true });
   rmSync(p.pid, { force: true });
+  rmSync(p.owner, { force: true });
+  if (options.owner !== undefined) writeFileSync(p.owner, options.owner, { mode: 0o600 });
   writeFileSync(p.id, randomBytes(8).toString("hex"), { mode: 0o600 });
   // Created here rather than by the shell's redirect, so the log is the
   // owner's alone like everything else under ~/.starkeep.

@@ -15,7 +15,9 @@
  * A POST mid-run follows the run instead of starting a second installer on the
  * same stack. When that run then fails, the POST starts a fresh one with its
  * own credentials, because a run that failed on stale credentials is the usual
- * reason to post again. A POST with `reattach: true` comes from a browser
+ * reason to post again. A slot that runs more than one kind of install names
+ * each run's `owner`. A POST mid-run for another owner gets a 409 instead,
+ * because following the run would show one install's output as another's. A POST with `reattach: true` comes from a browser
  * reconnecting after the stream dropped. Such a POST never starts a run: it
  * follows the run in progress, or reports how the last one ended.
  *
@@ -34,6 +36,11 @@ import { followRun, runLogPath, runStatus, startRun } from "./detached-run";
 export interface InstallStreamOptions {
   /** The run slot. One run at a time per slot. */
   readonly key: string;
+  /**
+   * What this POST installs, for a slot shared by several installs, such as
+   * "photos (web)". A POST mid-run for another owner gets a 409.
+   */
+  readonly owner?: string;
   /** What the run is called in progress notices: "install", "Drive install", "deploy". */
   readonly noun: string;
   readonly command: string;
@@ -72,6 +79,18 @@ const EXPIRED = {
 };
 
 export function installStream(options: InstallStreamOptions): Response {
+  if (options.owner !== undefined) {
+    const current = runStatus(options.key);
+    if (current.state === "running" && current.owner !== options.owner) {
+      return Response.json(
+        {
+          error: `Another cloud install is running (${current.owner ?? "unknown"}). Try again once it ends.`,
+        },
+        { status: 409 },
+      );
+    }
+  }
+
   const encoder = new TextEncoder();
   let stop: () => void = () => {};
 
@@ -137,6 +156,7 @@ export function installStream(options: InstallStreamOptions): Response {
         const child = startRun(options.key, options.command, options.args, {
           cwd: options.cwd,
           env: options.env,
+          ...(options.owner !== undefined ? { owner: options.owner } : {}),
         });
         child.on("error", (err) => {
           emitEvent("error", { message: err.message });

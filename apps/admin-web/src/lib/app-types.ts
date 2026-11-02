@@ -27,6 +27,8 @@ export interface ManifestSummary {
   infraRequirements?: {
     fileAccess?: FileAccess[];
     fileAccessAll?: boolean;
+    /** Present and enabled for an app with a cloud web app. */
+    compute?: { enabled: boolean };
   };
   /** The mobile builds the app ships; see the manifest's `mobile` field. */
   mobile?: {
@@ -64,4 +66,16 @@ export interface InstallStep {
 /** Membership comes from each app's manifest `targets` (default ["local"]). */
 export function targetsOf(a: LocalAppEntry): AppTarget[] {
   return a.manifest.targets ?? ["local"];
+}
+
+/**
+ * The cloud surfaces an app's manifest offers, by the rule admin-installer's
+ * `manifestSurfaces()` applies: compute makes a web app, an Android build a
+ * mobile app.
+ */
+export function surfacesOf(a: LocalAppEntry): AppSurface[] {
+  const out: AppSurface[] = [];
+  if (a.manifest.infraRequirements?.compute?.enabled) out.push("web");
+  if (a.manifest.mobile?.android) out.push("mobile");
+  return out;
 }

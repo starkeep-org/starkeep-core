@@ -13,7 +13,7 @@ import {
 import { refreshTokens, getIdentityPoolCredentials, type STSCredentials } from "@/lib/cognito-auth";
 import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
 import { ACTION_OCCASIONAL, ACTION_OPEN } from "@/lib/action-colors";
-import type { AppSurface, LocalAppEntry } from "@/lib/app-types";
+import { surfacesOf, type AppSurface, type LocalAppEntry } from "@/lib/app-types";
 import { runInstallStream } from "@/lib/install-stream-client";
 
 export function CloudAppsSection({
@@ -30,27 +30,26 @@ export function CloudAppsSection({
   // the "Set up cloud" CTA, so this section only disables installs.
   const [cloudReady, setCloudReady] = useState<boolean | null>(null);
   const [credError, setCredError] = useState<string | null>(null);
-  // The app whose install modal is currently open (null when closed).
+  // The tile whose install modal is currently open (null when closed). Each
+  // tile installs its own surface on top of the app's data side, and no other.
   const [installing, setInstalling] = useState<{
     appId: string;
     appName: string;
     endpoint: string;
-    /**
-     * The surfaces to install on top of the data side; undefined installs
-     * every surface the manifest offers.
-     */
-    surfaces?: AppSurface[];
+    surface: AppSurface;
   } | null>(null);
+  // Whether the open modal's run is in progress. Every cloud app install
+  // shares one run slot on the server, so every tile waits for it.
+  const [running, setRunning] = useState(false);
   const [credentials, setCredentials] = useState<(STSCredentials & { region?: string }) | null>(
     null,
   );
-  // Apps whose cloud web app the registry reports as installed. Loaded from
-  // `shared.app_registry` via POST /api/apps/cloud/list; refreshed after
-  // every successful install. null = not yet loaded / cloud not configured.
-  const [installedIds, setInstalledIds] = useState<Set<string> | null>(null);
-  // Apps whose mobile app the registry reports as installed, with or without
-  // the web app. Either one comes with the app's data side, which the mobile
-  // app's private channel syncs against.
+  // Apps whose cloud web app, and apps whose mobile app, the registry reports
+  // as installed. Loaded from `shared.app_registry` via POST
+  // /api/apps/cloud/list; refreshed after every successful install. null = not
+  // yet loaded / cloud not configured. The two surfaces install independently,
+  // each on top of the app's shared data side.
+  const [webIds, setWebIds] = useState<Set<string> | null>(null);
   const [mobileIds, setMobileIds] = useState<Set<string> | null>(null);
 
   // Resolve the browser-facing base URL from the persisted cloud config so each
@@ -97,7 +96,7 @@ export function CloudAppsSection({
       const body = (await res.json()) as {
         apps: Array<{ appId: string; webApp: boolean; mobileApp: boolean }>;
       };
-      setInstalledIds(new Set(body.apps.filter((a) => a.webApp).map((a) => a.appId)));
+      setWebIds(new Set(body.apps.filter((a) => a.webApp).map((a) => a.appId)));
       setMobileIds(new Set(body.apps.filter((a) => a.mobileApp).map((a) => a.appId)));
     } catch (err) {
       // The registry read is best-effort: a failure just means no "Installed"
@@ -114,7 +113,7 @@ export function CloudAppsSection({
     appId: string,
     appName: string,
     endpoint: string,
-    surfaces?: AppSurface[],
+    surface: AppSurface,
   ) => {
     setCredError(null);
     const cfg = await readCloudConfig();
@@ -141,7 +140,7 @@ export function CloudAppsSection({
     }
 
     setCredentials({ ...creds, region: cfg.region });
-    setInstalling({ appId, appName, endpoint, ...(surfaces ? { surfaces } : {}) });
+    setInstalling({ appId, appName, endpoint, surface });
   };
 
   return (
@@ -160,96 +159,98 @@ export function CloudAppsSection({
 
       <AppCardGrid>
         {leading}
-        {apps?.map((entry) => {
+        {apps?.flatMap((entry) => {
           const name = entry.manifest.name ?? entry.appId;
           // Cloud install is generic: any app discovered with a "cloud" target is
           // installable via the per-appId route, which drives the app's own
           // `bundle` script. No hardcoded installer registry.
           const endpoint = `/api/apps/${entry.appId}/cloud-install`;
           const url = browserBaseUrl ? `${browserBaseUrl}/apps/${entry.appId}/` : null;
-          // `installedIds === null` means the registry hasn't been read yet
-          // (user not signed in, cloud not set up, or the read errored). In
-          // that case render no "Installed" badge rather than guessing.
-          const installed = installedIds !== null && installedIds.has(entry.appId);
-          const shipsMobile = !!entry.manifest.mobile?.android;
-          const mobileRegistered = mobileIds !== null && mobileIds.has(entry.appId);
-          // A redeploy keeps the surfaces installed now, and adds none.
-          const redeploySurfaces: AppSurface[] = mobileRegistered ? ["web", "mobile"] : ["web"];
+          // One run at a time across every tile, and none before cloud is set up.
+          const blocked = !cloudReady
+            ? "Set up cloud before installing apps"
+            : running
+              ? "Another cloud install is running"
+              : undefined;
 
-          // An installed app opens; anything else deploys. Redeploy is the
-          // secondary action once a deployment already exists.
-          const actions: AppCardAction[] = [];
-          if (installed) {
-            actions.push({
-              label: `Redeploy ${name}`,
-              onSelect: () => handleInstall(entry.appId, name, endpoint, redeploySurfaces),
-              disabled: !cloudReady,
-              title: cloudReady ? undefined : "Set up cloud before installing apps",
-            });
-          }
-          // A full install adds the mobile app too, so this is for an app
-          // whose mobile app should sync without the cloud web app.
-          if (shipsMobile && !installed && !mobileRegistered && mobileIds !== null) {
-            actions.push({
-              label: `Register the ${name} mobile app only`,
-              onSelect: () => handleInstall(entry.appId, name, endpoint, ["mobile"]),
-              disabled: !cloudReady,
-              title: cloudReady ? undefined : "Set up cloud before installing apps",
-            });
-          }
+          // One tile per surface the manifest offers. Each tile reads only its
+          // own registry column and installs only its own surface.
+          return surfacesOf(entry).map((surface) => {
+            const tileName = surface === "web" ? name : `${name} Mobile`;
+            // A null set means the registry hasn't been read yet (user not
+            // signed in, cloud not set up, or the read errored). The tile
+            // then reads as not installed rather than guessing.
+            const installed = (surface === "web" ? webIds : mobileIds)?.has(entry.appId) ?? false;
+            const install = () => handleInstall(entry.appId, name, endpoint, surface);
 
-          return (
-            <AppCard
-              key={entry.appId}
-              name={name}
-              version={entry.manifest.version ?? "?"}
-              description={entry.manifest.description}
-              actions={actions}
-              badges={
-                installed ? (
-                  <Badge
-                    variant="secondary"
-                    className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+            const actions: AppCardAction[] = installed
+              ? [
+                  {
+                    label: surface === "web" ? `Redeploy ${name}` : `Re-register ${tileName}`,
+                    onSelect: install,
+                    disabled: blocked !== undefined,
+                    title: blocked,
+                  },
+                ]
+              : [];
+
+            const verb = surface === "web" ? "Installed" : "Registered";
+
+            let primary: ReactNode = null;
+            if (!installed) {
+              primary = (
+                // The title sits on the wrapper because a disabled button
+                // swallows the hover that would raise the tooltip.
+                <span className="block" title={blocked}>
+                  <Button
+                    size="sm"
+                    className={ACTION_OCCASIONAL}
+                    onClick={install}
+                    disabled={blocked !== undefined}
                   >
-                    Installed
-                  </Badge>
-                ) : mobileRegistered ? (
-                  <Badge variant="outline" className="text-xs">
-                    Mobile app only
-                  </Badge>
-                ) : (
-                  <Badge variant="outline" className="text-xs">
-                    Not installed
-                  </Badge>
-                )
-              }
-              primary={
-                installed && url ? (
-                  <Button asChild size="sm" className={ACTION_OPEN}>
-                    <a href={url} target="_blank" rel="noopener noreferrer" title={url}>
-                      Open {name} ↗
-                    </a>
+                    {surface === "web" ? `Install ${name} in cloud` : `Register ${tileName}`}
                   </Button>
-                ) : (
-                  // The title sits on the wrapper because a disabled button
-                  // swallows the hover that would raise the tooltip.
-                  <span
-                    className="block"
-                    title={cloudReady ? undefined : "Set up cloud before installing apps"}
-                  >
-                    <Button
-                      size="sm"
-                      className={ACTION_OCCASIONAL}
-                      onClick={() => handleInstall(entry.appId, name, endpoint)}
-                      disabled={!cloudReady}
+                </span>
+              );
+            } else if (surface === "web" && url) {
+              primary = (
+                <Button asChild size="sm" className={ACTION_OPEN}>
+                  <a href={url} target="_blank" rel="noopener noreferrer" title={url}>
+                    Open {name} ↗
+                  </a>
+                </Button>
+              );
+            }
+
+            return (
+              <AppCard
+                key={`${entry.appId}:${surface}`}
+                name={tileName}
+                version={entry.manifest.version ?? "?"}
+                description={
+                  surface === "web"
+                    ? entry.manifest.description
+                    : `The Android app. Registering the app lets phones sign in and sync ${name} with this cloud.`
+                }
+                actions={actions}
+                badges={
+                  installed ? (
+                    <Badge
+                      variant="secondary"
+                      className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
                     >
-                      Install {name} in cloud
-                    </Button>
-                  </span>
-                )
-              }
-            />
-          );
+                      {verb}
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="text-xs">
+                      Not {verb.toLowerCase()}
+                    </Badge>
+                  )
+                }
+                primary={primary}
+              />
+            );
+          });
         })}
       </AppCardGrid>
 
@@ -258,8 +259,9 @@ export function CloudAppsSection({
         appId={installing?.appId ?? null}
         appName={installing?.appName ?? null}
         endpoint={installing?.endpoint ?? null}
-        surfaces={installing?.surfaces}
+        surface={installing?.surface ?? null}
         credentials={credentials}
+        onRunningChange={setRunning}
         onClose={() => {
           setInstalling(null);
           setCredentials(null);
@@ -276,19 +278,21 @@ function CloudAppInstallModal({
   opened,
   appName,
   endpoint,
-  surfaces,
+  surface,
   credentials,
   onClose,
   onSuccess,
+  onRunningChange,
 }: {
   opened: boolean;
   appId: string | null;
   appName: string | null;
   endpoint: string | null;
-  surfaces: AppSurface[] | undefined;
+  surface: AppSurface | null;
   credentials: STSCredentials | null;
   onClose: () => void;
   onSuccess?: () => void;
+  onRunningChange?: (running: boolean) => void;
 }) {
   const [lines, setLines] = useState<string[]>([]);
   const [status, setStatus] = useState<"idle" | "running" | "success" | "failure">("idle");
@@ -297,7 +301,11 @@ function CloudAppInstallModal({
   const [retryNonce, setRetryNonce] = useState(0);
 
   useEffect(() => {
-    if (!opened || !credentials || !endpoint) return;
+    onRunningChange?.(status === "running");
+  }, [status]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!opened || !credentials || !endpoint || !surface) return;
 
     setLines([]);
     setStatus("running");
@@ -313,7 +321,7 @@ function CloudAppInstallModal({
           secretAccessKey: credentials!.secretAccessKey,
           sessionToken: credentials!.sessionToken,
           region: (credentials as STSCredentials & { region?: string }).region ?? "",
-          ...(surfaces ? { surfaces } : {}),
+          surfaces: [surface!],
         },
         { onLine: (line) => setLines((l) => [...l, line]), isAborted: () => aborted },
       );
@@ -331,7 +339,7 @@ function CloudAppInstallModal({
     return () => {
       aborted = true;
     };
-  }, [opened, credentials, endpoint, surfaces, retryNonce]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [opened, credentials, endpoint, surface, retryNonce]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <Dialog
@@ -343,8 +351,8 @@ function CloudAppInstallModal({
       <DialogContent className="sm:max-w-4xl">
         <DialogHeader>
           <DialogTitle>
-            {surfaces?.length === 1 && surfaces[0] === "mobile"
-              ? `Register the ${appName ?? "app"} mobile app`
+            {surface === "mobile"
+              ? `Register ${appName ?? "app"} Mobile`
               : `Install ${appName ?? "app"} in cloud`}
           </DialogTitle>
         </DialogHeader>
