@@ -667,7 +667,9 @@ describe("verification and repair across the wire", () => {
    * ordinary convergence and not what the digest exists for.
    */
   function loseSharedRecord(server: LocalDataServer, id: string): void {
-    const db = new DatabaseSync(join(server.starkeepDir, "data.db"));
+    // The server may still be finishing a write from the last sync round. Wait
+    // for its lock rather than failing with "database is locked".
+    const db = new DatabaseSync(join(server.starkeepDir, "data.db"), { timeout: 5_000 });
     try {
       db.prepare("DELETE FROM shared_records WHERE id = ?").run(id);
     } finally {
