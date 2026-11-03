@@ -2,11 +2,10 @@
  * Re-run one installed app's DSQL install DDL, to reissue grants a shared-table
  * recreate revoked or create a table added since the app was installed.
  *
- * This is step 6 of `docs/schema-change-runbook.md`, as a command. Since
- * 2026-10-15 a redeploy does it too: `run_dsql_ddl` and its temp-policy attach
- * and detach carry `alwaysRun` in `orchestrator.ts`. This script remains the
- * route that re-runs the DDL alone, without a bundle upload or a compute stack
- * update. A direct call touches no ledger row at all, which is why an app
+ * Since 2026-10-15 a redeploy does this too: `run_dsql_ddl` and its temp-policy
+ * attach and detach carry `alwaysRun` in `orchestrator.ts`. This script remains
+ * the route that re-runs the DDL alone, without a bundle upload or a compute
+ * stack update. A direct call touches no ledger row at all, which is why an app
  * repaired this way keeps its original install timestamp.
  *
  * Every statement `runAppInstallDdl` issues is idempotent — `IF NOT EXISTS`,

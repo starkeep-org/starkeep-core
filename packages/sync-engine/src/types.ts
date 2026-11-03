@@ -223,7 +223,7 @@ export interface ScanCapableApplier extends AppSyncableApplier {
  * from blob presence (`localObjectStorage.has(key)`), not from any stored
  * status — there is no `sync_status` column on this row. See
  * `residency.ts` (`RecordResidency`, `residencyOf`) for the named derived
- * state, and `system-design.md` "Per-record residency" for the rationale.
+ * state, and `docs/system-design.md` "Per-record residency" for the rationale.
  */
 export interface FileRecordRow {
   readonly id: string;

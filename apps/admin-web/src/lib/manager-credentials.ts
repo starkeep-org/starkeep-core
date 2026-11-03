@@ -4,7 +4,7 @@
  * The credentials that arrive in a request body are the admin-app role, which
  * deliberately holds no SSM grant beyond the Pulumi passphrase. Writing
  * credentials, device records and the deployment's settings is Manager's job
- * (see `data-roles-and-permissions.md`), which keeps the federated human from
+ * (see `docs/data-roles-and-permissions.md`), which keeps the federated human from
  * being a superuser over those prefixes. So a route does the same admin-app →
  * Manager hop the installer does.
  *

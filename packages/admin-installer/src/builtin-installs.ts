@@ -591,7 +591,7 @@ function drivePackageDir(): string {
  * If Drive ever gains compute it becomes structurally identical to Photos and
  * Memo, and worse: an unauthenticated Drive leaks everything the user owns
  * rather than one library. That manifest change is an event requiring the
- * reachability pass in `review-reachability-pass.md`, not a routine edit.
+ * reachability pass in `docs/reachability-review-requirement.md`, not a routine edit.
  * `__tests__/drive-manifest.test.ts` fails the day the flag flips, so this is
  * not left to whoever happens to read the JSON.
  */

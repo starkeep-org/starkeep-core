@@ -73,7 +73,7 @@ The stance does not outsource Starkeep's own platform code: the broker, the acce
 | Starkeep Drive             | trusted built-in             | The data role that writes all shared-record sync (the User-Data-Owner).                                |
 | Broker (cloud data server) | trusted but bounded          | The power to assume any app's data role. No standing data permissions of its own.                      |
 
-The load-bearing property, as `data-roles-and-permissions.md` states it, is **(1) user data stays confined to the identities authorized for it**. Two properties support it: **(2) powerful permissions are centralized, bounded and ephemeral**, and **(3) authorization is layered as nested ceilings**. The threats below ask what would have to break for property (1) to fail, and then cover the infrastructure and availability threats around it.
+The load-bearing property, as `docs/data-roles-and-permissions.md` states it, is **(1) user data stays confined to the identities authorized for it**. Two properties support it: **(2) powerful permissions are centralized, bounded and ephemeral**, and **(3) authorization is layered as nested ceilings**. The threats below ask what would have to break for property (1) to fail, and then cover the infrastructure and availability threats around it.
 
 ---
 
@@ -97,7 +97,7 @@ The net property: an app in the cloud can do exactly what its manifest declared.
 
 - **A grant is a grant.** Confinement stops an app from escaping its manifest. Confinement does not limit the manifest itself. An app granted `readwrite` on images can read, overwrite or tombstone every image in a person's library, whichever app wrote it. That is the intended shared-data model, and it makes the install-time grant decision the real security boundary for shared data. The admin is the only review gate (see T8).
 - **The application layer is load-bearing.** A future code path on `shared.records` that skipped the enforcer would leak a same-category, wrong-type record, because the coarser layers would not catch it. One shared module, `protocol-primitives/access`, serves both data servers, which narrows the risk. The layer remains the thinnest.
-- **Shared reads skip the IAM ceiling.** The broker serves shared file bytes through CloudFront signed URLs, and the signing key is not category-scoped. On that path, the application-layer check is the only per-category and per-user cut. One chokepoint, `signSharedCloudFrontUrl`, re-checks every key's namespace, user segment and category against the caller just before signing. The CloudFront distribution serves only `shared/*`, so the worst case of a bug is a leak within shared data, never of private app files. `data-roles-and-permissions.md` covers the trade.
+- **Shared reads skip the IAM ceiling.** The broker serves shared file bytes through CloudFront signed URLs, and the signing key is not category-scoped. On that path, the application-layer check is the only per-category and per-user cut. One chokepoint, `signSharedCloudFrontUrl`, re-checks every key's namespace, user segment and category against the caller just before signing. The CloudFront distribution serves only `shared/*`, so the worst case of a bug is a leak within shared data, never of private app files. `docs/data-roles-and-permissions.md` covers the trade.
 
 ## T2: app-identity forgery and request replay
 
@@ -309,7 +309,7 @@ None of these contradict the project's stated stance, and several are explicit d
 
 ## Source material
 
-- `data-roles-and-permissions.md` and `system-design.md`, for the design and the trust stance.
+- `docs/data-roles-and-permissions.md` and `docs/system-design.md`, for the design and the trust stance.
 - Live code:
   - the broker: `packages/admin-installer/builtin-apps/cloud-data-server/src/api-handler.ts`, `access-enforcer.ts`, `session-authorizer.ts`, `sign-in-routes.ts`, `verify-user-token.ts`, `mobile-keys.ts`, `mobile-attestation.ts` and `byte-presence.ts`;
   - the install: `packages/admin-installer/src/orchestrator.ts`, `iam.ts`, `temp-policies.ts` and `builtin-programs/cloud-data-server-program.ts`;

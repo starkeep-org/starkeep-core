@@ -18,7 +18,7 @@
  * This module is the one copy, so a fix reaches every app that adopts it.
  *
  * What stays with the app is the short list the boundary in
- * `authoring-an-app.md` was reaching for: which framework, the build command
+ * `docs/authoring-an-app.md` was reaching for: which framework, the build command
  * that produces its output, native dependencies, and **which of its public
  * paths are files on disk** — supplied here as data, and declared in the
  * manifest as `staticAssetPaths` so the platform can check it against

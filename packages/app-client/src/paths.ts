@@ -33,7 +33,7 @@ export function starkeepDir(): string {
  * from being usable as a way around the guard for anything else.
  *
  * Contrast `app-local/<appId>/...` (see `starkeepDir()` and core's
- * system-design.md): also non-syncable and also app-owned, but it holds derived
+ * docs/system-design.md): also non-syncable and also app-owned, but it holds derived
  * *user* data — Photos' face sidecars, clusters, scan progress — so it is state,
  * it resolves through the guarded root, and tests must never touch the real one.
  */

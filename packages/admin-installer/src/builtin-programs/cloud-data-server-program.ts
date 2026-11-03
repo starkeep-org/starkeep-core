@@ -848,7 +848,7 @@ export function buildCloudDataServerProgram(
     //
     // CloudFront is an OPTIMIZATION layer, not a security boundary: the gateway
     // stays directly reachable, and JWT/HMAC auth is unchanged on the origin.
-    // See data-roles-and-permissions.md.
+    // See docs/data-roles-and-permissions.md.
     // -----------------------------------------------------------------------
 
     // Managed policies (looked up by name so we don't hardcode AWS's IDs).
@@ -993,7 +993,7 @@ export function buildCloudDataServerProgram(
     // cloud-data-server Lambda signs URLs with the private key (read from SSM);
     // the read path stops minting S3 presigned URLs for shared bytes.
     //
-    // Trust note (see data-roles-and-permissions.md + the plan): this removes
+    // Trust note (see docs/data-roles-and-permissions.md + the plan): this removes
     // the per-app IAM ceiling from the shared *read* path. Blast radius is
     // capped structurally at `shared/*` — the distribution has no behavior for
     // apps/* or any other prefix, and OAC opens the bucket only to this

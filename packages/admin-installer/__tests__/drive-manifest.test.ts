@@ -10,7 +10,7 @@
  * That is a property of one line of JSON, and JSON cannot carry a comment
  * saying what depends on it. This test carries it instead. If it fails, the
  * change is not a routine manifest edit — it is an event requiring the
- * reachability pass in `review-reachability-pass.md`, because a Drive with
+ * reachability pass in `docs/reachability-review-requirement.md`, because a Drive with
  * compute is structurally identical to Photos and Memo except that an
  * unauthenticated one leaks everything the user owns rather than one library.
  */

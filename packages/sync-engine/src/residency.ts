@@ -8,7 +8,7 @@ import type { ResidencyVerdict } from "./residency-policy.js";
  * column; this type names what the combination of (row presence, blob
  * presence, deletedAt, policy) means.
  *
- * See system-design.md "Per-record residency" for the full rationale.
+ * See docs/system-design.md "Per-record residency" for the full rationale.
  *
  * - absent     — no row for this id on this side.
  * - staged     — row present, blob **wanted**, blob not yet present locally.

@@ -3,7 +3,7 @@
 This is a how-to guide for building an installable Starkeep app. It walks through
 the parts an app is made of — what each one is for, and which are required vs.
 optional — using the canonical **Photos** app in the sibling
-[`starkeep-apps/`](../starkeep-apps) repo as a worked example. File references
+[`starkeep-apps/`](../../starkeep-apps) repo as a worked example. File references
 below point at `starkeep-apps/photos/`.
 
 For the system this app plugs into — the data servers, how data is classified,
@@ -908,6 +908,6 @@ The install path is identical for first-party and third-party apps:
 3. For a cloud target, the installer additionally runs your `pnpm bundle` and
    deploys the resulting handlers.
 
-See [`starkeep-apps/README.md`](../starkeep-apps/README.md) for the install steps
-from the app-author's side, and the root [`README.md`](README.md) for the
+See [`starkeep-apps/README.md`](../../starkeep-apps/README.md) for the install steps
+from the app-author's side, and the root [`README.md`](../README.md) for the
 end-user local/cloud setup walkthrough.

@@ -13,7 +13,7 @@
  *
  * The watermark is Drive's because the Drive channel carries every shared
  * file. Every app's role may read it; see "How data access actually flows at
- * runtime" in `data-roles-and-permissions.md`.
+ * runtime" in `docs/data-roles-and-permissions.md`.
  *
  * Only the lazy reads ask: the per-tile renditions batch and the single-record
  * routes. The bulk library list signs nothing and checks nothing, since a

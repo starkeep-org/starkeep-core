@@ -1,33 +1,6 @@
-# The reachability pass
+# Reachability review requirement
 
-A review step for this repo. Run it during any code review, security review, or
-functional review that touches a credential, a signing capability, a role
-assumption, or a privileged operation. It takes a few minutes and it is the one
-review practice here that was added in response to something that actually
-happened rather than something that might.
-
-## Why it exists
-
-On 2026-08-23 an audit found that both cloud-deployed Starkeep apps served their
-entire data plane to unauthenticated callers, and had done so for three months.
-The striking part is not that a review missed it. It is that a review had
-already written down every fact needed to conclude it.
-
-`meta-docs/docs/functional-doc-cloud-apps-2026-06-05.md` states on line 107 that
-`auth: "public"` "skips the authorizer and lets unauthenticated traffic reach
-the handler," and on line 157 that the Photos static handler runs with
-`auth: "public"` on a catch-all and that its API routes fetch the app's HMAC
-secret from SSM and sign with it. Seventy lines apart, in one document, by one
-author paying attention. Line 162 then summarizes the arrangement approvingly.
-
-The review was organized by component, so "which routes are public" and "which
-code holds the app credential" were answered in separate passes and never
-joined. The failure was compositional, not observational. More careful reading
-would not have helped — the reading was already done. What was missing was a
-step whose _output shape_ forces the composition.
-
-See `postmortem-unauthenticated-cloud-apps-2026-08-23.md` §4 for the full
-account.
+The reachability review traces each credential, signing capability, role assumption and privileged operation in a change to the least-authenticated party that can make it run. Run the review during any code review, security review or functional review that touches one of these. The review produces a table, and later reviews compare their tables against it to catch a capability whose reachable caller became weaker.
 
 ## The procedure
 
@@ -47,9 +20,6 @@ looks fine" is not the same artifact and does not compose.
 | Mints CloudFront signed URLs for `shared/*`          | `cloud-data-server/src/api-handler.ts` (`signSharedCloudFrontUrl`) | any app with a valid HMAC signature and a matching grant |
 | Assumes a per-app role                               | `cloud-data-server` broker path                                    | any app with a valid HMAC signature                      |
 
-The first row is the real answer for 2026-06-05, derivable entirely from what
-that review already contained.
-
 ## Rules
 
 - **Trace outward, not inward.** The question is never "what does this check?"
@@ -62,8 +32,8 @@ that review already contained.
   validated form — none of them constrain a caller. Cross them out and keep
   tracing.
 - **A name that implies a boundary is not a boundary.** `/api/local-data` was
-  accurate for seven weeks and then named the primary cloud data path for three
-  months. Check the route table, not the identifier.
+  accurate at first and later named the primary cloud data path. Check the
+  route table, not the identifier.
 - **Name a party, not a mechanism.** "Anonymous internet", "any signed-in user",
   "any installed app", "operator on the local machine" are answers. "Behind the
   proxy", "requires the signature" are not — keep going until you can name who.

@@ -413,7 +413,7 @@ if (browserBaseForProbe) {
         `Load the app's module graph at module scope — build the entry with ` +
         `createLambdaEntry or createWebAppHandler from @starkeep/app-client, whose ` +
         `\`upstream\` takes a promise so a top-level \`await\` is the only way to ` +
-        `satisfy it. See authoring-an-app.md §7.`,
+        `satisfy it. See docs/authoring-an-app.md §7.`,
     );
     process.exit(1);
   }
