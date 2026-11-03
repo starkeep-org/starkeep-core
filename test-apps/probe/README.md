@@ -40,4 +40,4 @@ through `pnpm bundle`).
 Both surfaces run the same app code, so a divergence between them is the
 platform's rather than the fixture's. Every route in `src/app.ts` is written
 app-relative — `honoUpstream` strips the `/apps/probe` mount before Hono routes
-— which is the shape `authoring-an-app.md` asks every app to take.
+— which is the shape [`docs/authoring-an-app.md`](../../docs/authoring-an-app.md) asks every app to take.

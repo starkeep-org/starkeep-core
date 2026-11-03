@@ -9,11 +9,11 @@
  * themselves shipped leaves rows stranded exactly that way, permanently.
  *
  * That is not hypothetical. Recreating the metadata tables on 2026-09-10
- * revoked Drive's grants on them (see `docs/schema-change-runbook.md`), and
- * when the 2026-09-11 re-derive finally gave sync metadata to carry, 120 rows
- * — 42 originals and 78 renditions — had already shipped in the last rounds
- * that succeeded. Their `updated_at` values all fell inside one eight-second
- * window below the frozen watermark, and no amount of waiting would move them.
+ * revoked Drive's grants on them, and when the 2026-09-11 re-derive finally
+ * gave sync metadata to carry, 120 rows — 42 originals and 78 renditions — had
+ * already shipped in the last rounds that succeeded. Their `updated_at` values
+ * all fell inside one eight-second window below the frozen watermark, and no
+ * amount of waiting would move them.
  *
  * Writing each row back through the local data server's metadata route is what
  * unsticks them: the route goes through `sdk.data.putMetadata`, which writes

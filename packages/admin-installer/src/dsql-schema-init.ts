@@ -368,7 +368,7 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
     // Per-app PG GRANTs stay category-coarse, exactly as they are for
     // shared.records: DSQL has no row-level security, so the per-app cut is
     // application-layer in both data servers. Not a new weakening — the same
-    // trade already documented in data-roles-and-permissions.md.
+    // trade already documented in docs/data-roles-and-permissions.md.
     await sql
       .raw(`GRANT SELECT, INSERT, UPDATE, DELETE ON shared.record_labels TO PUBLIC`)
       .execute(db);
@@ -423,7 +423,7 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
     // reads this table on every listing (loadAvailabilityForPage batches it per
     // page), and DSQL has no row-level security, so the per-app cut is
     // application-layer either way — the trade already documented in
-    // data-roles-and-permissions.md.
+    // docs/data-roles-and-permissions.md.
     //
     // Without this grant every `GET /data/records` 500s with "permission denied
     // for table object_availability", for every app, because the listing path

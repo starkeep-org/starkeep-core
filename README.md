@@ -294,6 +294,6 @@ Starkeep's cloud-side security posture has been assessed in a written threat mod
 
 # Further reading
 
-- [`system-design.md`](system-design.md) — the major parts, how data is classified (shared vs app-specific), and how it moves and syncs.
-- [`data-roles-and-permissions.md`](data-roles-and-permissions.md) — identities, trust boundaries, and why the admin app never appears on the data path.
+- [`docs/system-design.md`](docs/system-design.md) — the major parts, how data is classified (shared vs app-specific), and how it moves and syncs.
+- [`docs/data-roles-and-permissions.md`](docs/data-roles-and-permissions.md) — identities, trust boundaries, and why the admin app never appears on the data path.
 - App READMEs: [`apps/admin-web`](apps/admin-web/README.md), [`apps/local-data-server`](apps/local-data-server/README.md).

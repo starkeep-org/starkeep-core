@@ -1,8 +1,8 @@
 /**
  * Inspect the DSQL state a schema change touches, as the admin PG role.
  *
- * Read-only. Answers the questions `docs/schema-change-runbook.md` asks you to
- * verify, which `debug-dsql-inspect.ts` does not cover:
+ * Read-only. Answers the questions a schema change needs verified, which
+ * `debug-dsql-inspect.ts` does not cover:
  *
  *   - which app schemas exist, and what tables each holds
  *   - the **physical column type** of every column, which is the thing a

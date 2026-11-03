@@ -1524,7 +1524,7 @@ async function loadCloudFrontSigningConfig(): Promise<CloudFrontSigningConfig> {
  *
  * Every shared file-url route mints its URL through here; no route may reach
  * the CloudFront signer around it. With the per-app IAM ceiling gone from the
- * shared read path (see data-roles-and-permissions.md / the CloudFront plan),
+ * shared read path (see docs/data-roles-and-permissions.md / the CloudFront plan),
  * this in-process re-check is the last per-request line of defense: it re-parses
  * the key against the caller's grants, REQUIRES the `shared/` namespace (the
  * distribution never serves apps/* or any other prefix), and re-asserts the

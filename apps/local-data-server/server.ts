@@ -2620,7 +2620,7 @@ async function main() {
         // /apps/<originAppId>/files, where the cloud-data-server assumes the
         // origin app's role to PUT into S3. That's the only path that
         // attributes the byte to its originating app, per
-        // data-roles-and-permissions.md.
+        // docs/data-roles-and-permissions.md.
 
         json(res, { record: await renderRecord(record) });
         return;

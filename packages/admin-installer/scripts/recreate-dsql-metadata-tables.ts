@@ -5,12 +5,12 @@
  * Step 2 of `investigation-photos-exif-extraction-2026-09-10.md`, which adds
  * `exif_present` to `IMAGE_METADATA_COLUMNS`. `ALTER TABLE ALTER COLUMN` is the
  * move DSQL refuses (0A000), so a declared-column change to these tables means
- * dropping them — see `docs/schema-change-runbook.md`.
+ * dropping them.
  *
- * These tables are the case that runbook explicitly does **not** cover: they
- * live only in `shared.*` and no sync refills them from local. What makes the
- * drop safe here is that they hold zero rows, and this refuses to run if that
- * is not still true rather than trusting the measurement that said so.
+ * Unlike an app's own tables, these tables live only in `shared.*` and no sync
+ * refills them from local. What makes the drop safe here is that they hold
+ * zero rows, and this refuses to run if that is not still true rather than
+ * trusting the measurement that said so.
  *
  * Recreation runs `initializeSharedSchema` rather than a copy of its DDL loop,
  * so the tables come back from the installer's own source of truth. Every
@@ -221,8 +221,7 @@ async function auditAppGrants(client: pg.Client): Promise<void> {
       `\n  ${suspect.join(", ")} writes shared.records and cannot touch any metadata\n` +
         `  table. No install produces that: every metadata apply fails with 42501 and\n` +
         `  takes the whole sync exchange down with it, so shared-record sync is off for\n` +
-        `  that app entirely. Re-run its install DDL — step 6 of\n` +
-        `  docs/schema-change-runbook.md: redeploy the app, or run\n` +
+        `  that app entirely. Re-run its install DDL: redeploy the app, or run\n` +
         `  scripts/rerun-app-install-ddl.ts.`,
     );
   }
