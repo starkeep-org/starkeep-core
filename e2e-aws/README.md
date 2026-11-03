@@ -1,6 +1,6 @@
 # @starkeep/e2e-aws — Tier-3 cloud journey
 
-The Tier-3 test of the four-tier plan (`meta-docs` doc 43, §11): the full
+The Tier-3 test of the four-tier test plan: the full
 install → sync → use → uninstall journey driven against **real AWS** through the
 same admin-installer CLIs an operator runs. It is the only suite that touches a
 live account, so it is **inert unless explicitly enabled**.

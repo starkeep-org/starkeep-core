@@ -10,8 +10,7 @@ this directory is kept because the plan cites its numbers.
 
 ## §3a — row-per-key vs jsonb
 
-Throwaway experiment backing §3a of
-`meta-docs/docs/plan-cross-app-record-labels-2026-07-27.md`: does DSQL's new `jsonb`
+Throwaway experiment backing §3a of the cross-app-record-labels plan: does DSQL's new `jsonb`
 support (May/June 2026) make "all of one app's labels for a record in one jsonb column"
 a better layout than one row per `(record, app, key)`?
 
