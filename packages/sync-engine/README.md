@@ -6,8 +6,6 @@ The package is data-kind-aware: shared data (always file-backed, no owning app) 
 
 Rows travel ahead of their files. Each receiver keeps two watermarks per author: a rows watermark and a bytes watermark, which says every file it wants up to that point is in its storage. A responder reports both, so a requester uploads the files the responder says it lacks, and downloads the files it lacks itself. A failed transfer holds only the affected author's bytes watermark, so rows keep flowing and the next round retries the file.
 
-See `starkeep-core/meta-docs/docs/functional-doc-data-sync-2026-06-08.md` for the full functional description.
-
 ## Installation
 
 ```bash
