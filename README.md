@@ -109,7 +109,7 @@ If you don't see it, click **Discover apps** in the header and add the absolute 
 2. Click **Approve & Install** to finish the install. This gives Photos permission to read and write photo and video files to your common storage.
 3. Click **Start Photos**, then click **Open Photos ↗**.
 
-Photos shows the images from your watched folder, or you can add photos to it directly.
+Photos shows the images from your watched folder, or use the mobile app to add photos from your phone.
 
 ## Part B: deploy Starkeep to your AWS account
 
