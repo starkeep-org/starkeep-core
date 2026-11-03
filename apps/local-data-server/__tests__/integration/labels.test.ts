@@ -500,7 +500,9 @@ describe("reverse query across a partially-readable library", () => {
       ids.map((id) => ({ recordId: id, key: "faces-detected" })),
     );
 
-    const db = new DatabaseSync(join(server.starkeepDir, "data.db"));
+    // Wait for any write the server still holds rather than failing with
+    // "database is locked".
+    const db = new DatabaseSync(join(server.starkeepDir, "data.db"), { timeout: 5_000 });
     try {
       db.prepare(`UPDATE shared_records SET deleted_at = updated_at WHERE id = ?`).run(ids[1]);
     } finally {
