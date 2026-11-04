@@ -21,7 +21,9 @@ import {
   DescribeUserPoolClientCommand,
   ListUserPoolClientsCommand,
   ResourceNotFoundException,
+  UpdateManagedLoginBrandingCommand,
   UpdateUserPoolClientCommand,
+  type CreateManagedLoginBrandingRequest,
   type UpdateUserPoolClientCommandInput,
   type UserPoolClientType,
 } from "@aws-sdk/client-cognito-identity-provider";
@@ -169,31 +171,132 @@ export function updateInputFrom(
 }
 
 /**
+ * The Starkeep star, as admin-web's favicon draws it, in a 64 by 64 box.
+ * Cognito's asset check refuses some markup, `role` and `aria-label` among
+ * it, so the SVGs here carry none.
+ */
+const STARKEEP_STAR = `<defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4098ff"/>
+      <stop offset="0.5" stop-color="#6366f1"/>
+      <stop offset="1" stop-color="#b23bff"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(32 32) rotate(43) scale(0.94) translate(-33.59 -30.41)">
+    <path d="M 17.50 22.20 L 18.61 1.00 L 36.42 12.56 L 56.93 7.07 L 51.44 27.58 L 63.00 45.39 L 41.80 46.50 L 28.43 63.00 L 20.82 43.18 L 1.00 35.57 Z" fill="url(#g)"/>
+    <path d="M 51.44 27.58 L 41.80 46.50 L 20.82 43.18 L 17.50 22.20 L 36.42 12.56 Z" fill="none" stroke="#000" stroke-width="1.4" stroke-linejoin="round"/>
+  </g>`;
+
+const STARKEEP_STAR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  ${STARKEEP_STAR}
+</svg>
+`;
+
+/** Cognito's default heading colors, so the name reads like the page's text. */
+const NAME_COLORS = { LIGHT: "#000716", DARK: "#d1d5db" } as const;
+
+function escapeXml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+/**
+ * The star with the deployment's name under it. An SVG shown as an image
+ * loads no web fonts, so the name takes the system's sans-serif. A long name
+ * gets a smaller font, so 32 characters still fit the 360-wide box.
+ */
+export function formLogoSvg(deploymentName: string, colorMode: "LIGHT" | "DARK"): string {
+  const fontSize = Math.min(28, Math.floor(600 / Math.max(deploymentName.length, 1)));
+  const name = escapeXml(deploymentName);
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 112">
+  <g transform="translate(148 0)">
+  ${STARKEEP_STAR}
+  </g>
+  <text x="180" y="100" text-anchor="middle" font-size="${fontSize}" font-weight="600" fill="${NAME_COLORS[colorMode]}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">${name}</text>
+</svg>
+`;
+}
+
+/**
+ * Cognito's default style with the star and the deployment's name above the
+ * form, and the star in the tab. The settings name only what differs from the
+ * defaults, which turn the form logo off; Cognito fills in the rest.
+ */
+export function brandingStyle(
+  deploymentName: string,
+): Pick<CreateManagedLoginBrandingRequest, "Settings" | "Assets"> {
+  const svg = (text: string) => new TextEncoder().encode(text);
+  const modes = ["LIGHT", "DARK"] as const;
+  return {
+    Settings: {
+      components: {
+        form: {
+          logo: { enabled: true, location: "CENTER", position: "TOP", formInclusion: "IN" },
+        },
+      },
+    },
+    Assets: [
+      ...modes.map((ColorMode) => ({
+        Category: "FORM_LOGO" as const,
+        ColorMode,
+        Extension: "SVG" as const,
+        Bytes: svg(formLogoSvg(deploymentName, ColorMode)),
+      })),
+      ...modes.map((ColorMode) => ({
+        Category: "FAVICON_SVG" as const,
+        ColorMode,
+        Extension: "SVG" as const,
+        Bytes: svg(STARKEEP_STAR_SVG),
+      })),
+    ],
+  };
+}
+
+/**
  * Without a branding style, a client's managed login page shows "Login pages
  * unavailable. Please contact an administrator." An SDK-created client gets
- * none, so each client gets Cognito's default style once.
+ * none, so each client gets the Starkeep style. A client that already has a
+ * style gets the Starkeep style written over it, so a reinstall replaces any
+ * edit made in the console's branding editor.
  */
 async function ensureBranding(
   client: CognitoIdentityProviderClient,
   userPoolId: string,
   clientId: string,
+  deploymentName: string,
 ): Promise<void> {
+  let brandingId: string | undefined;
   try {
-    await client.send(
+    const out = await client.send(
       new DescribeManagedLoginBrandingByClientCommand({
         UserPoolId: userPoolId,
         ClientId: clientId,
       }),
     );
-    return;
+    brandingId = out.ManagedLoginBranding?.ManagedLoginBrandingId;
   } catch (err) {
     if (!(err instanceof ResourceNotFoundException)) throw err;
+  }
+  if (brandingId) {
+    await client.send(
+      new UpdateManagedLoginBrandingCommand({
+        UserPoolId: userPoolId,
+        ManagedLoginBrandingId: brandingId,
+        UseCognitoProvidedValues: false,
+        ...brandingStyle(deploymentName),
+      }),
+    );
+    return;
   }
   await client.send(
     new CreateManagedLoginBrandingCommand({
       UserPoolId: userPoolId,
       ClientId: clientId,
-      UseCognitoProvidedValues: true,
+      ...brandingStyle(deploymentName),
     }),
   );
 }
@@ -289,7 +392,7 @@ export function mobileAppsClientSettings(
  * callbacks that app installs registered.
  */
 export async function configureAppSignInClients(
-  pool: PoolRef & { publicBaseUrl: string; clients: AppSignInClientIds },
+  pool: PoolRef & { publicBaseUrl: string; clients: AppSignInClientIds; deploymentName: string },
 ): Promise<void> {
   const client = cognito(pool.region);
   const cloudApps = await describe(client, pool.userPoolId, pool.clients.cloudAppsClientId);
@@ -298,7 +401,12 @@ export async function configureAppSignInClients(
       updateInputFrom(cloudApps, cloudAppsClientSettings(pool.publicBaseUrl)),
     ),
   );
-  await ensureBranding(client, pool.userPoolId, pool.clients.cloudAppsClientId);
+  await ensureBranding(
+    client,
+    pool.userPoolId,
+    pool.clients.cloudAppsClientId,
+    pool.deploymentName,
+  );
 
   const mobileApps = await describe(client, pool.userPoolId, pool.clients.mobileAppsClientId);
   await client.send(
@@ -306,12 +414,18 @@ export async function configureAppSignInClients(
       updateInputFrom(mobileApps, mobileAppsClientSettings(mobileApps.CallbackURLs ?? [])),
     ),
   );
-  await ensureBranding(client, pool.userPoolId, pool.clients.mobileAppsClientId);
+  await ensureBranding(
+    client,
+    pool.userPoolId,
+    pool.clients.mobileAppsClientId,
+    pool.deploymentName,
+  );
 }
 
 /**
  * Add or remove one mobile app's callback on the mobile-apps client, keeping
- * every other setting. Install adds the callback; uninstall removes it.
+ * every other setting. Install adds the callback; uninstall removes it. The
+ * client's branding style stays as the cloud data server install wrote it.
  */
 export async function setMobileAppCallback(
   pool: { region: string; userPoolId: string; mobileAppsClientId: string },
@@ -326,5 +440,4 @@ export async function setMobileAppCallback(
   await client.send(
     new UpdateUserPoolClientCommand(updateInputFrom(current, mobileAppsClientSettings(next))),
   );
-  if (present) await ensureBranding(client, pool.userPoolId, pool.mobileAppsClientId);
 }

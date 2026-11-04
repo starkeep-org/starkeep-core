@@ -72,6 +72,9 @@ export interface EnsureBootstrapStackResult {
   created: boolean;
 }
 
+/** The suite's deployment name, in the invitation email and under the sign-in star. */
+export const E2E_DEPLOYMENT_NAME = "Starkeep e2e";
+
 export async function ensureBootstrapStack(options: {
   stackPrefix: string;
   region: string;
@@ -80,7 +83,10 @@ export async function ensureBootstrapStack(options: {
   const stackName = `${stackPrefix}-bootstrap`;
   const client = new CloudFormationClient({ region });
 
-  const template = generateBootstrapTemplate({ stackPrefix });
+  const template = generateBootstrapTemplate({
+    stackPrefix,
+    deploymentName: E2E_DEPLOYMENT_NAME,
+  });
 
   const existing = await describeStack(client, stackName);
   if (existing) {

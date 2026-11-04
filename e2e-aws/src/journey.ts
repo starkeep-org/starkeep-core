@@ -49,7 +49,11 @@ import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import { compareHLC, deserializeHLC, type HLCTimestamp } from "@starkeep/protocol-primitives";
 import { appSyncableTableName, sqliteCompiler } from "@starkeep/storage-sqlite";
 import { AWS_TESTS_ENABLED, STACK_PREFIX, REGION, TEARDOWN } from "./env.js";
-import { ensureBootstrapStack, type BootstrapOutputs } from "./bootstrap-stack.js";
+import {
+  E2E_DEPLOYMENT_NAME,
+  ensureBootstrapStack,
+  type BootstrapOutputs,
+} from "./bootstrap-stack.js";
 import { ensureAdminUser } from "./admin-user.js";
 import { signInThisMachine, signInAdmin, runInstallCli, type AdminSession } from "./installers.js";
 import { cloudAppTokens, sessionCookieHeader } from "./cloud-app-session.js";
@@ -860,6 +864,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
           userPoolClientId: outputs.userPoolClientId,
           deviceUserPoolClientId: outputs.deviceUserPoolClientId,
           cognitoDomain: outputs.cognitoDomain,
+          deploymentName: E2E_DEPLOYMENT_NAME,
           identityPoolId: outputs.identityPoolId,
           managerRoleArn: outputs.managerRoleArn,
           permissionsBoundaryArn: outputs.appPermissionsBoundaryArn,

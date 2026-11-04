@@ -13,6 +13,12 @@ import type { CognitoConfig, STSCredentials } from "./cognito-auth";
  */
 export interface StarkeepConfig {
   stackPrefix: string;
+  /**
+   * The operator's name for the deployment, from step 1. The bootstrap
+   * template writes it into the invitation email, and the cloud data server
+   * install draws it under the sign-in page's star.
+   */
+  deploymentName?: string;
   stage: string;
   userPoolId: string;
   userPoolClientId: string;

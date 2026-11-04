@@ -10,6 +10,9 @@ export {
   installDdlBoundaryStatements,
   installInfraBoundaryStatements,
   MAX_STACK_PREFIX_LENGTH,
+  MAX_DEPLOYMENT_NAME_LENGTH,
+  isDeploymentName,
+  normalizeDeploymentName,
   MAX_INLINE_TEMPLATE_BYTES,
   type GenerateBootstrapTemplateInput,
 } from "./bootstrap/index.js";

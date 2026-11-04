@@ -22,7 +22,10 @@ import {
   generateBootstrapTemplate,
   getCloudFormationCreateStackUrl,
   getBootstrapStackOutputsUrl,
+  isDeploymentName,
+  MAX_DEPLOYMENT_NAME_LENGTH,
   MAX_STACK_PREFIX_LENGTH,
+  normalizeDeploymentName,
 } from "@starkeep/aws-bootstrap";
 import {
   readCloudConfig,
@@ -151,11 +154,13 @@ function StepToC({
 
 function Step1Bootstrap({
   initialStackPrefix,
+  initialDeploymentName,
   initialRegion,
   hasDeployment,
   onContinue,
 }: {
   initialStackPrefix: string;
+  initialDeploymentName: string;
   initialRegion: string;
   /**
    * The config already holds a user pool, so a download is for a stack update.
@@ -163,7 +168,12 @@ function Step1Bootstrap({
    * update would replace the first admin.
    */
   hasDeployment: boolean;
-  onContinue: (stackPrefix: string, region: string, adminEmail: string | null) => void;
+  onContinue: (
+    stackPrefix: string,
+    deploymentName: string,
+    region: string,
+    adminEmail: string | null,
+  ) => void;
 }) {
   // Step 1's region exists only to construct the CloudFormation console URL
   // and the bootstrap template's stack name. It is not persisted: once Step 2
@@ -175,21 +185,27 @@ function Step1Bootstrap({
   // region when the intended deployment was elsewhere.
   const [region, setRegion] = useState(initialRegion || "");
   const [stackPrefix, setStackPrefix] = useState(initialStackPrefix || "starkeep");
+  const [deploymentName, setDeploymentName] = useState(initialDeploymentName);
+  const [deploymentNameTouched, setDeploymentNameTouched] = useState(false);
   const [adminEmail, setAdminEmail] = useState("");
   const [adminEmailTouched, setAdminEmailTouched] = useState(false);
   const [downloaded, setDownloaded] = useState(false);
   const [showInstructions, setShowInstructions] = useState(false);
   const downloadStepRef = useRef<HTMLDivElement>(null);
 
-  const canContinue = !!region.trim() && !!stackPrefix.trim();
+  // Normalized on use, not on each keystroke, so a space between words survives.
+  const name = normalizeDeploymentName(deploymentName);
+  const deploymentNameInvalid = !isDeploymentName(name);
+  const canContinue = !!region.trim() && !!stackPrefix.trim() && !deploymentNameInvalid;
   const adminEmailInvalid = !hasDeployment && !isEmail(adminEmail);
   const canDownload = canContinue && !adminEmailInvalid;
   const continueWith = () =>
-    onContinue(stackPrefix, region, hasDeployment || adminEmailInvalid ? null : adminEmail);
+    onContinue(stackPrefix, name, region, hasDeployment || adminEmailInvalid ? null : adminEmail);
 
   function handleDownload() {
     const yaml = generateBootstrapTemplate({
       stackPrefix,
+      deploymentName: name,
       adminEmail: hasDeployment ? undefined : adminEmail,
     });
     const blob = new Blob([yaml], { type: "text/yaml" });
@@ -211,6 +227,25 @@ function Step1Bootstrap({
       </p>
 
       <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-1.5">
+          <label className="text-sm font-medium" htmlFor="deploymentName">
+            Deployment name
+          </label>
+          <Input
+            id="deploymentName"
+            value={deploymentName}
+            maxLength={MAX_DEPLOYMENT_NAME_LENGTH}
+            onChange={(e) => setDeploymentName(e.currentTarget.value)}
+            onBlur={() => setDeploymentNameTouched(true)}
+            aria-invalid={deploymentNameTouched && deploymentNameInvalid}
+            className={cn(deploymentNameTouched && deploymentNameInvalid && "border-destructive")}
+          />
+          <p className="text-xs text-muted-foreground">
+            Shown on sign-in pages and in new account emails. Letters, numbers, spaces, hyphens, and
+            underscores only ({MAX_DEPLOYMENT_NAME_LENGTH} chars max).
+          </p>
+        </div>
+
         <div className="flex flex-col gap-1.5">
           <label className="text-sm font-medium" htmlFor="region">
             AWS Region
@@ -1333,7 +1368,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
       setCloudConfig(cfg);
 
       const done = new Set<StepId>();
-      if (cfg?.stackPrefix) done.add(1);
+      if (cfg?.stackPrefix && isDeploymentName(cfg.deploymentName ?? "")) done.add(1);
       // Step 2 asks only for the IDs sign-in uses. The other outputs are
       // looked up after sign-in.
       const hasCognito = !!(cfg?.userPoolId && cfg?.userPoolClientId && cfg?.identityPoolId);
@@ -1430,11 +1465,12 @@ export function CloudSetupWizard({ onComplete }: Props) {
         {currentStep === 1 && (
           <Step1Bootstrap
             initialStackPrefix={stackPrefix}
+            initialDeploymentName={cloudConfig?.deploymentName ?? ""}
             initialRegion={
               cloudConfig?.userPoolId ? regionFromUserPoolId(cloudConfig.userPoolId) : ""
             }
             hasDeployment={!!cloudConfig?.userPoolId}
-            onContinue={async (prefix, region, adminEmail) => {
+            onContinue={async (prefix, deploymentName, region, adminEmail) => {
               setBootstrapRegion(region);
               setBootstrapAdminEmail(adminEmail);
               const isChanging = !!cloudConfig?.stackPrefix && cloudConfig.stackPrefix !== prefix;
@@ -1447,6 +1483,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
                 const updated = await patchCloudConfig({
                   stackPrefix: prefix,
                   stage: prefix,
+                  deploymentName,
                   userPoolId: null,
                   userPoolClientId: null,
                   identityPoolId: null,
@@ -1473,7 +1510,11 @@ export function CloudSetupWizard({ onComplete }: Props) {
                 setCredentials(null);
                 setCompletedSteps(new Set());
               } else {
-                const updated = await patchCloudConfig({ stackPrefix: prefix, stage: prefix });
+                const updated = await patchCloudConfig({
+                  stackPrefix: prefix,
+                  stage: prefix,
+                  deploymentName,
+                });
                 setCloudConfig(updated);
               }
               markDone(1);

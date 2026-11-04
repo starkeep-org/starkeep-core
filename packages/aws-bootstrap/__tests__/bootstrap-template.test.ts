@@ -4,6 +4,9 @@ import {
   generateBootstrapTemplate,
   getCloudFormationCreateStackUrl,
   getBootstrapStackOutputsUrl,
+  isDeploymentName,
+  MAX_DEPLOYMENT_NAME_LENGTH,
+  normalizeDeploymentName,
   MAX_INLINE_TEMPLATE_BYTES,
   MAX_STACK_PREFIX_LENGTH,
 } from "../src/bootstrap/index.js";
@@ -37,7 +40,10 @@ interface CfnTemplate {
 }
 
 function parseTemplate(stackPrefix?: string): CfnTemplate {
-  const raw = generateBootstrapTemplate(stackPrefix ? { stackPrefix } : {});
+  const raw = generateBootstrapTemplate({
+    ...(stackPrefix ? { stackPrefix } : {}),
+    deploymentName: "Test Library",
+  });
   return parse(raw, { customTags: cfnTags }) as CfnTemplate;
 }
 
@@ -94,7 +100,10 @@ describe("bootstrap template structure", () => {
   });
 
   it("interpolates a custom stack prefix into generation-time strings", () => {
-    const raw = generateBootstrapTemplate({ stackPrefix: "teststk" });
+    const raw = generateBootstrapTemplate({
+      stackPrefix: "teststk",
+      deploymentName: "Test Library",
+    });
     expect(raw).toContain(
       "arn:aws:s3:::teststk-files-*/shared/${aws:PrincipalTag/starkeep:userId}/*",
     );
@@ -106,10 +115,11 @@ describe("template size", () => {
   it("fits CloudFormation's inline cap, as the tier-3 suite sends it", () => {
     // `e2e-aws` creates and updates the stack with `TemplateBody`, which
     // CloudFormation refuses past 51,200 bytes before creating anything. The
-    // worst case: every `${stackPrefix}` at the longest prefix allowed, and
-    // the longest address an email can have.
+    // worst case: every `${stackPrefix}` at the longest prefix allowed, the
+    // longest name, and the longest address an email can have.
     const raw = generateBootstrapTemplate({
       stackPrefix: "s".repeat(MAX_STACK_PREFIX_LENGTH),
+      deploymentName: "x".repeat(MAX_DEPLOYMENT_NAME_LENGTH),
       adminEmail: `${"a".repeat(64)}@${"b".repeat(185)}.com`,
     });
     expect(Buffer.byteLength(raw, "utf8")).toBeLessThanOrEqual(MAX_INLINE_TEMPLATE_BYTES);
@@ -215,9 +225,16 @@ describe("the first admin", () => {
   it("bakes in the email the wizard asked for on a new deployment", () => {
     const withEmail = (adminEmail: string) =>
       (
-        parse(generateBootstrapTemplate({ stackPrefix: "teststk", adminEmail }), {
-          customTags: cfnTags,
-        }) as CfnTemplate
+        parse(
+          generateBootstrapTemplate({
+            stackPrefix: "teststk",
+            deploymentName: "Test Library",
+            adminEmail,
+          }),
+          {
+            customTags: cfnTags,
+          },
+        ) as CfnTemplate
       ).Parameters.AdminEmail!.Default;
     expect(withEmail("operator@example.com")).toBe("operator@example.com");
     // An apostrophe is valid in an address and must not end the YAML string.
@@ -293,6 +310,50 @@ describe("the invitation email", () => {
 
   it("is titled the way the wizard tells the operator to look for it", () => {
     expect(message.EmailSubject).toBe("Your Starkeep account");
+  });
+
+  it("names the deployment and the username", () => {
+    expect(message.EmailMessage).toContain(
+      "<p>Your new Starkeep account (Test Library) is ready. Welcome!</p>",
+    );
+    expect(message.EmailMessage).toContain(
+      "<p>Sign in with {username} and this temporary password:</p>",
+    );
+  });
+
+  it("refuses a name with markup or a Cognito placeholder", () => {
+    expect(() => generateBootstrapTemplate({ deploymentName: "Tom & Jerry" })).toThrow();
+    expect(() => generateBootstrapTemplate({ deploymentName: "Lab {####}" })).toThrow();
+  });
+});
+
+describe("the deployment name", () => {
+  it("accepts 1 to 32 letters, digits, single spaces, hyphens and underscores", () => {
+    expect(isDeploymentName("Koller Family")).toBe(true);
+    expect(isDeploymentName("Starkeep e2e_test-2")).toBe(true);
+    expect(isDeploymentName("x".repeat(MAX_DEPLOYMENT_NAME_LENGTH))).toBe(true);
+    expect(isDeploymentName("")).toBe(false);
+    expect(isDeploymentName(" Koller")).toBe(false);
+    expect(isDeploymentName("Koller ")).toBe(false);
+    expect(isDeploymentName("Koller  Family")).toBe(false);
+    expect(isDeploymentName("x".repeat(MAX_DEPLOYMENT_NAME_LENGTH + 1))).toBe(false);
+    expect(isDeploymentName("Koller\nFamily")).toBe(false);
+    expect(isDeploymentName("Koller\tFamily")).toBe(false);
+  });
+
+  it("refuses punctuation, markup, braces and letters outside ASCII", () => {
+    for (const name of ["Tom's", "A & B", "<b>", "Lab {####}", "{username}", "Café", "家族"]) {
+      expect(isDeploymentName(name)).toBe(false);
+    }
+  });
+
+  it("normalizes away the spaces at either end and between words", () => {
+    expect(normalizeDeploymentName("  Koller   Family ")).toBe("Koller Family");
+    expect(isDeploymentName(normalizeDeploymentName("  Koller   Family "))).toBe(true);
+  });
+
+  it("is required to generate the template", () => {
+    expect(() => generateBootstrapTemplate({ deploymentName: "" })).toThrow(/deployment name/);
   });
 });
 
@@ -374,20 +435,12 @@ describe("stack outputs", () => {
         "ArtifactsBucketName",
         "Region",
         "StackPrefix",
-        "UsersConsoleLink",
       ].sort(),
     );
   });
 });
 
 describe("console URL helpers", () => {
-  it("links to the pool's accounts, not to the create-user form", () => {
-    expect((template.Outputs.UsersConsoleLink as { Value: { "Fn::Sub": string } }).Value).toEqual({
-      "Fn::Sub":
-        "https://${AWS::Region}.console.aws.amazon.com/cognito/v2/idp/user-pools/${UserPool}/user-management/users?region=${AWS::Region}\n",
-    });
-  });
-
   it("builds the create-stack URL with an optional stack name", () => {
     expect(getCloudFormationCreateStackUrl("us-east-1")).toBe(
       "https://us-east-1.console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/create/template",
@@ -406,7 +459,7 @@ describe("console URL helpers", () => {
   it("quotes a condition operator YAML would read as null", () => {
     // `Null:` unquoted is a YAML null key, and CloudFormation rejects the
     // statement. The per-user boundaries split sessions on a Null condition.
-    const raw = generateBootstrapTemplate();
+    const raw = generateBootstrapTemplate({ deploymentName: "Test Library" });
     expect(raw).toContain("'Null':");
     expect(raw).not.toMatch(/^\s+Null:/m);
   });

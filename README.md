@@ -129,11 +129,12 @@ In the **Cloud** section of the dashboard, click **Deploy Starkeep Cloud**.
 
 The first step deploys your bootstrap stack. The stack creates the sign-in service and the identities and permission limits that the rest of the deployment uses.
 
-1. Choose an **AWS Region** and keep the default **Stack prefix**, `starkeep`, unless you need several deployments in one account.
-2. Enter your email address to create your Starkeep Admin account. This account will be able to manage users and apps in the cloud. This email is private to you, no one else sees it, not even the Starkeep organization.
-3. Click **Download bootstrap template**.
-4. Click **Open CloudFormation console ↗** and follow **Show full instructions** to create the stack from the downloaded template.
-5. Wait about a minute until the stack's **Outputs** tab lists values, then click **Stack is deployed — Continue**.
+1. Enter a **Deployment name** of up to 32 characters. Use letters, numbers, spaces, hyphens, and underscores. Sign-in pages and new account emails show this name.
+2. Choose an **AWS Region** and keep the default **Stack prefix**, `starkeep`, unless you need several deployments in one account.
+3. Enter your email address to create your Starkeep Admin account. This account will be able to manage users and apps in the cloud. This email is private to you, no one else sees it, not even the Starkeep organization.
+4. Click **Download bootstrap template**.
+5. Click **Open CloudFormation console ↗** and follow **Show full instructions** to create the stack from the downloaded template.
+6. Wait about a minute until the stack's **Outputs** tab lists values, then click **Stack is deployed — Continue**.
 
 ### 2. Copy the stack outputs
 
