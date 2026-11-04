@@ -41,6 +41,7 @@ jobs:
             pnpm changeset status --verbose
           fi
       - run: pnpm format:check
+      - run: pnpm check:icons
       - run: pnpm turbo run lint typecheck
       # Every package's vitest pool at once oversubscribes the runner's four
       # cores until a worker misses its RPC deadline ("Timeout calling
