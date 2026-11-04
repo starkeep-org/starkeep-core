@@ -11,7 +11,7 @@ Starkeep is a modern self-hosting system that allows you to keep your own data, 
 - Enterprise-grade security and built-in file versioning.
 - Easy enough for anyone to set up and run, with limitless potential for developers.
 
-[![Join us on Discord](https://img.shields.io/badge/Join%20us-Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/W2Kt9cPGeA)
+[![Join us on Discord](https://img.shields.io/badge/Join%20us-Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/7fKjYaCxVy)
 
 # Why Starkeep
 
