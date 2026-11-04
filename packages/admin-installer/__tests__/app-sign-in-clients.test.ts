@@ -215,7 +215,7 @@ describe("configureAppSignInClients", () => {
 
   it("writes the deployment's name under the star, escaped, in each mode's heading color", () => {
     const light = formLogoSvg("Tom & Jerry's <Photos>", "LIGHT");
-    expect(light).toContain(">Tom &amp; Jerry&apos;s &lt;Photos&gt;</text>");
+    expect(light).toContain(">Tom &amp; Jerry&#39;s &lt;Photos&gt;</text>");
     expect(light).toContain('fill="#000716"');
     expect(formLogoSvg("Koller Family", "DARK")).toContain('fill="#d1d5db"');
   });

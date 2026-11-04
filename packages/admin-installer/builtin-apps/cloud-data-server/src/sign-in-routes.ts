@@ -43,6 +43,7 @@ import {
   AUTH_SIGNED_OUT_ROUTE,
   AUTH_SIGN_OUT_ROUTE,
   AUTH_START_ROUTE,
+  escapeMarkup,
 } from "@starkeep/protocol-primitives";
 import { userPoolConfig, verifyUserToken } from "./verify-user-token.js";
 
@@ -120,10 +121,6 @@ function redirect(location: string, cookies: string[] = []): SignInResponse {
   };
 }
 
-function escapeHtml(text: string): string {
-  return text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
-}
-
 /** A plain page saying what went wrong, with a way back when there is one. */
 function page(
   status: number,
@@ -131,7 +128,7 @@ function page(
   backTo?: string,
   cookies: string[] = [],
 ): SignInResponse {
-  const back = backTo ? `<p><a href="${escapeHtml(backTo)}">Back</a></p>` : "";
+  const back = backTo ? `<p><a href="${escapeMarkup(backTo)}">Back</a></p>` : "";
   return {
     statusCode: status,
     headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
@@ -139,7 +136,7 @@ function page(
     body:
       `<!doctype html><html><head><meta charset="utf-8"><title>Starkeep</title>` +
       `<meta name="viewport" content="width=device-width,initial-scale=1"></head>` +
-      `<body><p>${escapeHtml(message)}</p>${back}</body></html>`,
+      `<body><p>${escapeMarkup(message)}</p>${back}</body></html>`,
   };
 }
 

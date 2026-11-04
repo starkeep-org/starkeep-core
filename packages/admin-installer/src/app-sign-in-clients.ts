@@ -27,6 +27,7 @@ import {
   type UpdateUserPoolClientCommandInput,
   type UserPoolClientType,
 } from "@aws-sdk/client-cognito-identity-provider";
+import { escapeMarkup } from "@starkeep/protocol-primitives";
 
 export interface AppSignInClientIds {
   /** Cloud app sessions: the broker's HMAC branch and both gateway authorizers. */
@@ -195,15 +196,6 @@ const STARKEEP_STAR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 
 /** Cognito's default heading colors, so the name reads like the page's text. */
 const NAME_COLORS = { LIGHT: "#000716", DARK: "#d1d5db" } as const;
 
-function escapeXml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
-
 /**
  * The star with the deployment's name under it. An SVG shown as an image
  * loads no web fonts, so the name takes the system's sans-serif. A long name
@@ -211,7 +203,7 @@ function escapeXml(text: string): string {
  */
 export function formLogoSvg(deploymentName: string, colorMode: "LIGHT" | "DARK"): string {
   const fontSize = Math.min(28, Math.floor(600 / Math.max(deploymentName.length, 1)));
-  const name = escapeXml(deploymentName);
+  const name = escapeMarkup(deploymentName);
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 112">
   <g transform="translate(148 0)">
   ${STARKEEP_STAR}
