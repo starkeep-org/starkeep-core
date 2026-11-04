@@ -182,7 +182,7 @@ Photos then shows the photos that synced from this computer.
 
 Starkeep Photos is available as an Android app you can build yourself. (Starkeep Photos for iOS is in the works.)
 
-Until the app is available in the Play Store, see the [Starkeep Discord](https://discord.gg/W2Kt9cPGeA) for an APK download link. You can also build the APK from source as described under [Build the APK from source](#build-the-apk-from-source-optional) below.
+Until the app is available in the Play Store, see the [Starkeep Discord](https://discord.gg/7fKjYaCxVy) for an APK download link. You can also build the APK from source as described under [Build the APK from source](#build-the-apk-from-source-optional) below.
 
 ### 1. Register the Photos mobile app on Starkeep Cloud
 
