@@ -70,7 +70,7 @@ describe("POST /api/cognito-outputs", () => {
   });
 
   it("looks for the client name the bootstrap template gives the device client", () => {
-    expect(generateBootstrapTemplate({ stackPrefix: "sktest" })).toContain(
+    expect(generateBootstrapTemplate({ stackPrefix: "sktest", deploymentName: "Test" })).toContain(
       `ClientName: !Sub '\${StackPrefix}-devices'`,
     );
     expect(route.deviceClientName("sktest")).toBe("sktest-devices");

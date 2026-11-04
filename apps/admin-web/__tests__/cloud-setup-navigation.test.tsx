@@ -49,12 +49,13 @@ vi.mock("../src/lib/cognito-auth", async (importOriginal) => ({
 }));
 
 // The template generator is real; the spy records what step 1 asked it for.
-const generatedFor: Array<{ stackPrefix?: string; adminEmail?: string }> = [];
+type TemplateInput = { stackPrefix?: string; deploymentName: string; adminEmail?: string };
+const generatedFor: TemplateInput[] = [];
 vi.mock("@starkeep/aws-bootstrap", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@starkeep/aws-bootstrap")>();
   return {
     ...actual,
-    generateBootstrapTemplate: (input: { stackPrefix?: string; adminEmail?: string }) => {
+    generateBootstrapTemplate: (input: TemplateInput) => {
       generatedFor.push(input);
       return actual.generateBootstrapTemplate(input);
     },
@@ -64,6 +65,7 @@ vi.mock("@starkeep/aws-bootstrap", async (importOriginal) => {
 const DEPLOYED_CONFIG = {
   stackPrefix: "sktest",
   stage: "sktest",
+  deploymentName: "Test Library",
   userPoolId: "us-east-2_abc123",
   userPoolClientId: "client",
   deviceUserPoolClientId: "deviceclient",
@@ -78,6 +80,7 @@ const DEPLOYED_CONFIG = {
 const SIGN_IN_ONLY_CONFIG = {
   stackPrefix: DEPLOYED_CONFIG.stackPrefix,
   stage: DEPLOYED_CONFIG.stage,
+  deploymentName: DEPLOYED_CONFIG.deploymentName,
   userPoolId: DEPLOYED_CONFIG.userPoolId,
   userPoolClientId: DEPLOYED_CONFIG.userPoolClientId,
   identityPoolId: DEPLOYED_CONFIG.identityPoolId,
@@ -600,6 +603,7 @@ describe("the admin email on step 1", () => {
     await user.click(await screen.findByRole("option", { name: /us-east-1/ }));
     const download = screen.getByRole("button", { name: "Download bootstrap template" });
     expect((download as HTMLButtonElement).disabled).toBe(true);
+    await user.type(screen.getByLabelText("Deployment name"), "Test Library");
 
     const email = screen.getByLabelText("Email address for your new Starkeep account");
     await user.type(email, "operator");
@@ -610,6 +614,7 @@ describe("the admin email on step 1", () => {
     await user.click(download);
     expect(generatedFor.at(-1)).toEqual({
       stackPrefix: "starkeep",
+      deploymentName: "Test Library",
       adminEmail: "operator@example.com",
     });
 
@@ -631,7 +636,110 @@ describe("the admin email on step 1", () => {
     expect(screen.queryByLabelText("Email address for your new Starkeep account")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Download bootstrap template" }));
-    expect(generatedFor.at(-1)).toEqual({ stackPrefix: "sktest", adminEmail: undefined });
+    expect(generatedFor.at(-1)).toEqual({
+      stackPrefix: "sktest",
+      deploymentName: "Test Library",
+      adminEmail: undefined,
+    });
+  });
+});
+
+/**
+ * Step 1 requires a deployment name, which the template's invitation email
+ * and the sign-in page show. A config without one reopens step 1.
+ */
+describe("the deployment name on step 1", () => {
+  beforeEach(() => {
+    generatedFor.length = 0;
+    supportRadixSelect();
+  });
+
+  it("holds both ways forward until the name is filled in, and collapses extra spaces", async () => {
+    const patches = statefulConfig(null);
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/cloud-setup"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await user.click(await screen.findByRole("combobox", {}, { timeout: 5_000 }));
+    await user.click(await screen.findByRole("option", { name: /us-east-1/ }));
+    const signIn = screen.getByRole("button", { name: "Sign in to existing admin account" });
+    expect((signIn as HTMLButtonElement).disabled).toBe(true);
+
+    const name = screen.getByLabelText("Deployment name") as HTMLInputElement;
+    await user.type(name, "   ");
+    expect((signIn as HTMLButtonElement).disabled).toBe(true);
+    await user.clear(name);
+    await user.type(name, " Koller   Family ");
+    expect(name.maxLength).toBe(32);
+    await user.click(signIn);
+
+    expect(await screen.findByRole("heading", { name: "Stack Outputs" })).toBeTruthy();
+    expect(patches.at(-1)).toMatchObject({ deploymentName: "Koller Family" });
+  });
+
+  it("holds the download until the name uses only the allowed characters", async () => {
+    statefulConfig(null);
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/cloud-setup"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await user.click(await screen.findByRole("combobox", {}, { timeout: 5_000 }));
+    await user.click(await screen.findByRole("option", { name: /us-east-1/ }));
+    await user.type(
+      screen.getByLabelText("Email address for your new Starkeep account"),
+      "operator@example.com",
+    );
+    const download = screen.getByRole("button", { name: "Download bootstrap template" });
+    const signIn = screen.getByRole("button", { name: "Sign in to existing admin account" });
+    const name = screen.getByLabelText("Deployment name") as HTMLInputElement;
+
+    for (const invalid of ["Tom & Jerry", "Lab {####}", "Café"]) {
+      await user.clear(name);
+      await user.type(name, invalid.replace(/[{]/g, "{{"));
+      expect(name.value).toBe(invalid);
+      expect((download as HTMLButtonElement).disabled).toBe(true);
+      expect((signIn as HTMLButtonElement).disabled).toBe(true);
+    }
+
+    await user.clear(name);
+    await user.type(name, "Koller_Family-2");
+    expect((download as HTMLButtonElement).disabled).toBe(false);
+    await user.click(download);
+    expect(generatedFor.at(-1)).toMatchObject({ deploymentName: "Koller_Family-2" });
+  });
+
+  it("reopens step 1 for a stored name that fails validation", async () => {
+    statefulConfig({ ...DEPLOYED_CONFIG, deploymentName: "Tom & Jerry" });
+    render(
+      <MemoryRouter initialEntries={["/cloud-setup"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Bootstrap Stack" }, { timeout: 5_000 }),
+    ).toBeTruthy();
+  });
+
+  it("reopens step 1 for a deployment saved before the name existed", async () => {
+    const { deploymentName: _n, ...older } = DEPLOYED_CONFIG;
+    statefulConfig(older);
+    render(
+      <MemoryRouter initialEntries={["/cloud-setup"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Bootstrap Stack" }, { timeout: 5_000 }),
+    ).toBeTruthy();
+    expect((screen.getByLabelText("Deployment name") as HTMLInputElement).value).toBe("");
   });
 });
 
@@ -653,10 +761,13 @@ describe("an operator with an existing deployment and no local config", () => {
     await user.click(screen.getByRole("combobox"));
     await user.click(await screen.findByRole("option", { name: /us-east-1/ }));
     // No email needed: the account already exists.
+    await user.type(screen.getByLabelText("Deployment name"), "Test Library");
     await user.click(screen.getByRole("button", { name: "Sign in to existing admin account" }));
 
     expect(await screen.findByRole("heading", { name: "Stack Outputs" })).toBeTruthy();
-    expect(patches).toEqual([{ stackPrefix: "starkeep", stage: "starkeep" }]);
+    expect(patches).toEqual([
+      { stackPrefix: "starkeep", stage: "starkeep", deploymentName: "Test Library" },
+    ]);
     expect(generatedFor).toEqual([]);
   });
 });

@@ -48,6 +48,7 @@ import {
   getIdentityPoolCredentials,
 } from "../src/cognito-auth";
 import { prompt } from "../src/cli-prompt";
+import { isDeploymentName } from "@starkeep/aws-bootstrap";
 
 interface StarkeepConfig {
   stackPrefix: string;
@@ -58,6 +59,8 @@ interface StarkeepConfig {
   deviceUserPoolClientId?: string;
   /** The bootstrap's CognitoDomain output: the managed login page's host name. */
   cognitoDomain?: string;
+  /** Step 1 of admin-web's cloud setup: the name under the sign-in page's star. */
+  deploymentName?: string;
   /** Written by this script: the client cloud app sessions sign in with. */
   cloudAppsUserPoolClientId?: string;
   /** Written by this script: the client mobile apps sign in with. */
@@ -128,6 +131,14 @@ if (!cognitoDomain) {
   console.error(
     "Sign in on admin-web's cloud setup, which looks it up. If the lookup fails, update the bootstrap stack first.",
   );
+  process.exit(1);
+}
+
+// The sign-in page shows the deployment's name under the star.
+const deploymentName = config.deploymentName;
+if (!deploymentName || !isDeploymentName(deploymentName)) {
+  console.error("Error: ~/.starkeep/config.json has no valid deploymentName.");
+  console.error("Name the deployment on step 1 of admin-web's cloud setup.");
   process.exit(1);
 }
 
@@ -236,6 +247,7 @@ const outputs = await installCloudDataServer({
   userPoolId: config.userPoolId,
   deviceUserPoolClientId,
   cognitoDomain,
+  deploymentName,
   // The cloud e2e harness passes --ephemeral to provision disposable infra and
   // skip the production data-protection hardening (versioning/SSE/PAB/deletion-
   // protect). A CLI flag — not an env var — so it can't leak in via the

@@ -300,7 +300,7 @@ describe("the temporary password's fit to the pool", () => {
     // "Reset password" would then fail for that one draw. The policy lives in
     // the bootstrap template, so check every draw against it there.
     const { generateBootstrapTemplate } = await import("@starkeep/aws-bootstrap");
-    const template = generateBootstrapTemplate();
+    const template = generateBootstrapTemplate({ deploymentName: "Test" });
     const policy = template.match(/PasswordPolicy:\s*\n((?:\s+\w+: .+\n)+)/)?.[1] ?? "";
     const field = (name: string) => policy.match(new RegExp(`${name}: (\\S+)`))?.[1];
     const minimum = Number(field("MinimumLength"));

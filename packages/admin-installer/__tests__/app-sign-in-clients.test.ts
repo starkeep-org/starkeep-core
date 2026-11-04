@@ -16,11 +16,14 @@ import {
   DescribeUserPoolClientCommand,
   ListUserPoolClientsCommand,
   ResourceNotFoundException,
+  UpdateManagedLoginBrandingCommand,
   UpdateUserPoolClientCommand,
   type UserPoolClientType,
 } from "@aws-sdk/client-cognito-identity-provider";
 import {
+  brandingStyle,
   configureAppSignInClients,
+  formLogoSvg,
   findOrCreateAppSignInClients,
   setMobileAppCallback,
 } from "../src/app-sign-in-clients.js";
@@ -126,6 +129,7 @@ describe("configureAppSignInClients", () => {
       ...POOL,
       publicBaseUrl: "https://d1.cloudfront.net/",
       clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1" },
+      deploymentName: "Koller Family",
     });
 
     const [cloud, mobile] = cognito
@@ -145,7 +149,7 @@ describe("configureAppSignInClients", () => {
     expect(mobile!.CallbackURLs).toEqual(["memo-mobile://auth/callback"]);
   });
 
-  it("gives a client with no branding style Cognito's default one", async () => {
+  it("gives a client with no branding style the Starkeep one", async () => {
     cognito.on(DescribeUserPoolClientCommand).resolves({ UserPoolClient: MOBILE });
     cognito
       .on(DescribeManagedLoginBrandingByClientCommand)
@@ -155,15 +159,78 @@ describe("configureAppSignInClients", () => {
       ...POOL,
       publicBaseUrl: "https://d1.cloudfront.net",
       clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1" },
+      deploymentName: "Koller Family",
     });
 
     const created = cognito
       .commandCalls(CreateManagedLoginBrandingCommand)
       .map((c) => c.args[0].input);
     expect(created).toEqual([
-      { UserPoolId: POOL.userPoolId, ClientId: "cloud1", UseCognitoProvidedValues: true },
-      { UserPoolId: POOL.userPoolId, ClientId: "mobile1", UseCognitoProvidedValues: true },
+      { UserPoolId: POOL.userPoolId, ClientId: "cloud1", ...brandingStyle("Koller Family") },
+      { UserPoolId: POOL.userPoolId, ClientId: "mobile1", ...brandingStyle("Koller Family") },
     ]);
+    expect(cognito.commandCalls(UpdateManagedLoginBrandingCommand)).toHaveLength(0);
+  });
+
+  it("writes the Starkeep style over a client's existing one", async () => {
+    cognito.on(DescribeUserPoolClientCommand).resolves({ UserPoolClient: MOBILE });
+    cognito
+      .on(DescribeManagedLoginBrandingByClientCommand, { ClientId: "cloud1" })
+      .resolves({ ManagedLoginBranding: { ManagedLoginBrandingId: "brand-cloud" } })
+      .on(DescribeManagedLoginBrandingByClientCommand, { ClientId: "mobile1" })
+      .resolves({ ManagedLoginBranding: { ManagedLoginBrandingId: "brand-mobile" } });
+
+    await configureAppSignInClients({
+      ...POOL,
+      publicBaseUrl: "https://d1.cloudfront.net",
+      clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1" },
+      deploymentName: "Koller Family",
+    });
+
+    const updated = cognito
+      .commandCalls(UpdateManagedLoginBrandingCommand)
+      .map((c) => c.args[0].input);
+    const style = { UseCognitoProvidedValues: false, ...brandingStyle("Koller Family") };
+    expect(updated).toEqual([
+      { UserPoolId: POOL.userPoolId, ManagedLoginBrandingId: "brand-cloud", ...style },
+      { UserPoolId: POOL.userPoolId, ManagedLoginBrandingId: "brand-mobile", ...style },
+    ]);
+    expect(cognito.commandCalls(CreateManagedLoginBrandingCommand)).toHaveLength(0);
+  });
+
+  it("puts the star above the form and in the tab, in both color modes", () => {
+    const { Settings, Assets } = brandingStyle("Koller Family");
+    expect(Settings).toMatchObject({ components: { form: { logo: { enabled: true } } } });
+    expect(Assets!.map((a) => `${a.Category}/${a.ColorMode}/${a.Extension}`)).toEqual([
+      "FORM_LOGO/LIGHT/SVG",
+      "FORM_LOGO/DARK/SVG",
+      "FAVICON_SVG/LIGHT/SVG",
+      "FAVICON_SVG/DARK/SVG",
+    ]);
+    const svg = (i: number) => new TextDecoder().decode(Assets![i]!.Bytes);
+    expect(svg(0)).toBe(formLogoSvg("Koller Family", "LIGHT"));
+    expect(svg(1)).toBe(formLogoSvg("Koller Family", "DARK"));
+    expect(svg(2)).not.toContain("Koller Family");
+  });
+
+  it("writes the deployment's name under the star, escaped, in each mode's heading color", () => {
+    const light = formLogoSvg("Tom & Jerry's <Photos>", "LIGHT");
+    expect(light).toContain(">Tom &amp; Jerry&apos;s &lt;Photos&gt;</text>");
+    expect(light).toContain('fill="#000716"');
+    expect(formLogoSvg("Koller Family", "DARK")).toContain('fill="#d1d5db"');
+  });
+
+  it("carries no attribute Cognito's asset check refuses", () => {
+    for (const asset of brandingStyle("Koller Family").Assets!) {
+      const svg = new TextDecoder().decode(asset.Bytes);
+      expect(svg).not.toMatch(/\b(role|aria-[a-z]+)=/);
+    }
+  });
+
+  it("shrinks the font for a long name", () => {
+    const size = (name: string) => Number(/font-size="(\d+)"/.exec(formLogoSvg(name, "LIGHT"))![1]);
+    expect(size("Koller")).toBe(28);
+    expect(size("x".repeat(32))).toBeLessThan(28);
   });
 });
 
@@ -185,6 +252,9 @@ describe("setMobileAppCallback", () => {
     expect(update.ReadAttributes).toEqual(["email"]);
     expect(update.ClientName).toBe("sk-mobile-apps");
     expect(update.IdTokenValidity).toBe(15);
+    // The cloud data server install owns the branding style.
+    expect(cognito.commandCalls(UpdateManagedLoginBrandingCommand)).toHaveLength(0);
+    expect(cognito.commandCalls(CreateManagedLoginBrandingCommand)).toHaveLength(0);
   });
 
   it("removes one app's callback and leaves the others", async () => {

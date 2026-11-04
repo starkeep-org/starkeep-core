@@ -354,6 +354,7 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           "cognito-idp:UpdateUserPoolClient",
           "cognito-idp:DescribeManagedLoginBrandingByClient",
           "cognito-idp:CreateManagedLoginBranding",
+          "cognito-idp:UpdateManagedLoginBranding",
         ].map((action) => ({
           action,
           resource: userPoolArn,

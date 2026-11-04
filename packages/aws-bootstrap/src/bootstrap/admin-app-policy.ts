@@ -55,6 +55,7 @@ export function adminAppPolicyStatements(stackPrefix: string): IamStatement[] {
         "cognito-idp:UpdateUserPoolClient",
         "cognito-idp:ListUserPoolClients",
         "cognito-idp:CreateManagedLoginBranding",
+        "cognito-idp:UpdateManagedLoginBranding",
         "cognito-idp:DescribeManagedLoginBrandingByClient",
       ],
       Resource: { GetAtt: "UserPool.Arn" },

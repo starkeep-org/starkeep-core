@@ -10,6 +10,12 @@ import { installInfraBoundaryStatements } from "./install-infra-boundary.js";
 export interface GenerateBootstrapTemplateInput {
   stackPrefix?: string;
   /**
+   * The name the operator gives the deployment. The invitation email names it,
+   * as literal text rather than a parameter: a stack update keeps a
+   * parameter's old value, so a renamed re-download would change nothing.
+   */
+  deploymentName: string;
+  /**
    * The first admin's email, written as the `AdminEmail` default. The wizard
    * passes it only for a new deployment. A re-download for an existing stack
    * omits it, so the default stays empty.
@@ -30,6 +36,26 @@ export interface GenerateBootstrapTemplateInput {
  */
 export const MAX_STACK_PREFIX_LENGTH = 16;
 
+/** The cap on a deployment name, so it fits under the star on the sign-in page. */
+export const MAX_DEPLOYMENT_NAME_LENGTH = 32;
+
+/**
+ * Whether `name` can name a deployment: 1 to 32 letters, digits, spaces,
+ * hyphens and underscores, with single spaces between words. The set needs no
+ * HTML or XML escaping and holds none of the braces of Cognito's `{username}`
+ * and `{####}` placeholders.
+ */
+export function isDeploymentName(name: string): boolean {
+  return (
+    name.length <= MAX_DEPLOYMENT_NAME_LENGTH && /^[A-Za-z0-9_-]+( [A-Za-z0-9_-]+)*$/.test(name)
+  );
+}
+
+/** Drops the spaces at either end of `name` and collapses each inner run to one. */
+export function normalizeDeploymentName(name: string): string {
+  return name.trim().replace(/ {2,}/g, " ");
+}
+
 /**
  * Single bootstrap CloudFormation template.
  *
@@ -42,8 +68,11 @@ export const MAX_STACK_PREFIX_LENGTH = 16;
  *   2. \${StackPrefix}-manager-role   — pure-delegation role for install/uninstall
  *   3. Permissions boundary managed policy for Manager-minted per-app roles
  */
-export function generateBootstrapTemplate(input: GenerateBootstrapTemplateInput = {}): string {
+export function generateBootstrapTemplate(input: GenerateBootstrapTemplateInput): string {
   const stackPrefix = input.stackPrefix ?? "starkeep";
+  if (!isDeploymentName(input.deploymentName)) {
+    throw new Error(`Not a deployment name: ${JSON.stringify(input.deploymentName)}`);
+  }
   // A single-quoted YAML scalar, so an address with an apostrophe stays valid.
   const adminEmailDefault = `'${(input.adminEmail ?? "").replace(/'/g, "''")}'`;
 
@@ -114,10 +143,9 @@ Resources:
           # paragraph, with no punctuation beside it, so a tap or a
           # double-click selects exactly the password, on a phone too.
           EmailMessage: >-
-            <p>Your Starkeep account has been created.</p>
-            <p>Your temporary password:</p>
+            <p>Your new Starkeep account (${input.deploymentName}) is ready. Welcome!</p>
+            <p>Sign in with {username} and this temporary password:</p>
             <p style="font-family: monospace; font-size: 18px">{####}</p>
-            <p>Sign in with username {username}</p>
       AutoVerifiedAttributes:
         - email
       UsernameAttributes:
@@ -573,13 +601,6 @@ Outputs:
   StackPrefix:
     Description: Stack prefix used for all Starkeep resources
     Value: !Ref StackPrefix
-
-  UsersConsoleLink:
-    Description: >
-      The user pool's accounts in the Cognito console, for recovery: an
-      expired invitation, or a pool with no admin who can sign in.
-    Value: !Sub >
-      https://\${AWS::Region}.console.aws.amazon.com/cognito/v2/idp/user-pools/\${UserPool}/user-management/users?region=\${AWS::Region}
 
 `;
 }

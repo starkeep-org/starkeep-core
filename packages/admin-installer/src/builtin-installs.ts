@@ -100,6 +100,8 @@ export interface CloudDataServerInstallConfig {
   deviceUserPoolClientId: string;
   /** Host name of the managed login page, the bootstrap's CognitoDomain output. */
   cognitoDomain: string;
+  /** The operator's name for the deployment, under the star on the sign-in page. */
+  deploymentName: string;
   /**
    * When true, provision disposable infrastructure and skip the production
    * data-protection hardening (files-bucket versioning/SSE/public-access-block
@@ -405,6 +407,7 @@ export async function installCloudDataServer(
       userPoolId: config.userPoolId,
       publicBaseUrl,
       clients: signInClients,
+      deploymentName: config.deploymentName,
     });
 
     // Step 4.5: Persist the CloudFront URL-signing config (Part B) as a

@@ -61,6 +61,8 @@ export interface TestStackConfig {
   deviceUserPoolClientId: string;
   /** Host name of the managed login page. */
   cognitoDomain?: string;
+  /** The deployment's name, which the cloud data server install draws on the sign-in page. */
+  deploymentName?: string;
   /** Written by the cloud data server install: the client cloud apps sign in with. */
   cloudAppsUserPoolClientId?: string;
   /** Written by the cloud data server install: the client mobile apps sign in with. */
