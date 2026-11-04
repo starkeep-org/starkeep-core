@@ -672,6 +672,58 @@ describe("the join notice on step 1", () => {
 });
 
 /**
+ * A new stack prefix on step 1 names a different bootstrap stack, so the
+ * outputs saved for the old one no longer apply. The wizard asks first, then
+ * clears them, and keeps the deployment name, which the new stack carries too.
+ */
+describe("changing the stack prefix on step 1", () => {
+  async function changePrefix(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+    await renderAtDeployStep();
+    await user.click(screen.getByRole("button", { name: "Bootstrap stack" }));
+    const prefix = await screen.findByLabelText("Stack prefix");
+    await user.clear(prefix);
+    await user.type(prefix, "skother");
+    await user.click(screen.getByRole("button", { name: "Stack is deployed — Continue" }));
+  }
+
+  it("asks first, then saves the new prefix and the name and clears the outputs", async () => {
+    const patches = statefulConfig(DEPLOYED_CONFIG);
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirm);
+    const user = userEvent.setup();
+
+    await changePrefix(user);
+
+    expect(await screen.findByLabelText("UserPoolId")).toBeTruthy();
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(patches.at(-1)).toMatchObject({
+      stackPrefix: "skother",
+      stage: "skother",
+      deploymentName: DEPLOYED_CONFIG.deploymentName,
+      userPoolId: null,
+      cognitoDomain: null,
+      s3Bucket: null,
+      auroraEndpoint: null,
+      apiGatewayUrl: null,
+    });
+  });
+
+  it("saves nothing when the operator cancels", async () => {
+    const patches = statefulConfig(DEPLOYED_CONFIG);
+    vi.stubGlobal(
+      "confirm",
+      vi.fn(() => false),
+    );
+    const user = userEvent.setup();
+
+    await changePrefix(user);
+
+    expect(patches).toEqual([]);
+    expect(screen.getByLabelText("Stack prefix")).toBeTruthy();
+  });
+});
+
+/**
  * Step 1 requires a deployment name, which the template's invitation email
  * and the sign-in page show. A config without one reopens step 1.
  */
