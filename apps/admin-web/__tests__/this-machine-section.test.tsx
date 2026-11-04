@@ -159,6 +159,22 @@ describe("a signed-in machine", () => {
 });
 
 describe("a machine with no cloud", () => {
+  it("addresses the owner's second computer as well as someone else's cloud", async () => {
+    machine = { ...SIGNED_OUT, cloudUrl: null };
+    render(<ThisMachineSection />);
+    expect(
+      await screen.findByText(/Already deployed Starkeep Cloud from another computer/),
+    ).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "This machine" })).toBeTruthy();
+  });
+
+  it("drops its heading when something beside it names it", async () => {
+    machine = { ...SIGNED_OUT, cloudUrl: null };
+    render(<ThisMachineSection untitled />);
+    expect(await screen.findByLabelText("Cloud address")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "This machine" })).toBeNull();
+  });
+
   it("joins a cloud by its address", async () => {
     machine = { ...SIGNED_OUT, cloudUrl: null };
     const user = userEvent.setup();

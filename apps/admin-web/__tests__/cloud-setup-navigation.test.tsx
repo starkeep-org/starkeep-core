@@ -645,6 +645,33 @@ describe("the admin email on step 1", () => {
 });
 
 /**
+ * A second computer joins the owner's cloud rather than deploying another, so
+ * a new deployment's first step points back to the dashboard's join box.
+ */
+describe("the join notice on step 1", () => {
+  it("points a new deployment to the dashboard's join box", async () => {
+    statefulConfig(null);
+    render(
+      <MemoryRouter initialEntries={["/cloud-setup"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    expect(
+      await screen.findByText(/Already deployed Starkeep Cloud from another computer\?/),
+    ).toBeTruthy();
+    expect(screen.getByRole("link", { name: "dashboard" }).getAttribute("href")).toBe("/");
+  });
+
+  it("leaves the notice off for a config that already holds a deployment", async () => {
+    const user = userEvent.setup();
+    await renderAtDeployStep();
+    await user.click(screen.getByRole("button", { name: "Bootstrap stack" }));
+    expect(await screen.findByLabelText("Deployment name")).toBeTruthy();
+    expect(screen.queryByText(/Already deployed Starkeep Cloud from another computer/)).toBeNull();
+  });
+});
+
+/**
  * Step 1 requires a deployment name, which the template's invitation email
  * and the sign-in page show. A config without one reopens step 1.
  */

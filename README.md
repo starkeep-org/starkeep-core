@@ -28,6 +28,7 @@ This guide installs Starkeep on your computer, adds the Starkeep Photos flagship
 - Part A runs entirely on your computer, no cloud account needed.
 - Part B adds the cloud, running on your own AWS account.
 - Part C adds the Starkeep Photos mobile app for Android (iOS coming soon) that syncs with the cloud and your local computer.
+- [Sync another computer with your cloud](#sync-another-computer-with-your-cloud) connects a second computer to the cloud you already deployed.
 
 ## Before you begin
 
@@ -117,7 +118,7 @@ The cloud stores a copy of your data in your own AWS account and syncs it across
 
 Only the accounts you create can sign in to your deployment and reach its data. The Starkeep organization has no access.
 
-Everything below is a one-time setup.
+Everything below is a one-time setup. Deploy from one computer only. To add a second computer, follow [Sync another computer with your cloud](#sync-another-computer-with-your-cloud) instead. A second deployment creates a separate cloud that does not share your data.
 
 ### Prerequisite
 
@@ -248,6 +249,19 @@ The `-r` flag updates an installed copy and keeps the app's data.
 
 The build uses Expo's public debug key, and the Photos manifest declares that key's certificate by default. Anyone can build an app that the cloud accepts as Photos, so treat this build as a development build.
 
+## Sync another computer with your cloud
+
+A second computer joins the cloud you deployed in Part B. The second computer syncs your data but does not administer the cloud. Manage users, cloud apps and costs from the computer that deployed the cloud.
+
+1. On the second computer, follow Part A, steps 1 to 3, to install Starkeep and start Admin and the local data server.
+2. On the computer that deployed the cloud, copy the address from the **Cloud address** line under the dashboard's **Cloud** heading.
+3. On the second computer, click **Join Existing Cloud** under the dashboard's **Cloud** heading. Do not click **Deploy Starkeep Cloud**.
+4. Paste the address into the form that opens and click **Join**. The local data server restarts.
+5. Enter the email address and password of your Starkeep account and click **Sign in to sync**.
+6. Wait for the form to change from "Signed in as `<email>`. Connecting to `<address>`…" to "Local apps sync with `<address>` as `<email>`."
+
+The second computer now syncs your library with the cloud in the background. A person you add under [Add users to your Starkeep deployment](#add-users-to-your-starkeep-deployment-optional) joins from their own computer the same way.
+
 ## Add users to your Starkeep deployment (optional)
 
 One deployment can hold several people, and each person gets a separate library. Nobody can see another person's data. The dashboard's **Cloud Users** section appears below the **Cloud** section while admin-web is signed in as an admin.
@@ -258,7 +272,7 @@ One deployment can hold several people, and each person gets a separate library.
    - **Admin** allows this user to manage other users, cloud apps and settings.
 3. Click **Add user**.
 
-The new user will be emailed a temporary password, and they choose a permanent password at first sign-in.
+The new user will be emailed a temporary password, and they choose a permanent password at first sign-in. Send the new user your cloud address. The new user joins with that address as described in [Sync another computer with your cloud](#sync-another-computer-with-your-cloud).
 
 ## Removing Starkeep Cloud
 

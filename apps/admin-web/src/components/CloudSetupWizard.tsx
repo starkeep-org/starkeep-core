@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useNavigate } from "react-router";
+import { Link, useNavigate } from "react-router";
 import { Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -225,6 +225,21 @@ function Step1Bootstrap({
       <p className="text-sm text-muted-foreground">
         Starkeep cloud runs in your own AWS account. Don&apos;t worry, setup is quick and painless.
       </p>
+
+      {/* A second computer that deploys here would make a second cloud with
+          separate data, so the step points it back to the join button. */}
+      {!hasDeployment && (
+        <Alert>
+          <AlertDescription className="block text-sm text-foreground">
+            Already deployed Starkeep Cloud from another computer? Don&apos;t deploy again: a second
+            deployment keeps separate data. Go back to the{" "}
+            <Link to="/" className="font-medium text-primary underline hover:no-underline">
+              dashboard
+            </Link>{" "}
+            and click <strong>Join Existing Cloud</strong>.
+          </AlertDescription>
+        </Alert>
+      )}
 
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-1.5">

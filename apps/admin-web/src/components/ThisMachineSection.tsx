@@ -8,8 +8,10 @@
  * created answers its first sign-in with a request for a new password, which
  * this form asks for in place.
  *
- * A machine that does not run the cloud joins one first, by the address its
- * admin sent.
+ * A machine that does not run the cloud joins one first, by its address. The
+ * owner's second computer joins this way too: only the machine that deployed
+ * the cloud administers it. The dashboard opens the join form from a button
+ * beside the Deploy button, which names the form, so the form drops its heading.
  *
  * On the machine that administers the cloud, the sign-in sits as a line under
  * the Local heading rather than in a card of its own, because signing in is
@@ -48,9 +50,12 @@ async function post(path: string, body?: unknown): Promise<Record<string, unknow
 
 export function ThisMachineSection({
   administering = false,
+  untitled = false,
 }: {
   /** This machine administers the cloud, and the section sits under the Local heading. */
   administering?: boolean;
+  /** Something beside the section already names it, so it shows no heading of its own. */
+  untitled?: boolean;
 } = {}) {
   const [load, setLoad] = useState<Load>({ kind: "loading" });
   const [cloudUrl, setCloudUrl] = useState("");
@@ -162,9 +167,9 @@ export function ThisMachineSection({
     }
     return (
       <section className="rounded-lg border p-4 space-y-2" aria-label="This machine">
-        <h3 className="font-medium">This machine</h3>
+        {!untitled && <h3 className="font-medium">This machine</h3>}
         <p className="text-sm text-muted-foreground">
-          Start the local data server to sign this machine in to a cloud.
+          Start the local data server to join a cloud or sign this machine in.
         </p>
       </section>
     );
@@ -179,7 +184,7 @@ export function ThisMachineSection({
       className={administering ? "space-y-3" : "rounded-lg border p-4 space-y-3"}
       aria-label="This machine"
     >
-      {!administering && <h3 className="font-medium">This machine</h3>}
+      {!administering && !untitled && <h3 className="font-medium">This machine</h3>}
 
       {restarting ? (
         <p className="text-sm text-muted-foreground" role="status">
@@ -188,7 +193,8 @@ export function ThisMachineSection({
       ) : v.cloudUrl === null ? (
         <>
           <p className="text-sm text-muted-foreground">
-            To sync with a Starkeep cloud someone else runs, enter the address its admin sent you.
+            Already deployed Starkeep Cloud from another computer, or have an account on someone
+            else&apos;s cloud? Enter the cloud&apos;s address to sync this computer with it.
           </p>
           <div className="flex gap-2">
             <Input

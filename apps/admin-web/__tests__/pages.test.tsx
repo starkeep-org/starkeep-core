@@ -74,10 +74,30 @@ describe("the dashboard", () => {
     expect(await screen.findByRole("button", { name: /Start Data Server/ })).toBeTruthy();
   });
 
-  it("offers exactly one thing to do with no cloud deployment: deploy one", async () => {
+  it("offers two ways in with no cloud: deploy one, or join one that exists", async () => {
+    const user = userEvent.setup();
     renderAt("/");
     const deploy = await screen.findByRole("link", { name: /Deploy Starkeep Cloud/ });
     expect(deploy.getAttribute("href")).toBe("/cloud-setup");
+
+    // Each button's line of text shows beneath both while the pointer is on it.
+    expect(screen.queryByText(/Creates a new cloud in your AWS account/)).toBeNull();
+    await user.hover(deploy);
+    expect(screen.getByText(/Creates a new cloud in your AWS account/)).toBeTruthy();
+    await user.unhover(deploy);
+    expect(screen.queryByText(/Creates a new cloud in your AWS account/)).toBeNull();
+
+    const join = screen.getByRole("button", { name: "Join Existing Cloud" });
+    await user.hover(join);
+    expect(screen.getByText("Sync this computer with your existing cloud.")).toBeTruthy();
+    expect(join.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText(/join a cloud or sign this machine in/)).toBeNull();
+
+    // The button names the form it opens, so the form shows no heading.
+    await user.click(join);
+    expect(join.getAttribute("aria-expanded")).toBe("true");
+    expect(await screen.findByText(/join a cloud or sign this machine in/)).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "This machine" })).toBeNull();
   });
 
   it("surfaces a failed app list rather than rendering an empty library", async () => {
