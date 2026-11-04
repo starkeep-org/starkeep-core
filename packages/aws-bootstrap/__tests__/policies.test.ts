@@ -278,6 +278,22 @@ describe("admin-app policy", () => {
     const actions = actionsOf(statements);
     expect(actions.some((a) => a.startsWith("iam:"))).toBe(false);
   });
+
+  // The cloud data server install brands both sign-in clients through
+  // `ensureBranding`, which describes a client's style, then creates one or
+  // overwrites the one there. Every reinstall takes the overwrite path, so a
+  // missing action fails each one with AccessDenied, which no other test sees.
+  it("can read, create and overwrite a sign-in client's branding on the user pool", () => {
+    const cognito = byId(statements, "AdminAppCognito");
+    expect(cognito.Action).toEqual(
+      expect.arrayContaining([
+        "cognito-idp:DescribeManagedLoginBrandingByClient",
+        "cognito-idp:CreateManagedLoginBranding",
+        "cognito-idp:UpdateManagedLoginBranding",
+      ]),
+    );
+    expect(cfnString(cognito.Resource as CfnValue)).toBe("UserPool.Arn");
+  });
 });
 
 describe("managed-policy size (AWS 6144-char ceiling)", () => {
