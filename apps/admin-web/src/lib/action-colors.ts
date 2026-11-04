@@ -5,7 +5,8 @@
 //   ACTION_OCCASIONAL — light green. Install, manage, discover, set up: the
 //                       actions an operator takes once or now and then.
 //   ACTION_START      — dark green. Bringing something up.
-//   ACTION_OPEN       — dark blue. Going to a running app.
+//   ACTION_OPEN       — dark blue. Going to a running app, or joining a
+//                       running cloud.
 //
 // Apply these through the Button `className`; the shadcn variants stay as-is
 // for everything outside the three classes.

@@ -49,7 +49,7 @@ import {
 } from "../lib/cognito-auth";
 import { projectFullMonth, type ServiceCost } from "../lib/cost-usage-report";
 import { localDataServerUrl } from "../lib/runtime-config";
-import { ACTION_OCCASIONAL, ACTION_START } from "../lib/action-colors";
+import { ACTION_OCCASIONAL, ACTION_OPEN, ACTION_START } from "../lib/action-colors";
 
 // ---------------------------------------------------------------------------
 // Dashboard
@@ -89,6 +89,10 @@ export function DashboardPage() {
 
   // Remote
   const [cloudConfig, setCloudConfig] = useState<CloudConfig | null | undefined>(undefined);
+  // Whether the join form is open beneath the no-cloud section's two buttons.
+  const [joining, setJoining] = useState(false);
+  // The no-cloud button under the pointer or focus, whose line of text shows beneath both.
+  const [cloudHint, setCloudHint] = useState<"deploy" | "join" | null>(null);
   const [cognitoSession, setCognitoSession] = useState<CognitoSession | null>(null);
 
   // Costs
@@ -608,10 +612,11 @@ export function DashboardPage() {
         </div>
 
         {/* ── CLOUD ──
-            Until a deployment exists there is nothing to report and exactly one
-            thing to do, so the section carries the deploy button alone. Once the
-            cloud is up the button retires into the Data Server card's menu,
-            where managing a deployment sits on the deployment it manages. */}
+            Until this machine deploys or joins a cloud there is nothing to
+            report and two ways in: deploy a new cloud, or join one that already
+            exists, as the owner's second computer does. Once the cloud is up the
+            deploy button retires into the Data Server card's menu, where
+            managing a deployment sits on the deployment it manages. */}
         <div className="flex flex-col gap-4">
           <h2 className="text-lg font-medium">Cloud</h2>
 
@@ -622,15 +627,46 @@ export function DashboardPage() {
             </div>
           ) : !cloudDeployed ? (
             <>
-              <div>
-                {/* With no deployment yet, deploying is what brings the cloud up,
-                    so it wears the dark green of a start action. */}
-                <Button asChild size="sm" className={ACTION_START}>
-                  <Link to="/cloud-setup">Deploy Starkeep Cloud</Link>
-                </Button>
+              <div className="flex flex-col gap-2">
+                <div className="flex flex-wrap gap-2">
+                  {/* With no deployment yet, deploying is what brings the cloud
+                      up, so it wears the dark green of a start action. */}
+                  <Button
+                    asChild
+                    size="sm"
+                    className={ACTION_START}
+                    onPointerEnter={() => setCloudHint("deploy")}
+                    onPointerLeave={() => setCloudHint(null)}
+                    onFocus={() => setCloudHint("deploy")}
+                    onBlur={() => setCloudHint(null)}
+                  >
+                    <Link to="/cloud-setup">Deploy Starkeep Cloud</Link>
+                  </Button>
+                  {/* Joining reaches a cloud that is already running, so it
+                      wears the blue of an open action. */}
+                  <Button
+                    size="sm"
+                    className={ACTION_OPEN}
+                    aria-expanded={joining}
+                    onClick={() => setJoining((open) => !open)}
+                    onPointerEnter={() => setCloudHint("join")}
+                    onPointerLeave={() => setCloudHint(null)}
+                    onFocus={() => setCloudHint("join")}
+                    onBlur={() => setCloudHint(null)}
+                  >
+                    Join Existing Cloud
+                  </Button>
+                </div>
+                {/* The line keeps its height while empty, so the form below
+                    does not jump as the pointer crosses the buttons. */}
+                <p className="min-h-4 text-xs text-muted-foreground" aria-live="polite">
+                  {cloudHint === "deploy" &&
+                    "Creates a new cloud in your AWS account. Deploy once, from one computer."}
+                  {cloudHint === "join" && "Sync this computer with your existing cloud."}
+                </p>
               </div>
-              {/* Or join one someone else runs. */}
-              <ThisMachineSection />
+              {/* The button names the form, so the form shows no heading. */}
+              {joining && <ThisMachineSection untitled />}
             </>
           ) : !cloudAdministered ? (
             // A machine that joined someone else's cloud holds its address and
