@@ -13,6 +13,8 @@
     "lint": "turbo run lint",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "icons": "tsx scripts/icons.ts",
+    "check:icons": "tsx scripts/icons.ts --check",
     "changeset": "changeset",
     "release:publish": "bash scripts/release-publish.sh"
   },

@@ -28,6 +28,7 @@ import {
   type UserPoolClientType,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { escapeMarkup } from "@starkeep/protocol-primitives";
+import { ADMIN_STAR, starBody, starSvg } from "./starkeep-star";
 
 export interface AppSignInClientIds {
   /** Cloud app sessions: the broker's HMAC branch and both gateway authorizers. */
@@ -171,28 +172,6 @@ export function updateInputFrom(
   ) as unknown as UpdateUserPoolClientCommandInput;
 }
 
-/**
- * The Starkeep star, as admin-web's favicon draws it, in a 64 by 64 box.
- * Cognito's asset check refuses some markup, `role` and `aria-label` among
- * it, so the SVGs here carry none.
- */
-const STARKEEP_STAR = `<defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#4098ff"/>
-      <stop offset="0.5" stop-color="#6366f1"/>
-      <stop offset="1" stop-color="#b23bff"/>
-    </linearGradient>
-  </defs>
-  <g transform="translate(32 32) rotate(43) scale(0.94) translate(-33.59 -30.41)">
-    <path d="M 17.50 22.20 L 18.61 1.00 L 36.42 12.56 L 56.93 7.07 L 51.44 27.58 L 63.00 45.39 L 41.80 46.50 L 28.43 63.00 L 20.82 43.18 L 1.00 35.57 Z" fill="url(#g)"/>
-    <path d="M 51.44 27.58 L 41.80 46.50 L 20.82 43.18 L 17.50 22.20 L 36.42 12.56 Z" fill="none" stroke="#000" stroke-width="1.4" stroke-linejoin="round"/>
-  </g>`;
-
-const STARKEEP_STAR_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  ${STARKEEP_STAR}
-</svg>
-`;
-
 /** Cognito's default heading colors, so the name reads like the page's text. */
 const NAME_COLORS = { LIGHT: "#000716", DARK: "#d1d5db" } as const;
 
@@ -206,7 +185,7 @@ export function formLogoSvg(deploymentName: string, colorMode: "LIGHT" | "DARK")
   const name = escapeMarkup(deploymentName);
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 112">
   <g transform="translate(148 0)">
-  ${STARKEEP_STAR}
+${starBody(ADMIN_STAR)}
   </g>
   <text x="180" y="100" text-anchor="middle" font-size="${fontSize}" font-weight="600" fill="${NAME_COLORS[colorMode]}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">${name}</text>
 </svg>
@@ -242,7 +221,7 @@ export function brandingStyle(
         Category: "FAVICON_SVG" as const,
         ColorMode,
         Extension: "SVG" as const,
-        Bytes: svg(STARKEEP_STAR_SVG),
+        Bytes: svg(starSvg(ADMIN_STAR)),
       })),
     ],
   };
