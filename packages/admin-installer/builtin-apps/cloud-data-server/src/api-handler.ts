@@ -304,8 +304,8 @@ const PLATFORM_CATEGORY = typeCategory(SETTINGS_TYPE_ID);
  * That is health, the deployment's settings, the exchange and the file routes
  * the object-storage adapter calls, plus a read-only view of the cloud's
  * records, which Drive's UI shows beside the local view through the local data
- * server, and the owner's public-share routes, so a person can publish an album
- * from any device. One device client serves desktops and phones, so a phone
+ * server, and the owner's public-share routes, so a person can publish a
+ * public share from any device. One device client serves desktops and phones, so a phone
  * holds the same list.
  *
  * The desktop list comes from an audit of every cloud call the local data
@@ -3715,7 +3715,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
 
     // /apps/{appId}/data/public-shares[/<id>] — the owner's public shares.
     //
-    //   GET    [?labelKey=&labelValue=]  list this app's shares, or one album's
+    //   GET    [?labelKey=&labelValue=]  list this app's shares, or one label's
     //   POST   { labelKey, labelValue, title, lifetime }   create
     //   PATCH  /<id> { title?, lifetime?, rotateLink? }     change
     //   DELETE /<id>                                        stop sharing
@@ -5756,7 +5756,7 @@ function publicOk(body: unknown) {
  * identity). The page is then read as the creating app, on a session tagged
  * with the owner, through the owner-scoped adapter and the app's own grants:
  * the visitor reaches at most what the app could read for the owner, and
- * `public-shares.ts` narrows that to display children of the album.
+ * `public-shares.ts` narrows that to display children of the labelled records.
  *
  * Read-only by construction: nothing below writes, and the only shared code
  * is the page loaders the records route also uses.

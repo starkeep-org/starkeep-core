@@ -755,7 +755,7 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
       `CREATE UNIQUE INDEX ASYNC IF NOT EXISTS uq_public_shares_link_token
          ON public_sharing.public_shares (link_token)`,
     );
-    // The owner's list, and the list of one album's public shares.
+    // The owner's list, and the list of one label's public shares.
     await ensureIndex(
       db,
       `CREATE INDEX ASYNC IF NOT EXISTS idx_public_shares_owner
