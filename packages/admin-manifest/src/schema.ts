@@ -358,6 +358,14 @@ export const infraRequirementsSchema = z.object({
    * rules.
    */
   labelKeys: z.array(labelKeySchema).max(64).default([]),
+  /**
+   * The app may publish records to public links: anyone holding the link sees
+   * the stand-ins of the records a public share names, with no sign-in. The
+   * person approves it at install, and only the person's own session may
+   * create a public share; a device credential never can. Cloud only, since
+   * the anonymous read path is the cloud's.
+   */
+  publicSharing: z.boolean().default(false),
 });
 
 export const permissionEntrySchema = z.object({

@@ -34,6 +34,7 @@ import { LocalAppsSection } from "../components/LocalAppsSection";
 import { CloudAppsSection } from "../components/CloudAppsSection";
 import { ThisMachineSection } from "../components/ThisMachineSection";
 import { UsersSection } from "../components/UsersSection";
+import { PublicSharesSection } from "../components/PublicSharesSection";
 import { CloudAddress } from "../components/CloudAddress";
 import { LocalFoldersModal, type Watch } from "../components/LocalFoldersModal";
 import { CommandOutputModal } from "../components/CommandOutputModal";
@@ -695,6 +696,8 @@ export function DashboardPage() {
         </div>
 
         {cloudAdministered && cognitoSession && <UsersSection />}
+
+        {cloudAdministered && cognitoSession && <PublicSharesSection />}
 
         {/* The cloud Data Server card's View Costs button targets this. */}
         {cloudAdministered && (

@@ -702,6 +702,66 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
          ON shared.record_labels (user_id, node_id, updated_at)`,
     );
 
+    // public_sharing — public links, outside the user cut.
+    //
+    // A public share is looked up by its link token before anyone knows whose
+    // it is, so the table cannot lead with the owner column the way an owned
+    // table does: the owner-scope compiler would pin every lookup to a user
+    // the request has not named yet. It sits beside the registry and the
+    // grants instead, and the broker checks `owner_user_id` against the
+    // caller on every owner route. See `public-shares.ts` in the
+    // cloud-data-server.
+    //
+    // `app_capabilities` records which installed apps the person approved to
+    // publish public links (the manifest's `infraRequirements.publicSharing`).
+    // Written by the installer, read by every role, like shared.access_grants.
+    //
+    // `public_shares` is read and written by every app role, like
+    // shared.record_labels: DSQL has no row-level security, so the cut by app
+    // and by owner is the broker's, and the installer may read and delete rows
+    // for admin-web's list and for uninstall.
+    await db.schema.createSchema("public_sharing").ifNotExists().execute();
+    await sql.raw(`GRANT USAGE ON SCHEMA public_sharing TO PUBLIC`).execute(db);
+    await db.schema
+      .createTable("public_sharing.app_capabilities")
+      .ifNotExists()
+      .addColumn("app_id", "text", (c) => c.notNull().primaryKey())
+      .execute();
+    await sql.raw(`GRANT SELECT ON public_sharing.app_capabilities TO PUBLIC`).execute(db);
+    await sql
+      .raw(`GRANT INSERT, UPDATE, DELETE ON public_sharing.app_capabilities TO "${installer}"`)
+      .execute(db);
+    await db.schema
+      .createTable("public_sharing.public_shares")
+      .ifNotExists()
+      .addColumn("id", "text", (c) => c.notNull().primaryKey())
+      .addColumn("link_token", "text", (c) => c.notNull())
+      .addColumn("owner_user_id", "text", (c) => c.notNull())
+      .addColumn("app_id", "text", (c) => c.notNull())
+      .addColumn("label_key", "text", (c) => c.notNull())
+      .addColumn("label_value", "text", (c) => c.notNull())
+      .addColumn("title", "text", (c) => c.notNull())
+      .addColumn("item_id_salt", "text", (c) => c.notNull())
+      .addColumn("created_at_ms", "bigint", (c) => c.notNull())
+      .addColumn("expires_at_ms", "bigint")
+      .execute();
+    await sql
+      .raw(`GRANT SELECT, INSERT, UPDATE, DELETE ON public_sharing.public_shares TO PUBLIC`)
+      .execute(db);
+    // The anonymous route's one lookup. Unique, so a rotated token can never
+    // name two shares.
+    await ensureIndex(
+      db,
+      `CREATE UNIQUE INDEX ASYNC IF NOT EXISTS uq_public_shares_link_token
+         ON public_sharing.public_shares (link_token)`,
+    );
+    // The owner's list, and the list of one album's public shares.
+    await ensureIndex(
+      db,
+      `CREATE INDEX ASYNC IF NOT EXISTS idx_public_shares_owner
+         ON public_sharing.public_shares (owner_user_id, app_id, label_key, label_value)`,
+    );
+
     // DSQL-side IAM-to-PG mapping for the cloud install registry. The
     // orchestrator opens its registry connection as the admin-app IAM role
     // (federated entry point — the same identity the human admin used to

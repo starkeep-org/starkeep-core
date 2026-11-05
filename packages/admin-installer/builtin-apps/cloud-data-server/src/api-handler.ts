@@ -173,6 +173,29 @@ import {
 } from "@starkeep/storage-adapter";
 import type { StoredAvailability } from "@starkeep/storage-adapter";
 import { ok, clientErr, type APIGatewayEvent, type LambdaContext } from "./handler-utils.js";
+import {
+  appMayPublish,
+  deleteOwnedShare,
+  DEFAULT_PUBLIC_SHARE_LIFETIME,
+  expiresAtFor,
+  findOwnedShare,
+  findShareByToken,
+  insertShare,
+  isExpired,
+  listOwnedShares,
+  loadPublicSharePage,
+  newLinkToken,
+  newShare,
+  normalizeTitle,
+  ownerView,
+  projectPublicSharePage,
+  publicItemsToken,
+  updateOwnedShare,
+  PUBLIC_SHARE_CACHE_SECONDS,
+  PUBLIC_SHARE_URL_TTL_SECONDS,
+  type PublicDisplaySet,
+  type PublicShareRow,
+} from "./public-shares.js";
 import { handleSignInRoute, isSignInRoute } from "./sign-in-routes.js";
 import {
   loadMobileKey,
@@ -1573,6 +1596,38 @@ export async function signSharedCloudFrontUrl(
   return { ok: true, url };
 }
 
+/**
+ * The public-share counterpart of {@link signSharedCloudFrontUrl}: signs a
+ * display child for an anonymous visitor of a public share.
+ *
+ * There is no caller to check grants against, so the check is the page's own
+ * {@link PublicDisplaySet}: the key must sit under the share owner's
+ * `shared/<ownerId>/` prefix, must be a display child the fixed query
+ * returned, and must not be a member's own key. Nothing here reads a key from
+ * the request; every key arrives from the query's results.
+ */
+export async function signPublicShareCloudFrontUrl(
+  display: PublicDisplaySet,
+  key: string,
+  expiresInSec: number,
+): Promise<{ ok: true; url: string } | { ok: false; status: number; message: string }> {
+  const check = display.check(key);
+  if (!check.ok) return check;
+  // The same redundant re-checks the shared signer makes, so neither signer
+  // trusts the other's parse.
+  if (!key.startsWith("shared/") || userIdFromObjectKey(key) !== display.ownerUserId) {
+    return { ok: false, status: 403, message: "Forbidden (another user's key)" };
+  }
+  const cfg = await loadCloudFrontSigningConfig();
+  const url = getCloudFrontSignedUrl({
+    url: `https://${cfg.domain}/${key}`,
+    keyPairId: cfg.keyPairId,
+    privateKey: cfg.privateKey,
+    dateLessThan: new Date(Date.now() + Math.max(1, expiresInSec) * 1000).toISOString(),
+  });
+  return { ok: true, url };
+}
+
 // ---------------------------------------------------------------------------
 // Response helpers
 // ---------------------------------------------------------------------------
@@ -2789,6 +2844,21 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       );
     }
 
+    // GET /public-shares/<linkToken>/items — a public share's items, for
+    // anyone holding the link. The one anonymous data read; see
+    // `public-shares.ts` and handlePublicShareItems below.
+    if (method === "GET") {
+      const linkToken = publicItemsToken(rawPath);
+      if (linkToken !== null) {
+        return await handlePublicShareItems(
+          linkToken,
+          event.queryStringParameters?.["cursor"],
+          getAccountId(context.invokedFunctionArn),
+          toClose,
+        );
+      }
+    }
+
     // All other routes require /apps/{appId}/...
     const parsed = parseAppPath(rawPath);
     if (!parsed) return clientErr("Not found", 404);
@@ -3628,6 +3698,129 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         ),
       );
       return ok({ retracted: plan.writes.length });
+    }
+
+    // /apps/{appId}/data/public-shares[/<id>] — the owner's public shares.
+    //
+    //   GET    [?labelKey=&labelValue=]  list this app's shares, or one album's
+    //   POST   { labelKey, labelValue, title, lifetime }   create
+    //   PATCH  /<id> { title?, lifetime?, rotateLink? }     change
+    //   DELETE /<id>                                        stop sharing
+    //
+    // A person's session only. A signed-in device or a mobile app never
+    // reaches these (`deviceMayCall` refuses them too), so a stolen device
+    // cannot publish a library. Creating or changing a share also needs the
+    // capability the person approved at install; listing and deleting do not,
+    // so an app that lost it can still be cleaned up after.
+    if (subPath === "/data/public-shares" || subPath.startsWith("/data/public-shares/")) {
+      if (mobileKey || signedInDevice) {
+        return clientErr("Public links are managed from a signed-in session only", 403);
+      }
+      const owner = { appId, userId: subject.userId };
+      const shareId = subPath.slice("/data/public-shares/".length) || null;
+      if (shareId !== null && !/^[0-9a-f-]{36}$/.test(shareId)) {
+        return clientErr("Not found", 404);
+      }
+      const readBody = (): Record<string, unknown> | null => {
+        try {
+          const parsedBody = JSON.parse(bodyBytes.toString("utf8") || "{}") as unknown;
+          return parsedBody && typeof parsedBody === "object"
+            ? (parsedBody as Record<string, unknown>)
+            : null;
+        } catch {
+          return null;
+        }
+      };
+      const mayPublish = () => appMayPublish(grantClient, appId);
+
+      if (method === "GET" && shareId === null) {
+        const labelKey = query["labelKey"];
+        const labelValue = query["labelValue"];
+        if ((labelKey === undefined) !== (labelValue === undefined)) {
+          return clientErr("labelKey and labelValue go together", 400);
+        }
+        const shares = await listOwnedShares(
+          grantClient,
+          owner,
+          labelKey !== undefined && labelValue !== undefined ? { labelKey, labelValue } : undefined,
+        );
+        return ok({ publicShares: shares.map(ownerView), mayPublish: await mayPublish() });
+      }
+
+      if (method === "POST" && shareId === null) {
+        if (!(await mayPublish())) {
+          return clientErr(`${appId} was not approved to publish public links`, 403);
+        }
+        const body = readBody();
+        if (!body) return clientErr("Body is not a JSON object", 400);
+        const { labelKey, labelValue } = body;
+        if (typeof labelKey !== "string" || typeof labelValue !== "string") {
+          return clientErr("labelKey and labelValue (strings) are required", 400);
+        }
+        if (!(await loadDeclaredLabelKeys(grantClient, appId)).has(labelKey)) {
+          return clientErr(`${appId} declares no label key "${labelKey}"`, 400);
+        }
+        if (labelValue.length === 0 || Buffer.byteLength(labelValue, "utf8") > 128) {
+          return clientErr("labelValue must be 1 to 128 bytes", 400);
+        }
+        const title = normalizeTitle(body.title);
+        if (title === null) return clientErr("title must be 1 to 200 characters", 400);
+        const nowMs = Date.now();
+        const expiry = expiresAtFor(body.lifetime ?? DEFAULT_PUBLIC_SHARE_LIFETIME, nowMs);
+        if (!expiry.ok) return clientErr("lifetime must be one of 1d, 7d, 30d, 1y, never", 400);
+        const share = newShare({
+          ownerUserId: subject.userId,
+          appId,
+          labelKey,
+          labelValue,
+          title,
+          nowMs,
+          expiresAtMs: expiry.expiresAtMs,
+        });
+        await insertShare(grantClient, share);
+        return ok({ publicShare: ownerView(share) }, 201);
+      }
+
+      if (shareId === null) return clientErr("Method not allowed", 405);
+      const existing = await findOwnedShare(grantClient, owner, shareId);
+      // Another person's share answers exactly as a missing one does.
+      if (!existing) return clientErr("Not found", 404);
+
+      if (method === "GET") return ok({ publicShare: ownerView(existing) });
+
+      if (method === "DELETE") {
+        await deleteOwnedShare(grantClient, owner, shareId);
+        return ok({ deleted: shareId });
+      }
+
+      if (method === "PATCH") {
+        if (!(await mayPublish())) {
+          return clientErr(`${appId} was not approved to publish public links`, 403);
+        }
+        const body = readBody();
+        if (!body) return clientErr("Body is not a JSON object", 400);
+        const set: {
+          -readonly [K in "title" | "expires_at_ms" | "link_token"]?: PublicShareRow[K];
+        } = {};
+        if (body.title !== undefined) {
+          const title = normalizeTitle(body.title);
+          if (title === null) return clientErr("title must be 1 to 200 characters", 400);
+          set.title = title;
+        }
+        if (body.lifetime !== undefined) {
+          // A lifetime counts from now, so "7 days" extends or shortens alike.
+          const expiry = expiresAtFor(body.lifetime, Date.now());
+          if (!expiry.ok) return clientErr("lifetime must be one of 1d, 7d, 30d, 1y, never", 400);
+          set.expires_at_ms = expiry.expiresAtMs;
+        }
+        // Replacing the link kills the old URL and keeps the share.
+        if (body.rotateLink === true) set.link_token = newLinkToken();
+        if (Object.keys(set).length === 0) return clientErr("Nothing to change", 400);
+        await updateOwnedShare(grantClient, owner, shareId, set);
+        return ok({ publicShare: ownerView({ ...existing, ...set }) });
+      }
+
+      return clientErr("Method not allowed", 405);
     }
 
     // POST /apps/{appId}/data/records
@@ -5525,6 +5718,113 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // returned a response, and a failed .end() should not corrupt that.
     await Promise.allSettled(toClose.map((close) => close()));
   }
+}
+
+/** A response a visitor's browser and CloudFront may cache for a minute. */
+function publicOk(body: unknown) {
+  return {
+    statusCode: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": `public, max-age=${PUBLIC_SHARE_CACHE_SECONDS}`,
+      "Referrer-Policy": "no-referrer",
+      "X-Robots-Tag": "noindex",
+    },
+    body: JSON.stringify(body),
+  };
+}
+
+/**
+ * The anonymous read path: one page of a public share.
+ *
+ * The request carries a link token and a cursor, and nothing else is read
+ * from it. The token is looked up as Starkeep Drive on an untagged session
+ * (the table sits outside the user cut, and Drive is the platform's standing
+ * identity). The page is then read as the creating app, on a session tagged
+ * with the owner, through the owner-scoped adapter and the app's own grants:
+ * the visitor reaches at most what the app could read for the owner, and
+ * `public-shares.ts` narrows that to display children of the album.
+ *
+ * Read-only by construction: nothing below writes, and the only shared code
+ * is the page loaders the records route also uses.
+ */
+async function handlePublicShareItems(
+  linkToken: string,
+  cursor: string | undefined,
+  accountId: string,
+  toClose: Array<() => Promise<void>>,
+) {
+  const driveCreds = await getAppCreds(DRIVE_APP_ID, accountId, null);
+  const lookup = makeConnection(DRIVE_APP_ID, driveCreds);
+  const lookupClient = await lookup.clientFactory.createClient({
+    hostname: lookup.auroraEndpoint,
+    region: lookup.region,
+  });
+  toClose.push(() => lookupClient.end());
+
+  const share: PublicShareRow | null = await findShareByToken(lookupClient, linkToken);
+  // One answer for a token that never existed, a revoked share and an app
+  // that lost the capability: a visitor learns nothing about which.
+  if (!share || !(await appMayPublish(lookupClient, share.app_id))) {
+    return clientErr("This link does not exist or was turned off", 404);
+  }
+  if (isExpired(share, Date.now())) return clientErr("This link has expired", 410);
+  if (!USER_SEGMENT_PATTERN.test(share.owner_user_id)) {
+    return clientErr("This link does not exist or was turned off", 404);
+  }
+
+  const creds = await getAppCreds(share.app_id, accountId, share.owner_user_id);
+  const { db, storage, clientFactory, auroraEndpoint, region } = makeAdapters(
+    share.app_id,
+    creds,
+    share.owner_user_id,
+  );
+  await db.init();
+  toClose.push(() => db.close());
+  const grantClient = await clientFactory.createClient({ hostname: auroraEndpoint, region });
+  toClose.push(() => grantClient.end());
+  const grants = await loadAccessGrants(grantClient, share.app_id);
+
+  let page;
+  try {
+    page = await loadPublicSharePage(db, grants, share, cloudLibrarySettings.standards(), cursor);
+  } catch (err) {
+    // A cursor the grammar cannot decode is the visitor's mistake.
+    if (err instanceof ApiError || (err as { status?: number }).status === 400) {
+      return clientErr("Invalid cursor", 400);
+    }
+    throw err;
+  }
+
+  const presence = createBytePresence({
+    loadWatermarks: () => db.byteCoverageStore(DRIVE_APP_ID).load(),
+    has: (key) => storage.has(key),
+    cache: presentKeyCache,
+  });
+  const missing = await presence.missing(page.displayFiles);
+  const metadata = await loadMetadataForPage(db, grants, [...page.members]);
+  const items = await projectPublicSharePage(
+    share,
+    page,
+    (id) => {
+      const row = metadata.get(id) as { width?: unknown; height?: unknown } | undefined;
+      const width = Number(row?.width);
+      const height = Number(row?.height);
+      return Number.isFinite(width) && Number.isFinite(height) ? { width, height } : null;
+    },
+    missing,
+    async (display, key) => {
+      const signed = await signPublicShareCloudFrontUrl(display, key, PUBLIC_SHARE_URL_TTL_SECONDS);
+      return signed.ok ? signed.url : null;
+    },
+  );
+  return publicOk({
+    title: share.title,
+    items,
+    nextCursor: page.nextCursor,
+    truncated: page.truncated,
+    expiresAtMs: share.expires_at_ms,
+  });
 }
 
 async function buildAppSyncableSource(

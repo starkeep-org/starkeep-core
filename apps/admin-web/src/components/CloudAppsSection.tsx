@@ -13,7 +13,12 @@ import {
 import { refreshTokens, getIdentityPoolCredentials, type STSCredentials } from "@/lib/cognito-auth";
 import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
 import { ACTION_OCCASIONAL, ACTION_OPEN } from "@/lib/action-colors";
-import { surfacesOf, type AppSurface, type LocalAppEntry } from "@/lib/app-types";
+import {
+  publicSharingConsent,
+  surfacesOf,
+  type AppSurface,
+  type LocalAppEntry,
+} from "@/lib/app-types";
 import { runInstallStream } from "@/lib/install-stream-client";
 
 export function CloudAppsSection({
@@ -181,7 +186,15 @@ export function CloudAppsSection({
             // signed in, cloud not set up, or the read errored). The tile
             // then reads as not installed rather than guessing.
             const installed = (surface === "web" ? webIds : mobileIds)?.has(entry.appId) ?? false;
-            const install = () => handleInstall(entry.appId, name, endpoint, surface);
+            // The cloud install has no consent dialog of its own, so the one
+            // capability a person must approve before the cloud acts on it is
+            // asked here: public links are served by the cloud web app.
+            const consent =
+              surface === "web" && !installed ? publicSharingConsent(entry.manifest) : null;
+            const install = () => {
+              if (consent && !confirm(`${consent}\n\nInstall ${name} in the cloud?`)) return;
+              void handleInstall(entry.appId, name, endpoint, surface);
+            };
 
             const actions: AppCardAction[] = installed
               ? [

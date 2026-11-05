@@ -170,6 +170,39 @@ describe("immutable app assets", () => {
   });
 });
 
+describe("/public-shares/* — anonymous public-share items pages", () => {
+  it("caches for a minute, keyed by path and query string", () => {
+    // The token is in the path and the cursor in the query, so both must
+    // separate entries; a minute bounds both the Lambda cost of a refresh
+    // burst and how long a revoked link answers from the edge.
+    const behavior = behaviorFor("/public-shares/*");
+    expect(behavior).toBeDefined();
+    expect(behavior!.targetOriginId).toBe("api-gateway");
+    expect(behavior!.allowedMethods).toEqual(["GET", "HEAD"]);
+    const policy = created.find(
+      (r) =>
+        r.type.endsWith("cloudfront/cachePolicy:CachePolicy") &&
+        `${r.name}-id` === behavior!.cachePolicyId,
+    );
+    expect(policy).toBeDefined();
+    expect(policy!.inputs.maxTtl).toBe(60);
+    const params = policy!.inputs.parametersInCacheKeyAndForwardedToOrigin as {
+      queryStringsConfig: { queryStringBehavior: string };
+      cookiesConfig: { cookieBehavior: string };
+    };
+    expect(params.queryStringsConfig.queryStringBehavior).toBe("all");
+    expect(params.cookiesConfig.cookieBehavior).toBe("none");
+  });
+
+  it("requires no signature and runs no signed-out redirect", () => {
+    const behavior = behaviorFor("/public-shares/*") as CacheBehavior & {
+      functionAssociations?: unknown[];
+    };
+    expect(behavior.trustedKeyGroups ?? []).toEqual([]);
+    expect(behavior.functionAssociations ?? []).toEqual([]);
+  });
+});
+
 describe("shared/* — Part B signed shared bytes", () => {
   it("requires CloudFront-signed requests from the key group", () => {
     const behavior = behaviorFor("shared/*");

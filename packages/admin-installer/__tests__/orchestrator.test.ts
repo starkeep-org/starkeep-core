@@ -558,6 +558,7 @@ describe("an app that ships a mobile build", () => {
       mobileManifest.infraRequirements.appSpecificSyncable.tables,
       mobileManifest.infraRequirements.appSpecificSyncable.files,
       mobileManifest.infraRequirements.labelKeys,
+      mobileManifest.infraRequirements.publicSharing,
     );
     expect(createAppExecRole).not.toHaveBeenCalled();
     expect(installComputeStack).not.toHaveBeenCalled();

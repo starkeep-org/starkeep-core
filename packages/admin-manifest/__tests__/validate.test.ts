@@ -93,6 +93,25 @@ describe("id-bound privilege flags", () => {
     expect(result.errors.some((e) => e.includes("brokerPower"))).toBe(true);
   });
 
+  it("defaults publicSharing to false", () => {
+    const result = validateManifest(minimal());
+    expect((result.manifest as AppManifest).infraRequirements.publicSharing).toBe(false);
+  });
+
+  it("rejects publicSharing for an app with no cloud target", () => {
+    const result = validateManifest(minimal({ infraRequirements: { publicSharing: true } }));
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("publicSharing"))).toBe(true);
+  });
+
+  it("accepts publicSharing for a cloud app", () => {
+    const result = validateManifest(
+      minimal({ targets: ["local", "cloud"], infraRequirements: { publicSharing: true } }),
+    );
+    expect(result.errors).toEqual([]);
+    expect((result.manifest as AppManifest).infraRequirements.publicSharing).toBe(true);
+  });
+
   it("accepts brokerPower for cloud-data-server", () => {
     const result = validateManifest(
       minimal({

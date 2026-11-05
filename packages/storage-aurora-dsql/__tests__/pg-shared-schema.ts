@@ -104,6 +104,23 @@ export async function createSharedSchema(pg: PGlite): Promise<void> {
       tables_json text NOT NULL,
       files_enabled boolean NOT NULL DEFAULT false
     );
+    CREATE SCHEMA IF NOT EXISTS public_sharing;
+    CREATE TABLE public_sharing.app_capabilities (
+      app_id text PRIMARY KEY
+    );
+    CREATE TABLE public_sharing.public_shares (
+      id text PRIMARY KEY,
+      link_token text NOT NULL,
+      owner_user_id text NOT NULL,
+      app_id text NOT NULL,
+      label_key text NOT NULL,
+      label_value text NOT NULL,
+      title text NOT NULL,
+      item_id_salt text NOT NULL,
+      created_at_ms bigint NOT NULL,
+      expires_at_ms bigint
+    );
+    CREATE UNIQUE INDEX uq_public_shares_link_token ON public_sharing.public_shares (link_token);
   `);
   for (const c of CATEGORIES.filter((c) => hasMetadataTable(c.id))) {
     await pg.exec(pgMetadataDdl(c));

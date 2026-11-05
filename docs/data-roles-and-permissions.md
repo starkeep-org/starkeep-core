@@ -229,6 +229,23 @@ Residual risks:
 - **A hostile app can still ask for a password.** Nothing stops an app from drawing its own form, and a typed password signs in through the device client with a desktop's scope. Browser sign-in makes such a form unusual, but closing the path needs a device client that accepts no password.
 - **Attested keys accumulate.** Each sign-in registers a new key and nothing deletes old ones. A key without a live token reaches nothing.
 
+### A public share's visitor
+
+A public share is the one data read that names no user. Anyone holding a link reads `GET /public-shares/<linkToken>/items`, and the link token is the only credential. A public share names one app label, such as Photos' `album` key with an album's id, and shows the stand-ins of the records carrying it. The code is `cloud-data-server/src/public-shares.ts`.
+
+- **Who may create one.** Only an app whose manifest declares `infraRequirements.publicSharing`, and only after the person approves the capability at install. The install DDL records the approval in `public_sharing.app_capabilities`, and an upgrade that drops the declaration deletes the row. Creating or changing a share needs a person's session: the HMAC branch with a cloud-apps ID token. A signed-in device or a mobile app is refused, so a stolen device cannot publish a library. The owner routes are `/apps/<appId>/data/public-shares`, and each one checks `owner_user_id` and `app_id` against the request's subject.
+- **Where the shares live.** `public_sharing.public_shares` sits outside the user cut, beside the registry and the grants, because the anonymous route finds a share by its token before it knows the owner. Every role holds `SELECT, INSERT, UPDATE, DELETE` on it through `PUBLIC`, as for `shared.record_labels`. The broker is the cut by owner and by app.
+- **How a page is read.** The broker looks the token up as Starkeep Drive on an untagged session, refuses an unknown or revoked token, a share of an app that lost the capability (404) and an expired share (410), then assumes the creating app's role tagged with the owner's user id. From there the page runs through the owner-scoped adapter and the creating app's grants, so a visitor reaches at most what the app could read for the owner. The request supplies only the token and a cursor, and a fixed query module, not the general records handler, builds every statement.
+- **What a visitor receives.** The response lists, for each member, an opaque item id (an HMAC of the record id with a per-share salt), a category, a display size and URLs to its display children: stand-ins, and a video's poster frames. It carries no record id, label, caption, date or metadata beyond the display size.
+- **The signer never signs an original.** `signPublicShareCloudFrontUrl` signs only keys that the page's `PublicDisplaySet` admitted: display children the fixed query returned, under the owner's `shared/<ownerId>/` prefix, and never a member's own key. So an archived original never meets a visitor and never triggers a restore, a large original costs no egress, and a small original's EXIF and GPS never leave. A visitor sees a self-canonical original at its largest smaller stand-in. URLs live one hour.
+- **Caching and revocation.** CloudFront's `/public-shares/*` behavior caches a page for 60 seconds, keyed by path and query string, with no trusted key group and no signed-out redirect. Deleting a share stops new pages at once and cached pages within a minute. URLs already signed keep working for up to an hour. Uninstalling the app deletes its shares and its capability row.
+
+Residual risks:
+
+- **The link is the secret.** Anyone the link reaches sees the album. The 128-bit token resists guessing, and the viewer sends `Referrer-Policy: no-referrer`, but a forwarded link works for whoever receives it.
+- **Signed URLs expose stand-in keys.** A key names the owner's user id and the stand-in's hash, so a visitor of two public shares can tell that one photo appears in both and that one owner published both. No key names an original's hash.
+- **A device can grow a public share.** A device that adds a photo to a shared album writes a label, and after sync the platform cannot tell it from a session's write. The owner sees additions in the album and can turn the link off.
+
 ---
 
 ## The local data server

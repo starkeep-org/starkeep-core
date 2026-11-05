@@ -29,6 +29,8 @@ export interface ManifestSummary {
     fileAccessAll?: boolean;
     /** Present and enabled for an app with a cloud web app. */
     compute?: { enabled: boolean };
+    /** The app asks to publish records to public links. */
+    publicSharing?: boolean;
   };
   /** The mobile builds the app ships; see the manifest's `mobile` field. */
   mobile?: {
@@ -78,4 +80,15 @@ export function surfacesOf(a: LocalAppEntry): AppSurface[] {
   if (a.manifest.infraRequirements?.compute?.enabled) out.push("web");
   if (a.manifest.mobile?.android) out.push("mobile");
   return out;
+}
+
+/**
+ * What the install dialogs say about the public-sharing capability. One
+ * sentence for both the local and the cloud install, so the person approves
+ * the same words either way.
+ */
+export function publicSharingConsent(manifest: ManifestSummary): string | null {
+  if (manifest.infraRequirements?.publicSharing !== true) return null;
+  const name = manifest.name ?? manifest.id ?? "This app";
+  return `${name} can publish photos to public links. Anyone with a link can see what it shows, without signing in.`;
 }
