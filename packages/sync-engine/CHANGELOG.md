@@ -1,5 +1,17 @@
 # @starkeep/sync-engine
 
+## 0.10.0
+
+### Minor Changes
+
+- d40562e: The in-process transport's `declinesBlob(key)` option is now `declinesBlobs(keys)`, which returns the set of keys this side declines. The bytes walk still asks object storage about a batch's keys concurrently, then makes one awaited `declinesBlobs` call with the keys storage lacks, so an implementation can query the exchange's connection without overlapping another statement. A failed call counts every key in it as not held, as a failed per-key check did.
+
+### Patch Changes
+
+- Updated dependencies [39e3d86]
+  - @starkeep/protocol-primitives@0.8.0
+  - @starkeep/storage-adapter@0.8.1
+
 ## 0.9.2
 
 ### Patch Changes

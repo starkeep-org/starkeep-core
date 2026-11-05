@@ -1,5 +1,11 @@
 # @starkeep/protocol-primitives
 
+## 0.8.0
+
+### Minor Changes
+
+- 39e3d86: `escapeMarkup` escapes `&`, `<`, `>`, `"` and `'` for HTML or XML, as element content or a quoted attribute value. The cloud data server's sign-in pages and the managed login SVG both use it, in place of two private copies.
+
 ## 0.7.0
 
 ### Minor Changes
