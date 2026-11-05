@@ -90,5 +90,5 @@ export function surfacesOf(a: LocalAppEntry): AppSurface[] {
 export function publicSharingConsent(manifest: ManifestSummary): string | null {
   if (manifest.infraRequirements?.publicSharing !== true) return null;
   const name = manifest.name ?? manifest.id ?? "This app";
-  return `${name} can publish photos to public links. Anyone with a link can see what it shows, without signing in.`;
+  return `${name} can publish files to public links. Anyone with a link can see what it shows, without signing in.`;
 }
