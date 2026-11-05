@@ -51,9 +51,11 @@ interface Props {
   primary?: ReactNode;
   /** Secondary controls, reached through the overflow menu. */
   actions?: AppCardAction[];
+  /** Settings shown under the badges, such as Drive's sharing checkbox. */
+  children?: ReactNode;
 }
 
-export function AppCard({ name, version, badges, description, primary, actions }: Props) {
+export function AppCard({ name, version, badges, description, primary, actions, children }: Props) {
   const menuActions = actions?.filter(Boolean) ?? [];
 
   return (
@@ -97,6 +99,8 @@ export function AppCard({ name, version, badges, description, primary, actions }
       {badges && (
         <CardContent className="flex flex-wrap items-center gap-1.5">{badges}</CardContent>
       )}
+
+      {children && <CardContent>{children}</CardContent>}
 
       {/* The primary action spans the card. `[&_button]:w-full` reaches the
           button inside a tooltip wrapper; `asChild` links are direct children

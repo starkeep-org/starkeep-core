@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { AppCard, type AppCardAction } from "@/components/AppCard";
+import { postAsOperator } from "@/components/PublicSharesSection";
 import { getRuntimeConfig, RUNTIME_CONFIG_DEFAULTS } from "@/lib/runtime-config";
 import { ACTION_OPEN, ACTION_START } from "@/lib/action-colors";
 
@@ -21,7 +22,75 @@ async function checkUrl(url: string): Promise<boolean> {
   }
 }
 
-export function LocalDriveSection() {
+const DRIVE_CAPABILITY = "/api/public-shares/drive-capability";
+
+/**
+ * Whether Drive may create public links. Drive reaches every file, including
+ * photo and video originals, so sharing starts off. The setting lives in the
+ * cloud, so the checkbox shows only once the cloud is deployed, and stays
+ * disabled until a signed-in operator has read it.
+ */
+function DriveSharingCheckbox({ signedIn }: { signedIn: boolean }) {
+  // Null until the first answer, so the checkbox never shows a guess.
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setEnabled(null);
+    setError(null);
+    if (!signedIn) return;
+    postAsOperator(DRIVE_CAPABILITY)
+      .then((body) => setEnabled((body as { enabled: boolean }).enabled))
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, [signedIn]);
+
+  const change = async (want: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const body = (await postAsOperator(DRIVE_CAPABILITY, { enabled: want })) as {
+        enabled: boolean;
+      };
+      setEnabled(body.enabled);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <label
+        className="flex items-center gap-2 text-sm"
+        title="Lets Drive create public links to any file, including photo and video originals. Turning it off stops Drive's existing links."
+      >
+        <input
+          type="checkbox"
+          className="size-4"
+          checked={enabled === true}
+          disabled={busy || enabled === null}
+          onChange={(e) => void change(e.target.checked)}
+        />
+        Enable sharing
+      </label>
+      {error && (
+        <p className="mt-1 text-xs text-destructive" role="alert">
+          {error}
+        </p>
+      )}
+    </>
+  );
+}
+
+export function LocalDriveSection({
+  cloudDeployed,
+  signedIn,
+}: {
+  cloudDeployed: boolean;
+  signedIn: boolean;
+}) {
   const [online, setOnline] = useState<boolean | null>(null);
   const [pending, setPending] = useState<"start" | "stop" | null>(null);
   const [driveUrl, setDriveUrl] = useState<string>(RUNTIME_CONFIG_DEFAULTS.driveUrl);
@@ -126,6 +195,8 @@ export function LocalDriveSection() {
           </Button>
         )
       }
-    />
+    >
+      {cloudDeployed && <DriveSharingCheckbox signedIn={signedIn} />}
+    </AppCard>
   );
 }

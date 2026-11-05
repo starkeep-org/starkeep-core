@@ -606,7 +606,10 @@ export function DashboardPage() {
                     ) : undefined
                   }
                 />
-                <LocalDriveSection />
+                <LocalDriveSection
+                  cloudDeployed={cloudDeployed}
+                  signedIn={cognitoSession !== null}
+                />
               </>
             }
           />

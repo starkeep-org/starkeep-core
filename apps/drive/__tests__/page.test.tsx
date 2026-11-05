@@ -382,7 +382,7 @@ describe("sharing a link", () => {
   it("points to admin-web when Drive's switch is off", async () => {
     linksBody = { available: true, mayPublish: false, links: [] };
     const dialog = await openDialog();
-    expect(within(dialog).getByText(/Allow Drive to create public links/)).toBeDefined();
+    expect(within(dialog).getByText(/Turn on “Enable sharing” on the Drive card/)).toBeDefined();
     expect(
       (within(dialog).getByRole("button", { name: "Create link" }) as HTMLButtonElement).disabled,
     ).toBe(true);
