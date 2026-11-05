@@ -2,10 +2,15 @@
  * Every public link in the deployment, across apps and people, each one
  * revocable.
  *
- * A public link shows an app's labelled records, such as a Photos album, to
- * anyone holding it. People create and manage their own from the app; this
- * list is the operator's audit of all of them. "Turn off" deletes the link: new visits fail at once, and pages
- * the edge already cached stop within a minute.
+ * A public link shows an app's labelled records, such as a Photos album, or
+ * one record, to anyone holding it. People create and manage their own from
+ * the app; this list is the operator's audit of all of them. "Turn off"
+ * deletes the link: new visits fail at once, and pages the edge already
+ * cached stop within a minute.
+ *
+ * The section also holds the switch that lets Starkeep Drive create public
+ * links. Drive reaches every file, including photo and video originals, so the
+ * switch starts off.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -57,6 +62,8 @@ export function PublicSharesSection() {
   const [list, setList] = useState<ListState>({ kind: "loading" });
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  // Null until the first answer, so the switch never shows a guess.
+  const [driveEnabled, setDriveEnabled] = useState<boolean | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -65,7 +72,33 @@ export function PublicSharesSection() {
     } catch (err) {
       setList({ kind: "error", message: err instanceof Error ? err.message : String(err) });
     }
+    try {
+      const body = (await call("/api/public-shares/drive-capability")) as { enabled: boolean };
+      setDriveEnabled(body.enabled);
+    } catch {
+      setDriveEnabled(null);
+    }
   }, []);
+
+  const setDrive = async (enabled: boolean) => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const body = (await call("/api/public-shares/drive-capability", { enabled })) as {
+        enabled: boolean;
+      };
+      setDriveEnabled(body.enabled);
+      setMessage(
+        body.enabled
+          ? "Drive can now create public links."
+          : "Drive can no longer create public links. Its existing links stop working.",
+      );
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   useEffect(() => {
     void load();
@@ -100,6 +133,20 @@ export function PublicSharesSection() {
         <p className="text-sm text-muted-foreground">
           Anyone holding one of these links can see what it shows without signing in.
         </p>
+        <label className="flex items-start gap-3 rounded-lg border bg-card p-3 text-sm">
+          <input
+            type="checkbox"
+            role="switch"
+            className="mt-0.5 size-4"
+            checked={driveEnabled === true}
+            disabled={busy || driveEnabled === null}
+            onChange={(e) => void setDrive(e.target.checked)}
+          />
+          <span>
+            Allow Drive to create public links to any file in your library, including photo and
+            video originals.
+          </span>
+        </label>
         {message && (
           <p className="text-sm" role="status">
             {message}

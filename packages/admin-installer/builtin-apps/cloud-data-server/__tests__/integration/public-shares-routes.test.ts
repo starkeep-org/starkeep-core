@@ -9,8 +9,14 @@
  * manages the share, from a session or a signed-in desktop; and expiry,
  * revocation and link replacement each stop the old link.
  *
+ * Record shares name one record. Photos' record share shows one stand-in;
+ * Starkeep Drive's direct link (`GET /public-shares/<token>/file`) redirects
+ * to a file's original, or to a photo's or a video's stand-in or original as
+ * the share says, and never to an archived or missing original.
+ *
  * See `~/projects/starkeep/proposal-public-sharing-albums-2026-11-05.md` and
- * `~/projects/starkeep/proposal-public-links-from-any-device-2026-11-05.md`.
+ * `~/projects/starkeep/proposal-public-links-from-any-device-2026-11-05.md`,
+ * and `~/projects/starkeep/plan-public-links-single-items-and-drive-2026-11-05.md`.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
@@ -42,6 +48,7 @@ const cfKeyPair = generateKeyPairSync("rsa", {
 });
 
 const PHOTOS = "photos";
+const DRIVE = "starkeep-drive";
 const A = "user-a";
 const B = "user-b";
 const ALBUM = "4de58a3c4d2a33014de58a3c4d2a3301";
@@ -95,7 +102,7 @@ beforeEach(async () => {
     INSERT INTO shared.app_label_keys (app_id, key, description) VALUES
       ('${PHOTOS}', 'album', null),
       ('${PHOTOS}', 'derived', null);
-    INSERT INTO public_sharing.app_capabilities (app_id) VALUES ('${PHOTOS}');
+    INSERT INTO public_sharing.app_capabilities (app_id) VALUES ('${PHOTOS}'), ('${DRIVE}');
     CREATE SCHEMA app_starkeep_drive;
     CREATE TABLE app_starkeep_drive._starkeep_byte_coverage (
       user_id text NOT NULL,
@@ -161,18 +168,28 @@ function parse(res: { statusCode: number; body?: string; headers?: Record<string
 }
 
 async function call(userId: string, method: string, subPath: string, body?: unknown) {
+  return callAs(PHOTOS, userId, method, subPath, body);
+}
+
+async function callAs(
+  appId: string,
+  userId: string,
+  method: string,
+  subPath: string,
+  body?: unknown,
+) {
   const bodyless = method === "GET" || method === "DELETE";
   const bodyStr = body === undefined ? undefined : JSON.stringify(body);
   const headers = signRequest({
-    appId: PHOTOS,
-    hmacSecret: `secret-${PHOTOS}`,
+    appId,
+    hmacSecret: `secret-${appId}`,
     method,
     path: subPath.split("?")[0]!,
     ...(bodyless ? {} : { body: bodyStr }),
   });
   const [path, search] = subPath.split("?");
   const event: APIGatewayEvent = {
-    rawPath: `/apps/${PHOTOS}${path}`,
+    rawPath: `/apps/${appId}${path}`,
     requestContext: { http: { method } },
     headers: { ...headers, "X-Starkeep-User-Token": tokens[userId]! },
     ...(search ? { queryStringParameters: Object.fromEntries(new URLSearchParams(search)) } : {}),
@@ -215,8 +232,26 @@ async function visit(linkToken: string, cursor?: string) {
   );
 }
 
-async function register(userId: string, body: Record<string, unknown>): Promise<string> {
-  const res = await call(userId, "POST", "/data/records", body);
+/** An anonymous visitor of a direct link. */
+async function visitFile(linkToken: string) {
+  const res = await handler(
+    {
+      rawPath: `/public-shares/${linkToken}/file`,
+      requestContext: { http: { method: "GET" } },
+      headers: {},
+    },
+    context,
+  );
+  const { headers } = res as { headers?: Record<string, string> };
+  return { status: res.statusCode, headers: headers ?? {}, raw: res.body ?? "" };
+}
+
+async function register(
+  userId: string,
+  body: Record<string, unknown>,
+  appId: string = PHOTOS,
+): Promise<string> {
+  const res = await callAs(appId, userId, "POST", "/data/records", body);
   expect(res.status, JSON.stringify(res.body)).toBe(201);
   return (res.body["record"] as { id: string }).id;
 }
@@ -252,16 +287,65 @@ async function label(userId: string, recordId: string) {
   expect(res.status, JSON.stringify(res.body)).toBe(200);
 }
 
+const ALBUM_SOURCE = { kind: "label", key: "album", value: ALBUM };
+
 async function share(userId: string = A, extra: Record<string, unknown> = {}) {
   const res = await call(userId, "POST", "/data/public-shares", {
-    labelKey: "album",
-    labelValue: ALBUM,
+    source: ALBUM_SOURCE,
     title: "Summer",
     lifetime: "7d",
     ...extra,
   });
   expect(res.status, JSON.stringify(res.body)).toBe(201);
   return res.body["publicShare"] as { id: string; linkToken: string; expiresAtMs: number | null };
+}
+
+/** A record share as `appId`. Answers the raw response, so a refusal can be asserted. */
+async function shareRecord(
+  appId: string,
+  recordId: string,
+  extra: Record<string, unknown> = {},
+  userId: string = A,
+) {
+  return callAs(appId, userId, "POST", "/data/public-shares", {
+    source: { kind: "record", recordId },
+    title: "Beach",
+    lifetime: "1d",
+    ...extra,
+  });
+}
+
+function made(res: { status: number; body: Record<string, unknown> }) {
+  expect(res.status, JSON.stringify(res.body)).toBe(201);
+  return res.body["publicShare"] as { id: string; linkToken: string; serves: string };
+}
+
+async function markAvailability(key: string, state: "archived" | "restoring") {
+  await pg.query(
+    `INSERT INTO shared.object_availability
+       (user_id, object_storage_key, state, tier, expected_latency_hours, observed_at_ms)
+     VALUES ($1, $2, $3, 'DEEP_ARCHIVE', 12, 1)`,
+    [A, key, state],
+  );
+}
+
+const PDF_HASH = "f".repeat(64);
+const PDF_KEY = `shared/${A}/document/ff/${PDF_HASH}`;
+const ORIGINAL_KEY = `shared/${A}/image/aa/${ORIGINAL_HASH}`;
+
+/** A PDF, written as Drive, which reads and writes every type. */
+async function pdf(userId: string = A, contentHash: string = PDF_HASH) {
+  return register(
+    userId,
+    {
+      type: "document/pdf",
+      contentType: "application/pdf",
+      contentHash,
+      sizeBytes: 40_000,
+      fileName: "trip-notes.pdf",
+    },
+    DRIVE,
+  );
 }
 
 describe("a visitor of a public share", () => {
@@ -467,8 +551,7 @@ describe("the owner's public-share routes", () => {
   it("refuse creation without the approved capability", async () => {
     await pg.query("DELETE FROM public_sharing.app_capabilities");
     const res = await call(A, "POST", "/data/public-shares", {
-      labelKey: "album",
-      labelValue: ALBUM,
+      source: ALBUM_SOURCE,
       title: "Summer",
     });
     expect(res.status).toBe(403);
@@ -477,25 +560,28 @@ describe("the owner's public-share routes", () => {
 
   it("refuse an undeclared label key and a bad lifetime", async () => {
     const undeclared = await call(A, "POST", "/data/public-shares", {
-      labelKey: "faces",
-      labelValue: "Alice",
+      source: { kind: "label", key: "faces", value: "Alice" },
       title: "Alice",
     });
     expect(undeclared.status).toBe(400);
     const badLifetime = await call(A, "POST", "/data/public-shares", {
-      labelKey: "album",
-      labelValue: ALBUM,
+      source: ALBUM_SOURCE,
       title: "Summer",
       lifetime: "5y",
     });
     expect(badLifetime.status).toBe(400);
+    const original = await call(A, "POST", "/data/public-shares", {
+      source: ALBUM_SOURCE,
+      serves: "original",
+      title: "Summer",
+    });
+    expect(original.status).toBe(400);
   });
 
   it("let a signed-in desktop create, change and stop a link, as its local data server forwards", async () => {
     await albumWithOnePhoto();
     const created = await device("POST", "/data/public-shares", {
-      labelKey: "album",
-      labelValue: ALBUM,
+      source: ALBUM_SOURCE,
       title: "Summer",
     });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
@@ -518,13 +604,221 @@ describe("the owner's public-share routes", () => {
     expect((await device("DELETE", `/data/public-shares/${others.id}`)).status).toBe(404);
     await pg.query("DELETE FROM public_sharing.app_capabilities");
     const res = await device("POST", "/data/public-shares", {
-      labelKey: "album",
-      labelValue: ALBUM,
+      source: ALBUM_SOURCE,
       title: "Summer",
     });
     expect(res.status).toBe(403);
     expect((await pg.query("SELECT owner_user_id FROM public_sharing.public_shares")).rows).toEqual(
       [{ owner_user_id: B }],
     );
+  });
+});
+
+describe("a record share", () => {
+  it("from Photos shows one photo's stand-in on the items page and through the direct link", async () => {
+    const { original } = await albumWithOnePhoto();
+    const created = made(await shareRecord(PHOTOS, original));
+    expect(created.serves).toBe("stand-in");
+
+    const page = await visit(created.linkToken);
+    expect(page.status, page.raw).toBe(200);
+    expect(page.body["source"]).toBe("record");
+    const items = page.body["items"] as Array<{ sizes: Array<{ url: string }> }>;
+    expect(items).toHaveLength(1);
+    expect(items[0]!.sizes[0]!.url).toContain(STAND_IN_HASH);
+    expect(page.raw).not.toContain(ORIGINAL_HASH);
+
+    const file = await visitFile(created.linkToken);
+    expect(file.status).toBe(302);
+    expect(file.headers["Location"]).toContain(STAND_IN_HASH);
+    expect(file.headers["Location"]).not.toContain(ORIGINAL_HASH);
+    expect(file.headers["Referrer-Policy"]).toBe("no-referrer");
+  });
+
+  it("from Photos is refused the original", async () => {
+    const { original } = await albumWithOnePhoto();
+    const res = await shareRecord(PHOTOS, original, { serves: "original" });
+    expect(res.status).toBe(403);
+    expect((await pg.query("SELECT * FROM public_sharing.public_shares")).rows).toEqual([]);
+  });
+
+  it("from Drive serves a photo's largest stand-in by default", async () => {
+    const { original } = await albumWithOnePhoto();
+    const created = made(await shareRecord(DRIVE, original));
+    expect(created.serves).toBe("stand-in");
+    const file = await visitFile(created.linkToken);
+    expect(file.status).toBe(302);
+    expect(file.headers["Location"]).toContain(STAND_IN_HASH);
+  });
+
+  it("from Drive serves a photo's original when asked, named after the title", async () => {
+    const { original } = await albumWithOnePhoto();
+    const created = made(await shareRecord(DRIVE, original, { serves: "original" }));
+    expect(created.serves).toBe("original");
+    const file = await visitFile(created.linkToken);
+    expect(file.status, file.raw).toBe(302);
+    const location = new URL(file.headers["Location"]!);
+    expect(location.pathname).toBe(`/${ORIGINAL_KEY}`);
+    expect(location.searchParams.get("response-content-disposition")).toContain(
+      'filename="Beach.jpg"',
+    );
+    // The items page still never signs the original, whatever the share says.
+    const page = await visit(created.linkToken);
+    expect(page.raw).not.toContain(ORIGINAL_HASH);
+  });
+
+  it("from Drive serves a video's playable stand-in, or the video itself", async () => {
+    const VIDEO_HASH = "1".repeat(64);
+    const WEBM_HASH = "3".repeat(64);
+    const video = await register(A, {
+      type: "video/mp4",
+      contentType: "video/mp4",
+      contentHash: VIDEO_HASH,
+      sizeBytes: 50_000_000,
+      fileName: "clip.mp4",
+      fidelity: 8000,
+    });
+    await register(A, {
+      type: "image/jpeg",
+      contentType: "image/jpeg",
+      contentHash: "2".repeat(64),
+      sizeBytes: 90_000,
+      fileName: "clip-poster.jpg",
+      parentId: video,
+      labels: [{ key: "derived", value: "video-poster-720p" }],
+      metadata: { width: 1280, height: 720 },
+    });
+    await register(A, {
+      type: "video/webm",
+      contentType: "video/webm",
+      contentHash: WEBM_HASH,
+      sizeBytes: 5_000_000,
+      fileName: "clip-2000.webm",
+      parentId: video,
+      standIn: { role: "smaller", fidelity: 2000 },
+    });
+    // The poster is labelled in Photos' derived key, which Drive's share does
+    // not read; the direct link needs no poster.
+    const original = made(await shareRecord(DRIVE, video, { serves: "original" }));
+    const toOriginal = await visitFile(original.linkToken);
+    expect(toOriginal.status, toOriginal.raw).toBe(302);
+    expect(toOriginal.headers["Location"]).toContain(VIDEO_HASH);
+
+    const standIn = made(await shareRecord(DRIVE, video));
+    const toStandIn = await visitFile(standIn.linkToken);
+    expect(toStandIn.status, toStandIn.raw).toBe(302);
+    expect(toStandIn.headers["Location"]).toContain(WEBM_HASH);
+    expect(toStandIn.headers["Location"]).not.toContain(VIDEO_HASH);
+  });
+
+  it("from Drive serves a file's original, whatever serves was asked", async () => {
+    const id = await pdf();
+    const created = made(await shareRecord(DRIVE, id, { title: "Trip notes" }));
+    expect(created.serves).toBe("original");
+    const file = await visitFile(created.linkToken);
+    expect(file.status, file.raw).toBe(302);
+    const location = new URL(file.headers["Location"]!);
+    expect(location.pathname).toBe(`/${PDF_KEY}`);
+    expect(location.searchParams.get("response-content-disposition")).toContain(
+      'filename="Trip notes.pdf"',
+    );
+    // A file has nothing to show on the items page.
+    expect((await visit(created.linkToken)).body["items"]).toEqual([]);
+  });
+
+  it("is listed by its record, and answers its source", async () => {
+    const id = await pdf();
+    made(await shareRecord(DRIVE, id));
+    const listed = await callAs(DRIVE, A, "GET", `/data/public-shares?recordId=${id}`);
+    expect(listed.status, JSON.stringify(listed.body)).toBe(200);
+    expect(listed.body["mayPublish"]).toBe(true);
+    expect(listed.body["publicShares"]).toMatchObject([
+      { source: { kind: "record", recordId: id }, serves: "original", title: "Beach" },
+    ]);
+    // Photos' list is Photos' own.
+    expect((await call(A, "GET", "/data/public-shares")).body["publicShares"]).toEqual([]);
+  });
+
+  it("stops showing anything once its record is deleted", async () => {
+    const id = await pdf();
+    const created = made(await shareRecord(DRIVE, id));
+    const deleted = await callAs(DRIVE, A, "DELETE", `/data/records/${id}`);
+    expect(deleted.status, JSON.stringify(deleted.body)).toBeLessThan(300);
+    const file = await visitFile(created.linkToken);
+    expect(file.status).toBe(404);
+    expect(file.raw).toContain("This link no longer shows anything.");
+    expect(file.headers["X-Robots-Tag"]).toBe("noindex");
+    expect(file.headers["Content-Type"]).toContain("text/html");
+  });
+
+  it("is refused for a child record, another user's record and a type the app cannot read", async () => {
+    const { standIn } = await albumWithOnePhoto();
+    expect((await shareRecord(DRIVE, standIn)).status).toBe(404);
+
+    // Only B holds the PDF. (A record's id follows from its content, so a
+    // photo both users hold has one id, and A's share of it is A's own.)
+    const others = await pdf(B);
+    expect((await shareRecord(DRIVE, others)).status).toBe(404);
+
+    const id = await pdf();
+    expect((await shareRecord(PHOTOS, id)).status).toBe(404);
+
+    expect((await shareRecord(DRIVE, "not-an-id")).status).toBe(400);
+    expect((await pg.query("SELECT * FROM public_sharing.public_shares")).rows).toEqual([]);
+  });
+
+  it("is refused for Drive once the admin-web switch is off", async () => {
+    const id = await pdf();
+    await pg.query("DELETE FROM public_sharing.app_capabilities WHERE app_id = $1", [DRIVE]);
+    expect((await shareRecord(DRIVE, id)).status).toBe(403);
+  });
+
+  it.each(["archived", "restoring"] as const)(
+    "is refused an original that is %s, and may still share the stand-in",
+    async (state) => {
+      const { original } = await albumWithOnePhoto();
+      await markAvailability(ORIGINAL_KEY, state);
+      const res = await shareRecord(DRIVE, original, { serves: "original" });
+      expect(res.status).toBe(409);
+      expect(JSON.stringify(res.body)).toContain("Share the largest stand-in instead.");
+      made(await shareRecord(DRIVE, original));
+    },
+  );
+
+  it("answers archived for an original that archived after its link was made", async () => {
+    const { original } = await albumWithOnePhoto();
+    const created = made(await shareRecord(DRIVE, original, { serves: "original" }));
+    await markAvailability(ORIGINAL_KEY, "archived");
+    const file = await visitFile(created.linkToken);
+    expect(file.status).toBe(409);
+    expect(file.raw).toContain("This file is archived.");
+    expect(file.raw).not.toContain(ORIGINAL_HASH);
+  });
+
+  it("answers not uploaded for a file whose bytes are still on a device", async () => {
+    // A hash of its own: a warm Lambda remembers a key once seen present.
+    const id = await pdf(A, "9".repeat(64));
+    const created = made(await shareRecord(DRIVE, id));
+    s3Mock
+      .on(HeadObjectCommand)
+      .rejects(Object.assign(new Error("NotFound"), { name: "NotFound" }));
+    const file = await visitFile(created.linkToken);
+    expect(file.status).toBe(409);
+    expect(file.raw).toContain("This file has not finished uploading.");
+  });
+
+  it("gives a label share no direct link, and an expired one the expiry", async () => {
+    await albumWithOnePhoto();
+    const album = await share();
+    expect((await visitFile(album.linkToken)).status).toBe(404);
+
+    const id = await pdf();
+    const created = made(await shareRecord(DRIVE, id));
+    await pg.query("UPDATE public_sharing.public_shares SET expires_at_ms = 1 WHERE id = $1", [
+      created.id,
+    ]);
+    const file = await visitFile(created.linkToken);
+    expect(file.status).toBe(410);
+    expect(file.raw).toContain("This link has expired.");
   });
 });

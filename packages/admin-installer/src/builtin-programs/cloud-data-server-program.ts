@@ -809,6 +809,14 @@ export function buildCloudDataServerProgram(
       target: pulumi.interpolate`integrations/${integration.id}`,
     });
 
+    // A record share's direct link: a redirect to one signed file. Anonymous
+    // for the same reason as the items page, and outside /apps/* likewise.
+    new aws.apigatewayv2.Route("route-public-share-file", {
+      apiId: api.id,
+      routeKey: "GET /public-shares/{linkToken}/file",
+      target: pulumi.interpolate`integrations/${integration.id}`,
+    });
+
     // The deployment's settings. The handler answers for Starkeep Drive only,
     // before any role is assumed.
     new aws.apigatewayv2.Route("route-deployment-settings", {
@@ -1065,7 +1073,15 @@ export function buildCloudDataServerProgram(
         parametersInCacheKeyAndForwardedToOrigin: {
           enableAcceptEncodingGzip: true,
           enableAcceptEncodingBrotli: true,
-          queryStringsConfig: { queryStringBehavior: "none" },
+          // One parameter only: a public direct link names its download with
+          // `response-content-disposition`, which S3 honours on the signed
+          // origin request. Every other shared URL carries none, so its cache
+          // key stays the path alone. CloudFront strips its own signature
+          // parameters before the cache key either way.
+          queryStringsConfig: {
+            queryStringBehavior: "whitelist",
+            queryStrings: { items: ["response-content-disposition"] },
+          },
           headersConfig: { headerBehavior: "none" },
           cookiesConfig: { cookieBehavior: "none" },
         },

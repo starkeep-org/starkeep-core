@@ -223,6 +223,115 @@ export async function restoreRecord(id: string): Promise<{ ids: string[] }> {
   return JSON.parse(body) as { ids: string[] };
 }
 
+/** A local-data-server answer that was not 2xx, with the status kept for the caller. */
+export class LdsResponseError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "LdsResponseError";
+  }
+}
+
+/**
+ * Send a request to a local-data-server `/data/*` path signed as Starkeep
+ * Drive, with an optional JSON body. The HMAC binds the method, the path and
+ * the body, as `restoreRecord` does above. A non-2xx answer throws
+ * {@link LdsResponseError} with the server's own message.
+ */
+async function ldsSend<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const secret = readDriveSecret();
+  if (!secret) throw new DriveNotInstalledError();
+  const bodyless = method === "GET" || method === "DELETE";
+  const bodyStr = bodyless ? undefined : JSON.stringify(body ?? {});
+  const res = await fetch(`${LDS_URL}${path}`, {
+    method,
+    headers: {
+      ...signRequest({
+        appId: DRIVE_APP_ID,
+        hmacSecret: secret,
+        method,
+        path,
+        ...(bodyStr === undefined ? {} : { body: bodyStr }),
+      }),
+      ...(bodyStr === undefined ? {} : { "Content-Type": "application/json" }),
+    },
+    ...(bodyStr === undefined ? {} : { body: bodyStr }),
+    cache: "no-store",
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    let message = `${res.status} ${res.statusText}`;
+    try {
+      const parsed = JSON.parse(text) as { error?: string; detail?: string };
+      message = parsed.detail ?? parsed.error ?? message;
+    } catch {
+      /* non-JSON body */
+    }
+    throw new LdsResponseError(res.status, message);
+  }
+  return JSON.parse(text) as T;
+}
+
+/** A public link as the platform's owner routes answer it. */
+export interface PublicShare {
+  id: string;
+  linkToken: string;
+  source: { kind: "label"; key: string; value: string } | { kind: "record"; recordId: string };
+  serves: "stand-in" | "original";
+  title: string;
+  createdAtMs: number;
+  expiresAtMs: number | null;
+}
+
+/**
+ * Drive's public links. They live in the cloud alone; the local data server
+ * forwards `/data/public-shares` there with this computer's sign-in.
+ * `mayPublish` is the admin-web switch.
+ */
+export async function listPublicShares(): Promise<{
+  publicShares: PublicShare[];
+  mayPublish: boolean;
+}> {
+  return ldsSend("GET", "/data/public-shares");
+}
+
+export async function createPublicShare(input: {
+  recordId: string;
+  serves: "stand-in" | "original";
+  title: string;
+  lifetime: string;
+}): Promise<PublicShare> {
+  const { publicShare } = await ldsSend<{ publicShare: PublicShare }>(
+    "POST",
+    "/data/public-shares",
+    {
+      source: { kind: "record", recordId: input.recordId },
+      serves: input.serves,
+      title: input.title,
+      lifetime: input.lifetime,
+    },
+  );
+  return publicShare;
+}
+
+export async function updatePublicShare(
+  id: string,
+  change: { title?: string; lifetime?: string; rotateLink?: true },
+): Promise<PublicShare> {
+  const { publicShare } = await ldsSend<{ publicShare: PublicShare }>(
+    "PATCH",
+    `/data/public-shares/${encodeURIComponent(id)}`,
+    change,
+  );
+  return publicShare;
+}
+
+export async function deletePublicShare(id: string): Promise<void> {
+  await ldsSend("DELETE", `/data/public-shares/${encodeURIComponent(id)}`);
+}
+
 export interface FileUrl {
   url: string;
   source: "local" | "remote";
@@ -261,7 +370,20 @@ export type CloudRecord = Pick<
   | "size_bytes"
   | "original_filename"
   | "parent_id"
->;
+> & {
+  /**
+   * Whether the cloud can serve the bytes now. The cloud's listing carries it
+   * for every record; absent means readable now.
+   */
+  availability?: { state: CloudAvailabilityState };
+};
+
+export type CloudAvailabilityState =
+  | "instant"
+  | "restoring"
+  | "archived"
+  | "absent"
+  | "awaiting-upload";
 
 /** Thrown when the cloud is unreachable/unconfigured (LDS replied 5xx). */
 export class CloudUnavailableError extends Error {

@@ -2,6 +2,7 @@ import {
   listRecords,
   listCloudRecords,
   DriveNotInstalledError,
+  type CloudAvailabilityState,
   type DriveRecord,
 } from "../lib/drive-client";
 
@@ -10,6 +11,12 @@ export type SyncStatus = "local-only" | "synced" | "modified-locally" | "cloud-o
 export interface MergedRecord extends Partial<DriveRecord> {
   id: string;
   sync_status: SyncStatus;
+  /**
+   * Whether the cloud can serve the bytes now, on a row the cloud holds. Null
+   * on a local-only row. "archived" and "restoring" mean the original sits in
+   * deep storage, so it cannot be opened or shared as itself until restored.
+   */
+  cloud_availability: CloudAvailabilityState | null;
 }
 
 export async function GET(req: Request) {
@@ -49,12 +56,20 @@ export async function GET(req: Request) {
       } else {
         sync_status = "synced";
       }
-      merged.push({ ...r, sync_status });
+      merged.push({
+        ...r,
+        sync_status,
+        cloud_availability: cloudRec ? (cloudRec.availability?.state ?? "instant") : null,
+      });
       cloudById.delete(r.id);
     }
     // Whatever remains in the cloud map exists only in the cloud.
-    for (const r of cloudById.values()) {
-      merged.push({ ...r, sync_status: "cloud-only" });
+    for (const { availability, ...r } of cloudById.values()) {
+      merged.push({
+        ...r,
+        sync_status: "cloud-only",
+        cloud_availability: availability?.state ?? "instant",
+      });
     }
 
     merged.sort((a, b) => (b.updated_at ?? "").localeCompare(a.updated_at ?? ""));

@@ -15,7 +15,10 @@ import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import type { StarkeepId } from "@starkeep/protocol-primitives";
 import {
   PublicDisplaySet,
+  PublicFileGrant,
   expiresAtFor,
+  publicFileDisposition,
+  publicFileToken,
   publicItemId,
   publicItemsToken,
   newLinkToken,
@@ -30,13 +33,16 @@ const cfKeyPair = generateKeyPairSync("rsa", {
 
 type HandlerModule = typeof import("../src/api-handler.js");
 let sign: HandlerModule["signPublicShareCloudFrontUrl"];
+let signFile: HandlerModule["signPublicFileCloudFrontUrl"];
 
 beforeAll(async () => {
   process.env.STACK_PREFIX = "teststack";
   process.env.AWS_REGION = "us-east-1";
   process.env.CLOUDFRONT_SIGNING_PARAM = "/teststack/app-creds/_cloudfront-signing";
   vi.spyOn(console, "warn").mockImplementation(() => {});
-  sign = (await import("../src/api-handler.js")).signPublicShareCloudFrontUrl;
+  const mod = await import("../src/api-handler.js");
+  sign = mod.signPublicShareCloudFrontUrl;
+  signFile = mod.signPublicFileCloudFrontUrl;
 });
 
 afterAll(() => {
@@ -126,6 +132,109 @@ describe("signPublicShareCloudFrontUrl", () => {
   });
 });
 
+describe("signPublicFileCloudFrontUrl", () => {
+  const PDF = `shared/${OWNER}/document/ab/${"f".repeat(64)}`;
+  const DISPOSITION = 'inline; filename="Notes.pdf"';
+  const recordShare = (serves: "stand-in" | "original") => ({
+    owner_user_id: OWNER,
+    source_kind: "record" as const,
+    record_id: "rec-1",
+    serves,
+  });
+  const photo = { id: "rec-1", type: "image/jpeg", objectStorageKey: ORIGINAL, parentId: null };
+  const pdf = { id: "rec-1", type: "application/pdf", objectStorageKey: PDF, parentId: null };
+
+  it("signs a file member's original, with the download name", async () => {
+    const grant = PublicFileGrant.forRecord(recordShare("original"), pdf)!;
+    const result = await signFile(grant, PDF, 3600, DISPOSITION);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.url.startsWith(`https://dtestcdn.cloudfront.net/${PDF}?`)).toBe(true);
+      expect(new URL(result.url).searchParams.get("response-content-disposition")).toBe(
+        DISPOSITION,
+      );
+      expect(result.url).toContain("Signature=");
+    }
+  });
+
+  it("admits a file member whatever the share's serves column says", () => {
+    expect(PublicFileGrant.forRecord(recordShare("stand-in"), pdf)).not.toBeNull();
+  });
+
+  it("admits a photo's original only when the share says original", async () => {
+    expect(PublicFileGrant.forRecord(recordShare("stand-in"), photo)).toBeNull();
+    const grant = PublicFileGrant.forRecord(recordShare("original"), photo)!;
+    expect((await signFile(grant, ORIGINAL, 3600, DISPOSITION)).ok).toBe(true);
+  });
+
+  it("admits nothing for a label share, a child record or another record", () => {
+    expect(
+      PublicFileGrant.forRecord({ ...recordShare("original"), source_kind: "label" }, pdf),
+    ).toBeNull();
+    expect(
+      PublicFileGrant.forRecord(recordShare("original"), { ...pdf, parentId: "rec-0" }),
+    ).toBeNull();
+    expect(PublicFileGrant.forRecord(recordShare("original"), { ...pdf, id: "rec-2" })).toBeNull();
+  });
+
+  it("refuses a second key, even a display child of the same record", async () => {
+    const grant = PublicFileGrant.forRecord(recordShare("original"), photo)!;
+    expect(await signFile(grant, STAND_IN, 3600, DISPOSITION)).toMatchObject({
+      ok: false,
+      status: 403,
+    });
+  });
+
+  it("refuses another user's key", async () => {
+    const other = `shared/owner-2/document/ab/${"f".repeat(64)}`;
+    const grant = PublicFileGrant.forRecord(recordShare("original"), {
+      ...pdf,
+      objectStorageKey: other,
+    })!;
+    expect(await signFile(grant, other, 3600, DISPOSITION)).toMatchObject({
+      ok: false,
+      status: 403,
+    });
+  });
+
+  it.each([
+    `shared/${OWNER}/document/../image/${"f".repeat(64)}`,
+    `apps/photos/${OWNER}/syncable/albums.json`,
+    `/${PDF}`,
+  ])("refuses a malformed or foreign key even as the record's own: %s", async (key) => {
+    const grant = PublicFileGrant.forRecord(recordShare("original"), {
+      ...pdf,
+      objectStorageKey: key,
+    })!;
+    expect((await signFile(grant, key, 3600, DISPOSITION)).ok).toBe(false);
+    expect(ssmMock.commandCalls(GetParameterCommand)).toHaveLength(0);
+  });
+});
+
+describe("publicFileDisposition", () => {
+  it("adds the original's extension to the title", () => {
+    expect(publicFileDisposition("Trip notes", "notes-2026.md")).toBe(
+      `inline; filename="Trip notes.md"; filename*=UTF-8''Trip%20notes.md`,
+    );
+  });
+
+  it("keeps a title that already ends in the extension", () => {
+    expect(publicFileDisposition("Report.PDF", "r.pdf")).toContain('filename="Report.PDF"');
+  });
+
+  it("keeps quotes, slashes and control characters out of the header", () => {
+    const header = publicFileDisposition('a"b/c\\d\r\ne', null);
+    expect(header).toContain('filename="a_b_c_d__e"');
+    expect(header).not.toMatch(/[\r\n]/);
+  });
+
+  it("gives a non-ASCII title an ASCII fallback and the UTF-8 form", () => {
+    const header = publicFileDisposition("Fête", "x.jpg");
+    expect(header).toContain('filename="F_te.jpg"');
+    expect(header).toContain("filename*=UTF-8''F%C3%AAte.jpg");
+  });
+});
+
 describe("public-share identifiers", () => {
   it("accepts only a well-formed link token in the items path", () => {
     const token = newLinkToken();
@@ -136,6 +245,15 @@ describe("public-share identifiers", () => {
     expect(publicItemsToken(`/public-shares/short/items`)).toBeNull();
     expect(publicItemsToken(`/public-shares/${token.slice(0, 21)}%2F/items`)).toBeNull();
     expect(publicItemsToken(`/apps/photos/public-shares/${token}/items`)).toBeNull();
+  });
+
+  it("accepts only a well-formed link token in the file path", () => {
+    const token = newLinkToken();
+    expect(publicFileToken(`/public-shares/${token}/file`)).toBe(token);
+    expect(publicFileToken(`/public-shares/${token}/items`)).toBeNull();
+    expect(publicItemsToken(`/public-shares/${token}/file`)).toBeNull();
+    expect(publicFileToken(`/public-shares/${token}/file/x`)).toBeNull();
+    expect(publicFileToken(`/public-shares/short/file`)).toBeNull();
   });
 
   it("derives item ids stable within a share and unlinkable across shares", () => {

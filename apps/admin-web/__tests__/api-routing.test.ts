@@ -79,7 +79,9 @@ vi.mock("../src/routes/stand-ins", () =>
 );
 vi.mock("../src/routes/deployment-settings", () => spy("deployment-settings", ["GET", "PUT"]));
 vi.mock("../src/routes/runtime-config", () => spy("runtime-config", ["GET"]));
-vi.mock("../src/routes/public-shares", () => spy("public-shares", ["list", "revoke"]));
+vi.mock("../src/routes/public-shares", () =>
+  spy("public-shares", ["list", "revoke", "driveCapability"]),
+);
 
 const { api } = await import("../src/api");
 
@@ -101,6 +103,7 @@ const ROUTES: Array<[string, string, string, string]> = [
   ["POST", "/api/apps/cloud/list", "apps-cloud-list", "POST"],
   ["POST", "/api/public-shares/list", "public-shares", "list"],
   ["POST", "/api/public-shares/revoke", "public-shares", "revoke"],
+  ["POST", "/api/public-shares/drive-capability", "public-shares", "driveCapability"],
   ["POST", "/api/apps/photos/cloud-install", "apps-cloud-install", "POST"],
   ["GET", "/api/apps/photos/install-status", "apps-install-status", "GET"],
   ["POST", "/api/cloud-data-server/install", "cloud-data-server-install", "POST"],

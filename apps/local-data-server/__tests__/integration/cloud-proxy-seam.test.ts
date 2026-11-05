@@ -88,7 +88,10 @@ describe("LDS /cloud/data proxy with a real device-token check", () => {
     const created = await drive.fetch("/data/public-shares", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ labelKey: "album", labelValue: "a1", title: "Summer" }),
+      body: JSON.stringify({
+        source: { kind: "label", key: "album", value: "a1" },
+        title: "Summer",
+      }),
     });
     expect(created.status).toBe(201);
     const { publicShare } = (await created.json()) as { publicShare: { id: string } };
@@ -151,7 +154,10 @@ describe("a machine that is not signed in", () => {
     const res = await drive.fetch("/data/public-shares", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ labelKey: "album", labelValue: "a1", title: "Summer" }),
+      body: JSON.stringify({
+        source: { kind: "label", key: "album", value: "a1" },
+        title: "Summer",
+      }),
     });
     expect(res.status).toBe(503);
     expect(((await res.json()) as { error: string }).error).toMatch(/not signed in to the cloud/);

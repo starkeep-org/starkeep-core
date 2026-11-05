@@ -172,6 +172,7 @@ describe("passes through", () => {
       "/shared/image/ab/hash",
       "/apps",
       "/public-shares/x/items",
+      "/public-shares/x/file",
     ]) {
       const r = req(uri, { dest: "document" });
       expect(handler({ request: r }), uri).toBe(r);

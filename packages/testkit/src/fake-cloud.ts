@@ -204,8 +204,8 @@ export interface FakeCloud {
 export interface FakePublicShare {
   id: string;
   linkToken: string;
-  labelKey: string;
-  labelValue: string;
+  source: { kind: "label"; key: string; value: string } | { kind: "record"; recordId: string };
+  serves: "stand-in" | "original";
   title: string;
   createdAtMs: number;
   expiresAtMs: number | null;
@@ -687,12 +687,12 @@ export async function startFakeCloud(): Promise<FakeCloud> {
         return;
       }
       if (shareId === null && req.method === "POST") {
-        const { labelKey, labelValue, title } = body();
+        const { source, serves, title } = body();
         const share: FakePublicShare = {
           id: randomUUID(),
           linkToken: randomUUID().replace(/-/g, "").slice(0, 22),
-          labelKey: String(labelKey),
-          labelValue: String(labelValue),
+          source: source as FakePublicShare["source"],
+          serves: serves === "original" ? "original" : "stand-in",
           title: String(title),
           createdAtMs: Date.now(),
           expiresAtMs: null,

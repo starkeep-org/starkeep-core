@@ -731,6 +731,8 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
     await sql
       .raw(`GRANT INSERT, UPDATE, DELETE ON public_sharing.app_capabilities TO "${installer}"`)
       .execute(db);
+    // A share names a label or one record (`source_kind`), and a record share
+    // of an image or video serves its stand-in or its original (`serves`).
     await db.schema
       .createTable("public_sharing.public_shares")
       .ifNotExists()
@@ -738,8 +740,15 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
       .addColumn("link_token", "text", (c) => c.notNull())
       .addColumn("owner_user_id", "text", (c) => c.notNull())
       .addColumn("app_id", "text", (c) => c.notNull())
-      .addColumn("label_key", "text", (c) => c.notNull())
-      .addColumn("label_value", "text", (c) => c.notNull())
+      .addColumn("source_kind", "text", (c) =>
+        c.notNull().check(sql`source_kind IN ('label', 'record')`),
+      )
+      .addColumn("label_key", "text")
+      .addColumn("label_value", "text")
+      .addColumn("record_id", "text")
+      .addColumn("serves", "text", (c) =>
+        c.notNull().check(sql`serves IN ('stand-in', 'original')`),
+      )
       .addColumn("title", "text", (c) => c.notNull())
       .addColumn("item_id_salt", "text", (c) => c.notNull())
       .addColumn("created_at_ms", "bigint", (c) => c.notNull())
@@ -755,11 +764,13 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
       `CREATE UNIQUE INDEX ASYNC IF NOT EXISTS uq_public_shares_link_token
          ON public_sharing.public_shares (link_token)`,
     );
-    // The owner's list, and the list of one label's public shares.
+    // The owner's list, and the list of one label's or one record's public
+    // shares.
     await ensureIndex(
       db,
       `CREATE INDEX ASYNC IF NOT EXISTS idx_public_shares_owner
-         ON public_sharing.public_shares (owner_user_id, app_id, label_key, label_value)`,
+         ON public_sharing.public_shares
+         (owner_user_id, app_id, source_kind, label_key, label_value, record_id)`,
     );
 
     // DSQL-side IAM-to-PG mapping for the cloud install registry. The
