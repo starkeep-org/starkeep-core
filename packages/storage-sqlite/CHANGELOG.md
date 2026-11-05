@@ -1,5 +1,14 @@
 # @starkeep/storage-sqlite
 
+## 0.6.2
+
+### Patch Changes
+
+- Updated dependencies [39e3d86]
+  - @starkeep/protocol-primitives@0.8.0
+  - @starkeep/shared-space-api@0.7.1
+  - @starkeep/storage-adapter@0.8.1
+
 ## 0.6.1
 
 ### Patch Changes

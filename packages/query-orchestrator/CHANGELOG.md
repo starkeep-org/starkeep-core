@@ -1,5 +1,13 @@
 # @starkeep/query-orchestrator
 
+## 0.4.5
+
+### Patch Changes
+
+- Updated dependencies [39e3d86]
+  - @starkeep/protocol-primitives@0.8.0
+  - @starkeep/storage-adapter@0.8.1
+
 ## 0.4.4
 
 ### Patch Changes

@@ -1,5 +1,21 @@
 # @starkeep/storage-aurora-dsql
 
+## 0.7.0
+
+### Minor Changes
+
+- 6f5c97c: `guardSingleFlight` wraps a DSQL client and flags a statement that starts while another is still running on the same client. In `"throw"` mode it refuses the statement and passes the refusal to an optional `onRefuse`, so a test can see one that a `catch` block swallowed; in `"warn"` mode it logs `[pg-overlap]` with the stack once per call site and lets `pg` queue the statement. `pg` 8 queues such statements with a stackless deprecation warning, and `pg` 9 will refuse them.
+
+### Patch Changes
+
+- 5e8767b: The owner-scope header now lists the `public_sharing` schema among the deployment's unscoped tables.
+- Updated dependencies [d40562e]
+- Updated dependencies [39e3d86]
+  - @starkeep/sync-engine@0.10.0
+  - @starkeep/protocol-primitives@0.8.0
+  - @starkeep/shared-space-api@0.7.1
+  - @starkeep/storage-adapter@0.8.1
+
 ## 0.6.0
 
 ### Minor Changes
