@@ -17,7 +17,7 @@ import {
   PublicDisplaySet,
   PublicFileGrant,
   expiresAtFor,
-  publicFileDisposition,
+  publicFileResponse,
   publicFileToken,
   publicItemId,
   publicItemsToken,
@@ -134,7 +134,10 @@ describe("signPublicShareCloudFrontUrl", () => {
 
 describe("signPublicFileCloudFrontUrl", () => {
   const PDF = `shared/${OWNER}/document/ab/${"f".repeat(64)}`;
-  const DISPOSITION = 'inline; filename="Notes.pdf"';
+  const RESPONSE = {
+    contentType: "application/pdf",
+    disposition: 'inline; filename="Notes.pdf"',
+  };
   const recordShare = (serves: "stand-in" | "original") => ({
     owner_user_id: OWNER,
     source_kind: "record" as const,
@@ -144,15 +147,15 @@ describe("signPublicFileCloudFrontUrl", () => {
   const photo = { id: "rec-1", type: "image/jpeg", objectStorageKey: ORIGINAL, parentId: null };
   const pdf = { id: "rec-1", type: "application/pdf", objectStorageKey: PDF, parentId: null };
 
-  it("signs a file member's original, with the download name", async () => {
+  it("signs a file member's original, with its pinned type and download name", async () => {
     const grant = PublicFileGrant.forRecord(recordShare("original"), pdf)!;
-    const result = await signFile(grant, PDF, 3600, DISPOSITION);
+    const result = await signFile(grant, PDF, 3600, RESPONSE);
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.url.startsWith(`https://dtestcdn.cloudfront.net/${PDF}?`)).toBe(true);
-      expect(new URL(result.url).searchParams.get("response-content-disposition")).toBe(
-        DISPOSITION,
-      );
+      const params = new URL(result.url).searchParams;
+      expect(params.get("response-content-type")).toBe(RESPONSE.contentType);
+      expect(params.get("response-content-disposition")).toBe(RESPONSE.disposition);
       expect(result.url).toContain("Signature=");
     }
   });
@@ -164,7 +167,7 @@ describe("signPublicFileCloudFrontUrl", () => {
   it("admits a photo's original only when the share says original", async () => {
     expect(PublicFileGrant.forRecord(recordShare("stand-in"), photo)).toBeNull();
     const grant = PublicFileGrant.forRecord(recordShare("original"), photo)!;
-    expect((await signFile(grant, ORIGINAL, 3600, DISPOSITION)).ok).toBe(true);
+    expect((await signFile(grant, ORIGINAL, 3600, RESPONSE)).ok).toBe(true);
   });
 
   it("admits nothing for a label share, a child record or another record", () => {
@@ -179,7 +182,7 @@ describe("signPublicFileCloudFrontUrl", () => {
 
   it("refuses a second key, even a display child of the same record", async () => {
     const grant = PublicFileGrant.forRecord(recordShare("original"), photo)!;
-    expect(await signFile(grant, STAND_IN, 3600, DISPOSITION)).toMatchObject({
+    expect(await signFile(grant, STAND_IN, 3600, RESPONSE)).toMatchObject({
       ok: false,
       status: 403,
     });
@@ -191,7 +194,7 @@ describe("signPublicFileCloudFrontUrl", () => {
       ...pdf,
       objectStorageKey: other,
     })!;
-    expect(await signFile(grant, other, 3600, DISPOSITION)).toMatchObject({
+    expect(await signFile(grant, other, 3600, RESPONSE)).toMatchObject({
       ok: false,
       status: 403,
     });
@@ -206,33 +209,82 @@ describe("signPublicFileCloudFrontUrl", () => {
       ...pdf,
       objectStorageKey: key,
     })!;
-    expect((await signFile(grant, key, 3600, DISPOSITION)).ok).toBe(false);
+    expect((await signFile(grant, key, 3600, RESPONSE)).ok).toBe(false);
     expect(ssmMock.commandCalls(GetParameterCommand)).toHaveLength(0);
   });
 });
 
-describe("publicFileDisposition", () => {
+describe("publicFileResponse", () => {
+  const original = (type: string) => ({ type, isOriginal: true });
+
   it("adds the original's extension to the title", () => {
-    expect(publicFileDisposition("Trip notes", "notes-2026.md")).toBe(
-      `inline; filename="Trip notes.md"; filename*=UTF-8''Trip%20notes.md`,
-    );
+    expect(
+      publicFileResponse("Trip notes", "notes-2026.md", original("document/markdown")),
+    ).toEqual({
+      contentType: "text/plain; charset=utf-8",
+      disposition: `inline; filename="Trip notes.md"; filename*=UTF-8''Trip%20notes.md`,
+    });
   });
 
   it("keeps a title that already ends in the extension", () => {
-    expect(publicFileDisposition("Report.PDF", "r.pdf")).toContain('filename="Report.PDF"');
+    expect(
+      publicFileResponse("Report.PDF", "r.pdf", original("document/pdf")).disposition,
+    ).toContain('filename="Report.PDF"');
+  });
+
+  it("names a stand-in with its own format in place of the original's extension", () => {
+    expect(
+      publicFileResponse("IMG_0001.HEIC", "IMG_0001.HEIC", {
+        type: "image/jpeg",
+        isOriginal: false,
+      }),
+    ).toEqual({
+      contentType: "image/jpeg",
+      disposition: `inline; filename="IMG_0001.jpeg"; filename*=UTF-8''IMG_0001.jpeg`,
+    });
   });
 
   it("keeps quotes, slashes and control characters out of the header", () => {
-    const header = publicFileDisposition('a"b/c\\d\r\ne', null);
-    expect(header).toContain('filename="a_b_c_d__e"');
-    expect(header).not.toMatch(/[\r\n]/);
+    const { disposition } = publicFileResponse('a"b/c\\d\r\ne', null, original("other/other"));
+    expect(disposition).toContain('filename="a_b_c_d__e"');
+    expect(disposition).not.toMatch(/[\r\n]/);
   });
 
   it("gives a non-ASCII title an ASCII fallback and the UTF-8 form", () => {
-    const header = publicFileDisposition("Fête", "x.jpg");
-    expect(header).toContain('filename="F_te.jpg"');
-    expect(header).toContain("filename*=UTF-8''F%C3%AAte.jpg");
+    const { disposition } = publicFileResponse("Fête", "x.jpg", original("image/jpeg"));
+    expect(disposition).toContain('filename="F_te.jpg"');
+    expect(disposition).toContain("filename*=UTF-8''F%C3%AAte.jpg");
   });
+
+  it("percent-encodes the characters RFC 8187 leaves out of filename*", () => {
+    const { disposition } = publicFileResponse("Mom's photo (1)*", "a.png", original("image/png"));
+    expect(disposition).toContain("filename*=UTF-8''Mom%27s%20photo%20%281%29%2A.png");
+  });
+
+  it.each([
+    ["image/jpeg", "image/jpeg"],
+    ["image/png", "image/png"],
+    ["image/heic", "image/heic"],
+    ["video/mov", "video/quicktime"],
+    ["audio/mp3", "audio/mpeg"],
+    ["document/pdf", "application/pdf"],
+    ["document/markdown", "text/plain; charset=utf-8"],
+    ["text/json", "text/plain; charset=utf-8"],
+    ["code/js", "text/plain; charset=utf-8"],
+  ])("shows %s in the browser as %s", (type, contentType) => {
+    const response = publicFileResponse("f", null, original(type));
+    expect(response.contentType).toBe(contentType);
+    expect(response.disposition.startsWith("inline;")).toBe(true);
+  });
+
+  it.each(["image/svg", "document/html", "document/docx", "image/dng", "other/other"])(
+    "downloads %s as an opaque file, never shown",
+    (type) => {
+      const response = publicFileResponse("f", null, original(type));
+      expect(response.contentType).toBe("application/octet-stream");
+      expect(response.disposition.startsWith("attachment;")).toBe(true);
+    },
+  );
 });
 
 describe("public-share identifiers", () => {
@@ -247,13 +299,16 @@ describe("public-share identifiers", () => {
     expect(publicItemsToken(`/apps/photos/public-shares/${token}/items`)).toBeNull();
   });
 
-  it("accepts only a well-formed link token in the file path", () => {
+  it("accepts only a well-formed link token in the file path, whatever the name", () => {
     const token = newLinkToken();
-    expect(publicFileToken(`/public-shares/${token}/file`)).toBe(token);
+    expect(publicFileToken(`/public-shares/${token}/file/notes.md`)).toBe(token);
+    expect(publicFileToken(`/public-shares/${token}/file/Trip%20notes.md`)).toBe(token);
+    expect(publicFileToken(`/public-shares/${token}/file`)).toBeNull();
+    expect(publicFileToken(`/public-shares/${token}/file/`)).toBeNull();
+    expect(publicFileToken(`/public-shares/${token}/file/a/b`)).toBeNull();
     expect(publicFileToken(`/public-shares/${token}/items`)).toBeNull();
-    expect(publicItemsToken(`/public-shares/${token}/file`)).toBeNull();
-    expect(publicFileToken(`/public-shares/${token}/file/x`)).toBeNull();
-    expect(publicFileToken(`/public-shares/short/file`)).toBeNull();
+    expect(publicItemsToken(`/public-shares/${token}/file/notes.md`)).toBeNull();
+    expect(publicFileToken(`/public-shares/short/file/notes.md`)).toBeNull();
   });
 
   it("derives item ids stable within a share and unlinkable across shares", () => {

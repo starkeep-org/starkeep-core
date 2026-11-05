@@ -376,6 +376,13 @@ export type CloudRecord = Pick<
    * for every record; absent means readable now.
    */
   availability?: { state: CloudAvailabilityState };
+  /**
+   * The original's sizes, on a photo or a video. A size with a record that is
+   * not the original's own is a stand-in the cloud holds.
+   */
+  stand_ins?: {
+    sizes: ReadonlyArray<{ role: string; record_id: string | null }>;
+  };
 };
 
 export type CloudAvailabilityState =

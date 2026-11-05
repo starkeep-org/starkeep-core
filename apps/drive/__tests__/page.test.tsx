@@ -25,6 +25,7 @@ interface Row {
   object_storage_key?: string | null;
   sync_status: string;
   cloud_availability?: string | null;
+  has_stand_in?: boolean;
 }
 
 /** The last stub EventSource the page opened, so a test can kick it. */
@@ -68,6 +69,7 @@ function row(over: Partial<Row> = {}): Row {
     original_filename: "holiday.png",
     object_storage_key: "obj/abc",
     sync_status: "synced",
+    has_stand_in: true,
     ...over,
   };
 }
@@ -87,7 +89,7 @@ beforeEach(() => {
       recordId: "rec-1",
       serves: "stand-in",
       title: "holiday.png",
-      url: "https://d1.cloudfront.net/public-shares/TTTTTTTTTTTTTTTTTTTTTT/file",
+      url: "https://d1.cloudfront.net/public-shares/TTTTTTTTTTTTTTTTTTTTTT/file/holiday.png",
       createdAtMs: 1,
       expiresAtMs: null,
     },
@@ -314,7 +316,7 @@ describe("sharing a link", () => {
     });
     expect(
       await within(dialog).findByDisplayValue(
-        "https://d1.cloudfront.net/public-shares/TTTTTTTTTTTTTTTTTTTTTT/file",
+        "https://d1.cloudfront.net/public-shares/TTTTTTTTTTTTTTTTTTTTTT/file/holiday.png",
       ),
     ).toBeDefined();
   });
@@ -325,6 +327,32 @@ describe("sharing a link", () => {
     expect(within(dialog).getByText(/including its location and camera details/)).toBeDefined();
     within(dialog).getByRole("button", { name: "Create link" }).click();
     await waitFor(() => expect(linkWrites[0]?.body["serves"]).toBe("original"));
+  });
+
+  it("offers no stand-in for a photo the cloud holds none for, and shares the original", async () => {
+    const dialog = await openDialog({ has_stand_in: false });
+    expect(within(dialog).queryByRole("radio")).toBeNull();
+    expect(within(dialog).getByText(/including its location and camera details/)).toBeDefined();
+    within(dialog).getByRole("button", { name: "Create link" }).click();
+    await waitFor(() => expect(linkWrites[0]?.body["serves"]).toBe("original"));
+  });
+
+  it("cannot share an archived photo that has no stand-in", async () => {
+    const dialog = await openDialog({ has_stand_in: false, cloud_availability: "archived" });
+    expect(within(dialog).queryByRole("radio")).toBeNull();
+    expect(within(dialog).getByText(/archived, so it cannot be shared until/)).toBeDefined();
+    expect(
+      (within(dialog).getByRole("button", { name: "Create link" }) as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
+
+  it("keeps the file's extension on a retitled link", async () => {
+    const dialog = await openDialog();
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Title" }), {
+      target: { value: "Our holiday" },
+    });
+    within(dialog).getByRole("button", { name: "Create link" }).click();
+    await waitFor(() => expect(linkWrites[0]?.body["title"]).toBe("Our holiday.png"));
   });
 
   it("cannot offer an archived original", async () => {
@@ -401,7 +429,7 @@ describe("the Links view", () => {
           recordId: "rec-1",
           serves: "original",
           title: "Beach",
-          url: "https://d1.cloudfront.net/public-shares/T/file",
+          url: "https://d1.cloudfront.net/public-shares/T/file/Beach.png",
           createdAtMs: 1,
           expiresAtMs: null,
         },

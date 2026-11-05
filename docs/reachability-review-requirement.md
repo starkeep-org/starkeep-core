@@ -37,6 +37,16 @@ looks fine" is not the same artifact and does not compose.
 - **Name a party, not a mechanism.** "Anonymous internet", "any signed-in user",
   "any installed app", "operator on the local machine" are answers. "Behind the
   proxy", "requires the signature" are not — keep going until you can name who.
+- **Trace what the output reaches, not only who reaches the code.** A signed
+  URL, a token or a redirect outlives the request that minted it. Ask who ends
+  up holding it, how long it works, and whether it can be forwarded. When the
+  output is something a browser opens, ask what the browser does with the
+  response on the origin that serves it. A file whose type lets it run script
+  runs with every cookie and permission of that origin. The response's type
+  and disposition then decide reach as much as the signer's checks do, and
+  the type stored by whoever uploaded the file is not a check. Write the widest
+  consequence into the caller column, for example "anonymous internet, and any
+  signed-in user who opens the link".
 - **Record the unsurprising rows too.** The value is the table existing, so a
   later review can diff it. The defect this pass catches is a capability whose
   answer got _weaker_ between two revisions while each individual change looked
@@ -44,7 +54,7 @@ looks fine" is not the same artifact and does not compose.
 
 ## Where the answers live in this system
 
-Three facts about the platform decide most rows, and all three are easy to get
+Four facts about the platform decide most rows, and all four are easy to get
 wrong from memory:
 
 - The cloud data plane has **no JWT authorizer**. It authenticates the _app_ via
@@ -54,6 +64,10 @@ wrong from memory:
 - **CloudFront is not a security boundary.** The API Gateway origin stays
   directly reachable by design. Any row that ends at "the edge blocks it" is
   wrong.
+- **One CloudFront domain serves everything.** The cloud apps' pages and
+  APIs, and every signed `shared/*` file, share one origin. A file that renders
+  as a page there runs as the signed-in apps, so a signed file URL's response
+  type is part of its reach.
 - A manifest handler's `auth: "public"` on a catch-all makes **every** path
   under `/apps/<appId>/` anonymous, including routes the app's bundle mounts
   that the manifest never names. The handler's `publicPaths` declaration states

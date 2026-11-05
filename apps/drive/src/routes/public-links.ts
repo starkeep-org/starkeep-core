@@ -1,6 +1,6 @@
 /**
  * Drive's public links: one file per link, served by the platform's direct
- * link, `<cloud>/public-shares/<token>/file`.
+ * link, `<cloud>/public-shares/<token>/file/<name>`.
  *
  *   GET    /api/public-links                     Drive's links, and whether it may make more
  *   POST   /api/public-links  { recordId, serves, title, lifetime }
@@ -53,6 +53,15 @@ export function cloudBaseUrl(
   }
 }
 
+/**
+ * The last segment of a link's address: the title, so a recipient sees what
+ * the link opens. The platform reads nothing from it.
+ */
+export function linkFileName(title: string): string {
+  const name = title.replace(/[\u0000-\u001f\u007f/\\]/g, "-").trim();
+  return encodeURIComponent(name || "file");
+}
+
 /** A platform share as Drive's page sees it: the record and the link's address. */
 function linkView(share: PublicShare, base: string | null) {
   return {
@@ -60,7 +69,7 @@ function linkView(share: PublicShare, base: string | null) {
     recordId: share.source.kind === "record" ? share.source.recordId : null,
     serves: share.serves,
     title: share.title,
-    url: base ? `${base}/public-shares/${share.linkToken}/file` : null,
+    url: base ? `${base}/public-shares/${share.linkToken}/file/${linkFileName(share.title)}` : null,
     createdAtMs: share.createdAtMs,
     expiresAtMs: share.expiresAtMs,
   };

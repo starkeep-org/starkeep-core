@@ -18,7 +18,7 @@
  * - **Display children** are a media member's stand-ins, and the
  *   image-category derived children of a video member (its poster frames)
  *   that carry a label in the creating app's `derived` key.
- * - **A record share's original**, through `GET /public-shares/<token>/file`
+ * - **A record share's original**, through `GET /public-shares/<token>/file/<name>`
  *   only, and only when the record is a file member (neither image nor video,
  *   so it has no stand-in) or the share says `serves: "original"`. Only a
  *   Starkeep Drive record share may say so for an image or video.
@@ -74,7 +74,7 @@ import {
 
 /**
  * The anonymous routes: `GET /public-shares/<linkToken>/items` and
- * `GET /public-shares/<linkToken>/file`.
+ * `GET /public-shares/<linkToken>/file/<name>`.
  */
 export const PUBLIC_SHARES_PREFIX = "/public-shares/";
 
@@ -188,12 +188,19 @@ export function publicItemsToken(rawPath: string): string | null {
   return publicShareToken(rawPath, "items");
 }
 
-/** The link token in `/public-shares/<token>/file`, or null for any other path. */
+/**
+ * The link token in `/public-shares/<token>/file/<name>`, or null for any
+ * other path. The name tells a recipient what the link opens, and the route
+ * reads nothing from it.
+ */
 export function publicFileToken(rawPath: string): string | null {
-  return publicShareToken(rawPath, "file");
+  if (!rawPath.startsWith(PUBLIC_SHARES_PREFIX)) return null;
+  const m = rawPath.match(/^\/public-shares\/([^/]+)\/file\/[^/]+$/);
+  if (!m || !LINK_TOKEN_PATTERN.test(m[1]!)) return null;
+  return m[1]!;
 }
 
-function publicShareToken(rawPath: string, leaf: "items" | "file"): string | null {
+function publicShareToken(rawPath: string, leaf: "items"): string | null {
   if (!rawPath.startsWith(PUBLIC_SHARES_PREFIX)) return null;
   const m = rawPath.match(/^\/public-shares\/([^/]+)\/([a-z]+)$/);
   if (!m || m[2] !== leaf || !LINK_TOKEN_PATTERN.test(m[1]!)) return null;
@@ -544,17 +551,106 @@ export class PublicFileGrant {
 }
 
 /**
- * The name a visitor's download takes: the share's title, with the original's
- * extension when the title lacks it. Quoted for `Content-Disposition`, with an
- * ASCII fallback and the UTF-8 form beside it.
+ * The content type a direct link shows in the browser, by record type, or
+ * null for a type that downloads. Each one renders as an image, a player, a
+ * PDF viewer or plain text, and none can run script. Every text and code type,
+ * and Markdown, shows as UTF-8 plain text.
+ *
+ * The signed URL pins this type, so the type stored at upload never decides
+ * how a browser treats the file. The direct link opens on the deployment's own
+ * origin, beside the signed-in cloud apps, and an HTML or SVG file shown there
+ * would run its script as those apps.
  */
-export function publicFileDisposition(title: string, originalFilename: string | null): string {
-  const ext = originalFilename?.match(/\.([A-Za-z0-9]{1,10})$/)?.[1];
-  const base = title.replace(/[\u0000-\u001f\u007f"\\/]/g, "_").trim() || "download";
+const INLINE_CONTENT_TYPES: Readonly<Record<string, string>> = {
+  "image/jpeg": "image/jpeg",
+  "image/png": "image/png",
+  "image/gif": "image/gif",
+  "image/webp": "image/webp",
+  "image/avif": "image/avif",
+  "image/heic": "image/heic",
+  "image/heif": "image/heif",
+  "image/bmp": "image/bmp",
+  "image/tiff": "image/tiff",
+  "image/ico": "image/x-icon",
+  "video/mp4": "video/mp4",
+  "video/m4v": "video/mp4",
+  "video/mov": "video/quicktime",
+  "video/webm": "video/webm",
+  "audio/mp3": "audio/mpeg",
+  "audio/m4a": "audio/mp4",
+  "audio/aac": "audio/aac",
+  "audio/wav": "audio/wav",
+  "audio/flac": "audio/flac",
+  "audio/ogg": "audio/ogg",
+  "audio/opus": "audio/ogg",
+  "document/pdf": "application/pdf",
+};
+
+const PLAIN_TEXT = "text/plain; charset=utf-8";
+
+function inlineContentType(type: string): string | null {
+  const exact = INLINE_CONTENT_TYPES[type];
+  if (exact) return exact;
+  const category = typeCategory(type);
+  if (category === "text" || category === "code" || type === "document/markdown") {
+    return PLAIN_TEXT;
+  }
+  return null;
+}
+
+/** How S3 answers a direct link's file: the type it pins and the disposition. */
+export interface PublicFileResponse {
+  readonly contentType: string;
+  readonly disposition: string;
+}
+
+/**
+ * The response a direct link's file gets. A type in the inline list opens in
+ * the browser under its pinned type. Any other type downloads as
+ * `application/octet-stream`, so a browser never renders it.
+ *
+ * The file takes the share's title for its name, with the served file's
+ * extension when the title lacks it: the original's for an original, and the
+ * stand-in's format for a stand-in. A stand-in's name drops the original's
+ * extension first. `filename` holds an ASCII fallback, and `filename*`
+ * holds the UTF-8 form.
+ */
+export function publicFileResponse(
+  title: string,
+  originalFilename: string | null,
+  served: { readonly type: string; readonly isOriginal: boolean },
+): PublicFileResponse {
+  const originalExt = originalFilename?.match(/\.([A-Za-z0-9]{1,10})$/)?.[1] ?? null;
+  const servedExt = served.isOriginal ? originalExt : (served.type.split("/")[1] ?? null);
+  let base = title.replace(/[\u0000-\u001f\u007f"\\/]/g, "_").trim() || "download";
+  if (
+    !served.isOriginal &&
+    originalExt &&
+    base.toLowerCase().endsWith(`.${originalExt.toLowerCase()}`)
+  ) {
+    base = base.slice(0, -(originalExt.length + 1));
+  }
   const name =
-    ext && !base.toLowerCase().endsWith(`.${ext.toLowerCase()}`) ? `${base}.${ext}` : base;
+    servedExt && !base.toLowerCase().endsWith(`.${servedExt.toLowerCase()}`)
+      ? `${base}.${servedExt}`
+      : base;
   const ascii = name.replace(/[^\x20-\x7e]/g, "_");
-  return `inline; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+  const inline = inlineContentType(served.type);
+  return {
+    contentType: inline ?? "application/octet-stream",
+    disposition: `${inline ? "inline" : "attachment"}; filename="${ascii}"; filename*=UTF-8''${encodeRfc8187(name)}`,
+  };
+}
+
+/**
+ * Percent-encode a value for an RFC 8187 `ext-value`, which admits fewer
+ * characters than `encodeURIComponent` leaves alone.
+ */
+function encodeRfc8187(value: string): string {
+  return encodeURIComponent(value).replace(
+    /['()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -821,7 +917,7 @@ export async function signLargestStandIn(
   share: PublicShareRow,
   page: PublicSharePage,
   missing: ReadonlySet<string>,
-  sign: (display: PublicDisplaySet, key: string) => Promise<string | null>,
+  sign: (display: PublicDisplaySet, key: string, type: string | null) => Promise<string | null>,
 ): Promise<string | null> {
   const member = page.members[0];
   if (!member || share.source_kind !== "record") return null;
@@ -830,7 +926,7 @@ export async function signLargestStandIn(
   const best = displayStandIns(page, member, missing).sort((a, b) => b.fidelity - a.fidelity)[0];
   if (!best) return null;
   display.admit({ objectStorageKey: best.objectStorageKey!, parentId: member.id });
-  return sign(display, best.objectStorageKey!);
+  return sign(display, best.objectStorageKey!, best.type);
 }
 
 /** A signer for one display key; refuses anything the page did not admit. */

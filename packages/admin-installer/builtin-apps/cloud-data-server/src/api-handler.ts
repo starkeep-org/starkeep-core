@@ -73,6 +73,7 @@ import {
   parseLabelRef,
   STAND_IN_MIME_TYPES,
   SETTINGS_TYPE_ID,
+  OTHER_TYPE_ID,
   DEPLOYMENT_SETTINGS_ROUTE,
   AUTH_CONFIG_ROUTE,
   MOBILE_KEYS_ROUTE,
@@ -195,7 +196,8 @@ import {
   loadPublicShareRecord,
   isFileType,
   PublicFileGrant,
-  publicFileDisposition,
+  publicFileResponse,
+  type PublicFileResponse,
   signLargestStandIn,
   updateOwnedShare,
   PUBLIC_SHARE_CACHE_SECONDS,
@@ -1621,12 +1623,14 @@ export async function signSharedCloudFrontUrl(
  * {@link PublicDisplaySet}: the key must sit under the share owner's
  * `shared/<ownerId>/` prefix, must be a display child the fixed query
  * returned, and must not be a member's own key. Nothing here reads a key from
- * the request; every key arrives from the query's results.
+ * the request; every key arrives from the query's results. The direct link
+ * passes `response` to pin how the browser treats the stand-in it opens.
  */
 export async function signPublicShareCloudFrontUrl(
   display: PublicDisplaySet,
   key: string,
   expiresInSec: number,
+  response?: PublicFileResponse,
 ): Promise<{ ok: true; url: string } | { ok: false; status: number; message: string }> {
   const check = display.check(key);
   if (!check.ok) return check;
@@ -1637,7 +1641,7 @@ export async function signPublicShareCloudFrontUrl(
   }
   const cfg = await loadCloudFrontSigningConfig();
   const url = getCloudFrontSignedUrl({
-    url: `https://${cfg.domain}/${key}`,
+    url: `https://${cfg.domain}/${key}${responseQuery(response)}`,
     keyPairId: cfg.keyPairId,
     privateKey: cfg.privateKey,
     dateLessThan: new Date(Date.now() + Math.max(1, expiresInSec) * 1000).toISOString(),
@@ -1646,19 +1650,31 @@ export async function signPublicShareCloudFrontUrl(
 }
 
 /**
+ * The query that pins a direct link's response: `response-content-type` and
+ * `response-content-disposition`, or nothing. The files behavior forwards
+ * these two parameters to S3, which honours them because CloudFront signs its
+ * origin request. The URL's signature covers the query, so a visitor cannot
+ * change either one.
+ */
+function responseQuery(response: PublicFileResponse | undefined): string {
+  if (!response) return "";
+  const query = new URLSearchParams({
+    "response-content-type": response.contentType,
+    "response-content-disposition": response.disposition,
+  });
+  return `?${query.toString()}`;
+}
+
+/**
  * The direct-link counterpart of {@link signPublicShareCloudFrontUrl}: signs
- * the one original a record share's {@link PublicFileGrant} admits.
- *
- * `disposition` rides in the signed URL as `response-content-disposition`, so
- * the download takes the share's title rather than the content hash. The
- * files behavior forwards that one parameter to S3, which honours it because
- * CloudFront signs its origin request.
+ * the one original a record share's {@link PublicFileGrant} admits, with the
+ * response that {@link publicFileResponse} chose.
  */
 export async function signPublicFileCloudFrontUrl(
   grant: PublicFileGrant,
   key: string,
   expiresInSec: number,
-  disposition: string,
+  response: PublicFileResponse,
 ): Promise<{ ok: true; url: string } | { ok: false; status: number; message: string }> {
   const check = grant.check(key);
   if (!check.ok) return check;
@@ -1666,9 +1682,8 @@ export async function signPublicFileCloudFrontUrl(
     return { ok: false, status: 403, message: "Forbidden (another user's key)" };
   }
   const cfg = await loadCloudFrontSigningConfig();
-  const query = new URLSearchParams({ "response-content-disposition": disposition });
   const url = getCloudFrontSignedUrl({
-    url: `https://${cfg.domain}/${key}?${query.toString()}`,
+    url: `https://${cfg.domain}/${key}${responseQuery(response)}`,
     keyPairId: cfg.keyPairId,
     privateKey: cfg.privateKey,
     dateLessThan: new Date(Date.now() + Math.max(1, expiresInSec) * 1000).toISOString(),
@@ -2907,8 +2922,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       }
     }
 
-    // GET /public-shares/<linkToken>/file — a record share's direct link: a
-    // redirect to one signed file. Anonymous like the items page, and it reads
+    // GET /public-shares/<linkToken>/file/<name> — a record share's direct
+    // link: a redirect to one signed file. Anonymous like the items page, and it reads
     // nothing from the request but the token; see handlePublicShareFile below.
     if (method === "GET") {
       const linkToken = publicFileToken(rawPath);
@@ -6022,6 +6037,10 @@ async function handlePublicShareItems(
     title: share.title,
     source: share.source_kind,
     items: result.items,
+    // Members on this page with nothing to show yet, because their stand-ins
+    // have not reached the cloud. A visitor's page can say "still uploading"
+    // rather than "gone".
+    pending: result.page.members.length - result.items.length,
     nextCursor: result.page.nextCursor,
     truncated: result.page.truncated,
     expiresAtMs: share.expires_at_ms,
@@ -6068,11 +6087,15 @@ async function handlePublicShareFile(
       share,
       page,
       await presence.missing(page.displayFiles),
-      async (display, key) => {
+      async (display, key, type) => {
         const signed = await signPublicShareCloudFrontUrl(
           display,
           key,
           PUBLIC_SHARE_URL_TTL_SECONDS,
+          publicFileResponse(share.title, record.originalFilename, {
+            type: type ?? OTHER_TYPE_ID,
+            isOriginal: false,
+          }),
         );
         return signed.ok ? signed.url : null;
       },
@@ -6099,7 +6122,10 @@ async function handlePublicShareFile(
     grant,
     record.objectStorageKey,
     PUBLIC_SHARE_URL_TTL_SECONDS,
-    publicFileDisposition(share.title, record.originalFilename),
+    publicFileResponse(share.title, record.originalFilename, {
+      type: record.type,
+      isOriginal: true,
+    }),
   );
   if (!signed.ok) return publicFilePage(404, "This link no longer shows anything.");
   return publicRedirect(signed.url);

@@ -3,8 +3,9 @@
  * view that lists Drive's links.
  *
  * A Drive link is the platform's direct link: anyone holding it gets the file
- * itself, with no page around it. For a photo or a video the person chooses
- * the largest stand-in (the default) or the original. The platform checks
+ * itself, with no page around it. For a photo or a video with a stand-in in
+ * the cloud, the person chooses the largest stand-in (the default) or the
+ * original. Any other file shares its original. The platform checks
  * every rule again on each call; what this adds is saying each consequence
  * before the person makes the link:
  *
@@ -25,6 +26,7 @@ export interface ShareableRecord {
   original_filename?: string | null;
   sync_status: "local-only" | "synced" | "modified-locally" | "cloud-only";
   cloud_availability?: CloudAvailability | null;
+  has_stand_in?: boolean;
 }
 
 export type CloudAvailability = "instant" | "restoring" | "archived" | "absent" | "awaiting-upload";
@@ -76,6 +78,17 @@ export function shareBlockedReason(record: ShareableRecord): string | null {
   return "This file is not in the cloud yet.";
 }
 
+/**
+ * The title with the file's extension, so the link's address and the
+ * download both say what kind of file it is.
+ */
+export function titleWithExtension(title: string, originalFilename?: string | null): string {
+  const trimmed = title.trim();
+  const ext = originalFilename?.match(/\.([A-Za-z0-9]{1,10})$/)?.[1];
+  if (!ext || trimmed.toLowerCase().endsWith(`.${ext.toLowerCase()}`)) return trimmed;
+  return `${trimmed}.${ext}`;
+}
+
 function formatMegabytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(0)} MB`;
 }
@@ -124,16 +137,21 @@ export function ShareLinkDialog({
   onClose: () => void;
   onCreated: () => void;
 }) {
-  const media = isMedia(record);
+  // A choice exists only for a photo or a video with a stand-in in the cloud.
+  // Anything else shares its original.
+  const choosable = isMedia(record) && record.has_stand_in === true;
   const archived = isArchived(record);
   const [title, setTitle] = useState(record.original_filename ?? "");
   const [lifetime, setLifetime] = useState("30d");
-  const [serves, setServes] = useState<"stand-in" | "original">("stand-in");
+  const [serves, setServes] = useState<"stand-in" | "original">(
+    choosable ? "stand-in" : "original",
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [made, setMade] = useState<PublicLink | null>(null);
 
-  const sharesOriginal = !media || serves === "original";
+  const sharesOriginal = serves === "original";
+  const blocked = sharesOriginal && archived;
 
   const create = async () => {
     const size = record.size_bytes ?? 0;
@@ -148,8 +166,8 @@ export function ShareLinkDialog({
     try {
       const { link } = await send("POST", "/api/public-links", {
         recordId: record.id,
-        serves: media ? serves : "original",
-        title: title.trim(),
+        serves,
+        title: titleWithExtension(title, record.original_filename),
         lifetime,
       });
       setMade(link ?? null);
@@ -199,7 +217,7 @@ export function ShareLinkDialog({
                 ))}
               </select>
             </label>
-            {media ? (
+            {choosable ? (
               <fieldset className="field">
                 <legend>Share</legend>
                 <label className="choice">
@@ -235,9 +253,15 @@ export function ShareLinkDialog({
                   </span>
                 </label>
               </fieldset>
+            ) : blocked ? (
+              <div className="notice warn">
+                This file is archived, so it cannot be shared until it is restored.
+              </div>
             ) : (
               <p className="muted">
-                Anyone with the link can download this file, including any metadata inside it.
+                {isMedia(record)
+                  ? "Anyone with the link can download the original, including its location and camera details."
+                  : "Anyone with the link can download this file, including any metadata inside it."}
               </p>
             )}
             {error && <div className="notice error">{error}</div>}
@@ -248,7 +272,7 @@ export function ShareLinkDialog({
               <button
                 className="row-action primary"
                 onClick={() => void create()}
-                disabled={busy || !mayPublish || title.trim().length === 0}
+                disabled={busy || !mayPublish || blocked || title.trim().length === 0}
               >
                 {busy ? "Creating…" : "Create link"}
               </button>

@@ -118,6 +118,31 @@ describe("GET /api/records — the sync-status merge", () => {
     expect(byId.get("away")).not.toHaveProperty("availability");
   });
 
+  it("says whether the cloud holds a stand-in for the row", async () => {
+    // Drive offers a stand-in link only when one exists. A size answered by
+    // the original itself, or one with no record yet, is not a stand-in.
+    const sizes = (...entries: Array<[string, string | null]>) => ({
+      stand_ins: { sizes: entries.map(([role, record_id]) => ({ role, record_id })) },
+    });
+    listRecords.mockResolvedValue([local("with"), local("self"), local("none"), local("here")]);
+    listCloudRecords.mockResolvedValue([
+      { ...local("with"), ...sizes(["original", "with"], ["smaller", "child-1"]) },
+      { ...local("self"), ...sizes(["original", "self"], ["canonical", "self"]) },
+      { ...local("none"), ...sizes(["smaller", null]) },
+      { ...local("away"), ...sizes(["canonical", "child-2"]) },
+    ]);
+    const merged = (await (await call()).json()) as {
+      records: Array<Record<string, unknown>>;
+    };
+    const byId = new Map(merged.records.map((r) => [r["id"], r]));
+    expect(byId.get("with")).toMatchObject({ has_stand_in: true });
+    expect(byId.get("self")).toMatchObject({ has_stand_in: false });
+    expect(byId.get("none")).toMatchObject({ has_stand_in: false });
+    expect(byId.get("here")).toMatchObject({ sync_status: "local-only", has_stand_in: false });
+    expect(byId.get("away")).toMatchObject({ sync_status: "cloud-only", has_stand_in: true });
+    expect(byId.get("away")).not.toHaveProperty("stand_ins");
+  });
+
   it("gives a local-only row no cloud archive state", async () => {
     listRecords.mockResolvedValue([local("a")]);
     expect((await (await call()).json()).records[0]).toMatchObject({ cloud_availability: null });

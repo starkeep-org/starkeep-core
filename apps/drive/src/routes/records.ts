@@ -3,6 +3,7 @@ import {
   listCloudRecords,
   DriveNotInstalledError,
   type CloudAvailabilityState,
+  type CloudRecord,
   type DriveRecord,
 } from "../lib/drive-client";
 
@@ -17,6 +18,20 @@ export interface MergedRecord extends Partial<DriveRecord> {
    * deep storage, so it cannot be opened or shared as itself until restored.
    */
   cloud_availability: CloudAvailabilityState | null;
+  /**
+   * Whether the cloud holds a stand-in for this row, so a public link can
+   * serve one. False on a local-only row, and on any type without stand-ins.
+   */
+  has_stand_in: boolean;
+}
+
+function hasStandIn(record: CloudRecord | undefined): boolean {
+  return (record?.stand_ins?.sizes ?? []).some(
+    (s) =>
+      (s.role === "canonical" || s.role === "smaller") &&
+      s.record_id !== null &&
+      s.record_id !== record!.id,
+  );
 }
 
 export async function GET(req: Request) {
@@ -60,15 +75,18 @@ export async function GET(req: Request) {
         ...r,
         sync_status,
         cloud_availability: cloudRec ? (cloudRec.availability?.state ?? "instant") : null,
+        has_stand_in: hasStandIn(cloudRec),
       });
       cloudById.delete(r.id);
     }
     // Whatever remains in the cloud map exists only in the cloud.
-    for (const { availability, ...r } of cloudById.values()) {
+    for (const cloudRec of cloudById.values()) {
+      const { availability, stand_ins: _, ...r } = cloudRec;
       merged.push({
         ...r,
         sync_status: "cloud-only",
         cloud_availability: availability?.state ?? "instant",
+        has_stand_in: hasStandIn(cloudRec),
       });
     }
 
