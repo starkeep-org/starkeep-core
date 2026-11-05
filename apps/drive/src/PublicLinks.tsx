@@ -57,7 +57,7 @@ const LIFETIMES: Array<[string, string]> = [
 ];
 
 export const SWITCH_OFF_TEXT =
-  "Drive cannot create public links. Turn on “Allow Drive to create public links” in admin-web, under Public Links.";
+  "Drive cannot create public links. Turn on “Enable sharing” on the Drive card in admin-web.";
 
 function isMedia(record: ShareableRecord): boolean {
   return record.category === "image" || record.category === "video";
