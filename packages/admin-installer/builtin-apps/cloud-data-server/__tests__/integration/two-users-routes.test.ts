@@ -869,7 +869,10 @@ describe("a mobile app through the broker", () => {
     await registerPhotosMobile();
     await pg.exec(`INSERT INTO public_sharing.app_capabilities (app_id) VALUES ('${PHOTOS}')`);
     const phone = await phoneOf(A);
-    const album = { labelKey: "album", labelValue: "a".repeat(32), title: "Summer" };
+    const album = {
+      source: { kind: "label", key: "album", value: "a".repeat(32) },
+      title: "Summer",
+    };
 
     const created = await phone.call("POST", "/data/public-shares", album, PHOTOS);
     expect(created.status, JSON.stringify(created.body)).toBe(201);
@@ -900,7 +903,7 @@ describe("a mobile app through the broker", () => {
     const res = await phone.call(
       "POST",
       "/data/public-shares",
-      { labelKey: "album", labelValue: "a".repeat(32), title: "Summer" },
+      { source: { kind: "label", key: "album", value: "a".repeat(32) }, title: "Summer" },
       PHOTOS,
     );
     expect(res.status).toBe(403);

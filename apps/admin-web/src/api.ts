@@ -52,6 +52,7 @@ api.post("/apps/cloud/list", (c) => appsCloudList.POST(c.req.raw));
 // Every public link in the deployment, and turning one off.
 api.post("/public-shares/list", (c) => publicShares.list(c.req.raw));
 api.post("/public-shares/revoke", (c) => publicShares.revoke(c.req.raw));
+api.post("/public-shares/drive-capability", (c) => publicShares.driveCapability(c.req.raw));
 // `:appId` before the two static `/apps/*` routes above would swallow them, so
 // the static paths are declared first and Hono's router prefers them anyway —
 // stated in both places rather than relying on either alone.

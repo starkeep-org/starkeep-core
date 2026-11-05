@@ -37,6 +37,24 @@ vi.mock("../src/routes/records", () => spy("records"));
 vi.mock("../src/routes/record-file", () => spy("record-file"));
 vi.mock("../src/routes/types", () => spy("types"));
 vi.mock("../src/routes/trash", () => spy("trash"));
+vi.mock("../src/routes/public-links", () => ({
+  GET: () => {
+    seen.push({ module: "public-links", url: "" });
+    return Response.json({});
+  },
+  POST: (req: Request) => {
+    seen.push({ module: "public-links:create", url: req.url });
+    return Response.json({});
+  },
+  PATCH: (req: Request, id: string) => {
+    seen.push({ module: "public-links:change", url: req.url, id });
+    return Response.json({});
+  },
+  DELETE: (id: string) => {
+    seen.push({ module: "public-links:delete", url: "", id });
+    return Response.json({});
+  },
+}));
 
 const { api } = await import("../src/api");
 
@@ -58,6 +76,10 @@ const ROUTES: Array<[string, string, string]> = [
   ["GET", "/api/types", "types"],
   ["GET", "/api/trash", "trash"],
   ["POST", "/api/trash/rec-1/restore", "trash:restore"],
+  ["GET", "/api/public-links", "public-links"],
+  ["POST", "/api/public-links", "public-links:create"],
+  ["PATCH", "/api/public-links/rec-1", "public-links:change"],
+  ["DELETE", "/api/public-links/rec-1", "public-links:delete"],
 ];
 
 describe("every declared route reaches its handler", () => {
@@ -77,7 +99,7 @@ describe("every declared route reaches its handler", () => {
       .map((r) => `${r.method} ${r.path}`)
       .sort();
     const declared = ROUTES.map(
-      ([method, path]) => `${method} ${path.replace("/rec-1/", "/:id/")}`,
+      ([method, path]) => `${method} ${path.replace(/\/rec-1(\/|$)/, "/:id$1")}`,
     ).sort();
     expect(mounted).toEqual(declared);
   });

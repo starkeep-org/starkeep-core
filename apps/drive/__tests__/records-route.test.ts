@@ -93,6 +93,36 @@ describe("GET /api/records — the sync-status merge", () => {
     ]);
   });
 
+  it("carries the cloud's archive state on synced and cloud-only rows", async () => {
+    // The cloud's listing says whether it can serve the bytes now. Drive shows
+    // an archived original as such, and its share dialog cannot offer it.
+    listRecords.mockResolvedValue([local("here"), local("plain")]);
+    listCloudRecords.mockResolvedValue([
+      { ...local("here"), availability: { state: "archived" } },
+      local("plain"),
+      { ...local("away"), availability: { state: "restoring" } },
+    ]);
+    const merged = (await (await call()).json()) as {
+      records: Array<Record<string, unknown>>;
+    };
+    const byId = new Map(merged.records.map((r) => [r["id"], r]));
+    expect(byId.get("here")).toMatchObject({
+      sync_status: "synced",
+      cloud_availability: "archived",
+    });
+    expect(byId.get("plain")).toMatchObject({ cloud_availability: "instant" });
+    expect(byId.get("away")).toMatchObject({
+      sync_status: "cloud-only",
+      cloud_availability: "restoring",
+    });
+    expect(byId.get("away")).not.toHaveProperty("availability");
+  });
+
+  it("gives a local-only row no cloud archive state", async () => {
+    listRecords.mockResolvedValue([local("a")]);
+    expect((await (await call()).json()).records[0]).toMatchObject({ cloud_availability: null });
+  });
+
   it("counts a local record behind the cloud as synced rather than modified", async () => {
     // Only the local copy having advanced means unpushed edits. The other
     // direction is the cloud being ahead, which is a pull this device has not

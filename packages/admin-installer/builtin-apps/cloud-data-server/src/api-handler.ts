@@ -190,11 +190,20 @@ import {
   ownerView,
   projectPublicSharePage,
   publicItemsToken,
+  publicFileToken,
+  parseSource,
+  loadPublicShareRecord,
+  isFileType,
+  PublicFileGrant,
+  publicFileDisposition,
+  signLargestStandIn,
   updateOwnedShare,
   PUBLIC_SHARE_CACHE_SECONDS,
   PUBLIC_SHARE_URL_TTL_SECONDS,
   type PublicDisplaySet,
   type PublicShareRow,
+  type PublicShareServes,
+  type PublicShareSource,
 } from "./public-shares.js";
 import { handleSignInRoute, isSignInRoute } from "./sign-in-routes.js";
 import {
@@ -1636,6 +1645,37 @@ export async function signPublicShareCloudFrontUrl(
   return { ok: true, url };
 }
 
+/**
+ * The direct-link counterpart of {@link signPublicShareCloudFrontUrl}: signs
+ * the one original a record share's {@link PublicFileGrant} admits.
+ *
+ * `disposition` rides in the signed URL as `response-content-disposition`, so
+ * the download takes the share's title rather than the content hash. The
+ * files behavior forwards that one parameter to S3, which honours it because
+ * CloudFront signs its origin request.
+ */
+export async function signPublicFileCloudFrontUrl(
+  grant: PublicFileGrant,
+  key: string,
+  expiresInSec: number,
+  disposition: string,
+): Promise<{ ok: true; url: string } | { ok: false; status: number; message: string }> {
+  const check = grant.check(key);
+  if (!check.ok) return check;
+  if (!key.startsWith("shared/") || userIdFromObjectKey(key) !== grant.ownerUserId) {
+    return { ok: false, status: 403, message: "Forbidden (another user's key)" };
+  }
+  const cfg = await loadCloudFrontSigningConfig();
+  const query = new URLSearchParams({ "response-content-disposition": disposition });
+  const url = getCloudFrontSignedUrl({
+    url: `https://${cfg.domain}/${key}?${query.toString()}`,
+    keyPairId: cfg.keyPairId,
+    privateKey: cfg.privateKey,
+    dateLessThan: new Date(Date.now() + Math.max(1, expiresInSec) * 1000).toISOString(),
+  });
+  return { ok: true, url };
+}
+
 // ---------------------------------------------------------------------------
 // Response helpers
 // ---------------------------------------------------------------------------
@@ -2867,6 +2907,20 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       }
     }
 
+    // GET /public-shares/<linkToken>/file — a record share's direct link: a
+    // redirect to one signed file. Anonymous like the items page, and it reads
+    // nothing from the request but the token; see handlePublicShareFile below.
+    if (method === "GET") {
+      const linkToken = publicFileToken(rawPath);
+      if (linkToken !== null) {
+        return await handlePublicShareFile(
+          linkToken,
+          getAccountId(context.invokedFunctionArn),
+          toClose,
+        );
+      }
+    }
+
     // All other routes require /apps/{appId}/...
     const parsed = parseAppPath(rawPath);
     if (!parsed) return clientErr("Not found", 404);
@@ -3715,19 +3769,25 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
 
     // /apps/{appId}/data/public-shares[/<id>] — the owner's public shares.
     //
-    //   GET    [?labelKey=&labelValue=]  list this app's shares, or one label's
-    //   POST   { labelKey, labelValue, title, lifetime }   create
-    //   PATCH  /<id> { title?, lifetime?, rotateLink? }     change
-    //   DELETE /<id>                                        stop sharing
+    //   GET    [?labelKey=&labelValue= | ?recordId=]   list this app's shares,
+    //                                                  or one source's
+    //   POST   { source, serves?, title, lifetime }    create
+    //   PATCH  /<id> { title?, lifetime?, rotateLink? } change
+    //   DELETE /<id>                                    stop sharing
+    //
+    // `source` is `{ kind: "label", key, value }` or `{ kind: "record",
+    // recordId }`. `serves` is `stand-in` (the default) or `original`, and
+    // only Starkeep Drive may ask for `original` for an image or video; a
+    // file record always serves its original, because it has no stand-in.
     //
     // Any of the owner's callers: a session through the app's server, a
     // signed-in desktop through its local data server, or a mobile app for its
     // own app (the gate refuses one on another app's channel). A stolen device can therefore publish, and the owner's answer
     // is "Sign out everywhere", which stops it within one ID-token lifetime.
-    // The device already holds the library it would publish, and a share shows
-    // stand-ins only. Creating or changing a share also needs the capability
-    // the person approved at install; listing and deleting do not, so an app
-    // that lost it can still be cleaned up after.
+    // The device already holds the library it would publish. Creating or
+    // changing a share also needs the capability the person approved at
+    // install (for Drive, the admin-web switch); listing and deleting do not,
+    // so an app that lost it can still be cleaned up after.
     if (subPath === "/data/public-shares" || subPath.startsWith("/data/public-shares/")) {
       const owner = { appId, userId: subject.userId };
       const shareId = subPath.slice("/data/public-shares/".length) || null;
@@ -3749,14 +3809,20 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (method === "GET" && shareId === null) {
         const labelKey = query["labelKey"];
         const labelValue = query["labelValue"];
+        const recordId = query["recordId"];
         if ((labelKey === undefined) !== (labelValue === undefined)) {
           return clientErr("labelKey and labelValue go together", 400);
         }
-        const shares = await listOwnedShares(
-          grantClient,
-          owner,
-          labelKey !== undefined && labelValue !== undefined ? { labelKey, labelValue } : undefined,
-        );
+        if (recordId !== undefined && labelKey !== undefined) {
+          return clientErr("Filter by a label or by a record, not both", 400);
+        }
+        const source: PublicShareSource | undefined =
+          labelKey !== undefined && labelValue !== undefined
+            ? { kind: "label", key: labelKey, value: labelValue }
+            : recordId !== undefined
+              ? { kind: "record", recordId }
+              : undefined;
+        const shares = await listOwnedShares(grantClient, owner, source);
         return ok({ publicShares: shares.map(ownerView), mayPublish: await mayPublish() });
       }
 
@@ -3766,15 +3832,52 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         }
         const body = readBody();
         if (!body) return clientErr("Body is not a JSON object", 400);
-        const { labelKey, labelValue } = body;
-        if (typeof labelKey !== "string" || typeof labelValue !== "string") {
-          return clientErr("labelKey and labelValue (strings) are required", 400);
+        const parsedSource = parseSource(body.source);
+        if (!parsedSource.ok) return clientErr(parsedSource.message, 400);
+        const { source } = parsedSource;
+        const askedServes = body.serves ?? "stand-in";
+        if (askedServes !== "stand-in" && askedServes !== "original") {
+          return clientErr("serves must be stand-in or original", 400);
         }
-        if (!(await loadDeclaredLabelKeys(grantClient, appId)).has(labelKey)) {
-          return clientErr(`${appId} declares no label key "${labelKey}"`, 400);
-        }
-        if (labelValue.length === 0 || Buffer.byteLength(labelValue, "utf8") > 128) {
-          return clientErr("labelValue must be 1 to 128 bytes", 400);
+        let serves: PublicShareServes = "stand-in";
+        if (source.kind === "label") {
+          if (askedServes !== "stand-in") {
+            return clientErr("A label share serves stand-ins only", 400);
+          }
+          if (!(await loadDeclaredLabelKeys(grantClient, appId)).has(source.key)) {
+            return clientErr(`${appId} declares no label key "${source.key}"`, 400);
+          }
+        } else {
+          // The same read a visit makes, so a share is created only for a
+          // record a visitor could reach: the owner's own, parentless, live,
+          // and of a type this app may read.
+          const record = await loadPublicShareRecord(db, grants, source.recordId);
+          if (!record) return clientErr("No such record to share", 404);
+          if (isFileType(record.type)) {
+            serves = "original";
+          } else if (askedServes === "original") {
+            // Decision 4 of the plan: a Drive link may serve a photo's or a
+            // video's original. Every other app's link keeps stand-ins only.
+            if (appId !== DRIVE_APP_ID) {
+              return clientErr(`${appId} may share stand-ins only`, 403);
+            }
+            serves = "original";
+          }
+          if (serves === "original") {
+            // The stored state only, never an S3 call or a restore. An
+            // original that archives later answers the visit check instead.
+            const availability = toRecordAvailability(
+              (await db.getAvailability([record.objectStorageKey])).get(record.objectStorageKey),
+            );
+            if (availability.state === "archived" || availability.state === "restoring") {
+              return clientErr(
+                isFileType(record.type)
+                  ? "This file is archived."
+                  : "This original is archived. Share the largest stand-in instead.",
+                409,
+              );
+            }
+          }
         }
         const title = normalizeTitle(body.title);
         if (title === null) return clientErr("title must be 1 to 200 characters", 400);
@@ -3784,8 +3887,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         const share = newShare({
           ownerUserId: subject.userId,
           appId,
-          labelKey,
-          labelValue,
+          source,
+          serves,
           title,
           nowMs,
           expiresAtMs: expiry.expiresAtMs,
@@ -5748,25 +5851,71 @@ function publicOk(body: unknown) {
 }
 
 /**
- * The anonymous read path: one page of a public share.
- *
- * The request carries a link token and a cursor, and nothing else is read
- * from it. The token is looked up as Starkeep Drive on an untagged session
- * (the table sits outside the user cut, and Drive is the platform's standing
- * identity). The page is then read as the creating app, on a session tagged
- * with the owner, through the owner-scoped adapter and the app's own grants:
- * the visitor reaches at most what the app could read for the owner, and
- * `public-shares.ts` narrows that to display children of the labelled records.
- *
- * Read-only by construction: nothing below writes, and the only shared code
- * is the page loaders the records route also uses.
+ * A direct link's answer when there is no file to send: a small page a
+ * browser shows, cached at the edge like a redirect, never indexed.
  */
-async function handlePublicShareItems(
+function publicFilePage(status: number, message: string) {
+  const escaped = message.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+  return {
+    statusCode: status,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": `public, max-age=${PUBLIC_SHARE_CACHE_SECONDS}`,
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
+      "Referrer-Policy": "no-referrer",
+      "X-Robots-Tag": "noindex",
+    },
+    body:
+      `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+      `<meta name="viewport" content="width=device-width, initial-scale=1">` +
+      `<meta name="robots" content="noindex"><title>${escaped}</title></head>` +
+      `<body style="font-family:system-ui,sans-serif;margin:4rem 1rem;text-align:center">` +
+      `<p>${escaped}</p></body></html>`,
+  };
+}
+
+/**
+ * A direct link's redirect to a signed URL. The edge caches it for a minute,
+ * well inside the URL's hour, so a cached answer never hands out a dead URL.
+ */
+function publicRedirect(url: string) {
+  return {
+    statusCode: 302,
+    headers: {
+      Location: url,
+      "Cache-Control": `public, max-age=${PUBLIC_SHARE_CACHE_SECONDS}`,
+      "Referrer-Policy": "no-referrer",
+      "X-Robots-Tag": "noindex",
+    },
+    body: "",
+  };
+}
+
+/** A public share opened for a visitor, as the creating app scoped to the owner. */
+interface OpenedPublicShare {
+  readonly share: PublicShareRow;
+  readonly db: DatabaseAdapter;
+  readonly grants: AccessGrants;
+  readonly presence: BytePresence;
+}
+
+/**
+ * Look a link token up and open its share for a visitor.
+ *
+ * The token is looked up as Starkeep Drive on an untagged session (the table
+ * sits outside the user cut, and Drive is the platform's standing identity).
+ * The share is then read as the creating app, on a session tagged with the
+ * owner, through the owner-scoped adapter and the app's own grants: the
+ * visitor reaches at most what the app could read for the owner, and
+ * `public-shares.ts` narrows that further.
+ */
+async function openPublicShare(
   linkToken: string,
-  cursor: string | undefined,
   accountId: string,
   toClose: Array<() => Promise<void>>,
-) {
+): Promise<
+  { ok: true; opened: OpenedPublicShare } | { ok: false; status: number; message: string }
+> {
   const driveCreds = await getAppCreds(DRIVE_APP_ID, accountId, null);
   const lookup = makeConnection(DRIVE_APP_ID, driveCreds);
   const lookupClient = await lookup.clientFactory.createClient({
@@ -5778,13 +5927,16 @@ async function handlePublicShareItems(
   const share: PublicShareRow | null = await findShareByToken(lookupClient, linkToken);
   // One answer for a token that never existed, a revoked share and an app
   // that lost the capability: a visitor learns nothing about which.
-  if (!share || !(await appMayPublish(lookupClient, share.app_id))) {
-    return clientErr("This link does not exist or was turned off", 404);
+  const gone = {
+    ok: false,
+    status: 404,
+    message: "This link does not exist or was turned off",
+  } as const;
+  if (!share || !(await appMayPublish(lookupClient, share.app_id))) return gone;
+  if (isExpired(share, Date.now())) {
+    return { ok: false, status: 410, message: "This link has expired" };
   }
-  if (isExpired(share, Date.now())) return clientErr("This link has expired", 410);
-  if (!USER_SEGMENT_PATTERN.test(share.owner_user_id)) {
-    return clientErr("This link does not exist or was turned off", 404);
-  }
+  if (!USER_SEGMENT_PATTERN.test(share.owner_user_id)) return gone;
 
   const creds = await getAppCreds(share.app_id, accountId, share.owner_user_id);
   const { db, storage, clientFactory, auroraEndpoint, region } = makeAdapters(
@@ -5797,23 +5949,26 @@ async function handlePublicShareItems(
   const grantClient = await clientFactory.createClient({ hostname: auroraEndpoint, region });
   toClose.push(() => grantClient.end());
   const grants = await loadAccessGrants(grantClient, share.app_id);
-
-  let page;
-  try {
-    page = await loadPublicSharePage(db, grants, share, cloudLibrarySettings.standards(), cursor);
-  } catch (err) {
-    // A cursor the grammar cannot decode is the visitor's mistake.
-    if (err instanceof ApiError || (err as { status?: number }).status === 400) {
-      return clientErr("Invalid cursor", 400);
-    }
-    throw err;
-  }
-
   const presence = createBytePresence({
     loadWatermarks: () => db.byteCoverageStore(DRIVE_APP_ID).load(),
     has: (key) => storage.has(key),
     cache: presentKeyCache,
   });
+  return { ok: true, opened: { share, db, grants, presence } };
+}
+
+/** One page of an opened share's items, signed for a visitor. */
+async function publicItemsFor(
+  { share, db, grants, presence }: OpenedPublicShare,
+  cursor: string | undefined,
+) {
+  const page = await loadPublicSharePage(
+    db,
+    grants,
+    share,
+    cloudLibrarySettings.standards(),
+    cursor,
+  );
   const missing = await presence.missing(page.displayFiles);
   const metadata = await loadMetadataForPage(db, grants, [...page.members]);
   const items = await projectPublicSharePage(
@@ -5831,13 +5986,123 @@ async function handlePublicShareItems(
       return signed.ok ? signed.url : null;
     },
   );
+  return { page, items };
+}
+
+/**
+ * The anonymous read path: one page of a public share.
+ *
+ * The request carries a link token and a cursor, and nothing else is read
+ * from it. See {@link openPublicShare} for whose rows the page reads.
+ *
+ * Read-only by construction: nothing below writes, and the only shared code
+ * is the page loaders the records route also uses.
+ */
+async function handlePublicShareItems(
+  linkToken: string,
+  cursor: string | undefined,
+  accountId: string,
+  toClose: Array<() => Promise<void>>,
+) {
+  const opened = await openPublicShare(linkToken, accountId, toClose);
+  if (!opened.ok) return clientErr(opened.message, opened.status);
+  const { share } = opened.opened;
+
+  let result;
+  try {
+    result = await publicItemsFor(opened.opened, cursor);
+  } catch (err) {
+    // A cursor the grammar cannot decode is the visitor's mistake.
+    if (err instanceof ApiError || (err as { status?: number }).status === 400) {
+      return clientErr("Invalid cursor", 400);
+    }
+    throw err;
+  }
   return publicOk({
     title: share.title,
-    items,
-    nextCursor: page.nextCursor,
-    truncated: page.truncated,
+    source: share.source_kind,
+    items: result.items,
+    nextCursor: result.page.nextCursor,
+    truncated: result.page.truncated,
     expiresAtMs: share.expires_at_ms,
   });
+}
+
+/**
+ * The anonymous direct link: a record share's one file, as a redirect.
+ *
+ * The request carries a link token and nothing else. A file member, or an
+ * image or video whose share says `original`, redirects to its original,
+ * signed through the share's {@link PublicFileGrant} after the stored
+ * availability says the bytes are readable now. The route never restores an
+ * archived original. Any other image or video redirects to the largest
+ * display file the items page would show: an image's largest stand-in, or a
+ * video's best playable stand-in.
+ *
+ * Read-only by construction, like the items page.
+ */
+async function handlePublicShareFile(
+  linkToken: string,
+  accountId: string,
+  toClose: Array<() => Promise<void>>,
+) {
+  const opened = await openPublicShare(linkToken, accountId, toClose);
+  if (!opened.ok) return publicFilePage(opened.status, `${opened.message}.`);
+  const { share, db, grants, presence } = opened.opened;
+  if (share.source_kind !== "record") {
+    return publicFilePage(404, "This link does not exist or was turned off.");
+  }
+  const record = await loadPublicShareRecord(db, grants, share.record_id!);
+  if (!record) return publicFilePage(404, "This link no longer shows anything.");
+
+  const grant = PublicFileGrant.forRecord(share, record);
+  if (grant === null) {
+    const page = await loadPublicSharePage(
+      db,
+      grants,
+      share,
+      cloudLibrarySettings.standards(),
+      undefined,
+    );
+    const url = await signLargestStandIn(
+      share,
+      page,
+      await presence.missing(page.displayFiles),
+      async (display, key) => {
+        const signed = await signPublicShareCloudFrontUrl(
+          display,
+          key,
+          PUBLIC_SHARE_URL_TTL_SECONDS,
+        );
+        return signed.ok ? signed.url : null;
+      },
+    );
+    if (url === null) return publicFilePage(409, "This file has not finished uploading.");
+    return publicRedirect(url);
+  }
+
+  const availability =
+    (await loadAvailabilityForPage(db, [record], presence)).get(record.id) ??
+    ({ state: "instant" } as const);
+  switch (availability.state) {
+    case "instant":
+      break;
+    case "archived":
+    case "restoring":
+      return publicFilePage(409, "This file is archived.");
+    case "awaiting-upload":
+      return publicFilePage(409, "This file has not finished uploading.");
+    default:
+      return publicFilePage(404, "This file is not in the cloud.");
+  }
+  const signed = await signPublicFileCloudFrontUrl(
+    grant,
+    record.objectStorageKey,
+    PUBLIC_SHARE_URL_TTL_SECONDS,
+    publicFileDisposition(share.title, record.originalFilename),
+  );
+  if (!signed.ok) return publicFilePage(404, "This link no longer shows anything.");
+  return publicRedirect(signed.url);
 }
 
 async function buildAppSyncableSource(

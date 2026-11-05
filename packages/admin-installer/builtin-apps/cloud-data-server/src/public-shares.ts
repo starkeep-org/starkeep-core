@@ -1,44 +1,55 @@
 /**
  * Public shares: a link anyone may open, showing the stand-ins of the records
- * that carry one app label.
+ * that carry one app label, or one record.
  *
- * A public share names an app label, `(app_id, label_key, label_value)`, and
- * the records carrying it are its members, resolved when a visitor asks. The
- * share copies nothing, so a record labelled later appears on the next page,
- * and a record deleted or unlabelled leaves it. Photos' albums are the first
- * use: an album is the `photos/album` label with the album's id.
+ * A public share names its source. A label share names an app label,
+ * `(app_id, label_key, label_value)`, and the records carrying it are its
+ * members, resolved when a visitor asks. The share copies nothing, so a record
+ * labelled later appears on the next page, and a record deleted or unlabelled
+ * leaves it. Photos' albums are the first use: an album is the `photos/album`
+ * label with the album's id. A record share names one parentless record, and
+ * that record is its only member while it lives.
  *
  * What a visitor may reach is fixed here and nowhere else:
  *
- * - **Members** are the owner's parentless, live, image or video records with
- *   the label, of a type the creating app may read.
- * - **Display children** are a member's stand-ins, and the image-category
- *   derived children of a video member (its poster frames) that carry a label
- *   in the creating app's `derived` key.
- * - **Nothing else.** No original bytes, no labels, no captions, no record ids,
- *   no metadata beyond a display size.
+ * - **Members** are the owner's parentless, live records named by the source,
+ *   of a type the creating app may read. A label share admits image and video
+ *   records only.
+ * - **Display children** are a media member's stand-ins, and the
+ *   image-category derived children of a video member (its poster frames)
+ *   that carry a label in the creating app's `derived` key.
+ * - **A record share's original**, through `GET /public-shares/<token>/file`
+ *   only, and only when the record is a file member (neither image nor video,
+ *   so it has no stand-in) or the share says `serves: "original"`. Only a
+ *   Starkeep Drive record share may say so for an image or video.
+ * - **Nothing else.** No labels, no captions, no record ids, no metadata
+ *   beyond a display size.
  *
- * Originals are never signed, whatever their size. That one rule keeps an
- * archived original out of reach (only parentless originals archive), keeps a
- * large original's egress off the link, and keeps a small original's EXIF and
- * GPS off it too: stand-ins carry no EXIF, and a self-canonical original shows
- * at its largest smaller stand-in instead. {@link PublicDisplaySet} enforces
- * the rule at the signer, so the viewer has no original to offer rather than
- * declining to show one.
+ * The items route never signs an original, whatever its size. That rule keeps
+ * an archived original out of reach (only parentless originals archive), keeps
+ * a large original's egress off an album, and keeps a small original's EXIF
+ * and GPS off it too: stand-ins carry no EXIF, and a self-canonical original
+ * shows at its largest smaller stand-in instead. {@link PublicDisplaySet}
+ * enforces the rule at the signer, so the viewer has no original to offer
+ * rather than declining to show one. {@link PublicFileGrant} is the one other
+ * signer path, and admits exactly one original's key.
  *
- * The anonymous route calls only {@link loadPublicSharePage} and
- * {@link projectPublicSharePage}. Neither reads anything from the request but
- * the link token and the cursor, and neither shares code with the general
- * records handler, which is how a request parameter cannot widen the query.
+ * The anonymous routes call only {@link loadPublicSharePage},
+ * {@link projectPublicSharePage} and {@link loadPublicShareRecord}. None of
+ * them reads anything from the request but the link token and the cursor, and
+ * none shares code with the general records handler, which is how a request
+ * parameter cannot widen the query.
  *
  * See `~/projects/starkeep/proposal-public-sharing-albums-2026-11-05.md`,
- * section "Public shares".
+ * section "Public shares", and
+ * `~/projects/starkeep/plan-public-links-single-items-and-drive-2026-11-05.md`.
  */
 
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import {
   canRead,
   isStandInOriginal,
+  isStarkeepId,
   typeCategory,
   type AccessGrants,
   type DataRecord,
@@ -61,7 +72,10 @@ import {
 // Constants
 // ---------------------------------------------------------------------------
 
-/** The anonymous route: `GET /public-shares/<linkToken>/items`. */
+/**
+ * The anonymous routes: `GET /public-shares/<linkToken>/items` and
+ * `GET /public-shares/<linkToken>/file`.
+ */
 export const PUBLIC_SHARES_PREFIX = "/public-shares/";
 
 /** A link token: 128 random bits, base64url, so 22 characters. */
@@ -121,13 +135,29 @@ const DERIVED_KEY = "derived";
 // The share record
 // ---------------------------------------------------------------------------
 
+/** What a public share names: an app label, or one record. */
+export type PublicShareSource =
+  | { readonly kind: "label"; readonly key: string; readonly value: string }
+  | { readonly kind: "record"; readonly recordId: string };
+
+/**
+ * What a record share's link serves for an image or video. A file member has
+ * no stand-in and always serves its original, so its row stores `original`.
+ */
+export type PublicShareServes = "stand-in" | "original";
+
 export interface PublicShareRow {
   readonly id: string;
   readonly link_token: string;
   readonly owner_user_id: string;
   readonly app_id: string;
-  readonly label_key: string;
-  readonly label_value: string;
+  readonly source_kind: PublicShareSource["kind"];
+  /** Set for a label share, null for a record share. */
+  readonly label_key: string | null;
+  readonly label_value: string | null;
+  /** Set for a record share, null for a label share. */
+  readonly record_id: string | null;
+  readonly serves: PublicShareServes;
   readonly title: string;
   readonly item_id_salt: string;
   readonly created_at_ms: number;
@@ -142,8 +172,11 @@ const SHARE_COLUMNS = [
   "link_token",
   "owner_user_id",
   "app_id",
+  "source_kind",
   "label_key",
   "label_value",
+  "record_id",
+  "serves",
   "title",
   "item_id_salt",
   "created_at_ms",
@@ -152,9 +185,18 @@ const SHARE_COLUMNS = [
 
 /** The link token in `/public-shares/<token>/items`, or null for any other path. */
 export function publicItemsToken(rawPath: string): string | null {
+  return publicShareToken(rawPath, "items");
+}
+
+/** The link token in `/public-shares/<token>/file`, or null for any other path. */
+export function publicFileToken(rawPath: string): string | null {
+  return publicShareToken(rawPath, "file");
+}
+
+function publicShareToken(rawPath: string, leaf: "items" | "file"): string | null {
   if (!rawPath.startsWith(PUBLIC_SHARES_PREFIX)) return null;
-  const m = rawPath.match(/^\/public-shares\/([^/]+)\/items$/);
-  if (!m || !LINK_TOKEN_PATTERN.test(m[1]!)) return null;
+  const m = rawPath.match(/^\/public-shares\/([^/]+)\/([a-z]+)$/);
+  if (!m || m[2] !== leaf || !LINK_TOKEN_PATTERN.test(m[1]!)) return null;
   return m[1]!;
 }
 
@@ -199,13 +241,49 @@ export function normalizeTitle(raw: unknown): string | null {
   return title;
 }
 
+/** A share's source, from its row. */
+export function sourceOf(share: PublicShareRow): PublicShareSource {
+  return share.source_kind === "record"
+    ? { kind: "record", recordId: share.record_id! }
+    : { kind: "label", key: share.label_key!, value: share.label_value! };
+}
+
+/**
+ * The source an owner's request names, or an error. The label's key and the
+ * record's existence are checked by the caller, which holds the database.
+ */
+export function parseSource(
+  raw: unknown,
+): { ok: true; source: PublicShareSource } | { ok: false; message: string } {
+  const body = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
+  if (body?.kind === "label") {
+    if (typeof body.key !== "string" || typeof body.value !== "string") {
+      return { ok: false, message: "A label source needs key and value (strings)" };
+    }
+    if (body.value.length === 0 || Buffer.byteLength(body.value, "utf8") > 128) {
+      return { ok: false, message: "A label value must be 1 to 128 bytes" };
+    }
+    return { ok: true, source: { kind: "label", key: body.key, value: body.value } };
+  }
+  if (body?.kind === "record") {
+    if (!isStarkeepId(body.recordId)) {
+      return { ok: false, message: "A record source needs recordId (a record id)" };
+    }
+    return { ok: true, source: { kind: "record", recordId: body.recordId } };
+  }
+  return {
+    ok: false,
+    message: 'source must be { kind: "label", key, value } or { kind: "record", recordId }',
+  };
+}
+
 /** What the owner's routes answer for one public share. Never the salt. */
 export function ownerView(share: PublicShareRow) {
   return {
     id: share.id,
     linkToken: share.link_token,
-    labelKey: share.label_key,
-    labelValue: share.label_value,
+    source: sourceOf(share),
+    serves: share.serves,
     title: share.title,
     createdAtMs: Number(share.created_at_ms),
     expiresAtMs: share.expires_at_ms === null ? null : Number(share.expires_at_ms),
@@ -278,15 +356,20 @@ export async function findOwnedShare(
 export async function listOwnedShares(
   client: DatabaseClient,
   owner: { appId: string; userId: string },
-  source?: { labelKey: string; labelValue: string },
+  source?: PublicShareSource,
 ): Promise<PublicShareRow[]> {
   let q = compiler
     .selectFrom(SHARES_TABLE)
     .select([...SHARE_COLUMNS])
     .where("owner_user_id", "=", owner.userId)
     .where("app_id", "=", owner.appId);
-  if (source) {
-    q = q.where("label_key", "=", source.labelKey).where("label_value", "=", source.labelValue);
+  if (source?.kind === "label") {
+    q = q
+      .where("source_kind", "=", "label")
+      .where("label_key", "=", source.key)
+      .where("label_value", "=", source.value);
+  } else if (source?.kind === "record") {
+    q = q.where("source_kind", "=", "record").where("record_id", "=", source.recordId);
   }
   const rows = await run(client, q.orderBy("created_at_ms", "asc").compile());
   return rows.map(rowOf);
@@ -341,19 +424,23 @@ export async function deleteOwnedShare(
 export function newShare(input: {
   ownerUserId: string;
   appId: string;
-  labelKey: string;
-  labelValue: string;
+  source: PublicShareSource;
+  serves: PublicShareServes;
   title: string;
   nowMs: number;
   expiresAtMs: number | null;
 }): PublicShareRow {
+  const { source } = input;
   return {
     id: randomUUID(),
     link_token: newLinkToken(),
     owner_user_id: input.ownerUserId,
     app_id: input.appId,
-    label_key: input.labelKey,
-    label_value: input.labelValue,
+    source_kind: source.kind,
+    label_key: source.kind === "label" ? source.key : null,
+    label_value: source.kind === "label" ? source.value : null,
+    record_id: source.kind === "record" ? source.recordId : null,
+    serves: input.serves,
     title: input.title,
     item_id_salt: newItemIdSalt(),
     created_at_ms: input.nowMs,
@@ -394,14 +481,8 @@ export class PublicDisplaySet {
   }
 
   check(key: string): KeyCheck {
-    if (key.split("/").includes("..")) return { ok: false, status: 400, message: "Invalid key" };
-    const m = key.match(
-      /^shared\/([A-Za-z0-9_-]+)\/([a-z0-9_-]+)\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/,
-    );
-    if (!m) return { ok: false, status: 400, message: "Not a shared key" };
-    if (m[1] !== this.ownerUserId) {
-      return { ok: false, status: 403, message: "Forbidden (another user's key)" };
-    }
+    const owned = checkOwnedSharedKey(this.ownerUserId, key);
+    if (!owned.ok) return owned;
     if (this.originals.has(key)) {
       return { ok: false, status: 403, message: "Forbidden (an original's key)" };
     }
@@ -410,6 +491,70 @@ export class PublicDisplaySet {
     }
     return { ok: true };
   }
+}
+
+/** A key under `shared/<ownerUserId>/`, in the shared key layout, with no traversal. */
+function checkOwnedSharedKey(ownerUserId: string, key: string): KeyCheck {
+  if (key.split("/").includes("..")) return { ok: false, status: 400, message: "Invalid key" };
+  const m = key.match(
+    /^shared\/([A-Za-z0-9_-]+)\/([a-z0-9_-]+)\/([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)$/,
+  );
+  if (!m) return { ok: false, status: 400, message: "Not a shared key" };
+  if (m[1] !== ownerUserId) {
+    return { ok: false, status: 403, message: "Forbidden (another user's key)" };
+  }
+  return { ok: true };
+}
+
+/**
+ * The one original a record share's `/file` route may sign.
+ *
+ * Built from the record {@link loadPublicShareRecord} returned, never from the
+ * request, and it admits exactly that record's key. A file member's original
+ * is always admitted, because a file has no stand-in. An image or video
+ * original is admitted only when the share row says `original`, which only a
+ * Starkeep Drive record share may store, so an album or a Photos link can
+ * never reach one through this path either. `forRecord` answers null for
+ * anything else, and the route then serves a stand-in or nothing.
+ */
+export class PublicFileGrant {
+  private constructor(
+    readonly ownerUserId: string,
+    private readonly key: string,
+  ) {}
+
+  static forRecord(
+    share: Pick<PublicShareRow, "owner_user_id" | "source_kind" | "record_id" | "serves">,
+    record: { id: string; type: string; objectStorageKey: string; parentId: string | null },
+  ): PublicFileGrant | null {
+    if (share.source_kind !== "record" || share.record_id !== record.id) return null;
+    if (record.parentId !== null) return null;
+    if (!isFileType(record.type) && share.serves !== "original") return null;
+    return new PublicFileGrant(share.owner_user_id, record.objectStorageKey);
+  }
+
+  check(key: string): KeyCheck {
+    const owned = checkOwnedSharedKey(this.ownerUserId, key);
+    if (!owned.ok) return owned;
+    if (key !== this.key) {
+      return { ok: false, status: 403, message: "Forbidden (not this link's file)" };
+    }
+    return { ok: true };
+  }
+}
+
+/**
+ * The name a visitor's download takes: the share's title, with the original's
+ * extension when the title lacks it. Quoted for `Content-Disposition`, with an
+ * ASCII fallback and the UTF-8 form beside it.
+ */
+export function publicFileDisposition(title: string, originalFilename: string | null): string {
+  const ext = originalFilename?.match(/\.([A-Za-z0-9]{1,10})$/)?.[1];
+  const base = title.replace(/[\u0000-\u001f\u007f"\\/]/g, "_").trim() || "download";
+  const name =
+    ext && !base.toLowerCase().endsWith(`.${ext.toLowerCase()}`) ? `${base}.${ext}` : base;
+  const ascii = name.replace(/[^\x20-\x7e]/g, "_");
+  return `inline; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -435,40 +580,35 @@ export interface PublicSharePage {
 const PUBLIC_CATEGORIES = new Set(["image", "video"]);
 
 /**
- * One page of a public share's members and their display children.
- *
- * `db` is the creating app's adapter scoped to the owner, so every statement
- * reads the owner's rows only; `grants` are the creating app's. `cursor` is
- * the records query's own page token and the only input from the request.
+ * Whether a type is a file member's: neither image nor video, so it has no
+ * stand-in and a public link can only serve its original.
  */
-export async function loadPublicSharePage(
-  db: DatabaseAdapter,
-  grants: AccessGrants,
-  share: PublicShareRow,
-  standards: StandInStandards,
-  cursor: string | undefined,
-): Promise<PublicSharePage> {
-  const readable = [...grants.readableTypes].filter((t) => PUBLIC_CATEGORIES.has(typeCategory(t)));
-  if (readable.length === 0) {
-    return {
-      members: [],
-      summaries: new Map(),
-      posters: new Map(),
-      displayFiles: [],
-      nextCursor: null,
-      truncated: false,
-    };
-  }
+export function isFileType(type: string): boolean {
+  return !PUBLIC_CATEGORIES.has(typeCategory(type));
+}
 
-  // The membership, from the reverse index. The value matches by equality.
+/**
+ * The ids a share's source names, before the records query filters them. A
+ * record share names its one record. A label share reads the label's whole
+ * membership from the reverse index, where the value matches by equality.
+ */
+async function loadMembership(
+  db: DatabaseAdapter,
+  share: PublicShareRow,
+  readable: readonly string[] | null,
+): Promise<{ ids: StarkeepId[]; truncated: boolean }> {
+  if (share.source_kind === "record") {
+    return { ids: [share.record_id! as StarkeepId], truncated: false };
+  }
+  if (readable === null) return { ids: [], truncated: false };
   const ids: StarkeepId[] = [];
   let labelCursor: string | undefined;
   let truncated = false;
   for (;;) {
     const plan = planFindByLabel({
       appId: share.app_id,
-      key: share.label_key,
-      value: share.label_value,
+      key: share.label_key!,
+      value: share.label_value!,
       readableTypes: new Set(readable),
       limit: MEMBERSHIP_READ_PAGE,
       ...(labelCursor === undefined ? {} : { cursor: labelCursor }),
@@ -486,6 +626,77 @@ export async function loadPublicSharePage(
     if (found.nextCursor === null) break;
     labelCursor = found.nextCursor;
   }
+  return { ids, truncated };
+}
+
+/**
+ * A record share's one record, when it is still the owner's parentless, live
+ * record of a type the creating app may read. Null otherwise, which a visitor
+ * sees as a link that no longer shows anything.
+ *
+ * `db` and `grants` are as for {@link loadPublicSharePage}. The owner routes
+ * call this too, so a share is created only for a record a visit could reach.
+ */
+export async function loadPublicShareRecord(
+  db: DatabaseAdapter,
+  grants: AccessGrants,
+  recordId: string,
+): Promise<DataRecord | null> {
+  const page = await db.query({
+    filters: [
+      { field: "id", operator: "in", value: [recordId as StarkeepId] },
+      { field: "parentId", operator: "isNull" },
+      { field: "deletedAt", operator: "isNull" },
+    ],
+    where: [{ column: "stand_in_role", predicate: { op: "is", value: null } }],
+    limit: 1,
+  });
+  const record = page.records[0];
+  if (
+    !record ||
+    record.id !== recordId ||
+    record.parentId !== null ||
+    record.deletedAt ||
+    record.standInRole !== null ||
+    !canRead(grants, record.type)
+  ) {
+    return null;
+  }
+  return record;
+}
+
+/**
+ * One page of a public share's members and their display children.
+ *
+ * `db` is the creating app's adapter scoped to the owner, so every statement
+ * reads the owner's rows only; `grants` are the creating app's. `cursor` is
+ * the records query's own page token and the only input from the request.
+ */
+export async function loadPublicSharePage(
+  db: DatabaseAdapter,
+  grants: AccessGrants,
+  share: PublicShareRow,
+  standards: StandInStandards,
+  cursor: string | undefined,
+): Promise<PublicSharePage> {
+  // The media types the app may read. Starkeep Drive reads every type by id
+  // rather than by grant rows, so it has no list; its record shares filter by
+  // category below instead. It declares no label key, so it has no label share.
+  const readable = grants.allAccess
+    ? null
+    : [...grants.readableTypes].filter((t) => PUBLIC_CATEGORIES.has(typeCategory(t)));
+  if (readable === null ? share.source_kind !== "record" : readable.length === 0) {
+    return {
+      members: [],
+      summaries: new Map(),
+      posters: new Map(),
+      displayFiles: [],
+      nextCursor: null,
+      truncated: false,
+    };
+  }
+
+  const { ids, truncated } = await loadMembership(db, share, readable);
   if (ids.length === 0) {
     return {
       members: [],
@@ -506,7 +717,9 @@ export async function loadPublicSharePage(
       { field: "deletedAt", operator: "isNull" },
     ],
     where: [
-      { column: "type", predicate: { op: "in", values: readable.sort() } },
+      ...(readable === null
+        ? []
+        : [{ column: "type", predicate: { op: "in", values: readable.sort() } } as const]),
       { column: "stand_in_role", predicate: { op: "is", value: null } },
     ],
     sort: [
@@ -582,6 +795,44 @@ export interface PublicItem {
   readonly playback: { readonly url: string; readonly type: string } | null;
 }
 
+/**
+ * A member's stand-ins whose files have reached the cloud. Stand-ins only:
+ * never the size an original answers itself.
+ */
+function displayStandIns(page: PublicSharePage, member: DataRecord, missing: ReadonlySet<string>) {
+  return (page.summaries.get(member.id)?.sizes ?? []).filter(
+    (s) =>
+      (s.role === "canonical" || s.role === "smaller") &&
+      s.recordId !== null &&
+      s.recordId !== member.id &&
+      s.objectStorageKey !== null &&
+      s.objectStorageKey !== member.objectStorageKey &&
+      !missing.has(s.objectStorageKey),
+  );
+}
+
+/**
+ * A record share's direct link to a stand-in: the URL of the one member's
+ * largest stand-in, which for a video is its best playable one. Null when
+ * none has reached the cloud. Unlike the items page this needs no poster
+ * frame, because a browser opens the file itself.
+ */
+export async function signLargestStandIn(
+  share: PublicShareRow,
+  page: PublicSharePage,
+  missing: ReadonlySet<string>,
+  sign: (display: PublicDisplaySet, key: string) => Promise<string | null>,
+): Promise<string | null> {
+  const member = page.members[0];
+  if (!member || share.source_kind !== "record") return null;
+  const display = new PublicDisplaySet(share.owner_user_id);
+  display.addMember(member);
+  const best = displayStandIns(page, member, missing).sort((a, b) => b.fidelity - a.fidelity)[0];
+  if (!best) return null;
+  display.admit({ objectStorageKey: best.objectStorageKey!, parentId: member.id });
+  return sign(display, best.objectStorageKey!);
+}
+
 /** A signer for one display key; refuses anything the page did not admit. */
 export type PublicSigner = (key: string) => Promise<string | null>;
 
@@ -606,17 +857,7 @@ export async function projectPublicSharePage(
   const items: PublicItem[] = [];
   for (const member of page.members) {
     const category = typeCategory(member.type) === "video" ? "video" : "image";
-    const summary = page.summaries.get(member.id);
-    // Stand-ins only: never the size an original answers itself.
-    const standIns = (summary?.sizes ?? []).filter(
-      (s) =>
-        (s.role === "canonical" || s.role === "smaller") &&
-        s.recordId !== null &&
-        s.recordId !== member.id &&
-        s.objectStorageKey !== null &&
-        s.objectStorageKey !== member.objectStorageKey &&
-        !missing.has(s.objectStorageKey),
-    );
+    const standIns = displayStandIns(page, member, missing);
     for (const s of standIns)
       display.admit({ objectStorageKey: s.objectStorageKey!, parentId: member.id });
 

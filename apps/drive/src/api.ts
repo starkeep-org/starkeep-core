@@ -10,9 +10,9 @@
  * server. `__tests__/api-routing.test.ts` drives this app instead, which is the
  * half no per-module test can cover.
  *
- * Drive served four read routes and no writes until the Trash arrived. Restore is
- * the one write, and it is a platform operation rather than an edit: a record's
- * fields stay immutable, and what moves is the tombstone.
+ * Drive's writes are platform operations rather than edits: a restore moves a
+ * tombstone, and a public link is a row in the cloud that names a record. A
+ * record's fields stay immutable.
  *
  * **Drive has no mount prefix and never will.** It carries no manifest,
  * installs nothing and never reaches Lambda, so there is no `/apps/<appId>` to
@@ -22,6 +22,7 @@
 import { Hono } from "hono";
 
 import * as events from "./routes/events";
+import * as publicLinks from "./routes/public-links";
 import * as records from "./routes/records";
 import * as recordFile from "./routes/record-file";
 import * as trash from "./routes/trash";
@@ -40,6 +41,11 @@ api.get("/types", () => types.GET());
 // Hono, which is what the handler needs — a record id is looked up as itself.
 api.get("/trash", () => trash.GET());
 api.post("/trash/:id/restore", (c) => trash.RESTORE(c.req.param("id")));
+// Public links to one file each. They live in the cloud; see the module.
+api.get("/public-links", () => publicLinks.GET());
+api.post("/public-links", (c) => publicLinks.POST(c.req.raw));
+api.patch("/public-links/:id", (c) => publicLinks.PATCH(c.req.raw, c.req.param("id")));
+api.delete("/public-links/:id", (c) => publicLinks.DELETE(c.req.param("id")));
 
 // An unrouted `/api/*` path is a mistake in the browser half, and saying so in
 // JSON keeps it from being parsed as the shell — which is what a fallback to

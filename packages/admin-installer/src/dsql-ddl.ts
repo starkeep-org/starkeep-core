@@ -340,7 +340,14 @@ export async function runAppInstallDdl(
       // an upgrade that drops `publicSharing` revokes it. Revoking leaves the
       // app's existing public shares in place but unreadable: the broker
       // checks this row on every items page and every owner route.
-      if (publicSharing) {
+      //
+      // Starkeep Drive is the exception. Its manifest cannot declare the
+      // capability (it has no cloud target), and the operator turns it on and
+      // off with admin-web's "Public Links" switch instead, so a Drive install
+      // leaves the row as the switch set it.
+      if (appId === USER_DATA_OWNER_APP_ID) {
+        // The admin-web switch owns this row.
+      } else if (publicSharing) {
         await db
           .insertInto("public_sharing.app_capabilities")
           .values({ app_id: appId })

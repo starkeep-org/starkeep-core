@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { fileLinkHref } from "@/lib/file-link";
+import {
+  LinksView,
+  ShareLinkDialog,
+  shareBlockedReason,
+  type CloudAvailability,
+  type PublicLinksState,
+} from "@/PublicLinks";
 
 type SyncStatus = "local-only" | "synced" | "modified-locally" | "cloud-only";
 
@@ -14,6 +21,7 @@ interface DriveRecord {
   mime_type?: string | null;
   object_storage_key?: string | null;
   sync_status: SyncStatus;
+  cloud_availability?: CloudAvailability | null;
 }
 
 interface DriveTypeSummary {
@@ -38,14 +46,20 @@ interface TrashPolicy {
   knows_library_value: boolean;
 }
 
-/** Which half of the library is on screen: what is here, or what has gone. */
-type View = "library" | "trash";
+/** Which part of the library is on screen: what is here, what has gone, or what is shared. */
+type View = "library" | "trash" | "links";
 
 const SYNC_LABEL: Record<SyncStatus, string> = {
   "local-only": "Local only",
   synced: "Synced",
   "modified-locally": "Modified locally",
   "cloud-only": "Cloud only",
+};
+
+/** The cloud's archive state, beside the sync status, when the original is not readable now. */
+const ARCHIVE_LABEL: Partial<Record<CloudAvailability, string>> = {
+  archived: "Archived",
+  restoring: "Restoring",
 };
 
 function formatBytes(n: number | null): string {
@@ -75,6 +89,17 @@ export function App() {
   const [trash, setTrash] = useState<TrashedRecord[]>([]);
   const [policy, setPolicy] = useState<TrashPolicy | null>(null);
   const [restoring, setRestoring] = useState<string | null>(null);
+  const [links, setLinks] = useState<PublicLinksState | null>(null);
+  const [sharing, setSharing] = useState<DriveRecord | null>(null);
+
+  const loadLinks = useCallback(() => {
+    fetch("/api/public-links")
+      .then((r) => r.json())
+      .then((d: PublicLinksState) => setLinks(d))
+      .catch((e: unknown) =>
+        setLinks({ available: false, reason: e instanceof Error ? e.message : String(e) }),
+      );
+  }, []);
 
   const loadTypes = useCallback(() => {
     fetch("/api/types")
@@ -151,9 +176,15 @@ export function App() {
   }, [loadTypes]);
 
   useEffect(() => {
-    if (view === "library") loadRecords();
-    else loadTrash();
+    if (view === "trash") loadTrash();
+    else loadRecords();
   }, [view, loadRecords, loadTrash]);
+
+  // Whether Drive may make links decides the row buttons, so the list loads
+  // with the page rather than with the Links view.
+  useEffect(() => {
+    loadLinks();
+  }, [loadLinks]);
 
   // Live updates: subscribe to the LDS /events stream (proxied same-origin at
   // /api/events) and re-fetch on each kick, so a record added underneath the
@@ -175,8 +206,8 @@ export function App() {
       loadTypesRef.current();
       // Only the half on screen: a kick is payload-less, so the page re-reads
       // whichever list the person is looking at rather than both.
-      if (viewRef.current === "library") loadRecordsRef.current({ silent: true });
-      else loadTrashRef.current({ silent: true });
+      if (viewRef.current === "trash") loadTrashRef.current({ silent: true });
+      else loadRecordsRef.current({ silent: true });
     };
     // The browser auto-reconnects an SSE source on transient errors; nothing to
     // do here beyond letting it.
@@ -190,7 +221,7 @@ export function App() {
         Everything you own across all your apps — including data from apps that aren&apos;t
         cloud-installed. Each row shows whether it lives only on this device, only in the cloud, or
         is synced to both. The Trash lists what you have deleted, when each item goes for good, and
-        lets you put one back.
+        lets you put one back. Links lists the files you have shared with a public link.
       </p>
 
       {cloud && !cloud.available && (
@@ -212,6 +243,15 @@ export function App() {
           onClick={() => setView("trash")}
         >
           Trash
+        </button>
+        <button
+          className={`chip${view === "links" ? " active" : ""}`}
+          onClick={() => {
+            setView("links");
+            loadLinks();
+          }}
+        >
+          Links
         </button>
       </div>
 
@@ -243,6 +283,19 @@ export function App() {
         <TrashView records={trash} policy={policy} restoring={restoring} onRestore={restore} />
       )}
 
+      {view === "links" && !error && !loading && (
+        <LinksView state={links} records={records} onChanged={loadLinks} />
+      )}
+
+      {sharing && (
+        <ShareLinkDialog
+          record={sharing}
+          mayPublish={links?.available === true && links.mayPublish}
+          onClose={() => setSharing(null)}
+          onCreated={loadLinks}
+        />
+      )}
+
       {view === "library" && !error && !loading && records.length === 0 && (
         <div className="notice">No shared records yet.</div>
       )}
@@ -258,6 +311,7 @@ export function App() {
               <th>From (origin app)</th>
               <th>Size</th>
               <th>Updated</th>
+              <th />
             </tr>
           </thead>
           <tbody>
@@ -267,10 +321,15 @@ export function App() {
               // records with no attached object. (See @/lib/file-link.)
               const name = r.original_filename ?? r.id;
               const href = fileLinkHref(r);
+              const archive = r.cloud_availability
+                ? ARCHIVE_LABEL[r.cloud_availability]
+                : undefined;
+              const blocked = links && !links.available ? links.reason : shareBlockedReason(r);
               return (
                 <tr key={r.id}>
                   <td>
                     <span className={`badge ${r.sync_status}`}>{SYNC_LABEL[r.sync_status]}</span>
+                    {archive && <span className="badge archived">{archive}</span>}
                   </td>
                   <td>{r.category ?? "—"}</td>
                   <td>{r.type || "—"}</td>
@@ -288,6 +347,16 @@ export function App() {
                   </td>
                   <td>{formatBytes(r.size_bytes ?? null)}</td>
                   <td>{r.updated_at ? new Date(r.updated_at).toLocaleString() : "—"}</td>
+                  <td>
+                    <button
+                      className="row-action"
+                      disabled={blocked !== null}
+                      title={blocked ?? undefined}
+                      onClick={() => setSharing(r)}
+                    >
+                      Share link…
+                    </button>
+                  </td>
                 </tr>
               );
             })}

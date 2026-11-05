@@ -575,6 +575,23 @@ describe("install DDL: the public-sharing capability", () => {
     );
   });
 
+  it("leaves Starkeep Drive's capability to the admin-web switch", async () => {
+    // Drive's manifest never declares the capability, so writing the row from
+    // it would revoke the switch on every Drive reinstall.
+    const ir = photosManifest.infraRequirements;
+    await runAppInstallDdl(
+      opts,
+      "starkeep-drive",
+      ir.fileAccess,
+      ir.fileAccessAll,
+      [],
+      false,
+      [],
+      false,
+    );
+    expect(stmts().some((t) => t.includes('"public_sharing"."app_capabilities"'))).toBe(false);
+  });
+
   it("revokes the capability on an install whose manifest no longer declares it", async () => {
     await install(false);
     const del = state.queries.find((q) =>

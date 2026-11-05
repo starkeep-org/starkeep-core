@@ -211,12 +211,14 @@ describe("shared/* — Part B signed shared bytes", () => {
     expect(behavior!.trustedKeyGroups?.length).toBeGreaterThan(0);
   });
 
-  it("excludes query strings from the cache key, or the edge never hits", () => {
+  it("keys the cache on the path and the download name alone, or the edge never hits", () => {
     // The signed-URL params (Expires/Signature/Key-Pair-Id) are validated by
     // CloudFront and then dropped from the cache key, so a freshly-signed URL
     // for an already-cached path still hits. `queryStringBehavior: "all"` would
     // keep every response correct and make Part B pointless — no test that only
     // re-fetches one signed URL can tell the difference, so assert it here.
+    // The one allowed parameter names a public direct link's download, and no
+    // other shared URL carries it.
     const behavior = behaviorFor("shared/*")!;
     const policy = created.find(
       (r) =>
@@ -226,11 +228,14 @@ describe("shared/* — Part B signed shared bytes", () => {
     expect(policy, "shared/* must use the custom path-keyed cache policy").toBeDefined();
 
     const params = policy!.inputs.parametersInCacheKeyAndForwardedToOrigin as {
-      queryStringsConfig: { queryStringBehavior: string };
+      queryStringsConfig: { queryStringBehavior: string; queryStrings?: { items: string[] } };
       headersConfig: { headerBehavior: string };
       cookiesConfig: { cookieBehavior: string };
     };
-    expect(params.queryStringsConfig.queryStringBehavior).toBe("none");
+    expect(params.queryStringsConfig).toEqual({
+      queryStringBehavior: "whitelist",
+      queryStrings: { items: ["response-content-disposition"] },
+    });
     // Headers/cookies in the cache key would fragment it the same way.
     expect(params.headersConfig.headerBehavior).toBe("none");
     expect(params.cookiesConfig.cookieBehavior).toBe("none");
