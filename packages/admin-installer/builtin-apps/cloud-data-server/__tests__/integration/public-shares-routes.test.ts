@@ -414,6 +414,22 @@ describe("a visitor of a public share", () => {
     expect((await visit(next.linkToken)).status).toBe(200);
   });
 
+  it("stops seeing a photo once the owner takes it out of the album", async () => {
+    const { original } = await albumWithOnePhoto();
+    const created = await share();
+    expect((await visit(created.linkToken)).body["items"]).toHaveLength(1);
+
+    const retracted = await call(A, "POST", "/data/labels/retract", {
+      labels: [{ recordId: original, key: "album", value: ALBUM }],
+    });
+    expect(retracted.status, JSON.stringify(retracted.body)).toBe(200);
+
+    const page = await visit(created.linkToken);
+    expect(page.status, page.raw).toBe(200);
+    expect(page.body["items"]).toEqual([]);
+    expect(page.raw).not.toContain(STAND_IN_HASH);
+  });
+
   it("gets no error and no wider page for a cursor it made up", async () => {
     // The cursor is the one free input. A malformed one cannot widen the
     // query: the album predicate and the owner scope are not in it.

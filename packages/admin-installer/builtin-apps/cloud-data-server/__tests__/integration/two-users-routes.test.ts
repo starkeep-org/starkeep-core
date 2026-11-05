@@ -864,6 +864,48 @@ describe("a mobile app through the broker", () => {
     expect(res.status).toBe(200);
     expect(res.body["records"]).toEqual([]);
   });
+
+  it("creates and stops a public link for its own app, as its user, and not on Drive's channel", async () => {
+    await registerPhotosMobile();
+    await pg.exec(`INSERT INTO public_sharing.app_capabilities (app_id) VALUES ('${PHOTOS}')`);
+    const phone = await phoneOf(A);
+    const album = { labelKey: "album", labelValue: "a".repeat(32), title: "Summer" };
+
+    const created = await phone.call("POST", "/data/public-shares", album, PHOTOS);
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const { id } = created.body["publicShare"] as { id: string };
+
+    // The share is A's: A's session lists it, and B's does not.
+    const listedByA = await call(A, "GET", "/data/public-shares", undefined, PHOTOS);
+    expect((listedByA.body["publicShares"] as Array<{ id: string }>).map((s) => s.id)).toEqual([
+      id,
+    ]);
+    const listedByB = await call(B, "GET", "/data/public-shares", undefined, PHOTOS);
+    expect(listedByB.body["publicShares"]).toEqual([]);
+
+    // The key may sync on Drive's channel, but publishes only as Photos.
+    const onDrive = await phone.call("POST", "/data/public-shares", album);
+    expect(onDrive.status).toBe(403);
+
+    const stopped = await phone.call("DELETE", `/data/public-shares/${id}`, undefined, PHOTOS);
+    expect(stopped.status, JSON.stringify(stopped.body)).toBe(200);
+    expect(
+      (await call(A, "GET", "/data/public-shares", undefined, PHOTOS)).body["publicShares"],
+    ).toEqual([]);
+  });
+
+  it("creates no public link for an app that was not approved to publish", async () => {
+    await registerPhotosMobile();
+    const phone = await phoneOf(A);
+    const res = await phone.call(
+      "POST",
+      "/data/public-shares",
+      { labelKey: "album", labelValue: "a".repeat(32), title: "Summer" },
+      PHOTOS,
+    );
+    expect(res.status).toBe(403);
+    expect(res.body["error"]).toMatch(/not approved to publish/);
+  });
 });
 
 /**

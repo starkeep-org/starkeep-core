@@ -95,9 +95,10 @@ export function validateManifest(raw: unknown): ValidationResult {
     );
   }
 
-  // A public share is served by the cloud's anonymous read path, and is created
-  // by a cloud session. A local-only app could declare it and never use it,
-  // and the install dialog would still ask the person to approve it.
+  // A public share lives in the cloud and is served by the cloud's anonymous
+  // read path, whichever device creates it. A local-only app could declare it
+  // and never use it, and the install dialog would still ask the person to
+  // approve it.
   if (manifest.infraRequirements.publicSharing && !manifest.targets.includes("cloud")) {
     errors.push(
       'infraRequirements.publicSharing is true but targets omits "cloud" — public links ' +

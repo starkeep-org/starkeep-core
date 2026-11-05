@@ -361,9 +361,10 @@ export const infraRequirementsSchema = z.object({
   /**
    * The app may publish records to public links: anyone holding the link sees
    * the stand-ins of the records a public share names, with no sign-in. The
-   * person approves it at install, and only the person's own session may
-   * create a public share; a device credential never can. Cloud only, since
-   * the anonymous read path is the cloud's.
+   * person approves it at install. The person may then create and manage a
+   * public share from any of their devices, through the cloud. Cloud only,
+   * since public shares live in the cloud and the anonymous read path is the
+   * cloud's.
    */
   publicSharing: z.boolean().default(false),
 });
