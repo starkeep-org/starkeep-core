@@ -549,7 +549,58 @@ describe("the label-key registry", () => {
   });
 });
 
+describe("install DDL: the public-sharing capability", () => {
+  function install(publicSharing: boolean) {
+    const ir = photosManifest.infraRequirements;
+    return runAppInstallDdl(
+      opts,
+      "photos",
+      ir.fileAccess,
+      ir.fileAccessAll,
+      ir.appSpecificSyncable.tables,
+      ir.appSpecificSyncable.files,
+      ir.labelKeys,
+      publicSharing,
+    );
+  }
+
+  it("records the capability when the manifest declares it", async () => {
+    await install(true);
+    const insert = state.queries.find((q) =>
+      q.text.includes('insert into "public_sharing"."app_capabilities"'),
+    );
+    expect(insert?.params).toEqual(["photos"]);
+    expect(stmts().some((t) => t.includes('delete from "public_sharing"."app_capabilities"'))).toBe(
+      false,
+    );
+  });
+
+  it("revokes the capability on an install whose manifest no longer declares it", async () => {
+    await install(false);
+    const del = state.queries.find((q) =>
+      q.text.includes('delete from "public_sharing"."app_capabilities"'),
+    );
+    expect(del?.text).toContain('where "app_id" =');
+    expect(del?.params).toEqual(["photos"]);
+  });
+});
+
 describe("uninstall DDL", () => {
+  it("deletes the app's public shares and its capability", async () => {
+    // A public link reads through the creating app's role, so with the app
+    // gone nothing could serve it, and a reinstall must not revive it.
+    const ir = photosManifest.infraRequirements;
+    await runAppUninstallDdl(opts, "photos", ir.fileAccess, ir.fileAccessAll);
+    for (const table of [
+      '"public_sharing"."public_shares"',
+      '"public_sharing"."app_capabilities"',
+    ]) {
+      const del = state.queries.find((q) => q.text.includes(`delete from ${table}`));
+      expect(del?.text).toContain('where "app_id" =');
+      expect(del?.params).toEqual(["photos"]);
+    }
+  });
+
   it("revokes grants, deletes registry rows, drops schema and role — shared tables survive", async () => {
     state.pgRoleExists = true;
     state.iamMappingExists = true;

@@ -391,6 +391,7 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
         ir.appSpecificSyncable.tables,
         ir.appSpecificSyncable.files,
         ir.labelKeys,
+        ir.publicSharing,
       );
     },
     { alwaysRun: true },

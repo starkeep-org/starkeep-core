@@ -798,6 +798,17 @@ export function buildCloudDataServerProgram(
       target: pulumi.interpolate`integrations/${integration.id}`,
     });
 
+    // A public share's items page, for anyone holding the link. No authorizer:
+    // the link token is the credential, and the handler checks it before it
+    // assumes any role. Outside /apps/*, so the post-install probe of an
+    // app's data mount (which fails an install when anything there answers
+    // anonymously) never sees it, and no app route can shadow it.
+    new aws.apigatewayv2.Route("route-public-share-items", {
+      apiId: api.id,
+      routeKey: "GET /public-shares/{linkToken}/items",
+      target: pulumi.interpolate`integrations/${integration.id}`,
+    });
+
     // The deployment's settings. The handler answers for Starkeep Drive only,
     // before any role is assumed.
     new aws.apigatewayv2.Route("route-deployment-settings", {
@@ -939,6 +950,10 @@ export function buildCloudDataServerProgram(
   if (/^\\/(data|files|sync|app-data|health)(\\/|$)/.test(rest)) return request;
   // Sign-in needs the pool ids before it can render.
   if (rest === "/starkeep-runtime-config") return request;
+  // An app's public-share viewer, reserved at /p/ in every app. A visitor
+  // holds a link, never a session, and must reach the viewer rather than the
+  // owner's sign-in page.
+  if (rest.indexOf("/p/") === 0) return request;
 
   // Only a navigation. An expired XHR must get the origin's 401, not an HTML
   // sign-in page it will try to parse as JSON.
@@ -1057,6 +1072,29 @@ export function buildCloudDataServerProgram(
       },
     );
 
+    // Public-share items pages: a minute at the edge, keyed by path and query
+    // string, so the link token (path) and the cursor (query) both separate
+    // entries and a burst of refreshes costs one invocation per page per
+    // minute. The minute is also how long a revoked link keeps answering
+    // from the edge. No headers or cookies: the route reads neither.
+    const publicSharesCachePolicy = new aws.cloudfront.CachePolicy(
+      `${ctx.stackPrefix}-public-shares-cache`,
+      {
+        name: `${ctx.stackPrefix}-public-shares-cache`,
+        comment: "One-minute caching for public-share items pages",
+        minTtl: 0,
+        defaultTtl: 60,
+        maxTtl: 60,
+        parametersInCacheKeyAndForwardedToOrigin: {
+          enableAcceptEncodingGzip: true,
+          enableAcceptEncodingBrotli: true,
+          queryStringsConfig: { queryStringBehavior: "all" },
+          headersConfig: { headerBehavior: "none" },
+          cookiesConfig: { cookieBehavior: "none" },
+        },
+      },
+    );
+
     const filesOriginId = "shared-files-s3";
 
     const distribution = new aws.cloudfront.Distribution(`${ctx.stackPrefix}-cdn`, {
@@ -1113,6 +1151,18 @@ export function buildCloudDataServerProgram(
           cachedMethods: ["GET", "HEAD"],
           cachePolicyId: sharedFilesCachePolicy.id,
           trustedKeyGroups: [keyGroup.id],
+          compress: true,
+        },
+        {
+          // Public-share items pages. Anonymous by design: no trusted key
+          // group and no signed-out redirect, which would send a visitor to
+          // a sign-in page they have no account for.
+          pathPattern: "/public-shares/*",
+          targetOriginId: gatewayOriginId,
+          viewerProtocolPolicy: "redirect-to-https",
+          allowedMethods: ["GET", "HEAD"],
+          cachedMethods: ["GET", "HEAD"],
+          cachePolicyId: publicSharesCachePolicy.id,
           compress: true,
         },
       ],

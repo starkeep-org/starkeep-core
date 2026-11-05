@@ -48,6 +48,7 @@ A platform component, deployed as a built-in app during Phase 2. It is the data 
 - It exposes a uniform request shape that covers both **shared-data** operations (records + type metadata + files) and **app-specific syncable** operations on behalf of the calling app.
 - It authenticates the **user** on every data call, as well as the calling app. Three kinds of caller reach it: an app's own server, which signs with the app's secret and forwards the user's token; a signed-in computer, through its local-data-server and a device token; and a mobile app, with a mobile token and a request signature by a key attested to that app. The user named by the token is the user whose library the request reads and writes.
 - It serves the sign-in routes for cloud apps (`/auth/*`). A person signs in on Cognito's managed login page, and the cloud-data-server sets the app's session cookies, so no app code ever receives a password.
+- It serves **public shares**, the one read that names no user. A person creates a public share from an app approved to publish them, naming one of the app's labels, such as a Photos album. Anyone holding the link reads `/public-shares/<linkToken>/items`, and the cloud-data-server answers with signed URLs to the stand-ins of the labelled records, never to an original. See "A public share's visitor" in `data-roles-and-permissions.md`.
 
 ### Apps (e.g. photos)
 
@@ -199,6 +200,8 @@ A request from an app's client to read or write a shared item, in steady state, 
 4. Writes update `shared.records`, the relevant per-category metadata table, and the file in `shared/<userId>/<category>/...`. Reads return a record + metadata + file URL/contents tuple.
 
 For an **app-specific** operation the same shape applies, but the operation targets the app's own schema and filespace: `app_<appId>.<table>` and `apps/<appId>/<userId>/syncable/...`. No other app can see the result; sync only carries it to other locations where the same app is installed.
+
+A **public share** reverses the first step. A visitor's browser calls `/public-shares/<linkToken>/items` with no session, and the cloud-data-server finds the share by its token, assumes the creating app's role tagged with the owner, and reads the album's members and their stand-ins through the owner-scoped adapter. The browser then fetches the stand-ins from CloudFront's `shared/*` behavior with the signed URLs the page carried.
 
 For **sync**, the local-data-server and cloud-data-server perform a single `/sync/exchange` round per channel: each side advertises its per-replica HLC watermarks and ships the records and app-syncable rows it believes the other hasn't seen. A phone runs the same round on the same channels. Both record changes and app-syncable rows are synthesized inline by scanning the respective tables on `updated_at > watermark[nodeId]` — no client-side change-log outbox is involved. Per-record origin-app re-attribution happens inside the cloud-data-server, not at the sync API boundary — the local-data-server does not carry AWS credentials and is not the writer of cloud bytes.
 

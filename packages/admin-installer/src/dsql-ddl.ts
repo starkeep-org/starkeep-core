@@ -186,6 +186,7 @@ export async function runAppInstallDdl(
   appSyncableTables: SyncableTable[] = [],
   appSyncableFilesEnabled: boolean = false,
   labelKeys: LabelKey[] = [],
+  publicSharing: boolean = false,
 ): Promise<void> {
   const pgRole = appIdToPgRole(opts.stackPrefix, appId);
   // Every statement below is idempotent (IF [NOT] EXISTS, probe-then-act,
@@ -333,6 +334,23 @@ export async function runAppInstallDdl(
           );
         }
         await stale.execute();
+      }
+
+      // The approved public-sharing capability. Written on every install, so
+      // an upgrade that drops `publicSharing` revokes it. Revoking leaves the
+      // app's existing public shares in place but unreadable: the broker
+      // checks this row on every items page and every owner route.
+      if (publicSharing) {
+        await db
+          .insertInto("public_sharing.app_capabilities")
+          .values({ app_id: appId })
+          .onConflict((oc) => oc.column("app_id").doNothing())
+          .execute();
+      } else {
+        await db
+          .deleteFrom("public_sharing.app_capabilities")
+          .where("app_id", "=", appId)
+          .execute();
       }
 
       // App-specific syncable tables under the app's private schema.
@@ -604,6 +622,12 @@ export async function runAppUninstallDdl(
       // explicit admin action, not a side effect of uninstall.
       await db.deleteFrom("shared.app_label_keys").where("app_id", "=", appId).execute();
       await db.deleteFrom("shared.app_syncable_namespaces").where("app_id", "=", appId).execute();
+      // Unlike labels, an app's public shares do not outlive it. A public link
+      // reads through the creating app's role and grants, so with the app gone
+      // nothing could serve the link, and a reinstall must not bring back a
+      // link the person may have forgotten.
+      await db.deleteFrom("public_sharing.public_shares").where("app_id", "=", appId).execute();
+      await db.deleteFrom("public_sharing.app_capabilities").where("app_id", "=", appId).execute();
       await sql`DROP SCHEMA IF EXISTS ${sql.raw(schemaName)} CASCADE`.execute(db);
 
       // Revoke the DSQL-side IAM mapping before DROP ROLE — DROP ROLE fails if

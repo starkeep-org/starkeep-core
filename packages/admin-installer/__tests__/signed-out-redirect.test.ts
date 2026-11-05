@@ -146,6 +146,16 @@ describe("passes through", () => {
     expect(handler({ request: r })).toBe(r);
   });
 
+  it("an app's public-share viewer, which a visitor opens with a link and no session", () => {
+    const r = req("/apps/photos/p/abcdefghijklmnopqrstuv", { dest: "document" });
+    expect(handler({ request: r })).toBe(r);
+  });
+
+  it("only the viewer's own prefix, not a page that merely starts with p", () => {
+    const res = handler({ request: req("/apps/photos/people", { dest: "document" }) });
+    expect(isRedirect(res)).toBe(true);
+  });
+
   it("an XHR, which must get the origin's 401 rather than an HTML page", () => {
     // An expired data call handed a sign-in page parses it as a corrupt
     // response instead of as "you are signed out".
@@ -156,7 +166,13 @@ describe("passes through", () => {
   });
 
   it("anything outside /apps/<appId>", () => {
-    for (const uri of ["/", "/health", "/shared/image/ab/hash", "/apps"]) {
+    for (const uri of [
+      "/",
+      "/health",
+      "/shared/image/ab/hash",
+      "/apps",
+      "/public-shares/x/items",
+    ]) {
       const r = req(uri, { dest: "document" });
       expect(handler({ request: r }), uri).toBe(r);
     }

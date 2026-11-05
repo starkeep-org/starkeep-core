@@ -26,8 +26,10 @@
  * Owned tables: `shared.records`, `shared.record_labels`,
  * `shared.object_availability`, the two `shared.node_watermarks_*` tables,
  * every `shared.record_<category>_metadata`, and every table in an app's
- * `app_<appId>` schema. The registry, the grants and
- * the label-key declarations belong to the deployment and stay unscoped.
+ * `app_<appId>` schema. The registry, the grants, the label-key declarations
+ * and the `public_sharing` schema belong to the deployment and stay unscoped.
+ * A public share is found by its link token before its owner is known, so the
+ * broker checks `owner_user_id` itself on every owner route.
  *
  * See `~/projects/starkeep/plan-multi-user-roles-2026-10-16.md`, steps 4.2–4.4.
  */

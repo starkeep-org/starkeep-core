@@ -40,6 +40,7 @@ import * as execDeployOutputs from "./routes/exec-deploy-outputs";
 import * as execStream from "./routes/exec-stream";
 import * as runtimeConfig from "./routes/runtime-config";
 import * as standIns from "./routes/stand-ins";
+import * as publicShares from "./routes/public-shares";
 
 export const api = new Hono().basePath("/api");
 
@@ -48,6 +49,9 @@ api.get("/apps/list", () => appsList.GET());
 api.post("/apps/install", (c) => appsInstall.POST(c.req.raw));
 api.post("/apps/uninstall", (c) => appsUninstall.POST(c.req.raw));
 api.post("/apps/cloud/list", (c) => appsCloudList.POST(c.req.raw));
+// Every public link in the deployment, and turning one off.
+api.post("/public-shares/list", (c) => publicShares.list(c.req.raw));
+api.post("/public-shares/revoke", (c) => publicShares.revoke(c.req.raw));
 // `:appId` before the two static `/apps/*` routes above would swallow them, so
 // the static paths are declared first and Hono's router prefers them anyway —
 // stated in both places rather than relying on either alone.

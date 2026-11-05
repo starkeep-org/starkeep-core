@@ -7,7 +7,13 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { ChevronDownIcon } from "lucide-react";
 import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
 import { ACTION_OCCASIONAL, ACTION_OPEN, ACTION_START } from "@/lib/action-colors";
-import type { DaemonStatus, InstallStep, LocalAppEntry, ManifestSummary } from "@/lib/app-types";
+import {
+  publicSharingConsent,
+  type DaemonStatus,
+  type InstallStep,
+  type LocalAppEntry,
+  type ManifestSummary,
+} from "@/lib/app-types";
 import {
   draftOf,
   draftProblems,
@@ -599,6 +605,13 @@ function ConsentModal({
               );
             })}
           </ul>
+        )}
+
+        {publicSharingConsent(entry.manifest) && (
+          <div className="border rounded-md p-3 text-sm flex flex-col gap-1">
+            <span className="font-medium">Public links</span>
+            <span className="text-muted-foreground">{publicSharingConsent(entry.manifest)}</span>
+          </div>
         )}
 
         {quality && (

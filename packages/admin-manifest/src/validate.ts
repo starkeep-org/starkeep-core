@@ -95,6 +95,16 @@ export function validateManifest(raw: unknown): ValidationResult {
     );
   }
 
+  // A public share is served by the cloud's anonymous read path, and is created
+  // by a cloud session. A local-only app could declare it and never use it,
+  // and the install dialog would still ask the person to approve it.
+  if (manifest.infraRequirements.publicSharing && !manifest.targets.includes("cloud")) {
+    errors.push(
+      'infraRequirements.publicSharing is true but targets omits "cloud" — public links ' +
+        "are served by the cloud",
+    );
+  }
+
   // Label keys are the app's published schema, so a duplicate is a manifest
   // authoring mistake rather than something to silently dedup: the registry's
   // primary key is (app_id, key), so a second row would be dropped and the
