@@ -343,8 +343,8 @@ export async function runAppInstallDdl(
       //
       // Starkeep Drive is the exception. Its manifest cannot declare the
       // capability (it has no cloud target), and the operator turns it on and
-      // off with admin-web's "Public Links" switch instead, so a Drive install
-      // leaves the row as the switch set it.
+      // off with the "Enable sharing" checkbox on admin-web's Drive card
+      // instead, so a Drive install leaves the row as the checkbox set it.
       if (appId === USER_DATA_OWNER_APP_ID) {
         // The admin-web switch owns this row.
       } else if (publicSharing) {
