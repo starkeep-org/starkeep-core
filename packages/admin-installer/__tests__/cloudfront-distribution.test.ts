@@ -217,8 +217,8 @@ describe("shared/* — Part B signed shared bytes", () => {
     // for an already-cached path still hits. `queryStringBehavior: "all"` would
     // keep every response correct and make Part B pointless — no test that only
     // re-fetches one signed URL can tell the difference, so assert it here.
-    // The one allowed parameter names a public direct link's download, and no
-    // other shared URL carries it.
+    // The two allowed parameters pin a public direct link's type and name its
+    // download, and no other shared URL carries them.
     const behavior = behaviorFor("shared/*")!;
     const policy = created.find(
       (r) =>
@@ -234,7 +234,7 @@ describe("shared/* — Part B signed shared bytes", () => {
     };
     expect(params.queryStringsConfig).toEqual({
       queryStringBehavior: "whitelist",
-      queryStrings: { items: ["response-content-disposition"] },
+      queryStrings: { items: ["response-content-type", "response-content-disposition"] },
     });
     // Headers/cookies in the cache key would fragment it the same way.
     expect(params.headersConfig.headerBehavior).toBe("none");

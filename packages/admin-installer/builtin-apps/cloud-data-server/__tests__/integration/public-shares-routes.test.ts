@@ -10,7 +10,7 @@
  * revocation and link replacement each stop the old link.
  *
  * Record shares name one record. Photos' record share shows one stand-in;
- * Starkeep Drive's direct link (`GET /public-shares/<token>/file`) redirects
+ * Starkeep Drive's direct link (`GET /public-shares/<token>/file/<name>`) redirects
  * to a file's original, or to a photo's or a video's stand-in or original as
  * the share says, and never to an archived or missing original.
  *
@@ -236,7 +236,7 @@ async function visit(linkToken: string, cursor?: string) {
 async function visitFile(linkToken: string) {
   const res = await handler(
     {
-      rawPath: `/public-shares/${linkToken}/file`,
+      rawPath: `/public-shares/${linkToken}/file/notes.md`,
       requestContext: { http: { method: "GET" } },
       headers: {},
     },
@@ -642,13 +642,18 @@ describe("a record share", () => {
     expect((await pg.query("SELECT * FROM public_sharing.public_shares")).rows).toEqual([]);
   });
 
-  it("from Drive serves a photo's largest stand-in by default", async () => {
+  it("from Drive serves a photo's largest stand-in by default, named in its own format", async () => {
     const { original } = await albumWithOnePhoto();
     const created = made(await shareRecord(DRIVE, original));
     expect(created.serves).toBe("stand-in");
     const file = await visitFile(created.linkToken);
     expect(file.status).toBe(302);
-    expect(file.headers["Location"]).toContain(STAND_IN_HASH);
+    const location = new URL(file.headers["Location"]!);
+    expect(location.pathname).toContain(STAND_IN_HASH);
+    expect(location.searchParams.get("response-content-type")).toBe("image/avif");
+    expect(location.searchParams.get("response-content-disposition")).toMatch(
+      /^inline; filename="Beach\.avif"/,
+    );
   });
 
   it("from Drive serves a photo's original when asked, named after the title", async () => {
@@ -659,8 +664,9 @@ describe("a record share", () => {
     expect(file.status, file.raw).toBe(302);
     const location = new URL(file.headers["Location"]!);
     expect(location.pathname).toBe(`/${ORIGINAL_KEY}`);
-    expect(location.searchParams.get("response-content-disposition")).toContain(
-      'filename="Beach.jpg"',
+    expect(location.searchParams.get("response-content-type")).toBe("image/jpeg");
+    expect(location.searchParams.get("response-content-disposition")).toMatch(
+      /^inline; filename="Beach\.jpg"/,
     );
     // The items page still never signs the original, whatever the share says.
     const page = await visit(created.linkToken);
@@ -719,12 +725,35 @@ describe("a record share", () => {
     expect(file.status, file.raw).toBe(302);
     const location = new URL(file.headers["Location"]!);
     expect(location.pathname).toBe(`/${PDF_KEY}`);
-    expect(location.searchParams.get("response-content-disposition")).toContain(
-      'filename="Trip notes.pdf"',
+    expect(location.searchParams.get("response-content-type")).toBe("application/pdf");
+    expect(location.searchParams.get("response-content-disposition")).toMatch(
+      /^inline; filename="Trip notes\.pdf"/,
     );
     // A file has nothing to show on the items page.
     expect((await visit(created.linkToken)).body["items"]).toEqual([]);
   });
+
+  it.each([
+    ["an SVG", "image/svg", "image/svg+xml", "drawing.svg"],
+    ["an HTML file", "document/html", "text/html", "page.html"],
+  ])(
+    "from Drive downloads %s as an opaque file, so its script never runs on this origin",
+    async (_, type, contentType, fileName) => {
+      const id = await register(
+        A,
+        { type, contentType, contentHash: "4".repeat(64), sizeBytes: 2_000, fileName },
+        DRIVE,
+      );
+      const created = made(await shareRecord(DRIVE, id, { serves: "original", title: fileName }));
+      const file = await visitFile(created.linkToken);
+      expect(file.status, file.raw).toBe(302);
+      const location = new URL(file.headers["Location"]!);
+      expect(location.searchParams.get("response-content-type")).toBe("application/octet-stream");
+      expect(location.searchParams.get("response-content-disposition")).toMatch(
+        new RegExp(`^attachment; filename="${fileName.replace(".", "\\.")}"`),
+      );
+    },
+  );
 
   it("is listed by its record, and answers its source", async () => {
     const id = await pdf();
@@ -793,6 +822,42 @@ describe("a record share", () => {
     expect(file.status).toBe(409);
     expect(file.raw).toContain("This file is archived.");
     expect(file.raw).not.toContain(ORIGINAL_HASH);
+  });
+
+  it("tells a visitor a photo is still uploading, rather than gone", async () => {
+    // Hashes of their own: a warm Lambda remembers a key once seen present.
+    const original = await register(A, {
+      type: "image/jpeg",
+      contentType: "image/jpeg",
+      contentHash: "5".repeat(64),
+      sizeBytes: 3_000_000,
+      fileName: "late.jpg",
+      fidelity: 4000,
+      metadata: { width: 4000, height: 3000 },
+    });
+    await register(A, {
+      type: "image/avif",
+      contentType: "image/avif",
+      contentHash: "6".repeat(64),
+      sizeBytes: 300_000,
+      fileName: "late-2560.avif",
+      parentId: original,
+      standIn: { role: "smaller", fidelity: 2560 },
+    });
+    const created = made(await shareRecord(PHOTOS, original));
+    s3Mock
+      .on(HeadObjectCommand)
+      .rejects(Object.assign(new Error("NotFound"), { name: "NotFound" }));
+    const waiting = await visit(created.linkToken);
+    expect(waiting.status, waiting.raw).toBe(200);
+    expect(waiting.body["items"]).toEqual([]);
+    expect(waiting.body["pending"]).toBe(1);
+
+    const deleted = await call(A, "DELETE", `/data/records/${original}`);
+    expect(deleted.status, JSON.stringify(deleted.body)).toBeLessThan(300);
+    const gone = await visit(created.linkToken);
+    expect(gone.body["items"]).toEqual([]);
+    expect(gone.body["pending"]).toBe(0);
   });
 
   it("answers not uploaded for a file whose bytes are still on a device", async () => {

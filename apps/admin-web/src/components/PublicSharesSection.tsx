@@ -20,6 +20,10 @@ interface PublicShareView {
   readonly id: string;
   readonly appId: string;
   readonly ownerUserId: string;
+  readonly source:
+    | { readonly kind: "label"; readonly key: string; readonly value: string }
+    | { readonly kind: "record"; readonly recordId: string };
+  readonly serves: "stand-in" | "original";
   readonly title: string;
   readonly createdAtMs: number;
   readonly expiresAtMs: number | null;
@@ -49,6 +53,16 @@ export async function postAsOperator(
   const body = (await res.json()) as { error?: string };
   if (!res.ok) throw new Error(body.error ?? `${path} failed: ${res.status}`);
   return body;
+}
+
+/**
+ * What a link shows: one record or a label's records, and whether a visitor
+ * gets an original. A label's link always serves stand-ins, and a file's link
+ * always serves its original, because a file has no stand-in.
+ */
+export function sharesText(share: Pick<PublicShareView, "source" | "serves">): string {
+  if (share.source.kind === "label") return `Label ${share.source.key}, stand-ins`;
+  return share.serves === "original" ? "One file, original" : "One file, stand-in";
 }
 
 /** "Expires 12 Nov 2026", "Expired", or "Never expires". */
@@ -128,7 +142,8 @@ export function PublicSharesSection() {
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium">{share.title}</p>
                   <p className="text-xs text-muted-foreground">
-                    {share.appId} · owner {share.ownerUserId} · {expiryText(share.expiresAtMs, now)}
+                    {share.appId} · {sharesText(share)} · owner {share.ownerUserId} ·{" "}
+                    {expiryText(share.expiresAtMs, now)}
                   </p>
                 </div>
                 <Button

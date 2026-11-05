@@ -32,7 +32,7 @@ const mocks = vi.hoisted(() => {
 
 vi.mock("../src/lib/drive-client", () => mocks);
 
-import { cloudBaseUrl, DELETE, GET, PATCH, POST } from "../src/routes/public-links";
+import { cloudBaseUrl, DELETE, GET, linkFileName, PATCH, POST } from "../src/routes/public-links";
 
 const SHARE_ID = "0b9c7c58-6a43-4b37-9f6e-0f5f1a7c2a11";
 
@@ -128,9 +128,9 @@ describe("POST /api/public-links", () => {
       lifetime: "7d",
     });
     const { link } = (await res.json()) as { link: { url: string | null } };
-    expect(link.url === null || link.url.endsWith(`/public-shares/${"T".repeat(22)}/file`)).toBe(
-      true,
-    );
+    expect(
+      link.url === null || link.url.endsWith(`/public-shares/${"T".repeat(22)}/file/Trip%20notes`),
+    ).toBe(true);
   });
 
   it("defaults to the stand-in", async () => {
@@ -187,5 +187,18 @@ describe("PATCH and DELETE /api/public-links/:id", () => {
   it("stop sharing", async () => {
     mocks.deletePublicShare.mockResolvedValue(undefined);
     expect(await (await DELETE(SHARE_ID)).json()).toEqual({ deleted: SHARE_ID });
+  });
+});
+
+describe("linkFileName", () => {
+  it("names the file in the link's last segment", () => {
+    expect(linkFileName("Trip notes.pdf")).toBe("Trip%20notes.pdf");
+    expect(linkFileName("Fête.jpg")).toBe("F%C3%AAte.jpg");
+  });
+
+  it("keeps the name to one path segment", () => {
+    expect(linkFileName("a/b\\c")).toBe("a-b-c");
+    expect(linkFileName("x?y#z")).toBe("x%3Fy%23z");
+    expect(linkFileName("  ")).toBe("file");
   });
 });

@@ -811,9 +811,10 @@ export function buildCloudDataServerProgram(
 
     // A record share's direct link: a redirect to one signed file. Anonymous
     // for the same reason as the items page, and outside /apps/* likewise.
+    // The last segment names the file for a recipient; the handler ignores it.
     new aws.apigatewayv2.Route("route-public-share-file", {
       apiId: api.id,
-      routeKey: "GET /public-shares/{linkToken}/file",
+      routeKey: "GET /public-shares/{linkToken}/file/{fileName}",
       target: pulumi.interpolate`integrations/${integration.id}`,
     });
 
@@ -1073,14 +1074,17 @@ export function buildCloudDataServerProgram(
         parametersInCacheKeyAndForwardedToOrigin: {
           enableAcceptEncodingGzip: true,
           enableAcceptEncodingBrotli: true,
-          // One parameter only: a public direct link names its download with
+          // Two parameters only: a public direct link pins the file's type
+          // and names its download with `response-content-type` and
           // `response-content-disposition`, which S3 honours on the signed
-          // origin request. Every other shared URL carries none, so its cache
-          // key stays the path alone. CloudFront strips its own signature
-          // parameters before the cache key either way.
+          // origin request. Every other shared URL carries neither, so its
+          // cache key stays the path alone. CloudFront strips its own
+          // signature parameters before the cache key either way.
           queryStringsConfig: {
             queryStringBehavior: "whitelist",
-            queryStrings: { items: ["response-content-disposition"] },
+            queryStrings: {
+              items: ["response-content-type", "response-content-disposition"],
+            },
           },
           headersConfig: { headerBehavior: "none" },
           cookiesConfig: { cookieBehavior: "none" },
