@@ -2,9 +2,9 @@
  * Every public link in the deployment, across apps and people, each one
  * revocable.
  *
- * A public link shows an album's photos to anyone holding it. People create
- * and manage their own from the app; this list is the operator's audit of all
- * of them. "Turn off" deletes the link: new visits fail at once, and pages
+ * A public link shows an app's labelled records, such as a Photos album, to
+ * anyone holding it. People create and manage their own from the app; this
+ * list is the operator's audit of all of them. "Turn off" deletes the link: new visits fail at once, and pages
  * the edge already cached stop within a minute.
  */
 

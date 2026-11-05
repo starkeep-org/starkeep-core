@@ -1,10 +1,12 @@
 /**
- * Public shares: a link anyone may open, showing the stand-ins of one album.
+ * Public shares: a link anyone may open, showing the stand-ins of the records
+ * that carry one app label.
  *
  * A public share names an app label, `(app_id, label_key, label_value)`, and
  * the records carrying it are its members, resolved when a visitor asks. The
- * share copies nothing, so a photo added to the album appears on the next
- * page, and a photo deleted from the library leaves it.
+ * share copies nothing, so a record labelled later appears on the next page,
+ * and a record deleted or unlabelled leaves it. Photos' albums are the first
+ * use: an album is the `photos/album` label with the album's id.
  *
  * What a visitor may reach is fixed here and nowhere else:
  *
@@ -72,7 +74,7 @@ export const PUBLIC_SHARE_PAGE_SIZE = 60;
  * Members one public share shows at most.
  *
  * Membership lives in the reverse label index, which orders by record id, and
- * a visitor expects capture order. So each page reads the album's whole
+ * a visitor expects capture order. So each page reads the label's whole
  * membership from the index (index-only, cheap) and lets one records query
  * order and page it. The cap bounds that read and the IN-list it feeds.
  */
@@ -426,7 +428,7 @@ export interface PublicSharePage {
    */
   readonly displayFiles: ReadonlyArray<{ key: string; updatedAt: DataRecord["updatedAt"] }>;
   readonly nextCursor: string | null;
-  /** Whether the album holds more members than one public share shows. */
+  /** Whether the label has more members than one public share shows. */
   readonly truncated: boolean;
 }
 
