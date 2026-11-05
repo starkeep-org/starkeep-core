@@ -304,12 +304,14 @@ const PLATFORM_CATEGORY = typeCategory(SETTINGS_TYPE_ID);
  * That is health, the deployment's settings, the exchange and the file routes
  * the object-storage adapter calls, plus a read-only view of the cloud's
  * records, which Drive's UI shows beside the local view through the local data
- * server. One device client serves desktops and phones, so a phone holds the
- * same list.
+ * server, and the owner's public-share routes, so a person can publish an album
+ * from any device. One device client serves desktops and phones, so a phone
+ * holds the same list.
  *
  * The desktop list comes from an audit of every cloud call the local data
  * server makes: its supervisor's transports, its object-storage adapters, its
- * settings read and its `/cloud/data/*` proxy.
+ * settings read, its `/cloud/data/*` proxy and its `/data/public-shares`
+ * forward.
  *
  * Writes that these routes allow are checked separately for the platform
  * category: see {@link deviceWriteRefusal}.
@@ -324,7 +326,13 @@ export function deviceMayCall(method: string, subPath: string): boolean {
   if (method === "GET" && (subPath === "/data/types" || subPath === "/data/records")) {
     return true;
   }
+  if (isPublicSharesPath(subPath)) return ["GET", "POST", "PATCH", "DELETE"].includes(method);
   return false;
+}
+
+/** The owner's public-share routes: the collection and one share. */
+function isPublicSharesPath(subPath: string): boolean {
+  return subPath === "/data/public-shares" || /^\/data\/public-shares\/[^/]+$/.test(subPath);
 }
 
 /**
@@ -2982,6 +2990,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       if (!deviceMayCall(method, subPath)) {
         return clientErr(`A mobile app may not call ${method} ${subPath}`, 403);
       }
+      // A key may sync on Drive's channel too, but it publishes only as the
+      // app that attested it.
+      if (isPublicSharesPath(subPath) && appId !== record.appId) {
+        return clientErr(`A mobile app manages ${record.appId}'s public links only`, 403);
+      }
       const writeRefusal = deviceWriteRefusal(method, subPath, bodyBytes);
       if (writeRefusal) return clientErr(writeRefusal, 403);
       if (appId !== DRIVE_APP_ID) {
@@ -3707,15 +3720,15 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     //   PATCH  /<id> { title?, lifetime?, rotateLink? }     change
     //   DELETE /<id>                                        stop sharing
     //
-    // A person's session only. A signed-in device or a mobile app never
-    // reaches these (`deviceMayCall` refuses them too), so a stolen device
-    // cannot publish a library. Creating or changing a share also needs the
-    // capability the person approved at install; listing and deleting do not,
-    // so an app that lost it can still be cleaned up after.
+    // Any of the owner's callers: a session through the app's server, a
+    // signed-in desktop through its local data server, or a mobile app for its
+    // own app (the gate refuses one on another app's channel). A stolen device can therefore publish, and the owner's answer
+    // is "Sign out everywhere", which stops it within one ID-token lifetime.
+    // The device already holds the library it would publish, and a share shows
+    // stand-ins only. Creating or changing a share also needs the capability
+    // the person approved at install; listing and deleting do not, so an app
+    // that lost it can still be cleaned up after.
     if (subPath === "/data/public-shares" || subPath.startsWith("/data/public-shares/")) {
-      if (mobileKey || signedInDevice) {
-        return clientErr("Public links are managed from a signed-in session only", 403);
-      }
       const owner = { appId, userId: subject.userId };
       const shareId = subPath.slice("/data/public-shares/".length) || null;
       if (shareId !== null && !/^[0-9a-f-]{36}$/.test(shareId)) {

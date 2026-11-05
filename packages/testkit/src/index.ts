@@ -11,6 +11,7 @@ export {
   type FakeCloud,
   type FakeCloudFailures,
   type FakeCloudExchangeLogEntry,
+  type FakePublicShare,
 } from "./fake-cloud.js";
 export {
   FAKE_POOL_ID,

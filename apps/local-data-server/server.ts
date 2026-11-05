@@ -1669,28 +1669,21 @@ async function main() {
         return;
       }
 
-      // GET /cloud/data/types and /cloud/data/records — read-only proxy to the
-      // cloud-data-server, with this machine's sign-in as the caller. The app
-      // (e.g. starkeep-drive) authenticates to *us* with its local HMAC as
-      // usual; we then present this machine's device token for the cloud,
-      // exactly as the sync supervisor does (sync-supervisor.ts →
-      // makeSignerFor). The cloud lets a signed-in device read these two routes
-      // and enforces the app's grants on them, so this exposes no data the app
-      // couldn't already sync. Lets the Drive UI show the cloud-side view (what
-      // actually pushed) next to the local view.
-      if (path === "/cloud/data/types" || path === "/cloud/data/records") {
-        if (req.method !== "GET") {
-          res.writeHead(405);
-          json(res, { error: "Method not allowed" });
-          return;
-        }
+      // A request forwarded to the cloud-data-server, with this machine's
+      // sign-in as the caller. The app authenticates to *us* with its local
+      // HMAC as usual; we then present this machine's device token for the
+      // cloud, exactly as the sync supervisor does (sync-supervisor.ts →
+      // makeSignerFor), on the calling app's own channel. The cloud lets a
+      // signed-in device reach a short list of routes (`deviceMayCall`) and
+      // applies the app's grants on each.
+      const forwardToCloud = async (subPath: string, body?: string): Promise<void> => {
         if (!CLOUD_URL) {
           res.writeHead(503);
           json(res, { error: "Cloud is not configured (no apiGatewayUrl / STARKEEP_CLOUD_URL)" });
           return;
         }
         // Refuse here rather than forward a request that can only come back
-        // 401, so the Drive UI says why instead of quoting a status.
+        // 401, so the app says why instead of quoting a status.
         const tokens = syncAllowed() ? activeTokenSource() : null;
         if (!tokens) {
           res.writeHead(503);
@@ -1699,7 +1692,6 @@ async function main() {
           });
           return;
         }
-        const subPath = path.slice("/cloud".length); // "/data/types" | "/data/records"
         // The device token alone, as the sync channels send it.
         const token = await tokens.current();
         if (!token) {
@@ -1708,9 +1700,14 @@ async function main() {
           return;
         }
         const cloudHeaders: Record<string, string> = { [USER_TOKEN_HEADER]: token };
+        if (body !== undefined) cloudHeaders["Content-Type"] = "application/json";
         const cloudUrl = `${CLOUD_URL.replace(/\/+$/, "")}/apps/${encodeURIComponent(appId!)}${subPath}${url.search}`;
         try {
-          const cloudRes = await fetch(cloudUrl, { headers: cloudHeaders });
+          const cloudRes = await fetch(cloudUrl, {
+            method: req.method,
+            headers: cloudHeaders,
+            ...(body !== undefined ? { body } : {}),
+          });
           const text = await cloudRes.text();
           res.writeHead(cloudRes.status, {
             "Content-Type": cloudRes.headers.get("content-type") ?? "application/json",
@@ -1722,6 +1719,38 @@ async function main() {
             error: `cloud request failed: ${err instanceof Error ? err.message : String(err)}`,
           });
         }
+      };
+
+      // GET /cloud/data/types and /cloud/data/records — a read-only view of
+      // the cloud's records. The cloud enforces the app's grants on these, so
+      // this exposes no data the app couldn't already sync. Lets the Drive UI
+      // show the cloud-side view (what actually pushed) next to the local view.
+      if (path === "/cloud/data/types" || path === "/cloud/data/records") {
+        if (req.method !== "GET") {
+          res.writeHead(405);
+          json(res, { error: "Method not allowed" });
+          return;
+        }
+        await forwardToCloud(path.slice("/cloud".length));
+        return;
+      }
+
+      // /data/public-shares[/<id>] — the owner's public links, which live in
+      // the cloud alone, so every method goes there. The cloud checks that the
+      // app was approved to publish, and that a share is this user's.
+      //
+      // Any process holding the app's local secret reaches this, as it reaches
+      // the sync routes; the owner's answer to a stolen machine is "Sign out
+      // everywhere". See
+      // ~/projects/starkeep/proposal-public-links-from-any-device-2026-11-05.md.
+      if (path === "/data/public-shares" || /^\/data\/public-shares\/[^/]+$/.test(path)) {
+        if (!["GET", "POST", "PATCH", "DELETE"].includes(req.method ?? "")) {
+          res.writeHead(405);
+          json(res, { error: "Method not allowed" });
+          return;
+        }
+        const bodied = req.method === "POST" || req.method === "PATCH";
+        await forwardToCloud(path, bodied ? await readBody(req) : undefined);
         return;
       }
 

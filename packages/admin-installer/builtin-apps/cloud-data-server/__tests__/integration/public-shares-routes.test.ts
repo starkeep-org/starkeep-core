@@ -6,10 +6,11 @@
  * what the proposal's section "What a public share admits" promises: the
  * visitor sees signed stand-ins and nothing that names or reaches an
  * original; a child carrying the album label admits nothing; the owner alone
- * manages the share, from a session only; and expiry, revocation and link
- * replacement each stop the old link.
+ * manages the share, from a session or a signed-in desktop; and expiry,
+ * revocation and link replacement each stop the old link.
  *
- * See `~/projects/starkeep/proposal-public-sharing-albums-2026-11-05.md`.
+ * See `~/projects/starkeep/proposal-public-sharing-albums-2026-11-05.md` and
+ * `~/projects/starkeep/proposal-public-links-from-any-device-2026-11-05.md`.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
@@ -178,6 +179,25 @@ async function call(userId: string, method: string, subPath: string, body?: unkn
     ...(bodyStr !== undefined ? { body: bodyStr } : {}),
   };
   return parse(await handler(event, context));
+}
+
+/**
+ * A signed-in desktop, as its local data server forwards a request: user A's
+ * device token alone, with no app signature.
+ */
+async function device(method: string, subPath: string, body?: unknown) {
+  const bodyStr = body === undefined ? undefined : JSON.stringify(body);
+  return parse(
+    await handler(
+      {
+        rawPath: `/apps/${PHOTOS}${subPath}`,
+        requestContext: { http: { method } },
+        headers: { "X-Starkeep-User-Token": deviceToken },
+        ...(bodyStr !== undefined ? { body: bodyStr } : {}),
+      },
+      context,
+    ),
+  );
 }
 
 /** An anonymous visitor: no signature, no token, no cookie. */
@@ -455,17 +475,40 @@ describe("the owner's public-share routes", () => {
     expect(badLifetime.status).toBe(400);
   });
 
-  it("refuse a signed-in device", async () => {
-    const res = await handler(
-      {
-        rawPath: `/apps/${PHOTOS}/data/public-shares`,
-        requestContext: { http: { method: "POST" } },
-        headers: { "X-Starkeep-User-Token": deviceToken },
-        body: JSON.stringify({ labelKey: "album", labelValue: ALBUM, title: "Summer" }),
-      },
-      context,
+  it("let a signed-in desktop create, change and stop a link, as its local data server forwards", async () => {
+    await albumWithOnePhoto();
+    const created = await device("POST", "/data/public-shares", {
+      labelKey: "album",
+      labelValue: ALBUM,
+      title: "Summer",
+    });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const made = created.body["publicShare"] as { id: string; linkToken: string };
+    expect((await visit(made.linkToken)).status).toBe(200);
+    // The device acts for its user: the share is A's, as a session's would be.
+    expect((await call(A, "GET", `/data/public-shares/${made.id}`)).status).toBe(200);
+    const listed = await device("GET", "/data/public-shares");
+    expect((listed.body["publicShares"] as unknown[]).length).toBe(1);
+    expect(
+      (await device("PATCH", `/data/public-shares/${made.id}`, { lifetime: "1d" })).status,
+    ).toBe(200);
+    expect((await device("DELETE", `/data/public-shares/${made.id}`)).status).toBe(200);
+    expect((await visit(made.linkToken)).status).toBe(404);
+  });
+
+  it("hold a signed-in desktop to the capability and to its own user's shares", async () => {
+    const others = await share(B);
+    expect((await device("GET", `/data/public-shares/${others.id}`)).status).toBe(404);
+    expect((await device("DELETE", `/data/public-shares/${others.id}`)).status).toBe(404);
+    await pg.query("DELETE FROM public_sharing.app_capabilities");
+    const res = await device("POST", "/data/public-shares", {
+      labelKey: "album",
+      labelValue: ALBUM,
+      title: "Summer",
+    });
+    expect(res.status).toBe(403);
+    expect((await pg.query("SELECT owner_user_id FROM public_sharing.public_shares")).rows).toEqual(
+      [{ owner_user_id: B }],
     );
-    expect(res.statusCode).toBe(403);
-    expect((await pg.query("SELECT * FROM public_sharing.public_shares")).rows).toEqual([]);
   });
 });

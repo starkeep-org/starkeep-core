@@ -394,6 +394,38 @@ describe("a signed request", () => {
     expect(res.statusCode).toBe(401);
   });
 
+  it("passes the gate for its attested app's public links", async () => {
+    const { token, keyId, key } = await registered();
+    const res = await handler(
+      event({
+        method: "GET",
+        path: "/apps/photos/data/public-shares",
+        headers: signed(token, keyId, key, {
+          method: "GET",
+          appId: "photos",
+          subPath: "/data/public-shares",
+        }),
+      }),
+      context,
+    );
+    // Past the gate: the listing reached the database.
+    expect(res.statusCode).toBe(500);
+  });
+
+  it("refuses public links on Drive's channel, which its key may sync on", async () => {
+    const { token, keyId, key } = await registered();
+    const res = await handler(
+      event({
+        method: "GET",
+        path: "/apps/starkeep-drive/data/public-shares",
+        headers: signed(token, keyId, key, { method: "GET", subPath: "/data/public-shares" }),
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(403);
+    expect(errorOf(res)).toContain("photos's public links only");
+  });
+
   it("refuses a route outside the sync allowlist", async () => {
     const { token, keyId, key } = await registered();
     const res = await handler(
