@@ -1,7 +1,8 @@
 /**
- * Integration coverage for the local-data-server `/cloud/data/*` proxy seam:
- * the wired chain drive-client → LDS `/cloud/data/*` proxy → cloud verifier,
- * exercised as one path with a *real* credential check.
+ * Integration coverage for the local-data-server's forwards to the cloud — the
+ * `/cloud/data/*` proxy and the `/data/public-shares` forward: the wired chain
+ * app → LDS forward → cloud verifier, exercised as one path with a *real*
+ * credential check.
  *
  * Why this earns its keep:
  *   The proxy once shipped `Authorization: Bearer <idToken>` instead of the
@@ -82,6 +83,39 @@ describe("LDS /cloud/data proxy with a real device-token check", () => {
     const { records } = (await res.json()) as { records: Array<{ type?: string }> };
     expect(records.length).toBeGreaterThanOrEqual(1);
   });
+
+  it("creates, changes, lists and stops a public link in the cloud, on the app's own channel", async () => {
+    const created = await drive.fetch("/data/public-shares", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ labelKey: "album", labelValue: "a1", title: "Summer" }),
+    });
+    expect(created.status).toBe(201);
+    const { publicShare } = (await created.json()) as { publicShare: { id: string } };
+    expect(cloud.publicShares(DRIVE).map((s) => s.title)).toEqual(["Summer"]);
+
+    const changed = await drive.fetch(`/data/public-shares/${publicShare.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Summer 2026" }),
+    });
+    expect(changed.status).toBe(200);
+    const listed = (await (await drive.fetch("/data/public-shares")).json()) as {
+      publicShares: Array<{ title: string }>;
+    };
+    expect(listed.publicShares.map((s) => s.title)).toEqual(["Summer 2026"]);
+
+    const stopped = await drive.fetch(`/data/public-shares/${publicShare.id}`, {
+      method: "DELETE",
+    });
+    expect(stopped.status).toBe(200);
+    expect(cloud.publicShares(DRIVE)).toEqual([]);
+  });
+
+  it("passes the cloud's answer through, status and all", async () => {
+    const res = await drive.fetch("/data/public-shares/11111111-2222-3333-4444-555555555555");
+    expect(res.status).toBe(404);
+  });
 });
 
 describe("a machine that is not signed in", () => {
@@ -111,5 +145,16 @@ describe("a machine that is not signed in", () => {
     expect(res.status).toBe(503);
     expect(((await res.json()) as { error: string }).error).toMatch(/not signed in to the cloud/);
     expect(cloud.exchangeLog.length).toBe(before);
+  });
+
+  it("refuses a public link locally, and the cloud holds none", async () => {
+    const res = await drive.fetch("/data/public-shares", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ labelKey: "album", labelValue: "a1", title: "Summer" }),
+    });
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { error: string }).error).toMatch(/not signed in to the cloud/);
+    expect(cloud.publicShares(DRIVE)).toEqual([]);
   });
 });

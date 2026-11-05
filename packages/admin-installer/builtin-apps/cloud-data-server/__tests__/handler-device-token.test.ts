@@ -358,6 +358,20 @@ describe("deviceMayCall", () => {
     expect(deviceMayCall("POST", "/data/records")).toBe(false);
     expect(deviceMayCall("DELETE", "/data/records/abc")).toBe(false);
   });
+
+  it("manages its user's public links, and nothing under them", () => {
+    for (const method of ["GET", "POST"]) {
+      expect(deviceMayCall(method, "/data/public-shares")).toBe(true);
+    }
+    for (const method of ["GET", "PATCH", "DELETE"]) {
+      expect(
+        deviceMayCall(method, "/data/public-shares/11111111-2222-3333-4444-555555555555"),
+      ).toBe(true);
+    }
+    expect(deviceMayCall("PUT", "/data/public-shares")).toBe(false);
+    expect(deviceMayCall("GET", "/data/public-shares/a/b")).toBe(false);
+    expect(deviceMayCall("GET", "/data/public-sharesx")).toBe(false);
+  });
 });
 
 describe("deviceWriteRefusal", () => {

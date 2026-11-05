@@ -48,7 +48,7 @@ import {
   type FakePool,
 } from "./fake-pool.js";
 import { createAppSpecificFactory, stampUnstampedOriginals } from "@starkeep/shared-space-api";
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   SqliteDatabaseAdapter,
   SqliteAppSyncableNamespaceStore,
@@ -195,7 +195,20 @@ export interface FakeCloud {
     mimeType?: string,
   ): Promise<{ key: string }>;
   hasBlob(key: string): Promise<boolean>;
+  /** The public shares an app's owner routes hold. */
+  publicShares(appId: string): FakePublicShare[];
   close(): Promise<void>;
+}
+
+/** A public share as the owner routes answer it. */
+export interface FakePublicShare {
+  id: string;
+  linkToken: string;
+  labelKey: string;
+  labelValue: string;
+  title: string;
+  createdAtMs: number;
+  expiresAtMs: number | null;
 }
 
 export async function startFakeCloud(): Promise<FakeCloud> {
@@ -244,6 +257,14 @@ export async function startFakeCloud(): Promise<FakeCloud> {
     blobGets: 0,
     blobPuts: 0,
     deploymentSettings: false,
+  };
+
+  // Public shares, per app, for the owner's routes below.
+  const publicShares = new Map<string, Map<string, FakePublicShare>>();
+  const publicSharesFor = (appId: string): Map<string, FakePublicShare> => {
+    let shares = publicShares.get(appId);
+    if (!shares) publicShares.set(appId, (shares = new Map()));
+    return shares;
   };
 
   // Per-app HMAC secrets. Empty by default (auth rubber-stamped); a test that
@@ -481,7 +502,9 @@ export async function startFakeCloud(): Promise<FakeCloud> {
     // Read the body once so it's available both for HMAC verification (signed
     // over the raw bytes) and for the handlers below.
     const rawBody =
-      req.method === "POST" || req.method === "PUT" ? await readBody(req) : Buffer.alloc(0);
+      req.method === "POST" || req.method === "PUT" || req.method === "PATCH"
+        ? await readBody(req)
+        : Buffer.alloc(0);
 
     // A signed-in device presents the pool's token alone; anything else signs
     // with the app's HMAC. The HMAC check is opt-in per app via setAppSecret
@@ -650,6 +673,59 @@ export async function startFakeCloud(): Promise<FakeCloud> {
       return;
     }
 
+    // The owner's public-share routes, which the LDS `/data/public-shares`
+    // forward targets. Shapes only: the real route's owner, capability and
+    // lifetime checks are covered against the real handler in
+    // cloud-data-server's `public-shares-routes.test.ts`.
+    const shareMatch = rest.match(/^\/data\/public-shares(?:\/([^/]+))?$/);
+    if (shareMatch) {
+      const shares = publicSharesFor(appId);
+      const shareId = shareMatch[1] ?? null;
+      const body = () => JSON.parse(rawBody.toString("utf8") || "{}") as Record<string, unknown>;
+      if (shareId === null && req.method === "GET") {
+        sendJson(res, 200, { publicShares: [...shares.values()], mayPublish: true });
+        return;
+      }
+      if (shareId === null && req.method === "POST") {
+        const { labelKey, labelValue, title } = body();
+        const share: FakePublicShare = {
+          id: randomUUID(),
+          linkToken: randomUUID().replace(/-/g, "").slice(0, 22),
+          labelKey: String(labelKey),
+          labelValue: String(labelValue),
+          title: String(title),
+          createdAtMs: Date.now(),
+          expiresAtMs: null,
+        };
+        shares.set(share.id, share);
+        sendJson(res, 201, { publicShare: share });
+        return;
+      }
+      const existing = shareId === null ? undefined : shares.get(shareId);
+      if (!existing) {
+        sendJson(res, 404, { error: "Not found" });
+        return;
+      }
+      if (req.method === "GET") {
+        sendJson(res, 200, { publicShare: existing });
+        return;
+      }
+      if (req.method === "PATCH") {
+        const { title } = body();
+        const changed = { ...existing, ...(typeof title === "string" ? { title } : {}) };
+        shares.set(existing.id, changed);
+        sendJson(res, 200, { publicShare: changed });
+        return;
+      }
+      if (req.method === "DELETE") {
+        shares.delete(existing.id);
+        sendJson(res, 200, { deleted: existing.id });
+        return;
+      }
+      sendJson(res, 405, { error: "Method not allowed" });
+      return;
+    }
+
     const presignGetMatch = rest.match(/^\/files\/([^/]+)\/presign$/);
     if (presignGetMatch && req.method === "GET") {
       if (failures.blobGets > 0) {
@@ -774,6 +850,7 @@ export async function startFakeCloud(): Promise<FakeCloud> {
       });
     },
     hasBlob: (key) => objectStorage.has(key),
+    publicShares: (appId) => [...publicSharesFor(appId).values()],
     async close() {
       await new Promise<void>((resolve, reject) =>
         server.close((err) => (err ? reject(err) : resolve())),
