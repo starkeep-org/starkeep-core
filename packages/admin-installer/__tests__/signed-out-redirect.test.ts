@@ -248,3 +248,37 @@ describe("wiring", () => {
     expect(defaultBlock).toContain("functionAssociations");
   });
 });
+
+describe("the viewer's host", () => {
+  // A deployment with a custom domain answers on two names, and the origin
+  // never sees Host. The broker reads this copy to finish a sign-in on the
+  // name it began on, whose cookies the sign-in set.
+  const withHost = (uri: string, host: string, extra: Record<string, CfHeader> = {}) => {
+    const r = req(uri, { dest: "document", token: "abc" });
+    r.headers.host = { value: host };
+    Object.assign(r.headers, extra);
+    return r;
+  };
+
+  it("reaches the sign-in routes, which return before any app-surface check", () => {
+    const r = withHost("/auth/start", "photos.example.com");
+    expect(handler({ request: r })).toBe(r);
+    expect(r.headers["x-starkeep-viewer-host"]!.value).toBe("photos.example.com");
+  });
+
+  it("reaches an app page and the reserved data plane", () => {
+    for (const uri of ["/apps/photos/browse", "/apps/photos/data/records"]) {
+      const r = withHost(uri, "d1.cloudfront.net");
+      handler({ request: r });
+      expect(r.headers["x-starkeep-viewer-host"]!.value, uri).toBe("d1.cloudfront.net");
+    }
+  });
+
+  it("overwrites a value the viewer sent", () => {
+    const r = withHost("/auth/callback", "d1.cloudfront.net", {
+      "x-starkeep-viewer-host": { value: "evil.example.com" },
+    });
+    handler({ request: r });
+    expect(r.headers["x-starkeep-viewer-host"]!.value).toBe("d1.cloudfront.net");
+  });
+});

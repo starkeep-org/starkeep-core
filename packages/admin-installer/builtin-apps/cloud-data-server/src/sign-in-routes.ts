@@ -61,7 +61,11 @@ const APP_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 const NO_SESSION_APPS: ReadonlySet<string> = new Set(["starkeep-drive", "cloud-data-server"]);
 
 export interface SignInRouteDeps {
-  /** The deployment's browser-facing base, `https://<distribution>`. */
+  /**
+   * The browser-facing base the request arrived on: the custom domain or the
+   * CloudFront domain. The callback and the logout return go to this base, so
+   * a sign-in finishes on the host whose cookies it set.
+   */
   publicBaseUrl(): Promise<string>;
   /** Whether `appId` names an installed app. */
   isInstalled(appId: string): Promise<boolean>;

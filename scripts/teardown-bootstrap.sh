@@ -413,6 +413,29 @@ else
   skip
 fi
 
+# ── Step 2c: Delete custom-domain certificates ───────────────────────────────
+# The cloud-data-server teardown keeps an external-DNS domain's certificate, so
+# a reinstall attaches it without new DNS validation. A full wipe removes it,
+# along with any stack certificate an interrupted teardown left. CloudFront takes
+# certificates only from us-east-1, so they live there whatever $REGION is.
+step "Deleting custom-domain certificates tagged starkeep:stackPrefix=${STACK_PREFIX} (us-east-1)"
+CERT_ARNS=$(aws acm list-certificates --region us-east-1 \
+  --certificate-statuses PENDING_VALIDATION ISSUED INACTIVE EXPIRED VALIDATION_TIMED_OUT REVOKED FAILED \
+  --query 'CertificateSummaryList[].CertificateArn' --output text 2>/dev/null || true)
+CERTS_DELETED=false
+if [ -n "$CERT_ARNS" ] && [ "$CERT_ARNS" != "None" ]; then
+  for arn in $CERT_ARNS; do
+    owner=$(aws acm list-tags-for-certificate --region us-east-1 --certificate-arn "$arn" \
+      --query "Tags[?Key=='starkeep:stackPrefix'].Value | [0]" --output text 2>/dev/null || true)
+    [ "$owner" = "$STACK_PREFIX" ] || continue
+    CERTS_DELETED=true
+    aws acm delete-certificate --region us-east-1 --certificate-arn "$arn" 2>/dev/null \
+      && echo "  Deleted $arn" \
+      || echo "  Could not delete $arn (still attached to a distribution?); continuing"
+  done
+fi
+[ "$CERTS_DELETED" = true ] || skip
+
 # ── Step 3: Delete IAM roles and policies manually ───────────────────────────
 # Done before CF deletion so CF never races against us or gets stuck on
 # dependency errors (e.g. can't delete a policy while a role holds it as a

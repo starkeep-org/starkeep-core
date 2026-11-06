@@ -127,7 +127,7 @@ describe("configureAppSignInClients", () => {
 
     await configureAppSignInClients({
       ...POOL,
-      publicBaseUrl: "https://d1.cloudfront.net/",
+      publicBaseUrls: ["https://d1.cloudfront.net/"],
       clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1" },
       deploymentName: "Koller Family",
     });
@@ -149,6 +149,44 @@ describe("configureAppSignInClients", () => {
     expect(mobile!.CallbackURLs).toEqual(["memo-mobile://auth/callback"]);
   });
 
+  it("lists a callback and a logout address on every name the cloud answers on", async () => {
+    cognito.on(DescribeUserPoolClientCommand).resolves({ UserPoolClient: MOBILE });
+
+    await configureAppSignInClients({
+      ...POOL,
+      // The custom domain, and the CloudFront name that keeps answering.
+      publicBaseUrls: ["https://photos.example.com", "https://d1.cloudfront.net/"],
+      clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1" },
+      deploymentName: "Koller Family",
+    });
+
+    expect(cognito.commandCalls(UpdateUserPoolClientCommand)[0]!.args[0].input).toMatchObject({
+      CallbackURLs: [
+        "https://photos.example.com/auth/callback",
+        "https://d1.cloudfront.net/auth/callback",
+      ],
+      LogoutURLs: [
+        "https://photos.example.com/auth/signed-out",
+        "https://d1.cloudfront.net/auth/signed-out",
+      ],
+    });
+  });
+
+  it("lists a name given twice once", async () => {
+    cognito.on(DescribeUserPoolClientCommand).resolves({ UserPoolClient: MOBILE });
+
+    await configureAppSignInClients({
+      ...POOL,
+      publicBaseUrls: ["https://d1.cloudfront.net", "https://d1.cloudfront.net/"],
+      clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1" },
+      deploymentName: "Koller Family",
+    });
+
+    expect(
+      cognito.commandCalls(UpdateUserPoolClientCommand)[0]!.args[0].input.CallbackURLs,
+    ).toEqual(["https://d1.cloudfront.net/auth/callback"]);
+  });
+
   it("gives a client with no branding style the Starkeep one", async () => {
     cognito.on(DescribeUserPoolClientCommand).resolves({ UserPoolClient: MOBILE });
     cognito
@@ -157,7 +195,7 @@ describe("configureAppSignInClients", () => {
 
     await configureAppSignInClients({
       ...POOL,
-      publicBaseUrl: "https://d1.cloudfront.net",
+      publicBaseUrls: ["https://d1.cloudfront.net"],
       clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1" },
       deploymentName: "Koller Family",
     });
@@ -182,7 +220,7 @@ describe("configureAppSignInClients", () => {
 
     await configureAppSignInClients({
       ...POOL,
-      publicBaseUrl: "https://d1.cloudfront.net",
+      publicBaseUrls: ["https://d1.cloudfront.net"],
       clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1" },
       deploymentName: "Koller Family",
     });

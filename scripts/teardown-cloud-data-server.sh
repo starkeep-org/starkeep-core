@@ -278,6 +278,7 @@ echo "  API Gateway  : $GATEWAY_NAME"
 echo "  Lambdas      : ${CDS_LAMBDA_PREFIX}*"
 echo "  DSQL cluster : (tagged starkeep:stackPrefix=${STACK_PREFIX})$([[ "$FORCE" == "true" ]] && echo "  [--force: will disable deletion protection]")"
 echo "  CloudFront   : distribution + OAC + cache policy + public key + key group (Part B)"
+echo "  Custom domain: a Route53-zone domain's certificate and records (an external-DNS certificate stays)"
 echo "  Signing key  : SSM /${STACK_PREFIX}/app-creds/_cloudfront-signing"
 echo "  S3 buckets   : $FILES_BUCKET, $BILLING_BUCKET"
 echo "  CUR report   : $CUR_REPORT"
@@ -493,8 +494,8 @@ fi
 # ── Step 4b: CloudFront (Part B: shared-file signed URLs) ─────────────────────
 # The platform CloudFront distribution and its URL-signing material: the
 # distribution itself, the S3-origin OAC, the custom shared-files cache policy,
-# the RSA public key + key group, and the signed-out-redirect viewer-request
-# function. Deleting a distribution requires
+# the RSA public key + key group, the signed-out-redirect viewer-request
+# function, and a custom domain the stack owned. Deleting a distribution requires
 # disable → wait-until-Deployed → delete, which is slow (~5–15 min). This whole
 # step is best-effort: any failure is logged and skipped so a hiccup never
 # aborts the wider teardown (these resources are idle/cheap and can be cleaned
@@ -560,6 +561,7 @@ def delete_with_etag(kind, list_cmd, list_key, match, id_of, get_cmd, delete_cmd
 
 
 # ---- Distribution: find by comment → disable → wait Deployed → delete --------
+dist_domain = None  # Its cloudfront.net name, which a custom domain's alias records target.
 try:
     data = cf("list-distributions")
     items = (data.get("DistributionList") or {}).get("Items", []) or []
@@ -568,15 +570,23 @@ try:
         print("  Distribution: not found, skipping.")
     else:
         dist_id = dist["Id"]
+        dist_domain = dist.get("DomainName")
         print(f"  Distribution: {dist_id} (disable → wait → delete)")
         gc = cf("get-distribution-config", "--id", dist_id)
         etag, cfg = gc["ETag"], gc["DistributionConfig"]
-        if cfg.get("Enabled"):
+        # Drop a custom domain in the same update. CloudFront refuses an alias
+        # that another distribution holds (CNAMEAlreadyExists), so a delete
+        # that fails below must not keep the next install off the domain.
+        has_alias = (cfg.get("Aliases") or {}).get("Quantity", 0) > 0
+        if cfg.get("Enabled") or has_alias:
             cfg["Enabled"] = False
+            if has_alias:
+                cfg["Aliases"] = {"Quantity": 0}
+                cfg["ViewerCertificate"] = {"CloudFrontDefaultCertificate": True}
             path = f"/tmp/cf-disable-{dist_id}.json"
             with open(path, "w") as f:
                 json.dump(cfg, f)
-            print("  Disabling distribution…")
+            print("  Disabling distribution" + (" and detaching its custom domain…" if has_alias else "…"))
             cf("update-distribution", "--id", dist_id, "--if-match", etag,
                "--distribution-config", f"file://{path}")
         # Wait for BOTH: the deployment to settle *and* the config to actually
@@ -670,6 +680,92 @@ for attempt in range(6):
             print(f"  WARN function cleanup ({REDIRECT_FN_NAME}) after 6 tries: {e}")
             break
         time.sleep(20)
+
+# ---- A custom domain the stack owned (Route53 mode) --------------------------
+# The stack's certificate carries the prefix tag and no starkeep:customDomainMode
+# tag; an external-DNS domain's certificate carries mode=external and stays, so
+# a reinstall attaches it with no new DNS validation. For each stack
+# certificate, delete its validation record and the A/AAAA alias records the
+# stack wrote, then the certificate. Best-effort like everything above.
+
+
+def aws_json(*args):
+    r = subprocess.run(["aws", *args, "--output", "json"], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip())
+    return json.loads(r.stdout) if r.stdout.strip() else {}
+
+
+def acm(*args):
+    return aws_json("acm", *args, "--region", "us-east-1")
+
+
+def zone_for(domain):
+    """The longest public Route53 zone name that equals or ends the domain."""
+    best = None
+    for z in aws_json("route53", "list-hosted-zones").get("HostedZones", []):
+        if z.get("Config", {}).get("PrivateZone"):
+            continue
+        name = z["Name"].rstrip(".").lower()
+        if (domain == name or domain.endswith("." + name)) and (not best or len(name) > len(best[1])):
+            best = (z["Id"].split("/")[-1], name)
+    return best
+
+
+def delete_record(zone_id, name, rtype, keep):
+    """Delete the record set `name`/`rtype` when `keep(record)` says it is ours."""
+    fqdn = name.rstrip(".") + "."
+    got = aws_json("route53", "list-resource-record-sets", "--hosted-zone-id", zone_id,
+                   "--start-record-name", fqdn, "--start-record-type", rtype, "--max-items", "1")
+    for rs in got.get("ResourceRecordSets", []):
+        if rs["Name"].lower() != fqdn.lower() or rs["Type"] != rtype or not keep(rs):
+            continue
+        batch = json.dumps({"Changes": [{"Action": "DELETE", "ResourceRecordSet": rs}]})
+        aws_json("route53", "change-resource-record-sets", "--hosted-zone-id", zone_id,
+                 "--change-batch", batch)
+        print(f"  Record: deleted {rtype} {fqdn}")
+
+
+try:
+    statuses = ["PENDING_VALIDATION", "ISSUED", "INACTIVE", "EXPIRED", "VALIDATION_TIMED_OUT",
+                "REVOKED", "FAILED"]
+    summaries = acm("list-certificates", "--certificate-statuses", *statuses).get(
+        "CertificateSummaryList", [])
+    for summary in summaries:
+        arn = summary["CertificateArn"]
+        tags = {t["Key"]: t.get("Value") for t in
+                acm("list-tags-for-certificate", "--certificate-arn", arn).get("Tags", [])}
+        if (tags.get("starkeep:stackPrefix") != prefix
+                or tags.get("starkeep:appId") != "cloud-data-server"
+                or "starkeep:customDomainMode" in tags):
+            continue
+        cert = acm("describe-certificate", "--certificate-arn", arn)["Certificate"]
+        domain = cert["DomainName"].lower()
+        zone = zone_for(domain)
+        if zone:
+            for option in cert.get("DomainValidationOptions", []):
+                rr = option.get("ResourceRecord")
+                if rr:
+                    delete_record(zone[0], rr["Name"], rr["Type"], lambda rs, v=rr["Value"]: any(
+                        x.get("Value") == v for x in rs.get("ResourceRecords", [])))
+            for rtype in ("A", "AAAA"):
+                delete_record(zone[0], domain, rtype, lambda rs: (
+                    rs.get("AliasTarget", {}).get("DNSName", "").rstrip(".").lower()
+                    == (dist_domain or "").lower()
+                    if dist_domain else
+                    rs.get("AliasTarget", {}).get("DNSName", "").rstrip(".").endswith(".cloudfront.net")))
+        for attempt in range(6):
+            try:
+                acm("delete-certificate", "--certificate-arn", arn)
+                print(f"  Certificate: deleted {arn} ({domain})")
+                break
+            except Exception as e:  # noqa: BLE001 — in use until the distribution is gone
+                if attempt == 5:
+                    print(f"  WARN certificate cleanup ({domain}) after 6 tries: {e}")
+                    break
+                time.sleep(20)
+except Exception as e:  # noqa: BLE001
+    print(f"  WARN custom domain cleanup: {e}")
 PYEOF
 
 step "Deleting CloudFront signing SecureString: /${STACK_PREFIX}/app-creds/_cloudfront-signing"
@@ -743,6 +839,10 @@ path = sys.argv[1]
 STALE = [
     "apiGatewayUrl",
     "publicBaseUrl",
+    "cloudfrontDomain",
+    # Describes the torn-down distribution. `customDomain`, the operator's
+    # choice, stays, so a reinstall attaches the same domain.
+    "customDomainStatus",
     "apiGatewayId",
     "apiGatewayExecutionArn",
     "authorizerId",

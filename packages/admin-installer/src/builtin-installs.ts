@@ -41,6 +41,14 @@ import { buildCloudDataServerProgram } from "./builtin-programs/cloud-data-serve
 import { putCloudFrontSigningParameter, putDeploymentSettingsParameter } from "./app-creds";
 import { configureAppSignInClients, findOrCreateAppSignInClients } from "./app-sign-in-clients";
 import {
+  deleteUnusedExternalCertificates,
+  ensureExternalCertificate,
+  findHostedZone,
+  validateCustomDomain,
+  type CustomDomainStatus,
+} from "./custom-domain";
+import type { CloudDataServerCustomDomain } from "./builtin-programs/cloud-data-server-program";
+import {
   checkDeploymentSettings,
   serializeDeploymentSettings,
 } from "@starkeep/protocol-primitives";
@@ -116,6 +124,17 @@ export interface CloudDataServerInstallConfig {
    * install never overwrites what the operator chose since.
    */
   deploymentSettings?: unknown;
+  /**
+   * The host the distribution should answer on besides its cloudfront.net
+   * name, such as `photos.example.com`, or undefined for none.
+   */
+  customDomain?: string;
+  /**
+   * The custom domain the previous install attached or requested, when it
+   * differs from `customDomain`. The install-time grants cover its records, so
+   * a removal or a change can delete them, and its certificate.
+   */
+  previousCustomDomain?: string;
 }
 
 /**
@@ -147,8 +166,15 @@ export interface CloudDataServerInstallOutputs {
   auroraHostname: string;
   bucketName: string;
   apiGatewayUrl: string;
-  /** Browser-facing base URL — the CloudFront distribution domain. */
+  /**
+   * Browser-facing base URL — the custom domain once attached, the CloudFront
+   * distribution domain otherwise.
+   */
   publicBaseUrl: string;
+  /** The distribution's own name, which keeps answering beside a custom domain. */
+  cloudfrontDomain: string;
+  /** Where the custom domain stands, or undefined when the install names none. */
+  customDomain?: CustomDomainStatus;
   apiGatewayId: string;
   apiGatewayExecutionArn: string;
   authorizerId: string;
@@ -260,6 +286,22 @@ function makeCloudDataServerOrphanCleaner(
 }
 
 /**
+ * The custom domains an install's grants must cover: the one it attaches and
+ * the one the previous install attached, normalized and without repeats.
+ */
+function customDomainsInPlay(config: CloudDataServerInstallConfig): string[] {
+  const names = [config.customDomain, config.previousCustomDomain].flatMap((d) => {
+    if (!d) return [];
+    try {
+      return [validateCustomDomain(d)];
+    } catch {
+      return [];
+    }
+  });
+  return [...new Set(names)];
+}
+
+/**
  * Install (or update) the cloud-data-server built-in app.
  *
  * Idempotent — safe to re-run. Each AWS-side check is an existence check,
@@ -280,6 +322,12 @@ export async function installCloudDataServer(
   const appRoleArn = `arn:aws:iam::${config.accountId}:role/${config.stackPrefix}-app-${appId}-role`;
 
   assertCloudInstallableAppId(appId);
+
+  // Checked before anything changes, so a mistyped domain costs nothing.
+  const customDomainName = config.customDomain
+    ? validateCustomDomain(config.customDomain)
+    : undefined;
+  const customDomains = customDomainsInPlay(config);
 
   const managerCreds = await roleChain([config.managerRoleArn]);
 
@@ -322,6 +370,7 @@ export async function installCloudDataServer(
     config.accountId,
     config.region,
     managerCreds,
+    customDomains,
   );
 
   if (policyUpdated) {
@@ -352,6 +401,37 @@ export async function installCloudDataServer(
     const appCreds: AwsCredentials = await roleChain([config.managerRoleArn, appRoleArn]);
     await logCallerIdentity("app session", appCreds);
 
+    // Step 3.5: Pick the custom domain's DNS mode. A zone in this account
+    // lets the Pulumi program own the certificate and every record. Otherwise
+    // the certificate is requested here, outside the stack, and attached by
+    // the first run after ACM issues it.
+    let programCustomDomain: CloudDataServerCustomDomain | undefined;
+    let externalCertificate: Awaited<ReturnType<typeof ensureExternalCertificate>> | undefined;
+    if (customDomainName) {
+      const zone = await findHostedZone(customDomainName, appCreds);
+      if (zone) {
+        console.log(`Custom domain ${customDomainName}: Route53 zone ${zone.name} (${zone.id}).`);
+        programCustomDomain = { name: customDomainName, mode: "route53", hostedZoneId: zone.id };
+      } else {
+        externalCertificate = await ensureExternalCertificate({
+          stackPrefix: config.stackPrefix,
+          domain: customDomainName,
+          creds: appCreds,
+        });
+        console.log(
+          `Custom domain ${customDomainName}: DNS outside this account; certificate ` +
+            `${externalCertificate.certificateArn} ${externalCertificate.issued ? "issued" : "awaits validation"}.`,
+        );
+        if (externalCertificate.issued) {
+          programCustomDomain = {
+            name: customDomainName,
+            mode: "external",
+            certificateArn: externalCertificate.certificateArn,
+          };
+        }
+      }
+    }
+
     // Step 4: Pulumi up — creates DSQL, files bucket, Lambda, API Gateway.
     console.log("Running pulumi up for cloud-data-server…");
     const distZipPath = join(cloudDataServerPackageDir(), "dist.zip");
@@ -372,6 +452,7 @@ export async function installCloudDataServer(
       deviceUserPoolClientId: config.deviceUserPoolClientId,
       cognitoDomain: config.cognitoDomain,
       ephemeral: config.ephemeral ?? false,
+      customDomain: programCustomDomain,
     });
 
     const outputs = await pulumiUpInline({
@@ -391,10 +472,24 @@ export async function installCloudDataServer(
     const apiGatewayExecutionArn = String(outputs.apiGatewayExecutionArn);
     const apiGatewayUrl = String(outputs.apiGatewayUrl);
     const publicBaseUrl = String(outputs.publicBaseUrl);
+    const cloudfrontDomain = String(outputs.cloudfrontDomain);
+    const cloudfrontBaseUrl = `https://${cloudfrontDomain}`;
     const authorizerId = String(outputs.authorizerId);
     const sessionAuthorizerId = String(outputs.sessionAuthorizerId);
     const functionArn = String(outputs.functionArn);
     const region = String(outputs.region);
+
+    // Step 4.3: Delete the external-mode certificates this run left unused:
+    // after the operator removed or changed the domain, or moved its zone into
+    // this account. Pulumi has detached them by now. Only a run that names a
+    // domain, now or before, holds the ACM grants.
+    if (customDomains.length > 0) {
+      await deleteUnusedExternalCertificates({
+        stackPrefix: config.stackPrefix,
+        keepArn: externalCertificate?.certificateArn,
+        creds: appCreds,
+      });
+    }
 
     // Step 4.4: Give both sign-in clients their full settings now that the
     // CloudFront domain is known: the cloud-apps client's callback and logout
@@ -405,7 +500,7 @@ export async function installCloudDataServer(
       stackPrefix: config.stackPrefix,
       region: config.region,
       userPoolId: config.userPoolId,
-      publicBaseUrl,
+      publicBaseUrls: [publicBaseUrl, cloudfrontBaseUrl],
       clients: signInClients,
       deploymentName: config.deploymentName,
     });
@@ -422,6 +517,7 @@ export async function installCloudDataServer(
       stackPrefix: config.stackPrefix,
       keyPairId: String(outputs.cloudfrontKeyPairId),
       domain: String(outputs.cloudfrontSigningDomain),
+      hosts: [...new Set([String(outputs.cloudfrontSigningDomain), cloudfrontDomain])],
       privateKey: String(outputs.cloudfrontSigningPrivateKey),
       region: config.region,
       awsCreds: managerCreds,
@@ -493,6 +589,17 @@ export async function installCloudDataServer(
       bucketName,
       apiGatewayUrl,
       publicBaseUrl,
+      cloudfrontDomain,
+      customDomain: customDomainName
+        ? {
+            name: customDomainName,
+            mode: externalCertificate ? "external" : "route53",
+            status: programCustomDomain ? "active" : "pending-validation",
+            validationRecord: externalCertificate?.validationRecord,
+            certificateArn: externalCertificate?.certificateArn,
+            aliasTarget: cloudfrontDomain,
+          }
+        : undefined,
       apiGatewayId,
       apiGatewayExecutionArn,
       authorizerId,
@@ -540,11 +647,14 @@ export async function uninstallCloudDataServer(
   }
 
   console.log("Attaching temp-install-cloud-data-server policy…");
+  // A route53-mode domain's certificate and records are stack resources, and
+  // `pulumi destroy` needs their grants.
   const policyUpdated = await attachTempInstallCloudDataServerPolicy(
     config.stackPrefix,
     config.accountId,
     config.region,
     managerCreds,
+    customDomainsInPlay(config),
   );
 
   if (policyUpdated) {

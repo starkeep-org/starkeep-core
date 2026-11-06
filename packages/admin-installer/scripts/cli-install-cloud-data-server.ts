@@ -49,6 +49,7 @@ import {
 } from "../src/cognito-auth";
 import { prompt } from "../src/cli-prompt";
 import { isDeploymentName } from "@starkeep/aws-bootstrap";
+import type { CustomDomainStatus } from "../src/custom-domain";
 
 interface StarkeepConfig {
   stackPrefix: string;
@@ -82,6 +83,12 @@ interface StarkeepConfig {
   auroraEndpoint?: string;
   /** The deployment's settings this machine held with no cloud; seeds SSM once. */
   deploymentSettings?: unknown;
+  /** The operator's custom domain for the cloud, set in admin-web. */
+  customDomain?: string;
+  /** Written by this script: the distribution's own cloudfront.net name. */
+  cloudfrontDomain?: string;
+  /** Written by this script: where the custom domain stood after the last install. */
+  customDomainStatus?: CustomDomainStatus;
 }
 
 const STARKEEP_DIR = starkeepDir();
@@ -257,6 +264,10 @@ const outputs = await installCloudDataServer({
   ...(config.deploymentSettings !== undefined
     ? { deploymentSettings: config.deploymentSettings }
     : {}),
+  customDomain: config.customDomain || undefined,
+  // The last install's domain, so this run can delete its records and
+  // certificate after a removal or a change.
+  previousCustomDomain: config.customDomainStatus?.name,
 }).catch(exitOnInstallFailure);
 
 // There is no separate cloud sync identity to install here: shared-record sync
@@ -275,6 +286,8 @@ const updated: StarkeepConfig = {
   pulumiStateBucket,
   apiGatewayUrl: outputs.apiGatewayUrl,
   publicBaseUrl: outputs.publicBaseUrl,
+  cloudfrontDomain: outputs.cloudfrontDomain,
+  customDomainStatus: outputs.customDomain,
   apiGatewayId: outputs.apiGatewayId,
   apiGatewayExecutionArn: outputs.apiGatewayExecutionArn,
   authorizerId: outputs.authorizerId,
@@ -290,5 +303,17 @@ writeFileSync(CONFIG_PATH, JSON.stringify(updated, null, 2), "utf-8");
 console.log("\nInstall complete. Updated ~/.starkeep/config.json:");
 console.log(`  apiGatewayUrl  : ${outputs.apiGatewayUrl}`);
 console.log(`  publicBaseUrl  : ${outputs.publicBaseUrl}`);
+if (outputs.customDomain?.status === "pending-validation") {
+  const record = outputs.customDomain.validationRecord;
+  console.log(`  customDomain   : ${outputs.customDomain.name} awaits certificate validation.`);
+  if (record)
+    console.log(`    Add ${record.type} ${record.name} -> ${record.value}, then install again.`);
+} else if (outputs.customDomain?.mode === "external") {
+  console.log(
+    `  customDomain   : ${outputs.customDomain.name} attached. Point a CNAME at ${outputs.cloudfrontDomain}.`,
+  );
+} else if (outputs.customDomain) {
+  console.log(`  customDomain   : ${outputs.customDomain.name} attached.`);
+}
 console.log(`  s3Bucket       : ${outputs.bucketName}`);
 console.log(`  auroraEndpoint : ${outputs.auroraHostname}`);

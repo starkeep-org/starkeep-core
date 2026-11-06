@@ -223,7 +223,13 @@ export async function ensureAppCredsParameter(opts: {
 export async function putCloudFrontSigningParameter(opts: {
   stackPrefix: string;
   keyPairId: string;
+  /** The canonical host: the custom domain when one is attached. */
   domain: string;
+  /**
+   * Every host the distribution answers on. The broker keeps a visit's sign-in
+   * and signed URLs on the host the visit used, when that host is listed here.
+   */
+  hosts: readonly string[];
   privateKey: string;
   region: string;
   awsCreds: AwsCredentials;
@@ -234,6 +240,7 @@ export async function putCloudFrontSigningParameter(opts: {
   const value = JSON.stringify({
     keyPairId: opts.keyPairId,
     domain: opts.domain,
+    hosts: opts.hosts,
     privateKey: opts.privateKey,
   });
   const description =

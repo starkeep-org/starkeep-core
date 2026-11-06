@@ -29,6 +29,7 @@ import * as cloudDataServerInstall from "./routes/cloud-data-server-install";
 import * as cognitoOutputs from "./routes/cognito-outputs";
 import * as config from "./routes/config";
 import * as costs from "./routes/costs";
+import * as customDomain from "./routes/custom-domain";
 import * as thisMachine from "./routes/this-machine";
 import * as users from "./routes/users";
 import * as deploymentSettings from "./routes/deployment-settings";
@@ -70,6 +71,9 @@ api.get("/cloud-deploy/status", () => cloudDeployStatus.GET());
 api.get("/config", () => config.GET());
 api.patch("/config", (c) => config.PATCH(c.req.raw));
 api.get("/exec/deploy-outputs", () => execDeployOutputs.GET());
+// The cloud's custom domain, which the next cloud data server install acts on.
+api.put("/custom-domain", (c) => customDomain.PUT(c.req.raw));
+api.post("/custom-domain/check", (c) => customDomain.CHECK(c.req.raw));
 // The two bootstrap outputs the wizard looks up after sign-in.
 api.post("/cognito-outputs", (c) => cognitoOutputs.POST(c.req.raw));
 

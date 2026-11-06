@@ -164,6 +164,74 @@ export function assertCloudInstallableAppId(appId: string): void {
   }
 }
 
+/**
+ * The broker's standing inline policy on the cloud-data-server role. It shares
+ * the role's 10,240-character inline-policy quota with the runtime policy and,
+ * during an install, the temp-install policy.
+ */
+export function buildBrokerPowerPolicy(stackPrefix: string, accountId: string): string {
+  return JSON.stringify({
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Sid: "BrokerAssumeAppRoles",
+        Effect: "Allow",
+        Action: "sts:AssumeRole",
+        Resource: `arn:aws:iam::${accountId}:role/${stackPrefix}-app-*`,
+      },
+      {
+        // The broker tags each per-app session with the user the request
+        // acts for, and with nothing else: a session tag overrides a role
+        // tag of the same key, so a broker free to set `starkeep:appId`
+        // could widen one app's session into another app's prefix.
+        Sid: "BrokerTagAppSessionsWithUser",
+        Effect: "Allow",
+        Action: "sts:TagSession",
+        Resource: `arn:aws:iam::${accountId}:role/${stackPrefix}-app-*`,
+        Condition: {
+          "ForAllValues:StringEquals": { "aws:TagKeys": [SESSION_USER_TAG] },
+        },
+      },
+      {
+        // Broker reads every per-app HMAC credential so it can verify
+        // signatures on /apps/{appId}/* requests. Scoped to the
+        // per-stack creds path; no other SSM parameters are reachable.
+        Sid: "BrokerReadAppCreds",
+        Effect: "Allow",
+        Action: "ssm:GetParameter",
+        Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/app-creds/*`,
+      },
+      {
+        // The platform's own non-secret parameters: the deployment's
+        // settings. Read only; Manager writes them.
+        Sid: "BrokerReadPlatformParameters",
+        Effect: "Allow",
+        Action: "ssm:GetParameter",
+        Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/platform/*`,
+      },
+      {
+        // A mobile app's attested key, registered once per install of
+        // the app on a phone and read on each of its requests. Public
+        // keys and ids only, so a plain String parameter.
+        Sid: "BrokerWriteMobileKeys",
+        Effect: "Allow",
+        Action: "ssm:PutParameter",
+        Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/platform/mobile-keys/*`,
+      },
+      {
+        // SecureString — decrypt via the SSM service key.
+        Sid: "BrokerReadAppCredsKmsDecrypt",
+        Effect: "Allow",
+        Action: "kms:Decrypt",
+        Resource: "*",
+        Condition: {
+          StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },
+        },
+      },
+    ],
+  });
+}
+
 export async function createAppRole(input: CreateAppRoleInput): Promise<string> {
   const {
     stackPrefix,
@@ -237,66 +305,7 @@ export async function createAppRole(input: CreateAppRoleInput): Promise<string> 
       new PutRolePolicyCommand({
         RoleName: roleName,
         PolicyName: "broker-power",
-        PolicyDocument: JSON.stringify({
-          Version: "2012-10-17",
-          Statement: [
-            {
-              Sid: "BrokerAssumeAppRoles",
-              Effect: "Allow",
-              Action: "sts:AssumeRole",
-              Resource: `arn:aws:iam::${accountId}:role/${stackPrefix}-app-*`,
-            },
-            {
-              // The broker tags each per-app session with the user the request
-              // acts for, and with nothing else: a session tag overrides a role
-              // tag of the same key, so a broker free to set `starkeep:appId`
-              // could widen one app's session into another app's prefix.
-              Sid: "BrokerTagAppSessionsWithUser",
-              Effect: "Allow",
-              Action: "sts:TagSession",
-              Resource: `arn:aws:iam::${accountId}:role/${stackPrefix}-app-*`,
-              Condition: {
-                "ForAllValues:StringEquals": { "aws:TagKeys": [SESSION_USER_TAG] },
-              },
-            },
-            {
-              // Broker reads every per-app HMAC credential so it can verify
-              // signatures on /apps/{appId}/* requests. Scoped to the
-              // per-stack creds path; no other SSM parameters are reachable.
-              Sid: "BrokerReadAppCreds",
-              Effect: "Allow",
-              Action: "ssm:GetParameter",
-              Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/app-creds/*`,
-            },
-            {
-              // The platform's own non-secret parameters: the deployment's
-              // settings. Read only; Manager writes them.
-              Sid: "BrokerReadPlatformParameters",
-              Effect: "Allow",
-              Action: "ssm:GetParameter",
-              Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/platform/*`,
-            },
-            {
-              // A mobile app's attested key, registered once per install of
-              // the app on a phone and read on each of its requests. Public
-              // keys and ids only, so a plain String parameter.
-              Sid: "BrokerWriteMobileKeys",
-              Effect: "Allow",
-              Action: "ssm:PutParameter",
-              Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/platform/mobile-keys/*`,
-            },
-            {
-              // SecureString — decrypt via the SSM service key.
-              Sid: "BrokerReadAppCredsKmsDecrypt",
-              Effect: "Allow",
-              Action: "kms:Decrypt",
-              Resource: "*",
-              Condition: {
-                StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },
-              },
-            },
-          ],
-        }),
+        PolicyDocument: buildBrokerPowerPolicy(stackPrefix, accountId),
       }),
     );
   }
@@ -563,6 +572,8 @@ function canonicalJson(obj: unknown): string {
  * Attach the wider temp-install policy used only by the cloud-data-server
  * built-in app's install/update — covers DSQL cluster management, S3 bucket
  * creation, API Gateway management, and the foundational Lambda + log group.
+ * `customDomains` adds the custom domain's certificate and record grants; see
+ * buildTempInstallCloudDataServerPolicy.
  *
  * Returns true if PutRolePolicy was actually called (policy was new or changed),
  * false if the existing policy was already identical and the call was skipped.
@@ -573,11 +584,17 @@ export async function attachTempInstallCloudDataServerPolicy(
   accountId: string,
   region: string,
   managerCreds: AwsCredentials,
+  customDomains: readonly string[] = [],
 ): Promise<boolean> {
   const iam = makeIamClient(managerCreds);
   const roleName = `${stackPrefix}-app-cloud-data-server-role`;
   const policyName = "temp-install-cloud-data-server";
-  const desiredDocument = buildTempInstallCloudDataServerPolicy(stackPrefix, accountId, region);
+  const desiredDocument = buildTempInstallCloudDataServerPolicy(
+    stackPrefix,
+    accountId,
+    region,
+    customDomains,
+  );
 
   // Skip PutRolePolicy if the live policy content is identical to what we'd
   // set. Calling PutRolePolicy — even with the same document — resets IAM's
