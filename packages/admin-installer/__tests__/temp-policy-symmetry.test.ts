@@ -106,6 +106,17 @@ describe("temp/runtime policies are subsumed by their boundaries", () => {
     ).toEqual([]);
   });
 
+  it("temp-install-cloud-data-server with a custom domain ⊆ foundational boundary", () => {
+    expect(
+      uncoveredActions(
+        buildTempInstallCloudDataServerPolicy(STACK_PREFIX, ACCOUNT_ID, REGION, [
+          "photos.example.com",
+        ]),
+        foundationalPermissionsBoundaryStatements(STACK_PREFIX),
+      ),
+    ).toEqual([]);
+  });
+
   it("per-app runtime policy ⊆ per-app boundary", () => {
     expect(
       uncoveredActions(

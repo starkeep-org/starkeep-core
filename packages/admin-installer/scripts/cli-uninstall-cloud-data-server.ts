@@ -61,6 +61,9 @@ interface StarkeepConfig {
   authorizerId?: string;
   s3Bucket?: string;
   auroraEndpoint?: string;
+  /** A route53-mode custom domain's certificate and records are stack resources. */
+  customDomain?: string;
+  customDomainStatus?: { name: string };
 }
 
 function regionFromUserPoolId(userPoolId: string): string {
@@ -343,6 +346,8 @@ await uninstallCloudDataServer({
   pulumiStateBucket,
   userPoolId: config.userPoolId,
   userPoolClientId: config.userPoolClientId,
+  customDomain: config.customDomain || undefined,
+  previousCustomDomain: config.customDomainStatus?.name,
 }).catch(exitOnInstallFailure);
 
 console.log("\nUninstall complete.");

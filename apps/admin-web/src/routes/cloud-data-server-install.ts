@@ -48,6 +48,8 @@ interface StarkeepConfig {
   userPoolId: string;
   apiGatewayUrl?: string;
   publicBaseUrl?: string;
+  cloudfrontDomain?: string;
+  customDomainStatus?: unknown;
   apiGatewayId?: string;
   apiGatewayExecutionArn?: string;
   authorizerId?: string;
@@ -147,6 +149,8 @@ export async function POST(req: Request) {
           data: {
             apiGatewayUrl: post.apiGatewayUrl,
             publicBaseUrl: post.publicBaseUrl,
+            cloudfrontDomain: post.cloudfrontDomain,
+            customDomainStatus: post.customDomainStatus,
             apiGatewayId: post.apiGatewayId,
             apiGatewayExecutionArn: post.apiGatewayExecutionArn,
             authorizerId: post.authorizerId,

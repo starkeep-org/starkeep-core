@@ -1,4 +1,5 @@
 import type { CognitoConfig, STSCredentials } from "./cognito-auth";
+import type { CustomDomainStatus } from "@starkeep/admin-installer/custom-domain";
 
 /**
  * starkeep-config.json — the single source of truth for cloud setup.
@@ -48,11 +49,20 @@ export interface StarkeepConfig {
   // Populated by the cloud-data-server install:
   apiGatewayUrl?: string;
   /**
-   * Browser-facing base URL — the CloudFront distribution domain. Browser calls
-   * to the cloud data server prefer this; falls back to apiGatewayUrl for
-   * pre-CloudFront configs.
+   * Browser-facing base URL — the custom domain once attached, the CloudFront
+   * distribution domain otherwise. Browser calls to the cloud data server
+   * prefer this; falls back to apiGatewayUrl for pre-CloudFront configs.
    */
   publicBaseUrl?: string;
+  /** The distribution's own cloudfront.net name, which keeps answering. */
+  cloudfrontDomain?: string;
+  /**
+   * The operator's custom domain for the cloud, such as photos.example.com. The
+   * next cloud data server install acts on it.
+   */
+  customDomain?: string;
+  /** Written by the cloud data server install: where the custom domain stands. */
+  customDomainStatus?: CustomDomainStatus;
   apiGatewayId?: string;
   apiGatewayExecutionArn?: string;
   authorizerId?: string;

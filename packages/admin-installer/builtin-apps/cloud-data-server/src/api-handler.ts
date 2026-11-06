@@ -1525,7 +1525,7 @@ export function parseObjectKey(
 //
 // Shared blob reads are served through the platform CloudFront distribution's
 // `shared/*` behavior (signed requests, edge-cached) instead of S3 presigned
-// GETs. The signing config — { keyPairId, domain, privateKey } — lives in one
+// GETs. The signing config — { keyPairId, domain, hosts, privateKey } — lives in one
 // SSM SecureString (name in CLOUDFRONT_SIGNING_PARAM), read once per warm
 // container. The private key never leaves this Lambda; app code cannot reach
 // it (only the CDS role has app-creds SSM read).
@@ -1533,8 +1533,37 @@ export function parseObjectKey(
 
 interface CloudFrontSigningConfig {
   keyPairId: string;
+  /** The canonical host: the custom domain when one is attached. */
   domain: string;
+  /** Every host the distribution answers on, `domain` included. */
+  hosts?: string[];
   privateKey: string;
+}
+
+/**
+ * The header CloudFront's viewer-request function sets to the host the viewer
+ * asked for. MUST match the header name in the signed-out-redirect function's
+ * source in cloud-data-server-program.ts.
+ */
+const VIEWER_HOST_HEADER = "x-starkeep-viewer-host";
+
+/**
+ * The browser-facing base a request arrived on: the viewer's host when it is
+ * one of the deployment's own, and the canonical base otherwise.
+ *
+ * A deployment with a custom domain answers on two names, and a sign-in's
+ * pending cookie is host-only, so a sign-in must return to the name it began
+ * on. The header is trusted only as a choice among `hosts`: a forged value can
+ * pick nothing but another of the deployment's own names. A request straight to
+ * the gateway carries no header and gets the canonical base.
+ */
+export function viewerBaseUrl(
+  headers: Record<string, string | undefined>,
+  cfg: Pick<CloudFrontSigningConfig, "domain" | "hosts">,
+): string {
+  const host = headers[VIEWER_HOST_HEADER]?.toLowerCase();
+  const hosts = cfg.hosts ?? [cfg.domain];
+  return `https://${host && hosts.includes(host) ? host : cfg.domain}`;
 }
 
 let cloudFrontConfigCache: { config: CloudFrontSigningConfig; fetchedAt: number } | null = null;
@@ -2901,7 +2930,8 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           cookieHeader: signInCookieHeader(event),
         },
         {
-          publicBaseUrl: async () => `https://${(await loadCloudFrontSigningConfig()).domain}`,
+          publicBaseUrl: async () =>
+            viewerBaseUrl(event.headers ?? {}, await loadCloudFrontSigningConfig()),
           isInstalled: async (appId) => (await loadAppHmacSecret(appId)) !== null,
         },
       );

@@ -125,7 +125,19 @@ export interface CloudDataServerProgramContext {
    * or about an original you are still editing — rather than for cost.
    */
   archiveHoldDays?: number;
+  /**
+   * The custom domain the distribution answers on, besides its own
+   * `cloudfront.net` name, or undefined for none. In "route53" mode the domain's
+   * zone sits in this account and the program owns the certificate and every
+   * record. In "external" mode the installer holds an issued certificate outside
+   * the stack and the operator keeps the DNS records. See custom-domain.ts.
+   */
+  customDomain?: CloudDataServerCustomDomain;
 }
+
+export type CloudDataServerCustomDomain =
+  | { name: string; mode: "route53"; hostedZoneId: string }
+  | { name: string; mode: "external"; certificateArn: string };
 
 /**
  * Below this, archiving costs more than not archiving.
@@ -931,6 +943,14 @@ export function buildCloudDataServerProgram(
   var request = event.request;
   var uri = request.uri;
 
+  // The host the viewer asked for, which the origin never sees: the origin
+  // request policy forwards every header but Host. The broker keeps a sign-in
+  // on the name the visit began on. Set before any early return, so /auth/*
+  // carries it too, and overwritten so a viewer cannot supply its own. The
+  // broker trusts it only as a choice among the deployment's own names. MUST
+  // match VIEWER_HOST_HEADER in the cloud-data-server's api-handler.
+  request.headers["x-starkeep-viewer-host"] = { value: request.headers.host ? request.headers.host.value : "" };
+
   // Only /apps/<appId>/... is an app surface. Anything else — the broker's own
   // routes, shared file bytes — is not something to redirect.
   var m = uri.match(/^\\/apps\\/([^/]+)(\\/.*)?$/);
@@ -1117,10 +1137,65 @@ export function buildCloudDataServerProgram(
 
     const filesOriginId = "shared-files-s3";
 
+    // CUR and CloudFront's certificates both live only in us-east-1, whatever
+    // the deployment region.
+    const usEast1Provider = new aws.Provider("us-east-1-provider", { region: "us-east-1" });
+
+    const customDomain = ctx.customDomain;
+    let zoneId: string | undefined;
+    let certificateArn: pulumi.Input<string> | undefined;
+    if (customDomain?.mode === "route53") {
+      // The domain's zone sits in this account, so the stack owns the whole
+      // chain and `pulumi destroy` removes it. CertificateValidation waits for
+      // issuance, usually a few minutes, and the distribution waits on it.
+      zoneId = customDomain.hostedZoneId;
+      const certificate = new aws.acm.Certificate(
+        `${ctx.stackPrefix}-custom-domain-cert`,
+        {
+          domainName: customDomain.name,
+          validationMethod: "DNS",
+          tags: {
+            "starkeep:managed": "true",
+            "starkeep:appId": "cloud-data-server",
+            "starkeep:stackPrefix": ctx.stackPrefix,
+          },
+        },
+        { provider: usEast1Provider },
+      );
+      const option = certificate.domainValidationOptions[0];
+      const validationRecord = new aws.route53.Record(
+        `${ctx.stackPrefix}-custom-domain-validation`,
+        {
+          zoneId: customDomain.hostedZoneId,
+          name: option.resourceRecordName,
+          type: option.resourceRecordType,
+          records: [option.resourceRecordValue],
+          ttl: 300,
+          // A certificate requested earlier for the same name asks for the same
+          // record, which may already exist.
+          allowOverwrite: true,
+        },
+      );
+      const validation = new aws.acm.CertificateValidation(
+        `${ctx.stackPrefix}-custom-domain-validation`,
+        {
+          certificateArn: certificate.arn,
+          validationRecordFqdns: [validationRecord.fqdn],
+        },
+        { provider: usEast1Provider },
+      );
+      certificateArn = validation.certificateArn;
+    } else if (customDomain?.mode === "external") {
+      // Issued already: the installer attaches an external certificate only
+      // once ACM reports it issued.
+      certificateArn = customDomain.certificateArn;
+    }
+
     const distribution = new aws.cloudfront.Distribution(`${ctx.stackPrefix}-cdn`, {
       enabled: true,
-      // Default *.cloudfront.net domain — no custom domain / ACM cert.
       comment: `${ctx.stackPrefix} platform CDN`,
+      // The distribution keeps answering on its cloudfront.net name too.
+      aliases: customDomain ? [customDomain.name] : [],
       origins: [
         {
           originId: gatewayOriginId,
@@ -1205,16 +1280,42 @@ export function buildCloudDataServerProgram(
       restrictions: {
         geoRestriction: { restrictionType: "none" },
       },
-      viewerCertificate: {
-        cloudfrontDefaultCertificate: true,
-      },
+      viewerCertificate: certificateArn
+        ? {
+            acmCertificateArn: certificateArn,
+            sslSupportMethod: "sni-only",
+            minimumProtocolVersion: "TLSv1.2_2021",
+          }
+        : { cloudfrontDefaultCertificate: true },
       tags: {
         "starkeep:managed": "true",
         "starkeep:appId": "cloud-data-server",
       },
     });
 
-    const publicBaseUrl = pulumi.interpolate`https://${distribution.domainName}`;
+    if (customDomain && zoneId) {
+      // Alias records, which also work at a zone apex where a CNAME cannot.
+      for (const type of ["A", "AAAA"]) {
+        new aws.route53.Record(`${ctx.stackPrefix}-custom-domain-${type.toLowerCase()}`, {
+          zoneId,
+          name: customDomain.name,
+          type,
+          aliases: [
+            {
+              name: distribution.domainName,
+              zoneId: distribution.hostedZoneId,
+              evaluateTargetHealth: false,
+            },
+          ],
+        });
+      }
+    }
+
+    // The canonical host: the custom domain when one is attached.
+    const canonicalHost: pulumi.Output<string> = customDomain
+      ? pulumi.output(customDomain.name)
+      : distribution.domainName;
+    const publicBaseUrl = pulumi.interpolate`https://${canonicalHost}`;
 
     // CloudFront signing config → written to one SSM SecureString by the
     // installer (under Manager creds) AFTER this stack comes up, not here: the
@@ -1370,10 +1471,9 @@ export function buildCloudDataServerProgram(
     // -----------------------------------------------------------------------
     // Billing bucket + CUR report definition
     //
-    // CUR is a global service (us-east-1 only), so we need a dedicated
-    // provider for those resources regardless of the deployment region.
+    // CUR is a global service (us-east-1 only), so it takes the us-east-1
+    // provider declared with the distribution above.
     // -----------------------------------------------------------------------
-    const usEast1Provider = new aws.Provider("us-east-1-provider", { region: "us-east-1" });
 
     const billingBucket = new aws.s3.BucketV2(`${ctx.stackPrefix}-billing`, {
       bucket: `${ctx.stackPrefix}-billing-${ctx.accountId}-${ctx.region}`,
@@ -1448,7 +1548,8 @@ export function buildCloudDataServerProgram(
       apiGatewayUrl: pulumi
         .all([api.apiEndpoint, stage.name])
         .apply(([endpoint, name]) => (name === "$default" ? endpoint : `${endpoint}/${name}`)),
-      // Browser-facing base URL — the CloudFront distribution domain. Everything
+      // Browser-facing base URL — the custom domain when one is attached, the
+      // CloudFront distribution domain otherwise. Everything
       // downstream (runtime-config → SPA data-client / cloud-config / admin-web)
       // derives its origin from this. Server-to-server calls keep using
       // apiGatewayUrl directly (see the URL-plumbing decision in the plan).
@@ -1460,7 +1561,10 @@ export function buildCloudDataServerProgram(
       // sensitive via the tls provider, so it stays encrypted in stack state
       // and is only decrypted into the installer process to write the param).
       cloudfrontKeyPairId: cfPublicKey.id,
-      cloudfrontSigningDomain: distribution.domainName,
+      cloudfrontSigningDomain: canonicalHost,
+      // The distribution's own name, which keeps answering beside a custom
+      // domain and which an external-mode domain's CNAME points at.
+      cloudfrontDomain: distribution.domainName,
       cloudfrontSigningPrivateKey: signingKey.privateKeyPem,
       authorizerId: authorizer.id,
       // Per-app installs read this to attach `auth: "session"` routes. See
