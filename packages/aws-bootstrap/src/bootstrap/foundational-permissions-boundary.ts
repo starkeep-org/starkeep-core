@@ -10,7 +10,8 @@ import type { IamStatement } from "../iam-utils.js";
  * permits DSQL cluster admin, S3 bucket admin on the well-known foundational
  * bucket name patterns, Lambda/log-group/API-Gateway admin scoped to the
  * cloud-data-server prefix, CloudFront admin (the platform distribution +
- * URL-signing key material), the CUR report definition API, and a single
+ * URL-signing key material), the custom domain's ACM certificate and Route53
+ * records, the CUR report definition API, and a single
  * PassRole carve-out (own role, lambda only). All other iam:* actions stay
  * denied via the NotAction carve-out, so a future temp-policy bug cannot
  * accidentally grant broader IAM.
@@ -320,6 +321,18 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       Sid: "FoundationalCloudFront",
       Effect: "Allow",
       Action: "cloudfront:*",
+      Resource: "*",
+    },
+    {
+      // The distribution's custom domain: its us-east-1 certificate and, when
+      // the domain's zone sits in this account, the validation and alias
+      // records. A wildcard ceiling for the same reason as CloudFront above,
+      // and because the policy has under 150 characters to spare. The
+      // temp-install policy grants the specific verbs, and only while an
+      // install runs, with record writes held to the domain's own names.
+      Sid: "FoundationalCustomDomain",
+      Effect: "Allow",
+      Action: ["acm:*", "route53:*"],
       Resource: "*",
     },
     {

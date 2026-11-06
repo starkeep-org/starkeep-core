@@ -79,8 +79,9 @@ export function simulateOne(
   accountId: string,
   action: string,
   resourceArn: string,
+  contextVariables?: Record<string, string | string[]>,
 ): Promise<{ verdict: Verdict; errorMessage?: string }> {
-  return runOne(ctx, accountId, action, resourceArn);
+  return runOne(ctx, accountId, action, resourceArn, contextVariables);
 }
 
 export async function simulateCalls(

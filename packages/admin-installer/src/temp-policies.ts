@@ -381,6 +381,7 @@ export function buildTempInstallCloudDataServerPolicy(
   stackPrefix: string,
   accountId: string,
   region: string,
+  customDomains: readonly string[] = [],
 ): string {
   const appId = "cloud-data-server";
   const pulumiStateBucket = `${stackPrefix}-pulumi-state-${accountId}-${region}`;
@@ -425,15 +426,13 @@ export function buildTempInstallCloudDataServerPolicy(
         },
       },
       {
-        Sid: "TempInstallDsqlAdmin",
-        Effect: "Allow",
-        Action: ["dsql:DbConnectAdmin", "dsql:DbConnect"],
-        Resource: "*",
-      },
-      {
-        Sid: "TempInstallDsqlCluster",
+        // The cluster's lifecycle and the admin connection the shared-schema
+        // DDL runs over, in one statement for the role's inline-policy quota.
+        Sid: "TempInstallDsql",
         Effect: "Allow",
         Action: [
+          "dsql:DbConnectAdmin",
+          "dsql:DbConnect",
           "dsql:CreateCluster",
           "dsql:GetCluster",
           "dsql:UpdateCluster",
@@ -498,7 +497,10 @@ export function buildTempInstallCloudDataServerPolicy(
           "s3:PutInventoryConfiguration",
           "s3:ListBucket",
         ],
-        Resource: [`arn:aws:s3:::${stackPrefix}-files-*`],
+        // Both foundational buckets in one statement. The billing bucket needs
+        // a subset of these verbs, and the role's inline policies share one
+        // 10,240-character quota that this policy nearly fills on its own.
+        Resource: [`arn:aws:s3:::${stackPrefix}-files-*`, `arn:aws:s3:::${stackPrefix}-billing-*`],
       },
       {
         Sid: "TempInstallS3FilesObjects",
@@ -633,40 +635,6 @@ export function buildTempInstallCloudDataServerPolicy(
         },
       },
       {
-        Sid: "TempInstallBillingBucket",
-        Effect: "Allow",
-        Action: [
-          "s3:CreateBucket",
-          "s3:DeleteBucket",
-          "s3:GetBucketAcl",
-          "s3:GetBucketLocation",
-          "s3:GetBucketPolicy",
-          "s3:PutBucketPolicy",
-          "s3:DeleteBucketPolicy",
-          "s3:GetBucketTagging",
-          "s3:PutBucketTagging",
-          "s3:GetBucketVersioning",
-          "s3:PutBucketVersioning",
-          "s3:GetBucketPublicAccessBlock",
-          "s3:PutBucketPublicAccessBlock",
-          "s3:GetBucketOwnershipControls",
-          "s3:PutBucketOwnershipControls",
-          "s3:GetEncryptionConfiguration",
-          "s3:PutEncryptionConfiguration",
-          "s3:GetBucketCORS",
-          "s3:GetBucketWebsite",
-          "s3:GetAccelerateConfiguration",
-          "s3:GetBucketLogging",
-          "s3:GetBucketRequestPayment",
-          "s3:GetBucketObjectLockConfiguration",
-          "s3:GetReplicationConfiguration",
-          "s3:GetLifecycleConfiguration",
-          "s3:GetBucketNotification",
-          "s3:ListBucket",
-        ],
-        Resource: `arn:aws:s3:::${stackPrefix}-billing-*`,
-      },
-      {
         Sid: "TempInstallCur",
         Effect: "Allow",
         Action: [
@@ -768,8 +736,65 @@ export function buildTempInstallCloudDataServerPolicy(
           StringEquals: { "iam:AWSServiceName": "dsql.amazonaws.com" },
         },
       },
+      ...customDomainStatements(customDomains),
     ],
   });
+}
+
+/**
+ * The grants an install needs for the distribution's custom domain, or none
+ * when the install names no domain.
+ *
+ * `customDomains` holds the domain this install attaches and any domain the
+ * previous install attached, so a removal or a change can still delete the old
+ * domain's records. One statement set serves both DNS modes, because the
+ * installer learns the mode only after this policy is attached.
+ *
+ * Record writes are held to the domains' own names: the domain itself, for the
+ * alias records, and `_*.<domain>`, the shape of ACM's validation record. Route53
+ * compares lowercase names without the trailing dot.
+ */
+function customDomainStatements(customDomains: readonly string[]): object[] {
+  if (customDomains.length === 0) return [];
+  return [
+    {
+      // Every verb but the record writes, on Resource "*": ACM and Route53 list
+      // calls name no resource, and one statement keeps the role's inline
+      // policies under their shared 10,240-character quota. A request that
+      // carries tags also needs AddTagsToCertificate. CloudFront reads the
+      // certificate when the distribution attaches it.
+      Sid: "TempInstallCustomDomain",
+      Effect: "Allow",
+      Action: [
+        "acm:RequestCertificate",
+        "acm:DescribeCertificate",
+        "acm:DeleteCertificate",
+        "acm:ListCertificates",
+        "acm:AddTagsToCertificate",
+        "acm:RemoveTagsFromCertificate",
+        "acm:ListTagsForCertificate",
+        "route53:ListHostedZones",
+        "route53:GetHostedZone",
+        "route53:ListResourceRecordSets",
+        "route53:GetChange",
+      ],
+      Resource: "*",
+    },
+    {
+      Sid: "TempInstallCustomDomainRecords",
+      Effect: "Allow",
+      Action: "route53:ChangeResourceRecordSets",
+      Resource: "arn:aws:route53:::hostedzone/*",
+      Condition: {
+        "ForAllValues:StringLike": {
+          "route53:ChangeResourceRecordSetsNormalizedRecordNames": customDomains.flatMap((d) => [
+            d,
+            `_*.${d}`,
+          ]),
+        },
+      },
+    },
+  ];
 }
 
 /**

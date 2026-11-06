@@ -315,4 +315,58 @@ describe("through the broker's handler", () => {
     expect(res.statusCode).toBe(400);
     expect(res.body).toContain("access_denied");
   });
+
+  describe("on a deployment with a custom domain", () => {
+    // The signing config names the canonical host and every host the
+    // distribution answers on. A sign-in must finish on the host it began on,
+    // because its pending cookie is host-only.
+    beforeEach(() => {
+      ssmMock.on(GetParameterCommand, { Name: process.env.CLOUDFRONT_SIGNING_PARAM }).resolves({
+        Parameter: {
+          Value: JSON.stringify({
+            keyPairId: "K",
+            domain: "photos.example.com",
+            hosts: ["photos.example.com", "d1.cloudfront.net"],
+            privateKey: "P",
+          }),
+        },
+      });
+    });
+
+    async function redirectUriFor(headers: Record<string, string>): Promise<string | null> {
+      const { handler } = await import("../src/api-handler.js");
+      const res = (await handler(
+        {
+          rawPath: "/auth/start",
+          requestContext: { http: { method: "GET" } },
+          queryStringParameters: { app: "photos", return: "/apps/photos/" },
+          headers,
+        },
+        context,
+      )) as SignInResponse;
+      return new URL(res.headers.Location!).searchParams.get("redirect_uri");
+    }
+
+    it("returns a sign-in begun on the CloudFront name to the CloudFront name", async () => {
+      expect(await redirectUriFor({ "x-starkeep-viewer-host": "d1.cloudfront.net" })).toBe(
+        "https://d1.cloudfront.net/auth/callback",
+      );
+    });
+
+    it("returns a sign-in begun on the custom domain to the custom domain", async () => {
+      expect(await redirectUriFor({ "x-starkeep-viewer-host": "Photos.Example.com" })).toBe(
+        "https://photos.example.com/auth/callback",
+      );
+    });
+
+    it("ignores a host the deployment does not answer on", async () => {
+      expect(await redirectUriFor({ "x-starkeep-viewer-host": "evil.example.com" })).toBe(
+        "https://photos.example.com/auth/callback",
+      );
+    });
+
+    it("uses the canonical host for a request that skipped CloudFront", async () => {
+      expect(await redirectUriFor({})).toBe("https://photos.example.com/auth/callback");
+    });
+  });
 });

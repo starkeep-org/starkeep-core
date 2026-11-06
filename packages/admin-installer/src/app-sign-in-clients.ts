@@ -308,11 +308,16 @@ export async function findOrCreateAppSignInClients(pool: PoolRef): Promise<AppSi
   };
 }
 
-/** The cloud-apps client's full settings for a deployment at `publicBaseUrl`. */
+/**
+ * The cloud-apps client's full settings for a deployment that answers at each
+ * of `publicBaseUrls`: the custom domain, when one is attached, and the
+ * CloudFront domain. A sign-in finishes on the name it began on, so each name
+ * needs its own callback and logout address.
+ */
 export function cloudAppsClientSettings(
-  publicBaseUrl: string,
+  publicBaseUrls: readonly string[],
 ): Partial<UpdateUserPoolClientCommandInput> {
-  const base = publicBaseUrl.replace(/\/+$/, "");
+  const bases = [...new Set(publicBaseUrls.map((u) => u.replace(/\/+$/, "")))];
   return {
     ...SHARED_SETTINGS,
     ...OAUTH_ON,
@@ -321,8 +326,8 @@ export function cloudAppsClientSettings(
     SupportedIdentityProviders: [...SHARED_SETTINGS.SupportedIdentityProviders],
     AllowedOAuthFlows: [...OAUTH_ON.AllowedOAuthFlows],
     AllowedOAuthScopes: [...OAUTH_ON.AllowedOAuthScopes],
-    CallbackURLs: [`${base}/auth/callback`],
-    LogoutURLs: [`${base}/auth/signed-out`],
+    CallbackURLs: bases.map((b) => `${b}/auth/callback`),
+    LogoutURLs: bases.map((b) => `${b}/auth/signed-out`),
   };
 }
 
@@ -363,13 +368,17 @@ export function mobileAppsClientSettings(
  * callbacks that app installs registered.
  */
 export async function configureAppSignInClients(
-  pool: PoolRef & { publicBaseUrl: string; clients: AppSignInClientIds; deploymentName: string },
+  pool: PoolRef & {
+    publicBaseUrls: readonly string[];
+    clients: AppSignInClientIds;
+    deploymentName: string;
+  },
 ): Promise<void> {
   const client = cognito(pool.region);
   const cloudApps = await describe(client, pool.userPoolId, pool.clients.cloudAppsClientId);
   await client.send(
     new UpdateUserPoolClientCommand(
-      updateInputFrom(cloudApps, cloudAppsClientSettings(pool.publicBaseUrl)),
+      updateInputFrom(cloudApps, cloudAppsClientSettings(pool.publicBaseUrls)),
     ),
   );
   await ensureBranding(

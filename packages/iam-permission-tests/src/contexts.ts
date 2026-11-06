@@ -98,6 +98,33 @@ interface ContextBuilder {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
+/** The custom domains the custom-domain install context's temp policy names. */
+export const CUSTOM_DOMAIN = "aaron.starkeep.app";
+export const PREVIOUS_CUSTOM_DOMAIN = "old.example.com";
+
+/** The cloud-data-server role during an install whose temp policy names `customDomains`. */
+function installCloudDataServerContext(
+  { stackPrefix, accountId, region }: ContextInput,
+  customDomains: string[],
+): IamContext {
+  const roleName = `${stackPrefix}-app-cloud-data-server-role`;
+  const tempInstall: PolicyDoc = {
+    name: "temp-install-cloud-data-server",
+    policy: JSON.parse(
+      buildTempInstallCloudDataServerPolicy(stackPrefix, accountId, region, customDomains),
+    ),
+  };
+  return {
+    principalArn: assumedRoleArn(accountId, roleName, "install"),
+    principalRoleName: roleName,
+    identityPolicies: [brokerPowerPolicy(stackPrefix, accountId), tempInstall],
+    permissionBoundaryPolicies: [foundationalBoundary(stackPrefix)],
+    contextVariables: {
+      "aws:PrincipalTag/starkeep:appId": "cloud-data-server",
+    },
+  };
+}
+
 function assumedRoleArn(accountId: string, roleName: string, session = "test"): string {
   return `arn:aws:sts::${accountId}:assumed-role/${roleName}/${session}`;
 }
@@ -386,22 +413,7 @@ const CONTEXTS: Record<string, ContextBuilder> = {
     description:
       "cloud-data-server app role during pulumi up — broker-power + " +
       "temp-install-cloud-data-server, foundational boundary.",
-    build({ stackPrefix, accountId, region }) {
-      const roleName = `${stackPrefix}-app-cloud-data-server-role`;
-      const tempInstall: PolicyDoc = {
-        name: "temp-install-cloud-data-server",
-        policy: JSON.parse(buildTempInstallCloudDataServerPolicy(stackPrefix, accountId, region)),
-      };
-      return {
-        principalArn: assumedRoleArn(accountId, roleName, "install"),
-        principalRoleName: roleName,
-        identityPolicies: [brokerPowerPolicy(stackPrefix, accountId), tempInstall],
-        permissionBoundaryPolicies: [foundationalBoundary(stackPrefix)],
-        contextVariables: {
-          "aws:PrincipalTag/starkeep:appId": "cloud-data-server",
-        },
-      };
-    },
+    build: (input) => installCloudDataServerContext(input, []),
     expectedCalls({ stackPrefix, accountId, region }) {
       // Pulumi's full call set isn't enumerated here yet (captured traces
       // remain the primary source). What IS modeled: the passphrase reads,
@@ -454,6 +466,90 @@ const CONTEXTS: Record<string, ContextBuilder> = {
             "temp-install-cloud-data-server policy AND the foundational boundary must grant " +
             "it — a missing grant silently fails the Lambda update. Only the CDS stack sets " +
             "reserved concurrency, so the per-app install-infra context intentionally omits it.",
+        },
+      ];
+    },
+  },
+
+  "install-cloud-data-server-custom-domain": {
+    description:
+      "install-cloud-data-server for a run that names a custom domain " +
+      `(${CUSTOM_DOMAIN}) and replaces the previous one (${PREVIOUS_CUSTOM_DOMAIN}).`,
+    build: (input) => installCloudDataServerContext(input, [CUSTOM_DOMAIN, PREVIOUS_CUSTOM_DOMAIN]),
+    expectedCalls({ accountId }) {
+      const certificate = `arn:aws:acm:us-east-1:${accountId}:certificate/0000-cert`;
+      const zone = "arn:aws:route53:::hostedzone/ZONE1";
+      const names = "route53:ChangeResourceRecordSetsNormalizedRecordNames";
+      return [
+        {
+          action: "route53:ListHostedZones",
+          resource: "*",
+          why: "findHostedZone lists the account's zones to pick the DNS mode.",
+        },
+        {
+          action: "route53:GetHostedZone",
+          resource: zone,
+          why: "findHostedZone compares the zone's name servers with public DNS; Pulumi's Record reads the zone too.",
+        },
+        {
+          action: "acm:RequestCertificate",
+          resource: "*",
+          why: "Pulumi (route53 mode) or the installer (external mode) requests the us-east-1 certificate.",
+        },
+        {
+          action: "acm:AddTagsToCertificate",
+          resource: certificate,
+          why: "A RequestCertificate that carries tags also authorizes AddTagsToCertificate.",
+        },
+        {
+          action: "acm:DescribeCertificate",
+          resource: certificate,
+          why: "The validation record, CertificateValidation's wait, and CloudFront's attach all read it.",
+        },
+        {
+          action: "acm:ListCertificates",
+          resource: "*",
+          why: "The installer finds this deployment's external-mode certificates by tag.",
+        },
+        {
+          action: "acm:ListTagsForCertificate",
+          resource: certificate,
+          why: "The tag match behind every external-mode lookup.",
+        },
+        {
+          action: "acm:DeleteCertificate",
+          resource: certificate,
+          why: "Removal, a change of domain, and pulumi destroy delete the certificate.",
+        },
+        {
+          action: "route53:ChangeResourceRecordSets",
+          resource: zone,
+          contextVariables: { [names]: [CUSTOM_DOMAIN] },
+          why: "Route53 mode writes the A and AAAA alias records at the domain.",
+        },
+        {
+          action: "route53:ChangeResourceRecordSets",
+          resource: zone,
+          contextVariables: { [names]: [`_0123abcd.${CUSTOM_DOMAIN}`] },
+          why: "Route53 mode writes ACM's validation record under the domain.",
+        },
+        {
+          action: "route53:ChangeResourceRecordSets",
+          resource: zone,
+          contextVariables: {
+            [names]: [PREVIOUS_CUSTOM_DOMAIN, `_0123abcd.${PREVIOUS_CUSTOM_DOMAIN}`],
+          },
+          why: "A change of domain deletes the previous domain's records.",
+        },
+        {
+          action: "route53:GetChange",
+          resource: "arn:aws:route53:::change/C0000",
+          why: "Pulumi waits for each record change to reach INSYNC.",
+        },
+        {
+          action: "route53:ListResourceRecordSets",
+          resource: zone,
+          why: "Pulumi reads each record back on refresh.",
         },
       ];
     },

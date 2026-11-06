@@ -120,6 +120,11 @@ const pairs: CheckResult[] = [
     foundationalPermissionsBoundaryStatements(STACK_PREFIX),
   ),
   checkPair(
+    "buildTempInstallCloudDataServerPolicy (custom domain) vs foundationalPermissionsBoundaryStatements",
+    buildTempInstallCloudDataServerPolicy(STACK_PREFIX, ACCOUNT_ID, REGION, ["photos.example.com"]),
+    foundationalPermissionsBoundaryStatements(STACK_PREFIX),
+  ),
+  checkPair(
     "buildRuntimePolicy vs appPermissionsBoundaryStatements",
     buildRuntimePolicy(STACK_PREFIX, APP_ID, ["image", "video"], true, true, true),
     appPermissionsBoundaryStatements(STACK_PREFIX),
