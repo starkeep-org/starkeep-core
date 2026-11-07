@@ -277,7 +277,7 @@ echo "  Stack prefix : $STACK_PREFIX  (region: $REGION, account: $ACCOUNT_ID)"
 echo "  API Gateway  : $GATEWAY_NAME"
 echo "  Lambdas      : ${CDS_LAMBDA_PREFIX}*"
 echo "  DSQL cluster : (tagged starkeep:stackPrefix=${STACK_PREFIX})$([[ "$FORCE" == "true" ]] && echo "  [--force: will disable deletion protection]")"
-echo "  CloudFront   : distribution + OAC + cache policy + public key + key group (Part B)"
+echo "  CloudFront   : distribution + OAC + cache policies + public key + key group (Part B)"
 echo "  Custom domain: a Route53-zone domain's certificate and records (an external-DNS certificate stays)"
 echo "  Signing key  : SSM /${STACK_PREFIX}/app-creds/_cloudfront-signing"
 echo "  S3 buckets   : $FILES_BUCKET, $BILLING_BUCKET"
@@ -493,10 +493,11 @@ fi
 
 # ── Step 4b: CloudFront (Part B: shared-file signed URLs) ─────────────────────
 # The platform CloudFront distribution and its URL-signing material: the
-# distribution itself, the S3-origin OAC, the custom shared-files cache policy,
-# the RSA public key + key group, the signed-out-redirect viewer-request
-# function, and a custom domain the stack owned. Deleting a distribution requires
-# disable → wait-until-Deployed → delete, which is slow (~5–15 min). This whole
+# distribution itself, the S3-origin OAC, the shared-files and public-shares
+# cache policies, the RSA public key + key group, the signed-out-redirect
+# viewer-request function, and a custom domain the stack owned. Deleting a
+# distribution requires disable → wait-until-Deployed → delete, which is slow
+# (~5–15 min). This whole
 # step is best-effort: any failure is logged and skipped so a hiccup never
 # aborts the wider teardown (these resources are idle/cheap and can be cleaned
 # up by hand). Done before the files bucket because the distribution's S3 origin
@@ -513,7 +514,9 @@ DIST_COMMENT = f"{prefix} platform CDN"
 PUBKEY_COMMENT = f"{prefix} shared-file signing key"
 KEYGROUP_COMMENT = f"{prefix} shared-file signers"
 OAC_NAME = f"{prefix}-files-oac"
-CACHE_NAME = f"{prefix}-shared-files-cache"
+# Every custom cache policy the program creates. Names are account-global, so a
+# policy left behind makes the next install of the prefix fail.
+CACHE_NAMES = [f"{prefix}-shared-files-cache", f"{prefix}-public-shares-cache"]
 REDIRECT_FN_NAME = f"{prefix}-signed-out-redirect"
 
 
@@ -652,12 +655,13 @@ delete_with_etag(
     lambda it: it["Id"],
     "get-origin-access-control", "delete-origin-access-control",
 )
-delete_with_etag(
-    "Cache policy", "list-cache-policies", "CachePolicyList",
-    lambda it: it.get("CachePolicy", {}).get("CachePolicyConfig", {}).get("Name") == CACHE_NAME,
-    lambda it: it["CachePolicy"]["Id"],
-    "get-cache-policy", "delete-cache-policy",
-)
+for cache_name in CACHE_NAMES:
+    delete_with_etag(
+        f"Cache policy {cache_name}", "list-cache-policies", "CachePolicyList",
+        lambda it, n=cache_name: it.get("CachePolicy", {}).get("CachePolicyConfig", {}).get("Name") == n,
+        lambda it: it["CachePolicy"]["Id"],
+        "get-cache-policy", "delete-cache-policy",
+    )
 
 # ---- The signed-out-redirect viewer-request function -------------------------
 # Addressed by name rather than id, so it needs its own block rather than
