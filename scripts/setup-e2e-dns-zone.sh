@@ -7,8 +7,9 @@
 # zone, and the zone your domain already uses receives none of them.
 #
 # Setup, which you run once:
-#   1. Refuses a bare registrable domain such as example.com, so the script
-#      never takes over a whole domain.
+#   1. Refuses a name that public DNS already delegates to other name servers,
+#      such as a registered domain like example.com or an existing subzone, so
+#      the script never takes over a domain that is already serving.
 #   2. Creates the public hosted zone <zone> in the account of the ambient AWS
 #      credentials, or reuses an existing zone of that name that holds only its
 #      NS and SOA records.
@@ -72,18 +73,6 @@ confirm() {
 
 if ! [[ "$ZONE" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
   echo "Error: $ZONE is not a valid DNS name." >&2
-  exit 1
-fi
-
-# A registrable domain is one label under a public suffix. Without a public
-# suffix list the check covers the common shapes: any name of two labels, and
-# a name of three labels under a well-known two-label suffix such as co.uk.
-# It guards against a slip, not against every suffix in the world.
-LABELS=$(awk -F. '{print NF}' <<<"$ZONE")
-PARENT="${ZONE#*.}"
-TWO_LABEL_SUFFIXES=" co.uk org.uk ac.uk gov.uk me.uk com.au net.au org.au co.nz co.jp co.za com.br com.cn co.in co.kr com.mx com.tr com.sg "
-if (( LABELS < 3 )) || { (( LABELS == 3 )) && [[ "$TWO_LABEL_SUFFIXES" == *" $PARENT "* ]]; }; then
-  echo "Error: $ZONE is a whole registrable domain. Name a subdomain of it, such as e2e.$ZONE." >&2
   exit 1
 fi
 
@@ -183,6 +172,31 @@ if [[ "$DELETE" == true ]]; then
   exit 0
 fi
 
+# ── Refuse a name delegated elsewhere ─────────────────────────────────────────
+
+# Every registered domain, and every subzone already in use, has public NS
+# records at its name. A new test zone has none until this script delegates it,
+# and afterwards they name this account's zone, so a rerun passes.
+if ! PUBLIC_NS_ANSWER=$(dig +noall +answer NS "$ZONE" @1.1.1.1); then
+  echo "Error: could not query public DNS for $ZONE." >&2
+  exit 1
+fi
+PUBLIC_NS=$(awk -v zone="$ZONE." 'tolower($1) == zone && $4 == "NS" { print tolower($5) }' \
+  <<<"$PUBLIC_NS_ANSWER" | sed 's/\.$//' | sort)
+if [[ -n "$PUBLIC_NS" ]]; then
+  OURS=""
+  if [[ -n "$ZONE_ID" ]]; then
+    OURS=$(aws route53 get-hosted-zone --id "$ZONE_ID" \
+      --query 'DelegationSet.NameServers' --output text | tr '\t' '\n' | tr '[:upper:]' '[:lower:]' | sort)
+  fi
+  if [[ -z "$OURS" ]] || ! comm -12 <(echo "$PUBLIC_NS") <(echo "$OURS") | grep -q .; then
+    echo "Error: public DNS already delegates $ZONE to other name servers:" >&2
+    sed 's/^/  /' <<<"$PUBLIC_NS" >&2
+    echo "Name a new subdomain instead, such as e2e.$ZONE." >&2
+    exit 1
+  fi
+fi
+
 # ── Create or reuse the zone ──────────────────────────────────────────────────
 
 if [[ -n "$ZONE_ID" ]]; then
@@ -240,8 +254,10 @@ print("yes" if norm(a) == norm(b) else "no")
     echo "Added the NS record."
   fi
 else
-  echo "Add one NS record for $ZONE at the DNS provider of its parent domain, naming:"
+  echo "At the DNS provider that hosts the records of ${ZONE#*.}, add one NS record"
+  echo "named $ZONE that lists these name servers:"
   sed 's/^/  /' <<<"$NAME_SERVERS"
+  echo "Leave the name servers of ${ZONE#*.} itself unchanged."
   echo ""
   echo "Waiting for public DNS to answer for $ZONE. Press Ctrl-C to stop; running this"
   echo "again picks up where it left off."
