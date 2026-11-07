@@ -10,7 +10,7 @@
     "build": "pnpm --filter @example-app/web build",
     "bundle": "pnpm --filter @example-app/web bundle",
     "typecheck": "pnpm -r --filter '!@example-app/e2e' typecheck",
-    "test": "pnpm -r --if-present test",
+    "test": "pnpm -r --filter '!@example-app/e2e' --if-present test",
     "typecheck:e2e": "node scripts/link-core-harness.mjs && pnpm --filter @example-app/e2e typecheck",
     "test:e2e": "node scripts/link-core-harness.mjs && pnpm --filter @example-app/e2e test"
   },
