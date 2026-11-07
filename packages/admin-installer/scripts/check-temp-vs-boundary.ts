@@ -25,57 +25,12 @@ import {
   buildTempInstallCloudDataServerPolicy,
   buildRuntimePolicy,
 } from "../src/temp-policies";
+import { uncoveredActions } from "../src/policy-subsumption";
 
 const STACK_PREFIX = "starkeep";
 const APP_ID = "exampleapp";
 const ACCOUNT_ID = "111122223333";
 const REGION = "us-east-1";
-
-interface PolicyDocument {
-  Version: string;
-  Statement: Array<{
-    Sid?: string;
-    Effect: "Allow" | "Deny";
-    Action?: string | string[];
-    NotAction?: string | string[];
-    Resource?: unknown;
-    Condition?: unknown;
-  }>;
-}
-
-function toArray(x: string | string[] | undefined): string[] {
-  if (x === undefined) return [];
-  return Array.isArray(x) ? x : [x];
-}
-
-/** Collect every Allow Action across the boundary statements. */
-function boundaryAllowedActions(boundary: IamStatement[]): Set<string> {
-  const out = new Set<string>();
-  for (const stmt of boundary) {
-    if (stmt.Effect !== "Allow") continue;
-    for (const action of toArray(stmt.Action)) out.add(action);
-  }
-  return out;
-}
-
-/** True if `granted` (with possible trailing wildcard) covers `wanted`. */
-function actionMatches(allowed: string, wanted: string): boolean {
-  if (allowed === wanted) return true;
-  if (allowed === "*") return true;
-  // Wildcard at end, e.g. "lambda:Get*" covers "lambda:GetFunction".
-  if (allowed.endsWith("*")) {
-    const prefix = allowed.slice(0, -1);
-    if (wanted.startsWith(prefix)) return true;
-  }
-  return false;
-}
-
-function actionPermittedByBoundary(action: string, allowed: Set<string>): boolean {
-  for (const a of allowed) {
-    if (actionMatches(a, action)) return true;
-  }
-  return false;
-}
 
 interface CheckResult {
   pairName: string;
@@ -83,19 +38,7 @@ interface CheckResult {
 }
 
 function checkPair(pairName: string, policyJson: string, boundary: IamStatement[]): CheckResult {
-  const policy = JSON.parse(policyJson) as PolicyDocument;
-  const allowed = boundaryAllowedActions(boundary);
-  const missing: CheckResult["missing"] = [];
-
-  for (const stmt of policy.Statement) {
-    if (stmt.Effect !== "Allow") continue;
-    for (const action of toArray(stmt.Action)) {
-      if (!actionPermittedByBoundary(action, allowed)) {
-        missing.push({ sid: stmt.Sid, action });
-      }
-    }
-  }
-  return { pairName, missing };
+  return { pairName, missing: uncoveredActions(JSON.parse(policyJson), boundary) };
 }
 
 const pairs: CheckResult[] = [

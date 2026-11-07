@@ -59,6 +59,26 @@ describe("PUT", () => {
     expect(onDisk().customDomain).toBeUndefined();
   });
 
+  it("refuses a domain whose grants would overflow the role's policy quota", async () => {
+    // A change of domain names both, and two names this long cannot fit.
+    const long = (c: string) =>
+      `${c.repeat(63)}.${c.repeat(63)}.${c.repeat(63)}.${c.repeat(57)}.com`;
+    writeAdminConfig(dataDir, {
+      stackPrefix: "sk",
+      userPoolId: "us-east-2_x",
+      customDomainStatus: {
+        name: long("a"),
+        mode: "route53",
+        status: "active",
+        aliasTarget: "d1.cloudfront.net",
+      },
+    });
+    const res = await route.PUT(jsonRequest("/api/custom-domain", { domain: long("b") }, "PUT"));
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/quota/);
+    expect(onDisk().customDomain).toBeUndefined();
+  });
+
   it("clears the domain", async () => {
     writeAdminConfig(dataDir, { stackPrefix: "sk", customDomain: "photos.example.com" });
     const res = await route.PUT(jsonRequest("/api/custom-domain", { domain: null }, "PUT"));

@@ -30,6 +30,8 @@ import {
 } from "@aws-sdk/client-route-53";
 import type { AwsCredentials } from "./session";
 
+export { customDomainPolicyFits } from "./iam";
+
 export type CustomDomainMode = "route53" | "external";
 
 /** The record ACM asks for before it issues a certificate. */
