@@ -164,6 +164,53 @@ export function assertCloudInstallableAppId(appId: string): void {
   }
 }
 
+/** IAM's cap on one role's inline policies together, whitespace excluded. */
+export const ROLE_INLINE_POLICY_QUOTA = 10_240;
+
+/** Every account ID has 12 digits, so a placeholder sizes a policy exactly. */
+const ACCOUNT_ID_PLACEHOLDER = "000000000000";
+
+/**
+ * The characters the cloud-data-server role's inline policies take during an
+ * install that names `customDomains`: the standing runtime and broker-power
+ * policies plus the temp-install policy. A domain's record-name condition
+ * grows with the domain's length, and a change of domain names two.
+ */
+export function cloudDataServerInlinePolicySize(
+  stackPrefix: string,
+  region: string,
+  customDomains: readonly string[],
+): number {
+  const size = (doc: string) => doc.replace(/\s/g, "").length;
+  return (
+    size(buildRuntimePolicy(stackPrefix, "cloud-data-server", [], false, false)) +
+    size(buildBrokerPowerPolicy(stackPrefix, ACCOUNT_ID_PLACEHOLDER)) +
+    size(
+      buildTempInstallCloudDataServerPolicy(
+        stackPrefix,
+        ACCOUNT_ID_PLACEHOLDER,
+        region,
+        customDomains,
+      ),
+    )
+  );
+}
+
+/**
+ * Whether an install naming `customDomains` keeps the role's inline policies
+ * within IAM's quota. Over it, PutRolePolicy refuses the temp policy, so the
+ * installer and admin-web's save both check first and name the domain.
+ */
+export function customDomainPolicyFits(
+  stackPrefix: string,
+  region: string,
+  customDomains: readonly string[],
+): boolean {
+  return (
+    cloudDataServerInlinePolicySize(stackPrefix, region, customDomains) <= ROLE_INLINE_POLICY_QUOTA
+  );
+}
+
 /**
  * The broker's standing inline policy on the cloud-data-server role. It shares
  * the role's 10,240-character inline-policy quota with the runtime policy and,

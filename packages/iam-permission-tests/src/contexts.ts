@@ -98,6 +98,27 @@ interface ContextBuilder {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
+/** The bucket-setting reads Pulumi's BucketV2 makes on create and on every refresh. */
+const BUCKET_SETTING_READS = [
+  "s3:GetBucketAcl",
+  "s3:GetBucketCORS",
+  "s3:GetBucketLocation",
+  "s3:GetBucketLogging",
+  "s3:GetBucketNotification",
+  "s3:GetBucketObjectLockConfiguration",
+  "s3:GetBucketOwnershipControls",
+  "s3:GetBucketPolicy",
+  "s3:GetBucketPublicAccessBlock",
+  "s3:GetBucketRequestPayment",
+  "s3:GetBucketTagging",
+  "s3:GetBucketVersioning",
+  "s3:GetBucketWebsite",
+  "s3:GetAccelerateConfiguration",
+  "s3:GetEncryptionConfiguration",
+  "s3:GetLifecycleConfiguration",
+  "s3:GetReplicationConfiguration",
+];
+
 /** The custom domains the custom-domain install context's temp policy names. */
 export const CUSTOM_DOMAIN = "aaron.starkeep.app";
 export const PREVIOUS_CUSTOM_DOMAIN = "old.example.com";
@@ -423,6 +444,7 @@ const CONTEXTS: Record<string, ContextBuilder> = {
       // here is the whole point of running the simulator pre-deploy.
       const passphraseArn = `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/pulumi/passphrase`;
       const filesBucketArn = `arn:aws:s3:::${stackPrefix}-files-${accountId}-${region}`;
+      const billingBucketArn = `arn:aws:s3:::${stackPrefix}-billing-${accountId}-${region}`;
       return [
         // ---- The availability wiring (media plan items 19/19b). ----------
         // These three shipped in the Pulumi program with no matching grant in
@@ -446,6 +468,18 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           resource: filesBucketArn,
           why: "Pulumi reads the inventory configuration back on every refresh.",
         },
+        // ---- Bucket-setting reads. ----------------------------------------
+        // The temp policy reads both buckets' settings through s3:GetBucket*
+        // and s3:Get*Configuration rather than an enumeration. These are the
+        // reads Pulumi's BucketV2 makes on create and refresh, so the patterns
+        // provably still admit every one on both buckets.
+        ...BUCKET_SETTING_READS.flatMap((action) =>
+          [filesBucketArn, billingBucketArn].map((resource) => ({
+            action,
+            resource,
+            why: "Pulumi's BucketV2 reads the bucket's settings on create and refresh.",
+          })),
+        ),
         {
           action: "ssm:GetParameter",
           resource: passphraseArn,
@@ -476,7 +510,7 @@ const CONTEXTS: Record<string, ContextBuilder> = {
       "install-cloud-data-server for a run that names a custom domain " +
       `(${CUSTOM_DOMAIN}) and replaces the previous one (${PREVIOUS_CUSTOM_DOMAIN}).`,
     build: (input) => installCloudDataServerContext(input, [CUSTOM_DOMAIN, PREVIOUS_CUSTOM_DOMAIN]),
-    expectedCalls({ accountId }) {
+    expectedCalls({ stackPrefix, accountId }): ExpectedCall[] {
       const certificate = `arn:aws:acm:us-east-1:${accountId}:certificate/0000-cert`;
       const zone = "arn:aws:route53:::hostedzone/ZONE1";
       const names = "route53:ChangeResourceRecordSetsNormalizedRecordNames";
@@ -519,7 +553,10 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         {
           action: "acm:DeleteCertificate",
           resource: certificate,
-          why: "Removal, a change of domain, and pulumi destroy delete the certificate.",
+          contextVariables: { "aws:ResourceTag/starkeep:stackPrefix": stackPrefix },
+          why:
+            "Removal, a change of domain, and pulumi destroy delete the certificate. Both DNS " +
+            "modes tag it with the stack prefix, which the grant's condition requires.",
         },
         {
           action: "route53:ChangeResourceRecordSets",

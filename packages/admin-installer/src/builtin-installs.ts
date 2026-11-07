@@ -31,6 +31,7 @@ import { roleChain, type AwsCredentials } from "./session";
 import {
   appRoleExists,
   attachTempInstallCloudDataServerPolicy,
+  customDomainPolicyFits,
   createAppRole,
   deleteAppRoleWithPolicies,
   detachTempInstallCloudDataServerPolicy,
@@ -302,6 +303,23 @@ function customDomainsInPlay(config: CloudDataServerInstallConfig): string[] {
 }
 
 /**
+ * Refuse an install whose custom-domain grants would push the role's inline
+ * policies past IAM's quota. PutRolePolicy would refuse the temp policy anyway;
+ * this names the cause before anything changes.
+ */
+function assertCustomDomainPolicyFits(
+  config: CloudDataServerInstallConfig,
+  customDomains: readonly string[],
+): void {
+  if (customDomainPolicyFits(config.stackPrefix, config.region, customDomains)) return;
+  throw new Error(
+    `The custom domain${customDomains.length > 1 ? "s" : ""} ${customDomains.join(" and ")} ` +
+      `(${customDomains.map((d) => d.length).join(" + ")} characters) would push the cloud data ` +
+      "server role's inline policies past IAM's 10,240-character quota. Choose a shorter domain.",
+  );
+}
+
+/**
  * Install (or update) the cloud-data-server built-in app.
  *
  * Idempotent — safe to re-run. Each AWS-side check is an existence check,
@@ -328,6 +346,7 @@ export async function installCloudDataServer(
     ? validateCustomDomain(config.customDomain)
     : undefined;
   const customDomains = customDomainsInPlay(config);
+  assertCustomDomainPolicyFits(config, customDomains);
 
   const managerCreds = await roleChain([config.managerRoleArn]);
 
@@ -638,6 +657,8 @@ export async function uninstallCloudDataServer(
 ): Promise<void> {
   const appId = "cloud-data-server";
   const appRoleArn = `arn:aws:iam::${config.accountId}:role/${config.stackPrefix}-app-${appId}-role`;
+  const customDomains = customDomainsInPlay(config);
+  assertCustomDomainPolicyFits(config, customDomains);
 
   const managerCreds = await roleChain([config.managerRoleArn]);
 
@@ -654,7 +675,7 @@ export async function uninstallCloudDataServer(
     config.accountId,
     config.region,
     managerCreds,
-    customDomainsInPlay(config),
+    customDomains,
   );
 
   if (policyUpdated) {

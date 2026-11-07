@@ -17,9 +17,11 @@
 import { promises as dns } from "node:dns";
 import { ACMClient, DescribeCertificateCommand } from "@aws-sdk/client-acm";
 import {
+  customDomainPolicyFits,
   validateCustomDomain,
   type CustomDomainStatus,
 } from "@starkeep/admin-installer/custom-domain";
+import { regionFromUserPoolId } from "../lib/cloud-config";
 import { readStarkeepConfig } from "../lib/manager-credentials";
 import { crossSiteRefusal, fromOwnPage } from "../lib/same-origin";
 import type { STSCredentials } from "../lib/cognito-auth";
@@ -43,6 +45,8 @@ export async function PUT(req: Request): Promise<Response> {
         { status: 400 },
       );
     }
+    const refusal = quotaRefusal(domain);
+    if (refusal) return Response.json({ error: refusal }, { status: 400 });
   }
   // The config route's PATCH deletes a field given null. It checks the origin
   // again, so the request carries this one's Origin and Host.
@@ -54,6 +58,30 @@ export async function PUT(req: Request): Promise<Response> {
       headers,
       body: JSON.stringify({ customDomain: domain }),
     }),
+  );
+}
+
+/**
+ * The next install's grants name this domain and the one the last install
+ * acted on, and IAM caps the role's inline policies together. A domain that
+ * would overflow the cap fails here rather than at the install's PutRolePolicy.
+ */
+function quotaRefusal(domain: string): string | null {
+  const config = readStarkeepConfig() as {
+    stackPrefix?: string;
+    userPoolId?: string;
+    customDomainStatus?: CustomDomainStatus;
+  };
+  if (!config.stackPrefix || !config.userPoolId) return null;
+  const inPlay = [
+    ...new Set([domain, config.customDomainStatus?.name].filter((d): d is string => !!d)),
+  ];
+  if (customDomainPolicyFits(config.stackPrefix, regionFromUserPoolId(config.userPoolId), inPlay)) {
+    return null;
+  }
+  return (
+    `${domain} is too long: the install's permissions for it would not fit IAM's ` +
+    "inline-policy quota. Choose a shorter domain."
   );
 }
 

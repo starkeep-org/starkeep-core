@@ -15,37 +15,100 @@
  */
 import { describe, expect, it } from "vitest";
 import { MAX_STACK_PREFIX_LENGTH } from "@starkeep/aws-bootstrap";
-import { buildTempInstallCloudDataServerPolicy, buildRuntimePolicy } from "../src/temp-policies";
-import { buildBrokerPowerPolicy } from "../src/iam";
+import {
+  ROLE_INLINE_POLICY_QUOTA,
+  cloudDataServerInlinePolicySize as inlineTotal,
+  customDomainPolicyFits,
+} from "../src/iam";
+import { buildTempInstallCloudDataServerPolicy } from "../src/temp-policies";
+import { validateCustomDomain } from "../src/custom-domain";
 
-const ROLE_INLINE_POLICY_QUOTA = 10_240;
-const ACCOUNT_ID = "111122223333";
+/** The longest region name, which the Pulumi state bucket's name embeds. */
+const LONGEST_REGION = "ap-southeast-2";
+const LONGEST_PREFIX = "x".repeat(MAX_STACK_PREFIX_LENGTH);
 
-function inlineTotal(stackPrefix: string, region: string, customDomains: string[]): number {
-  const size = (doc: string) => doc.replace(/\s/g, "").length;
-  return (
-    size(buildRuntimePolicy(stackPrefix, "cloud-data-server", [], false, false)) +
-    size(buildBrokerPowerPolicy(stackPrefix, ACCOUNT_ID)) +
-    size(buildTempInstallCloudDataServerPolicy(stackPrefix, ACCOUNT_ID, region, customDomains))
-  );
+/** A valid host name of exactly `length` characters (at least 6). */
+function domainOf(length: number, tag = "a"): string {
+  const labels: string[] = [];
+  let left = length - ".com".length;
+  while (left > 0) {
+    // Never leave a single character, which a dot alone would have to fill.
+    const label = left > 63 ? (left - 63 === 1 ? 61 : 63) : left;
+    labels.push(tag.repeat(label));
+    left -= label + 1;
+  }
+  return validateCustomDomain(`${labels.join(".")}.com`);
 }
 
 describe("cloud-data-server role inline policies", () => {
   it("fit with no custom domain at the longest allowed prefix", () => {
-    const prefix = "x".repeat(MAX_STACK_PREFIX_LENGTH);
-    expect(inlineTotal(prefix, "ap-southeast-2", [])).toBeLessThanOrEqual(ROLE_INLINE_POLICY_QUOTA);
-  });
-
-  it("fit with one custom domain at the longest allowed prefix", () => {
-    const prefix = "x".repeat(MAX_STACK_PREFIX_LENGTH);
-    expect(inlineTotal(prefix, "ap-southeast-2", ["photos.koller-family.com"])).toBeLessThanOrEqual(
+    expect(inlineTotal(LONGEST_PREFIX, LONGEST_REGION, [])).toBeLessThanOrEqual(
       ROLE_INLINE_POLICY_QUOTA,
     );
   });
 
-  it("fit during a change of domain at the default prefix", () => {
+  it("fit with one 253-character domain, the longest DNS allows", () => {
+    const domain = domainOf(253);
+    expect(domain).toHaveLength(253);
+    expect(customDomainPolicyFits(LONGEST_PREFIX, LONGEST_REGION, [domain])).toBe(true);
+  });
+
+  it("fit during a change between two domains totalling 250 characters", () => {
+    const first = domainOf(125, "a");
+    const second = domainOf(125, "b");
+    expect(first.length + second.length).toBe(250);
+    expect(customDomainPolicyFits(LONGEST_PREFIX, LONGEST_REGION, [first, second])).toBe(true);
+  });
+
+  it("refuse two 253-character domains, so the installer must check", () => {
     expect(
-      inlineTotal("starkeep", "us-east-2", ["photos.koller-family.com", "aaron.starkeep.app"]),
-    ).toBeLessThanOrEqual(ROLE_INLINE_POLICY_QUOTA);
+      customDomainPolicyFits(LONGEST_PREFIX, LONGEST_REGION, [
+        domainOf(253, "a"),
+        domainOf(253, "b"),
+      ]),
+    ).toBe(false);
+  });
+});
+
+describe("temp-install S3 statements", () => {
+  type Statement = { Sid: string; Action: string[]; Resource: string | string[] };
+  const statements = (
+    JSON.parse(buildTempInstallCloudDataServerPolicy("starkeep", "111122223333", "us-east-2")) as {
+      Statement: Statement[];
+    }
+  ).Statement;
+  const bySid = (sid: string) => statements.find((s) => s.Sid === sid)!;
+
+  it("give the billing bucket its own statement with the pre-PR verb set", () => {
+    const billing = bySid("TempInstallBillingBucket");
+    expect(billing.Resource).toBe("arn:aws:s3:::starkeep-billing-*");
+    expect([...billing.Action].sort()).toEqual(
+      [
+        "s3:CreateBucket",
+        "s3:DeleteBucket",
+        "s3:ListBucket",
+        "s3:GetBucket*",
+        "s3:Get*Configuration",
+        "s3:PutBucketPolicy",
+        "s3:DeleteBucketPolicy",
+        "s3:PutBucketTagging",
+        "s3:PutBucketVersioning",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:PutBucketOwnershipControls",
+        "s3:PutEncryptionConfiguration",
+      ].sort(),
+    );
+  });
+
+  it("hold the files-bucket statement to the files bucket", () => {
+    expect(bySid("TempInstallS3Bucket").Resource).toBe("arn:aws:s3:::starkeep-files-*");
+  });
+
+  it("read bucket settings through patterns that admit no object action", () => {
+    for (const s of statements) {
+      for (const action of [s.Action].flat()) {
+        expect(action, s.Sid).not.toBe("s3:Get*");
+      }
+    }
   });
 });
