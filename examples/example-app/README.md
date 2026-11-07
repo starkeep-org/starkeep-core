@@ -8,19 +8,19 @@ The app reads and writes only `example/plaintext`, a type in the `example` categ
 
 Each heading is one group of operations, with a table of the current state and a row of controls:
 
-| Heading       | What it does                                                                                        |
-| ------------- | --------------------------------------------------------------------------------------------------- |
-| Connection    | Which surface the page runs on, who is signed in, and the 403 a write outside the app's grant gets. |
-| Example files | Create from text, upload through a presigned URL, derive a copy, filter, page, count and delete.    |
-| Open file     | One file's record, content, metadata row, labels and note.                                          |
-| Metadata      | The `example` category's metadata table, queried directly, with totals.                             |
-| Labels        | Add, set and retract tags and a bare flag; count files per tag; list every app's declared keys.     |
-| Notes         | The app's own `notes` table: write, pin, search and delete.                                         |
-| Snapshots     | The app's own files: save every note as a private JSON file, then list, open and delete the files.  |
-| Deleted       | Every example file deleted since an instant, a restore, and the trash retention window.             |
-| Types         | Record counts for every type the app may read.                                                      |
-| Public links  | Links anyone can open, made with a file's Share button. They need a cloud.                          |
-| Activity      | Every request the page made, with method, path, status and duration.                                |
+| Heading       | What it does                                                                                                                                 |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Connection    | Which surface the page runs on, who is signed in, the 403 a write outside the app's grant gets, and a call to the app's own JWT-gated route. |
+| Example files | Create from text, upload through a presigned URL, derive a copy, filter, page, count and delete.                                             |
+| Open file     | One file's record, content, metadata row, labels and note.                                                                                   |
+| Metadata      | The `example` category's metadata table, queried directly, with totals.                                                                      |
+| Labels        | Add, set and retract tags and a bare flag; count files per tag; list every app's declared keys.                                              |
+| Notes         | The app's own `notes` table: write, pin, search and delete.                                                                                  |
+| Snapshots     | The app's own files: save every note as a private JSON file, then list, open and delete the files.                                           |
+| Deleted       | Every example file deleted since an instant, a restore, and the trash retention window.                                                      |
+| Types         | Record counts for every type the app may read.                                                                                               |
+| Public links  | Links anyone can open, made with a file's Share button. They need a cloud.                                                                   |
+| Activity      | Every request the page made, with method, path, status and duration.                                                                         |
 
 `web/src/browser/api.ts` holds one function per operation and names the route each one calls.
 
@@ -37,7 +37,9 @@ common/                  @example-app/common: the data contract, no DOM or Node 
 web/                     @example-app/web: the local web and cloud web flavors
   src/server/app.ts      the Hono app both surfaces run
   src/server/local.ts    the local entry, which the manifest's localRun starts
-  src/server/cloud.ts    the cloud entry, a Lambda handler
+  src/server/cloud.ts    the cloud entry of the `static` handler, a Lambda
+  src/server/api.ts      the cloud entry of the `api` handler: the JWT-gated routes
+  src/server/echo.ts     POST /api/echo, the JWT-gated route
   src/browser/           the page
   scripts/bundle.mjs     the cloud bundle
 e2e/                     @example-app/e2e: the tier-2 suite

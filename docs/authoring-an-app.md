@@ -82,7 +82,10 @@ package per flavor. Its `web` package serves both web surfaces from one Hono
 app, `src/server/app.ts`. The local surface starts `src/server/local.ts` and the
 cloud surface runs `src/server/cloud.ts`. The browser half, under `src/browser/`,
 calls every data-plane route through the signing proxy, and its page shows each
-request with its status. The example reads and writes only `example/plaintext`,
+request with its status. The manifest declares a second compute handler, `api`,
+for one JWT-gated route, `POST /api/echo` (`src/server/echo.ts`). The page
+calls it with a Bearer token from `GET /api/session/token` in the cloud, and
+same-origin with no token locally. The example reads and writes only `example/plaintext`,
 a type that exists for it alone, so trying it on a real deployment never mixes
 invented files into anyone's library.
 
