@@ -395,12 +395,25 @@ export async function assertNoForeignRecords(opts: {
   );
 }
 
-/** The certificates in us-east-1 that carry every one of `tags`. */
+/** A certificate the installer found by tag. */
+export interface TaggedCertificate {
+  arn: string;
+  domain: string;
+  status: string;
+}
+
+/**
+ * The certificates in us-east-1 for one of `domains` that carry every one of
+ * `tags`. A summary for any other domain is skipped before its tags are read,
+ * so the cost tracks the domains in play rather than the account's
+ * certificates.
+ */
 async function findTaggedCertificates(
   acm: ACMClient,
   tags: Record<string, string>,
-): Promise<Array<{ arn: string; domain: string; status: string }>> {
-  const found: Array<{ arn: string; domain: string; status: string }> = [];
+  domains: ReadonlySet<string>,
+): Promise<TaggedCertificate[]> {
+  const found: TaggedCertificate[] = [];
   const paginator = paginateListCertificates(
     { client: acm },
     // Without a status filter ACM lists only some statuses.
@@ -409,6 +422,7 @@ async function findTaggedCertificates(
   for await (const page of paginator) {
     for (const summary of page.CertificateSummaryList ?? []) {
       if (!summary.CertificateArn || !summary.DomainName) continue;
+      if (!domains.has(summary.DomainName.toLowerCase())) continue;
       const listed = await acm.send(
         new ListTagsForCertificateCommand({ CertificateArn: summary.CertificateArn }),
       );
@@ -416,13 +430,34 @@ async function findTaggedCertificates(
       if (Object.entries(tags).every(([k, v]) => held.get(k) === v)) {
         found.push({
           arn: summary.CertificateArn,
-          domain: summary.DomainName,
+          domain: summary.DomainName.toLowerCase(),
           status: summary.Status ?? "",
         });
       }
     }
   }
   return found;
+}
+
+/**
+ * This deployment's external-mode certificates for the domains an install has
+ * in play. One install lists once and hands the result to both
+ * ensureExternalCertificate and deleteUnusedExternalCertificates.
+ *
+ * A certificate for an older domain outside the set, whose deletion failed
+ * twice, stays behind. It costs nothing, and the teardown script's full sweep
+ * removes it.
+ */
+export async function listExternalCertificates(opts: {
+  stackPrefix: string;
+  domains: readonly string[];
+  creds: AwsCredentials;
+}): Promise<TaggedCertificate[]> {
+  return findTaggedCertificates(
+    acmClient(opts.creds),
+    externalTags(opts.stackPrefix),
+    new Set(opts.domains),
+  );
 }
 
 function externalTags(stackPrefix: string): Record<string, string> {
@@ -455,11 +490,13 @@ const DEAD_STATUSES = new Set<string>([
 export async function ensureExternalCertificate(opts: {
   stackPrefix: string;
   domain: string;
+  /** This install's listing, from listExternalCertificates. */
+  certificates: readonly TaggedCertificate[];
   creds: AwsCredentials;
 }): Promise<{ certificateArn: string; issued: boolean; validationRecord?: ValidationRecord }> {
   const acm = acmClient(opts.creds);
   const tags = externalTags(opts.stackPrefix);
-  const mine = (await findTaggedCertificates(acm, tags)).filter((c) => c.domain === opts.domain);
+  const mine = opts.certificates.filter((c) => c.domain === opts.domain);
 
   let arn: string | undefined;
   for (const cert of mine) {
@@ -517,17 +554,21 @@ function toValidationRecord(record: ResourceRecord | undefined): ValidationRecor
  * zone into this account.
  */
 export async function deleteUnusedExternalCertificates(opts: {
-  stackPrefix: string;
   keepArn?: string;
+  /** This install's listing, from listExternalCertificates. */
+  certificates: readonly TaggedCertificate[];
   creds: AwsCredentials;
 }): Promise<void> {
   const acm = acmClient(opts.creds);
-  for (const cert of await findTaggedCertificates(acm, externalTags(opts.stackPrefix))) {
+  for (const cert of opts.certificates) {
     if (cert.arn === opts.keepArn) continue;
     console.log(`Deleting unused certificate ${cert.arn} for ${cert.domain}.`);
     try {
       await acm.send(new DeleteCertificateCommand({ CertificateArn: cert.arn }));
     } catch (err) {
+      // ensureExternalCertificate already deleted a dead certificate from the
+      // same listing.
+      if ((err as { name?: string }).name === "ResourceNotFoundException") continue;
       // ACM can report a certificate in use for a while after CloudFront
       // detached it. The install has finished its real work by now, and the
       // next run deletes what this one could not.

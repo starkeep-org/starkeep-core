@@ -31,6 +31,7 @@ const {
   deleteUnusedExternalCertificates,
   ensureExternalCertificate,
   findHostedZone,
+  listExternalCertificates,
   validateCustomDomain,
 } = await import("../src/custom-domain");
 
@@ -122,6 +123,16 @@ describe("findHostedZone", () => {
   });
 });
 
+/** One install's path: list once, then ensure the domain's certificate. */
+async function ensure(domain: string) {
+  const certificates = await listExternalCertificates({
+    stackPrefix: "sk",
+    domains: [domain],
+    creds: CREDS,
+  });
+  return ensureExternalCertificate({ stackPrefix: "sk", domain, certificates, creds: CREDS });
+}
+
 describe("ensureExternalCertificate", () => {
   const RECORD = { Name: "_abc.photos.example.com.", Type: "CNAME" as const, Value: "_x.acm." };
 
@@ -135,11 +146,7 @@ describe("ensureExternalCertificate", () => {
       },
     });
 
-    const result = await ensureExternalCertificate({
-      stackPrefix: "sk",
-      domain: "photos.example.com",
-      creds: CREDS,
-    });
+    const result = await ensure("photos.example.com");
 
     expect(result).toEqual({
       certificateArn: "arn:new",
@@ -175,11 +182,7 @@ describe("ensureExternalCertificate", () => {
       },
     });
 
-    const result = await ensureExternalCertificate({
-      stackPrefix: "sk",
-      domain: "photos.example.com",
-      creds: CREDS,
-    });
+    const result = await ensure("photos.example.com");
 
     expect(result.certificateArn).toBe("arn:mine");
     expect(result.issued).toBe(true);
@@ -205,11 +208,7 @@ describe("ensureExternalCertificate", () => {
       },
     });
 
-    const result = await ensureExternalCertificate({
-      stackPrefix: "sk",
-      domain: "photos.example.com",
-      creds: CREDS,
-    });
+    const result = await ensure("photos.example.com");
 
     expect(acm.commandCalls(DeleteCertificateCommand).map((c) => c.args[0].input)).toEqual([
       { CertificateArn: "arn:dead" },
@@ -239,11 +238,7 @@ describe("ensureExternalCertificate", () => {
       },
     });
 
-    const result = await ensureExternalCertificate({
-      stackPrefix: "sk",
-      domain: "photos.example.com",
-      creds: CREDS,
-    });
+    const result = await ensure("photos.example.com");
 
     expect(result).toMatchObject({ certificateArn: "arn:pending", issued: false });
     expect(acm.commandCalls(RequestCertificateCommand)).toHaveLength(0);
@@ -271,8 +266,12 @@ describe("deleteUnusedExternalCertificates", () => {
       .resolves({ Tags: EXTERNAL_TAGS.slice(0, 3) });
 
     await deleteUnusedExternalCertificates({
-      stackPrefix: "sk",
       keepArn: "arn:keep",
+      certificates: await listExternalCertificates({
+        stackPrefix: "sk",
+        domains: ["photos.example.com", "old.example.com", "aaron.starkeep.app"],
+        creds: CREDS,
+      }),
       creds: CREDS,
     });
 
@@ -293,10 +292,90 @@ describe("deleteUnusedExternalCertificates", () => {
       .on(DeleteCertificateCommand, { CertificateArn: "arn:busy" })
       .rejects(Object.assign(new Error("in use"), { name: "ResourceInUseException" }));
 
+    const certificates = await listExternalCertificates({
+      stackPrefix: "sk",
+      domains: ["old.example.com", "older.example.com"],
+      creds: CREDS,
+    });
     await expect(
-      deleteUnusedExternalCertificates({ stackPrefix: "sk", creds: CREDS }),
+      deleteUnusedExternalCertificates({ certificates, creds: CREDS }),
     ).resolves.toBeUndefined();
     expect(acm.commandCalls(DeleteCertificateCommand)).toHaveLength(2);
+  });
+});
+
+describe("one certificate listing per install", () => {
+  it("reads tags only for the domains in play", async () => {
+    acm.on(ListCertificatesCommand).resolves({
+      CertificateSummaryList: [
+        { CertificateArn: "arn:mine", DomainName: "Photos.Example.com" },
+        { CertificateArn: "arn:website", DomainName: "www.starkeep.app" },
+        { CertificateArn: "arn:other", DomainName: "unrelated.example.org" },
+      ],
+    });
+    acm.on(ListTagsForCertificateCommand).resolves({ Tags: EXTERNAL_TAGS });
+
+    const found = await listExternalCertificates({
+      stackPrefix: "sk",
+      domains: ["photos.example.com"],
+      creds: CREDS,
+    });
+
+    expect(found).toEqual([{ arn: "arn:mine", domain: "photos.example.com", status: "" }]);
+    expect(
+      acm.commandCalls(ListTagsForCertificateCommand).map((c) => c.args[0].input.CertificateArn),
+    ).toEqual(["arn:mine"]);
+  });
+
+  it("serves both the ensure and the cleanup from a single ListCertificates call", async () => {
+    acm.on(ListCertificatesCommand).resolves({
+      CertificateSummaryList: [
+        { CertificateArn: "arn:dead", DomainName: "photos.example.com", Status: "FAILED" },
+        { CertificateArn: "arn:old", DomainName: "old.example.com", Status: "ISSUED" },
+      ],
+    });
+    acm.on(ListTagsForCertificateCommand).resolves({ Tags: EXTERNAL_TAGS });
+    acm.on(RequestCertificateCommand).resolves({ CertificateArn: "arn:fresh" });
+    acm
+      .on(DeleteCertificateCommand, { CertificateArn: "arn:dead" })
+      .resolvesOnce({})
+      .rejects(Object.assign(new Error("gone"), { name: "ResourceNotFoundException" }));
+    acm.on(DescribeCertificateCommand).resolves({
+      Certificate: {
+        Status: "PENDING_VALIDATION",
+        DomainValidationOptions: [
+          { DomainName: "x", ResourceRecord: { Name: "_a.", Type: "CNAME", Value: "_b." } },
+        ],
+      },
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const certificates = await listExternalCertificates({
+      stackPrefix: "sk",
+      domains: ["photos.example.com", "old.example.com"],
+      creds: CREDS,
+    });
+    const ensured = await ensureExternalCertificate({
+      stackPrefix: "sk",
+      domain: "photos.example.com",
+      certificates,
+      creds: CREDS,
+    });
+    await deleteUnusedExternalCertificates({
+      keepArn: ensured.certificateArn,
+      certificates,
+      creds: CREDS,
+    });
+
+    expect(acm.commandCalls(ListCertificatesCommand)).toHaveLength(1);
+    expect(acm.commandCalls(DeleteCertificateCommand).map((c) => c.args[0].input)).toEqual([
+      { CertificateArn: "arn:dead" },
+      { CertificateArn: "arn:dead" },
+      { CertificateArn: "arn:old" },
+    ]);
+    // The second delete of the dead certificate finds it gone, which is no news.
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });
 
