@@ -88,3 +88,72 @@ jobs:
           name: tier-2-test-results
           path: e2e/test-results/
           retention-days: 14
+
+  # The example app against this pull request's platform. The example is its
+  # own pnpm workspace, so it installs `@starkeep/app-client` from npm, as a
+  # third-party app does, while the harness boots local-data-server, admin-web
+  # and Drive from this checkout's source. A platform change that breaks an
+  # app-facing operation fails here.
+  example-tier-2:
+    name: Example app (tier 2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            examples/example-app/pnpm-lock.yaml
+      # Core's install: the platform the harness boots.
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile
+        working-directory: examples/example-app
+      - run: pnpm --filter @example-app/e2e exec playwright install --with-deps chromium
+        working-directory: examples/example-app
+      - run: pnpm test:e2e
+        working-directory: examples/example-app
+        env:
+          STARKEEP_CORE_DIR: ${{ github.workspace }}
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: example-tier-2-test-results
+          path: examples/example-app/e2e/test-results/
+          retention-days: 14
+
+  # The example app copied out of this repository, the way an author copies
+  # it. Catches anything the example silently borrows from core: a base
+  # tsconfig, a tool core's root installs, a path that climbs out of the folder.
+  example-copied-out:
+    name: Example app (copied out)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: examples/example-app/pnpm-lock.yaml
+      - name: Copy the example out of the checkout
+        run: |
+          mkdir -p "$RUNNER_TEMP/example-app"
+          git archive HEAD:examples/example-app | tar -x -C "$RUNNER_TEMP/example-app"
+      - run: pnpm install --frozen-lockfile
+        working-directory: ${{ runner.temp }}/example-app
+      - run: pnpm typecheck
+        working-directory: ${{ runner.temp }}/example-app
+      - run: pnpm test
+        working-directory: ${{ runner.temp }}/example-app
+      - run: pnpm build
+        working-directory: ${{ runner.temp }}/example-app
+      - run: pnpm bundle
+        working-directory: ${{ runner.temp }}/example-app
+        env:
+          STARKEEP_APP_BASE_PATH: /apps/example-app
+          STARKEEP_BUNDLE_OUT: ${{ runner.temp }}/example-dist.zip

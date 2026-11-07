@@ -157,8 +157,8 @@ app.all("/api/local-data/*", (c) => {
   return proxy(c.req.raw, { params: Promise.resolve({ path: segments }) });
 });
 
-// Local-surface upload relay. See assetScript() for why the local surface
-// cannot PUT to the presigned URL from the page.
+// Local-surface upload relay: the server-side signed write path. See
+// assetScript() for why Probe keeps it.
 app.put("/api/upload", (c) => {
   if (isCloud()) return json({ error: "The upload relay is a local-surface route" }, 404);
   return relayUpload(c.req.raw);

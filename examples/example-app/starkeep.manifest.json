@@ -1,0 +1,81 @@
+{
+  "id": "example-app",
+  "name": "Example App",
+  "version": "0.1.0",
+  "description": "Performs every app-facing data operation on invented plaintext files, and shows each request and its result. Safe to run on a real deployment: it reads and writes only its own example type.",
+  "tier": "official",
+  "targets": ["local", "cloud"],
+  "localRun": {
+    "command": "pnpm",
+    "args": ["start"],
+    "cwd": "web",
+    "portFlag": "--port"
+  },
+  "infraRequirements": {
+    "fileAccess": [
+      {
+        "types": ["example/plaintext"],
+        "access": "readwrite",
+        "metadataWrite": true,
+        "rationale": "The example app creates, reads, labels and deletes invented plaintext files of its own type, and writes their line, word and character counts. It never reads or writes any other type."
+      }
+    ],
+    "labelKeys": [
+      {
+        "key": "tag",
+        "description": "A set-valued tag on an example file, such as draft or idea."
+      },
+      {
+        "key": "reviewed",
+        "description": "A bare flag: the example file has been reviewed."
+      },
+      {
+        "key": "derived",
+        "description": "Marks a derived copy, valued with how the copy was made, such as uppercase."
+      }
+    ],
+    "appSpecificSyncable": {
+      "files": true,
+      "tables": [
+        {
+          "name": "notes",
+          "columns": [
+            { "name": "record_id", "type": "text", "primaryKey": true, "notNull": true },
+            { "name": "note", "type": "text" },
+            { "name": "pinned", "type": "boolean" },
+            { "name": "updated_on", "type": "timestamp" }
+          ],
+          "indexes": [{ "columns": ["pinned"] }]
+        }
+      ]
+    },
+    "publicSharing": true,
+    "compute": {
+      "enabled": true,
+      "handlers": [
+        {
+          "name": "static",
+          "handler": "index.handler",
+          "memoryMb": 256,
+          "timeoutSeconds": 10,
+          "routes": ["GET /", "ANY /{proxy+}"],
+          "auth": "session",
+          "publicPaths": [
+            "/",
+            "/_immutable/*",
+            "/sign-in",
+            "/api/session/*",
+            "/starkeep-runtime-config"
+          ],
+          "staticAssetPaths": ["/", "/_immutable/*"],
+          "env": {
+            "STARKEEP_API_GATEWAY_URL": "",
+            "STARKEEP_USER_POOL_ID": "",
+            "STARKEEP_USER_POOL_CLIENT_ID": "",
+            "STARKEEP_IDENTITY_POOL_ID": ""
+          }
+        }
+      ]
+    }
+  }
+}

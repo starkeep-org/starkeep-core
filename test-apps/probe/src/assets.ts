@@ -23,10 +23,12 @@ export const ASSET_NAME = "probe.5f3a9c21.js";
  * Uploading is the one flow that differs by surface, and the difference is not
  * cosmetic. In the cloud the presigned URL points at S3 and the browser PUTs to
  * it directly — which is the only place anything exercises S3's CORS
- * configuration on a real presigned PUT. Locally the presign endpoint hands
- * back a loopback URL on the data server's own origin, which a page served from
- * the app's origin cannot PUT to, so the upload goes through the app's own
- * server instead. Both paths end in the same `POST /data/records`.
+ * configuration on a real presigned PUT. Locally the upload goes through the
+ * app's own server instead, which keeps a caller on the server-side signed
+ * write path (`POST /data/files` with the app's credentials). A page *can* PUT
+ * to the local presigned URL: local-data-server answers CORS for it, and the
+ * example app (`examples/example-app`) uploads that way on both surfaces. Both
+ * of Probe's paths end in the same `POST /data/records`.
  */
 export function assetScript(): string {
   return `(() => {

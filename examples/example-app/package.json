@@ -1,0 +1,20 @@
+{
+  "name": "example-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The Starkeep example app: every app-facing data operation, on invented plaintext files.",
+  "packageManager": "pnpm@10.20.0",
+  "scripts": {
+    "start": "pnpm --filter @example-app/web start",
+    "build": "pnpm --filter @example-app/web build",
+    "bundle": "pnpm --filter @example-app/web bundle",
+    "typecheck": "pnpm -r --filter '!@example-app/e2e' typecheck",
+    "test": "pnpm -r --if-present test",
+    "typecheck:e2e": "node scripts/link-core-harness.mjs && pnpm --filter @example-app/e2e typecheck",
+    "test:e2e": "node scripts/link-core-harness.mjs && pnpm --filter @example-app/e2e test"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
