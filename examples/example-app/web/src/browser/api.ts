@@ -307,23 +307,6 @@ export async function deriveUppercase(record: ExampleRecord): Promise<ExampleRec
   });
 }
 
-/**
- * Replace a file's content. Records are immutable and their ids are a hash of
- * their content, so a new version is a new record: write it, move the app's
- * own note to the new id, then delete the old record. Deleting a record also
- * deletes its derived copies, so a replaced file loses its uppercase copy.
- */
-export async function replaceContent(record: ExampleRecord, text: string): Promise<ExampleRecord> {
-  const next = await createFromText(record.original_filename ?? "file.skexample", text);
-  const note = await getNote(record.id);
-  if (note) {
-    await saveNote({ ...note, recordId: next.id, updatedOn: new Date().toISOString() });
-    await deleteNote(record.id);
-  }
-  await deleteRecord(record.id);
-  return next;
-}
-
 export type RecordFilter =
   | { kind: "all" }
   | { kind: "originals" }
@@ -400,7 +383,10 @@ export async function fileUrls(ids: string[]): Promise<Record<string, unknown>> 
   ).urls;
 }
 
-/** `DELETE /data/records/:id`. */
+/**
+ * `DELETE /data/records/:id`. Deleting a record deletes its derived copies
+ * with it: deleting a file also deletes its uppercase copy.
+ */
 export async function deleteRecord(id: string): Promise<void> {
   expectOk(await data("DELETE", `/data/records/${encodeURIComponent(id)}`));
 }

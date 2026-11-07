@@ -159,7 +159,7 @@ connection.controls.append(
 
 const files = section(
   "Example files",
-  "Shared records of type example/plaintext. Create one from text, upload a file, derive a copy, replace content, filter, page and delete.",
+  "Shared records of type example/plaintext. Create one from text, upload a file, derive a copy, filter, page and delete.",
 );
 const nameInput = el("input", { value: "hello.skexample" });
 const textInput = el("textarea", { rows: 3, value: "Hello, Starkeep.\nThis file is an example." });
@@ -289,12 +289,6 @@ async function renderFiles(): Promise<void> {
               button(`Copy uppercase ${r.original_filename}`, () =>
                 run("Copy uppercase", async () => {
                   selectedId = (await api.deriveUppercase(r)).id;
-                  await refreshAll();
-                }),
-              ),
-              button(`Replace ${r.original_filename}`, () =>
-                run("Replace", async () => {
-                  selectedId = (await api.replaceContent(r, textInput.value)).id;
                   await refreshAll();
                 }),
               ),
