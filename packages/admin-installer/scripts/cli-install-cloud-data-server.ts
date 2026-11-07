@@ -49,9 +49,13 @@ import {
 } from "../src/cognito-auth";
 import { prompt } from "../src/cli-prompt";
 import { isDeploymentName } from "@starkeep/aws-bootstrap";
-import type { CustomDomainStatus } from "../src/custom-domain";
+import {
+  customDomainInstallInput,
+  nextCustomDomainConfig,
+  type CustomDomainConfigFields,
+} from "../src/custom-domain";
 
-interface StarkeepConfig {
+interface StarkeepConfig extends CustomDomainConfigFields {
   stackPrefix: string;
   accountId?: string;
   userPoolId: string;
@@ -83,12 +87,8 @@ interface StarkeepConfig {
   auroraEndpoint?: string;
   /** The deployment's settings this machine held with no cloud; seeds SSM once. */
   deploymentSettings?: unknown;
-  /** The operator's custom domain for the cloud, set in admin-web. */
-  customDomain?: string;
   /** Written by this script: the distribution's own cloudfront.net name. */
   cloudfrontDomain?: string;
-  /** Written by this script: where the custom domain stood after the last install. */
-  customDomainStatus?: CustomDomainStatus;
 }
 
 const STARKEEP_DIR = starkeepDir();
@@ -241,6 +241,16 @@ console.log(
     : "  Already present; leaving as-is.",
 );
 
+// Record the domain this run attaches before anything touches AWS. A run that
+// fails part-way can leave the domain's certificate and records behind, and the
+// next run's grants must still cover them.
+mkdirSync(STARKEEP_DIR, { recursive: true });
+writeFileSync(
+  CONFIG_PATH,
+  JSON.stringify(nextCustomDomainConfig(config, { stage: "starting" }), null, 2),
+  "utf-8",
+);
+
 console.log("\nInstalling cloud-data-server…\n");
 const outputs = await installCloudDataServer({
   stackPrefix,
@@ -264,11 +274,9 @@ const outputs = await installCloudDataServer({
   ...(config.deploymentSettings !== undefined
     ? { deploymentSettings: config.deploymentSettings }
     : {}),
-  customDomain: config.customDomain || undefined,
-  // The last install's domain, so this run can delete its records and
-  // certificate after a removal or a change.
-  previousCustomDomain: config.customDomainStatus?.name,
-  cloudfrontDomain: config.cloudfrontDomain,
+  // The domain to attach, and the earlier ones whose records and certificate
+  // this run may need to delete after a removal, a change, or a failed attempt.
+  ...customDomainInstallInput(config),
 }).catch(exitOnInstallFailure);
 
 // There is no separate cloud sync identity to install here: shared-record sync
@@ -278,7 +286,7 @@ const outputs = await installCloudDataServer({
 // wizard's second deploy pass) — after this cloud-data-server install completes.
 
 const updated: StarkeepConfig = {
-  ...config,
+  ...nextCustomDomainConfig(config, { stage: "succeeded", status: outputs.customDomain }),
   accountId,
   permissionsBoundaryArn,
   foundationalPermissionsBoundaryArn,
@@ -288,7 +296,6 @@ const updated: StarkeepConfig = {
   apiGatewayUrl: outputs.apiGatewayUrl,
   publicBaseUrl: outputs.publicBaseUrl,
   cloudfrontDomain: outputs.cloudfrontDomain,
-  customDomainStatus: outputs.customDomain,
   apiGatewayId: outputs.apiGatewayId,
   apiGatewayExecutionArn: outputs.apiGatewayExecutionArn,
   authorizerId: outputs.authorizerId,

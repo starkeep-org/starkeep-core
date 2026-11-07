@@ -139,6 +139,12 @@ export interface CloudDataServerInstallConfig {
    */
   previousCustomDomain?: string;
   /**
+   * A domain an earlier install started on and never finished. Its grants stay
+   * in place, so this run, or `pulumi destroy`, can delete what the failed
+   * attempt created.
+   */
+  attemptedCustomDomain?: string;
+  /**
    * The distribution's cloudfront.net name from the last install. An external
    * domain becomes canonical only once public DNS sends it there, and the
    * check runs before `pulumi up` reports the name again.
@@ -295,11 +301,21 @@ function makeCloudDataServerOrphanCleaner(
 }
 
 /**
- * The custom domains an install's grants must cover: the one it attaches and
- * the one the previous install attached, normalized and without repeats.
+ * The custom domains an install's grants must cover: the one it attaches, the
+ * one the previous install attached, and one an earlier install started on and
+ * never finished, normalized and without repeats. An invalid name drops out.
  */
-function customDomainsInPlay(config: CloudDataServerInstallConfig): string[] {
-  const names = [config.customDomain, config.previousCustomDomain].flatMap((d) => {
+export function customDomainsInPlay(
+  config: Pick<
+    CloudDataServerInstallConfig,
+    "customDomain" | "previousCustomDomain" | "attemptedCustomDomain"
+  >,
+): string[] {
+  const names = [
+    config.customDomain,
+    config.previousCustomDomain,
+    config.attemptedCustomDomain,
+  ].flatMap((d) => {
     if (!d) return [];
     try {
       return [validateCustomDomain(d)];
@@ -316,7 +332,7 @@ function customDomainsInPlay(config: CloudDataServerInstallConfig): string[] {
  * this names the cause before anything changes.
  */
 function assertCustomDomainPolicyFits(
-  config: CloudDataServerInstallConfig,
+  config: Pick<CloudDataServerInstallConfig, "stackPrefix" | "region">,
   customDomains: readonly string[],
 ): void {
   if (customDomainPolicyFits(config.stackPrefix, config.region, customDomains)) return;

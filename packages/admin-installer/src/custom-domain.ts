@@ -181,6 +181,75 @@ export function signingHosts(
   ];
 }
 
+/** The custom-domain fields of `~/.starkeep/config.json`. */
+export interface CustomDomainConfigFields {
+  /** The operator's choice, set in admin-web. */
+  customDomain?: string;
+  /** Where the domain stood after the last successful install. */
+  customDomainStatus?: CustomDomainStatus;
+  /**
+   * The domain an install started on and has not finished. A failed first
+   * attach can leave a certificate and records that only this name's grants
+   * can delete, and `customDomainStatus` never names it.
+   */
+  customDomainAttempted?: string;
+}
+
+/**
+ * The config's custom-domain fields after one step of an install:
+ *
+ * - `starting`, written before the install touches AWS: the domain the run
+ *   attaches becomes `customDomainAttempted`. A run that names no domain
+ *   keeps an earlier attempt, so the attempt's leftovers stay in play.
+ * - `succeeded`: the run's status replaces the attempt.
+ * - `failed`: nothing changes, so the attempt carries into the next run.
+ */
+export function nextCustomDomainConfig<T extends CustomDomainConfigFields>(
+  previous: T,
+  outcome:
+    | { stage: "starting" }
+    | { stage: "succeeded"; status?: CustomDomainStatus }
+    | { stage: "failed" },
+): T {
+  const next = { ...previous };
+  switch (outcome.stage) {
+    case "starting":
+      if (previous.customDomain) next.customDomainAttempted = previous.customDomain;
+      return next;
+    case "succeeded":
+      delete next.customDomainAttempted;
+      if (outcome.status) next.customDomainStatus = outcome.status;
+      else delete next.customDomainStatus;
+      return next;
+    case "failed":
+      return next;
+  }
+}
+
+/**
+ * The custom-domain part of an install or uninstall's input, from the config:
+ * the domain to attach, and the earlier names whose records and certificates
+ * the run's grants must still cover.
+ */
+export function customDomainInstallInput(config: {
+  customDomain?: string;
+  customDomainStatus?: { name: string };
+  customDomainAttempted?: string;
+  cloudfrontDomain?: string;
+}): {
+  customDomain?: string;
+  previousCustomDomain?: string;
+  attemptedCustomDomain?: string;
+  cloudfrontDomain?: string;
+} {
+  return {
+    customDomain: config.customDomain || undefined,
+    previousCustomDomain: config.customDomainStatus?.name,
+    attemptedCustomDomain: config.customDomainAttempted,
+    cloudfrontDomain: config.cloudfrontDomain,
+  };
+}
+
 function credentialsOf(creds: AwsCredentials) {
   return {
     accessKeyId: creds.accessKeyId,
