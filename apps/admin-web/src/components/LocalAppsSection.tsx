@@ -518,10 +518,11 @@ const CATEGORY_NAMES: Record<string, string> = {
   video: "Videos",
   audio: "Audio",
   document: "Documents",
+  example: "Example files",
   other: "Other files",
 };
 
-function categoriesOf(types: readonly string[]): string {
+export function categoriesOf(types: readonly string[]): string {
   const prefixes = [...new Set(types.map((t) => t.split("/")[0] ?? t))];
   return prefixes.map((p) => CATEGORY_NAMES[p] ?? p).join(", ");
 }

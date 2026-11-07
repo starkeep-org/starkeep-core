@@ -807,6 +807,7 @@ describe("a mobile app through the broker", () => {
       );
       expect(res.status, JSON.stringify(res.body)).toBe(200);
     };
+    const started = Date.now();
     await register(A, "covers/b.jpg");
     await register(A, "covers/a.jpg");
     await register(A, "styles/s.jpg");
@@ -831,7 +832,9 @@ describe("a mobile app through the broker", () => {
     const covers = await list(A, { prefix: "covers/" });
     expect(covers.files.map((f) => f.sub_key)).toEqual(["covers/a.jpg", "covers/b.jpg"]);
     expect(covers.files[0]!.size_bytes).toBe(3);
-    expect(Date.parse(covers.files[0]!.created_at)).not.toBeNaN();
+    // The registering node's clock, read back as an instant: not merely a
+    // parseable date, but this test's own minute.
+    expect(Math.abs(Date.parse(covers.files[0]!.created_at) - started)).toBeLessThan(60_000);
 
     const first = await list(A, { limit: "2" });
     expect(first.files.map((f) => f.sub_key)).toEqual(["covers/a.jpg", "covers/b.jpg"]);
@@ -841,6 +844,35 @@ describe("a mobile app through the broker", () => {
 
     // B's listing holds B's file alone, under the same app.
     expect((await list(B, {})).files.map((f) => f.sub_key)).toEqual(["covers/z.jpg"]);
+  });
+
+  it("fails the listing loudly on a file row whose created_at is not an HLC", async () => {
+    await registerPhotosMobile();
+    await createPhotosPrivateTables({ filesEnabled: true });
+    // Nothing on the ingest path checks the column's format, so a peer can
+    // ship an ISO instant. Read as an HLC, that instant would list as 1970.
+    const iso = fileRow(A, "iso.jpg", "desk-a");
+    const pushed = await call(
+      A,
+      "POST",
+      "/sync/exchange",
+      {
+        watermarks: {},
+        appSyncableRows: [{ ...iso, row: { ...iso.row, created_at: "2026-10-27T00:00:00.000Z" } }],
+      },
+      PHOTOS,
+    );
+    expect(pushed.status, JSON.stringify(pushed.body)).toBe(200);
+
+    const res = await handler(
+      { ...as(A, "GET", "/app-data/files", undefined, PHOTOS), queryStringParameters: {} },
+      context,
+    );
+    expect(res.statusCode, JSON.stringify({ pushed: pushed.body, list: res.body })).toBe(400);
+    expect(JSON.parse(res.body).error).toBe(
+      `File index row apps/${PHOTOS}/${A}/syncable/covers/iso.jpg has created_at ` +
+        `"2026-10-27T00:00:00.000Z", not a serialized HLC`,
+    );
   });
 
   it("refuses a labels-only push on the app's own channel", async () => {

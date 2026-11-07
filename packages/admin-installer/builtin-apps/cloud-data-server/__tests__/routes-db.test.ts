@@ -1250,20 +1250,30 @@ describe("OCC retry on record read-modify-write", () => {
     });
   }
 
-  // The metadata write bumps the record's clock in a read-modify-write, so a
-  // retry has to re-read the row rather than replay the stale one.
-  it("metadata write re-reads the record on an OCC conflict", async () => {
-    let committedUpdatedAt = "2026-01-01T00:00:00.000Z";
+  /** The row a `shared.records` insert wrote, as column → value. */
+  function insertedRow(q: { text: string; values: unknown[] }): Record<string, unknown> {
+    const columns = /insert into "shared"\."records" \(([^)]+)\) values/.exec(q.text);
+    if (!columns) throw new Error(`not a records insert: ${q.text}`);
+    const names = columns[1]!.split(",").map((c) => c.trim().replace(/"/g, ""));
+    return Object.fromEntries(names.map((n, i) => [n, q.values[i]]));
+  }
+
+  // The metadata write bumps the record's clock in a read-modify-write: it
+  // writes the whole row it read back with a new `updated_at`. A retry that
+  // replayed the first read would write back the stale row and undo whatever
+  // the concurrent writer committed in between.
+  it("metadata write retries with the row a concurrent writer committed", async () => {
+    let committedVersion = 1;
     let insertAttempts = 0;
     const db = fakeDsqlWithGrants(grants)
       .on(RECORD_BY_ID, () => [
-        recordRow({ id: "rmw1", type: "image/jpeg", updated_at: committedUpdatedAt }),
+        recordRow({ id: "rmw1", type: "image/jpeg", version: committedVersion }),
       ])
       .on(/insert into "shared"\."record_image_metadata"/, [])
       .on(RECORDS_INSERT, () => {
         insertAttempts++;
         if (insertAttempts === 1) {
-          committedUpdatedAt = "2026-01-02T00:00:00.000Z"; // a concurrent writer wins
+          committedVersion = 2; // a concurrent writer wins the race
           throw occConflict();
         }
         return [];
@@ -1281,9 +1291,42 @@ describe("OCC retry on record read-modify-write", () => {
     );
 
     expect(res.statusCode, res.body).toBe(200);
-    // One read for the checks, then one per attempt of the unit.
-    expect(db.calls(RECORD_BY_ID)).toHaveLength(3);
-    expect(db.calls(RECORDS_INSERT)).toHaveLength(2);
+    const writes = db.calls(RECORDS_INSERT).map(insertedRow);
+    expect(writes).toHaveLength(2);
+    // The retry carries the concurrent writer's version, not the stale 1. The
+    // metadata write itself never bumps `version`.
+    expect(writes[0]!["version"]).toBe(1);
+    expect(writes[1]!["version"]).toBe(2);
+  });
+
+  it("metadata write retries into a record deleted meanwhile and writes nothing back", async () => {
+    let deletedAt: string | null = null;
+    const db = fakeDsqlWithGrants(grants)
+      .on(RECORD_BY_ID, () => [
+        recordRow({ id: "rmw4", type: "image/jpeg", deleted_at: deletedAt }),
+      ])
+      .on(/insert into "shared"\."record_image_metadata"/, [])
+      .on(RECORDS_INSERT, () => {
+        // A concurrent delete commits between the two attempts.
+        deletedAt = serializeHLC({ wallTime: Date.UTC(2026, 0, 2), counter: 0, nodeId: "other" });
+        throw occConflict();
+      });
+    setDbFactory(db);
+
+    const res = await handler(
+      signedEvent({
+        appId: "rmw",
+        method: "POST",
+        subPath: "/data/records/rmw4/metadata",
+        body: { typeId: "image/jpeg", metadata: { width: 100 } },
+      }),
+      context,
+    );
+
+    expect(res.statusCode, res.body).toBe(200);
+    // One failed attempt and no second one: a replay of the first read would
+    // have written the live row back over the tombstone.
+    expect(db.calls(RECORDS_INSERT)).toHaveLength(1);
   });
 
   it("maps a non-OCC write failure to 500 without retrying", async () => {
