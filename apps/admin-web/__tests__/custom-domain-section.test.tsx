@@ -196,6 +196,51 @@ describe("Set up", () => {
   });
 });
 
+describe("Remove", () => {
+  const removeRequests = () => requests.filter((r) => r.method === "PUT");
+
+  it("names the Route53 records it deletes, and removes only once approved", async () => {
+    config = {
+      customDomain: DOMAIN,
+      customDomainStatus: {
+        name: DOMAIN,
+        mode: "route53",
+        status: "active",
+        aliasTarget: CLOUDFRONT,
+      },
+    };
+    await open();
+    await userEvent.click(screen.getByRole("button", { name: "Remove" }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toContain(`the A record at ${DOMAIN}`);
+    expect(dialog.textContent).toContain(`_<code>.${DOMAIN}`);
+    expect(dialog.textContent).toContain("every link sent with");
+    expect(removeRequests()).toEqual([]);
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Remove" }));
+    expect(removeRequests()).toEqual([
+      { url: "/api/custom-domain", method: "PUT", body: { domain: null } },
+    ]);
+    expect(runInstallStream).toHaveBeenCalledOnce();
+  });
+
+  it("lists the provider's records for an external domain, and breaks no link before it is active", async () => {
+    config = { customDomain: DOMAIN, customDomainStatus: external("pending-validation") };
+    await open();
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toContain("changes no DNS records");
+    expect(within(dialog).getByText(`CNAME ${VALIDATION.name}`)).toBeDefined();
+    expect(within(dialog).getByText(`CNAME ${DOMAIN}`)).toBeDefined();
+    expect(dialog.textContent).toContain("no link stops working");
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Keep it" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(removeRequests()).toEqual([]);
+    expect(runInstallStream).not.toHaveBeenCalled();
+  });
+});
+
 describe("a saved domain no install has applied", () => {
   it("offers Remove, which clears the domain without running the install", async () => {
     config = { customDomain: DOMAIN };
