@@ -484,15 +484,45 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
         </DialogContent>
       </Dialog>
 
+      {/* The last install recorded the domain's mode, so the dialog names the
+          exact changes. */}
       <Dialog open={confirmRemove} onOpenChange={setConfirmRemove}>
-        <DialogContent className="max-w-sm">
+        <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>Remove {domain}</DialogTitle>
           </DialogHeader>
-          <p className="text-sm text-muted-foreground">
-            Every link sent with {domain} stops working. Links on the cloud's cloudfront.net address
-            keep working.
-          </p>
+          <div className="flex flex-col gap-2 text-sm text-muted-foreground">
+            {status?.status === "active" ? (
+              <p>
+                The cloud stops answering on {domain}, and every link sent with {domain} stops
+                working. Links on the cloud's cloudfront.net address keep working.
+              </p>
+            ) : (
+              <p>Links never used {domain}, so no link stops working.</p>
+            )}
+            {status?.mode === "route53" ? (
+              <p>
+                The cloud update deletes two records from the domain's Route53 zone in this AWS
+                account: the A record at {domain}, and the CNAME record at _&lt;code&gt;.{domain}{" "}
+                that proved ownership. The update deletes no other record.
+              </p>
+            ) : (
+              <>
+                <p>
+                  The cloud update changes no DNS records. Afterwards, delete these records at your
+                  DNS provider if you added them:
+                </p>
+                <ul className="flex flex-col gap-1 font-mono text-foreground">
+                  {status?.validationRecord && <li>CNAME {status.validationRecord.name}</li>}
+                  <li>CNAME {domain}</li>
+                </ul>
+              </>
+            )}
+            <p>
+              The update also deletes the domain's certificate. When ACM still reports the
+              certificate in use, the certificate stays, at no cost, until the cloud is torn down.
+            </p>
+          </div>
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => setConfirmRemove(false)}>
               Keep it
