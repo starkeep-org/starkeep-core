@@ -1072,6 +1072,45 @@ describe("POST /data/reap — the window it applies", () => {
 });
 
 /**
+ * GET /data/trash answers the window any app may read, as local-data-server's
+ * route does. An app that mirrors records needs it to know how often it must
+ * reconcile; Drive needs it to print a removal date.
+ */
+describe("GET /data/trash", () => {
+  function trash(appId = "rs3"): Promise<{ statusCode: number; body: string }> {
+    setDbFactory(fakeDsqlWithGrants(GRANTS));
+    return handler(request(appId, "GET", "/data/trash"), context);
+  }
+
+  it("answers the window the owner chose, to an ordinary app", async () => {
+    settingsParam = { trash: { retentionDays: 90 } };
+    const res = await trash();
+    expect(res.statusCode, res.body).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({
+      retention_days: 90,
+      default_retention_days: 30,
+      knows_library_value: true,
+    });
+    expect(settingsReads()).toBe(1);
+  });
+
+  it("answers the default when the operator set none", async () => {
+    const res = await trash();
+    expect(JSON.parse(res.body)).toMatchObject({ retention_days: 30, knows_library_value: true });
+  });
+
+  it("answers null when the deployment's settings cannot be read", async () => {
+    settingsParam = "fail";
+    const res = await trash();
+    expect(res.statusCode, res.body).toBe(200);
+    expect(JSON.parse(res.body)).toMatchObject({
+      retention_days: null,
+      knows_library_value: false,
+    });
+  });
+});
+
+/**
  * GET /apps/starkeep-drive/deployment/settings — the document every node and
  * the phone read, answered from SSM before any app role is assumed.
  */

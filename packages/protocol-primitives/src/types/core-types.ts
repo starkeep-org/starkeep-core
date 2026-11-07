@@ -238,6 +238,7 @@ export type Category =
   | "archive"
   | "data"
   | "model3d"
+  | "example"
   | "starkeep"
   | "other";
 
@@ -379,6 +380,15 @@ const MODEL3D_METADATA_COLUMNS: CoreTypeMetadataColumn[] = [
   { name: "has_animation", type: "boolean" },
 ];
 
+// The example app's invented type. All three columns are derivable from the
+// bytes and mean the same thing to every reader. The example app computes and
+// writes them itself (`metadataWrite`); no derivation runs for this category.
+const EXAMPLE_METADATA_COLUMNS: CoreTypeMetadataColumn[] = [
+  { name: "line_count", type: "integer" },
+  { name: "word_count", type: "integer" },
+  { name: "char_count", type: "integer" },
+];
+
 export const CATEGORIES: readonly CategoryDef[] = [
   {
     id: "image",
@@ -419,6 +429,16 @@ export const CATEGORIES: readonly CategoryDef[] = [
     id: "model3d",
     description: "3D meshes and scenes.",
     metadataColumns: MODEL3D_METADATA_COLUMNS,
+  },
+  {
+    // A category of its own keeps the example app's files apart at every
+    // layer: their own records, metadata table, S3 prefix and Drive heading.
+    // An operator who tried the example on a real deployment finds and
+    // deletes every example file in one place.
+    id: "example",
+    description:
+      "Invented plaintext files used by the Starkeep example app. Holds no real content.",
+    metadataColumns: EXAMPLE_METADATA_COLUMNS,
   },
   {
     id: "starkeep",
@@ -651,6 +671,8 @@ const TYPE_SPECS: readonly TypeSpec[] = [
   { category: "model3d", format: "ply", extensions: ["ply"] },
   { category: "model3d", format: "usd", extensions: ["usd"] },
   { category: "model3d", format: "usdz", extensions: ["usdz"] },
+  // example
+  { category: "example", format: "plaintext", extensions: ["skexample"] },
 ];
 
 /** The terminal catch-all type for unmapped / extension-less files. */

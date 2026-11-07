@@ -34,6 +34,7 @@ import {
 } from "../../packages/storage-sqlite/src/index.js";
 import { createAppSpecificFactory } from "../../packages/shared-space-api/src/app-syncable/factory.js";
 import { queryParamsFrom } from "../../packages/shared-space-api/src/query/params.js";
+import { appFileListingJson } from "../../packages/shared-space-api/src/app-syncable/file-listing.js";
 import {
   planLabelQuery,
   planMetadataQuery,
@@ -3029,6 +3030,29 @@ async function main() {
               if (fileUrl) urls[subKey] = fileUrl;
             }
             json(res, { urls, expiresIn });
+            return;
+          } catch (err) {
+            res.writeHead(400);
+            json(res, { error: err instanceof Error ? err.message : String(err) });
+            return;
+          }
+        }
+
+        // GET /app-data/files — list the app's own files from the file index.
+        // Query: prefix (a sub-key prefix), limit, page_token. Answers in
+        // sub-keys, the form every other file route takes. The cloud data
+        // server answers the same route with the same shape.
+        if (path === "/app-data/files" && req.method === "GET") {
+          try {
+            const prefix = url.searchParams.get("prefix");
+            const limit = url.searchParams.get("limit");
+            const pageToken = url.searchParams.get("page_token");
+            const listing = await view.listFiles({
+              ...(prefix !== null ? { prefix } : {}),
+              ...(limit !== null ? { limit } : {}),
+              ...(pageToken !== null ? { pageToken } : {}),
+            });
+            json(res, appFileListingJson(listing));
             return;
           } catch (err) {
             res.writeHead(400);
