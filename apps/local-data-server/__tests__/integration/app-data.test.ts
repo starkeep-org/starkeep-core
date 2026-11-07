@@ -256,7 +256,9 @@ describe("GET /app-data/files — listing an app's own files", () => {
     return app.fetch(`/app-data/files?${query}`);
   }
 
+  let started = 0;
   beforeAll(async () => {
+    started = Date.now();
     await putAppFile(appA, "listing/b.json", "{}", "application/json");
     await putAppFile(appA, "listing/a.json", "{}", "application/json");
     await putAppFile(appA, "listing/c.json", "{}", "application/json");
@@ -273,7 +275,9 @@ describe("GET /app-data/files — listing an app's own files", () => {
       "listing/c.json",
     ]);
     expect(body.files[0]).toMatchObject({ size_bytes: 2, mime_type: "application/json" });
-    expect(Date.parse(body.files[0]!.created_at)).not.toBeNaN();
+    // The registering node's clock, read back as an instant: not merely a
+    // parseable date, but this test's own minute.
+    expect(Math.abs(Date.parse(body.files[0]!.created_at) - started)).toBeLessThan(60_000);
     expect(body.truncated).toBe(false);
     expect(body.page_token).toBeNull();
   });
@@ -312,7 +316,11 @@ describe("GET /app-data/files — listing an app's own files", () => {
   });
 
   it("refuses an app that declared files:false", async () => {
-    expect([400, 404]).toContain((await list(appB, "")).status);
+    const res = await list(appB, "");
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      'App "app-b" did not opt in to syncable files',
+    );
   });
 });
 

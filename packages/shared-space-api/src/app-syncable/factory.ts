@@ -47,6 +47,26 @@ export interface AppSpecificFactoryOptions {
   userId: () => string;
 }
 
+/** A serialized HLC: hex wall time, hex counter, node id (`serializeHLC`). */
+const SERIALIZED_HLC = /^[0-9a-f]+:[0-9a-f]+:.+$/;
+
+/**
+ * A file-index row's `created_at` as an ISO instant.
+ *
+ * The index has one format, the HLC the registering node stamped, and a row in
+ * any other format fails the listing loudly. The check is not
+ * `deserializeHLC`'s, because that one splits on `:` alone: an ISO instant
+ * holds exactly two colons, passes, and reads as a moment in 1970.
+ */
+function fileIndexInstant(key: string, value: unknown): string {
+  if (typeof value !== "string" || !SERIALIZED_HLC.test(value)) {
+    throw new Error(
+      `File index row ${key} has created_at ${JSON.stringify(value)}, not a serialized HLC`,
+    );
+  }
+  return new Date(deserializeHLC(value).wallTime).toISOString();
+}
+
 /**
  * Builds the per-request `appSpecific` view. Returns a factory shaped to
  * plug directly into `createSharedSpaceApi({ getAppSpecific })`.
@@ -383,8 +403,7 @@ export function createAppSpecificFactory(
           sizeBytes: Number(row["size_bytes"] ?? 0),
           mimeType: (row["mime_type"] as string | null) ?? "application/octet-stream",
           originalFilename: (row["original_filename"] as string | null) ?? null,
-          // The index's one format: the HLC the registering node stamped.
-          createdAt: new Date(deserializeHLC(String(row["created_at"])).wallTime).toISOString(),
+          createdAt: fileIndexInstant(String(row["id"]), row["created_at"]),
         }));
         return { files, truncated: result.truncated, pageToken: result.pageToken };
       },
