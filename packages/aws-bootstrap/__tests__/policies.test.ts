@@ -257,14 +257,14 @@ describe("foundational boundary (cloud-data-server only)", () => {
   const statements = foundationalPermissionsBoundaryStatements(PREFIX);
 
   it("may assume per-app roles (broker power) — unique among boundaries", () => {
-    const assume = byId(statements, "FoundationalBrokerAssumeAppRoles");
+    const assume = byId(statements, "BrokerAssumeAppRoles");
     // TagSession: the broker names the user each session acts for.
     expect(assume.Action).toEqual(["sts:AssumeRole", "sts:TagSession"]);
     expect(cfnString(assume.Resource as CfnValue)).toContain(`role/${PREFIX}-app-`);
   });
 
   it("denies mutating IAM (service-linked-role creation aside)", () => {
-    const deny = byId(statements, "FoundationalDenyOtherIam");
+    const deny = byId(statements, "DenyOtherIam");
     expect(deny.Effect).toBe("Deny");
   });
 });

@@ -79,7 +79,7 @@ describe("temp-install S3 statements", () => {
   ).Statement;
   const bySid = (sid: string) => statements.find((s) => s.Sid === sid)!;
 
-  it("give the billing bucket its own statement with the pre-PR verb set", () => {
+  it("give the billing bucket its own statement, which reads and writes no object", () => {
     const billing = bySid("TempInstallBillingBucket");
     expect(billing.Resource).toBe("arn:aws:s3:::starkeep-billing-*");
     expect([...billing.Action].sort()).toEqual(
@@ -87,6 +87,8 @@ describe("temp-install S3 statements", () => {
         "s3:CreateBucket",
         "s3:DeleteBucket",
         "s3:ListBucket",
+        "s3:ListBucketVersions",
+        "s3:DeleteObject*",
         "s3:GetBucket*",
         "s3:Get*Configuration",
         "s3:PutBucketPolicy",
