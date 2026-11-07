@@ -12,12 +12,16 @@
  * - POST /check — `{ credentials }`, the operator's session. Reads whether ACM
  *          has issued an external-DNS domain's certificate, as admin-app, and
  *          whether the domain resolves to the distribution yet.
+ * - POST /zone — `{ domain, credentials }`. Checks the domain as PUT does, then
+ *          finds the Route53 zone in this account the install would write to,
+ *          as admin-app, so "Set up" can show the records before it saves.
  */
 
 import { ACMClient, DescribeCertificateCommand } from "@aws-sdk/client-acm";
 import {
   customDomainPolicyFits,
   domainPointsAt,
+  findHostedZone,
   validateCustomDomain,
   type CustomDomainStatus,
 } from "@starkeep/admin-installer/custom-domain";
@@ -89,6 +93,46 @@ function quotaRefusal(domain: string): string | null {
     `${domain} is too long: the install's permissions for it would not fit IAM's ` +
     "inline-policy quota. Choose a shorter domain."
   );
+}
+
+export interface CustomDomainZone {
+  /** The domain in the form PUT saves. */
+  domain: string;
+  /** The account's Route53 zone the install writes the domain's records to, or null. */
+  zone: string | null;
+}
+
+export async function ZONE(req: Request): Promise<Response> {
+  const { domain: raw, credentials } = (await req.json()) as {
+    domain?: unknown;
+    credentials?: STSCredentials;
+  };
+  if (!credentials) return Response.json({ error: "credentials required" }, { status: 400 });
+  let domain: string;
+  try {
+    domain = validateCustomDomain(typeof raw === "string" ? raw : "");
+  } catch (err) {
+    return Response.json(
+      { error: err instanceof Error ? err.message : String(err) },
+      { status: 400 },
+    );
+  }
+  const refusal = quotaRefusal(domain);
+  if (refusal) return Response.json({ error: refusal }, { status: 400 });
+  try {
+    const zone = await findHostedZone(domain, {
+      ...credentials,
+      expiration: new Date(credentials.expiration),
+    });
+    return Response.json({ domain, zone: zone?.name ?? null } satisfies CustomDomainZone);
+  } catch (err) {
+    return Response.json(
+      {
+        error: `Could not read the account's DNS zones: ${err instanceof Error ? err.message : err}`,
+      },
+      { status: 502 },
+    );
+  }
 }
 
 export interface CustomDomainCheck {

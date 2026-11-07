@@ -12,6 +12,10 @@
  * becomes the canonical host only when it works. "Check now" reads the
  * certificate and the domain's DNS, as the signed-in operator.
  *
+ * "Set up" first asks which case applies, then confirms before it saves. For a
+ * domain in an account zone, the dialog names the records the install adds
+ * there. For any other domain, it lists the steps at the operator's provider.
+ *
  * The cloudfront.net name keeps working throughout, so nothing sent before the
  * domain breaks. Removing the domain breaks every link sent with it.
  */
@@ -107,8 +111,11 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [check, setCheck] = useState<Check | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
-  /** The domain "Set up" waits to save until the operator approves its DNS changes. */
-  const [confirmSetUp, setConfirmSetUp] = useState<string | null>(null);
+  /** The domain "Set up" waits to save until the operator approves, and its account zone. */
+  const [confirmSetUp, setConfirmSetUp] = useState<{
+    domain: string;
+    zone: string | null;
+  } | null>(null);
   const [run, setRun] = useState<{
     lines: string[];
     status: "running" | "success" | "failure";
@@ -221,6 +228,38 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
     }
   }
 
+  /**
+   * Find whether the domain's zone lives in this account, so the confirmation
+   * describes the case that applies.
+   */
+  async function setUp(raw: string) {
+    setBusy(true);
+    setError(null);
+    let found: { domain: string; zone: string | null };
+    try {
+      const { credentials } = await operatorSession();
+      const res = await fetch("/api/custom-domain/zone", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ domain: raw, credentials }),
+      });
+      const body = (await res.json()) as {
+        domain: string;
+        zone: string | null;
+        error?: string;
+      };
+      if (!res.ok)
+        throw new Error(body.error ?? `Finding the domain's zone failed (${res.status}).`);
+      found = body;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setBusy(false);
+      return;
+    }
+    setBusy(false);
+    setConfirmSetUp(found);
+  }
+
   async function checkNow() {
     setBusy(true);
     setError(null);
@@ -279,7 +318,7 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
         className="flex flex-col gap-2"
         onSubmit={(e) => {
           e.preventDefault();
-          setConfirmSetUp(input.trim());
+          void setUp(input);
         }}
       >
         <div className="flex flex-wrap items-center gap-2">
@@ -439,33 +478,64 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
         )}
       </CollapsibleContent>
 
-      {/* The install, not admin-web, finds out where the domain's DNS lives, so
-          the dialog describes both outcomes. */}
       <Dialog open={confirmSetUp !== null} onOpenChange={(open) => !open && setConfirmSetUp(null)}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Set up {confirmSetUp}</DialogTitle>
+            <DialogTitle>Set up {confirmSetUp?.domain}</DialogTitle>
           </DialogHeader>
-          <div className="flex flex-col gap-2 text-sm text-muted-foreground">
-            <p>
-              The cloud update requests a certificate for {confirmSetUp}. The DNS changes depend on
-              where the domain's DNS lives.
-            </p>
-            <p>
-              <span className="font-medium text-foreground">
-                A Route53 zone in this AWS account:
-              </span>{" "}
-              The update adds two records to that zone. An A record at {confirmSetUp} points the
-              domain at the cloud, and a CNAME record at _&lt;code&gt;.{confirmSetUp} proves
-              ownership to the certificate authority. The update stops if {confirmSetUp} already has
-              an A, AAAA or CNAME record. Removing the domain later deletes both records.
-            </p>
-            <p>
-              <span className="font-medium text-foreground">Any other DNS provider:</span> The
-              update changes no DNS records. This section then shows two records for you to add at
-              your provider.
-            </p>
-          </div>
+          {confirmSetUp?.zone ? (
+            <div className="flex flex-col gap-2 text-sm text-muted-foreground">
+              <p>
+                The domain's DNS lives in the Route53 zone {confirmSetUp.zone} in this AWS account.
+                The cloud update requests a certificate for {confirmSetUp.domain} and adds two
+                records to that zone:
+              </p>
+              <ul className="flex flex-col gap-1">
+                <li>
+                  <span className="font-mono break-all text-foreground">
+                    A {confirmSetUp.domain}
+                  </span>{" "}
+                  points the domain at the cloud.
+                </li>
+                <li>
+                  <span className="font-mono break-all text-foreground">
+                    CNAME _&lt;code&gt;.{confirmSetUp.domain}
+                  </span>{" "}
+                  proves ownership to the certificate authority.
+                </li>
+              </ul>
+              <p>
+                The update changes no other record, and stops if {confirmSetUp.domain} already has
+                an A, AAAA or CNAME record. Removing the domain later deletes both records.
+              </p>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2 text-sm text-muted-foreground">
+              <p>
+                The DNS of {confirmSetUp?.domain} lives outside this AWS account. You add its
+                records at your DNS provider, in these steps:
+              </p>
+              <ol className="flex list-decimal flex-col gap-1 pl-5">
+                <li>
+                  "Set up" runs a cloud update that requests a certificate for{" "}
+                  {confirmSetUp?.domain}. The update changes no DNS records.
+                </li>
+                <li>
+                  This section then shows two records to add at your DNS provider. One proves you
+                  own the domain, and the other points the domain at the cloud. The first record
+                  exists only once the certificate is requested.
+                </li>
+                <li>
+                  "Check now" confirms that the certificate is issued and the domain resolves.
+                </li>
+                <li>
+                  "Finish" runs a second cloud update, which attaches the domain. Links then use{" "}
+                  {confirmSetUp?.domain}.
+                </li>
+              </ol>
+              <p>The cloud's cloudfront.net address keeps working throughout.</p>
+            </div>
+          )}
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => setConfirmSetUp(null)}>
               Cancel
@@ -473,7 +543,7 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
             <Button
               className={ACTION_OCCASIONAL}
               onClick={() => {
-                const domain = confirmSetUp;
+                const domain = confirmSetUp?.domain;
                 setConfirmSetUp(null);
                 if (domain) void act(() => saveDomain(domain));
               }}
@@ -487,7 +557,7 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
       {/* The last install recorded the domain's mode, so the dialog names the
           exact changes. */}
       <Dialog open={confirmRemove} onOpenChange={setConfirmRemove}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Remove {domain}</DialogTitle>
           </DialogHeader>
@@ -512,7 +582,7 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
                   The cloud update changes no DNS records. Afterwards, delete these records at your
                   DNS provider if you added them:
                 </p>
-                <ul className="flex flex-col gap-1 font-mono text-foreground">
+                <ul className="flex flex-col gap-1 font-mono break-all text-foreground">
                   {status?.validationRecord && <li>CNAME {status.validationRecord.name}</li>}
                   <li>CNAME {domain}</li>
                 </ul>
@@ -545,7 +615,7 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
         open={run !== null}
         onOpenChange={(open) => !open && run?.status !== "running" && setRun(null)}
       >
-        <DialogContent className="max-w-3xl">
+        <DialogContent className="sm:max-w-3xl">
           <DialogHeader>
             <DialogTitle>Updating the cloud</DialogTitle>
           </DialogHeader>

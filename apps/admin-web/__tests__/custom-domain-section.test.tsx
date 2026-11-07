@@ -43,12 +43,15 @@ function external(status: CustomDomainStatus["status"]): CustomDomainStatus {
 }
 
 let checkResult: { certificateStatus?: string; pointsAtDistribution: boolean };
+/** The account zone /zone reports for the domain, or null for external DNS. */
+let zone: string | null;
 let requests: Array<{ url: string; method: string; body: unknown }>;
 
 beforeEach(() => {
   requests = [];
   runInstallStream.mockClear();
   checkResult = { pointsAtDistribution: false };
+  zone = null;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: RequestInit) => {
@@ -58,6 +61,7 @@ beforeEach(() => {
         body: init?.body ? JSON.parse(String(init.body)) : undefined,
       });
       if (url === "/api/custom-domain/check") return Response.json(checkResult);
+      if (url === "/api/custom-domain/zone") return Response.json({ domain: DOMAIN, zone });
       return Response.json({});
     }),
   );
@@ -162,6 +166,8 @@ describe("external mode, awaiting DNS", () => {
 });
 
 describe("Set up", () => {
+  const saves = () => requests.filter((r) => r.method === "PUT");
+
   async function pressSetUp() {
     config = {};
     await open();
@@ -169,30 +175,64 @@ describe("Set up", () => {
     await userEvent.click(screen.getByRole("button", { name: "Set up" }));
   }
 
-  it("describes the DNS changes and saves nothing until the operator approves", async () => {
+  it("asks for the domain's zone with the operator's credentials", async () => {
     await pressSetUp();
-    const dialog = screen.getByRole("dialog");
-    expect(dialog.textContent).toContain(`An A record at ${DOMAIN}`);
-    expect(dialog.textContent).toContain("changes no DNS records");
-    expect(requests.filter((r) => r.method === "PUT")).toEqual([]);
+    expect(requests).toContainEqual({
+      url: "/api/custom-domain/zone",
+      method: "POST",
+      body: {
+        domain: DOMAIN,
+        credentials: {
+          accessKeyId: "AKIA",
+          secretAccessKey: "s",
+          sessionToken: "t",
+          expiration: "x",
+        },
+      },
+    });
+  });
+
+  it("names a Route53 domain's records and saves nothing until the operator approves", async () => {
+    zone = "example.com";
+    await pressSetUp();
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toContain("Route53 zone example.com");
+    expect(within(dialog).getByText(`A ${DOMAIN}`)).toBeDefined();
+    expect(within(dialog).getByText(`CNAME _<code>.${DOMAIN}`)).toBeDefined();
+    expect(saves()).toEqual([]);
 
     await userEvent.click(within(dialog).getByRole("button", { name: "Set up" }));
-    expect(requests).toContainEqual({
-      url: "/api/custom-domain",
-      method: "PUT",
-      body: { domain: DOMAIN },
-    });
+    expect(saves()).toEqual([
+      { url: "/api/custom-domain", method: "PUT", body: { domain: DOMAIN } },
+    ]);
     expect(runInstallStream).toHaveBeenCalledOnce();
   });
 
   it("Cancel saves nothing and runs no install", async () => {
+    zone = "example.com";
     await pressSetUp();
     await userEvent.click(
-      within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }),
+      within(await screen.findByRole("dialog")).getByRole("button", { name: "Cancel" }),
     );
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(requests.filter((r) => r.method === "PUT")).toEqual([]);
+    expect(screen.queryByRole("dialog", { name: `Set up ${DOMAIN}` })).toBeNull();
+    expect(saves()).toEqual([]);
     expect(runInstallStream).not.toHaveBeenCalled();
+  });
+
+  it("lists the steps for a domain hosted elsewhere, and saves nothing until approved", async () => {
+    await pressSetUp();
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toContain("lives outside this AWS account");
+    expect(dialog.textContent).toContain("changes no DNS records");
+    expect(dialog.textContent).toContain('"Finish" runs a second cloud update');
+    expect(saves()).toEqual([]);
+    expect(runInstallStream).not.toHaveBeenCalled();
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Set up" }));
+    expect(saves()).toEqual([
+      { url: "/api/custom-domain", method: "PUT", body: { domain: DOMAIN } },
+    ]);
+    expect(runInstallStream).toHaveBeenCalledOnce();
   });
 });
 

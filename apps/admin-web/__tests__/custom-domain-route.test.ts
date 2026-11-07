@@ -19,6 +19,12 @@ const dnsMock = {
 };
 vi.mock("node:dns", () => ({ promises: dnsMock }));
 
+const findHostedZone = vi.fn();
+vi.mock("@starkeep/admin-installer/custom-domain", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@starkeep/admin-installer/custom-domain")>()),
+  findHostedZone,
+}));
+
 const acm = mockClient(ACMClient);
 const CREDENTIALS = { accessKeyId: "a", secretAccessKey: "s", sessionToken: "t" };
 
@@ -33,6 +39,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
   acm.reset();
+  findHostedZone.mockReset();
   dnsMock.resolveCname.mockReset();
   dnsMock.resolve4.mockReset();
   writeAdminConfig(dataDir, { stackPrefix: "sk", userPoolId: "us-east-2_x" });
@@ -160,5 +167,46 @@ describe("POST /check", () => {
       jsonRequest("/api/custom-domain/check", { credentials: CREDENTIALS }),
     );
     expect(res.status).toBe(400);
+  });
+});
+
+describe("POST /zone", () => {
+  const zone = (domain: unknown) =>
+    route.ZONE(
+      jsonRequest("/api/custom-domain/zone", {
+        domain,
+        credentials: { ...CREDENTIALS, expiration: "2026-11-07T00:00:00Z" },
+      }),
+    );
+
+  it("names the account's zone for the domain, found with the operator's credentials", async () => {
+    findHostedZone.mockResolvedValue({ id: "Z1", name: "example.com" });
+    const res = await zone(" Photos.Example.com ");
+    expect(await res.json()).toEqual({ domain: "photos.example.com", zone: "example.com" });
+    expect(findHostedZone).toHaveBeenCalledWith(
+      "photos.example.com",
+      expect.objectContaining({ accessKeyId: "a", sessionToken: "t" }),
+    );
+  });
+
+  it("reports no zone for a domain hosted elsewhere", async () => {
+    findHostedZone.mockResolvedValue(null);
+    expect(await (await zone("photos.example.com")).json()).toEqual({
+      domain: "photos.example.com",
+      zone: null,
+    });
+  });
+
+  it("refuses an invalid name before it reads Route53", async () => {
+    const res = await zone("*.example.com");
+    expect(res.status).toBe(400);
+    expect(findHostedZone).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed Route53 read", async () => {
+    findHostedZone.mockRejectedValue(new Error("AccessDenied"));
+    const res = await zone("photos.example.com");
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { error: string }).error).toMatch(/AccessDenied/);
   });
 });
