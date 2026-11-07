@@ -94,18 +94,25 @@ Each run picks a random six-character id. The two test names are
    CloudFront refuses a tampered or missing signature.
 6. **Change** to the second name: it serves, and the first name's alias,
    validation record and certificate are gone.
-7. **Removal**: the second name's records and certificate are gone, and the
-   public base URL returns to the `cloudfront.net` name.
+7. **Removal**: the second name's records are gone, the distribution no longer
+   serves the name or its certificate, and the public base URL returns to the
+   `cloudfront.net` name. ACM can report a certificate in use for most of an
+   hour after CloudFront moves to its default certificate, so the step does not
+   require the certificate deleted. The install leaves it, and step 8 deletes
+   it.
 8. **Teardown with a domain attached**: the run reattaches the first name and
    runs the teardown `STARKEEP_AWS_TEARDOWN` asks for. Afterwards no record
-   remains at either test name, and no certificate of this stack for either name
-   remains. With `STARKEEP_AWS_TEARDOWN=none` the stack stays up, with no domain.
+   remains at either test name. With `all`, no certificate of this stack for
+   either name remains either: `teardown-bootstrap.sh` waits for ACM to let go
+   of each one. With `apps`, the certificates stay for the bootstrap teardown.
+   With `STARKEEP_AWS_TEARDOWN=none` the stack stays up, with no domain.
 9. **Postconditions**, whatever happened above: the parent zone and each live
    deployment must match the step 1 snapshot exactly. Any difference fails the
    run and prints it.
 
 Steps 3, 6, 7 and 8 each wait on a CloudFront deployment, and a new name waits
 on ACM validation, so a run takes roughly 30 to 60 minutes on a warm stack.
+With the default teardown, the wait for ACM in step 8 can add most of an hour.
 
 ## Safety
 

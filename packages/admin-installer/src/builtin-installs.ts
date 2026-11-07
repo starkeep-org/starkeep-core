@@ -43,11 +43,11 @@ import { putCloudFrontSigningParameter, putDeploymentSettingsParameter } from ".
 import { configureAppSignInClients, findOrCreateAppSignInClients } from "./app-sign-in-clients";
 import {
   assertNoForeignRecords,
-  deleteUnusedExternalCertificates,
+  deleteUnusedCertificates,
   domainPointsAt,
   ensureExternalCertificate,
   findHostedZone,
-  listExternalCertificates,
+  listDeploymentCertificates,
   planCustomDomain,
   signingHosts,
   validateCustomDomain,
@@ -471,7 +471,7 @@ export async function installCloudDataServer(
     // play: ACM's tag lookup costs one call per certificate it reads.
     const certificates =
       customDomains.length > 0
-        ? await listExternalCertificates({
+        ? await listDeploymentCertificates({
             stackPrefix: config.stackPrefix,
             domains: customDomains,
             creds: appCreds,
@@ -573,13 +573,16 @@ export async function installCloudDataServer(
     const functionArn = String(outputs.functionArn);
     const region = String(outputs.region);
 
-    // Step 4.3: Delete the external-mode certificates this run left unused:
-    // after the operator removed or changed the domain, or moved its zone into
-    // this account. Pulumi has detached them by now. Only a run that names a
-    // domain, now or before, holds the ACM grants.
+    // Step 4.3: Delete the certificates this run left unused: after the
+    // operator removed or changed the domain, or moved its zone. Pulumi has
+    // detached them by now. Only a run that names a domain, now or before,
+    // holds the ACM grants.
     if (customDomains.length > 0) {
-      await deleteUnusedExternalCertificates({
-        keepArn: externalCertificate?.certificateArn,
+      await deleteUnusedCertificates({
+        keepArns: [
+          externalCertificate?.certificateArn,
+          outputs.customDomainCertificateArn as string | undefined,
+        ],
         certificates,
         creds: appCreds,
       });
@@ -765,6 +768,20 @@ export async function uninstallCloudDataServer(
     stackPrefix: config.stackPrefix,
     awsCreds: appCreds,
   });
+
+  // The program retains its certificate on delete, and an external-mode
+  // certificate was never in the stack. Pulumi has deleted the distribution.
+  if (customDomains.length > 0) {
+    await deleteUnusedCertificates({
+      keepArns: [],
+      certificates: await listDeploymentCertificates({
+        stackPrefix: config.stackPrefix,
+        domains: customDomains,
+        creds: appCreds,
+      }),
+      creds: appCreds,
+    });
+  }
 
   console.log("Deleting app role…");
   await deleteAppRoleWithPolicies(config.stackPrefix, appId, managerCreds);

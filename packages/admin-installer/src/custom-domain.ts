@@ -400,6 +400,8 @@ export interface TaggedCertificate {
   arn: string;
   domain: string;
   status: string;
+  /** Requested by the installer for an external-DNS domain, not by Pulumi. */
+  external: boolean;
 }
 
 /**
@@ -432,6 +434,7 @@ async function findTaggedCertificates(
           arn: summary.CertificateArn,
           domain: summary.DomainName.toLowerCase(),
           status: summary.Status ?? "",
+          external: held.get(TAG_MODE) === "external",
         });
       }
     }
@@ -440,33 +443,37 @@ async function findTaggedCertificates(
 }
 
 /**
- * This deployment's external-mode certificates for the domains an install has
- * in play. One install lists once and hands the result to both
- * ensureExternalCertificate and deleteUnusedExternalCertificates.
+ * This deployment's certificates, of either mode, for the domains an install
+ * has in play. One install lists once and hands the result to both
+ * ensureExternalCertificate and deleteUnusedCertificates.
  *
- * A certificate for an older domain outside the set, whose deletion failed
- * twice, stays behind. It costs nothing, and the teardown script's full sweep
- * removes it.
+ * A certificate for an older domain outside the set, whose deletion failed,
+ * stays behind. It costs nothing, and `scripts/teardown-bootstrap.sh` sweeps
+ * every certificate tagged with the prefix.
  */
-export async function listExternalCertificates(opts: {
+export async function listDeploymentCertificates(opts: {
   stackPrefix: string;
   domains: readonly string[];
   creds: AwsCredentials;
 }): Promise<TaggedCertificate[]> {
   return findTaggedCertificates(
     acmClient(opts.creds),
-    externalTags(opts.stackPrefix),
+    deploymentTags(opts.stackPrefix),
     new Set(opts.domains),
   );
 }
 
-function externalTags(stackPrefix: string): Record<string, string> {
+/** The tags on every certificate of the deployment, in either mode. */
+function deploymentTags(stackPrefix: string): Record<string, string> {
   return {
     [TAG_MANAGED]: "true",
     [TAG_APP_ID]: "cloud-data-server",
     [TAG_STACK_PREFIX]: stackPrefix,
-    [TAG_MODE]: "external",
   };
+}
+
+function externalTags(stackPrefix: string): Record<string, string> {
+  return { ...deploymentTags(stackPrefix), [TAG_MODE]: "external" };
 }
 
 /** Statuses after which a certificate can never issue. */
@@ -490,13 +497,13 @@ const DEAD_STATUSES = new Set<string>([
 export async function ensureExternalCertificate(opts: {
   stackPrefix: string;
   domain: string;
-  /** This install's listing, from listExternalCertificates. */
+  /** This install's listing, from listDeploymentCertificates. */
   certificates: readonly TaggedCertificate[];
   creds: AwsCredentials;
 }): Promise<{ certificateArn: string; issued: boolean; validationRecord?: ValidationRecord }> {
   const acm = acmClient(opts.creds);
   const tags = externalTags(opts.stackPrefix);
-  const mine = opts.certificates.filter((c) => c.domain === opts.domain);
+  const mine = opts.certificates.filter((c) => c.external && c.domain === opts.domain);
 
   let arn: string | undefined;
   for (const cert of mine) {
@@ -547,21 +554,22 @@ function toValidationRecord(record: ResourceRecord | undefined): ValidationRecor
 }
 
 /**
- * Delete every external-mode certificate of this deployment except `keepArn`.
+ * Delete every certificate in the listing except those in `keepArns`.
  *
- * Runs after `pulumi up`, which has already detached any certificate the run no
- * longer uses: after the operator removes the domain, changes it, or moves its
- * zone into this account.
+ * Runs after `pulumi up` or `pulumi destroy`, which has already detached any
+ * certificate the run no longer uses: after the operator removes the domain,
+ * changes it, or moves its zone. The Pulumi program retains its certificate on
+ * delete, so this is also where a Route53-mode certificate goes.
  */
-export async function deleteUnusedExternalCertificates(opts: {
-  keepArn?: string;
-  /** This install's listing, from listExternalCertificates. */
+export async function deleteUnusedCertificates(opts: {
+  keepArns: readonly (string | undefined)[];
+  /** This run's listing, from listDeploymentCertificates. */
   certificates: readonly TaggedCertificate[];
   creds: AwsCredentials;
 }): Promise<void> {
   const acm = acmClient(opts.creds);
   for (const cert of opts.certificates) {
-    if (cert.arn === opts.keepArn) continue;
+    if (opts.keepArns.includes(cert.arn)) continue;
     console.log(`Deleting unused certificate ${cert.arn} for ${cert.domain}.`);
     try {
       await acm.send(new DeleteCertificateCommand({ CertificateArn: cert.arn }));
@@ -569,9 +577,10 @@ export async function deleteUnusedExternalCertificates(opts: {
       // ensureExternalCertificate already deleted a dead certificate from the
       // same listing.
       if ((err as { name?: string }).name === "ResourceNotFoundException") continue;
-      // ACM can report a certificate in use for a while after CloudFront
-      // detached it. The install has finished its real work by now, and the
-      // next run deletes what this one could not.
+      // ACM can report a certificate in use for most of an hour after
+      // CloudFront detached it. The run has finished its real work by now. The
+      // next run that has the domain in play, or the bootstrap teardown,
+      // deletes what this one could not.
       console.warn(
         `Could not delete certificate ${cert.arn}: ${err instanceof Error ? err.message : String(err)}`,
       );

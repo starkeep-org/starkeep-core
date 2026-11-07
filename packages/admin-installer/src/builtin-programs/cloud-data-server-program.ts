@@ -1154,10 +1154,12 @@ export function buildCloudDataServerProgram(
     const customDomain = ctx.customDomain;
     let zoneId: string | undefined;
     let certificateArn: pulumi.Input<string> | undefined;
+    let customDomainCertificateArn: pulumi.Output<string> | undefined;
     if (customDomain?.mode === "route53") {
       // The domain's zone sits in this account, so the stack owns the whole
-      // chain and `pulumi destroy` removes it. CertificateValidation waits for
-      // issuance, usually a few minutes, and the distribution waits on it.
+      // chain and `pulumi destroy` removes it, except the certificate.
+      // CertificateValidation waits for issuance, usually a few minutes, and
+      // the distribution waits on it.
       zoneId = customDomain.hostedZoneId;
       const certificate = new aws.acm.Certificate(
         `${ctx.stackPrefix}-custom-domain-cert`,
@@ -1170,8 +1172,13 @@ export function buildCloudDataServerProgram(
             "starkeep:stackPrefix": ctx.stackPrefix,
           },
         },
-        { provider: usEast1Provider },
+        // After CloudFront moves to its default certificate, ACM can report
+        // this one in use for most of an hour, and a Pulumi delete would fail
+        // the whole run. Pulumi forgets it instead, and the installer's
+        // cleanup deletes it once ACM lets go.
+        { provider: usEast1Provider, retainOnDelete: true },
       );
+      customDomainCertificateArn = certificate.arn;
       const option = certificate.domainValidationOptions[0];
       const validationRecord = new aws.route53.Record(
         `${ctx.stackPrefix}-custom-domain-validation`,
@@ -1579,6 +1586,8 @@ export function buildCloudDataServerProgram(
       // The distribution's own name, which keeps answering beside a custom
       // domain and which an external-mode domain's CNAME points at.
       cloudfrontDomain: distribution.domainName,
+      // The Route53-mode certificate, which the installer's cleanup must keep.
+      customDomainCertificateArn,
       cloudfrontSigningPrivateKey: signingKey.privateKeyPem,
       authorizerId: authorizer.id,
       // Per-app installs read this to attach `auth: "session"` routes. See
