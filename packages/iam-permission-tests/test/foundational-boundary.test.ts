@@ -8,8 +8,9 @@
  * IAM's `*` in a resource ARN spans `/`, so the bucket globs also match every
  * object. The boundary therefore keeps object reads out through its action
  * patterns, `s3:GetBucket*` and `s3:Get*Configuration`. FoundationalS3Objects
- * admits plain object reads, writes and deletes on both buckets; the version,
- * ACL and tag reads stay out.
+ * admits plain object reads, writes and deletes on the files bucket only; the
+ * version, ACL and tag reads stay out of both buckets, and nothing under this
+ * role reaches a billing object.
  */
 import { describe, expect, test } from "vitest";
 import { foundationalPermissionsBoundaryStatements } from "../../aws-bootstrap/src/bootstrap/foundational-permissions-boundary";
@@ -53,6 +54,13 @@ describe("foundational boundary, S3", () => {
   test("allows s3:GetObject on a files object, through FoundationalS3Objects", async () => {
     expect(await verdict("s3:GetObject", `${FILES}/shared/u1/a.jpg`)).toBe("Allowed");
   });
+
+  test.each(["s3:GetObject", "s3:PutObject", "s3:DeleteObject"])(
+    "refuses %s on a billing object",
+    async (action) => {
+      expect(await verdict(action, `${BILLING}/cur/report.csv.gz`)).toBe("ImplicitlyDenied");
+    },
+  );
 
   test.each(
     ["s3:GetObjectVersion", "s3:GetObjectAcl", "s3:GetObjectTagging"].flatMap((action) => [

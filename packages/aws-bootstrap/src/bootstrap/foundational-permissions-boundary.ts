@@ -132,12 +132,15 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       Resource: [`arn:aws:s3:::${stackPrefix}-files-*`, `arn:aws:s3:::${stackPrefix}-billing-*`],
     },
     {
+      // The files bucket only. Nothing under this role touches a billing-bucket
+      // object: AWS's billing service writes the cost reports through the
+      // bucket policy, admin-app reads them under its own policy, and the
+      // teardown script empties the bucket with the operator's credentials.
       Sid: "FoundationalS3Objects",
       Effect: "Allow",
       Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
       Resource: [
         `arn:aws:s3:::${stackPrefix}-files-*/*`,
-        `arn:aws:s3:::${stackPrefix}-billing-*/*`,
         // cds bundle is shipped via pulumi.asset.FileArchive (Pulumi's own
         // asset machinery uploads it as part of stack state), not via the
         // cds role PUTing to the artifacts bucket — so no artifacts grant
