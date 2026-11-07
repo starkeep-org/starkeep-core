@@ -201,6 +201,24 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
     }
   }
 
+  /**
+   * Clear a saved domain no install has applied. The cloud never answered on
+   * it, so the change needs no update; the section offers one only if an
+   * earlier domain is still attached.
+   */
+  async function removeUnapplied() {
+    setBusy(true);
+    setError(null);
+    try {
+      if (await saveDomain(null)) {
+        setInput("");
+        await load();
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function checkNow() {
     setBusy(true);
     setError(null);
@@ -280,9 +298,20 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
           </Button>
         </div>
         {domain && !applied && (
-          <p className="text-xs text-muted-foreground">
-            The cloud has not set up {domain} yet. Press "Set up" to run the update.
-          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-xs text-muted-foreground">
+              The cloud has not set up {domain} yet. Press "Set up" to run the update.
+            </p>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={busy}
+              onClick={() => void removeUnapplied()}
+            >
+              Remove
+            </Button>
+          </div>
         )}
       </form>
     );

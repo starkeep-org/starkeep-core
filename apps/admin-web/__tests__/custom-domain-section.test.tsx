@@ -160,3 +160,20 @@ describe("external mode, awaiting DNS", () => {
     expect(finish().disabled).toBe(false);
   });
 });
+
+describe("a saved domain no install has applied", () => {
+  it("offers Remove, which clears the domain without running the install", async () => {
+    config = { customDomain: DOMAIN };
+    await open();
+    expect(screen.getByText(/has not set up/)).toBeDefined();
+    config = {};
+    await userEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(requests).toContainEqual({
+      url: "/api/custom-domain",
+      method: "PUT",
+      body: { domain: null },
+    });
+    expect(runInstallStream).not.toHaveBeenCalled();
+    expect(screen.queryByText(/has not set up/)).toBeNull();
+  });
+});
