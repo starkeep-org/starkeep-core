@@ -977,11 +977,16 @@ When none holds a usable checkout, the script stops with one message naming the
 path it tried. The example's `test:e2e` script is
 `node scripts/link-core-harness.mjs && pnpm --filter @example-app/e2e test`.
 
-**Tier 3, a real cloud.** core's AWS journey, in `e2e-aws/`, deploys a test
-stack and installs an app into it. Run it from a core checkout and point it at
-your app's folder with `STARKEEP_AWS_APP_DIR`. The journey is app-agnostic: it
-checks that the app installs, serves its shell, signs in and reaches the data
-plane. It deploys real AWS resources, so read `e2e-aws/README.md` first.
+**Tier 3, a real cloud.** core's second harness, `@starkeep/e2e-aws`, deploys a
+throwaway cloud and runs the platform's journey against an app: install, the
+shell, sign-in, the data plane, the browser upload and uninstall. The same link
+script links it beside `@starkeep/e2e`. Your suite runs from your own
+repository: it describes your app as a `JourneyApp` and passes it to
+`defineCloudJourney`, then adds steps for what is true of your app alone.
+Photos' `photos/e2e-aws/photos-journey.test.ts` in `starkeep-apps` is the worked
+example, and its `vitest.config.ts` adds the core checkout from the script's
+`coreDir()` to Vite's `server.fs.allow`. The journey deploys real AWS resources,
+so read core's `e2e-aws/README.md` first.
 
 ## Structuring an app with several flavors
 
