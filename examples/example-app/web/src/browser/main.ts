@@ -89,10 +89,11 @@ let reconciledFrom = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
 const connection = section(
   "Connection",
-  "Which surface this page runs on, who is signed in, and what a write outside the app's grant gets back.",
+  "Which surface this page runs on, who is signed in, what a write outside the app's grant gets back, and a call to the app's own JWT-gated route.",
 );
 const connectionRows: { name: string; value: string }[] = [];
 let grantCheckResult = "not run";
+let jwtRouteResult = "not run";
 
 async function renderConnection(): Promise<void> {
   const config = await api.runtimeConfig();
@@ -116,6 +117,7 @@ async function renderConnection(): Promise<void> {
           : "none needed locally",
     },
     { name: "Grant check (write text/txt)", value: grantCheckResult },
+    { name: "JWT route (POST /api/echo)", value: jwtRouteResult },
   );
   connection.body.replaceChildren(
     renderTable(
@@ -135,6 +137,16 @@ connection.controls.append(
       const result = await api.grantCheck();
       grantCheckResult =
         result.status === 403 ? "403 refused, as it should be" : `unexpected ${result.status}`;
+      await renderConnection();
+    }),
+  ),
+  button("Call the JWT route", () =>
+    run("JWT route", async () => {
+      const result = await api.callJwtRoute(isCloud, "hello");
+      jwtRouteResult =
+        result.ok && result.body.echo?.message === "hello"
+          ? `${result.status}, echoed`
+          : `unexpected ${result.status}`;
       await renderConnection();
     }),
   ),

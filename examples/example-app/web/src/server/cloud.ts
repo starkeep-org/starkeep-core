@@ -16,7 +16,10 @@ import { honoUpstream } from "@starkeep/app-client/hono";
 import manifest from "../../../starkeep.manifest.json" with { type: "json" };
 
 const shell = manifest.infraRequirements.compute.handlers.find((h) => h.name === "static");
-if (!shell) throw new Error("the manifest has no `static` compute handler");
+if (!shell?.staticAssetPaths) {
+  throw new Error("the manifest has no `static` compute handler with `staticAssetPaths`");
+}
+const staticAssetPaths = shell.staticAssetPaths;
 
 /** The browser routes that answer with the shell, `index.html`. */
 const SHELL_PATHS = ["/"];
@@ -27,7 +30,7 @@ export const handler = await createWebAppHandler({
   // From the manifest, never a second copy: the static branch runs before the
   // app's gate, so this list bypasses the gate by construction. The schema
   // refuses an entry `publicPaths` does not cover.
-  staticPaths: shell.staticAssetPaths.filter((p) => !SHELL_PATHS.includes(p)),
+  staticPaths: staticAssetPaths.filter((p) => !SHELL_PATHS.includes(p)),
   shellPaths: SHELL_PATHS,
   immutablePaths: ["/_immutable/*"],
   staticMiss: "notFound",

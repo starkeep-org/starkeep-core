@@ -168,6 +168,29 @@ export async function signOut(): Promise<{ signOutUrl?: string }> {
 }
 
 /**
+ * `POST /api/echo`, the app's own JWT-gated route (`web/src/server/echo.ts`).
+ *
+ * In the cloud the gateway's JWT authorizer guards the route, and it wants
+ * the signed-in user's token as a Bearer credential, which a cookie cannot
+ * carry. `GET /api/session/token` hands the page a short-lived one. Locally
+ * the route is same-origin and needs no token.
+ */
+export async function callJwtRoute(
+  cloud: boolean,
+  message: string,
+): Promise<Result<{ ok?: boolean; echo?: { message?: unknown } | null }>> {
+  const headers: Record<string, string> = {};
+  if (cloud) {
+    const { accessToken } = expectOk(
+      await call<{ accessToken?: string }>("GET", `${BASE}api/session/token`),
+    );
+    if (!accessToken) throw new ApiError(401, "The session handed out no token");
+    headers["Authorization"] = `Bearer ${accessToken}`;
+  }
+  return call("POST", `${BASE}api/echo`, { json: { message }, headers });
+}
+
+/**
  * `POST /data/records` for a type the app was not granted. The data server
  * refuses it with 403 before anything is written, which is the point.
  */

@@ -93,6 +93,15 @@ test("Connection: the local surface, and a refused write outside the grant", asy
   await expectLogged("POST", /^\/data\/records$/, 403);
 });
 
+test("Connection: the app's own JWT-gated route answers", async () => {
+  // Locally the route is same-origin and needs no token. In the cloud the
+  // gateway's JWT authorizer guards it, and only a cloud run can check that;
+  // the example has no tier-3 suite yet.
+  await click("Call the JWT route", "JWT route");
+  await expect(await cell("Connection", "JWT route", "Value")).toHaveText("200, echoed");
+  await expectLogged("POST", /^\/api\/echo$/, 200);
+});
+
 test("Connection: the local server refuses a non-loopback Host", async () => {
   // A DNS-rebinding page reaches 127.0.0.1 under a hostname it controls, so
   // the request arrives with that hostname in `Host`. Node's fetch drops a

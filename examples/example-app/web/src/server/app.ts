@@ -30,6 +30,7 @@ import {
 } from "@starkeep/app-client";
 import { appBasePath, honoOriginGate } from "@starkeep/app-client/hono";
 import { APP_ID } from "@example-app/common";
+import { echo } from "./echo.js";
 import manifest from "../../../starkeep.manifest.json" with { type: "json" };
 
 if (manifest.id !== APP_ID) {
@@ -38,7 +39,10 @@ if (manifest.id !== APP_ID) {
   );
 }
 const staticHandler = manifest.infraRequirements.compute.handlers.find((h) => h.name === "static");
-if (!staticHandler) throw new Error("the manifest has no `static` compute handler");
+if (!staticHandler?.publicPaths) {
+  throw new Error("the manifest has no `static` compute handler with `publicPaths`");
+}
+const publicPaths = staticHandler.publicPaths;
 
 const sessionRoutes = createSessionRoutes({ appId: APP_ID });
 
@@ -55,7 +59,7 @@ export const app = new Hono();
 app.use(
   "*",
   honoOriginGate({
-    publicPaths: staticHandler.publicPaths,
+    publicPaths,
     signInPath: "/sign-in",
     basePath: appBasePath(),
   }),
@@ -104,6 +108,11 @@ app.all("/api/local-data/*", (c) => {
   const path = c.req.path.slice("/api/local-data/".length).split("/").filter(Boolean);
   return proxy(c.req.raw, { params: Promise.resolve({ path }) });
 });
+
+// The JWT-gated route, on the local surface. In the cloud the gateway sends
+// `POST /api/echo` to the manifest's `api` handler instead, so this line never
+// runs there. See `echo.ts`.
+app.post("/api/echo", (c) => echo(c.req.raw));
 
 // The cloud address public links live under, for the local surface. A computer
 // signed in to a cloud records it in `~/.starkeep/config.json`, as Drive reads
