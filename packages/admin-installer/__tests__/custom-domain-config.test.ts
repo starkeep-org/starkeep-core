@@ -8,7 +8,7 @@
  * before the install touches AWS until an install succeeds.
  */
 import { describe, expect, it } from "vitest";
-import { customDomainsInPlay } from "../src/builtin-installs";
+import { customDomainsInPlay, ownDistributionDomains } from "../src/builtin-installs";
 import {
   customDomainInstallInput,
   nextCustomDomainConfig,
@@ -152,5 +152,35 @@ describe("customDomainInstallInput", () => {
 
   it("treats an empty domain as none", () => {
     expect(customDomainInstallInput({ customDomain: "" }).customDomain).toBeUndefined();
+  });
+});
+
+describe("ownDistributionDomains", () => {
+  it("takes the distribution's name from state and from the last install, once each", () => {
+    expect(
+      ownDistributionDomains(
+        [
+          {
+            urn: "urn:pulumi:sk-cloud-data-server::sk-builtins::aws:cloudfront/distribution:Distribution::sk-cdn",
+            type: "aws:cloudfront/distribution:Distribution",
+            outputs: { domainName: "d1.cloudfront.net" },
+          },
+          { urn: "urn:x", type: "aws:s3/bucketV2:BucketV2", outputs: { bucket: "b" } },
+        ],
+        "d1.cloudfront.net",
+      ),
+    ).toEqual(["d1.cloudfront.net"]);
+  });
+
+  it("covers a first install that failed before the config learned the name", () => {
+    expect(
+      ownDistributionDomains([
+        {
+          urn: "urn:d",
+          type: "aws:cloudfront/distribution:Distribution",
+          outputs: { domainName: "d2.cloudfront.net" },
+        },
+      ]),
+    ).toEqual(["d2.cloudfront.net"]);
   });
 });

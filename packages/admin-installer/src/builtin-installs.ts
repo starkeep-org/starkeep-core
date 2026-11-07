@@ -36,12 +36,13 @@ import {
   deleteAppRoleWithPolicies,
   detachTempInstallCloudDataServerPolicy,
 } from "./iam";
-import { pulumiUpInline, pulumiDestroyInline } from "./compute-stack";
+import { pulumiUpInline, pulumiDestroyInline, type StateResource } from "./compute-stack";
 import { initializeSharedSchema } from "./dsql-schema-init";
 import { buildCloudDataServerProgram } from "./builtin-programs/cloud-data-server-program";
 import { putCloudFrontSigningParameter, putDeploymentSettingsParameter } from "./app-creds";
 import { configureAppSignInClients, findOrCreateAppSignInClients } from "./app-sign-in-clients";
 import {
+  assertNoForeignRecords,
   deleteUnusedExternalCertificates,
   domainPointsAt,
   ensureExternalCertificate,
@@ -327,6 +328,22 @@ export function customDomainsInPlay(
 }
 
 /**
+ * This deployment's distribution names: the one the stack's state holds, and
+ * the one the last install recorded. State covers a first install that failed
+ * after Pulumi wrote the alias record, before the config learned the name.
+ */
+export function ownDistributionDomains(
+  resources: readonly StateResource[],
+  lastKnown?: string,
+): string[] {
+  const fromState = resources
+    .filter((r) => r.type === "aws:cloudfront/distribution:Distribution")
+    .map((r) => r.outputs?.domainName)
+    .filter((d): d is string => typeof d === "string");
+  return [...new Set([...fromState, ...(lastKnown ? [lastKnown] : [])])];
+}
+
+/**
  * Refuse an install whose custom-domain grants would push the role's inline
  * policies past IAM's quota. PutRolePolicy would refuse the temp policy anyway;
  * this names the cause before anything changes.
@@ -507,6 +524,7 @@ export async function installCloudDataServer(
       customDomain: plan.program,
     });
 
+    const route53Domain = plan.program?.mode === "route53" ? plan.program : undefined;
     const outputs = await pulumiUpInline({
       stackName: `${config.stackPrefix}-cloud-data-server`,
       projectName: `${config.stackPrefix}-builtins`,
@@ -515,6 +533,19 @@ export async function installCloudDataServer(
       region: config.region,
       stackPrefix: config.stackPrefix,
       awsCreds: appCreds,
+      // Route53 mode: refuse before Pulumi requests the certificate when the
+      // domain already holds a record the stack did not write. The stack's
+      // own distribution, from state or from the last install, owns any alias
+      // to it.
+      preflight: route53Domain
+        ? (resources) =>
+            assertNoForeignRecords({
+              name: route53Domain.name,
+              hostedZoneId: route53Domain.hostedZoneId,
+              ownedAliasTargets: ownDistributionDomains(resources, config.cloudfrontDomain),
+              creds: appCreds,
+            })
+        : undefined,
       preCleanupOrphans: makeCloudDataServerOrphanCleaner(config, appCreds),
     });
 
