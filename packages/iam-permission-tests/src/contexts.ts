@@ -412,6 +412,14 @@ const CONTEXTS: Record<string, ContextBuilder> = {
             "Manager hop. App installs rewrite the mobile-apps client's callbacks. " +
             "admin-web's routes/cognito-outputs.ts lists the clients to find the device client.",
         })),
+        ...["acm:DescribeCertificate", "acm:ListCertificates"].map((action) => ({
+          action,
+          resource: "*",
+          contextVariables: { "aws:RequestedRegion": "us-east-1" },
+          why:
+            'admin-web\'s "Check now" reads whether ACM has issued an external-DNS custom ' +
+            "domain's certificate. CloudFront takes certificates only from us-east-1.",
+        })),
         {
           action: "cognito-idp:DescribeUserPool",
           resource: userPoolArn,
