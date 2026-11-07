@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Example App</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 1.5rem;
+        max-width: 72rem;
+      }
+      section {
+        border-top: 1px solid #ccc;
+        margin-top: 1.5rem;
+      }
+      table {
+        border-collapse: collapse;
+        margin: 0.5rem 0;
+      }
+      th,
+      td {
+        border: 1px solid #ddd;
+        padding: 0.25rem 0.5rem;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        background: #f4f4f4;
+      }
+      td.empty {
+        color: #777;
+        font-style: italic;
+      }
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        align-items: center;
+        margin: 0.5rem 0;
+      }
+      .group {
+        display: inline-flex;
+        flex-wrap: wrap;
+        gap: 0.25rem;
+      }
+      .intro {
+        color: #555;
+      }
+      pre.content {
+        background: #f8f8f8;
+        padding: 0.5rem;
+        white-space: pre-wrap;
+        max-height: 12rem;
+        overflow: auto;
+      }
+      #status {
+        font-weight: bold;
+      }
+    </style>
+  </head>
+  <body>
+    <main id="app">
+      <h1>Example App</h1>
+      <p>Loading…</p>
+    </main>
+    <script type="module" src="/src/browser/main.ts"></script>
+  </body>
+</html>

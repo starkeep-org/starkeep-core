@@ -1,0 +1,20 @@
+{
+  "name": "@example-app/common",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The example app's data contract, shared by every flavor. No DOM or Node imports.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^5.0.5"
+  }
+}

@@ -1,0 +1,13 @@
+# The example app is its own workspace, apart from starkeep-core's. Every
+# flavor of the app lives here: `web` now, `mobile` and `desktop` later. They
+# share `common`, and `workspace:*` between them never crosses a repository
+# boundary, so a copy of this folder installs on its own.
+packages:
+  - "common"
+  - "web"
+  - "e2e"
+
+# esbuild ships its binary through a postinstall script, and `pnpm bundle`
+# needs it. pnpm 10 runs no dependency's scripts unless named here.
+onlyBuiltDependencies:
+  - esbuild

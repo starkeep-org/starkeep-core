@@ -1,0 +1,17 @@
+{
+  "name": "@example-app/e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Tier 2: the example app installed through admin-web on a real local platform, driven in a browser.",
+  "scripts": {
+    "test": "playwright test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@example-app/common": "workspace:*",
+    "@playwright/test": "^1.51.1",
+    "@types/node": "^25.4.0",
+    "typescript": "^5.7.0"
+  }
+}
