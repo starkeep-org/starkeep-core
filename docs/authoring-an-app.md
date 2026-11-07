@@ -2,9 +2,13 @@
 
 This is a how-to guide for building an installable Starkeep app. It walks through
 the parts an app is made of — what each one is for, and which are required vs.
-optional — using the canonical **Photos** app in the sibling
-[`starkeep-apps/`](../../starkeep-apps) repo as a worked example. File references
-below point at `starkeep-apps/photos/`.
+optional. The worked example is the **example app** in
+[`examples/example-app`](../examples/example-app), a small app that performs every
+app-facing data operation and shows each request on its page. Copy that folder to
+start an app. The **Photos** app in the sibling
+[`starkeep-apps/`](../../starkeep-apps) repo is the full-size reference: a real
+browser UI, image processing and a phone app. File references below that name no
+folder point at `starkeep-apps/photos/`.
 
 For the system this app plugs into — the data servers, how data is classified,
 and how it syncs — read [`system-design.md`](system-design.md) first. For the
@@ -70,7 +74,24 @@ Four rules govern what a browser reaches, and the manifest states each one:
   browser resolves a URL itself: an absolute redirect, and a link printed into
   HTML.
 
-### Probe, the worked example
+### The example app
+
+[`examples/example-app`](../examples/example-app) is the shape to copy. It is
+one folder holding one app: one manifest at the root, one pnpm workspace, and a
+package per flavor. Its `web` package serves both web surfaces from one Hono
+app, `src/server/app.ts`. The local surface starts `src/server/local.ts` and the
+cloud surface runs `src/server/cloud.ts`. The browser half, under `src/browser/`,
+calls every data-plane route through the signing proxy, and its page shows each
+request with its status. The example reads and writes only `example/plaintext`,
+a type that exists for it alone, so trying it on a real deployment never mixes
+invented files into anyone's library.
+
+The example is its own workspace with its own lockfile, so a copy installs
+anywhere. Its `README.md` lists what to rename. Two CI jobs keep it honest: one
+runs its end-to-end suite against core's current platform, and one copies the
+folder out of the repository and installs, typechecks, builds and bundles it.
+
+### Probe, the platform's fixture
 
 `test-apps/probe` in this repository is the smallest app that touches every
 surface the platform offers: a served shell, a sign-in flow, a signing proxy, a
@@ -83,8 +104,7 @@ copy. The tier-2 and tier-3 suites install Probe, drive it and assert the
 result, so a change that breaks the pattern breaks those suites first. Being a
 fixture also makes Probe austere on purpose: Probe writes its shell as a string
 and ships no browser bundle at all, because a fixture carrying a build step
-would test the build step. Take the shape from Probe, and read Photos and Memo
-for what a real app's browser half looks like.
+would test the build step. Copy the example app rather than Probe.
 
 ## The pieces, at a glance
 
@@ -111,10 +131,15 @@ pnpm add -D @starkeep/admin-manifest # optional — manifest validation in tests
 ```
 
 `@starkeep/app-client` is the only `@starkeep/*` package the app needs at
-runtime. Your `package.json` always declares published version ranges, never
-`workspace:*` paths into a sibling repo — see `photos/package.json`. (To iterate
-on core and an app together, use `pnpm link` / `overrides`; that's a dev-only
-ergonomics workflow.)
+runtime. Declare the Starkeep platform packages, the ones published from
+`starkeep-core`, by published version range. Never point them at a path into a
+core checkout, through `workspace:*`, `link:` or `file:`: a copy of your app
+then fails to install anywhere that checkout is absent. See
+`examples/example-app/web/package.json`. Your app's own packages are a different
+case. The example's flavors depend on `@example-app/common` as `workspace:*`,
+which is fine because the dependency never leaves the app's own folder. (To
+iterate on core and an app together, use `pnpm link` / `overrides`; that's a
+dev-only ergonomics workflow.)
 
 ## 2. Write `starkeep.manifest.json`
 
@@ -249,6 +274,9 @@ For the local target these go through the `/api/local-data` proxy from §4; for 
 remote target they go to `<apiGatewayUrl>/apps/<appId>/...` with a
 `Authorization: Bearer` header.
 
+The example app's `web/src/browser/api.ts` calls every route this guide lists,
+one function per route, and is the quickest place to see a request's exact shape.
+
 **A note on type granularity.** A Starkeep type is a two-level
 `<category>/<format>` id (e.g. `image/jpeg`) — it resembles a MIME type but is
 the platform's own namespace, with extra categories like `archive`. Two
@@ -316,7 +344,17 @@ and show only the originals. Guidance:
   `updated_at` / `deleted_at` are reserved by the sync runtime. Photos declares an
   `image_enriched` table (caption, title, date override).
 - `files: true` — opt into an `apps/<appId>/syncable/` object-storage prefix for
-  app-private blobs. Leave false for row-only apps.
+  app-private blobs. Leave false for row-only apps. An app names each file by a
+  sub-key of its choosing, such as `snapshots/notes-1.json`:
+  - `POST /app-data/files/presign`, the `PUT`, then
+    `POST /app-data/files/<subKey>/record` stores one;
+  - `GET /app-data/files/<subKey>` and `POST /app-data/file-urls` sign URLs to
+    read them;
+  - `DELETE /app-data/files/<subKey>` deletes one;
+  - `GET /app-data/files?prefix=snapshots/&limit=…&page_token=…` lists them in
+    sub-key order. The response is `{files, truncated, page_token}`, and each
+    file carries `sub_key`, `size_bytes`, `mime_type`, `original_filename` and
+    `created_at`.
 - `indexes[]` on a table — an ordered column list, e.g.
   `{"columns": ["deck_id", "due"]}`. Declare one for every filter and grouping
   your app actually issues. Without a matching index a filter is a full scan
@@ -839,7 +877,8 @@ reconcile against the live set instead — list what the library holds, and trea
 everything of yours that is not in it as gone.
 
 The window is a setting rather than a constant. `GET /data/trash` answers
-`retention_days`, and your app should read it rather than compile in the default
+`retention_days` on both data servers, so a cloud-only app and a phone app read
+it the same way a local one does. Your app should read it rather than compile in the default
 of 30: a library whose owner chose a year is making a longer promise than your
 app would assume, and one who chose a week is making a shorter one.
 `retention_days: null` means that machine cannot read the library's settings file
@@ -911,3 +950,72 @@ The install path is identical for first-party and third-party apps:
 See [`starkeep-apps/README.md`](../../starkeep-apps/README.md) for the install steps
 from the app-author's side, and the root [`README.md`](../README.md) for the
 end-user local/cloud setup walkthrough.
+
+## Testing your app
+
+Test an app against a real platform at two tiers. The example app carries both
+set up, in `examples/example-app/e2e/` and `examples/example-app/scripts/`.
+
+**Tier 2, a local platform.** core's harness, `@starkeep/e2e`, boots
+local-data-server, admin-web and Drive from a starkeep-core checkout. Your suite
+installs the app through admin-web, starts it from the manifest's `localRun`,
+and drives its page with Playwright. `startPlatformStack({ appParentDirs })`
+takes the folder that holds your app, which admin-web scans as it would on an
+operator's computer.
+
+The harness is not published, because it boots the platform from source. Your
+`package.json` therefore never names it. Copy the example's
+`scripts/link-core-harness.mjs` into your app and run it before every e2e
+command. The script finds core, checks that core's dependencies are installed,
+and links the harness into `node_modules/@starkeep/`. It looks in three places:
+
+1. `STARKEEP_CORE_DIR`, when set;
+2. an enclosing starkeep-core checkout;
+3. `starkeep-core` beside your repository's root.
+
+When none holds a usable checkout, the script stops with one message naming the
+path it tried. The example's `test:e2e` script is
+`node scripts/link-core-harness.mjs && pnpm --filter @example-app/e2e test`.
+
+**Tier 3, a real cloud.** core's AWS journey, in `e2e-aws/`, deploys a test
+stack and installs an app into it. Run it from a core checkout and point it at
+your app's folder with `STARKEEP_AWS_APP_DIR`. The journey is app-agnostic: it
+checks that the app installs, serves its shell, signs in and reaches the data
+plane. It deploys real AWS resources, so read `e2e-aws/README.md` first.
+
+## Structuring an app with several flavors
+
+An app can have several flavors: a local web app, a cloud web app, a phone app,
+and later a desktop app. The platform treats them as one app when they share one
+app id and one manifest. It then syncs the app's data among them with no work
+from the app:
+
+- **App-specific rows and files** travel on the app's own channel, between
+  every computer with the app installed, the cloud and the phone.
+- **Shared records, metadata and labels** travel on Drive's channel, whichever
+  flavor wrote them.
+
+The flavors must still agree on the data itself: the table schemas, the row
+encoding, the label keys, and how any metadata is computed. The manifest
+declares the schemas once. Put the rest in one package every flavor imports.
+
+The example app shows the layout:
+
+```
+examples/example-app/
+  starkeep.manifest.json   one manifest for every flavor
+  package.json             the scripts the platform calls: start, bundle
+  pnpm-workspace.yaml      one workspace holding every flavor
+  common/                  the data contract; no DOM or Node imports
+  web/                     local web and cloud web: one Hono app, two entries
+  e2e/                     the tier-2 suite
+  mobile/                  reserved for a React Native flavor
+  desktop/                 reserved for a desktop flavor
+```
+
+Three details make the root manifest work. `localRun.cwd` is relative to the
+manifest, so `"cwd": "web"` starts the server in the web folder. The installer
+runs `pnpm bundle` in the manifest's folder, so the root `bundle` script
+delegates to `web`. And `workspace:*` between the flavors is legitimate, because
+the dependency never leaves the app's folder. Keep `common/` free of DOM and Node
+imports, so a phone bundler and both halves of a desktop app can all build it.
