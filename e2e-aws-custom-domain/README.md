@@ -123,7 +123,7 @@ Several independent layers keep a run away from live resources:
    lands in the test zone. Step 1 refuses to start when that resolution fails.
 2. **A dedicated zone only.** Step 1 refuses a zone that serves records no run
    wrote, so a mistyped variable cannot aim the suite at a live zone. The setup
-   script refuses a bare registrable domain.
+   script refuses a name that public DNS already delegates elsewhere.
 3. **IAM confines the installer's record writes** to the test names and
    `_*.<test name>`, through the temp policy's record-name condition.
 4. **The suite's own writes go through one helper**, `TestZoneWriter`, which
