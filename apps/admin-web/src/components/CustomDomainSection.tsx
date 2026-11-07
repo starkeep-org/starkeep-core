@@ -107,6 +107,8 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [check, setCheck] = useState<Check | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  /** The domain "Set up" waits to save until the operator approves its DNS changes. */
+  const [confirmSetUp, setConfirmSetUp] = useState<string | null>(null);
   const [run, setRun] = useState<{
     lines: string[];
     status: "running" | "success" | "failure";
@@ -277,7 +279,7 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
         className="flex flex-col gap-2"
         onSubmit={(e) => {
           e.preventDefault();
-          void act(() => saveDomain(input.trim()));
+          setConfirmSetUp(input.trim());
         }}
       >
         <div className="flex flex-wrap items-center gap-2">
@@ -436,6 +438,51 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
           </Alert>
         )}
       </CollapsibleContent>
+
+      {/* The install, not admin-web, finds out where the domain's DNS lives, so
+          the dialog describes both outcomes. */}
+      <Dialog open={confirmSetUp !== null} onOpenChange={(open) => !open && setConfirmSetUp(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Set up {confirmSetUp}</DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-col gap-2 text-sm text-muted-foreground">
+            <p>
+              The cloud update requests a certificate for {confirmSetUp}. The DNS changes depend on
+              where the domain's DNS lives.
+            </p>
+            <p>
+              <span className="font-medium text-foreground">
+                A Route53 zone in this AWS account:
+              </span>{" "}
+              The update adds two records to that zone. An A record at {confirmSetUp} points the
+              domain at the cloud, and a CNAME record at _&lt;code&gt;.{confirmSetUp} proves
+              ownership to the certificate authority. The update stops if {confirmSetUp} already has
+              an A, AAAA or CNAME record. Removing the domain later deletes both records.
+            </p>
+            <p>
+              <span className="font-medium text-foreground">Any other DNS provider:</span> The
+              update changes no DNS records. This section then shows two records for you to add at
+              your provider.
+            </p>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setConfirmSetUp(null)}>
+              Cancel
+            </Button>
+            <Button
+              className={ACTION_OCCASIONAL}
+              onClick={() => {
+                const domain = confirmSetUp;
+                setConfirmSetUp(null);
+                if (domain) void act(() => saveDomain(domain));
+              }}
+            >
+              Set up
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={confirmRemove} onOpenChange={setConfirmRemove}>
         <DialogContent className="max-w-sm">

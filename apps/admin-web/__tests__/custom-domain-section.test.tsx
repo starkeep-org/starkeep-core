@@ -7,7 +7,7 @@
  * once both work, so "Finish" waits for both checks.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { CustomDomainStatus } from "@starkeep/admin-installer/custom-domain";
 
@@ -158,6 +158,41 @@ describe("external mode, awaiting DNS", () => {
     await userEvent.click(screen.getByRole("button", { name: "Check now" }));
     await screen.findByRole("status");
     expect(finish().disabled).toBe(false);
+  });
+});
+
+describe("Set up", () => {
+  async function pressSetUp() {
+    config = {};
+    await open();
+    await userEvent.type(screen.getByRole("textbox", { name: "Custom domain" }), DOMAIN);
+    await userEvent.click(screen.getByRole("button", { name: "Set up" }));
+  }
+
+  it("describes the DNS changes and saves nothing until the operator approves", async () => {
+    await pressSetUp();
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toContain(`An A record at ${DOMAIN}`);
+    expect(dialog.textContent).toContain("changes no DNS records");
+    expect(requests.filter((r) => r.method === "PUT")).toEqual([]);
+
+    await userEvent.click(within(dialog).getByRole("button", { name: "Set up" }));
+    expect(requests).toContainEqual({
+      url: "/api/custom-domain",
+      method: "PUT",
+      body: { domain: DOMAIN },
+    });
+    expect(runInstallStream).toHaveBeenCalledOnce();
+  });
+
+  it("Cancel saves nothing and runs no install", async () => {
+    await pressSetUp();
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(requests.filter((r) => r.method === "PUT")).toEqual([]);
+    expect(runInstallStream).not.toHaveBeenCalled();
   });
 });
 
