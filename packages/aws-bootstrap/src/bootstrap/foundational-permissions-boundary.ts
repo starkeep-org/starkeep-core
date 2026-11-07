@@ -84,24 +84,25 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
         "s3:CreateBucket",
         "s3:DeleteBucket",
         "s3:ListBucket",
-        // Every bucket-level *read*, as one wildcard.
+        // Every bucket-setting read, as two patterns.
         //
         // Enumerating these individually pushed this policy past AWS's
         // 6144-character managed-policy ceiling, and the enumeration was buying
-        // nothing: all seventeen were already granted, Pulumi's BucketV2 reads
-        // most of them on every refresh, and the list only ever grew.
+        // nothing: Pulumi's BucketV2 reads most of them on every refresh, and
+        // the list only ever grew.
         //
-        // The safety property that makes the wildcard sound is the Resource
-        // below: **bucket ARNs only, never `bucket/*`**. Object actions like
-        // `s3:GetObject` require an object ARN, so they cannot match this
-        // statement however the wildcard expands — including for read actions
-        // AWS adds in future. What it admits is reading our own two buckets'
-        // configuration, which every enumerated entry already admitted.
+        // The patterns, not the Resource, keep object reads out. IAM's `*` in
+        // a resource ARN spans `/`, so the bucket globs below also match every
+        // object in both buckets, and a plain `s3:Get*` here admitted
+        // GetObject, GetObjectVersion and the other object reads on all of
+        // them. No S3 object action starts with GetBucket or ends with
+        // Configuration, so these two admit only bucket-setting reads,
+        // including any AWS adds later under the same names.
         //
         // This is the *ceiling*, not a grant. The install-time temp policy
-        // still enumerates exactly what it needs, so widening here does not
-        // widen what any identity actually holds.
-        "s3:Get*",
+        // grants the same two patterns on each bucket separately.
+        "s3:GetBucket*",
+        "s3:Get*Configuration",
         // Writes stay enumerated. A `s3:Put*` here would admit
         // PutBucketPolicy-class changes nobody has asked for, and the whole
         // point of a boundary is that the dangerous half is explicit.
@@ -123,7 +124,7 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
         // The availability machinery (media plan items 19/19b): the event
         // subscription that keeps stored availability true, and the daily
         // inventory that backstops it. Both are writes, so neither rides the
-        // `s3:Get*` wildcard above — a boundary that omits them caps the
+        // read patterns above — a boundary that omits them caps the
         // install below what the temp policy grants and the apply 403s.
         "s3:PutBucketNotification",
         "s3:PutInventoryConfiguration",
