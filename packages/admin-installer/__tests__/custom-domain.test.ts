@@ -215,6 +215,39 @@ describe("ensureExternalCertificate", () => {
       { CertificateArn: "arn:dead" },
     ]);
     expect(result.certificateArn).toBe("arn:fresh");
+    // A fixed token would hand back the certificate just deleted.
+    expect(acm.commandCalls(RequestCertificateCommand)[0]!.args[0].input.IdempotencyToken).toBe(
+      undefined,
+    );
+  });
+
+  it("makes no new request on a rerun while this deployment's certificate is pending", async () => {
+    acm.on(ListCertificatesCommand).resolves({
+      CertificateSummaryList: [
+        {
+          CertificateArn: "arn:pending",
+          DomainName: "photos.example.com",
+          Status: "PENDING_VALIDATION",
+        },
+      ],
+    });
+    acm.on(ListTagsForCertificateCommand).resolves({ Tags: EXTERNAL_TAGS });
+    acm.on(DescribeCertificateCommand).resolves({
+      Certificate: {
+        Status: "PENDING_VALIDATION",
+        DomainValidationOptions: [{ DomainName: "x", ResourceRecord: RECORD }],
+      },
+    });
+
+    const result = await ensureExternalCertificate({
+      stackPrefix: "sk",
+      domain: "photos.example.com",
+      creds: CREDS,
+    });
+
+    expect(result).toMatchObject({ certificateArn: "arn:pending", issued: false });
+    expect(acm.commandCalls(RequestCertificateCommand)).toHaveLength(0);
+    expect(acm.commandCalls(DeleteCertificateCommand)).toHaveLength(0);
   });
 });
 

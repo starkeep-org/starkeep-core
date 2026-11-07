@@ -11,7 +11,6 @@
  * has issued it. Plan: plan-custom-domain-byo-2026-11-06.md, "Two DNS modes".
  */
 
-import { createHash } from "node:crypto";
 import { promises as dns } from "node:dns";
 import {
   ACMClient,
@@ -478,11 +477,10 @@ export async function ensureExternalCertificate(opts: {
       new RequestCertificateCommand({
         DomainName: opts.domain,
         ValidationMethod: "DNS",
-        // Collapses a retried request within the hour into one certificate.
-        IdempotencyToken: createHash("sha256")
-          .update(`${opts.stackPrefix}/${opts.domain}`)
-          .digest("hex")
-          .slice(0, 32),
+        // No IdempotencyToken: a fixed token hands back, for an hour, the
+        // certificate the loop above may just have deleted. ACM applies the
+        // tags in this same request, so a rerun finds a pending certificate
+        // by tag instead.
         Tags: Object.entries(tags).map(([Key, Value]) => ({ Key, Value })),
       }),
     );
