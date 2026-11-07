@@ -1304,21 +1304,23 @@ export function buildCloudDataServerProgram(
     });
 
     if (customDomain && zoneId) {
-      // Alias records, which also work at a zone apex where a CNAME cannot.
-      for (const type of ["A", "AAAA"]) {
-        new aws.route53.Record(`${ctx.stackPrefix}-custom-domain-${type.toLowerCase()}`, {
-          zoneId,
-          name: customDomain.name,
-          type,
-          aliases: [
-            {
-              name: distribution.domainName,
-              zoneId: distribution.hostedZoneId,
-              evaluateTargetHealth: false,
-            },
-          ],
-        });
-      }
+      // An alias record, which also works at a zone apex where a CNAME cannot.
+      // A only: the distribution has IPv6 off, so an AAAA alias would answer
+      // with addresses that serve nothing. allowOverwrite stays unset, so a
+      // record the operator already has at the name fails the install rather
+      // than being replaced; the installer's preflight names it first.
+      new aws.route53.Record(`${ctx.stackPrefix}-custom-domain-a`, {
+        zoneId,
+        name: customDomain.name,
+        type: "A",
+        aliases: [
+          {
+            name: distribution.domainName,
+            zoneId: distribution.hostedZoneId,
+            evaluateTargetHealth: false,
+          },
+        ],
+      });
     }
 
     // The canonical host: the custom domain once it is attached and DNS sends

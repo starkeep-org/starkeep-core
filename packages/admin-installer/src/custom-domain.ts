@@ -25,8 +25,10 @@ import {
 } from "@aws-sdk/client-acm";
 import {
   GetHostedZoneCommand,
+  ListResourceRecordSetsCommand,
   Route53Client,
   paginateListHostedZones,
+  type ResourceRecordSet,
 } from "@aws-sdk/client-route-53";
 import type { AwsCredentials } from "./session";
 import type { CloudDataServerCustomDomain } from "./builtin-programs/cloud-data-server-program";
@@ -307,6 +309,91 @@ export async function findHostedZone(
     return null;
   }
   return best;
+}
+
+/** A Route53 name as the API returns it, in the form every check compares. */
+function normalizeRecordName(name: string): string {
+  return name.replace(/\\052/g, "*").toLowerCase().replace(/\.$/, "");
+}
+
+/** The record types that would take the name the stack's alias record needs. */
+const CONFLICTING_TYPES = new Set(["A", "AAAA", "CNAME"]);
+
+/**
+ * The records at exactly `name` that would stop a route53-mode install, as
+ * text naming each one. An A or AAAA alias to one of `ownedAliasTargets`, this
+ * deployment's own distribution, belongs to the stack: a rerun after Pulumi
+ * created it, or an AAAA record an earlier version wrote, which the run then
+ * deletes. Any other A, AAAA or CNAME belongs to the operator, and the stack's
+ * alias record never overwrites one.
+ */
+export async function findForeignRecords(opts: {
+  name: string;
+  hostedZoneId: string;
+  ownedAliasTargets: readonly string[];
+  creds: AwsCredentials;
+}): Promise<string[]> {
+  const route53 = new Route53Client({
+    region: "us-east-1",
+    credentials: credentialsOf(opts.creds),
+  });
+  const owned = new Set(opts.ownedAliasTargets.map(normalizeRecordName));
+  const atName: ResourceRecordSet[] = [];
+  let start: { name?: string; type?: string; identifier?: string } = { name: `${opts.name}.` };
+  for (;;) {
+    const page = await route53.send(
+      new ListResourceRecordSetsCommand({
+        HostedZoneId: opts.hostedZoneId,
+        StartRecordName: start.name,
+        StartRecordType: start.type as never,
+        StartRecordIdentifier: start.identifier,
+      }),
+    );
+    const sets = page.ResourceRecordSets ?? [];
+    // Route53 lists from the start name onward in its own order, so the
+    // records after this name (a sibling, a deeper name) follow; stop there.
+    const here = sets.filter((r) => normalizeRecordName(r.Name ?? "") === opts.name);
+    atName.push(...here);
+    const next = page.NextRecordName && normalizeRecordName(page.NextRecordName);
+    if (!page.IsTruncated || next !== opts.name || here.length < sets.length) break;
+    start = {
+      name: page.NextRecordName,
+      type: page.NextRecordType,
+      identifier: page.NextRecordIdentifier,
+    };
+  }
+  return atName
+    .filter((r) => CONFLICTING_TYPES.has(r.Type ?? ""))
+    .filter((r) => {
+      const target = r.AliasTarget?.DNSName;
+      return !(r.Type !== "CNAME" && target && owned.has(normalizeRecordName(target)));
+    })
+    .map((r) => {
+      const value = r.AliasTarget?.DNSName
+        ? `alias to ${normalizeRecordName(r.AliasTarget.DNSName)}`
+        : (r.ResourceRecords ?? []).map((v) => v.Value).join(", ");
+      return `${r.Type} ${opts.name} (${value})`;
+    });
+}
+
+/**
+ * Refuse a route53-mode install when the domain already holds a record the
+ * stack does not own. Runs before `pulumi up` creates the certificate, so a
+ * refusal leaves nothing behind.
+ */
+export async function assertNoForeignRecords(opts: {
+  name: string;
+  hostedZoneId: string;
+  ownedAliasTargets: readonly string[];
+  creds: AwsCredentials;
+}): Promise<void> {
+  const foreign = await findForeignRecords(opts);
+  if (foreign.length === 0) return;
+  throw new Error(
+    `Route53 already has ${foreign.join(" and ")} in zone ${opts.hostedZoneId}. ` +
+      `The install will not replace a record it did not create. Remove the record, ` +
+      `then install again.`,
+  );
 }
 
 /** The certificates in us-east-1 that carry every one of `tags`. */

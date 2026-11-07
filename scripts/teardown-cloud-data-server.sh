@@ -685,8 +685,8 @@ for attempt in range(6):
 # The stack's certificate carries the prefix tag and no starkeep:customDomainMode
 # tag; an external-DNS domain's certificate carries mode=external and stays, so
 # a reinstall attaches it with no new DNS validation. For each stack
-# certificate, delete its validation record and the A/AAAA alias records the
-# stack wrote, then the certificate. Best-effort like everything above.
+# certificate, delete its validation record and the A alias record the stack
+# wrote, then the certificate. Best-effort like everything above.
 
 
 def aws_json(*args):
@@ -748,12 +748,11 @@ try:
                 if rr:
                     delete_record(zone[0], rr["Name"], rr["Type"], lambda rs, v=rr["Value"]: any(
                         x.get("Value") == v for x in rs.get("ResourceRecords", [])))
-            for rtype in ("A", "AAAA"):
-                delete_record(zone[0], domain, rtype, lambda rs: (
-                    rs.get("AliasTarget", {}).get("DNSName", "").rstrip(".").lower()
-                    == (dist_domain or "").lower()
-                    if dist_domain else
-                    rs.get("AliasTarget", {}).get("DNSName", "").rstrip(".").endswith(".cloudfront.net")))
+            delete_record(zone[0], domain, "A", lambda rs: (
+                rs.get("AliasTarget", {}).get("DNSName", "").rstrip(".").lower()
+                == (dist_domain or "").lower()
+                if dist_domain else
+                rs.get("AliasTarget", {}).get("DNSName", "").rstrip(".").endswith(".cloudfront.net")))
         for attempt in range(6):
             try:
                 acm("delete-certificate", "--certificate-arn", arn)

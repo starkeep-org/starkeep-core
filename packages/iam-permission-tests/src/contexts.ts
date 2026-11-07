@@ -562,7 +562,7 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           action: "route53:ChangeResourceRecordSets",
           resource: zone,
           contextVariables: { [names]: [CUSTOM_DOMAIN] },
-          why: "Route53 mode writes the A and AAAA alias records at the domain.",
+          why: "Route53 mode writes the A alias record at the domain.",
         },
         {
           action: "route53:ChangeResourceRecordSets",
@@ -586,7 +586,9 @@ const CONTEXTS: Record<string, ContextBuilder> = {
         {
           action: "route53:ListResourceRecordSets",
           resource: zone,
-          why: "Pulumi reads each record back on refresh.",
+          why:
+            "The installer's Route53-mode preflight lists the domain's records before pulumi " +
+            "up, to refuse a record the stack does not own; Pulumi reads each record back on refresh.",
         },
       ];
     },

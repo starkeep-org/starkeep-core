@@ -184,15 +184,16 @@ describe("Route53 mode", () => {
     ).toMatch(/#validated$/);
   });
 
-  it("points A and AAAA alias records at the distribution", () => {
+  it("points one A alias record at the distribution, and writes no AAAA", () => {
+    // The distribution has IPv6 off; an AAAA alias would answer with
+    // addresses that serve nothing.
     const aliases = ofType(r, "route53/record:Record").filter((x) => x.inputs.aliases);
-    expect(aliases.map((a) => a.inputs.type).sort()).toEqual(["A", "AAAA"]);
-    for (const a of aliases) {
-      expect(a.inputs).toMatchObject({ zoneId: "ZONE1", name: "aaron.starkeep.app" });
-      expect(a.inputs.aliases).toEqual([
-        { name: "d1.cloudfront.net", zoneId: "Z2FDTNDATAQYW2", evaluateTargetHealth: false },
-      ]);
-    }
+    expect(aliases.map((a) => a.inputs.type)).toEqual(["A"]);
+    expect(aliases[0]!.inputs).toMatchObject({ zoneId: "ZONE1", name: "aaron.starkeep.app" });
+    expect(aliases[0]!.inputs.allowOverwrite).toBeUndefined();
+    expect(aliases[0]!.inputs.aliases).toEqual([
+      { name: "d1.cloudfront.net", zoneId: "Z2FDTNDATAQYW2", evaluateTargetHealth: false },
+    ]);
   });
 
   it("makes the custom domain canonical and keeps exporting the cloudfront.net name", () => {

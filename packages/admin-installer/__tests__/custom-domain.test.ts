@@ -19,6 +19,7 @@ import {
 import {
   GetHostedZoneCommand,
   ListHostedZonesCommand,
+  ListResourceRecordSetsCommand,
   Route53Client,
 } from "@aws-sdk/client-route-53";
 
@@ -26,6 +27,7 @@ const resolveNs = vi.fn<(name: string) => Promise<string[]>>();
 vi.mock("node:dns", () => ({ promises: { resolveNs: (n: string) => resolveNs(n) } }));
 
 const {
+  assertNoForeignRecords,
   deleteUnusedExternalCertificates,
   ensureExternalCertificate,
   findHostedZone,
@@ -262,5 +264,133 @@ describe("deleteUnusedExternalCertificates", () => {
       deleteUnusedExternalCertificates({ stackPrefix: "sk", creds: CREDS }),
     ).resolves.toBeUndefined();
     expect(acm.commandCalls(DeleteCertificateCommand)).toHaveLength(2);
+  });
+});
+
+describe("assertNoForeignRecords", () => {
+  const NAME = "aaron.starkeep.app";
+  const OWN = "d1.cloudfront.net";
+  const check = () =>
+    assertNoForeignRecords({
+      name: NAME,
+      hostedZoneId: "ZONE1",
+      ownedAliasTargets: [OWN],
+      creds: CREDS,
+    });
+  const alias = (type: "A" | "AAAA", target: string) => ({
+    Name: `${NAME}.`,
+    Type: type,
+    AliasTarget: {
+      DNSName: `${target}.`,
+      HostedZoneId: "Z2FDTNDATAQYW2",
+      EvaluateTargetHealth: false,
+    },
+  });
+
+  it("passes when nothing is at the name", async () => {
+    route53.on(ListResourceRecordSetsCommand).resolves({
+      ResourceRecordSets: [],
+      IsTruncated: false,
+    });
+    await expect(check()).resolves.toBeUndefined();
+    expect(route53.commandCalls(ListResourceRecordSetsCommand)[0]!.args[0].input).toMatchObject({
+      HostedZoneId: "ZONE1",
+      StartRecordName: `${NAME}.`,
+    });
+  });
+
+  it.each([
+    [
+      "an A record",
+      { Name: `${NAME}.`, Type: "A", TTL: 300, ResourceRecords: [{ Value: "203.0.113.7" }] },
+      /A aaron\.starkeep\.app \(203\.0\.113\.7\)/,
+    ],
+    [
+      "an AAAA record",
+      { Name: `${NAME}.`, Type: "AAAA", TTL: 300, ResourceRecords: [{ Value: "2001:db8::1" }] },
+      /AAAA aaron\.starkeep\.app \(2001:db8::1\)/,
+    ],
+    [
+      "a CNAME",
+      {
+        Name: `${NAME}.`,
+        Type: "CNAME",
+        TTL: 300,
+        ResourceRecords: [{ Value: "old.host.example." }],
+      },
+      /CNAME aaron\.starkeep\.app \(old\.host\.example\.\)/,
+    ],
+    [
+      "an alias to another distribution",
+      alias("A", "d9.cloudfront.net"),
+      /A aaron\.starkeep\.app \(alias to d9\.cloudfront\.net\)/,
+    ],
+  ])("refuses %s at the name, and names it", async (_label, record, message) => {
+    route53.on(ListResourceRecordSetsCommand).resolves({
+      ResourceRecordSets: [record as never],
+      IsTruncated: false,
+    });
+    await expect(check()).rejects.toThrow(message);
+    await expect(check()).rejects.toThrow(/Remove the record/);
+  });
+
+  it("passes an alias to this deployment's own distribution, A or AAAA", async () => {
+    route53.on(ListResourceRecordSetsCommand).resolves({
+      ResourceRecordSets: [alias("A", "D1.CloudFront.net"), alias("AAAA", OWN)],
+      IsTruncated: false,
+    });
+    await expect(check()).resolves.toBeUndefined();
+  });
+
+  it("ignores records at the name that cannot clash, and names listed after it", async () => {
+    route53.on(ListResourceRecordSetsCommand).resolves({
+      ResourceRecordSets: [
+        { Name: `${NAME}.`, Type: "TXT", TTL: 300, ResourceRecords: [{ Value: '"v=spf1"' }] },
+        { Name: `_abc.${NAME}.`, Type: "CNAME", TTL: 300, ResourceRecords: [{ Value: "_x.acm." }] },
+        { Name: `www.${NAME}.`, Type: "A", TTL: 300, ResourceRecords: [{ Value: "203.0.113.7" }] },
+        {
+          Name: "zzz.starkeep.app.",
+          Type: "A",
+          TTL: 300,
+          ResourceRecords: [{ Value: "203.0.113.8" }],
+        },
+      ],
+      IsTruncated: true,
+      NextRecordName: "zzzz.starkeep.app.",
+      NextRecordType: "A",
+    });
+    await expect(check()).resolves.toBeUndefined();
+    expect(route53.commandCalls(ListResourceRecordSetsCommand)).toHaveLength(1);
+  });
+
+  it("follows a page break inside the name's own record sets", async () => {
+    route53
+      .on(ListResourceRecordSetsCommand, {
+        StartRecordName: `${NAME}.`,
+        StartRecordType: undefined,
+      })
+      .resolves({
+        ResourceRecordSets: [alias("A", OWN)],
+        IsTruncated: true,
+        NextRecordName: `${NAME}.`,
+        NextRecordType: "CNAME",
+      })
+      .on(ListResourceRecordSetsCommand, { StartRecordType: "CNAME" })
+      .resolves({
+        ResourceRecordSets: [
+          { Name: `${NAME}.`, Type: "CNAME", TTL: 300, ResourceRecords: [{ Value: "x.example." }] },
+        ],
+        IsTruncated: false,
+      });
+    await expect(check()).rejects.toThrow(/CNAME aaron\.starkeep\.app/);
+  });
+
+  it("makes no ACM call, so a refusal requests no certificate", async () => {
+    route53.on(ListResourceRecordSetsCommand).resolves({
+      ResourceRecordSets: [alias("A", "d9.cloudfront.net")],
+      IsTruncated: false,
+    });
+    await expect(check()).rejects.toThrow();
+    expect(acm.calls()).toHaveLength(0);
   });
 });
