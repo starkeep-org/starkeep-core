@@ -512,12 +512,24 @@ function InstallStepsDialog({ appId, onClose }: { appId: string | null; onClose:
   );
 }
 
-/** A grant's file categories, named in the plural for the install prompt. */
+/**
+ * A grant's file categories, named in the plural for the install prompt.
+ *
+ * One entry per category an app may be granted, plus `other`. A category
+ * missing here shows as its raw id, so `consent-category-names.test.ts` checks
+ * the map against the registry's `APP_GRANTABLE_CATEGORIES`.
+ */
 const CATEGORY_NAMES: Record<string, string> = {
   image: "Images",
   video: "Videos",
   audio: "Audio",
   document: "Documents",
+  text: "Text files",
+  code: "Code files",
+  font: "Fonts",
+  archive: "Archives",
+  data: "Data files",
+  model3d: "3D models",
   example: "Example files",
   other: "Other files",
 };
