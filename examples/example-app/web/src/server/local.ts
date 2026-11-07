@@ -44,7 +44,32 @@ async function fromDist(relative: string, cacheControl: string): Promise<Respons
   }
 }
 
+/**
+ * The bind keeps other devices out. The `Host` check keeps out a DNS-rebinding
+ * page in this machine's own browser: such a page reaches 127.0.0.1 under a
+ * hostname it controls, and without the check it could drive the signing
+ * proxy, which holds this app's credentials. local-data-server makes the same
+ * check; starkeep-core's `apps/local-data-server/loopback-host.ts` explains
+ * why. A request with no `Host` did not come from a browser and passes.
+ */
+const LISTEN_HOST = "127.0.0.1";
+const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+function isLoopbackHost(host: string | undefined): boolean {
+  if (host === undefined) return true;
+  const lower = host.trim().toLowerCase();
+  const end = lower.startsWith("[") ? lower.indexOf("]") + 1 : lower.indexOf(":");
+  return LOOPBACK_HOSTNAMES.has(end > 0 ? lower.slice(0, end) : lower);
+}
+
 const local = new Hono();
+
+local.use("*", async (c, next) => {
+  if (!isLoopbackHost(c.req.header("host"))) {
+    return c.text("This app answers only on a loopback address.", 403);
+  }
+  await next();
+});
 
 // Content-hashed output is cacheable forever, the same split the cloud applies.
 local.get("/_immutable/*", async (c) => {
@@ -72,6 +97,6 @@ function portFromArgv(argv: string[]): number {
 
 const port = portFromArgv(process.argv.slice(2));
 
-serve({ fetch: local.fetch, port, hostname: "127.0.0.1" }, () => {
+serve({ fetch: local.fetch, port, hostname: LISTEN_HOST }, () => {
   console.log(`example-app listening on http://127.0.0.1:${port}`);
 });
