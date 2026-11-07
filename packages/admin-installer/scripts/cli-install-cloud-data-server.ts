@@ -268,6 +268,7 @@ const outputs = await installCloudDataServer({
   // The last install's domain, so this run can delete its records and
   // certificate after a removal or a change.
   previousCustomDomain: config.customDomainStatus?.name,
+  cloudfrontDomain: config.cloudfrontDomain,
 }).catch(exitOnInstallFailure);
 
 // There is no separate cloud sync identity to install here: shared-record sync
@@ -308,6 +309,13 @@ if (outputs.customDomain?.status === "pending-validation") {
   console.log(`  customDomain   : ${outputs.customDomain.name} awaits certificate validation.`);
   if (record)
     console.log(`    Add ${record.type} ${record.name} -> ${record.value}, then install again.`);
+} else if (outputs.customDomain?.status === "awaiting-dns") {
+  console.log(
+    `  customDomain   : ${outputs.customDomain.name} attached, but does not point at the cloud yet.`,
+  );
+  console.log(
+    `    Point a CNAME at ${outputs.cloudfrontDomain}, then install again to make it canonical.`,
+  );
 } else if (outputs.customDomain?.mode === "external") {
   console.log(
     `  customDomain   : ${outputs.customDomain.name} attached. Point a CNAME at ${outputs.cloudfrontDomain}.`,
