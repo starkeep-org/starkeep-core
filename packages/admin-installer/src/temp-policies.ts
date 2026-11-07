@@ -487,13 +487,22 @@ export function buildTempInstallCloudDataServerPolicy(
       },
       {
         // The cost-and-usage-report bucket: Pulumi creates it, locks it down
-        // and reads its settings, and writes nothing else.
+        // and reads its settings, and writes nothing else. An ephemeral
+        // stack's destroy empties it of the test object AWS's billing service
+        // writes: it lists the object versions and deletes each one by version
+        // ID, even in an unversioned bucket. IAM's `*` spans `/`, so the
+        // bucket's resource covers its objects; no action here reads or
+        // writes one. `s3:DeleteObject*` also admits the tag deletes, and
+        // spends fewer of the role's inline-policy characters than the two
+        // verbs it needs.
         Sid: "TempInstallBillingBucket",
         Effect: "Allow",
         Action: [
           "s3:CreateBucket",
           "s3:DeleteBucket",
           "s3:ListBucket",
+          "s3:ListBucketVersions",
+          "s3:DeleteObject*",
           "s3:GetBucket*",
           "s3:Get*Configuration",
           "s3:PutBucketPolicy",

@@ -1499,6 +1499,11 @@ export function buildCloudDataServerProgram(
 
     const billingBucket = new aws.s3.BucketV2(`${ctx.stackPrefix}-billing`, {
       bucket: `${ctx.stackPrefix}-billing-${ctx.accountId}-${ctx.region}`,
+      // AWS's billing service writes a test object when the report below is
+      // created, so the bucket is never empty. An ephemeral stack's uninstall
+      // empties it on destroy; a real one keeps the guard, as the files bucket
+      // does.
+      forceDestroy: ctx.ephemeral,
       tags: { "starkeep:managed": "true", "starkeep:appId": "cloud-data-server" },
     });
 
