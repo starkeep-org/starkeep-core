@@ -416,22 +416,40 @@ fi
 # ── Step 2c: Delete custom-domain certificates ───────────────────────────────
 # The cloud-data-server teardown keeps an external-DNS domain's certificate, so
 # a reinstall attaches it without new DNS validation. A full wipe removes it,
-# along with any stack certificate an interrupted teardown left. CloudFront takes
+# along with any stack certificate a removal or a teardown left. CloudFront takes
 # certificates only from us-east-1, so they live there whatever $REGION is.
+# ACM can report a certificate in use for most of an hour after CloudFront let
+# go of it, so the step retries a certificate in use until one shared deadline.
 step "Deleting custom-domain certificates tagged starkeep:stackPrefix=${STACK_PREFIX} (us-east-1)"
 CERT_ARNS=$(aws acm list-certificates --region us-east-1 \
   --certificate-statuses PENDING_VALIDATION ISSUED INACTIVE EXPIRED VALIDATION_TIMED_OUT REVOKED FAILED \
   --query 'CertificateSummaryList[].CertificateArn' --output text 2>/dev/null || true)
 CERTS_DELETED=false
+CERT_DEADLINE=$(( $(date +%s) + 75 * 60 ))
 if [ -n "$CERT_ARNS" ] && [ "$CERT_ARNS" != "None" ]; then
   for arn in $CERT_ARNS; do
     owner=$(aws acm list-tags-for-certificate --region us-east-1 --certificate-arn "$arn" \
       --query "Tags[?Key=='starkeep:stackPrefix'].Value | [0]" --output text 2>/dev/null || true)
     [ "$owner" = "$STACK_PREFIX" ] || continue
     CERTS_DELETED=true
-    aws acm delete-certificate --region us-east-1 --certificate-arn "$arn" 2>/dev/null \
-      && echo "  Deleted $arn" \
-      || echo "  Could not delete $arn (still attached to a distribution?); continuing"
+    waited=0
+    while :; do
+      if err=$(aws acm delete-certificate --region us-east-1 --certificate-arn "$arn" 2>&1); then
+        echo "  Deleted $arn"
+        break
+      fi
+      if [[ "$err" != *ResourceInUseException* ]]; then
+        echo "  Could not delete $arn: $err; continuing"
+        break
+      fi
+      if [ "$(date +%s)" -ge "$CERT_DEADLINE" ]; then
+        echo "  $arn is still in use in ACM after the wait; run this script again later to delete it"
+        break
+      fi
+      [ $(( waited % 300 )) -eq 0 ] && echo "  $arn is still in use in ACM; waiting for ACM to let go (up to 75 minutes)…"
+      sleep 30
+      waited=$(( waited + 30 ))
+    done
   done
 fi
 [ "$CERTS_DELETED" = true ] || skip

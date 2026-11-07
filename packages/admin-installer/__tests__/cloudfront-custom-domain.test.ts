@@ -6,7 +6,8 @@
  * - Route53 mode: the zone sits in the account, so the stack owns the whole
  *   chain — certificate, validation record, CertificateValidation, and the
  *   alias records — and the distribution takes the *validated* ARN, which is
- *   what makes it wait for issuance.
+ *   what makes it wait for issuance. The certificate is retained on delete,
+ *   which the mocks cannot see; the live suite covers it.
  * - External mode: the installer holds an issued certificate outside the
  *   stack, so the stack creates no certificate and no record.
  *
@@ -133,6 +134,7 @@ describe("no custom domain", () => {
   it("creates no certificate and no record", () => {
     expect(ofType(r, "acm/certificate:Certificate")).toHaveLength(0);
     expect(ofType(r, "route53/record:Record")).toHaveLength(0);
+    expect(r.outputs.customDomainCertificateArn).toBeUndefined();
   });
 
   it("uses the cloudfront.net name as the canonical base and signing host", () => {
@@ -155,6 +157,12 @@ describe("Route53 mode", () => {
       validationMethod: "DNS",
     });
     expect(cert!.inputs.tags).toMatchObject({ "starkeep:stackPrefix": "starkeep" });
+  });
+
+  it("exports the certificate's ARN, which the installer's cleanup keeps", () => {
+    // The program retains the certificate on delete, and the installer deletes
+    // every other certificate of the deployment for a domain in play.
+    expect(r.outputs.customDomainCertificateArn).toBe("arn:fake:starkeep-custom-domain-cert");
   });
 
   it("writes the validation record ACM asks for, in the domain's zone", () => {
@@ -219,6 +227,7 @@ describe("external mode", () => {
     expect(ofType(r, "acm/certificate:Certificate")).toHaveLength(0);
     expect(ofType(r, "acm/certificateValidation:CertificateValidation")).toHaveLength(0);
     expect(ofType(r, "route53/record:Record")).toHaveLength(0);
+    expect(r.outputs.customDomainCertificateArn).toBeUndefined();
     expect(r.distribution.inputs.aliases).toEqual(["photos.example.com"]);
     expect(r.distribution.inputs.viewerCertificate).toMatchObject({ acmCertificateArn: arn });
   });

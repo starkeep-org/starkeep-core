@@ -686,7 +686,10 @@ for attempt in range(6):
 # tag; an external-DNS domain's certificate carries mode=external and stays, so
 # a reinstall attaches it with no new DNS validation. For each stack
 # certificate, delete its validation record and the A alias record the stack
-# wrote, then the certificate. Best-effort like everything above.
+# wrote, then the certificate. Best-effort like everything above. ACM can
+# report a certificate in use for most of an hour after its distribution let
+# go, so a certificate still in use stays for teardown-bootstrap.sh, which
+# waits for it, or for the next install that names the domain.
 
 
 def aws_json(*args):
@@ -753,16 +756,15 @@ try:
                 == (dist_domain or "").lower()
                 if dist_domain else
                 rs.get("AliasTarget", {}).get("DNSName", "").rstrip(".").endswith(".cloudfront.net")))
-        for attempt in range(6):
-            try:
-                acm("delete-certificate", "--certificate-arn", arn)
-                print(f"  Certificate: deleted {arn} ({domain})")
-                break
-            except Exception as e:  # noqa: BLE001 — in use until the distribution is gone
-                if attempt == 5:
-                    print(f"  WARN certificate cleanup ({domain}) after 6 tries: {e}")
-                    break
-                time.sleep(20)
+        try:
+            acm("delete-certificate", "--certificate-arn", arn)
+            print(f"  Certificate: deleted {arn} ({domain})")
+        except Exception as e:  # noqa: BLE001
+            if "ResourceInUseException" in str(e):
+                print(f"  Certificate: {arn} ({domain}) is still in use in ACM; "
+                      "teardown-bootstrap.sh deletes it, as does the next install that names the domain.")
+            else:
+                print(f"  WARN certificate cleanup ({domain}): {e}")
 except Exception as e:  # noqa: BLE001
     print(f"  WARN custom domain cleanup: {e}")
 PYEOF

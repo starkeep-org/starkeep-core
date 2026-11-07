@@ -23,12 +23,14 @@ import {
   ListTagsForCertificateCommand,
   paginateListCertificates,
 } from "@aws-sdk/client-acm";
+import { CloudFrontClient, paginateListDistributions } from "@aws-sdk/client-cloudfront";
 import { STSClient } from "@aws-sdk/client-sts";
 import type { AwsCredentials } from "@starkeep/admin-installer/session";
 
 /** Route53 is global; its API lives in us-east-1, as do CloudFront's certificates. */
 const route53 = new Route53Client({ region: "us-east-1" });
 const acm = new ACMClient({ region: "us-east-1" });
+const cloudfront = new CloudFrontClient({ region: "us-east-1" });
 
 export interface ZoneRef {
   id: string;
@@ -225,6 +227,22 @@ export async function certificatesFor(domains: readonly string[]): Promise<Certi
     }
   }
   return found.sort((a, b) => a.arn.localeCompare(b.arn));
+}
+
+/** The aliases and certificate the distribution named `domainName` serves with. */
+export async function distributionServing(
+  domainName: string,
+): Promise<{ aliases: string[]; certificateArn?: string }> {
+  for await (const page of paginateListDistributions({ client: cloudfront }, {})) {
+    for (const d of page.DistributionList?.Items ?? []) {
+      if (d.DomainName !== domainName) continue;
+      return {
+        aliases: d.Aliases?.Items ?? [],
+        certificateArn: d.ViewerCertificate?.ACMCertificateArn,
+      };
+    }
+  }
+  throw new Error(`no distribution named ${domainName}`);
 }
 
 /** A stable text form of record sets, for before-and-after comparison. */

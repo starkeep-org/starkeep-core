@@ -28,10 +28,10 @@ vi.mock("node:dns", () => ({ promises: { resolveNs: (n: string) => resolveNs(n) 
 
 const {
   assertNoForeignRecords,
-  deleteUnusedExternalCertificates,
+  deleteUnusedCertificates,
   ensureExternalCertificate,
   findHostedZone,
-  listExternalCertificates,
+  listDeploymentCertificates,
   validateCustomDomain,
 } = await import("../src/custom-domain");
 
@@ -39,12 +39,12 @@ const acm = mockClient(ACMClient);
 const route53 = mockClient(Route53Client);
 const CREDS = { accessKeyId: "a", secretAccessKey: "s", sessionToken: "t" };
 
-const EXTERNAL_TAGS = [
+const STACK_TAGS = [
   { Key: "starkeep:managed", Value: "true" },
   { Key: "starkeep:appId", Value: "cloud-data-server" },
   { Key: "starkeep:stackPrefix", Value: "sk" },
-  { Key: "starkeep:customDomainMode", Value: "external" },
 ];
+const EXTERNAL_TAGS = [...STACK_TAGS, { Key: "starkeep:customDomainMode", Value: "external" }];
 
 beforeEach(() => {
   acm.reset();
@@ -125,7 +125,7 @@ describe("findHostedZone", () => {
 
 /** One install's path: list once, then ensure the domain's certificate. */
 async function ensure(domain: string) {
-  const certificates = await listExternalCertificates({
+  const certificates = await listDeploymentCertificates({
     stackPrefix: "sk",
     domains: [domain],
     creds: CREDS,
@@ -189,6 +189,28 @@ describe("ensureExternalCertificate", () => {
     expect(acm.commandCalls(RequestCertificateCommand)).toHaveLength(0);
   });
 
+  it("never adopts the Pulumi program's certificate for the domain", async () => {
+    // The domain's zone left the account; the stack's certificate remains.
+    acm.on(ListCertificatesCommand).resolves({
+      CertificateSummaryList: [
+        { CertificateArn: "arn:stack", DomainName: "photos.example.com", Status: "ISSUED" },
+      ],
+    });
+    acm.on(ListTagsForCertificateCommand).resolves({ Tags: STACK_TAGS });
+    acm.on(RequestCertificateCommand).resolves({ CertificateArn: "arn:new" });
+    acm.on(DescribeCertificateCommand).resolves({
+      Certificate: {
+        Status: "PENDING_VALIDATION",
+        DomainValidationOptions: [{ DomainName: "x", ResourceRecord: RECORD }],
+      },
+    });
+
+    const result = await ensure("photos.example.com");
+
+    expect(result.certificateArn).toBe("arn:new");
+    expect(acm.commandCalls(DeleteCertificateCommand)).toHaveLength(0);
+  });
+
   it("replaces a certificate whose validation timed out", async () => {
     acm.on(ListCertificatesCommand).resolves({
       CertificateSummaryList: [
@@ -246,37 +268,62 @@ describe("ensureExternalCertificate", () => {
   });
 });
 
-describe("deleteUnusedExternalCertificates", () => {
-  it("deletes this deployment's external certificates except the one in use", async () => {
+describe("deleteUnusedCertificates", () => {
+  function listing() {
     acm.on(ListCertificatesCommand).resolves({
       CertificateSummaryList: [
         { CertificateArn: "arn:keep", DomainName: "photos.example.com" },
         { CertificateArn: "arn:old", DomainName: "old.example.com" },
         { CertificateArn: "arn:stack", DomainName: "aaron.starkeep.app" },
+        { CertificateArn: "arn:stack-old", DomainName: "removed.starkeep.app" },
+        { CertificateArn: "arn:other", DomainName: "other.starkeep.app" },
       ],
     });
     acm
-      .on(ListTagsForCertificateCommand, { CertificateArn: "arn:keep" })
+      .on(ListTagsForCertificateCommand)
       .resolves({ Tags: EXTERNAL_TAGS })
-      .on(ListTagsForCertificateCommand, { CertificateArn: "arn:old" })
-      .resolves({ Tags: EXTERNAL_TAGS })
-      // The Pulumi stack's own certificate has no mode tag, and `pulumi
-      // destroy` owns it.
+      // The Pulumi program's certificates carry no mode tag.
       .on(ListTagsForCertificateCommand, { CertificateArn: "arn:stack" })
-      .resolves({ Tags: EXTERNAL_TAGS.slice(0, 3) });
+      .resolves({ Tags: STACK_TAGS })
+      .on(ListTagsForCertificateCommand, { CertificateArn: "arn:stack-old" })
+      .resolves({ Tags: STACK_TAGS })
+      // Another deployment's certificate for a domain in play.
+      .on(ListTagsForCertificateCommand, { CertificateArn: "arn:other" })
+      .resolves({ Tags: [...STACK_TAGS.slice(0, 2), { Key: "starkeep:stackPrefix", Value: "x" }] });
+    return listDeploymentCertificates({
+      stackPrefix: "sk",
+      domains: [
+        "photos.example.com",
+        "old.example.com",
+        "aaron.starkeep.app",
+        "removed.starkeep.app",
+        "other.starkeep.app",
+      ],
+      creds: CREDS,
+    });
+  }
 
-    await deleteUnusedExternalCertificates({
-      keepArn: "arn:keep",
-      certificates: await listExternalCertificates({
-        stackPrefix: "sk",
-        domains: ["photos.example.com", "old.example.com", "aaron.starkeep.app"],
-        creds: CREDS,
-      }),
+  it("deletes this deployment's certificates of both modes except those kept", async () => {
+    await deleteUnusedCertificates({
+      keepArns: ["arn:keep", "arn:stack"],
+      certificates: await listing(),
       creds: CREDS,
     });
 
     expect(acm.commandCalls(DeleteCertificateCommand).map((c) => c.args[0].input)).toEqual([
       { CertificateArn: "arn:old" },
+      { CertificateArn: "arn:stack-old" },
+    ]);
+  });
+
+  it("deletes every certificate after an uninstall, and none of another deployment's", async () => {
+    await deleteUnusedCertificates({ keepArns: [], certificates: await listing(), creds: CREDS });
+
+    expect(acm.commandCalls(DeleteCertificateCommand).map((c) => c.args[0].input)).toEqual([
+      { CertificateArn: "arn:keep" },
+      { CertificateArn: "arn:old" },
+      { CertificateArn: "arn:stack" },
+      { CertificateArn: "arn:stack-old" },
     ]);
   });
 
@@ -292,13 +339,13 @@ describe("deleteUnusedExternalCertificates", () => {
       .on(DeleteCertificateCommand, { CertificateArn: "arn:busy" })
       .rejects(Object.assign(new Error("in use"), { name: "ResourceInUseException" }));
 
-    const certificates = await listExternalCertificates({
+    const certificates = await listDeploymentCertificates({
       stackPrefix: "sk",
       domains: ["old.example.com", "older.example.com"],
       creds: CREDS,
     });
     await expect(
-      deleteUnusedExternalCertificates({ certificates, creds: CREDS }),
+      deleteUnusedCertificates({ keepArns: [], certificates, creds: CREDS }),
     ).resolves.toBeUndefined();
     expect(acm.commandCalls(DeleteCertificateCommand)).toHaveLength(2);
   });
@@ -315,13 +362,15 @@ describe("one certificate listing per install", () => {
     });
     acm.on(ListTagsForCertificateCommand).resolves({ Tags: EXTERNAL_TAGS });
 
-    const found = await listExternalCertificates({
+    const found = await listDeploymentCertificates({
       stackPrefix: "sk",
       domains: ["photos.example.com"],
       creds: CREDS,
     });
 
-    expect(found).toEqual([{ arn: "arn:mine", domain: "photos.example.com", status: "" }]);
+    expect(found).toEqual([
+      { arn: "arn:mine", domain: "photos.example.com", status: "", external: true },
+    ]);
     expect(
       acm.commandCalls(ListTagsForCertificateCommand).map((c) => c.args[0].input.CertificateArn),
     ).toEqual(["arn:mine"]);
@@ -350,7 +399,7 @@ describe("one certificate listing per install", () => {
     });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    const certificates = await listExternalCertificates({
+    const certificates = await listDeploymentCertificates({
       stackPrefix: "sk",
       domains: ["photos.example.com", "old.example.com"],
       creds: CREDS,
@@ -361,8 +410,8 @@ describe("one certificate listing per install", () => {
       certificates,
       creds: CREDS,
     });
-    await deleteUnusedExternalCertificates({
-      keepArn: ensured.certificateArn,
+    await deleteUnusedCertificates({
+      keepArns: [ensured.certificateArn],
       certificates,
       creds: CREDS,
     });
