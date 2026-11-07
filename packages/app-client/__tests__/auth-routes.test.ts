@@ -35,14 +35,22 @@ function idClaims(over: Record<string, unknown> = {}) {
 }
 
 function req(
-  opts: { method?: string; body?: unknown; cookie?: string; origin?: string | null } = {},
+  opts: {
+    method?: string;
+    body?: unknown;
+    cookie?: string;
+    origin?: string | null;
+    url?: string;
+    viewerHost?: string;
+  } = {},
 ): MinimalRequest {
   const headers: Record<string, string> = {};
   if (opts.cookie) headers.cookie = opts.cookie;
   if (opts.origin !== null) headers.origin = opts.origin ?? ORIGIN;
+  if (opts.viewerHost) headers["x-starkeep-viewer-host"] = opts.viewerHost;
   return {
     method: opts.method ?? "POST",
-    url: `${ORIGIN}/apps/memo/api/session/refresh`,
+    url: opts.url ?? `${ORIGIN}/apps/memo/api/session/refresh`,
     headers: { get: (n) => headers[n.toLowerCase()] ?? null },
     text: async () => (opts.body === undefined ? "" : JSON.stringify(opts.body)),
     arrayBuffer: async () => new ArrayBuffer(0),
@@ -183,6 +191,77 @@ describe("cross-origin", () => {
       if (saved === undefined) delete process.env.STARKEEP_API_GATEWAY_URL;
       else process.env.STARKEEP_API_GATEWAY_URL = saved;
     }
+  });
+});
+
+describe("cross-origin with a custom domain", () => {
+  // Behind CloudFront the Lambda sees the gateway URL, the baked base names the
+  // cloudfront.net host, and the browser may be on either that host or the
+  // custom domain. The distribution's function names the viewer's host.
+  const GATEWAY = "https://abc123.execute-api.us-east-2.amazonaws.com/apps/memo/api/session";
+  const BAKED = "https://d1.cloudfront.net";
+  const CUSTOM = "https://photos.example.com";
+
+  beforeEach(() => {
+    process.env.STARKEEP_API_GATEWAY_URL = BAKED;
+  });
+
+  function post(action: string, origin: string | null, viewerHost?: string) {
+    return routes.POST(
+      req({
+        cookie: `${SESSION_COOKIE}=refresh-abc`,
+        origin,
+        url: `${GATEWAY}/${action}`,
+        viewerHost,
+      }),
+      ctx(action),
+    );
+  }
+
+  for (const action of ["refresh", "sign-out"]) {
+    describe(action, () => {
+      it("allows a request from the custom host when the viewer-host header names it", async () => {
+        expect((await post(action, CUSTOM, "photos.example.com")).status).toBe(200);
+      });
+
+      it("compares the header without regard to case, as the viewer typed the host", async () => {
+        expect((await post(action, CUSTOM, "Photos.Example.COM")).status).toBe(200);
+      });
+
+      it("refuses an Origin that differs from the header's host", async () => {
+        expect((await post(action, CUSTOM, "other.example.com")).status).toBe(403);
+      });
+
+      it("refuses an Origin naming neither host while the header is present", async () => {
+        expect((await post(action, "https://evil.example.com", "photos.example.com")).status).toBe(
+          403,
+        );
+      });
+
+      it("still allows the baked base when the header names the other host", async () => {
+        expect((await post(action, BAKED, "photos.example.com")).status).toBe(200);
+      });
+
+      it("falls back to the baked base for a request with no header", async () => {
+        expect((await post(action, BAKED)).status).toBe(200);
+        expect((await post(action, CUSTOM)).status).toBe(403);
+      });
+    });
+  }
+
+  it("leaves GET requests unchecked", async () => {
+    const res = await routes.GET(
+      req({
+        method: "GET",
+        cookie: `${TOKEN_COOKIE}=${idToken}`,
+        origin: "https://evil.example.com",
+        url: GATEWAY,
+        viewerHost: "photos.example.com",
+      }),
+      ctx(),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ signedIn: true, email: "a@example.com" });
   });
 });
 

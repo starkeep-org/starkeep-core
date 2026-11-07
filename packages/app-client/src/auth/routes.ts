@@ -30,6 +30,8 @@ export interface SessionRouteOptions {
 
 type RouteContext = { params: Promise<{ action?: string[] }> };
 
+const VIEWER_HOST_HEADER = "x-starkeep-viewer-host";
+
 function json(body: unknown, status = 200, cookies: string[] = []): Response {
   const headers = new Headers({ "Content-Type": "application/json" });
   for (const c of cookies) headers.append("Set-Cookie", c);
@@ -69,6 +71,21 @@ function crossOrigin(req: MinimalRequest): boolean {
   // install time (the distribution, falling back to the raw gateway). It is the
   // one value that knows what "same origin" means for this deployment; the app
   // cannot infer it from the request.
+  //
+  // A deployment with a custom domain answers on two hosts, and the baked base
+  // names only one. The distribution's viewer-request function copies the
+  // viewer's Host into x-starkeep-viewer-host, overwriting anything the viewer
+  // sent, so the header names the host the browser is on. A browser cannot set
+  // the header on a direct gateway request either: the gateway's CORS
+  // allowHeaders omits it.
+  const viewerHost = req.headers.get(VIEWER_HOST_HEADER)?.toLowerCase();
+  if (viewerHost) {
+    try {
+      if (sent === new URL(`https://${viewerHost}`).origin) return false;
+    } catch {
+      // A malformed header grants no exemption.
+    }
+  }
   const publicBase = process.env.STARKEEP_API_GATEWAY_URL;
   if (publicBase) {
     try {
