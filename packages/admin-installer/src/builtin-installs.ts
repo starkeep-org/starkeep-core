@@ -43,12 +43,14 @@ import { putCloudFrontSigningParameter, putDeploymentSettingsParameter } from ".
 import { configureAppSignInClients, findOrCreateAppSignInClients } from "./app-sign-in-clients";
 import {
   deleteUnusedExternalCertificates,
+  domainPointsAt,
   ensureExternalCertificate,
   findHostedZone,
+  planCustomDomain,
+  signingHosts,
   validateCustomDomain,
   type CustomDomainStatus,
 } from "./custom-domain";
-import type { CloudDataServerCustomDomain } from "./builtin-programs/cloud-data-server-program";
 import {
   checkDeploymentSettings,
   serializeDeploymentSettings,
@@ -136,6 +138,12 @@ export interface CloudDataServerInstallConfig {
    * a removal or a change can delete them, and its certificate.
    */
   previousCustomDomain?: string;
+  /**
+   * The distribution's cloudfront.net name from the last install. An external
+   * domain becomes canonical only once public DNS sends it there, and the
+   * check runs before `pulumi up` reports the name again.
+   */
+  cloudfrontDomain?: string;
 }
 
 /**
@@ -423,14 +431,15 @@ export async function installCloudDataServer(
     // Step 3.5: Pick the custom domain's DNS mode. A zone in this account
     // lets the Pulumi program own the certificate and every record. Otherwise
     // the certificate is requested here, outside the stack, and attached by
-    // the first run after ACM issues it.
-    let programCustomDomain: CloudDataServerCustomDomain | undefined;
+    // the first run after ACM issues it. An attached external domain becomes
+    // canonical only once public DNS sends it to the distribution.
     let externalCertificate: Awaited<ReturnType<typeof ensureExternalCertificate>> | undefined;
+    let zone: Awaited<ReturnType<typeof findHostedZone>> = null;
+    let pointsAtDistribution = false;
     if (customDomainName) {
-      const zone = await findHostedZone(customDomainName, appCreds);
+      zone = await findHostedZone(customDomainName, appCreds);
       if (zone) {
         console.log(`Custom domain ${customDomainName}: Route53 zone ${zone.name} (${zone.id}).`);
-        programCustomDomain = { name: customDomainName, mode: "route53", hostedZoneId: zone.id };
       } else {
         externalCertificate = await ensureExternalCertificate({
           stackPrefix: config.stackPrefix,
@@ -441,15 +450,23 @@ export async function installCloudDataServer(
           `Custom domain ${customDomainName}: DNS outside this account; certificate ` +
             `${externalCertificate.certificateArn} ${externalCertificate.issued ? "issued" : "awaits validation"}.`,
         );
-        if (externalCertificate.issued) {
-          programCustomDomain = {
-            name: customDomainName,
-            mode: "external",
-            certificateArn: externalCertificate.certificateArn,
-          };
+        if (externalCertificate.issued && config.cloudfrontDomain) {
+          pointsAtDistribution = await domainPointsAt(customDomainName, config.cloudfrontDomain);
+          if (!pointsAtDistribution) {
+            console.log(
+              `Custom domain ${customDomainName} does not point at ${config.cloudfrontDomain} yet; ` +
+                "attaching it, and keeping the cloudfront.net name canonical.",
+            );
+          }
         }
       }
     }
+    const plan = planCustomDomain({
+      name: customDomainName,
+      zone,
+      certificate: externalCertificate,
+      pointsAtDistribution,
+    });
 
     // Step 4: Pulumi up — creates DSQL, files bucket, Lambda, API Gateway.
     console.log("Running pulumi up for cloud-data-server…");
@@ -471,7 +488,7 @@ export async function installCloudDataServer(
       deviceUserPoolClientId: config.deviceUserPoolClientId,
       cognitoDomain: config.cognitoDomain,
       ephemeral: config.ephemeral ?? false,
-      customDomain: programCustomDomain,
+      customDomain: plan.program,
     });
 
     const outputs = await pulumiUpInline({
@@ -492,7 +509,6 @@ export async function installCloudDataServer(
     const apiGatewayUrl = String(outputs.apiGatewayUrl);
     const publicBaseUrl = String(outputs.publicBaseUrl);
     const cloudfrontDomain = String(outputs.cloudfrontDomain);
-    const cloudfrontBaseUrl = `https://${cloudfrontDomain}`;
     const authorizerId = String(outputs.authorizerId);
     const sessionAuthorizerId = String(outputs.sessionAuthorizerId);
     const functionArn = String(outputs.functionArn);
@@ -514,12 +530,14 @@ export async function installCloudDataServer(
     // CloudFront domain is known: the cloud-apps client's callback and logout
     // address on the shared origin, and each client's branding style. As
     // admin-app, the only role with Cognito client grants.
+    const signingDomain = String(outputs.cloudfrontSigningDomain);
+    const hosts = signingHosts(signingDomain, cloudfrontDomain, plan.program?.name);
     console.log("Configuring the sign-in clients' callbacks and branding…");
     await configureAppSignInClients({
       stackPrefix: config.stackPrefix,
       region: config.region,
       userPoolId: config.userPoolId,
-      publicBaseUrls: [publicBaseUrl, cloudfrontBaseUrl],
+      publicBaseUrls: hosts.map((h) => `https://${h}`),
       clients: signInClients,
       deploymentName: config.deploymentName,
     });
@@ -535,8 +553,8 @@ export async function installCloudDataServer(
     await putCloudFrontSigningParameter({
       stackPrefix: config.stackPrefix,
       keyPairId: String(outputs.cloudfrontKeyPairId),
-      domain: String(outputs.cloudfrontSigningDomain),
-      hosts: [...new Set([String(outputs.cloudfrontSigningDomain), cloudfrontDomain])],
+      domain: signingDomain,
+      hosts,
       privateKey: String(outputs.cloudfrontSigningPrivateKey),
       region: config.region,
       awsCreds: managerCreds,
@@ -609,16 +627,7 @@ export async function installCloudDataServer(
       apiGatewayUrl,
       publicBaseUrl,
       cloudfrontDomain,
-      customDomain: customDomainName
-        ? {
-            name: customDomainName,
-            mode: externalCertificate ? "external" : "route53",
-            status: programCustomDomain ? "active" : "pending-validation",
-            validationRecord: externalCertificate?.validationRecord,
-            certificateArn: externalCertificate?.certificateArn,
-            aliasTarget: cloudfrontDomain,
-          }
-        : undefined,
+      customDomain: plan.status ? { ...plan.status, aliasTarget: cloudfrontDomain } : undefined,
       apiGatewayId,
       apiGatewayExecutionArn,
       authorizerId,

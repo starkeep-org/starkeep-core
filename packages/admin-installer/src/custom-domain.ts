@@ -29,6 +29,7 @@ import {
   paginateListHostedZones,
 } from "@aws-sdk/client-route-53";
 import type { AwsCredentials } from "./session";
+import type { CloudDataServerCustomDomain } from "./builtin-programs/cloud-data-server-program";
 
 export { customDomainPolicyFits } from "./iam";
 
@@ -42,13 +43,16 @@ export interface ValidationRecord {
 }
 
 /**
- * What an install reports about the custom domain. `pending-validation` exists
- * only in external mode: a route53-mode run waits for issuance itself.
+ * What an install reports about the custom domain. `pending-validation` and
+ * `awaiting-dns` exist only in external mode: a route53-mode run waits for
+ * issuance itself and writes its own alias records. `awaiting-dns` means the
+ * distribution answers on the domain, but public DNS does not send the domain
+ * there yet, so the cloudfront.net name stays canonical.
  */
 export interface CustomDomainStatus {
   name: string;
   mode: CustomDomainMode;
-  status: "pending-validation" | "active";
+  status: "pending-validation" | "awaiting-dns" | "active";
   /** The record the operator adds at their DNS provider (external mode). */
   validationRecord?: ValidationRecord;
   /** The external-mode certificate, which admin-web's "Check now" reads. */
@@ -86,6 +90,95 @@ export function validateCustomDomain(domain: string): string {
     throw new Error(`Custom domain ${domain} is a CloudFront name; name a domain you own.`);
   }
   return name;
+}
+
+/**
+ * Whether public DNS sends `name` to the distribution `aliasTarget`: a CNAME to
+ * it, or, for a provider that flattens the record or a Route53 alias, the same
+ * addresses.
+ */
+export async function domainPointsAt(name: string, aliasTarget: string): Promise<boolean> {
+  const target = aliasTarget.toLowerCase().replace(/\.$/, "");
+  try {
+    const cnames = await dns.resolveCname(name);
+    if (cnames.some((c) => c.toLowerCase().replace(/\.$/, "") === target)) return true;
+  } catch {
+    // No CNAME: an alias or a flattened record may still answer.
+  }
+  try {
+    const [mine, theirs] = await Promise.all([dns.resolve4(name), dns.resolve4(target)]);
+    const theirSet = new Set(theirs);
+    return mine.length > 0 && mine.every((a) => theirSet.has(a));
+  } catch {
+    return false;
+  }
+}
+
+/** What one install does with the custom domain, decided before `pulumi up`. */
+export interface CustomDomainPlan {
+  /** The program's `customDomain` input, or undefined when nothing attaches. */
+  program?: CloudDataServerCustomDomain;
+  /** Whether the custom domain becomes the canonical host this run. */
+  canonical: boolean;
+  /** The status the install reports, short of the distribution's name. */
+  status?: Omit<CustomDomainStatus, "aliasTarget">;
+}
+
+/**
+ * Decide the run from what the installer found: the domain's zone in this
+ * account, if any; otherwise the external certificate, and whether public DNS
+ * already sends the domain to the distribution.
+ *
+ * An external domain becomes canonical only once its DNS points at the
+ * distribution. Before that, the distribution still answers on the domain, but
+ * links and signed URLs keep the cloudfront.net name, which resolves.
+ */
+export function planCustomDomain(opts: {
+  name?: string;
+  zone: { id: string; name: string } | null;
+  certificate?: { certificateArn: string; issued: boolean; validationRecord?: ValidationRecord };
+  pointsAtDistribution: boolean;
+}): CustomDomainPlan {
+  const { name, zone, certificate } = opts;
+  if (!name) return { canonical: false };
+  if (zone) {
+    return {
+      program: { name, mode: "route53", hostedZoneId: zone.id },
+      canonical: true,
+      status: { name, mode: "route53", status: "active" },
+    };
+  }
+  if (!certificate) throw new Error(`No certificate for external-mode domain ${name}.`);
+  const external = {
+    name,
+    mode: "external" as const,
+    validationRecord: certificate.validationRecord,
+    certificateArn: certificate.certificateArn,
+  };
+  if (!certificate.issued) {
+    return { canonical: false, status: { ...external, status: "pending-validation" } };
+  }
+  const canonical = opts.pointsAtDistribution;
+  return {
+    program: { name, mode: "external", certificateArn: certificate.certificateArn, canonical },
+    canonical,
+    status: { ...external, status: canonical ? "active" : "awaiting-dns" },
+  };
+}
+
+/**
+ * The hosts the signing config lists and sign-in accepts, canonical first:
+ * the signing domain, the attached custom domain when it is not canonical yet,
+ * and the distribution's own name.
+ */
+export function signingHosts(
+  signingDomain: string,
+  cloudfrontDomain: string,
+  attachedDomain?: string,
+): string[] {
+  return [
+    ...new Set([signingDomain, attachedDomain, cloudfrontDomain].filter((h): h is string => !!h)),
+  ];
 }
 
 function credentialsOf(creds: AwsCredentials) {

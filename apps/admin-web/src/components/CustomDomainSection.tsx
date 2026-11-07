@@ -6,10 +6,11 @@
  * `~/.starkeep/config.json` and reports back in `customDomainStatus`. A domain
  * whose zone sits in Route53 in the deployment's AWS account goes live in that
  * one run. A domain hosted anywhere else takes two runs: the first requests a
- * certificate and shows the record that proves ownership, and "Finish" attaches
- * the domain once the certificate is issued. The operator then points the
- * domain at the distribution with a CNAME. "Check now" reads the certificate
- * and the domain's DNS, as the signed-in operator.
+ * certificate and shows two records, the one that proves ownership and the
+ * CNAME that points the domain at the distribution. "Finish" attaches the
+ * domain once the certificate is issued and the CNAME resolves, so the domain
+ * becomes the canonical host only when it works. "Check now" reads the
+ * certificate and the domain's DNS, as the signed-in operator.
  *
  * The cloudfront.net name keeps working throughout, so nothing sent before the
  * domain breaks. Removing the domain breaks every link sent with it.
@@ -225,6 +226,12 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
   const status = config.customDomainStatus;
   const applied = !!domain && status?.name === domain;
   const issued = check?.certificateStatus === "ISSUED";
+  const pointed = check?.pointsAtDistribution === true;
+  const cnameReport =
+    check &&
+    (pointed
+      ? `${domain} points at the cloud.`
+      : `${domain} does not point at the cloud yet. DNS changes can take a while to spread.`);
 
   let body: React.ReactNode;
   if (!domain && status) {
@@ -284,16 +291,53 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
     body = (
       <>
         <p className="text-sm">
-          Prove that you own <span className="font-mono">{domain}</span>: add this record at your
-          DNS provider, then press "Check now". The certificate usually issues within minutes of the
-          record appearing.
+          Add these two records at your DNS provider for <span className="font-mono">{domain}</span>
+          , then press "Check now". The first proves you own the domain, and the certificate usually
+          issues within minutes of it appearing. The second points the domain at the cloud.
         </p>
         {record && <RecordLine name={record.name} type={record.type} value={record.value} />}
+        <RecordLine name={domain} type="CNAME" value={status.aliasTarget} />
+        {check && (
+          <div className="text-sm" role="status">
+            <p>
+              {issued
+                ? "The certificate is issued."
+                : `The certificate is not issued yet (${check.certificateStatus ?? "unknown"}).`}
+            </p>
+            <p>{cnameReport}</p>
+            {issued && pointed && <p>Press "Finish" to attach the domain.</p>}
+          </div>
+        )}
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" disabled={busy} onClick={() => void checkNow()}>
+            Check now
+          </Button>
+          <Button
+            className={ACTION_OCCASIONAL}
+            disabled={busy || !issued || !pointed}
+            onClick={() => void act(async () => {})}
+          >
+            Finish
+          </Button>
+          <Button variant="ghost" disabled={busy} onClick={() => setConfirmRemove(true)}>
+            Cancel
+          </Button>
+        </div>
+      </>
+    );
+  } else if (status?.status === "awaiting-dns") {
+    body = (
+      <>
+        <p className="text-sm">
+          The cloud is ready to answer on <span className="font-mono">{domain}</span>, but the
+          domain does not point at the cloud yet, so links keep the cloud's cloudfront.net address.
+          Add this record at your DNS provider, then press "Check now".
+        </p>
+        <RecordLine name={domain} type="CNAME" value={status.aliasTarget} />
         {check && (
           <p className="text-sm" role="status">
-            {issued
-              ? 'The certificate is issued. Press "Finish" to attach the domain.'
-              : `The certificate is not issued yet (${check.certificateStatus ?? "unknown"}).`}
+            {cnameReport}
+            {pointed && ' Press "Finish" to make it the cloud\'s address.'}
           </p>
         )}
         <div className="flex flex-wrap gap-2">
@@ -302,13 +346,13 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
           </Button>
           <Button
             className={ACTION_OCCASIONAL}
-            disabled={busy || !issued}
+            disabled={busy || !pointed}
             onClick={() => void act(async () => {})}
           >
             Finish
           </Button>
           <Button variant="ghost" disabled={busy} onClick={() => setConfirmRemove(true)}>
-            Cancel
+            Remove
           </Button>
         </div>
       </>
@@ -328,9 +372,7 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
             <RecordLine name={domain} type="CNAME" value={status.aliasTarget} />
             {check && (
               <p className="text-sm" role="status">
-                {check.pointsAtDistribution
-                  ? `${domain} reaches the cloud.`
-                  : `${domain} does not reach the cloud yet. DNS changes can take a while to spread.`}
+                {cnameReport}
               </p>
             )}
           </>

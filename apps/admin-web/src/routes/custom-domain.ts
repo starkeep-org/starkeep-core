@@ -14,10 +14,10 @@
  *          whether the domain resolves to the distribution yet.
  */
 
-import { promises as dns } from "node:dns";
 import { ACMClient, DescribeCertificateCommand } from "@aws-sdk/client-acm";
 import {
   customDomainPolicyFits,
+  domainPointsAt,
   validateCustomDomain,
   type CustomDomainStatus,
 } from "@starkeep/admin-installer/custom-domain";
@@ -104,7 +104,9 @@ export async function CHECK(req: Request): Promise<Response> {
     );
   }
 
-  const result: CustomDomainCheck = { pointsAtDistribution: await pointsAt(status) };
+  const result: CustomDomainCheck = {
+    pointsAtDistribution: await domainPointsAt(status.name, status.aliasTarget),
+  };
   if (status.certificateArn) {
     // CloudFront takes certificates only from us-east-1.
     const acm = new ACMClient({
@@ -128,25 +130,4 @@ export async function CHECK(req: Request): Promise<Response> {
     }
   }
   return Response.json(result);
-}
-
-/**
- * Whether the domain reaches the distribution: a CNAME to its name, or, for a
- * provider that flattens the record or a Route53 alias, the same addresses.
- */
-async function pointsAt(status: CustomDomainStatus): Promise<boolean> {
-  const target = status.aliasTarget.toLowerCase();
-  try {
-    const cnames = await dns.resolveCname(status.name);
-    if (cnames.some((c) => c.toLowerCase().replace(/\.$/, "") === target)) return true;
-  } catch {
-    // No CNAME: an alias or a flattened record may still answer.
-  }
-  try {
-    const [mine, theirs] = await Promise.all([dns.resolve4(status.name), dns.resolve4(target)]);
-    const theirSet = new Set(theirs);
-    return mine.length > 0 && mine.every((a) => theirSet.has(a));
-  } catch {
-    return false;
-  }
 }

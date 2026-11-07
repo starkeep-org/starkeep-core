@@ -206,7 +206,12 @@ describe("external mode", () => {
   let r: Run;
   const arn = "arn:aws:acm:us-east-1:111122223333:certificate/ext";
   beforeAll(async () => {
-    r = await run({ name: "photos.example.com", mode: "external", certificateArn: arn });
+    r = await run({
+      name: "photos.example.com",
+      mode: "external",
+      certificateArn: arn,
+      canonical: true,
+    });
   });
 
   it("attaches the installer's certificate and owns no certificate or record", () => {
@@ -220,6 +225,30 @@ describe("external mode", () => {
   it("makes the custom domain canonical", () => {
     expect(r.outputs.publicBaseUrl).toBe("https://photos.example.com");
     expect(r.outputs.cloudfrontSigningDomain).toBe("photos.example.com");
+    expect(r.outputs.cloudfrontDomain).toBe("d1.cloudfront.net");
+  });
+});
+
+describe("external mode before DNS points at the distribution", () => {
+  let r: Run;
+  const arn = "arn:aws:acm:us-east-1:111122223333:certificate/ext";
+  beforeAll(async () => {
+    r = await run({
+      name: "photos.example.com",
+      mode: "external",
+      certificateArn: arn,
+      canonical: false,
+    });
+  });
+
+  it("still attaches the alias and the certificate", () => {
+    expect(r.distribution.inputs.aliases).toEqual(["photos.example.com"]);
+    expect(r.distribution.inputs.viewerCertificate).toMatchObject({ acmCertificateArn: arn });
+  });
+
+  it("keeps the cloudfront.net name canonical, so links resolve", () => {
+    expect(r.outputs.publicBaseUrl).toBe("https://d1.cloudfront.net");
+    expect(r.outputs.cloudfrontSigningDomain).toBe("d1.cloudfront.net");
     expect(r.outputs.cloudfrontDomain).toBe("d1.cloudfront.net");
   });
 });

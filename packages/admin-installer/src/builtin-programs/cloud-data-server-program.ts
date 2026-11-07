@@ -137,7 +137,17 @@ export interface CloudDataServerProgramContext {
 
 export type CloudDataServerCustomDomain =
   | { name: string; mode: "route53"; hostedZoneId: string }
-  | { name: string; mode: "external"; certificateArn: string };
+  | {
+      name: string;
+      mode: "external";
+      certificateArn: string;
+      /**
+       * False while public DNS does not yet send the domain to the
+       * distribution: the alias and certificate attach, but the public base
+       * URL and the signing domain keep the cloudfront.net name.
+       */
+      canonical: boolean;
+    };
 
 /**
  * Below this, archiving costs more than not archiving.
@@ -1311,10 +1321,12 @@ export function buildCloudDataServerProgram(
       }
     }
 
-    // The canonical host: the custom domain when one is attached.
-    const canonicalHost: pulumi.Output<string> = customDomain
-      ? pulumi.output(customDomain.name)
-      : distribution.domainName;
+    // The canonical host: the custom domain once it is attached and DNS sends
+    // it here. Route53 mode writes its own alias records above.
+    const canonicalHost: pulumi.Output<string> =
+      customDomain && (customDomain.mode === "route53" || customDomain.canonical)
+        ? pulumi.output(customDomain.name)
+        : distribution.domainName;
     const publicBaseUrl = pulumi.interpolate`https://${canonicalHost}`;
 
     // CloudFront signing config → written to one SSM SecureString by the
