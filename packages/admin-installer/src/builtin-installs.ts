@@ -47,6 +47,7 @@ import {
   domainPointsAt,
   ensureExternalCertificate,
   findHostedZone,
+  listExternalCertificates,
   planCustomDomain,
   signingHosts,
   validateCustomDomain,
@@ -466,6 +467,16 @@ export async function installCloudDataServer(
     // the certificate is requested here, outside the stack, and attached by
     // the first run after ACM issues it. An attached external domain becomes
     // canonical only once public DNS sends it to the distribution.
+    // One certificate listing serves the whole run, scoped to the domains in
+    // play: ACM's tag lookup costs one call per certificate it reads.
+    const certificates =
+      customDomains.length > 0
+        ? await listExternalCertificates({
+            stackPrefix: config.stackPrefix,
+            domains: customDomains,
+            creds: appCreds,
+          })
+        : [];
     let externalCertificate: Awaited<ReturnType<typeof ensureExternalCertificate>> | undefined;
     let zone: Awaited<ReturnType<typeof findHostedZone>> = null;
     let pointsAtDistribution = false;
@@ -477,6 +488,7 @@ export async function installCloudDataServer(
         externalCertificate = await ensureExternalCertificate({
           stackPrefix: config.stackPrefix,
           domain: customDomainName,
+          certificates,
           creds: appCreds,
         });
         console.log(
@@ -567,8 +579,8 @@ export async function installCloudDataServer(
     // domain, now or before, holds the ACM grants.
     if (customDomains.length > 0) {
       await deleteUnusedExternalCertificates({
-        stackPrefix: config.stackPrefix,
         keepArn: externalCertificate?.certificateArn,
+        certificates,
         creds: appCreds,
       });
     }
