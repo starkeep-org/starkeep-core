@@ -96,6 +96,16 @@ export function adminAppPolicyStatements(stackPrefix: string): IamStatement[] {
       Condition: { StringEquals: { "aws:RequestedRegion": "us-east-1" } },
     },
     {
+      // Admin-web's "Set up" on a custom domain: finds whether the domain's
+      // zone lives in this account, as the install will, so the operator sees
+      // the records the install adds before approving them. Zone metadata
+      // only; no record reads or writes.
+      Sid: "AdminAppReadHostedZones",
+      Effect: "Allow",
+      Action: ["route53:ListHostedZones", "route53:GetHostedZone"],
+      Resource: "*",
+    },
+    {
       Sid: "AdminAppDsqlConnect",
       Effect: "Allow",
       Action: "dsql:DbConnect",

@@ -421,6 +421,16 @@ const CONTEXTS: Record<string, ContextBuilder> = {
             "domain's certificate. CloudFront takes certificates only from us-east-1.",
         })),
         {
+          action: "route53:ListHostedZones",
+          resource: "*",
+          why: 'admin-web\'s "Set up" runs findHostedZone to learn the DNS mode before the install.',
+        },
+        {
+          action: "route53:GetHostedZone",
+          resource: "arn:aws:route53:::hostedzone/ZONE1",
+          why: "findHostedZone compares the zone's name servers with public DNS.",
+        },
+        {
           action: "cognito-idp:DescribeUserPool",
           resource: userPoolArn,
           why:

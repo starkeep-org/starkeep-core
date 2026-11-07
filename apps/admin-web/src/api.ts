@@ -74,6 +74,7 @@ api.get("/exec/deploy-outputs", () => execDeployOutputs.GET());
 // The cloud's custom domain, which the next cloud data server install acts on.
 api.put("/custom-domain", (c) => customDomain.PUT(c.req.raw));
 api.post("/custom-domain/check", (c) => customDomain.CHECK(c.req.raw));
+api.post("/custom-domain/zone", (c) => customDomain.ZONE(c.req.raw));
 // The two bootstrap outputs the wizard looks up after sign-in.
 api.post("/cognito-outputs", (c) => cognitoOutputs.POST(c.req.raw));
 
