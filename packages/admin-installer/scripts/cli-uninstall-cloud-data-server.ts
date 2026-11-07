@@ -39,6 +39,7 @@ import {
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { uninstallCloudDataServer, uninstallDrive } from "../src/builtin-installs";
 import { exitOnInstallFailure } from "../src/cli-exit";
+import { customDomainInstallInput } from "../src/custom-domain";
 
 interface StarkeepConfig {
   stackPrefix: string;
@@ -64,6 +65,7 @@ interface StarkeepConfig {
   /** A route53-mode custom domain's certificate and records are stack resources. */
   customDomain?: string;
   customDomainStatus?: { name: string };
+  customDomainAttempted?: string;
 }
 
 function regionFromUserPoolId(userPoolId: string): string {
@@ -346,8 +348,7 @@ await uninstallCloudDataServer({
   pulumiStateBucket,
   userPoolId: config.userPoolId,
   userPoolClientId: config.userPoolClientId,
-  customDomain: config.customDomain || undefined,
-  previousCustomDomain: config.customDomainStatus?.name,
+  ...customDomainInstallInput(config),
 }).catch(exitOnInstallFailure);
 
 console.log("\nUninstall complete.");

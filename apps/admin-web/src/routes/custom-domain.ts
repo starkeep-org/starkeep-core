@@ -62,19 +62,25 @@ export async function PUT(req: Request): Promise<Response> {
 }
 
 /**
- * The next install's grants name this domain and the one the last install
- * acted on, and IAM caps the role's inline policies together. A domain that
- * would overflow the cap fails here rather than at the install's PutRolePolicy.
+ * The next install's grants name this domain, the one the last install acted
+ * on, and one an unfinished install attempted. IAM caps the role's inline
+ * policies together, so a domain that would overflow the cap fails here rather
+ * than at the install's PutRolePolicy.
  */
 function quotaRefusal(domain: string): string | null {
   const config = readStarkeepConfig() as {
     stackPrefix?: string;
     userPoolId?: string;
     customDomainStatus?: CustomDomainStatus;
+    customDomainAttempted?: string;
   };
   if (!config.stackPrefix || !config.userPoolId) return null;
   const inPlay = [
-    ...new Set([domain, config.customDomainStatus?.name].filter((d): d is string => !!d)),
+    ...new Set(
+      [domain, config.customDomainStatus?.name, config.customDomainAttempted].filter(
+        (d): d is string => !!d,
+      ),
+    ),
   ];
   if (customDomainPolicyFits(config.stackPrefix, regionFromUserPoolId(config.userPoolId), inPlay)) {
     return null;
