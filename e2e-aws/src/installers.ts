@@ -12,8 +12,8 @@
  * co-locate exactly as they do under ~/.starkeep in production.
  */
 
-import { spawn } from "node:child_process";
-import { resolve, dirname } from "node:path";
+import { spawn, spawnSync } from "node:child_process";
+import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   cognitoPasswordAuthTokens,
@@ -22,7 +22,7 @@ import {
   type IdentityPoolCredentials,
 } from "@starkeep/admin-installer";
 import type { AdminCredentials, RunPaths, TestStackConfig } from "./run-state.js";
-import { HMAC_CACHE_TTL_MS } from "./env.js";
+import { HMAC_CACHE_TTL_MS, REGION, STACK_PREFIX } from "./env.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const INSTALLER_DIR = resolve(REPO_ROOT, "packages/admin-installer");
@@ -50,6 +50,22 @@ export async function signInAdmin(
   return { idToken, refreshToken, awsCredentials, region: regionFromUserPoolId(config.userPoolId) };
 }
 
+/** A CLI run that exited non-zero, with what it printed. */
+export class CliFailure extends Error {
+  constructor(
+    message: string,
+    readonly output: string,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * Run one installer CLI and resolve with everything it printed, which also
+ * streams to this process as it arrives. A non-zero exit rejects with a
+ * {@link CliFailure} carrying the same output, so a step can assert on the
+ * message a refusal printed.
+ */
 export async function runInstallCli(
   script:
     | "cli-install-cloud-data-server"
@@ -59,15 +75,16 @@ export async function runInstallCli(
   args: string[],
   paths: RunPaths,
   session: AdminSession,
-): Promise<void> {
+): Promise<string> {
   const pnpmArgs = ["tsx", `scripts/${script}.ts`, ...args, "--non-interactive"];
   const label = `${script} ${args.join(" ")}`.trim();
   console.log(`\n[e2e-aws] pnpm ${pnpmArgs.join(" ")}`);
 
-  await new Promise<void>((resolveDone, rejectDone) => {
+  return new Promise<string>((resolveDone, rejectDone) => {
+    const chunks: Buffer[] = [];
     const child = spawn("pnpm", pnpmArgs, {
       cwd: INSTALLER_DIR,
-      stdio: "inherit",
+      stdio: ["inherit", "pipe", "pipe"],
       env: {
         ...process.env,
         STARKEEP_DIR: paths.dataDir,
@@ -86,12 +103,42 @@ export async function runInstallCli(
         HMAC_CACHE_TTL_MS,
       },
     });
+    child.stdout.on("data", (chunk: Buffer) => {
+      chunks.push(chunk);
+      process.stdout.write(chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      chunks.push(chunk);
+      process.stderr.write(chunk);
+    });
     child.once("error", rejectDone);
-    child.once("exit", (code) => {
-      if (code === 0) resolveDone();
-      else rejectDone(new Error(`${label} exited with code ${code}`));
+    child.once("close", (code) => {
+      const output = Buffer.concat(chunks).toString("utf-8");
+      if (code === 0) resolveDone(output);
+      else rejectDone(new CliFailure(`${label} exited with code ${code}`, output));
     });
   });
+}
+
+/**
+ * Run one of the repository's teardown scripts against the test stack, as the
+ * operator would, with this run's state dir as STARKEEP_DIR.
+ */
+export function runTeardownScript(
+  script: "teardown-cloud-data-server.sh" | "teardown-bootstrap.sh",
+  paths: RunPaths,
+): void {
+  const result = spawnSync(
+    "bash",
+    [join(REPO_ROOT, "scripts", script), "--yes", "--prefix", STACK_PREFIX, "--region", REGION],
+    {
+      stdio: "inherit",
+      env: { ...process.env, STARKEEP_DIR: paths.dataDir, AWS_REGION: REGION },
+    },
+  );
+  if (result.status !== 0) {
+    throw new Error(`${script} exited with code ${result.status}`);
+  }
 }
 
 /**

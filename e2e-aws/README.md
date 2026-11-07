@@ -12,6 +12,10 @@ STARKEEP_AWS_TESTS=1 pnpm test:aws          # from repo root (turbo) or this dir
 Without `STARKEEP_AWS_TESTS=1` the suite reports skipped and makes no AWS calls.
 `pnpm test` (the default unit suite) never runs it.
 
+Custom domains have a live suite of their own, `e2e-aws-custom-domain`, which
+needs a DNS zone you control and never runs under `pnpm test:aws`. Its
+[README](../e2e-aws-custom-domain/README.md) explains the setup.
+
 The browser steps (real Chromium) need the Playwright browser installed once:
 
 ```bash
