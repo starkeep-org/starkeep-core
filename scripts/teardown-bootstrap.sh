@@ -442,6 +442,20 @@ if [ -n "$CERT_ARNS" ] && [ "$CERT_ARNS" != "None" ]; then
         echo "  Could not delete $arn: $err; continuing"
         break
       fi
+      # A distribution that still names the certificate never lets go: the
+      # cloud-data-server teardown failed to detach or delete it.
+      holder=""
+      for dist in $(aws acm describe-certificate --region us-east-1 --certificate-arn "$arn" \
+          --query 'Certificate.InUseBy[]' --output text 2>/dev/null || true); do
+        [[ "$dist" == arn:aws:cloudfront::*:distribution/* ]] || continue
+        current=$(aws cloudfront get-distribution-config --id "${dist##*/}" \
+          --query 'DistributionConfig.ViewerCertificate.ACMCertificateArn' --output text 2>/dev/null || true)
+        if [ "$current" = "$arn" ]; then holder="${dist##*/}"; fi
+      done
+      if [ -n "$holder" ]; then
+        echo "  $arn is attached to distribution $holder; run teardown-cloud-data-server.sh, then this script again"
+        break
+      fi
       if [ "$(date +%s)" -ge "$CERT_DEADLINE" ]; then
         echo "  $arn is still in use in ACM after the wait; run this script again later to delete it"
         break

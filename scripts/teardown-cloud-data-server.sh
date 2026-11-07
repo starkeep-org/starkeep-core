@@ -582,7 +582,10 @@ try:
             cfg["Enabled"] = False
             if has_alias:
                 cfg["Aliases"] = {"Quantity": 0}
-                cfg["ViewerCertificate"] = {"CloudFrontDefaultCertificate": True}
+                # UpdateDistribution requires MinimumProtocolVersion even
+                # here, and TLSv1 is the value the default certificate takes.
+                cfg["ViewerCertificate"] = {"CloudFrontDefaultCertificate": True,
+                                            "MinimumProtocolVersion": "TLSv1"}
             path = f"/tmp/cf-disable-{dist_id}.json"
             with open(path, "w") as f:
                 json.dump(cfg, f)
