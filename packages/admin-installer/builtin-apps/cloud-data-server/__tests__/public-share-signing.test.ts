@@ -271,6 +271,7 @@ describe("publicFileResponse", () => {
     ["document/markdown", "text/plain; charset=utf-8"],
     ["text/json", "text/plain; charset=utf-8"],
     ["code/js", "text/plain; charset=utf-8"],
+    ["example/plaintext", "text/plain; charset=utf-8"],
   ])("shows %s in the browser as %s", (type, contentType) => {
     const response = publicFileResponse("f", null, original(type));
     expect(response.contentType).toBe(contentType);

@@ -91,6 +91,38 @@ export interface AppSpecificOperations {
   ): Promise<{ mimeType: string; sizeBytes: number; contentHash: string } | null>;
   deleteFile(subKey: string): Promise<void>;
   fileUrl(subKey: string, opts?: { expiresIn?: number }): Promise<string | null>;
+  /**
+   * The app's live files, in sub-key order, read from the file index.
+   *
+   * `prefix` narrows the listing to sub-keys that start with it. `limit` and
+   * `pageToken` page the way the table query does: the same default and cap,
+   * and an opaque token from the previous page. Every entry names its file by
+   * sub-key, the form every other file operation takes.
+   */
+  listFiles(opts?: {
+    prefix?: string;
+    limit?: string;
+    pageToken?: string;
+  }): Promise<AppFileListing>;
+}
+
+/** One app-private file, as `listFiles` reports it. */
+export interface AppFileEntry {
+  readonly subKey: string;
+  readonly sizeBytes: number;
+  readonly mimeType: string;
+  readonly originalFilename: string | null;
+  /** When the file was registered, as an ISO 8601 UTC instant. */
+  readonly createdAt: string;
+}
+
+/** One page of `listFiles`. */
+export interface AppFileListing {
+  readonly files: readonly AppFileEntry[];
+  /** More files match than this page holds. */
+  readonly truncated: boolean;
+  /** Pass back as `pageToken` for the next page; null on the last page. */
+  readonly pageToken: string | null;
 }
 
 export interface ApiContext {

@@ -710,7 +710,7 @@ describe("a mobile app through the broker", () => {
         size_bytes: 3,
         original_filename: name,
         origin_app_id: PHOTOS,
-        created_at: "2026-10-27T00:00:00.000Z",
+        created_at: serializeHLC(timestamp),
         updated_at: serializeHLC(timestamp),
         deleted_at: null,
       },
@@ -792,6 +792,55 @@ describe("a mobile app through the broker", () => {
     );
     expect(res.status).toBe(403);
     expect((await pg.query(`SELECT 1 FROM app_photos.${FILE_RECORDS_TABLE}`)).rows).toEqual([]);
+  });
+
+  it("lists each user's own app files from the index, in sub-key order and by page", async () => {
+    await registerPhotosMobile();
+    await createPhotosPrivateTables({ filesEnabled: true });
+    const register = async (userId: string, subKey: string) => {
+      const res = await call(
+        userId,
+        "POST",
+        `/app-data/files/${subKey}/record`,
+        { contentHash: HASH, mimeType: "image/jpeg", sizeBytes: 3, originalFilename: "c.jpg" },
+        PHOTOS,
+      );
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+    };
+    await register(A, "covers/b.jpg");
+    await register(A, "covers/a.jpg");
+    await register(A, "styles/s.jpg");
+    await register(B, "covers/z.jpg");
+
+    const list = async (userId: string, query: Record<string, string>) => {
+      const res = await handler(
+        {
+          ...as(userId, "GET", "/app-data/files", undefined, PHOTOS),
+          queryStringParameters: query,
+        },
+        context,
+      );
+      expect(res.statusCode, res.body).toBe(200);
+      return JSON.parse(res.body) as {
+        files: Array<{ sub_key: string; size_bytes: number; created_at: string }>;
+        truncated: boolean;
+        page_token: string | null;
+      };
+    };
+
+    const covers = await list(A, { prefix: "covers/" });
+    expect(covers.files.map((f) => f.sub_key)).toEqual(["covers/a.jpg", "covers/b.jpg"]);
+    expect(covers.files[0]!.size_bytes).toBe(3);
+    expect(Date.parse(covers.files[0]!.created_at)).not.toBeNaN();
+
+    const first = await list(A, { limit: "2" });
+    expect(first.files.map((f) => f.sub_key)).toEqual(["covers/a.jpg", "covers/b.jpg"]);
+    expect(first.truncated).toBe(true);
+    const second = await list(A, { limit: "2", page_token: first.page_token! });
+    expect(second.files.map((f) => f.sub_key)).toEqual(["styles/s.jpg"]);
+
+    // B's listing holds B's file alone, under the same app.
+    expect((await list(B, {})).files.map((f) => f.sub_key)).toEqual(["covers/z.jpg"]);
   });
 
   it("refuses a labels-only push on the app's own channel", async () => {

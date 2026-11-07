@@ -1250,20 +1250,20 @@ describe("OCC retry on record read-modify-write", () => {
     });
   }
 
-  it("PUT re-reads on an OCC conflict so version advances (no lost update)", async () => {
-    // The upsert loses the OCC race exactly once. Between the failed attempt and
-    // the retry, a concurrent writer commits version 2, so the re-read sees 2
-    // and the retry must derive version 3 — not replay the stale 2.
-    let committedVersion = 1;
+  // The metadata write bumps the record's clock in a read-modify-write, so a
+  // retry has to re-read the row rather than replay the stale one.
+  it("metadata write re-reads the record on an OCC conflict", async () => {
+    let committedUpdatedAt = "2026-01-01T00:00:00.000Z";
     let insertAttempts = 0;
     const db = fakeDsqlWithGrants(grants)
       .on(RECORD_BY_ID, () => [
-        recordRow({ id: "rmw1", type: "image/jpeg", version: committedVersion }),
+        recordRow({ id: "rmw1", type: "image/jpeg", updated_at: committedUpdatedAt }),
       ])
+      .on(/insert into "shared"\."record_image_metadata"/, [])
       .on(RECORDS_INSERT, () => {
         insertAttempts++;
         if (insertAttempts === 1) {
-          committedVersion = 2; // a concurrent writer wins the race
+          committedUpdatedAt = "2026-01-02T00:00:00.000Z"; // a concurrent writer wins
           throw occConflict();
         }
         return [];
@@ -1273,18 +1273,16 @@ describe("OCC retry on record read-modify-write", () => {
     const res = await handler(
       signedEvent({
         appId: "rmw",
-        method: "PUT",
-        subPath: "/data/records/rmw1",
-        body: { originalFilename: "renamed.jpg" },
+        method: "POST",
+        subPath: "/data/records/rmw1/metadata",
+        body: { typeId: "image/jpeg", metadata: { width: 100 } },
       }),
       context,
     );
 
-    expect(res.statusCode).toBe(200);
-    const { record } = bodyOf(res) as { record: Record<string, unknown> };
-    expect(record["version"]).toBe(3); // re-read 2 + 1, not stale 1 + 1
-    // The unit re-read: two SELECTs, two upsert attempts.
-    expect(db.calls(RECORD_BY_ID)).toHaveLength(2);
+    expect(res.statusCode, res.body).toBe(200);
+    // One read for the checks, then one per attempt of the unit.
+    expect(db.calls(RECORD_BY_ID)).toHaveLength(3);
     expect(db.calls(RECORDS_INSERT)).toHaveLength(2);
   });
 
@@ -1292,6 +1290,7 @@ describe("OCC retry on record read-modify-write", () => {
     let insertAttempts = 0;
     const db = fakeDsqlWithGrants(grants)
       .on(RECORD_BY_ID, [recordRow({ id: "rmw2", type: "image/jpeg", version: 1 })])
+      .on(/insert into "shared"\."record_image_metadata"/, [])
       .on(RECORDS_INSERT, () => {
         insertAttempts++;
         throw Object.assign(new Error("relation missing"), { code: "42P01" });
@@ -1301,15 +1300,33 @@ describe("OCC retry on record read-modify-write", () => {
     const res = await handler(
       signedEvent({
         appId: "rmw",
-        method: "PUT",
-        subPath: "/data/records/rmw2",
-        body: { originalFilename: "x.jpg" },
+        method: "POST",
+        subPath: "/data/records/rmw2/metadata",
+        body: { typeId: "image/jpeg", metadata: { width: 100 } },
       }),
       context,
     );
 
     expect(res.statusCode).toBe(500);
     expect(insertAttempts).toBe(1); // no retry on a non-OCC error
+  });
+
+  it("answers no PUT on a record: a rename would break its content-addressed id", async () => {
+    const db = fakeDsqlWithGrants(grants).on(RECORD_BY_ID, [
+      recordRow({ id: "rmw3", type: "image/jpeg" }),
+    ]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "rmw",
+        method: "PUT",
+        subPath: "/data/records/rmw3",
+        body: { originalFilename: "renamed.jpg" },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(404);
+    expect(db.calls(RECORDS_INSERT)).toHaveLength(0);
   });
 });
 

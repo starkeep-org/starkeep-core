@@ -592,7 +592,12 @@ function inlineContentType(type: string): string | null {
   const exact = INLINE_CONTENT_TYPES[type];
   if (exact) return exact;
   const category = typeCategory(type);
-  if (category === "text" || category === "code" || type === "document/markdown") {
+  if (
+    category === "text" ||
+    category === "code" ||
+    type === "document/markdown" ||
+    type === "example/plaintext"
+  ) {
     return PLAIN_TEXT;
   }
   return null;

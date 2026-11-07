@@ -69,6 +69,9 @@ export const FILE_RECORDS_COLUMNS: readonly FileRecordsTableColumn[] = [
   { name: "size_bytes", type: "bigint", notNull: true, primaryKey: false },
   { name: "original_filename", type: "text", notNull: false, primaryKey: false },
   { name: "origin_app_id", type: "text", notNull: true, primaryKey: false },
+  // A serialized HLC (`serializeHLC`), stamped by the node that registered
+  // the file, like `updated_at`. One format only: `GET /app-data/files`
+  // converts it to an ISO instant for the caller.
   { name: "created_at", type: "text", notNull: true, primaryKey: false },
 ];
 

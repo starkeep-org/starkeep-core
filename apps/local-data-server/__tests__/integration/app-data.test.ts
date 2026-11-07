@@ -240,6 +240,82 @@ describe("per-app file namespace", () => {
   });
 });
 
+describe("GET /app-data/files — listing an app's own files", () => {
+  interface Listing {
+    files: Array<{
+      sub_key: string;
+      size_bytes: number;
+      mime_type: string;
+      original_filename: string | null;
+      created_at: string;
+    }>;
+    truncated: boolean;
+    page_token: string | null;
+  }
+  async function list(app: InstalledApp, query: string): Promise<Response> {
+    return app.fetch(`/app-data/files?${query}`);
+  }
+
+  beforeAll(async () => {
+    await putAppFile(appA, "listing/b.json", "{}", "application/json");
+    await putAppFile(appA, "listing/a.json", "{}", "application/json");
+    await putAppFile(appA, "listing/c.json", "{}", "application/json");
+    await putAppFile(appA, "elsewhere/z.bin", "z");
+  });
+
+  it("lists the files under a prefix in sub-key order, with their index facts", async () => {
+    const res = await list(appA, "prefix=listing/");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Listing;
+    expect(body.files.map((f) => f.sub_key)).toEqual([
+      "listing/a.json",
+      "listing/b.json",
+      "listing/c.json",
+    ]);
+    expect(body.files[0]).toMatchObject({ size_bytes: 2, mime_type: "application/json" });
+    expect(Date.parse(body.files[0]!.created_at)).not.toBeNaN();
+    expect(body.truncated).toBe(false);
+    expect(body.page_token).toBeNull();
+  });
+
+  it("pages with limit and page_token", async () => {
+    const first = (await (await list(appA, "prefix=listing/&limit=2")).json()) as Listing;
+    expect(first.files.map((f) => f.sub_key)).toEqual(["listing/a.json", "listing/b.json"]);
+    expect(first.truncated).toBe(true);
+    const second = (await (
+      await list(
+        appA,
+        `prefix=listing/&limit=2&page_token=${encodeURIComponent(first.page_token!)}`,
+      )
+    ).json()) as Listing;
+    expect(second.files.map((f) => f.sub_key)).toEqual(["listing/c.json"]);
+    expect(second.page_token).toBeNull();
+  });
+
+  it("drops a deleted file", async () => {
+    await putAppFile(appA, "listing/gone.json", "{}", "application/json");
+    await appA.fetch("/app-data/files/listing/gone.json", { method: "DELETE" });
+    const body = (await (await list(appA, "prefix=listing/")).json()) as Listing;
+    expect(body.files.map((f) => f.sub_key)).not.toContain("listing/gone.json");
+  });
+
+  it("lists every file without a prefix", async () => {
+    const body = (await (await list(appA, "limit=500")).json()) as Listing;
+    const keys = body.files.map((f) => f.sub_key);
+    expect(keys).toContain("elsewhere/z.bin");
+    expect(keys).toContain("listing/a.json");
+  });
+
+  it("refuses a prefix that would leave the app's namespace", async () => {
+    expect((await list(appA, "prefix=../other")).status).toBe(400);
+    expect((await list(appA, "prefix=/abs")).status).toBe(400);
+  });
+
+  it("refuses an app that declared files:false", async () => {
+    expect([400, 404]).toContain((await list(appB, "")).status);
+  });
+});
+
 describe("reserved sync-records table", () => {
   function tableNames(): string[] {
     const db = new DatabaseSync(join(server.starkeepDir, "data.db"), { readOnly: true });

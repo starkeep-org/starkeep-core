@@ -7,6 +7,8 @@ export type {
   ApiContext,
   ApiRouter,
   AppSpecificOperations,
+  AppFileEntry,
+  AppFileListing,
   SharedSpaceApi,
   SharedSpaceApiOptions,
   WebSocketConnection,
@@ -38,6 +40,7 @@ export {
   createAppSpecificFactory,
   type AppSpecificFactoryOptions,
 } from "./app-syncable/factory.js";
+export { appFileListingJson } from "./app-syncable/file-listing.js";
 export { quoteIdent, validateTableName, RESERVED_COLUMN_NAMES } from "./app-syncable/validation.js";
 export {
   FILE_RECORDS_TABLE,

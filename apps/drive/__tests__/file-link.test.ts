@@ -68,6 +68,7 @@ describe("fileLinkHref", () => {
 describe("httpContentType — derive a web-renderable Content-Type", () => {
   it("maps the special Starkeep ids whose IANA type differs from the id", () => {
     expect(httpContentType("image/svg", null)).toBe("image/svg+xml");
+    expect(httpContentType("example/plaintext", null)).toBe("text/plain; charset=utf-8");
     expect(httpContentType("image/ico", null)).toBe("image/x-icon");
     expect(httpContentType("document/pdf", null)).toBe("application/pdf");
     expect(httpContentType("document/html", null)).toBe("text/html; charset=utf-8");

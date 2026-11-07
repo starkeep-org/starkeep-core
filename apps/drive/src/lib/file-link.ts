@@ -19,6 +19,8 @@ const TYPE_CONTENT_TYPE: Record<string, string> = {
   "document/pdf": "application/pdf",
   "document/html": "text/html; charset=utf-8",
   "document/markdown": "text/markdown; charset=utf-8",
+  // The example app's invented type holds plain UTF-8 text.
+  "example/plaintext": "text/plain; charset=utf-8",
 };
 
 /**

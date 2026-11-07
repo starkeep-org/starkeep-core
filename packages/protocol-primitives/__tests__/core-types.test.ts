@@ -17,6 +17,8 @@ import {
   pgMetadataDdl,
   sqliteMetadataDdl,
   sqliteMetadataTableName,
+  hasMetadataTable,
+  isGrantableCategory,
 } from "../src/types/core-types.js";
 
 describe("TYPES registry", () => {
@@ -136,6 +138,30 @@ describe("camera raw types (media plan item 29)", () => {
     expect(sqliteMetadataTableName(defaultTypeForExtension("dng"))).toBe(
       "shared_record_image_metadata",
     );
+  });
+});
+
+describe("the example category", () => {
+  // The example app writes only this type, so trying the example on a real
+  // deployment never mixes invented files into a person's library.
+  it("maps .skexample to example/plaintext", () => {
+    expect(defaultTypeForExtension("skexample")).toBe("example/plaintext");
+    expect(isKnownType("example/plaintext")).toBe(true);
+  });
+
+  it("is grantable to installable apps, unlike starkeep and other", () => {
+    expect(isGrantableCategory("example")).toBe(true);
+    expect(APP_GRANTABLE_CATEGORIES).toContain("example");
+  });
+
+  it("has a metadata table with the three text counts", () => {
+    expect(hasMetadataTable("example")).toBe(true);
+    expect(getCategory("example")!.metadataColumns.map((c) => c.name)).toEqual([
+      "line_count",
+      "word_count",
+      "char_count",
+    ]);
+    expect(sqliteMetadataTableName("example/plaintext")).toBe("shared_record_example_metadata");
   });
 });
 

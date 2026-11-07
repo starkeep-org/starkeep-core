@@ -1,14 +1,18 @@
 import type { HLCClock } from "@starkeep/protocol-primitives";
-import { serializeHLC } from "@starkeep/protocol-primitives";
+import {
+  appSyncableObjectKey,
+  appSyncableObjectPrefix,
+  deserializeHLC,
+  serializeHLC,
+} from "@starkeep/protocol-primitives";
 import type { ObjectStorageAdapter } from "@starkeep/storage-adapter";
-import { appSyncableObjectKey } from "@starkeep/protocol-primitives";
 import type {
   AppSyncableNamespaceStore,
   AppSyncableApplier,
   AppSyncableRowEntry,
   ChangeNotifier,
 } from "@starkeep/sync-engine";
-import type { AppSpecificOperations, ApiSubject } from "../types.js";
+import type { AppFileEntry, AppSpecificOperations, ApiSubject } from "../types.js";
 import { parseQuery } from "../query/parse.js";
 import { checkValue } from "../query/values.js";
 import { SYSTEM_COLUMN_NAMES } from "./columns.js";
@@ -352,6 +356,37 @@ export function createAppSpecificFactory(
         await fileStorage.delete(key);
         await tombstoneFileRecord(key);
         emitLocalChange();
+      },
+
+      async listFiles(opts) {
+        ensureFilesEnabled();
+        const keyPrefix = appSyncableObjectPrefix(appId, userId());
+        const subPrefix = opts?.prefix ?? "";
+        // The same checks a sub-key gets, so a prefix cannot reach outside the
+        // app's own namespace either.
+        if (subPrefix !== "") appSyncableObjectKey(appId, userId(), subPrefix);
+        // The framework reading its own index, as `readFileRecord` does: the
+        // app names only a prefix and a page, never the reserved table. The
+        // query still goes through the parser, so the limit's default and cap
+        // and the page token's checks are the table query's own.
+        const params: { where: string; order: string; limit?: string; page_token?: string } = {
+          where: JSON.stringify({ id: { prefix: keyPrefix + subPrefix } }),
+          order: "id.asc",
+        };
+        if (opts?.limit !== undefined) params.limit = opts.limit;
+        if (opts?.pageToken !== undefined) params.page_token = opts.pageToken;
+        const parsed = parseQuery(schemaFor(FILE_RECORDS_TABLE), params);
+        const result = await requireQueryCapable().runQuery(appId, FILE_RECORDS_TABLE, parsed);
+        if (result.mode !== "rows") throw new Error("listFiles: expected rows");
+        const files: AppFileEntry[] = result.rows.map((row) => ({
+          subKey: String(row["id"]).slice(keyPrefix.length),
+          sizeBytes: Number(row["size_bytes"] ?? 0),
+          mimeType: (row["mime_type"] as string | null) ?? "application/octet-stream",
+          originalFilename: (row["original_filename"] as string | null) ?? null,
+          // The index's one format: the HLC the registering node stamped.
+          createdAt: new Date(deserializeHLC(String(row["created_at"])).wallTime).toISOString(),
+        }));
+        return { files, truncated: result.truncated, pageToken: result.pageToken };
       },
 
       async fileUrl(subKey, opts) {

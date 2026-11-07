@@ -61,6 +61,7 @@ import {
   estimateRestore,
   DEFAULT_AVAILABILITY,
   DEFAULT_RETRIEVAL_INTENT,
+  DEFAULT_TRASH_RETENTION_DAYS,
   RETRIEVAL_INTENTS,
   checkMetadataValues,
   typeCategory,
@@ -111,6 +112,7 @@ import {
 } from "@starkeep/storage-aurora-dsql";
 import {
   createAppSpecificFactory,
+  appFileListingJson,
   assertRecordParams,
   planLabelQuery,
   planMetadataQuery,
@@ -5152,6 +5154,25 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       });
     }
 
+    // GET /apps/{appId}/data/trash — the retention window, as the deployment's
+    // settings state it. The same answer local-data-server gives.
+    //
+    // Any authenticated caller may read it. Drive's Trash view prints a removal
+    // date from it, and an app that mirrors records in its own tables needs it:
+    // the completeness promise on `deleted=only&updated_after=` holds only for
+    // an app that reconciles at least once per *this* window.
+    //
+    // `retention_days: null` means the cloud cannot read the deployment's
+    // settings. A Trash view then shows no date, and the reaper reaps nothing.
+    if (method === "GET" && subPath === "/data/trash") {
+      const window = await readLibrarySettings();
+      return ok({
+        retention_days: window.known ? window.days : null,
+        default_retention_days: DEFAULT_TRASH_RETENTION_DAYS,
+        knows_library_value: window.known,
+      });
+    }
+
     // POST /apps/{appId}/data/reap — reclaim the bytes of items deleted longer ago
     // than the library's retention window.
     //
@@ -5287,7 +5308,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       });
     }
 
-    // GET|PUT|DELETE /apps/{appId}/data/records/:id
+    // GET|DELETE /apps/{appId}/data/records/:id
+    //
+    // No PUT. A record's id is a hash of its parent, filename and content, so
+    // a rename or reparent would leave an id that no longer matches its own
+    // fields — and the watcher recomputes that id to find a file's record.
     const recordIdMatch = subPath.match(/^\/data\/records\/([^/]+)$/);
     if (recordIdMatch) {
       const id = decodeURIComponent(recordIdMatch[1]!) as StarkeepId;
@@ -5318,41 +5343,6 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             undefined,
             detailStandIns.get(record.id),
           ),
-        });
-      }
-
-      if (method === "PUT") {
-        // Records are immutable apart from system mutations (promotion, sync,
-        // tombstones). Editing user fields lives in app-specific data which is
-        // out of scope; the PUT endpoint accepts only originalFilename and
-        // parentId for now.
-        const body = event.body
-          ? (JSON.parse(event.body) as {
-              originalFilename?: string | null;
-              parentId?: string | null;
-            })
-          : null;
-        if (!body) return clientErr("body is required", 400);
-        // Read-modify-write: `version` is derived from the row we read, so the
-        // whole get→compute→put must be one OCC unit. Retrying only the put
-        // would replay a stale version and lose a concurrent update; wrapping
-        // here re-reads `existing` on conflict so version advances correctly.
-        // `await` (not a bare return) so the handler's finally — which closes
-        // the DB — runs only after the retry unit settles.
-        return await withOccRetry("PUT /data/records/:id", async () => {
-          const existing = await db.get(id);
-          if (!existing || existing.deletedAt) return clientErr("Record not found", 404);
-          if (!canWrite(grants, existing.type)) return clientErr("Forbidden", 403);
-          const now = clock.now();
-          const updated: DataRecord = {
-            ...existing,
-            originalFilename: body.originalFilename ?? existing.originalFilename,
-            parentId: (body.parentId as DataRecord["parentId"]) ?? existing.parentId,
-            updatedAt: now,
-            version: existing.version + 1,
-          };
-          await db.put(updated);
-          return ok({ record: recordToResponse(updated) });
         });
       }
 
@@ -5585,6 +5575,22 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             );
           }
           return ok({ urls, expiresIn });
+        } catch (err) {
+          return clientErr(err instanceof Error ? err.message : String(err), 400);
+        }
+      }
+
+      // GET /app-data/files — list the app's own files from the file index.
+      // Query: prefix (a sub-key prefix), limit, page_token. The same route
+      // and shape as local-data-server's.
+      if (subPath === "/app-data/files" && method === "GET") {
+        try {
+          const listing = await view.listFiles({
+            ...(query["prefix"] !== undefined ? { prefix: query["prefix"] } : {}),
+            ...(query["limit"] !== undefined ? { limit: query["limit"] } : {}),
+            ...(query["page_token"] !== undefined ? { pageToken: query["page_token"] } : {}),
+          });
+          return ok(appFileListingJson(listing));
         } catch (err) {
           return clientErr(err instanceof Error ? err.message : String(err), 400);
         }
