@@ -47,13 +47,13 @@ export const sharedResourceRequirementSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("cloudfront"),
     name: z.string(),
-    distributionConfig: z.record(z.unknown()),
+    distributionConfig: z.record(z.string(), z.unknown()),
   }),
   z.object({
     kind: z.literal("custom"),
     name: z.string(),
     providerId: z.string(),
-    config: z.record(z.unknown()),
+    config: z.record(z.string(), z.unknown()),
   }),
 ]);
 
@@ -94,9 +94,9 @@ export const appComputeRouteSchema = z.union([
  * it is the artifact that makes the decision reviewable, and the thing a
  * reviewer can diff.
  */
-const publicPathSchema = z
-  .string()
-  .regex(/^\/[^\s]*$/, { message: "publicPaths entries must be absolute paths starting with /" });
+const publicPathSchema = z.string().regex(/^\/[^\s]*$/, {
+  error: "publicPaths entries must be absolute paths starting with /",
+});
 
 /**
  * Does a `publicPaths` entry cover a concrete app-relative path?
@@ -138,7 +138,7 @@ const appComputeHandlerObjectSchema = z.object({
    */
   reservedConcurrency: z.number().int().min(1).max(1000).optional(),
   routes: z.array(appComputeRouteSchema).default(["$default"]),
-  env: z.record(z.string()).default({}),
+  env: z.record(z.string(), z.string()).default({}),
   /**
    * How the gateway gates this handler's routes.
    *
@@ -197,7 +197,7 @@ export const appComputeHandlerSchema = appComputeHandlerObjectSchema.superRefine
     const probe = entry.endsWith("/*") ? `${entry.slice(0, -2)}/x` : entry;
     if (handler.publicPaths.some((p) => publicPathCovers(p, probe))) continue;
     ctx.addIssue({
-      code: z.ZodIssueCode.custom,
+      code: "custom",
       path: ["staticAssetPaths"],
       message:
         `"${entry}" is served from disk by this handler's bundle but is not covered by ` +
@@ -344,11 +344,11 @@ export const infraRequirementsSchema = z.object({
       enabled: z.boolean().default(false),
       handlers: z.array(appComputeHandlerSchema).default([]),
     })
-    .default({}),
+    .prefault({}),
   additionalResources: z.array(sharedResourceRequirementSchema).default([]),
   // sts:AssumeRole on ${StackPrefix}-app-* roles — only allowed for the cloud-data-server built-in app.
   brokerPower: z.boolean().default(false),
-  appSpecificSyncable: appSpecificSyncableSchema.default({}),
+  appSpecificSyncable: appSpecificSyncableSchema.prefault({}),
   sharedResources: z.array(sharedResourceRequirementSchema).default([]),
   /**
    * Label keys this app may write into `shared.record_labels`. Capped at 64 —
@@ -402,18 +402,18 @@ export const localRunSchema = z.object({
  */
 export const androidIdentitySchema = z.object({
   package: z.string().regex(/^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$/, {
-    message: "package must be an Android application id, such as app.starkeep.photos",
+    error: "package must be an Android application id, such as app.starkeep.photos",
   }),
   signingCertSha256: z
     .array(
       z.string().regex(/^[0-9a-f]{64}$/, {
-        message: "signingCertSha256 entries must be 64 lowercase hex characters",
+        error: "signingCertSha256 entries must be 64 lowercase hex characters",
       }),
     )
     .min(1)
     .max(8),
   callbackScheme: z.string().regex(/^[a-z][a-z0-9+.-]{1,62}$/, {
-    message: "callbackScheme must be a lowercase URL scheme",
+    error: "callbackScheme must be a lowercase URL scheme",
   }),
 });
 
@@ -434,10 +434,10 @@ export const appManifestSchema = z.object({
   targets: z.array(appTargetSchema).default(["local"]),
   requiredPermissions: z.array(permissionEntrySchema).default([]),
   optionalPermissions: z.array(permissionEntrySchema).default([]),
-  infraRequirements: infraRequirementsSchema.default({}),
+  infraRequirements: infraRequirementsSchema.prefault({}),
   localRun: localRunSchema.optional(),
   mobile: mobileSchema.optional(),
-  homepage: z.string().url().optional(),
+  homepage: z.url().optional(),
   author: z.string().optional(),
   license: z.string().optional(),
 });
