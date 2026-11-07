@@ -1,11 +1,12 @@
 /**
  * An app's HMAC secret in SSM: created once at cloud install, never rotated by
- * a reinstall.
+ * a reinstall. And the CloudFront signing config, which the broker reads to
+ * keep a visit's sign-in and signed URLs on the host the visit used.
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { mockClient } from "aws-sdk-client-mock";
 import { SSMClient, ParameterAlreadyExists, PutParameterCommand } from "@aws-sdk/client-ssm";
-import { ensureAppCredsParameter } from "../src/app-creds.js";
+import { ensureAppCredsParameter, putCloudFrontSigningParameter } from "../src/app-creds.js";
 
 const ssm = mockClient(SSMClient);
 const awsCreds = {
@@ -64,5 +65,41 @@ describe("ensureAppCredsParameter", () => {
       (i) => (JSON.parse(i.Value!) as { hmacSecret: string }).hmacSecret,
     );
     expect(a).not.toBe(b);
+  });
+});
+
+describe("putCloudFrontSigningParameter", () => {
+  const signing = {
+    stackPrefix: "sk",
+    keyPairId: "K1",
+    domain: "photos.example.com",
+    hosts: ["photos.example.com", "d1.cloudfront.net"],
+    privateKey: "-----BEGIN PRIVATE KEY-----",
+    region: "us-east-2",
+    awsCreds,
+  };
+
+  it("stores every host the distribution answers on, beside the canonical domain", async () => {
+    ssm.on(PutParameterCommand).resolves({});
+    await putCloudFrontSigningParameter(signing);
+    const [input] = putInputs();
+    expect(input!.Name).toBe("/sk/app-creds/_cloudfront-signing");
+    expect(JSON.parse(input!.Value!)).toEqual({
+      keyPairId: "K1",
+      domain: "photos.example.com",
+      hosts: ["photos.example.com", "d1.cloudfront.net"],
+      privateKey: "-----BEGIN PRIVATE KEY-----",
+    });
+  });
+
+  it("carries the hosts into the overwrite of an existing parameter", async () => {
+    ssm
+      .on(PutParameterCommand)
+      .rejectsOnce(new ParameterAlreadyExists({ message: "exists", $metadata: {} }))
+      .resolves({});
+    await putCloudFrontSigningParameter(signing);
+    const overwrite = putInputs()[1]!;
+    expect(overwrite.Overwrite).toBe(true);
+    expect(JSON.parse(overwrite.Value!).hosts).toEqual(["photos.example.com", "d1.cloudfront.net"]);
   });
 });
