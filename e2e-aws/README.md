@@ -52,7 +52,10 @@ registry database, which must not land in a checkout you do not own.
 
 ## What it does (ordered steps)
 
-1. Create-if-missing the bootstrap CloudFormation stack; read its outputs.
+1. Create-if-missing the bootstrap CloudFormation stack; read its outputs. Then
+   run `scripts/update-bootstrap.sh` in preview mode and require it to find
+   nothing to change, so the operator's update script renders the template the
+   suite deploys.
 2. Create-if-missing a Cognito admin user (per-run password) and sign in through
    the real Cognito + Identity Pool chain.
 3. Install cloud-data-server via `cli-install-cloud-data-server` (real Pulumi up:

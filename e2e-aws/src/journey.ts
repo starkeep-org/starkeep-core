@@ -28,6 +28,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { chromium, watchPageProblems, signInWithBrowser } from "./browser.js";
@@ -48,7 +49,12 @@ import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import { compareHLC, deserializeHLC, type HLCTimestamp } from "@starkeep/protocol-primitives";
 import { appSyncableTableName, sqliteCompiler } from "@starkeep/storage-sqlite";
 import { AWS_TESTS_ENABLED, STACK_PREFIX, REGION, TEARDOWN } from "./env.js";
-import { ensureBootstrapStack, stackConfigFrom, type BootstrapOutputs } from "./bootstrap-stack.js";
+import {
+  E2E_DEPLOYMENT_NAME,
+  ensureBootstrapStack,
+  stackConfigFrom,
+  type BootstrapOutputs,
+} from "./bootstrap-stack.js";
 import { signInTestAdmin } from "./admin-user.js";
 import {
   signInThisMachine,
@@ -844,6 +850,33 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // any cloud-data-server outputs from a previous kept-up run.
         config = stackConfigFrom(readConfig(paths), STACK_PREFIX, outputs, app.appDir);
         writeConfig(paths, config);
+      });
+
+      it("scripts/update-bootstrap.sh finds nothing to change on the stack just verified", async () => {
+        // The step above brought the stack to this checkout's template, so the
+        // operator's update script must preview no change. A difference means
+        // the script renders a template the suite does not deploy, and every
+        // live deployment would take an update nobody tested.
+        const result = spawnSync(
+          "bash",
+          [
+            join(REPO_ROOT, "scripts", "update-bootstrap.sh"),
+            "--prefix",
+            STACK_PREFIX,
+            "--region",
+            REGION,
+            "--deployment-name",
+            E2E_DEPLOYMENT_NAME,
+          ],
+          {
+            encoding: "utf-8",
+            env: { ...process.env, STARKEEP_DIR: paths.dataDir, AWS_REGION: REGION },
+          },
+        );
+        const output = `${result.stdout}${result.stderr}`;
+        console.log(output);
+        expect(result.status, output).toBe(0);
+        expect(output).toContain("The stack already matches this template.");
       });
 
       it("admin user exists and signs in through Cognito + Identity Pool", async () => {
