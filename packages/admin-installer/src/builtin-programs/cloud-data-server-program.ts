@@ -1228,10 +1228,11 @@ export function buildCloudDataServerProgram(
           // Part B: the shared-data files bucket, locked with OAC.
           originId: filesOriginId,
           domainName: bucket.bucketRegionalDomainName,
+          // No s3OriginConfig: the provider sends the empty identity the API
+          // wants beside an OAC, and reads it back as no block. Declaring the
+          // block made every refresh drop it and every install update the
+          // distribution to restore it.
           originAccessControlId: filesOac.id,
-          // s3OriginConfig with an empty OAI is required by the API when
-          // using OAC on an S3 origin (OAC supersedes the legacy OAI).
-          s3OriginConfig: { originAccessIdentity: "" },
         },
       ],
       orderedCacheBehaviors: [
