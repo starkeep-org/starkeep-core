@@ -511,7 +511,7 @@ async function renderLabels(): Promise<void> {
     renderTable(
       "Declared label keys",
       [
-        { heading: "App", cell: (r) => r.app_id ?? r.appId ?? "" },
+        { heading: "App", cell: (r) => r.app_id },
         { heading: "Key", cell: (r) => r.key },
         { heading: "Description", cell: (r) => r.description ?? "" },
       ] satisfies Column<api.LabelKey>[],
@@ -590,7 +590,8 @@ snapshots.controls.append(
   ),
   button("Get snapshot URLs", () =>
     run("Get snapshot URLs", async () => {
-      const keys = (await api.listSnapshots()).map((s) => s.sub_key);
+      // The batch route takes at most 200 sub-keys.
+      const keys = (await api.listSnapshots()).map((s) => s.sub_key).slice(0, 200);
       if (keys.length === 0) throw new Error("no snapshots yet");
       const urls = await api.snapshotUrls(keys);
       snapshotOut.textContent = `${Object.keys(urls).length} URLs fetched in one call.`;
