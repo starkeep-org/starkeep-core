@@ -112,6 +112,12 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm install --frozen-lockfile
         working-directory: examples/example-app
+      # Playwright strips the suite's types without checking them, and the
+      # root `typecheck` skips the suite, because it needs core's harness.
+      - run: pnpm typecheck:e2e
+        working-directory: examples/example-app
+        env:
+          STARKEEP_CORE_DIR: ${{ github.workspace }}
       - run: pnpm --filter @example-app/e2e exec playwright install --with-deps chromium
         working-directory: examples/example-app
       - run: pnpm test:e2e
