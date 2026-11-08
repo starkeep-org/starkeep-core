@@ -408,10 +408,28 @@ export async function fileUrls(ids: string[]): Promise<Record<string, unknown>> 
 
 /**
  * `DELETE /data/records/:id`. Deleting a record deletes its derived copies
- * with it: deleting a file also deletes its uppercase copy.
+ * with it: deleting a file also deletes its uppercase copy. Answers the id of
+ * every record the delete took, the file's own first.
  */
-export async function deleteRecord(id: string): Promise<void> {
-  expectOk(await data("DELETE", `/data/records/${encodeURIComponent(id)}`));
+export async function deleteRecord(id: string): Promise<string[]> {
+  return expectOk(
+    await data<{ ids: string[] }>("DELETE", `/data/records/${encodeURIComponent(id)}`),
+  ).ids;
+}
+
+/**
+ * Delete a file, then the note of every record the delete took.
+ *
+ * The platform deletes a record's derived copies, but it knows nothing of the
+ * app's own rows that point at a record: a note names its file only by
+ * `record_id`. The app deletes those rows itself, from the ids the record
+ * delete answers. The record goes first, so a failed delete leaves the note in
+ * place. Restoring the file does not bring its note back.
+ */
+export async function deleteFile(id: string): Promise<void> {
+  const ids = await deleteRecord(id);
+  // The table delete matches one value per column, so one request per note.
+  for (const recordId of ids) await deleteNote(recordId);
 }
 
 // ---------------------------------------------------------------------------
