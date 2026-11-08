@@ -78,8 +78,8 @@ beforeAll(async () => {
     }),
   );
 
-  // An app checkout that was never `pnpm install`ed: package.json present,
-  // node_modules missing.
+  // An app checkout that was never `pnpm install`ed: package.json declares a
+  // dependency, and node_modules is missing.
   makeAppDir(
     parent,
     "nodeps-app",
@@ -88,7 +88,10 @@ beforeAll(async () => {
       localRun: { command: process.execPath, args: ["server.mjs"], portFlag: "--port" },
     }),
   );
-  writeFileSync(join(parent, "nodeps-app", "package.json"), JSON.stringify({ name: "nodeps-app" }));
+  writeFileSync(
+    join(parent, "nodeps-app", "package.json"),
+    JSON.stringify({ name: "nodeps-app", dependencies: { "left-pad": "^1.3.0" } }),
+  );
   writeFileSync(join(parent, "nodeps-app", "server.mjs"), SERVER_MJS);
 
   process.env.STARKEEP_DIR = dataDir;
@@ -256,6 +259,7 @@ describe("start failures are diagnosed, not silent", () => {
     const { error } = (await res.json()) as { error: string };
     expect(error).toContain("pnpm install");
     expect(error).toContain("nodeps-app");
+    expect(error).toContain("left-pad");
     // Refused before spawning: no pid/meta files, nothing running.
     expect(existsSync(join(pidsDir, "nodeps-app.pid"))).toBe(false);
     expect((await status("nodeps-app")).running).toBe(false);
