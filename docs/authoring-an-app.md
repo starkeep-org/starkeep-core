@@ -1055,10 +1055,17 @@ The install path is identical for first-party and third-party apps:
 1. Place the app dir inside a parent directory registered with admin-web. The
    sibling `starkeep-apps/` is seeded by default; add others via the **App
    discovery** card on the Dashboard.
-2. Click **Install** on the app's card. Admin reads and validates the manifest,
+2. Install the app's dependencies with `pnpm install` in the app's folder.
+   admin-web runs the app straight from that folder and never installs
+   anything itself. An app placed inside another repository's pnpm workspace,
+   such as `starkeep-apps/`, gets its dependencies from that workspace's
+   install only when the workspace's `pnpm-workspace.yaml` lists the app.
+   **Start** refuses an app whose declared dependencies do not resolve, and
+   names the missing packages.
+3. Click **Install** on the app's card. Admin reads and validates the manifest,
    prompts you to approve the requested grants, and POSTs to `local-data-server`
    to register the app and provision its per-app HMAC credential.
-3. For a cloud target, the installer additionally runs your `pnpm bundle` and
+4. For a cloud target, the installer additionally runs your `pnpm bundle` and
    deploys the resulting handlers.
 
 See [`starkeep-apps/README.md`](../../starkeep-apps/README.md) for the install steps

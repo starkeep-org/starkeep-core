@@ -195,11 +195,22 @@ export function readLogTail(logPath: string, maxBytes = 2_000): string {
 }
 
 // If the daemon's working directory is npm-shaped (a package.json in scope)
-// but dependencies were never installed, spawning it produces a cryptic
-// module-resolution failure. Detect that up front and name the directory to
-// run `pnpm install` in. Returns null when deps look fine or the directory
-// isn't npm-shaped at all.
-function missingDepsInstallDir(cwd: string): string | null {
+// but some of its dependencies do not resolve, spawning it produces a cryptic
+// module-resolution failure. Detect that up front and say which packages are
+// missing and where to install them. Returns null when every declared
+// dependency resolves or the directory isn't npm-shaped at all.
+//
+// Each declared dependency is looked up the way Node resolves it: in
+// node_modules of the package's folder and of every ancestor. A bare
+// "node_modules exists somewhere" test passed for an app copied into another
+// repository's workspace without being listed there (#141): the workspace's
+// own install made the folder, and the app's packages were never in it. The
+// lookup reads `<name>/package.json` on disk rather than calling
+// require.resolve, which fails on packages whose `exports` hide package.json.
+export function missingDependencies(
+  id: string,
+  cwd: string,
+): { missing: string[]; message: string } | null {
   let pkgDir: string | null = null;
   let wsRoot: string | null = null;
   for (let dir = cwd; ; dir = dirname(dir)) {
@@ -208,9 +219,35 @@ function missingDepsInstallDir(cwd: string): string | null {
     if (dirname(dir) === dir) break;
   }
   if (!pkgDir) return null;
-  if (existsSync(join(pkgDir, "node_modules"))) return null;
-  if (wsRoot && existsSync(join(wsRoot, "node_modules"))) return null;
-  return wsRoot ?? pkgDir;
+
+  let declared: string[];
+  try {
+    const pkg = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf-8")) as {
+      dependencies?: Record<string, string>;
+    };
+    declared = Object.keys(pkg.dependencies ?? {});
+  } catch {
+    return null;
+  }
+  const missing = declared.filter((name) => !resolvesFrom(pkgDir, name));
+  if (missing.length === 0) return null;
+
+  const shown = missing.length > 5 ? `${missing.slice(0, 5).join(", ")}, …` : missing.join(", ");
+  const count = missing.length === 1 ? "1 dependency is" : `${missing.length} dependencies are`;
+  const where = wsRoot
+    ? `Run \`pnpm install\` in ${wsRoot}. If ${pkgDir} is not listed in that workspace's pnpm-workspace.yaml, list it there or move the app out of the workspace.`
+    : `Run \`pnpm install\` in ${pkgDir}.`;
+  return {
+    missing,
+    message: `'${id}' cannot start: ${count} not installed (${shown}). ${where} Then try again.`,
+  };
+}
+
+function resolvesFrom(pkgDir: string, name: string): boolean {
+  for (let dir = pkgDir; ; dir = dirname(dir)) {
+    if (existsSync(join(dir, "node_modules", name, "package.json"))) return true;
+    if (dirname(dir) === dir) return false;
+  }
 }
 
 // Functional probe of the environment a daemon needs: this Node must be able
@@ -270,13 +307,8 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<StartOutcom
   const { id, command, args, cwd, port } = opts;
   mkdirSync(PIDS_DIR, { recursive: true });
 
-  const installDir = missingDepsInstallDir(cwd);
-  if (installDir) {
-    return {
-      ok: false,
-      error: `Dependencies are not installed for '${id}' — run \`pnpm install\` in ${installDir}, then try again.`,
-    };
-  }
+  const deps = missingDependencies(id, cwd);
+  if (deps) return { ok: false, error: deps.message };
 
   const logPath = resolve(PIDS_DIR, `${id}.log`);
   const logFd = openSync(logPath, "w");
