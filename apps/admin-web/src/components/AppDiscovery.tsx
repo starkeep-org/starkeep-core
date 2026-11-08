@@ -10,6 +10,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ACTION_START } from "@/lib/action-colors";
+import type { AppList, ScanProblem } from "@/lib/app-types";
 
 // ---------------------------------------------------------------------------
 // App parent directories editor — the "Discover apps" button in the shell
@@ -47,6 +48,13 @@ function AppDiscoveryModal({
   const [newDir, setNewDir] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // What the last added directory contributed, so an author who picked the
+  // wrong folder hears so at once rather than seeing nothing change.
+  const [report, setReport] = useState<{
+    dir: string;
+    appCount: number;
+    problems: ScanProblem[];
+  } | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
@@ -65,9 +73,10 @@ function AppDiscoveryModal({
     if (open) load();
   }, [open, load]);
 
-  const save = useCallback(async (next: string[]) => {
+  const save = useCallback(async (next: string[]): Promise<boolean> => {
     setSaving(true);
     setError(null);
+    setReport(null);
     try {
       const res = await fetch("/api/config", {
         method: "PATCH",
@@ -77,8 +86,10 @@ function AppDiscoveryModal({
       if (!res.ok) throw new Error(`config save failed: ${res.status}`);
       setDirs(next);
       window.dispatchEvent(new Event(APPS_CHANGED_EVENT));
+      return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      return false;
     } finally {
       setSaving(false);
     }
@@ -91,7 +102,21 @@ function AppDiscoveryModal({
       return;
     }
     setNewDir("");
-    save([...(dirs ?? []), d]);
+    void save([...(dirs ?? []), d]).then(async (saved) => {
+      if (!saved) return;
+      try {
+        const res = await fetch("/api/apps/list");
+        if (!res.ok) return;
+        const body = (await res.json()) as AppList;
+        setReport({
+          dir: d,
+          appCount: body.dirs.find((x) => x.dir === d)?.appCount ?? 0,
+          problems: body.problems.filter((p) => p.configuredDir === d),
+        });
+      } catch {
+        // The list itself reports on the Dashboard; the dialog stays quiet.
+      }
+    });
   };
 
   const remove = (d: string) => save((dirs ?? []).filter((x) => x !== d));
@@ -102,9 +127,9 @@ function AppDiscoveryModal({
         <DialogHeader>
           <DialogTitle>App discovery</DialogTitle>
           <DialogDescription>
-            Parent directories scanned for apps — each subdirectory holding a{" "}
-            <code className="text-xs">starkeep.manifest.json</code> counts as an app. Add parent
-            directories as siblings to starkeep-core.
+            Directories scanned for apps. A directory holding a{" "}
+            <code className="text-xs">starkeep.manifest.json</code> is an app; any other directory
+            is scanned for app subdirectories.
           </DialogDescription>
         </DialogHeader>
 
@@ -155,6 +180,26 @@ function AppDiscoveryModal({
             Add directory
           </Button>
         </div>
+
+        {report && (
+          <div className="flex flex-col gap-1 text-sm">
+            <p>
+              {report.appCount === 0
+                ? "No app found in "
+                : `Found ${report.appCount} ${report.appCount === 1 ? "app" : "apps"} in `}
+              <code className="text-xs">{report.dir}</code>.
+            </p>
+            {report.problems.length > 0 && (
+              <ul className="flex flex-col gap-1 text-muted-foreground">
+                {report.problems.map((p) => (
+                  <li key={p.dir}>
+                    <code className="text-xs break-all">{p.dir}</code>: {p.reason}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   );

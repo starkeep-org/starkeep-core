@@ -57,7 +57,7 @@ pnpm typecheck
 pnpm test
 ```
 
-To run it on your computer, put this folder, or a copy of it, inside a parent directory admin-web scans, then install and start it from admin-web. The manifest's `localRun` runs `pnpm start` in `web/`, which builds the page and serves it.
+To run it on your computer, add this folder, or a copy of it, in admin-web's **Discover apps**, then install and start it from admin-web. The manifest's `localRun` runs `pnpm start` in `web/`, which builds the page and serves it.
 
 To install it to your cloud, use admin-web's cloud install. The installer runs `pnpm bundle` here. The cloud's data server must know the `example` category, so a cloud deployed before the category existed needs a redeploy first. Until then, the install fails with "Unknown type id: example/plaintext".
 
