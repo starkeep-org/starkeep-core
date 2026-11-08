@@ -2,8 +2,8 @@
  * The names every flavor of the example app must agree on.
  *
  * The manifest declares the same names, so a change here needs the matching
- * change in `starkeep.manifest.json`. The web flavor's tests check the two
- * agree.
+ * change in `starkeep.manifest.json`. `common/__tests__/manifest.test.ts`
+ * checks the two agree.
  */
 
 /** The app id: it namespaces the app's labels and its own tables. */
