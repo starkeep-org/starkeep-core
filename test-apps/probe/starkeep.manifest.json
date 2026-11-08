@@ -22,8 +22,7 @@
     "labelKeys": [
       {
         "key": "variant",
-        "sizeClass": true,
-        "description": "Which rung of the fixture's derived size ladder this record is. Present so the platform's size-class namespacing, residency classification and variant-candidate resolution have a declared key to work against."
+        "description": "Which rung of the fixture's derived size ladder this record is. Present so variant-candidate resolution has a declared key to work against."
       },
       {
         "key": "flag",

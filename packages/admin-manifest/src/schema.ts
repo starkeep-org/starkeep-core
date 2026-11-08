@@ -14,7 +14,7 @@ export const appTargetSchema = z.enum(["local", "cloud"]);
  * unmapped (`other/*`) set is unreachable by apps. Category-level and wildcard
  * grants are not expressible here — Drive's all-access uses `fileAccessAll`.
  */
-export const fileAccessSchema = z.object({
+export const fileAccessSchema = z.strictObject({
   types: z.array(z.string().regex(/^[a-z0-9]+\/[a-z0-9]+$/)).min(1),
   access: z.enum(["read", "readwrite"]),
   metadataWrite: z.boolean().default(false),
@@ -38,18 +38,18 @@ export const fileAccessSchema = z.object({
  * `description` is carried into the registry so the cross-app enumeration is
  * self-explaining rather than a list of bare strings.
  */
-export const labelKeySchema = z.object({
+export const labelKeySchema = z.strictObject({
   key: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/),
   description: z.string().min(1),
 });
 
 export const sharedResourceRequirementSchema = z.discriminatedUnion("kind", [
-  z.object({
+  z.strictObject({
     kind: z.literal("cloudfront"),
     name: z.string(),
     distributionConfig: z.record(z.unknown()),
   }),
-  z.object({
+  z.strictObject({
     kind: z.literal("custom"),
     name: z.string(),
     providerId: z.string(),
@@ -76,7 +76,7 @@ export const sharedResourceRequirementSchema = z.discriminatedUnion("kind", [
  */
 export const appComputeRouteSchema = z.union([
   z.string().min(1),
-  z.object({
+  z.strictObject({
     route: z.string().min(1),
     auth: z.enum(["public", "jwt", "session"]),
   }),
@@ -118,7 +118,7 @@ export function publicPathCovers(entry: string, path: string): boolean {
 // `index.handler` or `infra/src/resize-handler.handler`). The app's
 // `pnpm bundle` script is responsible for producing a zip whose contents
 // resolve this path — the installer does not synthesize handler code.
-const appComputeHandlerObjectSchema = z.object({
+const appComputeHandlerObjectSchema = z.strictObject({
   name: z.string(),
   handler: z.string(),
   runtime: z.enum(["nodejs22.x"]).default("nodejs22.x"),
@@ -256,7 +256,7 @@ export const syncableTableColumnSchema = z
  * Expression indexes do work on DSQL and are not exposed yet, because no
  * caller has asked and an expression is a third thing to validate.
  */
-export const syncableTableIndexSchema = z.object({
+export const syncableTableIndexSchema = z.strictObject({
   columns: z
     .array(z.string().regex(/^[a-z_][a-z0-9_]*$/))
     .min(1)
@@ -323,7 +323,7 @@ export const syncableTableSchema = z
       `never leave the node that made them.`,
   });
 
-export const appSpecificSyncableSchema = z.object({
+export const appSpecificSyncableSchema = z.strictObject({
   tables: z.array(syncableTableSchema).default([]),
   // Opt-in for apps/<appId>/syncable/ object-storage prefix. App-specific
   // (private) data is not necessarily file-backed — apps with row-only
@@ -332,7 +332,7 @@ export const appSpecificSyncableSchema = z.object({
   files: z.boolean().default(false),
 });
 
-export const infraRequirementsSchema = z.object({
+export const infraRequirementsSchema = z.strictObject({
   fileAccess: z.array(fileAccessSchema).default([]),
   // All-access over every type + the `other` catch-all. Only the
   // `starkeep-drive` (User-Data-Owner) app may set this true; the validator
@@ -369,7 +369,7 @@ export const infraRequirementsSchema = z.object({
   publicSharing: z.boolean().default(false),
 });
 
-export const permissionEntrySchema = z.object({
+export const permissionEntrySchema = z.strictObject({
   subjectType: z.literal("app"),
   resourceType: z.enum(["type", "collection", "wildcard"]),
   resourceId: z.string().min(1),
@@ -381,7 +381,7 @@ export const permissionEntrySchema = z.object({
 // apps without a localRun block cannot be started from the admin UI. When
 // `portFlag` is set, admin-web allocates a free TCP port at start time and
 // appends `[portFlag, <port>]` to args; apps that pick their own port omit it.
-export const localRunSchema = z.object({
+export const localRunSchema = z.strictObject({
   command: z.string().min(1),
   args: z.array(z.string()).default([]),
   portFlag: z.string().optional(),
@@ -414,7 +414,7 @@ export const installCommandSchema = z.object({
  * `callbackScheme` is the custom URL scheme the managed login page returns to
  * (`<scheme>://auth/callback`).
  */
-export const androidIdentitySchema = z.object({
+export const androidIdentitySchema = z.strictObject({
   package: z.string().regex(/^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$/, {
     message: "package must be an Android application id, such as app.starkeep.photos",
   }),
@@ -432,14 +432,16 @@ export const androidIdentitySchema = z.object({
 });
 
 /** The mobile builds an app ships. Only Android is attestable today. */
-export const mobileSchema = z.object({
+export const mobileSchema = z.strictObject({
   android: androidIdentitySchema.optional(),
 });
 
-export const appManifestSchema = z.object({
+export const appManifestSchema = z.strictObject({
   id: z.string().min(1),
   name: z.string().min(1),
   version: z.string().min(1),
+  // One sentence about the app, shown on its Dashboard cards.
+  description: z.string().optional(),
   // The lowest platform protocol version the app needs (`PROTOCOL_VERSION` in
   // @starkeep/protocol-primitives). Both installers refuse an app whose
   // requirement the platform does not meet.
