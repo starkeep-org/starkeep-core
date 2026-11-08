@@ -11,10 +11,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const resolveCname = vi.fn<(name: string) => Promise<string[]>>();
 const resolve4 = vi.fn<(name: string) => Promise<string[]>>();
+const reverse = vi.fn<(address: string) => Promise<string[]>>();
 vi.mock("node:dns", () => ({
   promises: {
     resolveCname: (n: string) => resolveCname(n),
     resolve4: (n: string) => resolve4(n),
+    reverse: (a: string) => reverse(a),
   },
 }));
 
@@ -255,6 +257,7 @@ describe("domainPointsAt", () => {
   beforeEach(() => {
     resolveCname.mockReset();
     resolve4.mockReset();
+    reverse.mockReset();
   });
 
   it("accepts a CNAME to the distribution, whatever its case and trailing dot", async () => {
@@ -262,19 +265,38 @@ describe("domainPointsAt", () => {
     expect(await domainPointsAt("photos.example.com", "d1.cloudfront.net")).toBe(true);
   });
 
-  it("accepts a flattened record that resolves to the distribution's addresses", async () => {
+  it("accepts a flattened record whose addresses are all CloudFront edges", async () => {
+    // A flattening provider resolves the distribution from its own location,
+    // so the addresses need not match what this machine's resolver returns.
     resolveCname.mockRejectedValue(Object.assign(new Error("ENODATA"), { code: "ENODATA" }));
-    resolve4.mockImplementation(async (n) =>
-      n === "photos.example.com" ? ["1.1.1.1"] : ["1.1.1.1", "2.2.2.2"],
-    );
+    resolve4.mockResolvedValue(["13.32.164.46", "54.192.55.5"]);
+    reverse.mockImplementation(async (a) => [
+      `server-${a.replaceAll(".", "-")}.ord58.r.cloudfront.net.`,
+    ]);
     expect(await domainPointsAt("photos.example.com", "d1.cloudfront.net")).toBe(true);
+    expect(resolve4).not.toHaveBeenCalledWith("d1.cloudfront.net");
   });
 
-  it("refuses a CNAME to a different distribution", async () => {
-    resolveCname.mockResolvedValue(["d2.cloudfront.net"]);
-    resolve4.mockImplementation(async (n) =>
-      n === "photos.example.com" ? ["3.3.3.3"] : ["1.1.1.1"],
+  it("refuses a flattened record with any address outside CloudFront", async () => {
+    resolveCname.mockRejectedValue(Object.assign(new Error("ENODATA"), { code: "ENODATA" }));
+    resolve4.mockResolvedValue(["13.32.164.46", "192.0.2.1"]);
+    reverse.mockImplementation(async (a) =>
+      a === "192.0.2.1" ? ["host.example.net"] : ["server-13-32-164-46.ord58.r.cloudfront.net"],
     );
+    expect(await domainPointsAt("photos.example.com", "d1.cloudfront.net")).toBe(false);
+  });
+
+  it("refuses an address with no reverse name", async () => {
+    resolveCname.mockRejectedValue(Object.assign(new Error("ENODATA"), { code: "ENODATA" }));
+    resolve4.mockResolvedValue(["192.0.2.1"]);
+    reverse.mockRejectedValue(Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" }));
+    expect(await domainPointsAt("photos.example.com", "d1.cloudfront.net")).toBe(false);
+  });
+
+  it("refuses a CNAME to a different distribution, though its edges are CloudFront's", async () => {
+    resolveCname.mockResolvedValue(["d2.cloudfront.net"]);
+    resolve4.mockResolvedValue(["13.32.164.46"]);
+    reverse.mockResolvedValue(["server-13-32-164-46.ord58.r.cloudfront.net"]);
     expect(await domainPointsAt("photos.example.com", "d1.cloudfront.net")).toBe(false);
   });
 

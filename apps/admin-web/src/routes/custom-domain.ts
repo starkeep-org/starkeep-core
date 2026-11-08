@@ -22,8 +22,10 @@ import {
   customDomainPolicyFits,
   domainPointsAt,
   findHostedZone,
+  pendingAttemptBlocking,
+  pendingAttemptRefusal,
   validateCustomDomain,
-  type CustomDomainStatus,
+  type CustomDomainConfigFields,
 } from "@starkeep/admin-installer/custom-domain";
 import { regionFromUserPoolId } from "../lib/cloud-config";
 import { readStarkeepConfig } from "../lib/manager-credentials";
@@ -49,7 +51,7 @@ export async function PUT(req: Request): Promise<Response> {
         { status: 400 },
       );
     }
-    const refusal = quotaRefusal(domain);
+    const refusal = setRefusal(domain);
     if (refusal) return Response.json({ error: refusal }, { status: 400 });
   }
   // The config route's PATCH deletes a field given null. It checks the origin
@@ -65,40 +67,65 @@ export async function PUT(req: Request): Promise<Response> {
   );
 }
 
+type DomainConfig = CustomDomainConfigFields & { stackPrefix?: string; userPoolId?: string };
+
+/**
+ * Why `domain` cannot be set now, or null: a failed attempt at another domain
+ * still waits for its cleanup, or the next install's grants would not fit.
+ */
+function setRefusal(domain: string): string | null {
+  const config = readStarkeepConfig() as DomainConfig;
+  const attempted = pendingAttemptBlocking(config, domain);
+  if (attempted) return pendingAttemptRefusal(attempted);
+  return quotaRefusal(config, domain);
+}
+
 /**
  * The next install's grants name this domain, the one the last install acted
  * on, one an unfinished install attempted, and the one whose certificate the
- * distribution keeps. IAM caps the role's inline
- * policies together, so a domain that would overflow the cap fails here rather
- * than at the install's PutRolePolicy.
+ * distribution keeps. IAM caps the role's inline policies together, so a
+ * domain that would overflow the cap fails here rather than at the install's
+ * PutRolePolicy. The refusal names the other domains when they, not this one
+ * alone, push the grants over: the install must still delete their records.
  */
-function quotaRefusal(domain: string): string | null {
-  const config = readStarkeepConfig() as {
-    stackPrefix?: string;
-    userPoolId?: string;
-    customDomainStatus?: CustomDomainStatus;
-    customDomainAttempted?: string;
-    customDomainKept?: { name: string };
-  };
+function quotaRefusal(config: DomainConfig, domain: string): string | null {
   if (!config.stackPrefix || !config.userPoolId) return null;
-  const inPlay = [
+  const region = regionFromUserPoolId(config.userPoolId);
+  const fits = (domains: string[]) => customDomainPolicyFits(config.stackPrefix!, region, domains);
+  const others = [
     ...new Set(
       [
-        domain,
         config.customDomainStatus?.name,
         config.customDomainAttempted,
         config.customDomainKept?.name,
-      ].filter((d): d is string => !!d),
+      ].filter((d): d is string => !!d && d !== domain),
     ),
   ];
-  if (customDomainPolicyFits(config.stackPrefix, regionFromUserPoolId(config.userPoolId), inPlay)) {
-    return null;
+  if (fits([domain, ...others])) return null;
+  if (others.length > 0 && fits([domain])) {
+    return (
+      `${domain} does not fit beside ${others.join(" and ")}: the next install must still ` +
+      `delete ${others.length > 1 ? "their" : "its"} records and certificate, and the ` +
+      "permissions for all of them would not fit IAM's inline-policy quota. Choose a shorter domain."
+    );
   }
   return (
     `${domain} is too long: the install's permissions for it would not fit IAM's ` +
     "inline-policy quota. Choose a shorter domain."
   );
 }
+
+/** The request's JSON body, or null when it is missing or malformed. */
+async function jsonBody<T>(req: Request): Promise<T | null> {
+  try {
+    const body = (await req.json()) as unknown;
+    return body && typeof body === "object" ? (body as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+const INVALID_BODY = () => Response.json({ error: "Invalid JSON body" }, { status: 400 });
 
 export interface CustomDomainZone {
   /** The domain in the form PUT saves. */
@@ -108,10 +135,10 @@ export interface CustomDomainZone {
 }
 
 export async function ZONE(req: Request): Promise<Response> {
-  const { domain: raw, credentials } = (await req.json()) as {
-    domain?: unknown;
-    credentials?: STSCredentials;
-  };
+  if (!fromOwnPage(req)) return crossSiteRefusal();
+  const body = await jsonBody<{ domain?: unknown; credentials?: STSCredentials }>(req);
+  if (!body) return INVALID_BODY();
+  const { domain: raw, credentials } = body;
   if (!credentials) return Response.json({ error: "credentials required" }, { status: 400 });
   let domain: string;
   try {
@@ -122,7 +149,7 @@ export async function ZONE(req: Request): Promise<Response> {
       { status: 400 },
     );
   }
-  const refusal = quotaRefusal(domain);
+  const refusal = setRefusal(domain);
   if (refusal) return Response.json({ error: refusal }, { status: 400 });
   try {
     const zone = await findHostedZone(domain, {
@@ -148,10 +175,12 @@ export interface CustomDomainCheck {
 }
 
 export async function CHECK(req: Request): Promise<Response> {
-  const { credentials } = (await req.json()) as { credentials?: STSCredentials };
+  if (!fromOwnPage(req)) return crossSiteRefusal();
+  const body = await jsonBody<{ credentials?: STSCredentials }>(req);
+  if (!body) return INVALID_BODY();
+  const { credentials } = body;
   if (!credentials) return Response.json({ error: "credentials required" }, { status: 400 });
-  const status = (readStarkeepConfig() as { customDomainStatus?: CustomDomainStatus })
-    .customDomainStatus;
+  const status = (readStarkeepConfig() as CustomDomainConfigFields).customDomainStatus;
   if (!status) {
     return Response.json(
       { error: "No install has acted on a custom domain yet." },

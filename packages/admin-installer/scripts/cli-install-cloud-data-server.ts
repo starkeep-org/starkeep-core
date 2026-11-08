@@ -244,12 +244,16 @@ console.log(
 // Record the domain this run attaches before anything touches AWS. A run that
 // fails part-way can leave the domain's certificate and records behind, and the
 // next run's grants must still cover them.
+let starting: StarkeepConfig;
+try {
+  starting = nextCustomDomainConfig(config, { stage: "starting" });
+} catch (err) {
+  // A failed attempt at another domain still waits for its cleanup.
+  console.error(`\nError: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+}
 mkdirSync(STARKEEP_DIR, { recursive: true });
-writeFileSync(
-  CONFIG_PATH,
-  JSON.stringify(nextCustomDomainConfig(config, { stage: "starting" }), null, 2),
-  "utf-8",
-);
+writeFileSync(CONFIG_PATH, JSON.stringify(starting, null, 2), "utf-8");
 
 console.log("\nInstalling cloud-data-server…\n");
 const outputs = await installCloudDataServer({

@@ -157,6 +157,26 @@ describe("nextCustomDomainConfig", () => {
     expect(nextCustomDomainConfig(before, { stage: "failed" })).toEqual(before);
   });
 
+  it("refuses to start on another domain while a failed attempt waits", () => {
+    expect(() =>
+      nextCustomDomainConfig(
+        { customDomain: "new.example.com", customDomainAttempted: "failed.example.com" },
+        { stage: "starting" },
+      ),
+    ).toThrow(/An install for failed\.example\.com failed/);
+    // A retry of the same domain, and a run with no domain, still start.
+    expect(
+      nextCustomDomainConfig(
+        { customDomain: "failed.example.com", customDomainAttempted: "failed.example.com" },
+        { stage: "starting" },
+      ).customDomainAttempted,
+    ).toBe("failed.example.com");
+    expect(
+      nextCustomDomainConfig({ customDomainAttempted: "failed.example.com" }, { stage: "starting" })
+        .customDomainAttempted,
+    ).toBe("failed.example.com");
+  });
+
   it("passes a failed attempt on to the next run after the operator clears the domain", () => {
     // The first run failed part-way through attaching new.example.com.
     const afterFailure = nextCustomDomainConfig(
@@ -187,6 +207,34 @@ describe("customDomainInstallInput", () => {
       heldCertificate: { name: "old.example.com", mode: "route53", hostedZoneId: undefined },
       cloudfrontDomain: "d1.cloudfront.net",
     });
+  });
+
+  it("names an active external domain only while the distribution is the one it points at", () => {
+    const active: CustomDomainStatus = {
+      name: "photos.example.com",
+      mode: "external",
+      status: "active",
+      certificateArn: "arn:c",
+      aliasTarget: "d1.cloudfront.net",
+    };
+    expect(
+      customDomainInstallInput({
+        customDomainStatus: active,
+        cloudfrontDomain: "d1.cloudfront.net",
+      }).activeExternalDomain,
+    ).toBe("photos.example.com");
+    expect(
+      customDomainInstallInput({
+        customDomainStatus: active,
+        cloudfrontDomain: "d2.cloudfront.net",
+      }).activeExternalDomain,
+    ).toBeUndefined();
+    expect(
+      customDomainInstallInput({
+        customDomainStatus: { ...active, status: "awaiting-dns" },
+        cloudfrontDomain: "d1.cloudfront.net",
+      }).activeExternalDomain,
+    ).toBeUndefined();
   });
 
   it("holds the kept certificate after a removal, and keeps its domain in play", () => {

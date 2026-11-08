@@ -154,6 +154,14 @@ export interface CloudDataServerInstallConfig {
    */
   heldCertificate?: KeptCertificate;
   /**
+   * An external domain the last install found pointing at this distribution.
+   * It stays canonical without a new DNS check: a lookup that fails on the
+   * operator's machine, behind a VPN or a filtering resolver, must not move
+   * every link back to the cloudfront.net name. An operator who points the
+   * domain elsewhere removes it in admin-web.
+   */
+  activeExternalDomain?: string;
+  /**
    * The distribution's cloudfront.net name from the last install. An external
    * domain becomes canonical only once public DNS sends it there, and the
    * check runs before `pulumi up` reports the name again.
@@ -506,7 +514,9 @@ export async function installCloudDataServer(
           `Custom domain ${customDomainName}: DNS outside this account; certificate ` +
             `${externalCertificate.certificateArn} ${externalCertificate.issued ? "issued" : "awaits validation"}.`,
         );
-        if (externalCertificate.issued && config.cloudfrontDomain) {
+        if (externalCertificate.issued && config.activeExternalDomain === customDomainName) {
+          pointsAtDistribution = true;
+        } else if (externalCertificate.issued && config.cloudfrontDomain) {
           pointsAtDistribution = await domainPointsAt(customDomainName, config.cloudfrontDomain);
           if (!pointsAtDistribution) {
             console.log(
