@@ -306,7 +306,7 @@ async function renderFiles(): Promise<void> {
               ),
               button(`Delete ${r.original_filename}`, () =>
                 run("Delete", async () => {
-                  await api.deleteRecord(r.id);
+                  await api.deleteFile(r.id);
                   if (selectedId === r.id) selectedId = null;
                   await refreshAll();
                 }),

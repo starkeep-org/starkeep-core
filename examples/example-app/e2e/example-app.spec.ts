@@ -272,7 +272,7 @@ test("Snapshots: save the notes as a private file, list, open and delete it", as
   await expectLogged("DELETE", /^\/app-data\/files\/snapshots\//, 200);
 });
 
-test("Deleted: a deletion appears in the reconcile, restores, and takes derived copies", async () => {
+test("Deleted: a deletion appears in the reconcile, restores, and takes derived copies and notes", async () => {
   await click("Delete uploaded.skexample", "Delete");
   await expectLogged("DELETE", /^\/data\/records\/[^/?]+$/, 200);
   await expect(table("Example files")).not.toContainText("uploaded.skexample");
@@ -288,6 +288,10 @@ test("Deleted: a deletion appears in the reconcile, restores, and takes derived 
   await expect(table("Example files")).not.toContainText("hello-upper.skexample");
   await expect(table("Deleted files")).toContainText("hello.skexample");
   await expect(table("Deleted files")).toContainText("hello-upper.skexample");
+  // The note on hello.skexample goes with its file. The app deletes it from
+  // the ids the record delete answered.
+  await expect(table("Notes")).not.toContainText("first note");
+  await expectLogged("DELETE", /^\/app-data\/db\/notes$/, 200);
 
   // The platform's default window, read through GET /data/trash.
   await expect(await cell("Trash", "Retention window", "Value")).toHaveText("30 days");
