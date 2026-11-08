@@ -60,11 +60,7 @@ export async function POST(req: Request) {
   }
 
   if (!installResp.ok) {
-    const text = await installResp.text();
-    return Response.json(
-      { error: "Install failed", status: installResp.status, body: text },
-      { status: installResp.status },
-    );
+    return Response.json(await installFailure(installResp), { status: installResp.status });
   }
 
   const result = (await installResp.json()) as { appId: string; hmacSecret: string };
@@ -97,4 +93,37 @@ export async function POST(req: Request) {
   stopById(appId);
 
   return Response.json({ appId: result.appId, secretPath, ok: true });
+}
+
+/**
+ * Turn local-data-server's install refusal into `{ error, details? }`, where
+ * `error` is a sentence the UI shows as is and `details` lists each manifest
+ * validation error. local-data-server answers 400
+ * `{ error: "ManifestValidationError", details }` or 500 `{ error, message }`.
+ */
+async function installFailure(resp: Response): Promise<{ error: string; details?: string[] }> {
+  const text = await resp.text();
+  const parsed = parseJsonObject(text);
+  if (parsed?.error === "ManifestValidationError" && Array.isArray(parsed.details)) {
+    return {
+      error: "The app's manifest failed validation.",
+      details: parsed.details.map(String),
+    };
+  }
+  if (typeof parsed?.message === "string") {
+    return { error: `Install failed: ${parsed.message}` };
+  }
+  const quoted = text.trim() ? `: ${text.trim().slice(0, 500)}` : "";
+  return { error: `Install failed: local-data-server answered ${resp.status}${quoted}` };
+}
+
+function parseJsonObject(
+  text: string,
+): { error?: unknown; message?: unknown; details?: unknown } | null {
+  try {
+    const value: unknown = JSON.parse(text);
+    return typeof value === "object" && value !== null ? value : null;
+  } catch {
+    return null;
+  }
 }
