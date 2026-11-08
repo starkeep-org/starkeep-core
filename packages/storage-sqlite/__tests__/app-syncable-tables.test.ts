@@ -92,4 +92,39 @@ describe("registerAppSyncableNamespace", () => {
       .all();
     expect(rows).toEqual([{ record_id: "r1", caption: "A cat", title: "Cat", node_id: "desktop" }]);
   });
+
+  it("refuses a file-index row whose created_at is not a serialized HLC", () => {
+    const db = freshDb();
+    registerAppSyncableNamespace(db, "photos", photosSyncable);
+    const applier = new SqliteAppSyncableApplier(db, new SqliteAppSyncableNamespaceStore(db));
+    const ts = { wallTime: 1_000, counter: 0, nodeId: "phone" };
+    const fileRow = (id: string, createdAt: string) => ({
+      timestamp: ts,
+      appId: "photos",
+      table: "_starkeep_sync_records",
+      op: "insert" as const,
+      row: {
+        id,
+        object_storage_key: id,
+        content_hash: "a".repeat(64),
+        mime_type: "image/jpeg",
+        size_bytes: 3,
+        original_filename: null,
+        origin_app_id: "photos",
+        created_at: createdAt,
+        updated_at: serializeHLC(ts),
+        deleted_at: null,
+      },
+    });
+    // An ISO instant holds two colons, so a split on `:` alone would read it
+    // as a moment in 1970. The applier refuses it before anything is written.
+    expect(() => applier.apply(fileRow("iso.jpg", "2026-10-27T00:00:00.000Z"))).toThrow(
+      'File index row iso.jpg has created_at "2026-10-27T00:00:00.000Z", not a serialized HLC',
+    );
+    applier.apply(fileRow("hlc.jpg", serializeHLC(ts)));
+    const ids = db
+      .prepare(`SELECT id FROM ${appSyncableTableName("photos", "_starkeep_sync_records")}`)
+      .all();
+    expect(ids).toEqual([{ id: "hlc.jpg" }]);
+  });
 });

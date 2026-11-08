@@ -9,6 +9,7 @@ import type {
   ScanCapableApplier,
   ScanSincePage,
 } from "@starkeep/shared-space-api";
+import { requireWellFormedFileIndexRow } from "@starkeep/shared-space-api";
 import {
   buildAppAggregateQuery,
   buildAppRowQuery,
@@ -74,6 +75,7 @@ export class SqliteAppSyncableApplier implements AppSyncableApplier, ScanCapable
         `SqliteAppSyncableApplier: table "${entry.table}" not declared for app "${entry.appId}"`,
       );
     }
+    requireWellFormedFileIndexRow(entry);
 
     const fullName = appSyncableTableName(entry.appId, entry.table);
     const { pkColumns } = tableInfo;

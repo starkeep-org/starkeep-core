@@ -7,6 +7,7 @@ import type {
   ScanCapableApplier,
   ScanSincePage,
 } from "@starkeep/shared-space-api";
+import { requireWellFormedFileIndexRow } from "@starkeep/shared-space-api";
 import {
   buildAppAggregateQuery,
   buildAppRowQuery,
@@ -96,6 +97,7 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
         `DsqlAppSyncableApplier: table "${entry.table}" not declared for app "${entry.appId}"`,
       );
     }
+    requireWellFormedFileIndexRow(entry);
 
     const schemaTable = `app_${entry.appId.replace(/-/g, "_")}.${entry.table}`;
     const { pkColumns } = tableInfo;
