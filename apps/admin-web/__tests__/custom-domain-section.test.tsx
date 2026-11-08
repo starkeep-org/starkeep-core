@@ -239,7 +239,7 @@ describe("Set up", () => {
 describe("Remove", () => {
   const removeRequests = () => requests.filter((r) => r.method === "PUT");
 
-  it("names the Route53 records it deletes, and removes only once approved", async () => {
+  it("names the Route53 record it deletes and the one it keeps, and removes only once approved", async () => {
     config = {
       customDomain: DOMAIN,
       customDomainStatus: {
@@ -252,8 +252,9 @@ describe("Remove", () => {
     await open();
     await userEvent.click(screen.getByRole("button", { name: "Remove" }));
     const dialog = screen.getByRole("dialog");
-    expect(dialog.textContent).toContain(`the A record at ${DOMAIN}`);
-    expect(dialog.textContent).toContain(`_<code>.${DOMAIN}`);
+    expect(dialog.textContent).toContain(`deletes the A record at ${DOMAIN}`);
+    expect(dialog.textContent).toContain(`_<code>.${DOMAIN} stays`);
+    expect(dialog.textContent).toContain("certificate stays on the cloud");
     expect(dialog.textContent).toContain("every link sent with");
     expect(removeRequests()).toEqual([]);
 
@@ -269,15 +270,29 @@ describe("Remove", () => {
     await open();
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
     const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toContain("deletes the certificate requested");
     expect(dialog.textContent).toContain("changes no DNS records");
     expect(within(dialog).getByText(`CNAME ${VALIDATION.name}`)).toBeDefined();
     expect(within(dialog).getByText(`CNAME ${DOMAIN}`)).toBeDefined();
     expect(dialog.textContent).toContain("no link stops working");
+    expect(dialog.textContent).not.toContain("certificate stays on the cloud");
 
     await userEvent.click(within(dialog).getByRole("button", { name: "Keep it" }));
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(removeRequests()).toEqual([]);
     expect(runInstallStream).not.toHaveBeenCalled();
+  });
+});
+
+describe("Remove, for an attached external domain", () => {
+  it("asks to delete the domain's CNAME and keep the validation record", async () => {
+    config = { customDomain: DOMAIN, customDomainStatus: external("active") };
+    await open();
+    await userEvent.click(screen.getByRole("button", { name: "Remove" }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText(`CNAME ${DOMAIN}`)).toBeDefined();
+    expect(dialog.textContent).toContain(`Keep the record CNAME ${VALIDATION.name}`);
+    expect(dialog.textContent).toContain("certificate stays on the cloud");
   });
 });
 

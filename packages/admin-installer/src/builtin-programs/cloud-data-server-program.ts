@@ -135,7 +135,7 @@ export interface CloudDataServerProgramContext {
   customDomain?: CloudDataServerCustomDomain;
 }
 
-export type CloudDataServerCustomDomain =
+export type CloudDataServerCustomDomain = (
   | { name: string; mode: "route53"; hostedZoneId: string }
   | {
       name: string;
@@ -147,7 +147,18 @@ export type CloudDataServerCustomDomain =
        * URL and the signing domain keep the cloudfront.net name.
        */
       canonical: boolean;
-    };
+    }
+) & {
+  /**
+   * True for a certificate the distribution keeps after a removal: no alias, no
+   * A record, never canonical. The certificate stays on the distribution, and
+   * in route53 mode so do its validation record and the stack's certificate,
+   * so ACM keeps renewing it. A later domain swaps it out, or the uninstall
+   * deletes the distribution, and ACM releases it at once after either. See
+   * KeptCertificate in custom-domain.ts.
+   */
+  detached?: boolean;
+};
 
 /**
  * Below this, archiving costs more than not archiving.
@@ -1172,10 +1183,10 @@ export function buildCloudDataServerProgram(
             "starkeep:stackPrefix": ctx.stackPrefix,
           },
         },
-        // After CloudFront moves to its default certificate, ACM can report
-        // this one in use for most of an hour, and a Pulumi delete would fail
-        // the whole run. Pulumi forgets it instead, and the installer's
-        // cleanup deletes it once ACM lets go.
+        // Pulumi forgets the certificate on delete, and the installer's
+        // cleanup deletes it at the end of the run: Pulumi would delete it
+        // right after the swap or the distribution's deletion that releases
+        // it, before ACM reports it free.
         { provider: usEast1Provider, retainOnDelete: true },
       );
       customDomainCertificateArn = certificate.arn;
@@ -1212,7 +1223,7 @@ export function buildCloudDataServerProgram(
       enabled: true,
       comment: `${ctx.stackPrefix} platform CDN`,
       // The distribution keeps answering on its cloudfront.net name too.
-      aliases: customDomain ? [customDomain.name] : [],
+      aliases: customDomain && !customDomain.detached ? [customDomain.name] : [],
       origins: [
         {
           originId: gatewayOriginId,
@@ -1311,7 +1322,7 @@ export function buildCloudDataServerProgram(
       },
     });
 
-    if (customDomain && zoneId) {
+    if (customDomain && !customDomain.detached && zoneId) {
       // An alias record, which also works at a zone apex where a CNAME cannot.
       // A only: the distribution has IPv6 off, so an AAAA alias would answer
       // with addresses that serve nothing. allowOverwrite stays unset, so a
@@ -1334,7 +1345,9 @@ export function buildCloudDataServerProgram(
     // The canonical host: the custom domain once it is attached and DNS sends
     // it here. Route53 mode writes its own alias records above.
     const canonicalHost: pulumi.Output<string> =
-      customDomain && (customDomain.mode === "route53" || customDomain.canonical)
+      customDomain &&
+      !customDomain.detached &&
+      (customDomain.mode === "route53" || customDomain.canonical)
         ? pulumi.output(customDomain.name)
         : distribution.domainName;
     const publicBaseUrl = pulumi.interpolate`https://${canonicalHost}`;

@@ -262,3 +262,55 @@ describe("external mode before DNS points at the distribution", () => {
     expect(r.outputs.cloudfrontDomain).toBe("d1.cloudfront.net");
   });
 });
+
+describe("a kept certificate after a removal", () => {
+  // ACM holds a certificate for up to an hour after CloudFront falls back to
+  // its default certificate, so a removal keeps the certificate on the
+  // distribution and drops only the alias.
+  let route53: Run;
+  let external: Run;
+  beforeAll(async () => {
+    route53 = await run({
+      name: "aaron.starkeep.app",
+      mode: "route53",
+      hostedZoneId: "ZONE1",
+      detached: true,
+    });
+    external = await run({
+      name: "photos.example.com",
+      mode: "external",
+      certificateArn: "arn:aws:acm:us-east-1:111122223333:certificate/external",
+      canonical: false,
+      detached: true,
+    });
+  });
+
+  it("drops the alias but keeps the certificate on the distribution", () => {
+    expect(route53.distribution.inputs.aliases).toEqual([]);
+    expect(
+      String(
+        (route53.distribution.inputs.viewerCertificate as { acmCertificateArn: string })
+          .acmCertificateArn,
+      ),
+    ).toMatch(/#validated$/);
+    expect(external.distribution.inputs.aliases).toEqual([]);
+    expect(external.distribution.inputs.viewerCertificate).toMatchObject({
+      acmCertificateArn: "arn:aws:acm:us-east-1:111122223333:certificate/external",
+    });
+  });
+
+  it("keeps the Route53-mode certificate and its validation record, so ACM keeps renewing it", () => {
+    expect(ofType(route53, "acm/certificate:Certificate")).toHaveLength(1);
+    const records = ofType(route53, "route53/record:Record");
+    expect(records.map((x) => x.inputs.type)).toEqual(["CNAME"]);
+    expect(route53.outputs.customDomainCertificateArn).toBe("arn:fake:starkeep-custom-domain-cert");
+  });
+
+  it("writes no A record, and keeps the cloudfront.net name canonical", () => {
+    for (const r of [route53, external]) {
+      expect(ofType(r, "route53/record:Record").filter((x) => x.inputs.aliases)).toEqual([]);
+      expect(r.outputs.publicBaseUrl).toBe("https://d1.cloudfront.net");
+      expect(r.outputs.cloudfrontSigningDomain).toBe("d1.cloudfront.net");
+    }
+  });
+});

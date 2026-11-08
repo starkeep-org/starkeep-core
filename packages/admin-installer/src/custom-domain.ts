@@ -58,8 +58,34 @@ export interface CustomDomainStatus {
   validationRecord?: ValidationRecord;
   /** The external-mode certificate, which admin-web's "Check now" reads. */
   certificateArn?: string;
+  /** The Route53 zone that holds the domain's records (route53 mode). */
+  hostedZoneId?: string;
   /** The distribution's own name, which the domain's CNAME points at. */
   aliasTarget: string;
+}
+
+/**
+ * A certificate the distribution holds with no alias, after a removal or while
+ * a new external domain waits on validation.
+ *
+ * ACM releases a certificate at once when CloudFront swaps it for another or
+ * deletes the distribution, but holds it for up to an hour after CloudFront
+ * falls back to its default certificate. A removal therefore drops only the
+ * alias, and a later domain or the uninstall releases the certificate in a way
+ * that lets the same run delete it. Findings: plan-pr133-review-fixes-2026-11-07.md,
+ * "Toward deterministic certificate cleanup".
+ */
+export interface KeptCertificate {
+  /** The domain the certificate names, which no longer resolves to the cloud. */
+  name: string;
+  mode: CustomDomainMode;
+  /** The installer's certificate (external mode). */
+  certificateArn?: string;
+  /**
+   * The zone that holds the certificate's validation record (route53 mode).
+   * The record stays, so ACM keeps renewing the certificate.
+   */
+  hostedZoneId?: string;
 }
 
 /** CloudFront takes certificates only from us-east-1. */
@@ -117,12 +143,35 @@ export async function domainPointsAt(name: string, aliasTarget: string): Promise
 
 /** What one install does with the custom domain, decided before `pulumi up`. */
 export interface CustomDomainPlan {
-  /** The program's `customDomain` input, or undefined when nothing attaches. */
+  /**
+   * The program's `customDomain` input, or undefined when the distribution
+   * holds no custom certificate. A kept certificate attaches as `detached`.
+   */
   program?: CloudDataServerCustomDomain;
   /** Whether the custom domain becomes the canonical host this run. */
   canonical: boolean;
   /** The status the install reports, short of the distribution's name. */
   status?: Omit<CustomDomainStatus, "aliasTarget">;
+  /** The certificate the distribution keeps with no alias, if any. */
+  kept?: KeptCertificate;
+}
+
+/**
+ * The certificate the distribution held after the last successful install: the
+ * attached domain's, or a kept one. An external certificate still pending
+ * validation was never attached.
+ */
+export function certificateOnDistribution(
+  status: CustomDomainStatus | undefined,
+  kept: KeptCertificate | undefined,
+): KeptCertificate | undefined {
+  if (status?.mode === "route53") {
+    return { name: status.name, mode: "route53", hostedZoneId: status.hostedZoneId };
+  }
+  if (status?.mode === "external" && status.status !== "pending-validation") {
+    return { name: status.name, mode: "external", certificateArn: status.certificateArn };
+  }
+  return kept;
 }
 
 /**
@@ -133,20 +182,63 @@ export interface CustomDomainPlan {
  * An external domain becomes canonical only once its DNS points at the
  * distribution. Before that, the distribution still answers on the domain, but
  * links and signed URLs keep the cloudfront.net name, which resolves.
+ *
+ * A run that attaches no domain keeps `held`, the certificate already on the
+ * distribution, with no alias: CloudFront then never falls back to its default
+ * certificate, the one change after which ACM holds a certificate for up to an
+ * hour. A run that attaches a domain swaps the held certificate out, and ACM
+ * releases it at once.
  */
 export function planCustomDomain(opts: {
   name?: string;
   zone: { id: string; name: string } | null;
   certificate?: { certificateArn: string; issued: boolean; validationRecord?: ValidationRecord };
   pointsAtDistribution: boolean;
+  /** The certificate on the distribution before this run, from certificateOnDistribution. */
+  held?: KeptCertificate;
 }): CustomDomainPlan {
-  const { name, zone, certificate } = opts;
-  if (!name) return { canonical: false };
+  const { name, zone, certificate, held } = opts;
+  const keep = (status?: CustomDomainPlan["status"]): CustomDomainPlan => {
+    if (!held) return { canonical: false, status };
+    if (held.mode === "route53") {
+      if (!held.hostedZoneId) {
+        throw new Error(`No Route53 zone recorded for the kept certificate of ${held.name}.`);
+      }
+      return {
+        program: {
+          name: held.name,
+          mode: "route53",
+          hostedZoneId: held.hostedZoneId,
+          detached: true,
+        },
+        canonical: false,
+        status,
+        kept: held,
+      };
+    }
+    if (!held.certificateArn) {
+      throw new Error(`No certificate recorded for the kept external domain ${held.name}.`);
+    }
+    return {
+      program: {
+        name: held.name,
+        mode: "external",
+        certificateArn: held.certificateArn,
+        canonical: false,
+        detached: true,
+      },
+      canonical: false,
+      status,
+      kept: held,
+    };
+  };
+
+  if (!name) return keep();
   if (zone) {
     return {
       program: { name, mode: "route53", hostedZoneId: zone.id },
       canonical: true,
-      status: { name, mode: "route53", status: "active" },
+      status: { name, mode: "route53", status: "active", hostedZoneId: zone.id },
     };
   }
   if (!certificate) throw new Error(`No certificate for external-mode domain ${name}.`);
@@ -156,9 +248,7 @@ export function planCustomDomain(opts: {
     validationRecord: certificate.validationRecord,
     certificateArn: certificate.certificateArn,
   };
-  if (!certificate.issued) {
-    return { canonical: false, status: { ...external, status: "pending-validation" } };
-  }
+  if (!certificate.issued) return keep({ ...external, status: "pending-validation" });
   const canonical = opts.pointsAtDistribution;
   return {
     program: { name, mode: "external", certificateArn: certificate.certificateArn, canonical },
@@ -194,6 +284,8 @@ export interface CustomDomainConfigFields {
    * can delete, and `customDomainStatus` never names it.
    */
   customDomainAttempted?: string;
+  /** The certificate the distribution kept with no alias after the last install. */
+  customDomainKept?: KeptCertificate;
 }
 
 /**
@@ -202,14 +294,14 @@ export interface CustomDomainConfigFields {
  * - `starting`, written before the install touches AWS: the domain the run
  *   attaches becomes `customDomainAttempted`. A run that names no domain
  *   keeps an earlier attempt, so the attempt's leftovers stay in play.
- * - `succeeded`: the run's status replaces the attempt.
+ * - `succeeded`: the run's status and kept certificate replace the attempt.
  * - `failed`: nothing changes, so the attempt carries into the next run.
  */
 export function nextCustomDomainConfig<T extends CustomDomainConfigFields>(
   previous: T,
   outcome:
     | { stage: "starting" }
-    | { stage: "succeeded"; status?: CustomDomainStatus }
+    | { stage: "succeeded"; status?: CustomDomainStatus; kept?: KeptCertificate }
     | { stage: "failed" },
 ): T {
   const next = { ...previous };
@@ -221,6 +313,8 @@ export function nextCustomDomainConfig<T extends CustomDomainConfigFields>(
       delete next.customDomainAttempted;
       if (outcome.status) next.customDomainStatus = outcome.status;
       else delete next.customDomainStatus;
+      if (outcome.kept) next.customDomainKept = outcome.kept;
+      else delete next.customDomainKept;
       return next;
     case "failed":
       return next;
@@ -234,19 +328,22 @@ export function nextCustomDomainConfig<T extends CustomDomainConfigFields>(
  */
 export function customDomainInstallInput(config: {
   customDomain?: string;
-  customDomainStatus?: { name: string };
+  customDomainStatus?: CustomDomainStatus;
   customDomainAttempted?: string;
+  customDomainKept?: KeptCertificate;
   cloudfrontDomain?: string;
 }): {
   customDomain?: string;
   previousCustomDomain?: string;
   attemptedCustomDomain?: string;
+  heldCertificate?: KeptCertificate;
   cloudfrontDomain?: string;
 } {
   return {
     customDomain: config.customDomain || undefined,
     previousCustomDomain: config.customDomainStatus?.name,
     attemptedCustomDomain: config.customDomainAttempted,
+    heldCertificate: certificateOnDistribution(config.customDomainStatus, config.customDomainKept),
     cloudfrontDomain: config.cloudfrontDomain,
   };
 }
@@ -405,15 +502,15 @@ export interface TaggedCertificate {
 }
 
 /**
- * The certificates in us-east-1 for one of `domains` that carry every one of
- * `tags`. A summary for any other domain is skipped before its tags are read,
- * so the cost tracks the domains in play rather than the account's
- * certificates.
+ * The certificates in us-east-1 that carry every one of `tags`, for one of
+ * `domains` when given. A summary for any other domain is skipped before its
+ * tags are read, so the cost tracks the domains in play rather than the
+ * account's certificates.
  */
 async function findTaggedCertificates(
   acm: ACMClient,
   tags: Record<string, string>,
-  domains: ReadonlySet<string>,
+  domains?: ReadonlySet<string>,
 ): Promise<TaggedCertificate[]> {
   const found: TaggedCertificate[] = [];
   const paginator = paginateListCertificates(
@@ -424,7 +521,7 @@ async function findTaggedCertificates(
   for await (const page of paginator) {
     for (const summary of page.CertificateSummaryList ?? []) {
       if (!summary.CertificateArn || !summary.DomainName) continue;
-      if (!domains.has(summary.DomainName.toLowerCase())) continue;
+      if (domains && !domains.has(summary.DomainName.toLowerCase())) continue;
       const listed = await acm.send(
         new ListTagsForCertificateCommand({ CertificateArn: summary.CertificateArn }),
       );
@@ -443,23 +540,20 @@ async function findTaggedCertificates(
 }
 
 /**
- * This deployment's certificates, of either mode, for the domains an install
- * has in play. One install lists once and hands the result to both
+ * This deployment's certificates, of either mode: for the domains an install
+ * has in play, or every one when `domains` is omitted, as the uninstall needs.
+ * One install lists once and hands the result to both
  * ensureExternalCertificate and deleteUnusedCertificates.
- *
- * A certificate for an older domain outside the set, whose deletion failed,
- * stays behind. It costs nothing, and `scripts/teardown-bootstrap.sh` sweeps
- * every certificate tagged with the prefix.
  */
 export async function listDeploymentCertificates(opts: {
   stackPrefix: string;
-  domains: readonly string[];
+  domains?: readonly string[];
   creds: AwsCredentials;
 }): Promise<TaggedCertificate[]> {
   return findTaggedCertificates(
     acmClient(opts.creds),
     deploymentTags(opts.stackPrefix),
-    new Set(opts.domains),
+    opts.domains ? new Set(opts.domains) : undefined,
   );
 }
 
@@ -556,10 +650,12 @@ function toValidationRecord(record: ResourceRecord | undefined): ValidationRecor
 /**
  * Delete every certificate in the listing except those in `keepArns`.
  *
- * Runs after `pulumi up` or `pulumi destroy`, which has already detached any
- * certificate the run no longer uses: after the operator removes the domain,
- * changes it, or moves its zone. The Pulumi program retains its certificate on
- * delete, so this is also where a Route53-mode certificate goes.
+ * Runs after `pulumi up` or `pulumi destroy`. The certificates it deletes left
+ * the distribution by a swap or with the distribution itself, and ACM releases
+ * a certificate at once after either. A removal never detaches a certificate:
+ * the distribution keeps it with no alias. A delete that fails therefore means
+ * an assumption broke, and the run stops with an error that names the
+ * certificate and what ACM says still uses it. A rerun deletes it.
  */
 export async function deleteUnusedCertificates(opts: {
   keepArns: readonly (string | undefined)[];
@@ -577,12 +673,19 @@ export async function deleteUnusedCertificates(opts: {
       // ensureExternalCertificate already deleted a dead certificate from the
       // same listing.
       if ((err as { name?: string }).name === "ResourceNotFoundException") continue;
-      // ACM can report a certificate in use for most of an hour after
-      // CloudFront detached it. The run has finished its real work by now. The
-      // next run that has the domain in play, or the bootstrap teardown,
-      // deletes what this one could not.
-      console.warn(
-        `Could not delete certificate ${cert.arn}: ${err instanceof Error ? err.message : String(err)}`,
+      let inUseBy: string[] = [];
+      try {
+        const described = await acm.send(
+          new DescribeCertificateCommand({ CertificateArn: cert.arn }),
+        );
+        inUseBy = described.Certificate?.InUseBy ?? [];
+      } catch {
+        // The error below names the certificate either way.
+      }
+      throw new Error(
+        `Could not delete certificate ${cert.arn} for ${cert.domain}` +
+          (inUseBy.length > 0 ? `, which ACM reports in use by ${inUseBy.join(", ")}` : "") +
+          `: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }

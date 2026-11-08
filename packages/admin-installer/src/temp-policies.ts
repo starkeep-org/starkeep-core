@@ -382,6 +382,12 @@ export function buildTempInstallCloudDataServerPolicy(
   accountId: string,
   region: string,
   customDomains: readonly string[] = [],
+  /**
+   * The uninstall's grants: the certificate reads and deletes even when no
+   * domain is in play, because the uninstall deletes every certificate tagged
+   * with the prefix.
+   */
+  opts: { sweepCertificates?: boolean } = {},
 ): string {
   const appId = "cloud-data-server";
   const pulumiStateBucket = `${stackPrefix}-pulumi-state-${accountId}-${region}`;
@@ -733,14 +739,15 @@ export function buildTempInstallCloudDataServerPolicy(
           StringEquals: { "iam:AWSServiceName": "dsql.amazonaws.com" },
         },
       },
-      ...customDomainStatements(stackPrefix, customDomains),
+      ...customDomainStatements(stackPrefix, customDomains, opts.sweepCertificates ?? false),
     ],
   });
 }
 
 /**
  * The grants an install needs for the distribution's custom domain, or none
- * when the install names no domain.
+ * when the install names no domain. With `sweepCertificates`, the uninstall's
+ * certificate grants come without any domain's record grants.
  *
  * `customDomains` holds the domain this install attaches and any domain the
  * previous install attached, so a removal or a change can still delete the old
@@ -751,8 +758,12 @@ export function buildTempInstallCloudDataServerPolicy(
  * alias records, and `_*.<domain>`, the shape of ACM's validation record. Route53
  * compares lowercase names without the trailing dot.
  */
-function customDomainStatements(stackPrefix: string, customDomains: readonly string[]): object[] {
-  if (customDomains.length === 0) return [];
+function customDomainStatements(
+  stackPrefix: string,
+  customDomains: readonly string[],
+  sweepCertificates: boolean,
+): object[] {
+  if (customDomains.length === 0 && !sweepCertificates) return [];
   return [
     {
       // Every verb but the record writes and the certificate delete, on
@@ -787,20 +798,23 @@ function customDomainStatements(stackPrefix: string, customDomains: readonly str
       Resource: "*",
       Condition: { StringEquals: { "aws:ResourceTag/starkeep:stackPrefix": stackPrefix } },
     },
-    {
-      Sid: "TempInstallCustomDomainRecords",
-      Effect: "Allow",
-      Action: "route53:ChangeResourceRecordSets",
-      Resource: "arn:aws:route53:::hostedzone/*",
-      Condition: {
-        "ForAllValues:StringLike": {
-          "route53:ChangeResourceRecordSetsNormalizedRecordNames": customDomains.flatMap((d) => [
-            d,
-            `_*.${d}`,
-          ]),
-        },
-      },
-    },
+    ...(customDomains.length === 0
+      ? []
+      : [
+          {
+            Sid: "TempInstallCustomDomainRecords",
+            Effect: "Allow",
+            Action: "route53:ChangeResourceRecordSets",
+            Resource: "arn:aws:route53:::hostedzone/*",
+            Condition: {
+              "ForAllValues:StringLike": {
+                "route53:ChangeResourceRecordSetsNormalizedRecordNames": customDomains.flatMap(
+                  (d) => [d, `_*.${d}`],
+                ),
+              },
+            },
+          },
+        ]),
   ];
 }
 

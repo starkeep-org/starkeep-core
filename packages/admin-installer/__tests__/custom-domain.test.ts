@@ -327,7 +327,7 @@ describe("deleteUnusedCertificates", () => {
     ]);
   });
 
-  it("leaves a certificate ACM still reports in use for the next run", async () => {
+  it("stops with an error naming a certificate ACM still reports in use", async () => {
     acm.on(ListCertificatesCommand).resolves({
       CertificateSummaryList: [
         { CertificateArn: "arn:busy", DomainName: "old.example.com" },
@@ -344,10 +344,25 @@ describe("deleteUnusedCertificates", () => {
       domains: ["old.example.com", "older.example.com"],
       creds: CREDS,
     });
+    acm.on(DescribeCertificateCommand, { CertificateArn: "arn:busy" }).resolves({
+      Certificate: { InUseBy: ["arn:aws:cloudfront::1:distribution/E1"] },
+    });
     await expect(
       deleteUnusedCertificates({ keepArns: [], certificates, creds: CREDS }),
-    ).resolves.toBeUndefined();
-    expect(acm.commandCalls(DeleteCertificateCommand)).toHaveLength(2);
+    ).rejects.toThrow(/arn:busy for old\.example\.com, which ACM reports in use by .*E1/);
+    expect(acm.commandCalls(DeleteCertificateCommand)).toHaveLength(1);
+  });
+
+  it("lists every certificate of the deployment when no domains are given", async () => {
+    acm.on(ListCertificatesCommand).resolves({
+      CertificateSummaryList: [
+        { CertificateArn: "arn:a", DomainName: "a.example.com" },
+        { CertificateArn: "arn:b", DomainName: "b.example.com" },
+      ],
+    });
+    acm.on(ListTagsForCertificateCommand).resolves({ Tags: EXTERNAL_TAGS });
+    const certificates = await listDeploymentCertificates({ stackPrefix: "sk", creds: CREDS });
+    expect(certificates.map((c) => c.arn)).toEqual(["arn:a", "arn:b"]);
   });
 });
 

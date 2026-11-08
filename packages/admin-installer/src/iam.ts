@@ -619,7 +619,8 @@ function canonicalJson(obj: unknown): string {
  * Attach the wider temp-install policy used only by the cloud-data-server
  * built-in app's install/update — covers DSQL cluster management, S3 bucket
  * creation, API Gateway management, and the foundational Lambda + log group.
- * `customDomains` adds the custom domain's certificate and record grants; see
+ * `customDomains` adds the custom domain's certificate and record grants, and
+ * `sweepCertificates` the uninstall's certificate grants; see
  * buildTempInstallCloudDataServerPolicy.
  *
  * Returns true if PutRolePolicy was actually called (policy was new or changed),
@@ -632,6 +633,7 @@ export async function attachTempInstallCloudDataServerPolicy(
   region: string,
   managerCreds: AwsCredentials,
   customDomains: readonly string[] = [],
+  opts: { sweepCertificates?: boolean } = {},
 ): Promise<boolean> {
   const iam = makeIamClient(managerCreds);
   const roleName = `${stackPrefix}-app-cloud-data-server-role`;
@@ -641,6 +643,7 @@ export async function attachTempInstallCloudDataServerPolicy(
     accountId,
     region,
     customDomains,
+    opts,
   );
 
   // Skip PutRolePolicy if the live policy content is identical to what we'd

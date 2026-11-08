@@ -414,56 +414,36 @@ else
 fi
 
 # ── Step 2c: Delete custom-domain certificates ───────────────────────────────
-# The cloud-data-server teardown keeps an external-DNS domain's certificate, so
-# a reinstall attaches it without new DNS validation. A full wipe removes it,
-# along with any stack certificate a removal or a teardown left. CloudFront takes
-# certificates only from us-east-1, so they live there whatever $REGION is.
-# ACM can report a certificate in use for most of an hour after CloudFront let
-# go of it, so the step retries a certificate in use until one shared deadline.
+# teardown-cloud-data-server.sh above deletes every certificate tagged with the
+# prefix after it deletes the distribution, which releases each one at once.
+# This step deletes any certificate an earlier, failed run left. CloudFront
+# takes certificates only from us-east-1, so they live there whatever $REGION
+# is. Each delete runs once: a certificate still in use means a distribution
+# still holds it, and the script names the distribution and fails at the end.
 step "Deleting custom-domain certificates tagged starkeep:stackPrefix=${STACK_PREFIX} (us-east-1)"
 CERT_ARNS=$(aws acm list-certificates --region us-east-1 \
   --certificate-statuses PENDING_VALIDATION ISSUED INACTIVE EXPIRED VALIDATION_TIMED_OUT REVOKED FAILED \
   --query 'CertificateSummaryList[].CertificateArn' --output text 2>/dev/null || true)
 CERTS_DELETED=false
-CERT_DEADLINE=$(( $(date +%s) + 75 * 60 ))
+CERT_FAILURES=()
 if [ -n "$CERT_ARNS" ] && [ "$CERT_ARNS" != "None" ]; then
   for arn in $CERT_ARNS; do
     owner=$(aws acm list-tags-for-certificate --region us-east-1 --certificate-arn "$arn" \
       --query "Tags[?Key=='starkeep:stackPrefix'].Value | [0]" --output text 2>/dev/null || true)
     [ "$owner" = "$STACK_PREFIX" ] || continue
     CERTS_DELETED=true
-    waited=0
-    while :; do
-      if err=$(aws acm delete-certificate --region us-east-1 --certificate-arn "$arn" 2>&1); then
-        echo "  Deleted $arn"
-        break
-      fi
-      if [[ "$err" != *ResourceInUseException* ]]; then
-        echo "  Could not delete $arn: $err; continuing"
-        break
-      fi
-      # A distribution that still names the certificate never lets go: the
-      # cloud-data-server teardown failed to detach or delete it.
-      holder=""
-      for dist in $(aws acm describe-certificate --region us-east-1 --certificate-arn "$arn" \
-          --query 'Certificate.InUseBy[]' --output text 2>/dev/null || true); do
-        [[ "$dist" == arn:aws:cloudfront::*:distribution/* ]] || continue
-        current=$(aws cloudfront get-distribution-config --id "${dist##*/}" \
-          --query 'DistributionConfig.ViewerCertificate.ACMCertificateArn' --output text 2>/dev/null || true)
-        if [ "$current" = "$arn" ]; then holder="${dist##*/}"; fi
-      done
-      if [ -n "$holder" ]; then
-        echo "  $arn is attached to distribution $holder; run teardown-cloud-data-server.sh, then this script again"
-        break
-      fi
-      if [ "$(date +%s)" -ge "$CERT_DEADLINE" ]; then
-        echo "  $arn is still in use in ACM after the wait; run this script again later to delete it"
-        break
-      fi
-      [ $(( waited % 300 )) -eq 0 ] && echo "  $arn is still in use in ACM; waiting for ACM to let go (up to 75 minutes)…"
-      sleep 30
-      waited=$(( waited + 30 ))
-    done
+    if err=$(aws acm delete-certificate --region us-east-1 --certificate-arn "$arn" 2>&1); then
+      echo "  Deleted $arn"
+      continue
+    fi
+    holders=$(aws acm describe-certificate --region us-east-1 --certificate-arn "$arn" \
+      --query 'Certificate.InUseBy[]' --output text 2>/dev/null || true)
+    if [ -n "$holders" ] && [ "$holders" != "None" ]; then
+      echo "  ERROR $arn is in use by $holders; run teardown-cloud-data-server.sh, then this script again"
+    else
+      echo "  ERROR could not delete $arn: $err"
+    fi
+    CERT_FAILURES+=("$arn")
   done
 fi
 [ "$CERTS_DELETED" = true ] || skip
@@ -575,4 +555,9 @@ else
 fi
 
 echo ""
+if [ "${#CERT_FAILURES[@]}" -gt 0 ]; then
+  echo "Bootstrap teardown finished, but these certificates could not be deleted:"
+  printf '  %s\n' "${CERT_FAILURES[@]}"
+  exit 1
+fi
 echo "Bootstrap teardown complete."

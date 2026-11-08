@@ -506,7 +506,9 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
               </ul>
               <p>
                 The update changes no other record, and stops if {confirmSetUp.domain} already has
-                an A, AAAA or CNAME record. Removing the domain later deletes both records.
+                an A, AAAA or CNAME record. Removing the domain later deletes the A record. The
+                CNAME record stays until another domain replaces the certificate or the cloud is
+                removed.
               </p>
             </div>
           ) : (
@@ -570,28 +572,51 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
             ) : (
               <p>Links never used {domain}, so no link stops working.</p>
             )}
-            {status?.mode === "route53" ? (
+            {status?.status === "pending-validation" ? (
+              <>
+                <p>
+                  The cloud update deletes the certificate requested for {domain}, which the cloud
+                  never used, and changes no DNS records. Afterwards, delete these records at your
+                  DNS provider if you added them:
+                </p>
+                <ul className="flex flex-col gap-1 font-mono break-all text-foreground">
+                  {status.validationRecord && <li>CNAME {status.validationRecord.name}</li>}
+                  <li>CNAME {domain}</li>
+                </ul>
+              </>
+            ) : status?.mode === "route53" ? (
               <p>
-                The cloud update deletes two records from the domain's Route53 zone in this AWS
-                account: the A record at {domain}, and the CNAME record at _&lt;code&gt;.{domain}{" "}
-                that proved ownership. The update deletes no other record.
+                The cloud update deletes the A record at {domain} from the domain's Route53 zone in
+                this AWS account. The CNAME record at _&lt;code&gt;.{domain} stays, so the
+                certificate keeps renewing. The update changes no other record.
               </p>
             ) : (
               <>
                 <p>
-                  The cloud update changes no DNS records. Afterwards, delete these records at your
-                  DNS provider if you added them:
+                  The cloud update changes no DNS records. Afterwards, delete this record at your
+                  DNS provider:
                 </p>
                 <ul className="flex flex-col gap-1 font-mono break-all text-foreground">
-                  {status?.validationRecord && <li>CNAME {status.validationRecord.name}</li>}
                   <li>CNAME {domain}</li>
                 </ul>
+                {status?.validationRecord && (
+                  <p>
+                    Keep the record{" "}
+                    <span className="font-mono break-all text-foreground">
+                      CNAME {status.validationRecord.name}
+                    </span>
+                    , so the certificate keeps renewing.
+                  </p>
+                )}
               </>
             )}
-            <p>
-              The update also deletes the domain's certificate. When ACM still reports the
-              certificate in use, the certificate stays, at no cost, until the cloud is torn down.
-            </p>
+            {status?.status !== "pending-validation" && (
+              <p>
+                The domain's certificate stays on the cloud, unused and at no cost. Setting up{" "}
+                {domain} again reuses it. Setting up another domain, or removing the cloud, deletes
+                it.
+              </p>
+            )}
           </div>
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => setConfirmRemove(false)}>
