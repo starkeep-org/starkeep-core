@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { REPO_ROOT, STREAM_COMMANDS, type StreamCommandId } from "../lib/exec-commands";
 import type { STSCredentials } from "../lib/cognito-auth";
+import { installerEnv, withoutAwsVariables } from "@starkeep/admin-installer/aws-env";
 
 export async function POST(req: Request) {
   const body = (await req.json()) as {
@@ -17,13 +18,11 @@ export async function POST(req: Request) {
     return Response.json({ error: "Credentials required" }, { status: 400 });
   }
 
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  if (credentials) {
-    env.AWS_ACCESS_KEY_ID = credentials.accessKeyId;
-    env.AWS_SECRET_ACCESS_KEY = credentials.secretAccessKey;
-    env.AWS_SESSION_TOKEN = credentials.sessionToken;
-    env.AWS_REGION = credentials.region;
-  }
+  // Never the shell's AWS variables: a command runs with the wizard's
+  // credentials or with none.
+  const env = credentials
+    ? installerEnv(credentials, credentials.region)
+    : withoutAwsVariables(process.env);
 
   const [executable, ...args] = cmd.args;
   const encoder = new TextEncoder();

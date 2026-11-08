@@ -59,6 +59,7 @@ import {
   getIdentityPoolCredentials,
 } from "../src/cognito-auth";
 import { prompt } from "../src/cli-prompt";
+import { useOnlyAwsCredentials, withoutAwsVariables } from "../src/aws-env";
 import {
   loadStarkeepCliConfig,
   resolveAppDir,
@@ -75,8 +76,9 @@ function buildAppBundle(appDir: string, appBasePath: string): Buffer {
     const result = spawnSync("pnpm", ["bundle"], {
       cwd: appDir,
       stdio: "inherit",
+      // The app's own build gets none of the installer's AWS credentials.
       env: {
-        ...process.env,
+        ...withoutAwsVariables(process.env),
         STARKEEP_APP_BASE_PATH: appBasePath,
         STARKEEP_BUNDLE_OUT: distZip,
       },
@@ -203,6 +205,14 @@ if (nonInteractive) {
     );
     process.exit(1);
   }
+  useOnlyAwsCredentials(
+    {
+      accessKeyId: AWS_ACCESS_KEY_ID,
+      secretAccessKey: AWS_SECRET_ACCESS_KEY,
+      sessionToken: AWS_SESSION_TOKEN,
+    },
+    process.env.AWS_REGION ?? region,
+  );
 } else {
   const email = await prompt("Email: ");
   const password = await prompt("Password: ", true);
@@ -219,10 +229,7 @@ if (nonInteractive) {
   });
   console.log("Fetching temporary AWS credentials…");
   const creds = await getIdentityPoolCredentials(config, idToken);
-  process.env.AWS_ACCESS_KEY_ID = creds.accessKeyId;
-  process.env.AWS_SECRET_ACCESS_KEY = creds.secretAccessKey;
-  process.env.AWS_SESSION_TOKEN = creds.sessionToken;
-  process.env.AWS_REGION = region;
+  useOnlyAwsCredentials(creds, region);
 }
 
 // Derive account ID from STS if not already in config.
