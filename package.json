@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "preinstall": "node scripts/check-pnpm-on-path.mjs",
     "postinstall": "turbo run build",
     "build": "turbo run build",
     "test": "turbo run test",
