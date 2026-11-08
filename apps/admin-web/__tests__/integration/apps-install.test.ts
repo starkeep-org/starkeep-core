@@ -122,9 +122,9 @@ describe("local-data-server error paths", () => {
   it("forwards the LDS validator rejection for a manifest that scans but fails validation", async () => {
     const res = await install({ appId: "invalid-app", approved: true });
     expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string; body: string };
-    expect(body.error).toBe("Install failed");
-    expect(body.body).toContain("ManifestValidationError");
+    const body = (await res.json()) as { error: string; details: string[] };
+    expect(body.error).toBe("The app's manifest failed validation.");
+    expect(body.details.length).toBeGreaterThan(0);
   });
 
   it("returns 502 when the local-data-server is unreachable", async () => {

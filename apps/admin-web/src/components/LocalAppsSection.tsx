@@ -47,6 +47,9 @@ export function LocalAppsSection({
   const [runStatus, setRunStatus] = useState<Record<string, DaemonStatus>>({});
   // App whose install-step ledger is currently displayed (null when closed).
   const [stepsOpenFor, setStepsOpenFor] = useState<string | null>(null);
+  // Why the last install failed, shown in the step-ledger dialog that the
+  // failure opens. Cleared when the dialog closes.
+  const [installFailure, setInstallFailure] = useState<InstallFailure | null>(null);
   // Per-app pending transition. We keep this set until the polled status
   // reflects the target state (running for "start", not-running for "stop"),
   // so the spinner survives the first poll round.
@@ -156,6 +159,12 @@ export function LocalAppsSection({
     setPendingConsent(null);
     setBusyAppId(entry.appId);
     setError(null);
+    // A failed install opens the step ledger with the reason on top, so the
+    // operator sees the error and the step the installer stopped at together.
+    const fail = (failure: Omit<InstallFailure, "appId">) => {
+      setInstallFailure({ appId: entry.appId, ...failure });
+      setStepsOpenFor(entry.appId);
+    };
     try {
       const res = await fetch("/api/apps/install", {
         method: "POST",
@@ -163,15 +172,16 @@ export function LocalAppsSection({
         body: JSON.stringify({ appId: entry.appId, approved: true }),
       });
       if (!res.ok) {
-        const data = (await res.json().catch(() => null)) as { error?: string } | null;
-        // Pop the step ledger so the operator can see which step failed
-        // without having to crack open the sqlite DB.
-        setStepsOpenFor(entry.appId);
-        throw new Error(data?.error ?? `install failed: ${res.status}`);
+        const data = (await res.json().catch(() => null)) as {
+          error?: string;
+          details?: string[];
+        } | null;
+        fail({ error: data?.error ?? `Install failed: ${res.status}`, details: data?.details });
+        return;
       }
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      fail({ error: err instanceof Error ? err.message : String(err) });
     } finally {
       setBusyAppId(null);
     }
@@ -386,7 +396,14 @@ export function LocalAppsSection({
         />
       )}
 
-      <InstallStepsDialog appId={stepsOpenFor} onClose={() => setStepsOpenFor(null)} />
+      <InstallStepsDialog
+        appId={stepsOpenFor}
+        failure={installFailure?.appId === stepsOpenFor ? installFailure : null}
+        onClose={() => {
+          setStepsOpenFor(null);
+          setInstallFailure(null);
+        }}
+      />
     </div>
   );
 }
@@ -394,11 +411,22 @@ export function LocalAppsSection({
 // ---------------------------------------------------------------------------
 // Install-step ledger dialog. Reads from /api/apps/[appId]/install-status,
 // which proxies the local-data-server's step ledger. Opens on demand (Steps
-// button) and automatically when an install fails so the operator can see
-// which step the installer got stuck on.
+// button) and automatically when an install fails, with the failure on top,
+// so the operator can see why and at which step the installer stopped.
 // ---------------------------------------------------------------------------
 
-function InstallStepsDialog({ appId, onClose }: { appId: string | null; onClose: () => void }) {
+/** An install failure as `/api/apps/install` reports it. */
+type InstallFailure = { appId: string; error: string; details?: string[] };
+
+function InstallStepsDialog({
+  appId,
+  failure,
+  onClose,
+}: {
+  appId: string | null;
+  failure: InstallFailure | null;
+  onClose: () => void;
+}) {
   const [steps, setSteps] = useState<InstallStep[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -437,8 +465,27 @@ function InstallStepsDialog({ appId, onClose }: { appId: string | null; onClose:
     >
       <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
-          <DialogTitle>Install steps for {appId ?? "app"}</DialogTitle>
+          <DialogTitle>
+            {failure ? `Install of ${appId} failed` : `Install steps for ${appId ?? "app"}`}
+          </DialogTitle>
         </DialogHeader>
+
+        {failure && (
+          <Alert variant="destructive">
+            <AlertTitle>{failure.error}</AlertTitle>
+            {failure.details && failure.details.length > 0 && (
+              <AlertDescription>
+                <ul className="list-disc pl-4">
+                  {failure.details.map((d) => (
+                    <li key={d} className="font-mono text-xs break-words">
+                      {d}
+                    </li>
+                  ))}
+                </ul>
+              </AlertDescription>
+            )}
+          </Alert>
+        )}
 
         {loading && <p className="text-sm text-muted-foreground">Loading…</p>}
 
@@ -451,7 +498,9 @@ function InstallStepsDialog({ appId, onClose }: { appId: string | null; onClose:
 
         {!loading && !error && steps !== null && steps.length === 0 && (
           <p className="text-sm text-muted-foreground">
-            No install or uninstall steps recorded for this app.
+            {failure
+              ? "The install stopped before the installer recorded its first step."
+              : "No install or uninstall steps recorded for this app."}
           </p>
         )}
 
