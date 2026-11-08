@@ -868,7 +868,7 @@ describe("a mobile app through the broker", () => {
       { ...as(A, "GET", "/app-data/files", undefined, PHOTOS), queryStringParameters: {} },
       context,
     );
-    expect(res.statusCode, JSON.stringify({ pushed: pushed.body, list: res.body })).toBe(400);
+    expect(res.statusCode, JSON.stringify({ pushed: pushed.body, list: res.body })).toBe(500);
     expect(JSON.parse(res.body).error).toBe(
       `File index row apps/${PHOTOS}/${A}/syncable/covers/iso.jpg has created_at ` +
         `"2026-10-27T00:00:00.000Z", not a serialized HLC`,

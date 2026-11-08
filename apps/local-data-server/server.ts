@@ -32,7 +32,10 @@ import {
   SqliteAppSyncableApplier,
   sqliteCompiler as qb,
 } from "../../packages/storage-sqlite/src/index.js";
-import { createAppSpecificFactory } from "../../packages/shared-space-api/src/app-syncable/factory.js";
+import {
+  createAppSpecificFactory,
+  CorruptFileIndexRowError,
+} from "../../packages/shared-space-api/src/app-syncable/factory.js";
 import { queryParamsFrom } from "../../packages/shared-space-api/src/query/params.js";
 import { appFileListingJson } from "../../packages/shared-space-api/src/app-syncable/file-listing.js";
 import {
@@ -3055,7 +3058,9 @@ async function main() {
             json(res, appFileListingJson(listing));
             return;
           } catch (err) {
-            res.writeHead(400);
+            // A row the index cannot read is the server's fault, not the
+            // request's.
+            res.writeHead(err instanceof CorruptFileIndexRowError ? 500 : 400);
             json(res, { error: err instanceof Error ? err.message : String(err) });
             return;
           }
