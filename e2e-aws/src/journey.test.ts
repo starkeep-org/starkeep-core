@@ -43,7 +43,7 @@ function configuredApp(dir: string): JourneyApp {
   const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as {
     id?: string;
     infraRequirements?: {
-      labelKeys?: Array<{ key: string; sizeClass?: boolean }>;
+      labelKeys?: Array<{ key: string }>;
       appSpecificSyncable?: { tables?: Array<{ name: string; columns: Array<{ name: string }> }> };
       compute?: { handlers?: Array<{ routes?: string[]; auth?: string }> };
     };
@@ -55,13 +55,13 @@ function configuredApp(dir: string): JourneyApp {
   // — a stale name would fail as a broker 400 and read as a platform fault.
   const ir = manifest.infraRequirements ?? {};
 
-  // Any two declared keys that are not the size-class key. A size-class label
-  // claims the record is a derived rung of some original, which would make the
-  // later variant-resolution reads treat the record as its own variant.
-  const keys = (ir.labelKeys ?? []).filter((k) => !k.sizeClass).map((k) => k.key);
+  // Any two declared keys other than `variant`. A `variant` label claims the
+  // record is a derived rung of some original, which would make the later
+  // variant-resolution reads treat the record as its own variant.
+  const keys = (ir.labelKeys ?? []).filter((k) => k.key !== "variant").map((k) => k.key);
   if (keys.length < 2) {
     throw new Error(
-      `${manifest.id} declares ${keys.length} non-size-class label key(s); the cross-app ` +
+      `${manifest.id} declares ${keys.length} label key(s) other than variant; the cross-app ` +
         "label step needs two (one written valueless, one written with a value).",
     );
   }

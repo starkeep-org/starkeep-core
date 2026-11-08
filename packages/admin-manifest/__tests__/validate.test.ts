@@ -75,6 +75,40 @@ describe("protocolMinVersion", () => {
   });
 });
 
+describe("unknown keys (#137)", () => {
+  it("rejects a misspelled field and names the field it resembles", () => {
+    const result = validateManifest(minimal({ localrun: { command: "pnpm", args: ["start"] } }));
+    expect(result.valid).toBe(false);
+    expect(result.errors).toEqual(['unknown key "localrun" (did you mean "localRun"?)']);
+  });
+
+  it("names the path of a stray key inside a nested object", () => {
+    const result = validateManifest(
+      minimal({
+        infraRequirements: {
+          fileAccess: [
+            { types: ["image/jpeg"], acess: "read", access: "read", rationale: "Shows photos." },
+          ],
+        },
+      }),
+    );
+    expect(result.errors).toEqual([
+      'infraRequirements.fileAccess.0: unknown key "acess" (did you mean "access"?)',
+    ]);
+  });
+
+  it("offers no suggestion for a key unlike any declared one", () => {
+    const result = validateManifest(minimal({ color: "blue" }));
+    expect(result.errors).toEqual(['unknown key "color"']);
+  });
+
+  it("accepts description, which the Dashboard cards show", () => {
+    const result = validateManifest(minimal({ description: "Rolls dice." }));
+    expect(result.errors).toEqual([]);
+    expect(result.manifest?.description).toBe("Rolls dice.");
+  });
+});
+
 describe("id-bound privilege flags", () => {
   it("rejects fileAccessAll for any id except starkeep-drive", () => {
     const result = validateManifest(minimal({ infraRequirements: { fileAccessAll: true } }));

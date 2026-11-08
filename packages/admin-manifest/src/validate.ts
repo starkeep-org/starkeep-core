@@ -1,5 +1,6 @@
 import type { AppManifest } from "./schema.js";
 import { appManifestSchema } from "./schema.js";
+import { z } from "zod";
 import { isKnownType, typeCategory, isGrantableCategory } from "@starkeep/protocol-primitives";
 import {
   declaredHandlerRoutes,
@@ -23,6 +24,78 @@ const RESERVED_PREFIX = "@starkeep/";
 // Only the User-Data-Owner app (Starkeep Drive) may claim all-access.
 const FILE_ACCESS_ALL_APP_ID = "starkeep-drive";
 
+/**
+ * One schema issue as an error line. An unknown key names the key and, when a
+ * declared key at the same place is close, the key the author probably meant:
+ * a misspelled optional field otherwise reads as a field left out (#137).
+ */
+function issueMessage(issue: z.ZodIssue): string {
+  const where = issue.path.join(".");
+  if (issue.code !== z.ZodIssueCode.unrecognized_keys) return `${where}: ${issue.message}`;
+  const declared = declaredKeysAt(appManifestSchema, issue.path);
+  const keys = issue.keys.map((key) => {
+    const near = closestKey(key, declared);
+    return near ? `"${key}" (did you mean "${near}"?)` : `"${key}"`;
+  });
+  const prefix = where ? `${where}: ` : "";
+  return `${prefix}unknown ${keys.length === 1 ? "key" : "keys"} ${keys.join(", ")}`;
+}
+
+/** Strip the wrappers that do not change an object's keys. */
+function unwrap(schema: z.ZodTypeAny): z.ZodTypeAny {
+  for (;;) {
+    if (schema instanceof z.ZodDefault) schema = schema._def.innerType;
+    else if (schema instanceof z.ZodOptional) schema = schema._def.innerType;
+    else if (schema instanceof z.ZodEffects) schema = schema._def.schema;
+    else return schema;
+  }
+}
+
+/** The keys an object at `path` inside `schema` declares. */
+function declaredKeysAt(schema: z.ZodTypeAny, path: (string | number)[]): string[] {
+  let node = unwrap(schema);
+  for (const segment of path) {
+    if (node instanceof z.ZodArray && typeof segment === "number") node = unwrap(node.element);
+    else if (node instanceof z.ZodObject && typeof segment === "string") {
+      const child = (node.shape as Record<string, z.ZodTypeAny>)[segment];
+      if (!child) return [];
+      node = unwrap(child);
+    } else return [];
+  }
+  // A union (a compute route, a shared resource) suggests from every member.
+  const members =
+    node instanceof z.ZodUnion || node instanceof z.ZodDiscriminatedUnion
+      ? (node.options as z.ZodTypeAny[]).map(unwrap)
+      : [node];
+  return members.flatMap((m) => (m instanceof z.ZodObject ? Object.keys(m.shape) : []));
+}
+
+/** The declared key within two edits of `key`, ignoring case, if any. */
+function closestKey(key: string, declared: string[]): string | null {
+  let best: { key: string; distance: number } | null = null;
+  for (const candidate of declared) {
+    const distance = editDistance(key.toLowerCase(), candidate.toLowerCase());
+    if (distance <= 2 && (!best || distance < best.distance)) best = { key: candidate, distance };
+  }
+  return best?.key ?? null;
+}
+
+function editDistance(a: string, b: string): number {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const row = [i];
+    for (let j = 1; j <= b.length; j++) {
+      row[j] = Math.min(
+        prev[j]! + 1,
+        row[j - 1]! + 1,
+        prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    prev = row;
+  }
+  return prev[b.length]!;
+}
+
 export function validateManifest(raw: unknown): ValidationResult {
   const result = appManifestSchema.safeParse(raw);
   const errors: string[] = [];
@@ -33,7 +106,7 @@ export function validateManifest(raw: unknown): ValidationResult {
     return {
       valid: false,
       manifest: null,
-      errors: result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`),
+      errors: result.error.issues.map(issueMessage),
       warnings: [],
       impliedCategories: [],
     };
