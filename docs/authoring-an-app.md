@@ -121,7 +121,7 @@ would test the build step. Copy the example app rather than Probe.
 | A data client                      | **Required**          | The code that actually calls `/data/records`, `/files/presign`, etc.                                                                             |
 | `appSpecificSyncable` tables/files | Optional              | App-private rows and blobs that sync alongside shared records.                                                                                   |
 | `compute` handlers + `pnpm bundle` | Optional (cloud only) | Lambda handlers and the deployment-zip builder for a cloud install.                                                                              |
-| Auth gate                          | Required in cloud     | Gates the _UI_ behind Cognito sign-in when talking to a remote data server. Cosmetic — enforcement is §10.                                       |
+| Sign-in page + session routes      | Required in cloud     | A `/sign-in` page and the platform's `/api/session` routes, so a person can sign in to the cloud surface (§8). Enforcement is §4 and §10.        |
 | Server-side end-user check         | **Required in cloud** | Nothing upstream of your app checks who the end user is. See §10.                                                                                |
 
 ---
@@ -247,11 +247,17 @@ your app's HMAC credential and will sign whatever reaches it, and on the cloud
 surface nothing upstream is checking who the caller is (§10). Answer it with
 one of:
 
-- `{ auth: "session", verifySession }` — refuse callers with no valid session.
-  The proxy returns `401` before the credential is loaded at all. Local mode is
-  exempt by default, because on-device data belongs to the person at the
-  keyboard and a sign-in gate there would break local-first; pass
-  `allowAnonymousLocal: false` to gate both surfaces.
+- `sessionAuth()` — refuse callers with no valid session. This is the answer
+  for almost every app, and the example app uses it. It checks the platform's
+  session cookie (§8), and the proxy returns `401` before the credential is
+  loaded at all. Local mode is exempt by default, because on-device data
+  belongs to the person at the keyboard and a sign-in gate there would break
+  local-first; pass `sessionAuth({ allowAnonymousLocal: false })` to gate both
+  surfaces.
+- `{ auth: "session", verifySession }` — the same check with a verifier you
+  write. `sessionAuth()` returns this form with the platform's verifier filled
+  in. Write your own only if your users do not sign in through the platform's
+  session.
 - `{ auth: "anonymous", justification }` — sign for anyone. Legitimate only
   when everything behind the proxy is genuinely public. The justification
   string is there to be read by a reviewer, so write one you would defend.
@@ -628,17 +634,76 @@ are Vite and Hono, and neither is enforced), the build command that produces
 your output, native dependencies, any handler beyond the shell, and which of
 your public paths are files on disk rather than routes your server answers.
 
-### 8. Gate the UI behind sign-in (cloud target only)
+### 8. Sign-in (cloud target only)
 
-When paired with a remote data server, requests need a Cognito token. Wrap the
-app in an auth gate that checks for a refresh token and shows a sign-in form
-otherwise — see `src/lib/AuthGate.tsx` and `SignInForm.tsx`. For local builds the
-gate is a no-op (`not-required`).
+A person signs in to a cloud app on the platform's managed login page, never on
+a form your app draws. Your app never receives a password: a password a cloud
+app held would sign in to every other app too. The platform runs the sign-in
+flow and sets the session cookies. Your app supplies four small pieces, and the
+example app's `web/src/server/app.ts` shows all four.
 
-**A client-side gate decides what to render and enforces nothing.** It is a
-usability feature, not a security boundary: an attacker never runs your
-JavaScript. Ship it for the user experience, and do the enforcement in §4 and
-§10.
+1. **A sign-in page at `/sign-in`.** The page needs one form or link to
+   `SIGN_IN_START_PATH` (`/auth/start`) from `@starkeep/app-client/auth`, with
+   your app id as `app` and the path to return to as `return`. After the
+   managed login page, the platform's `/auth/callback` sets two cookies scoped
+   to your app's path. `sk_session` holds the refresh token and lasts weeks.
+   `sk_token` holds an ID token and lasts about an hour.
+2. **The session routes under `/api/session`.** Mount the routes that
+   `createSessionRoutes({ appId })` from `@starkeep/app-client/auth` returns.
+   `GET /api/session` reports who is signed in. `POST /api/session/refresh`
+   trades `sk_session` for a fresh `sk_token`. `POST /api/session/sign-out`
+   clears both cookies and names the platform's sign-out page for the browser
+   to visit next. `GET /api/session/token` hands the page a short-lived bearer
+   token for a `jwt` route.
+3. **`publicPaths` that cover both.** List `/sign-in` and `/api/session/*` in
+   the handler's `publicPaths`, and `/starkeep-runtime-config` if your page
+   reads it before sign-in. Otherwise the gateway refuses the requests that
+   sign a person in. The example's `static` handler declares
+   `"auth": "session"`, so the gateway's session authorizer checks `sk_token`
+   on every other path.
+4. **The origin gate.** `honoOriginGate({ publicPaths, signInPath: "/sign-in" })`
+   from `@starkeep/app-client/hono` sends a navigation without `sk_session` to
+   `/sign-in`, and answers any other such request with `401`. Read
+   `publicPaths` from the manifest, as the example does, so that the gate and
+   the gateway use one list.
+
+None of this runs on the local surface. The origin gate is inert there,
+`GET /api/session` reports no session, and the signing proxy exempts local
+callers (§4).
+
+**The sign-in page must live at `/sign-in`.** The platform's CloudFront
+distribution runs a viewer-request function, `signed-out-redirect` in
+`packages/admin-installer/src/builtin-programs/cloud-data-server-program.ts`,
+in front of every app. The function sends a document navigation under
+`/apps/<appId>/` that carries no `sk_token` to `/apps/<appId>/sign-in`, before
+the request reaches your Lambda. The path is fixed, so a sign-in page anywhere
+else is unreachable for a signed-out visitor. The function does not read your
+`publicPaths`, so a signed-out navigation to a page your manifest declares
+public lands on sign-in too. The function leaves four kinds of request alone:
+
+- a request that is not a navigation, so a fetch from your page still gets
+  the gateway's `401` rather than an HTML page;
+- the data-plane prefixes `/data`, `/files`, `/sync`, `/app-data` and
+  `/health`, which signed-in devices call with a bearer token and no cookie;
+- `/starkeep-runtime-config`;
+- `/p/*`, the public-share viewer every app reserves, because a visitor
+  holding a link has no session.
+
+The function is an optimization, not a gate: it keeps signed-out traffic off
+your Lambda, and the gateway origin stays directly reachable (§10).
+
+**A session can expire while the page is open.** `sk_token` lasts about an
+hour, and the gateway then refuses the page's requests with `401`. Call
+`POST /api/session/refresh` once and retry the request. If the refresh fails
+too, send the browser to `/sign-in`. Photos does this in
+`photos/src/lib/data-client.ts`. The example app offers a **Refresh session**
+button instead, which keeps its page small.
+
+**A client-side gate is optional, and it enforces nothing.** Photos wraps its
+UI in an `AuthGate` component that probes `GET /api/session` and goes to
+`/sign-in` when nobody is signed in. Such a gate is a usability
+feature, not a security boundary: an attacker never runs your JavaScript. Ship
+one for the user experience if you like, and do the enforcement in §4 and §10.
 
 ### 9. Cross-app labels
 
@@ -919,7 +984,8 @@ Concretely, in a cloud install:
   reachable, and `data-roles-and-permissions.md` says so explicitly. An edge
   check is an optimization that keeps anonymous traffic off your Lambda; it is
   never enforcement.
-- **`AuthGate` is not a boundary** (§8). It runs in the browser.
+- **A client-side gate such as `AuthGate` is not a boundary** (§8). It runs
+  in the browser.
 - **Your signing proxy is the boundary** (§4). It is the one place every cloud
   request passes through and the only place that holds your HMAC credential.
   `endUserAuth` is where you say whether it checks.
@@ -929,7 +995,8 @@ The checklist before a cloud install:
 1. Every handler's `auth` and `publicPaths` reflect what you actually intend to
    be anonymous, and the installer's anonymous-route report at install time
    matches what you expected.
-2. Your proxy's `endUserAuth` is `{ auth: "session", … }`, or you can defend
+2. Your proxy's `endUserAuth` is `sessionAuth()` or another
+   `{ auth: "session", … }` form, or you can defend
    the `justification` string you wrote instead.
 3. An unauthenticated `curl` against your data path returns `401` or `403`.
    Do this by hand once; the platform's tier-3 e2e asserts it too, and that
