@@ -30,6 +30,7 @@ import { starkeepDir } from "@starkeep/app-client";
 import { REPO_ROOT } from "../lib/exec-commands";
 import { getRegion } from "../lib/cloud-config";
 import { installStream } from "../lib/install-stream";
+import { installerEnv } from "@starkeep/admin-installer/aws-env";
 
 const STARKEEP_DIR = starkeepDir();
 const CONFIG_PATH = join(STARKEEP_DIR, "config.json");
@@ -101,11 +102,14 @@ export async function POST(req: Request) {
   const sdkTraceFilePath = join(STARKEEP_DIR, "cds-install.sdk.trace");
 
   const spawnEnv = {
-    ...process.env,
-    AWS_ACCESS_KEY_ID: body.accessKeyId,
-    AWS_SECRET_ACCESS_KEY: body.secretAccessKey,
-    AWS_SESSION_TOKEN: body.sessionToken,
-    AWS_REGION: region,
+    ...installerEnv(
+      {
+        accessKeyId: body.accessKeyId,
+        secretAccessKey: body.secretAccessKey,
+        sessionToken: body.sessionToken,
+      },
+      region,
+    ),
     ...(PULUMI_VERBOSE_TRACE
       ? {
           TF_LOG: "DEBUG",
