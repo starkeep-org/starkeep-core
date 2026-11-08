@@ -7,6 +7,7 @@ import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
+import { PROTOCOL_VERSION, parseProtocolVersion } from "@starkeep/protocol-primitives";
 import {
   installApp,
   putAppFile,
@@ -56,6 +57,27 @@ describe("built-ins on a fresh boot", () => {
 });
 
 describe("install", () => {
+  it("reports its protocol version on /health and refuses an app that needs a newer one", async () => {
+    const health = (await (await fetch(`${server.url}/health`)).json()) as {
+      protocolVersion: string;
+    };
+    expect(health.protocolVersion).toBe(PROTOCOL_VERSION);
+
+    const [major, minor] = parseProtocolVersion(PROTOCOL_VERSION)!;
+    const res = await fetch(`${server.url}/admin/apps/install`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...testAppManifest({ id: "future-app" }),
+        protocolMinVersion: `${major}.${minor + 1}.0`,
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; message: string };
+    expect(body.error).toBe("ProtocolVersionError");
+    expect(body.message).toContain(`speaks ${PROTOCOL_VERSION}`);
+  });
+
   it("returns {appId, hmacSecret}; the secret never appears in GET /admin/apps", async () => {
     const app = await installApp(server, testAppManifest({ id: "lifecycle-app" }));
     expect(app.appId).toBe("lifecycle-app");

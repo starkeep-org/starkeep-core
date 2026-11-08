@@ -18,6 +18,7 @@ import {
   uninstallLocal,
   LocalInstallError,
   ManifestValidationError,
+  ProtocolVersionError,
 } from "../../packages/admin-installer/src/local/installer.js";
 import {
   listAppRegistry,
@@ -99,6 +100,7 @@ import {
   revokePendingSignOut,
   signOut,
   USER_TOKEN_HEADER,
+  PROTOCOL_VERSION,
   type AuthTokens,
   type CloudTokenSource,
   type CognitoClient,
@@ -1378,7 +1380,7 @@ async function main() {
 
     try {
       if (path === "/health") {
-        json(res, { status: "ok" });
+        json(res, { status: "ok", protocolVersion: PROTOCOL_VERSION });
         return;
       }
 
@@ -4510,6 +4512,11 @@ async function main() {
           if (err instanceof ManifestValidationError) {
             res.writeHead(400);
             json(res, { error: "ManifestValidationError", details: err.errors });
+            return;
+          }
+          if (err instanceof ProtocolVersionError) {
+            res.writeHead(400);
+            json(res, { error: err.name, message: err.message });
             return;
           }
           if (err instanceof LocalInstallError) {

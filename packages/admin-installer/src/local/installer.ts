@@ -1,6 +1,8 @@
 import type { RawDatabase } from "@starkeep/storage-adapter";
 import { randomBytes } from "node:crypto";
 import { validateManifest, type AppManifest } from "@starkeep/admin-manifest";
+import { PROTOCOL_VERSION } from "@starkeep/protocol-primitives";
+import { protocolRefusal } from "../protocol-check.js";
 import {
   appRegistryRow,
   clearStepLedger,
@@ -48,6 +50,23 @@ export class ManifestValidationError extends LocalInstallError {
   }
 }
 
+/** The app needs a newer platform protocol than this data server speaks. */
+export class ProtocolVersionError extends LocalInstallError {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProtocolVersionError";
+  }
+}
+
+/** The manifest's `id` before validation, for a message only. */
+function rawAppId(rawManifest: unknown): string {
+  const id =
+    typeof rawManifest === "object" && rawManifest !== null
+      ? (rawManifest as { id?: unknown }).id
+      : undefined;
+  return typeof id === "string" && id ? id : "The app";
+}
+
 /**
  * Install an app locally: registers it in shared_app_registry, mints an HMAC
  * secret, and writes per-type rows into shared_access_grants. Idempotent and
@@ -57,6 +76,13 @@ export class ManifestValidationError extends LocalInstallError {
  * app process for request signing.
  */
 export function installLocal(db: RawDatabase, rawManifest: unknown): InstallLocalResult {
+  const refusal = protocolRefusal({
+    appId: rawAppId(rawManifest),
+    rawManifest,
+    platformVersion: PROTOCOL_VERSION,
+    target: "local",
+  });
+  if (refusal) throw new ProtocolVersionError(refusal);
   const validation = validateManifest(rawManifest);
   if (!validation.valid || !validation.manifest) {
     throw new ManifestValidationError(validation.errors);
