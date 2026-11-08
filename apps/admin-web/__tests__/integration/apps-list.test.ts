@@ -25,6 +25,8 @@ let lds: LocalDataServer | undefined;
 let ldsPort: number;
 let parentA: string;
 let parentB: string;
+let directApp: string;
+let missingDir: string;
 
 beforeAll(async () => {
   const dataDir = makeDataDir();
@@ -32,7 +34,11 @@ beforeAll(async () => {
   parentB = join(dataDir, "parent-b");
   mkdirSync(parentA, { recursive: true });
   mkdirSync(parentB, { recursive: true });
-  writeAdminConfig(dataDir, { appParentDirs: [parentA, parentB] });
+  // An app folder configured directly, as an author who picks their own app's
+  // folder does, and a configured folder that does not exist.
+  directApp = join(dataDir, "direct");
+  missingDir = join(dataDir, "no-such-dir");
+  writeAdminConfig(dataDir, { appParentDirs: [parentA, parentB, directApp, missingDir] });
 
   // Valid app in parent A.
   makeAppDir(parentA, "alpha", testAppManifest({ id: "alpha-app", name: "Alpha" }));
@@ -47,6 +53,8 @@ beforeAll(async () => {
   makeAppDir(parentA, "dup-from-a", testAppManifest({ id: "dup-app", name: "From A" }));
   makeAppDir(parentB, "dup-from-b", testAppManifest({ id: "dup-app", name: "From B" }));
 
+  makeAppDir(dataDir, "direct", testAppManifest({ id: "direct-app" }));
+
   ldsPort = await getFreePort();
   process.env.STARKEEP_DIR = dataDir;
   process.env.STARKEEP_LOCAL_DATA_SERVER_URL = `http://127.0.0.1:${ldsPort}`;
@@ -56,6 +64,16 @@ beforeAll(async () => {
 afterAll(async () => {
   await lds?.stop();
 });
+
+type ListBody = {
+  apps: ListedApp[];
+  problems: Array<{ configuredDir: string; dir: string; reason: string }>;
+  dirs: Array<{ dir: string; appCount: number }>;
+};
+
+async function body(): Promise<ListBody> {
+  return (await (await GET()).json()) as ListBody;
+}
 
 async function list(): Promise<ListedApp[]> {
   const res = await GET();
@@ -78,10 +96,25 @@ describe("with the local-data-server down", () => {
     expect(body.dataServerReachable).toBe(false);
   });
 
-  it("skips malformed manifests", async () => {
-    const apps = await list();
+  it("skips a malformed manifest and reports the parse error", async () => {
+    const { apps, problems } = await body();
     expect(apps.map((a) => a.appId)).not.toContain("broken");
     expect(apps.map((a) => a.sourceDir)).not.toContain(join(parentA, "broken"));
+    const broken = problems.find((p) => p.dir === join(parentA, "broken"));
+    expect(broken?.configuredDir).toBe(parentA);
+    expect(broken?.reason).toMatch(/could not be read as JSON/);
+  });
+
+  it("treats a configured folder that holds a manifest as an app", async () => {
+    const { apps, dirs } = await body();
+    expect(apps.find((a) => a.appId === "direct-app")?.sourceDir).toBe(directApp);
+    expect(dirs.find((d) => d.dir === directApp)?.appCount).toBe(1);
+  });
+
+  it("reports a configured folder that does not exist", async () => {
+    const { problems, dirs } = await body();
+    expect(problems.find((p) => p.dir === missingDir)?.reason).toBe("The folder does not exist.");
+    expect(dirs.find((d) => d.dir === missingDir)?.appCount).toBe(0);
   });
 
   it("keys apps by manifest id, falling back to the dir name when id is missing", async () => {
@@ -98,6 +131,10 @@ describe("with the local-data-server down", () => {
     expect(dups).toHaveLength(1);
     expect(dups[0]!.sourceDir).toBe(join(parentA, "dup-from-a"));
     expect(dups[0]!.manifest.name).toBe("From A");
+    const { problems } = await body();
+    expect(problems.find((p) => p.dir === join(parentB, "dup-from-b"))?.reason).toBe(
+      `Another app already uses the id "dup-app", in ${join(parentA, "dup-from-a")}.`,
+    );
   });
 });
 

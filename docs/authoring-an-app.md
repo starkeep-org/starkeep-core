@@ -16,9 +16,9 @@ trust boundaries, see [`data-roles-and-permissions.md`](data-roles-and-permissio
 
 ## What an app is
 
-An app is **any directory that contains a `starkeep.manifest.json`, lives inside
-a parent directory admin-web is configured to scan, and depends on the published
-`@starkeep/*` packages.** There is no privileged build wiring against
+An app is **any directory that contains a `starkeep.manifest.json`, is
+configured in admin-web's app discovery or lives inside a folder that is, and
+depends on the published `@starkeep/*` packages.** There is no privileged build wiring against
 `starkeep-core` — first-party apps like Photos install through the exact same
 path a third-party app would.
 
@@ -1052,9 +1052,11 @@ The checklist before a cloud install:
 
 The install path is identical for first-party and third-party apps:
 
-1. Place the app dir inside a parent directory registered with admin-web. The
-   sibling `starkeep-apps/` is seeded by default; add others via the **App
-   discovery** card on the Dashboard.
+1. Add the app's folder, or a folder that holds it, in **Discover apps** on
+   the Dashboard. The sibling `starkeep-apps/` is seeded by default. A folder
+   that holds `starkeep.manifest.json` is an app; any other folder is scanned
+   for app subfolders. The Dashboard lists every folder the scan skipped and
+   why, such as a manifest that is not valid JSON or a duplicate app id.
 2. Install the app's dependencies with `pnpm install` in the app's folder.
    admin-web runs the app straight from that folder and never installs
    anything itself. An app placed inside another repository's pnpm workspace,

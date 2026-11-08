@@ -7,7 +7,7 @@ interface InstalledApp {
 }
 
 export async function GET() {
-  const scanned = scanApps();
+  const { apps: scanned, problems, dirs } = scanApps();
 
   // null means "we could not ask" — the data server was unreachable or errored.
   // That is not the same fact as "the registry has no row for this app", and
@@ -33,5 +33,5 @@ export async function GET() {
     status: installedById ? (installedById.get(s.appId)?.status ?? "not_installed") : "unknown",
   }));
 
-  return Response.json({ apps, dataServerReachable: installedById !== null });
+  return Response.json({ apps, problems, dirs, dataServerReachable: installedById !== null });
 }

@@ -28,7 +28,7 @@ import {
 import { AppCard } from "../components/AppCard";
 import { CloudDataServerStatus } from "../components/CloudDataServerStatus";
 import { StatusBadge } from "../components/StatusBadge";
-import { APPS_CHANGED_EVENT } from "../components/AppDiscovery";
+import { AppDiscovery, APPS_CHANGED_EVENT } from "../components/AppDiscovery";
 import { LocalDriveSection } from "../components/LocalDriveSection";
 import { LocalAppsSection } from "../components/LocalAppsSection";
 import { CloudAppsSection } from "../components/CloudAppsSection";
@@ -39,7 +39,7 @@ import { CloudAddress } from "../components/CloudAddress";
 import { CustomDomainSection } from "../components/CustomDomainSection";
 import { LocalFoldersModal, type Watch } from "../components/LocalFoldersModal";
 import { CommandOutputModal } from "../components/CommandOutputModal";
-import { targetsOf, type LocalAppEntry } from "../lib/app-types";
+import { targetsOf, type AppList, type LocalAppEntry, type ScanProblem } from "../lib/app-types";
 import {
   initiateAuth,
   respondNewPasswordChallenge,
@@ -65,13 +65,16 @@ export function DashboardPage() {
   // sections is derived from each manifest's `targets` (default ["local"]).
   const [apps, setApps] = useState<LocalAppEntry[] | null>(null);
   const [appsError, setAppsError] = useState<string | null>(null);
+  // Folders discovery skipped, each with its reason.
+  const [scanProblems, setScanProblems] = useState<ScanProblem[]>([]);
   const refreshApps = useCallback(async () => {
     setAppsError(null);
     try {
       const res = await fetch("/api/apps/list");
       if (!res.ok) throw new Error(`list failed: ${res.status}`);
-      const body = (await res.json()) as { apps: LocalAppEntry[] };
+      const body = (await res.json()) as AppList;
       setApps(body.apps);
+      setScanProblems(body.problems ?? []);
     } catch (err) {
       setAppsError(err instanceof Error ? err.message : String(err));
     }
@@ -516,6 +519,27 @@ export function DashboardPage() {
         <Alert variant="destructive" className="mb-6 max-w-7xl">
           <AlertTitle>Error</AlertTitle>
           <AlertDescription>{appsError}</AlertDescription>
+        </Alert>
+      )}
+
+      {scanProblems.length > 0 && (
+        <Alert className="mb-6 max-w-7xl">
+          <AlertTitle>
+            App discovery skipped{" "}
+            {scanProblems.length === 1 ? "a folder" : `${scanProblems.length} folders`}
+          </AlertTitle>
+          <AlertDescription>
+            <ul className="flex flex-col gap-1">
+              {scanProblems.map((p) => (
+                <li key={p.dir}>
+                  <code className="text-xs break-all">{p.dir}</code>: {p.reason}
+                </li>
+              ))}
+            </ul>
+            <div className="pt-2">
+              <AppDiscovery />
+            </div>
+          </AlertDescription>
         </Alert>
       )}
 

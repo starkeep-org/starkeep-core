@@ -11,6 +11,27 @@ export type AppTarget = "local" | "cloud";
  */
 export type AppSurface = "web" | "mobile";
 
+/** A folder app discovery skipped, as `/api/apps/list` reports it. */
+export interface ScanProblem {
+  /** The configured directory the folder was found under, as configured. */
+  configuredDir: string;
+  dir: string;
+  reason: string;
+}
+
+/** What one configured directory contributed to the app list. */
+export interface ScannedDir {
+  dir: string;
+  appCount: number;
+}
+
+/** The body of `GET /api/apps/list`. */
+export interface AppList {
+  apps: LocalAppEntry[];
+  problems: ScanProblem[];
+  dirs: ScannedDir[];
+}
+
 export interface FileAccess {
   types: string[];
   access: "read" | "readwrite";
