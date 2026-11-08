@@ -59,6 +59,8 @@ export interface StateResource {
   id?: string;
   /** Pulumi type token, e.g. `aws:apigatewayv2/route:Route`. */
   type?: string;
+  /** The resource's outputs as of the last update. */
+  outputs?: Record<string, unknown>;
 }
 
 export interface ComputeContext {
@@ -276,6 +278,11 @@ export async function pulumiUpInline(opts: {
   region: string;
   stackPrefix: string;
   awsCreds: AwsCredentials;
+  /**
+   * Called first after stack selection, with everything currently in state. A
+   * throw stops the run before Pulumi changes anything.
+   */
+  preflight?: (resources: StateResource[]) => Promise<void>;
   /** Called after stack selection but before refresh/up, with the set of URNs currently in state. */
   preCleanupOrphans?: (inStateUrns: Set<string>) => Promise<void>;
   /**
@@ -325,13 +332,15 @@ export async function pulumiUpInline(opts: {
 
   await stack.setConfig("aws:region", { value: opts.region });
 
-  // Both pre-`up` hooks read the same state snapshot, so export it once.
+  // Every pre-`up` hook reads the same state snapshot, so export it once.
   let stateResources: StateResource[] = [];
-  if (opts.preCleanupOrphans || opts.pruneBeforeUp) {
+  if (opts.preflight || opts.preCleanupOrphans || opts.pruneBeforeUp) {
     const deployment = await stack.exportStack();
     stateResources =
       (deployment.deployment as { resources?: StateResource[] } | undefined)?.resources ?? [];
   }
+
+  if (opts.preflight) await opts.preflight(stateResources);
 
   // Pre-cleanup: detect AWS resources that exist but aren't in Pulumi state
   // (left over from previously interrupted runs) and remove them so the

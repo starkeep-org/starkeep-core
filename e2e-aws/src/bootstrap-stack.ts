@@ -8,6 +8,7 @@
  * "bootstrap stack create (or verify)" leg.
  */
 
+import { dirname } from "node:path";
 import {
   CloudFormationClient,
   CreateStackCommand,
@@ -19,6 +20,7 @@ import {
   type Stack,
 } from "@aws-sdk/client-cloudformation";
 import { generateBootstrapTemplate } from "@starkeep/aws-bootstrap";
+import type { TestStackConfig } from "./run-state.js";
 
 export interface BootstrapOutputs {
   userPoolId: string;
@@ -172,4 +174,39 @@ async function describeStack(
     if ((err as { name?: string }).name === "ValidationError") return undefined;
     throw err;
   }
+}
+
+/**
+ * The CLI-facing config for a run, from the bootstrap stack's outputs, keeping
+ * any cloud-data-server outputs a previous kept-up run wrote.
+ *
+ * `appDir` is the app the run installs. The config names its PARENT, not the
+ * app: `resolveAppDir` scans each entry's children for a manifest whose id
+ * matches, so naming the app's own directory would have it look inside the app
+ * for a nested copy of itself and find nothing. Derived rather than configured:
+ * the parent of an app's directory is a directory that contains that app, by
+ * construction, so there is nothing here for a caller to get wrong.
+ */
+export function stackConfigFrom(
+  previous: TestStackConfig | undefined,
+  stackPrefix: string,
+  outputs: BootstrapOutputs,
+  appDir: string,
+): TestStackConfig {
+  return {
+    ...previous,
+    stackPrefix,
+    userPoolId: outputs.userPoolId,
+    userPoolClientId: outputs.userPoolClientId,
+    deviceUserPoolClientId: outputs.deviceUserPoolClientId,
+    cognitoDomain: outputs.cognitoDomain,
+    deploymentName: E2E_DEPLOYMENT_NAME,
+    identityPoolId: outputs.identityPoolId,
+    managerRoleArn: outputs.managerRoleArn,
+    permissionsBoundaryArn: outputs.appPermissionsBoundaryArn,
+    foundationalPermissionsBoundaryArn: outputs.appFoundationalPermissionsBoundaryArn,
+    userDataOwnerPermissionsBoundaryArn: outputs.userDataOwnerPermissionsBoundaryArn,
+    pulumiStateBucket: outputs.pulumiStateBucketName,
+    appParentDirs: [dirname(appDir)],
+  };
 }

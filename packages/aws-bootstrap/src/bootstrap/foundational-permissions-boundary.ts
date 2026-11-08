@@ -10,7 +10,8 @@ import type { IamStatement } from "../iam-utils.js";
  * permits DSQL cluster admin, S3 bucket admin on the well-known foundational
  * bucket name patterns, Lambda/log-group/API-Gateway admin scoped to the
  * cloud-data-server prefix, CloudFront admin (the platform distribution +
- * URL-signing key material), the CUR report definition API, and a single
+ * URL-signing key material), the custom domain's ACM certificate and Route53
+ * records, the CUR report definition API, and a single
  * PassRole carve-out (own role, lambda only). All other iam:* actions stay
  * denied via the NotAction carve-out, so a future temp-policy bug cannot
  * accidentally grant broader IAM.
@@ -58,7 +59,7 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
 
   return [
     {
-      Sid: "FoundationalDsqlCluster",
+      Sid: "DsqlCluster",
       Effect: "Allow",
       Action: [
         "dsql:CreateCluster",
@@ -77,30 +78,31 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       Resource: "*",
     },
     {
-      Sid: "FoundationalS3Buckets",
+      Sid: "S3Buckets",
       Effect: "Allow",
       Action: [
         "s3:CreateBucket",
         "s3:DeleteBucket",
         "s3:ListBucket",
-        // Every bucket-level *read*, as one wildcard.
+        // Every bucket-setting read, as two patterns.
         //
         // Enumerating these individually pushed this policy past AWS's
         // 6144-character managed-policy ceiling, and the enumeration was buying
-        // nothing: all seventeen were already granted, Pulumi's BucketV2 reads
-        // most of them on every refresh, and the list only ever grew.
+        // nothing: Pulumi's BucketV2 reads most of them on every refresh, and
+        // the list only ever grew.
         //
-        // The safety property that makes the wildcard sound is the Resource
-        // below: **bucket ARNs only, never `bucket/*`**. Object actions like
-        // `s3:GetObject` require an object ARN, so they cannot match this
-        // statement however the wildcard expands — including for read actions
-        // AWS adds in future. What it admits is reading our own two buckets'
-        // configuration, which every enumerated entry already admitted.
+        // The patterns, not the Resource, keep object reads out. IAM's `*` in
+        // a resource ARN spans `/`, so the bucket globs below also match every
+        // object in both buckets, and a plain `s3:Get*` here admitted
+        // GetObject, GetObjectVersion and the other object reads on all of
+        // them. No S3 object action starts with GetBucket or ends with
+        // Configuration, so these two admit only bucket-setting reads,
+        // including any AWS adds later under the same names.
         //
         // This is the *ceiling*, not a grant. The install-time temp policy
-        // still enumerates exactly what it needs, so widening here does not
-        // widen what any identity actually holds.
-        "s3:Get*",
+        // grants the same two patterns on each bucket separately.
+        "s3:GetBucket*",
+        "s3:Get*Configuration",
         // Writes stay enumerated. A `s3:Put*` here would admit
         // PutBucketPolicy-class changes nobody has asked for, and the whole
         // point of a boundary is that the dangerous half is explicit.
@@ -122,7 +124,7 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
         // The availability machinery (media plan items 19/19b): the event
         // subscription that keeps stored availability true, and the daily
         // inventory that backstops it. Both are writes, so neither rides the
-        // `s3:Get*` wildcard above — a boundary that omits them caps the
+        // read patterns above — a boundary that omits them caps the
         // install below what the temp policy grants and the apply 403s.
         "s3:PutBucketNotification",
         "s3:PutInventoryConfiguration",
@@ -130,12 +132,15 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       Resource: [`arn:aws:s3:::${stackPrefix}-files-*`, `arn:aws:s3:::${stackPrefix}-billing-*`],
     },
     {
-      Sid: "FoundationalS3Objects",
+      // The files bucket only. Nothing under this role reads or writes a
+      // billing-bucket object: AWS's billing service writes the cost reports
+      // through the bucket policy, and admin-app reads them under its own
+      // policy.
+      Sid: "S3Objects",
       Effect: "Allow",
       Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
       Resource: [
         `arn:aws:s3:::${stackPrefix}-files-*/*`,
-        `arn:aws:s3:::${stackPrefix}-billing-*/*`,
         // cds bundle is shipped via pulumi.asset.FileArchive (Pulumi's own
         // asset machinery uploads it as part of stack state), not via the
         // cds role PUTing to the artifacts bucket — so no artifacts grant
@@ -144,7 +149,18 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       ],
     },
     {
-      Sid: "FoundationalPulumiState",
+      // Deletes only, on the billing bucket: an ephemeral stack's destroy
+      // empties it of the test object AWS's billing service writes. IAM's `*`
+      // spans `/`, so the one resource covers the bucket and its objects.
+      // `s3:DeleteObject*` admits DeleteObjectVersion, which the provider
+      // uses, and the tag deletes.
+      Sid: "BillingObjects",
+      Effect: "Allow",
+      Action: ["s3:ListBucketVersions", "s3:DeleteObject*"],
+      Resource: `arn:aws:s3:::${stackPrefix}-billing-*`,
+    },
+    {
+      Sid: "PulumiState",
       Effect: "Allow",
       Action: [
         "s3:GetObject",
@@ -170,7 +186,7 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       //    admits it so the intersection holds at runtime.
       //  - /platform/*: the deployment's settings, which cloud-data-server
       //    reads to serve them. Not secret.
-      Sid: "FoundationalReadSsmParameters",
+      Sid: "ReadSsmParameters",
       Effect: "Allow",
       Action: "ssm:GetParameter",
       Resource: [
@@ -181,19 +197,19 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
     },
     {
       // cloud-data-server registers each mobile app's attested key here.
-      Sid: "FoundationalWriteMobileKeys",
+      Sid: "WriteMobileKeys",
       Effect: "Allow",
       Action: "ssm:PutParameter",
       Resource: `arn:aws:ssm:*:*:parameter/${stackPrefix}/platform/mobile-keys/*`,
     },
     {
       // SecureString decrypt for the two SSM SecureStrings this role reads
-      // (both parameters in FoundationalReadSsmParameters — the Pulumi state
+      // (both parameters in ReadSsmParameters — the Pulumi state
       // passphrase and the per-app HMAC creds). Both decrypt via the SSM
       // service key, so a single kms:ViaService-scoped statement covers both —
       // folded together to keep this boundary under the 6144-char
       // managed-policy size limit.
-      Sid: "FoundationalSsmSecureStringKmsDecrypt",
+      Sid: "SsmSecureStringKmsDecrypt",
       Effect: "Allow",
       Action: "kms:Decrypt",
       Resource: "*",
@@ -202,7 +218,7 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       },
     },
     {
-      Sid: "FoundationalLambda",
+      Sid: "Lambda",
       Effect: "Allow",
       Action: [
         "lambda:CreateFunction",
@@ -234,7 +250,7 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       Resource: `arn:aws:lambda:*:*:function:${stackPrefix}-app-${cdsAppId}-*`,
     },
     {
-      Sid: "FoundationalLogs",
+      Sid: "Logs",
       Effect: "Allow",
       Action: [
         "logs:CreateLogGroup",
@@ -253,13 +269,13 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       // the all-zeros resource arn:aws:logs:…:log-group::log-stream:, so it
       // must be granted on Resource:"*" regardless of which group we want
       // to filter for in the API call.
-      Sid: "FoundationalLogsList",
+      Sid: "LogsList",
       Effect: "Allow",
       Action: ["logs:DescribeLogGroups"],
       Resource: "*",
     },
     {
-      Sid: "FoundationalApiGateway",
+      Sid: "ApiGateway",
       Effect: "Allow",
       Action: apigatewayv2Verbs,
       Resource: "*",
@@ -270,7 +286,7 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       // using REST-method action names (apigateway:GET/POST/…), not
       // apigatewayv2:*. CreateApi is evaluated against /apis (not /v2/apis),
       // so both the un-prefixed and v2-prefixed path forms are required.
-      Sid: "FoundationalApiGatewayRestActions",
+      Sid: "ApiGatewayRestActions",
       Effect: "Allow",
       Action: [
         "apigateway:GET",
@@ -291,7 +307,7 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       ],
     },
     {
-      Sid: "FoundationalCur",
+      Sid: "Cur",
       Effect: "Allow",
       Action: [
         "cur:PutReportDefinition",
@@ -317,18 +333,30 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       // effective standing CloudFront power of the CDS role is none. Kept as a
       // single compact statement to stay under the 6144-char managed-policy
       // limit.
-      Sid: "FoundationalCloudFront",
+      Sid: "CloudFront",
       Effect: "Allow",
       Action: "cloudfront:*",
+      Resource: "*",
+    },
+    {
+      // The distribution's custom domain: its us-east-1 certificate and, when
+      // the domain's zone sits in this account, the validation and alias
+      // records. A wildcard ceiling for the same reason as CloudFront above,
+      // and because the policy has under 150 characters to spare. The
+      // temp-install policy grants the specific verbs, and only while an
+      // install runs, with record writes held to the domain's own names.
+      Sid: "CustomDomain",
+      Effect: "Allow",
+      Action: ["acm:*", "route53:*"],
       Resource: "*",
     },
     {
       // First-ever dsql:CreateCluster in an account often needs the DSQL
       // service-linked role created. AWS auto-creates SLRs when the caller
       // holds iam:CreateServiceLinkedRole for the matching service. Scoped
-      // to the DSQL service principal so the FoundationalDenyOtherIam
+      // to the DSQL service principal so the DenyOtherIam
       // NotAction carve-out doesn't admit anything else (G9i).
-      Sid: "FoundationalIamCreateServiceLinkedRole",
+      Sid: "IamCreateServiceLinkedRole",
       Effect: "Allow",
       Action: "iam:CreateServiceLinkedRole",
       Resource: "*",
@@ -345,13 +373,13 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       // statement in the boundary, the intersection cap denies AssumeRole at
       // runtime and every /apps/{appId}/sync/{pull,push} ends in 403.
       // TagSession: the broker tags each session with the user it acts for.
-      Sid: "FoundationalBrokerAssumeAppRoles",
+      Sid: "BrokerAssumeAppRoles",
       Effect: "Allow",
       Action: ["sts:AssumeRole", "sts:TagSession"],
       Resource: `arn:aws:iam::*:role/${stackPrefix}-app-*`,
     },
     {
-      Sid: "FoundationalPassRoleOwnRoleToLambda",
+      Sid: "PassRoleOwnRoleToLambda",
       Effect: "Allow",
       Action: "iam:PassRole",
       Resource: `arn:aws:iam::*:role/${stackPrefix}-app-${cdsAppId}-role`,
@@ -368,7 +396,7 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       // explicit subverbs rather than the wildcard so CreateServiceLinkedRole
       // isn't accidentally caught (G9i). Read-only iam:Get*/List* are not
       // denied — they remain implicitly denied because nothing Allows them.
-      Sid: "FoundationalDenyOtherIam",
+      Sid: "DenyOtherIam",
       Effect: "Deny",
       Action: [
         "iam:Add*",

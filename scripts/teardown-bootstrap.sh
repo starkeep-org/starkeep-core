@@ -413,6 +413,41 @@ else
   skip
 fi
 
+# ── Step 2c: Delete custom-domain certificates ───────────────────────────────
+# teardown-cloud-data-server.sh above deletes every certificate tagged with the
+# prefix after it deletes the distribution, which releases each one at once.
+# This step deletes any certificate an earlier, failed run left. CloudFront
+# takes certificates only from us-east-1, so they live there whatever $REGION
+# is. Each delete runs once: a certificate still in use means a distribution
+# still holds it, and the script names the distribution and fails at the end.
+step "Deleting custom-domain certificates tagged starkeep:stackPrefix=${STACK_PREFIX} (us-east-1)"
+CERT_ARNS=$(aws acm list-certificates --region us-east-1 \
+  --certificate-statuses PENDING_VALIDATION ISSUED INACTIVE EXPIRED VALIDATION_TIMED_OUT REVOKED FAILED \
+  --query 'CertificateSummaryList[].CertificateArn' --output text 2>/dev/null || true)
+CERTS_DELETED=false
+CERT_FAILURES=()
+if [ -n "$CERT_ARNS" ] && [ "$CERT_ARNS" != "None" ]; then
+  for arn in $CERT_ARNS; do
+    owner=$(aws acm list-tags-for-certificate --region us-east-1 --certificate-arn "$arn" \
+      --query "Tags[?Key=='starkeep:stackPrefix'].Value | [0]" --output text 2>/dev/null || true)
+    [ "$owner" = "$STACK_PREFIX" ] || continue
+    CERTS_DELETED=true
+    if err=$(aws acm delete-certificate --region us-east-1 --certificate-arn "$arn" 2>&1); then
+      echo "  Deleted $arn"
+      continue
+    fi
+    holders=$(aws acm describe-certificate --region us-east-1 --certificate-arn "$arn" \
+      --query 'Certificate.InUseBy[]' --output text 2>/dev/null || true)
+    if [ -n "$holders" ] && [ "$holders" != "None" ]; then
+      echo "  ERROR $arn is in use by $holders; run teardown-cloud-data-server.sh, then this script again"
+    else
+      echo "  ERROR could not delete $arn: $err"
+    fi
+    CERT_FAILURES+=("$arn")
+  done
+fi
+[ "$CERTS_DELETED" = true ] || skip
+
 # ── Step 3: Delete IAM roles and policies manually ───────────────────────────
 # Done before CF deletion so CF never races against us or gets stuck on
 # dependency errors (e.g. can't delete a policy while a role holds it as a
@@ -520,4 +555,9 @@ else
 fi
 
 echo ""
+if [ "${#CERT_FAILURES[@]}" -gt 0 ]; then
+  echo "Bootstrap teardown finished, but these certificates could not be deleted:"
+  printf '  %s\n' "${CERT_FAILURES[@]}"
+  exit 1
+fi
 echo "Bootstrap teardown complete."

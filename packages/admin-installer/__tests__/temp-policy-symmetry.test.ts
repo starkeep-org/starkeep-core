@@ -1,5 +1,6 @@
 /**
- * Co-edit guard as a standing test (mirrors scripts/check-temp-vs-boundary.ts):
+ * Co-edit guard as a standing test (runs the same matcher as
+ * scripts/check-temp-vs-boundary.ts):
  * every Action a temp/runtime policy grants must be Allowed by its matching
  * permissions boundary. IAM intersects policy with boundary, so a verb the
  * boundary doesn't allow is silently denied at runtime — this catches the
@@ -20,59 +21,24 @@ import {
   buildTempInstallCloudDataServerPolicy,
   buildRuntimePolicy,
 } from "../src/temp-policies";
+import { uncoveredActions } from "../src/policy-subsumption";
 
 const STACK_PREFIX = "starkeep";
 const APP_ID = "exampleapp";
 const ACCOUNT_ID = "111122223333";
 const REGION = "us-east-1";
 
-interface PolicyDocument {
-  Statement: Array<{
-    Sid?: string;
-    Effect: "Allow" | "Deny";
-    Action?: string | string[];
-  }>;
-}
-
-function toArray(x: string | string[] | undefined): string[] {
-  if (x === undefined) return [];
-  return Array.isArray(x) ? x : [x];
-}
-
-function boundaryAllowedActions(boundary: IamStatement[]): Set<string> {
-  const out = new Set<string>();
-  for (const stmt of boundary) {
-    if (stmt.Effect !== "Allow") continue;
-    for (const action of toArray(stmt.Action)) out.add(action);
-  }
-  return out;
-}
-
-function actionMatches(allowed: string, wanted: string): boolean {
-  if (allowed === wanted || allowed === "*") return true;
-  return allowed.endsWith("*") && wanted.startsWith(allowed.slice(0, -1));
-}
-
 /** Actions the policy Allows that no boundary statement covers. */
-function uncoveredActions(policyJson: string, boundary: IamStatement[]): string[] {
-  const allowed = boundaryAllowedActions(boundary);
-  const policy = JSON.parse(policyJson) as PolicyDocument;
-  const missing: string[] = [];
-  for (const stmt of policy.Statement) {
-    if (stmt.Effect !== "Allow") continue;
-    for (const action of toArray(stmt.Action)) {
-      if (![...allowed].some((a) => actionMatches(a, action))) {
-        missing.push(`${stmt.Sid ?? "(no sid)"}: ${action}`);
-      }
-    }
-  }
-  return missing;
+function uncovered(policyJson: string, boundary: IamStatement[]): string[] {
+  return uncoveredActions(JSON.parse(policyJson), boundary).map(
+    (m) => `${m.sid ?? "(no sid)"}: ${m.action}`,
+  );
 }
 
 describe("temp/runtime policies are subsumed by their boundaries", () => {
   it("temp-install-ddl ⊆ install-ddl boundary", () => {
     expect(
-      uncoveredActions(
+      uncovered(
         buildTempInstallDdlPolicy(STACK_PREFIX),
         installDdlBoundaryStatements(STACK_PREFIX),
       ),
@@ -81,7 +47,7 @@ describe("temp/runtime policies are subsumed by their boundaries", () => {
 
   it("temp-install-infra ⊆ install-infra boundary", () => {
     expect(
-      uncoveredActions(
+      uncovered(
         buildTempInstallInfraPolicy(STACK_PREFIX, APP_ID, ACCOUNT_ID, REGION),
         installInfraBoundaryStatements(STACK_PREFIX),
       ),
@@ -90,7 +56,7 @@ describe("temp/runtime policies are subsumed by their boundaries", () => {
 
   it("temp-uninstall-infra ⊆ install-infra boundary", () => {
     expect(
-      uncoveredActions(
+      uncovered(
         buildTempUninstallInfraPolicy(STACK_PREFIX, APP_ID, ACCOUNT_ID, REGION),
         installInfraBoundaryStatements(STACK_PREFIX),
       ),
@@ -99,8 +65,19 @@ describe("temp/runtime policies are subsumed by their boundaries", () => {
 
   it("temp-install-cloud-data-server ⊆ foundational boundary", () => {
     expect(
-      uncoveredActions(
+      uncovered(
         buildTempInstallCloudDataServerPolicy(STACK_PREFIX, ACCOUNT_ID, REGION),
+        foundationalPermissionsBoundaryStatements(STACK_PREFIX),
+      ),
+    ).toEqual([]);
+  });
+
+  it("temp-install-cloud-data-server with a custom domain ⊆ foundational boundary", () => {
+    expect(
+      uncovered(
+        buildTempInstallCloudDataServerPolicy(STACK_PREFIX, ACCOUNT_ID, REGION, [
+          "photos.example.com",
+        ]),
         foundationalPermissionsBoundaryStatements(STACK_PREFIX),
       ),
     ).toEqual([]);
@@ -108,7 +85,7 @@ describe("temp/runtime policies are subsumed by their boundaries", () => {
 
   it("per-app runtime policy ⊆ per-app boundary", () => {
     expect(
-      uncoveredActions(
+      uncovered(
         buildRuntimePolicy(STACK_PREFIX, APP_ID, ["image", "video"], true, true),
         appPermissionsBoundaryStatements(STACK_PREFIX),
       ),

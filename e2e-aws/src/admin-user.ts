@@ -21,12 +21,14 @@ import {
   AdminSetUserPasswordCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { regionFromUserPoolId } from "@starkeep/admin-installer";
+import { signInAdmin, type AdminSession } from "./installers.js";
 import {
   generatePassword,
   readAdminCredentials,
   writeAdminCredentials,
   type AdminCredentials,
   type RunPaths,
+  type TestStackConfig,
 } from "./run-state.js";
 
 const TEST_ADMIN_EMAIL = "tier3-admin@starkeep.test";
@@ -99,6 +101,26 @@ export async function ensureAdminUser(
   );
   writeAdminCredentials(paths, creds);
   return creds;
+}
+
+/**
+ * Ensure the test admin exists and sign it in through Cognito and the
+ * identity pool. Another checkout's run against the same stack may have set a
+ * new password since this run's was saved; the account is then taken back with
+ * a fresh one, once.
+ */
+export async function signInTestAdmin(
+  paths: RunPaths,
+  config: TestStackConfig,
+): Promise<{ admin: AdminCredentials; session: AdminSession }> {
+  let admin = await ensureAdminUser(paths, config.userPoolId);
+  try {
+    return { admin, session: await signInAdmin(config, admin) };
+  } catch (err) {
+    if ((err as { name?: string }).name !== "NotAuthorizedException") throw err;
+    admin = await ensureAdminUser(paths, config.userPoolId, { resetPassword: true });
+    return { admin, session: await signInAdmin(config, admin) };
+  }
 }
 
 async function userExists(

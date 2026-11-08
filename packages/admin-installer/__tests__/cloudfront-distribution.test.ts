@@ -260,6 +260,12 @@ describe("shared/* — Part B signed shared bytes", () => {
     const filesOrigin = origins.find((o) => o.originId === "shared-files-s3");
     expect(filesOrigin?.originAccessControlId).toBeTruthy();
   });
+
+  it("declares no s3OriginConfig, which every refresh would drop and every install restore", () => {
+    const origins = distribution.inputs.origins as Array<Record<string, unknown>>;
+    const filesOrigin = origins.find((o) => o.originId === "shared-files-s3");
+    expect(filesOrigin).not.toHaveProperty("s3OriginConfig");
+  });
 });
 
 describe("files bucket policy — the distribution can only ever read shared/*", () => {

@@ -1,0 +1,27 @@
+{
+  "name": "@starkeep/e2e-aws-custom-domain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run src/zone.unit.test.ts",
+    "test:aws:custom-domain": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-acm": "^3.1163.0",
+    "@aws-sdk/client-cloudfront": "^3.1164.0",
+    "@aws-sdk/client-route-53": "^3.1163.0",
+    "@aws-sdk/client-ssm": "^3.700.0",
+    "@aws-sdk/client-sts": "^3.700.0",
+    "@starkeep/admin-installer": "workspace:*",
+    "@starkeep/app-client": "workspace:*",
+    "@starkeep/e2e": "workspace:*",
+    "@starkeep/e2e-aws": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.4.0",
+    "typescript": "^5.7.0",
+    "vitest": "^5.0.5"
+  }
+}

@@ -120,6 +120,8 @@ const byTypeSuffix = (suffix: string): CreatedResource[] =>
 
 const filesBucket = (): CreatedResource =>
   byTypeSuffix("s3/bucketV2:BucketV2").find((r) => r.name === "starkeep-files")!;
+const billingBucket = (): CreatedResource =>
+  byTypeSuffix("s3/bucketV2:BucketV2").find((r) => r.name === "starkeep-billing")!;
 const dsqlCluster = (): CreatedResource => byTypeSuffix("dsql/cluster:Cluster")[0];
 const versioning = (): CreatedResource[] => byTypeSuffix("bucketVersioningV2:BucketVersioningV2");
 const sse = (): CreatedResource[] =>
@@ -174,6 +176,11 @@ describe("real installs (ephemeral=false) are hardened", () => {
   it("guards the files bucket against destroy-while-non-empty", async () => {
     await run(false);
     expect(filesBucket().inputs.forceDestroy).toBe(false);
+  });
+
+  it("guards the billing bucket against destroy-while-non-empty", async () => {
+    await run(false);
+    expect(billingBucket().inputs.forceDestroy).toBe(false);
   });
 
   it("enables versioning on the files bucket", async () => {
@@ -440,6 +447,13 @@ describe("ephemeral e2e installs (ephemeral=true) skip hardening", () => {
   it("makes the files bucket self-emptying on destroy", async () => {
     await run(true);
     expect(filesBucket().inputs.forceDestroy).toBe(true);
+  });
+
+  it("makes the billing bucket self-emptying on destroy", async () => {
+    // AWS's billing service writes a test object when the cost report is
+    // created, so the uninstall's destroy finds the bucket non-empty.
+    await run(true);
+    expect(billingBucket().inputs.forceDestroy).toBe(true);
   });
 
   it("creates no versioning, SSE, or public-access-block resources", async () => {

@@ -31,15 +31,29 @@ import { roleChain, type AwsCredentials } from "./session";
 import {
   appRoleExists,
   attachTempInstallCloudDataServerPolicy,
+  customDomainPolicyFits,
   createAppRole,
   deleteAppRoleWithPolicies,
   detachTempInstallCloudDataServerPolicy,
 } from "./iam";
-import { pulumiUpInline, pulumiDestroyInline } from "./compute-stack";
+import { pulumiUpInline, pulumiDestroyInline, type StateResource } from "./compute-stack";
 import { initializeSharedSchema } from "./dsql-schema-init";
 import { buildCloudDataServerProgram } from "./builtin-programs/cloud-data-server-program";
 import { putCloudFrontSigningParameter, putDeploymentSettingsParameter } from "./app-creds";
 import { configureAppSignInClients, findOrCreateAppSignInClients } from "./app-sign-in-clients";
+import {
+  assertNoForeignRecords,
+  deleteUnusedCertificates,
+  domainPointsAt,
+  ensureExternalCertificate,
+  findHostedZone,
+  listDeploymentCertificates,
+  planCustomDomain,
+  signingHosts,
+  validateCustomDomain,
+  type CustomDomainStatus,
+  type KeptCertificate,
+} from "./custom-domain";
 import {
   checkDeploymentSettings,
   serializeDeploymentSettings,
@@ -116,6 +130,43 @@ export interface CloudDataServerInstallConfig {
    * install never overwrites what the operator chose since.
    */
   deploymentSettings?: unknown;
+  /**
+   * The host the distribution should answer on besides its cloudfront.net
+   * name, such as `photos.example.com`, or undefined for none.
+   */
+  customDomain?: string;
+  /**
+   * The custom domain the previous install attached or requested, when it
+   * differs from `customDomain`. The install-time grants cover its records, so
+   * a removal or a change can delete them, and its certificate.
+   */
+  previousCustomDomain?: string;
+  /**
+   * A domain an earlier install started on and never finished. Its grants stay
+   * in place, so this run, or `pulumi destroy`, can delete what the failed
+   * attempt created.
+   */
+  attemptedCustomDomain?: string;
+  /**
+   * The certificate the distribution held after the last install: the attached
+   * domain's, or one kept with no alias. A run that attaches no domain keeps
+   * it; a run that attaches one swaps it out and deletes it.
+   */
+  heldCertificate?: KeptCertificate;
+  /**
+   * An external domain the last install found pointing at this distribution.
+   * It stays canonical without a new DNS check: a lookup that fails on the
+   * operator's machine, behind a VPN or a filtering resolver, must not move
+   * every link back to the cloudfront.net name. An operator who points the
+   * domain elsewhere removes it in admin-web.
+   */
+  activeExternalDomain?: string;
+  /**
+   * The distribution's cloudfront.net name from the last install. An external
+   * domain becomes canonical only once public DNS sends it there, and the
+   * check runs before `pulumi up` reports the name again.
+   */
+  cloudfrontDomain?: string;
 }
 
 /**
@@ -147,8 +198,17 @@ export interface CloudDataServerInstallOutputs {
   auroraHostname: string;
   bucketName: string;
   apiGatewayUrl: string;
-  /** Browser-facing base URL — the CloudFront distribution domain. */
+  /**
+   * Browser-facing base URL — the custom domain once attached, the CloudFront
+   * distribution domain otherwise.
+   */
   publicBaseUrl: string;
+  /** The distribution's own name, which keeps answering beside a custom domain. */
+  cloudfrontDomain: string;
+  /** Where the custom domain stands, or undefined when the install names none. */
+  customDomain?: CustomDomainStatus;
+  /** The certificate the distribution keeps with no alias, if any. */
+  keptCertificate?: KeptCertificate;
   apiGatewayId: string;
   apiGatewayExecutionArn: string;
   authorizerId: string;
@@ -260,6 +320,67 @@ function makeCloudDataServerOrphanCleaner(
 }
 
 /**
+ * The custom domains an install's grants must cover: the one it attaches, the
+ * one the previous install attached, one an earlier install started on and
+ * never finished, and the one whose certificate the distribution holds,
+ * normalized and without repeats. An invalid name drops out.
+ */
+export function customDomainsInPlay(
+  config: Pick<
+    CloudDataServerInstallConfig,
+    "customDomain" | "previousCustomDomain" | "attemptedCustomDomain" | "heldCertificate"
+  >,
+): string[] {
+  const names = [
+    config.customDomain,
+    config.previousCustomDomain,
+    config.attemptedCustomDomain,
+    config.heldCertificate?.name,
+  ].flatMap((d) => {
+    if (!d) return [];
+    try {
+      return [validateCustomDomain(d)];
+    } catch {
+      return [];
+    }
+  });
+  return [...new Set(names)];
+}
+
+/**
+ * This deployment's distribution names: the one the stack's state holds, and
+ * the one the last install recorded. State covers a first install that failed
+ * after Pulumi wrote the alias record, before the config learned the name.
+ */
+export function ownDistributionDomains(
+  resources: readonly StateResource[],
+  lastKnown?: string,
+): string[] {
+  const fromState = resources
+    .filter((r) => r.type === "aws:cloudfront/distribution:Distribution")
+    .map((r) => r.outputs?.domainName)
+    .filter((d): d is string => typeof d === "string");
+  return [...new Set([...fromState, ...(lastKnown ? [lastKnown] : [])])];
+}
+
+/**
+ * Refuse an install whose custom-domain grants would push the role's inline
+ * policies past IAM's quota. PutRolePolicy would refuse the temp policy anyway;
+ * this names the cause before anything changes.
+ */
+function assertCustomDomainPolicyFits(
+  config: Pick<CloudDataServerInstallConfig, "stackPrefix" | "region">,
+  customDomains: readonly string[],
+): void {
+  if (customDomainPolicyFits(config.stackPrefix, config.region, customDomains)) return;
+  throw new Error(
+    `The custom domain${customDomains.length > 1 ? "s" : ""} ${customDomains.join(" and ")} ` +
+      `(${customDomains.map((d) => d.length).join(" + ")} characters) would push the cloud data ` +
+      "server role's inline policies past IAM's 10,240-character quota. Choose a shorter domain.",
+  );
+}
+
+/**
  * Install (or update) the cloud-data-server built-in app.
  *
  * Idempotent — safe to re-run. Each AWS-side check is an existence check,
@@ -280,6 +401,13 @@ export async function installCloudDataServer(
   const appRoleArn = `arn:aws:iam::${config.accountId}:role/${config.stackPrefix}-app-${appId}-role`;
 
   assertCloudInstallableAppId(appId);
+
+  // Checked before anything changes, so a mistyped domain costs nothing.
+  const customDomainName = config.customDomain
+    ? validateCustomDomain(config.customDomain)
+    : undefined;
+  const customDomains = customDomainsInPlay(config);
+  assertCustomDomainPolicyFits(config, customDomains);
 
   const managerCreds = await roleChain([config.managerRoleArn]);
 
@@ -322,6 +450,7 @@ export async function installCloudDataServer(
     config.accountId,
     config.region,
     managerCreds,
+    customDomains,
   );
 
   if (policyUpdated) {
@@ -352,6 +481,72 @@ export async function installCloudDataServer(
     const appCreds: AwsCredentials = await roleChain([config.managerRoleArn, appRoleArn]);
     await logCallerIdentity("app session", appCreds);
 
+    // Step 3.5: Pick the custom domain's DNS mode. A zone in this account
+    // lets the Pulumi program own the certificate and every record. Otherwise
+    // the certificate is requested here, outside the stack, and attached by
+    // the first run after ACM issues it. An attached external domain becomes
+    // canonical only once public DNS sends it to the distribution.
+    // One certificate listing serves the whole run, scoped to the domains in
+    // play: ACM's tag lookup costs one call per certificate it reads.
+    const certificates =
+      customDomains.length > 0
+        ? await listDeploymentCertificates({
+            stackPrefix: config.stackPrefix,
+            domains: customDomains,
+            creds: appCreds,
+          })
+        : [];
+    let externalCertificate: Awaited<ReturnType<typeof ensureExternalCertificate>> | undefined;
+    let zone: Awaited<ReturnType<typeof findHostedZone>> = null;
+    let pointsAtDistribution = false;
+    if (customDomainName) {
+      zone = await findHostedZone(customDomainName, appCreds);
+      if (zone) {
+        console.log(`Custom domain ${customDomainName}: Route53 zone ${zone.name} (${zone.id}).`);
+      } else {
+        externalCertificate = await ensureExternalCertificate({
+          stackPrefix: config.stackPrefix,
+          domain: customDomainName,
+          certificates,
+          creds: appCreds,
+        });
+        console.log(
+          `Custom domain ${customDomainName}: DNS outside this account; certificate ` +
+            `${externalCertificate.certificateArn} ${externalCertificate.issued ? "issued" : "awaits validation"}.`,
+        );
+        if (externalCertificate.issued && config.activeExternalDomain === customDomainName) {
+          pointsAtDistribution = true;
+        } else if (externalCertificate.issued && config.cloudfrontDomain) {
+          pointsAtDistribution = await domainPointsAt(customDomainName, config.cloudfrontDomain);
+          if (!pointsAtDistribution) {
+            console.log(
+              `Custom domain ${customDomainName} does not point at ${config.cloudfrontDomain} yet; ` +
+                "attaching it, and keeping the cloudfront.net name canonical.",
+            );
+          }
+        }
+      }
+    }
+    // A route53-mode status written before the zone was recorded names no
+    // zone; the kept certificate's validation record needs it.
+    let held = config.heldCertificate;
+    if (held?.mode === "route53" && !held.hostedZoneId) {
+      held = { ...held, hostedZoneId: (await findHostedZone(held.name, appCreds))?.id };
+    }
+    const plan = planCustomDomain({
+      name: customDomainName,
+      zone,
+      certificate: externalCertificate,
+      pointsAtDistribution,
+      held,
+    });
+    if (plan.kept) {
+      console.log(
+        `Keeping the certificate for ${plan.kept.name} on the distribution with no alias, ` +
+          "until another domain replaces it or the cloud is uninstalled.",
+      );
+    }
+
     // Step 4: Pulumi up — creates DSQL, files bucket, Lambda, API Gateway.
     console.log("Running pulumi up for cloud-data-server…");
     const distZipPath = join(cloudDataServerPackageDir(), "dist.zip");
@@ -372,8 +567,10 @@ export async function installCloudDataServer(
       deviceUserPoolClientId: config.deviceUserPoolClientId,
       cognitoDomain: config.cognitoDomain,
       ephemeral: config.ephemeral ?? false,
+      customDomain: plan.program,
     });
 
+    const route53Domain = plan.program?.mode === "route53" ? plan.program : undefined;
     const outputs = await pulumiUpInline({
       stackName: `${config.stackPrefix}-cloud-data-server`,
       projectName: `${config.stackPrefix}-builtins`,
@@ -382,6 +579,19 @@ export async function installCloudDataServer(
       region: config.region,
       stackPrefix: config.stackPrefix,
       awsCreds: appCreds,
+      // Route53 mode: refuse before Pulumi requests the certificate when the
+      // domain already holds a record the stack did not write. The stack's
+      // own distribution, from state or from the last install, owns any alias
+      // to it.
+      preflight: route53Domain
+        ? (resources) =>
+            assertNoForeignRecords({
+              name: route53Domain.name,
+              hostedZoneId: route53Domain.hostedZoneId,
+              ownedAliasTargets: ownDistributionDomains(resources, config.cloudfrontDomain),
+              creds: appCreds,
+            })
+        : undefined,
       preCleanupOrphans: makeCloudDataServerOrphanCleaner(config, appCreds),
     });
 
@@ -391,6 +601,7 @@ export async function installCloudDataServer(
     const apiGatewayExecutionArn = String(outputs.apiGatewayExecutionArn);
     const apiGatewayUrl = String(outputs.apiGatewayUrl);
     const publicBaseUrl = String(outputs.publicBaseUrl);
+    const cloudfrontDomain = String(outputs.cloudfrontDomain);
     const authorizerId = String(outputs.authorizerId);
     const sessionAuthorizerId = String(outputs.sessionAuthorizerId);
     const functionArn = String(outputs.functionArn);
@@ -400,12 +611,18 @@ export async function installCloudDataServer(
     // CloudFront domain is known: the cloud-apps client's callback and logout
     // address on the shared origin, and each client's branding style. As
     // admin-app, the only role with Cognito client grants.
+    const signingDomain = String(outputs.cloudfrontSigningDomain);
+    const hosts = signingHosts(
+      signingDomain,
+      cloudfrontDomain,
+      plan.program?.detached ? undefined : plan.program?.name,
+    );
     console.log("Configuring the sign-in clients' callbacks and branding…");
     await configureAppSignInClients({
       stackPrefix: config.stackPrefix,
       region: config.region,
       userPoolId: config.userPoolId,
-      publicBaseUrl,
+      publicBaseUrls: hosts.map((h) => `https://${h}`),
       clients: signInClients,
       deploymentName: config.deploymentName,
     });
@@ -421,7 +638,8 @@ export async function installCloudDataServer(
     await putCloudFrontSigningParameter({
       stackPrefix: config.stackPrefix,
       keyPairId: String(outputs.cloudfrontKeyPairId),
-      domain: String(outputs.cloudfrontSigningDomain),
+      domain: signingDomain,
+      hosts,
       privateKey: String(outputs.cloudfrontSigningPrivateKey),
       region: config.region,
       awsCreds: managerCreds,
@@ -467,6 +685,23 @@ export async function installCloudDataServer(
     });
     console.log("Shared schema initialized.");
 
+    // Step 5.5: Delete the certificates this run left unused: after the
+    // operator changed the domain or moved its zone, or a pending external
+    // certificate after a removal. The swap released each one at once. Last,
+    // so a failure here stops a run that has done everything else, and a
+    // rerun only repeats the delete.
+    if (customDomains.length > 0) {
+      await deleteUnusedCertificates({
+        keepArns: [
+          externalCertificate?.certificateArn,
+          outputs.customDomainCertificateArn as string | undefined,
+          plan.kept?.certificateArn,
+        ],
+        certificates,
+        creds: appCreds,
+      });
+    }
+
     // Step 6: Detach on success only. On failure we deliberately leave the
     // policy attached: PutRolePolicy resets per-service authz cache
     // propagation (S3 in particular can take several minutes), so detaching
@@ -493,6 +728,9 @@ export async function installCloudDataServer(
       bucketName,
       apiGatewayUrl,
       publicBaseUrl,
+      cloudfrontDomain,
+      customDomain: plan.status ? { ...plan.status, aliasTarget: cloudfrontDomain } : undefined,
+      keptCertificate: plan.kept,
       apiGatewayId,
       apiGatewayExecutionArn,
       authorizerId,
@@ -531,6 +769,8 @@ export async function uninstallCloudDataServer(
 ): Promise<void> {
   const appId = "cloud-data-server";
   const appRoleArn = `arn:aws:iam::${config.accountId}:role/${config.stackPrefix}-app-${appId}-role`;
+  const customDomains = customDomainsInPlay(config);
+  assertCustomDomainPolicyFits(config, customDomains);
 
   const managerCreds = await roleChain([config.managerRoleArn]);
 
@@ -540,11 +780,16 @@ export async function uninstallCloudDataServer(
   }
 
   console.log("Attaching temp-install-cloud-data-server policy…");
+  // A route53-mode domain's certificate and records are stack resources, and
+  // `pulumi destroy` needs their grants. The certificate sweep below needs the
+  // certificate grants whatever domain is in play.
   const policyUpdated = await attachTempInstallCloudDataServerPolicy(
     config.stackPrefix,
     config.accountId,
     config.region,
     managerCreds,
+    customDomains,
+    { sweepCertificates: true },
   );
 
   if (policyUpdated) {
@@ -565,6 +810,19 @@ export async function uninstallCloudDataServer(
     region: config.region,
     stackPrefix: config.stackPrefix,
     awsCreds: appCreds,
+  });
+
+  // The program retains its certificate on delete, and an external-mode
+  // certificate was never in the stack. Pulumi has deleted the distribution,
+  // which releases every certificate it held. Every certificate tagged with
+  // the prefix goes, whatever domain it names.
+  await deleteUnusedCertificates({
+    keepArns: [],
+    certificates: await listDeploymentCertificates({
+      stackPrefix: config.stackPrefix,
+      creds: appCreds,
+    }),
+    creds: appCreds,
   });
 
   console.log("Deleting app role…");

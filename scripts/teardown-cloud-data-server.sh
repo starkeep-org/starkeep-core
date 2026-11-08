@@ -277,7 +277,8 @@ echo "  Stack prefix : $STACK_PREFIX  (region: $REGION, account: $ACCOUNT_ID)"
 echo "  API Gateway  : $GATEWAY_NAME"
 echo "  Lambdas      : ${CDS_LAMBDA_PREFIX}*"
 echo "  DSQL cluster : (tagged starkeep:stackPrefix=${STACK_PREFIX})$([[ "$FORCE" == "true" ]] && echo "  [--force: will disable deletion protection]")"
-echo "  CloudFront   : distribution + OAC + cache policy + public key + key group (Part B)"
+echo "  CloudFront   : distribution + OAC + cache policies + public key + key group (Part B)"
+echo "  Custom domain: every certificate tagged with the prefix, and a Route53-zone domain's records"
 echo "  Signing key  : SSM /${STACK_PREFIX}/app-creds/_cloudfront-signing"
 echo "  S3 buckets   : $FILES_BUCKET, $BILLING_BUCKET"
 echo "  CUR report   : $CUR_REPORT"
@@ -492,10 +493,11 @@ fi
 
 # ── Step 4b: CloudFront (Part B: shared-file signed URLs) ─────────────────────
 # The platform CloudFront distribution and its URL-signing material: the
-# distribution itself, the S3-origin OAC, the custom shared-files cache policy,
-# the RSA public key + key group, and the signed-out-redirect viewer-request
-# function. Deleting a distribution requires
-# disable → wait-until-Deployed → delete, which is slow (~5–15 min). This whole
+# distribution itself, the S3-origin OAC, the shared-files and public-shares
+# cache policies, the RSA public key + key group, the signed-out-redirect
+# viewer-request function, and a custom domain the stack owned. Deleting a
+# distribution requires disable → wait-until-Deployed → delete, which is slow
+# (~5–15 min). This whole
 # step is best-effort: any failure is logged and skipped so a hiccup never
 # aborts the wider teardown (these resources are idle/cheap and can be cleaned
 # up by hand). Done before the files bucket because the distribution's S3 origin
@@ -503,16 +505,22 @@ fi
 # install that failed before creating them).
 
 step "Deleting CloudFront distribution + signing key material"
-python3 - "$STACK_PREFIX" << 'PYEOF'
+# The certificate deletes below name each failure here, and the script fails at
+# the end when any is listed.
+CERT_FAILURES=$(mktemp)
+python3 - "$STACK_PREFIX" "$CERT_FAILURES" << 'PYEOF'
 import json, subprocess, sys, time
 
 prefix = sys.argv[1]
+cert_failures = sys.argv[2]
 
 DIST_COMMENT = f"{prefix} platform CDN"
 PUBKEY_COMMENT = f"{prefix} shared-file signing key"
 KEYGROUP_COMMENT = f"{prefix} shared-file signers"
 OAC_NAME = f"{prefix}-files-oac"
-CACHE_NAME = f"{prefix}-shared-files-cache"
+# Every custom cache policy the program creates. Names are account-global, so a
+# policy left behind makes the next install of the prefix fail.
+CACHE_NAMES = [f"{prefix}-shared-files-cache", f"{prefix}-public-shares-cache"]
 REDIRECT_FN_NAME = f"{prefix}-signed-out-redirect"
 
 
@@ -560,6 +568,7 @@ def delete_with_etag(kind, list_cmd, list_key, match, id_of, get_cmd, delete_cmd
 
 
 # ---- Distribution: find by comment → disable → wait Deployed → delete --------
+dist_domain = None  # Its cloudfront.net name, which a custom domain's alias records target.
 try:
     data = cf("list-distributions")
     items = (data.get("DistributionList") or {}).get("Items", []) or []
@@ -568,15 +577,26 @@ try:
         print("  Distribution: not found, skipping.")
     else:
         dist_id = dist["Id"]
+        dist_domain = dist.get("DomainName")
         print(f"  Distribution: {dist_id} (disable → wait → delete)")
         gc = cf("get-distribution-config", "--id", dist_id)
         etag, cfg = gc["ETag"], gc["DistributionConfig"]
-        if cfg.get("Enabled"):
+        # Drop a custom domain in the same update. CloudFront refuses an alias
+        # that another distribution holds (CNAMEAlreadyExists), so a delete
+        # that fails below must not keep the next install off the domain.
+        has_alias = (cfg.get("Aliases") or {}).get("Quantity", 0) > 0
+        if cfg.get("Enabled") or has_alias:
             cfg["Enabled"] = False
+            if has_alias:
+                cfg["Aliases"] = {"Quantity": 0}
+                # UpdateDistribution requires MinimumProtocolVersion even
+                # here, and TLSv1 is the value the default certificate takes.
+                cfg["ViewerCertificate"] = {"CloudFrontDefaultCertificate": True,
+                                            "MinimumProtocolVersion": "TLSv1"}
             path = f"/tmp/cf-disable-{dist_id}.json"
             with open(path, "w") as f:
                 json.dump(cfg, f)
-            print("  Disabling distribution…")
+            print("  Disabling distribution" + (" and detaching its custom domain…" if has_alias else "…"))
             cf("update-distribution", "--id", dist_id, "--if-match", etag,
                "--distribution-config", f"file://{path}")
         # Wait for BOTH: the deployment to settle *and* the config to actually
@@ -639,12 +659,13 @@ delete_with_etag(
     lambda it: it["Id"],
     "get-origin-access-control", "delete-origin-access-control",
 )
-delete_with_etag(
-    "Cache policy", "list-cache-policies", "CachePolicyList",
-    lambda it: it.get("CachePolicy", {}).get("CachePolicyConfig", {}).get("Name") == CACHE_NAME,
-    lambda it: it["CachePolicy"]["Id"],
-    "get-cache-policy", "delete-cache-policy",
-)
+for cache_name in CACHE_NAMES:
+    delete_with_etag(
+        f"Cache policy {cache_name}", "list-cache-policies", "CachePolicyList",
+        lambda it, n=cache_name: it.get("CachePolicy", {}).get("CachePolicyConfig", {}).get("Name") == n,
+        lambda it: it["CachePolicy"]["Id"],
+        "get-cache-policy", "delete-cache-policy",
+    )
 
 # ---- The signed-out-redirect viewer-request function -------------------------
 # Addressed by name rather than id, so it needs its own block rather than
@@ -670,6 +691,96 @@ for attempt in range(6):
             print(f"  WARN function cleanup ({REDIRECT_FN_NAME}) after 6 tries: {e}")
             break
         time.sleep(20)
+
+# ---- The custom domain's certificates and records ----------------------------
+# Every certificate tagged with the prefix goes: the stack's (Route53 mode, no
+# starkeep:customDomainMode tag) and the installer's (mode=external). For a
+# stack certificate, first delete its validation record and the A alias record
+# the stack wrote. External-mode records live at the operator's DNS provider.
+# The distribution is gone by now, and ACM releases a certificate at once when
+# its distribution is deleted, so a delete that still fails is recorded and
+# fails the script at the end.
+
+
+def aws_json(*args):
+    r = subprocess.run(["aws", *args, "--output", "json"], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip())
+    return json.loads(r.stdout) if r.stdout.strip() else {}
+
+
+def acm(*args):
+    return aws_json("acm", *args, "--region", "us-east-1")
+
+
+def zone_for(domain):
+    """The longest public Route53 zone name that equals or ends the domain."""
+    best = None
+    for z in aws_json("route53", "list-hosted-zones").get("HostedZones", []):
+        if z.get("Config", {}).get("PrivateZone"):
+            continue
+        name = z["Name"].rstrip(".").lower()
+        if (domain == name or domain.endswith("." + name)) and (not best or len(name) > len(best[1])):
+            best = (z["Id"].split("/")[-1], name)
+    return best
+
+
+def delete_record(zone_id, name, rtype, keep):
+    """Delete the record set `name`/`rtype` when `keep(record)` says it is ours."""
+    fqdn = name.rstrip(".") + "."
+    got = aws_json("route53", "list-resource-record-sets", "--hosted-zone-id", zone_id,
+                   "--start-record-name", fqdn, "--start-record-type", rtype, "--max-items", "1")
+    for rs in got.get("ResourceRecordSets", []):
+        if rs["Name"].lower() != fqdn.lower() or rs["Type"] != rtype or not keep(rs):
+            continue
+        batch = json.dumps({"Changes": [{"Action": "DELETE", "ResourceRecordSet": rs}]})
+        aws_json("route53", "change-resource-record-sets", "--hosted-zone-id", zone_id,
+                 "--change-batch", batch)
+        print(f"  Record: deleted {rtype} {fqdn}")
+
+
+try:
+    statuses = ["PENDING_VALIDATION", "ISSUED", "INACTIVE", "EXPIRED", "VALIDATION_TIMED_OUT",
+                "REVOKED", "FAILED"]
+    summaries = acm("list-certificates", "--certificate-statuses", *statuses).get(
+        "CertificateSummaryList", [])
+    for summary in summaries:
+        arn = summary["CertificateArn"]
+        tags = {t["Key"]: t.get("Value") for t in
+                acm("list-tags-for-certificate", "--certificate-arn", arn).get("Tags", [])}
+        if (tags.get("starkeep:stackPrefix") != prefix
+                or tags.get("starkeep:appId") != "cloud-data-server"):
+            continue
+        cert = acm("describe-certificate", "--certificate-arn", arn)["Certificate"]
+        domain = cert["DomainName"].lower()
+        zone = None if "starkeep:customDomainMode" in tags else zone_for(domain)
+        if zone:
+            for option in cert.get("DomainValidationOptions", []):
+                rr = option.get("ResourceRecord")
+                if rr:
+                    delete_record(zone[0], rr["Name"], rr["Type"], lambda rs, v=rr["Value"]: any(
+                        x.get("Value") == v for x in rs.get("ResourceRecords", [])))
+            delete_record(zone[0], domain, "A", lambda rs: (
+                rs.get("AliasTarget", {}).get("DNSName", "").rstrip(".").lower()
+                == (dist_domain or "").lower()
+                if dist_domain else
+                rs.get("AliasTarget", {}).get("DNSName", "").rstrip(".").endswith(".cloudfront.net")))
+        try:
+            acm("delete-certificate", "--certificate-arn", arn)
+            print(f"  Certificate: deleted {arn} ({domain})")
+        except Exception as e:  # noqa: BLE001
+            in_use = acm("describe-certificate", "--certificate-arn", arn)["Certificate"].get(
+                "InUseBy", [])
+            failure = (f"{arn} ({domain})"
+                       + (f", which ACM reports in use by {', '.join(in_use)}" if in_use else "")
+                       + f": {e}")
+            print(f"  ERROR certificate {failure}")
+            with open(cert_failures, "a") as f:
+                f.write(failure + "\n")
+except Exception as e:  # noqa: BLE001
+    print(f"  ERROR custom domain cleanup: {e}")
+    with open(cert_failures, "a") as f:
+        f.write(f"custom domain cleanup: {e}\n")
 PYEOF
 
 step "Deleting CloudFront signing SecureString: /${STACK_PREFIX}/app-creds/_cloudfront-signing"
@@ -743,6 +854,13 @@ path = sys.argv[1]
 STALE = [
     "apiGatewayUrl",
     "publicBaseUrl",
+    "cloudfrontDomain",
+    # The domain's certificates and records are gone with the distribution,
+    # so a reinstall starts with no domain, as after the uninstall CLI.
+    "customDomain",
+    "customDomainStatus",
+    "customDomainAttempted",
+    "customDomainKept",
     "apiGatewayId",
     "apiGatewayExecutionArn",
     "authorizerId",
@@ -769,6 +887,15 @@ else
   step "Clearing stale cloud-data-server keys from $CONFIG_FILE"
   skip
 fi
+
+if [[ -s "$CERT_FAILURES" ]]; then
+  echo ""
+  echo "Cloud-data-server teardown finished, but these certificates could not be deleted:"
+  sed 's/^/  /' "$CERT_FAILURES"
+  rm -f "$CERT_FAILURES"
+  exit 1
+fi
+rm -f "$CERT_FAILURES"
 
 echo ""
 echo "Cloud-data-server teardown complete."

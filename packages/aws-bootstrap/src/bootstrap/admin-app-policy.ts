@@ -86,6 +86,26 @@ export function adminAppPolicyStatements(stackPrefix: string): IamStatement[] {
       Resource: SUB(`arn:aws:s3:::${stackPrefix}-billing-*/*`),
     },
     {
+      // Admin-web's "Check now" on a custom domain whose DNS lives outside
+      // this account: reads whether ACM has issued the domain's certificate.
+      // CloudFront takes certificates only from us-east-1.
+      Sid: "AdminAppReadCertificates",
+      Effect: "Allow",
+      Action: ["acm:DescribeCertificate", "acm:ListCertificates"],
+      Resource: "*",
+      Condition: { StringEquals: { "aws:RequestedRegion": "us-east-1" } },
+    },
+    {
+      // Admin-web's "Set up" on a custom domain: finds whether the domain's
+      // zone lives in this account, as the install will, so the operator sees
+      // the records the install adds before approving them. Zone metadata
+      // only; no record reads or writes.
+      Sid: "AdminAppReadHostedZones",
+      Effect: "Allow",
+      Action: ["route53:ListHostedZones", "route53:GetHostedZone"],
+      Resource: "*",
+    },
+    {
       Sid: "AdminAppDsqlConnect",
       Effect: "Allow",
       Action: "dsql:DbConnect",

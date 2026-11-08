@@ -36,6 +36,7 @@ import { ThisMachineSection } from "../components/ThisMachineSection";
 import { UsersSection } from "../components/UsersSection";
 import { PublicSharesSection } from "../components/PublicSharesSection";
 import { CloudAddress } from "../components/CloudAddress";
+import { CustomDomainSection } from "../components/CustomDomainSection";
 import { LocalFoldersModal, type Watch } from "../components/LocalFoldersModal";
 import { CommandOutputModal } from "../components/CommandOutputModal";
 import { targetsOf, type LocalAppEntry } from "../lib/app-types";
@@ -697,6 +698,8 @@ export function DashboardPage() {
             </>
           )}
         </div>
+
+        {cloudAdministered && cognitoSession && <CustomDomainSection onChanged={bumpAll} />}
 
         {cloudAdministered && cognitoSession && <UsersSection />}
 

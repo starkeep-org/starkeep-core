@@ -5,3 +5,4 @@ packages:
   - "test-apps/*"
   - "e2e"
   - "e2e-aws"
+  - "e2e-aws-custom-domain"

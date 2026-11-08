@@ -49,8 +49,13 @@ import {
 } from "../src/cognito-auth";
 import { prompt } from "../src/cli-prompt";
 import { isDeploymentName } from "@starkeep/aws-bootstrap";
+import {
+  customDomainInstallInput,
+  nextCustomDomainConfig,
+  type CustomDomainConfigFields,
+} from "../src/custom-domain";
 
-interface StarkeepConfig {
+interface StarkeepConfig extends CustomDomainConfigFields {
   stackPrefix: string;
   accountId?: string;
   userPoolId: string;
@@ -82,6 +87,8 @@ interface StarkeepConfig {
   auroraEndpoint?: string;
   /** The deployment's settings this machine held with no cloud; seeds SSM once. */
   deploymentSettings?: unknown;
+  /** Written by this script: the distribution's own cloudfront.net name. */
+  cloudfrontDomain?: string;
 }
 
 const STARKEEP_DIR = starkeepDir();
@@ -234,6 +241,20 @@ console.log(
     : "  Already present; leaving as-is.",
 );
 
+// Record the domain this run attaches before anything touches AWS. A run that
+// fails part-way can leave the domain's certificate and records behind, and the
+// next run's grants must still cover them.
+let starting: StarkeepConfig;
+try {
+  starting = nextCustomDomainConfig(config, { stage: "starting" });
+} catch (err) {
+  // A failed attempt at another domain still waits for its cleanup.
+  console.error(`\nError: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+}
+mkdirSync(STARKEEP_DIR, { recursive: true });
+writeFileSync(CONFIG_PATH, JSON.stringify(starting, null, 2), "utf-8");
+
 console.log("\nInstalling cloud-data-server…\n");
 const outputs = await installCloudDataServer({
   stackPrefix,
@@ -257,6 +278,9 @@ const outputs = await installCloudDataServer({
   ...(config.deploymentSettings !== undefined
     ? { deploymentSettings: config.deploymentSettings }
     : {}),
+  // The domain to attach, and the earlier ones whose records and certificate
+  // this run may need to delete after a removal, a change, or a failed attempt.
+  ...customDomainInstallInput(config),
 }).catch(exitOnInstallFailure);
 
 // There is no separate cloud sync identity to install here: shared-record sync
@@ -266,7 +290,11 @@ const outputs = await installCloudDataServer({
 // wizard's second deploy pass) — after this cloud-data-server install completes.
 
 const updated: StarkeepConfig = {
-  ...config,
+  ...nextCustomDomainConfig(config, {
+    stage: "succeeded",
+    status: outputs.customDomain,
+    kept: outputs.keptCertificate,
+  }),
   accountId,
   permissionsBoundaryArn,
   foundationalPermissionsBoundaryArn,
@@ -275,6 +303,7 @@ const updated: StarkeepConfig = {
   pulumiStateBucket,
   apiGatewayUrl: outputs.apiGatewayUrl,
   publicBaseUrl: outputs.publicBaseUrl,
+  cloudfrontDomain: outputs.cloudfrontDomain,
   apiGatewayId: outputs.apiGatewayId,
   apiGatewayExecutionArn: outputs.apiGatewayExecutionArn,
   authorizerId: outputs.authorizerId,
@@ -290,5 +319,30 @@ writeFileSync(CONFIG_PATH, JSON.stringify(updated, null, 2), "utf-8");
 console.log("\nInstall complete. Updated ~/.starkeep/config.json:");
 console.log(`  apiGatewayUrl  : ${outputs.apiGatewayUrl}`);
 console.log(`  publicBaseUrl  : ${outputs.publicBaseUrl}`);
+if (outputs.customDomain?.status === "pending-validation") {
+  const record = outputs.customDomain.validationRecord;
+  console.log(`  customDomain   : ${outputs.customDomain.name} awaits certificate validation.`);
+  if (record)
+    console.log(`    Add ${record.type} ${record.name} -> ${record.value}, then install again.`);
+} else if (outputs.customDomain?.status === "awaiting-dns") {
+  console.log(
+    `  customDomain   : ${outputs.customDomain.name} attached, but does not point at the cloud yet.`,
+  );
+  console.log(
+    `    Point a CNAME at ${outputs.cloudfrontDomain}, then install again to make it canonical.`,
+  );
+} else if (outputs.customDomain?.mode === "external") {
+  console.log(
+    `  customDomain   : ${outputs.customDomain.name} attached. Point a CNAME at ${outputs.cloudfrontDomain}.`,
+  );
+} else if (outputs.customDomain) {
+  console.log(`  customDomain   : ${outputs.customDomain.name} attached.`);
+}
+if (outputs.keptCertificate) {
+  console.log(
+    `  customDomain   : the certificate for ${outputs.keptCertificate.name} stays on the ` +
+      "distribution, with no alias, until another domain replaces it.",
+  );
+}
 console.log(`  s3Bucket       : ${outputs.bucketName}`);
 console.log(`  auroraEndpoint : ${outputs.auroraHostname}`);

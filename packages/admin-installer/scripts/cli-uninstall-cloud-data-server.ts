@@ -22,7 +22,7 @@
 
 // First import: load repo-root .env / .env.local so STARKEEP_DIR is populated.
 import "@starkeep/app-client/load-env";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
 import { createInterface } from "node:readline";
@@ -39,8 +39,9 @@ import {
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { uninstallCloudDataServer, uninstallDrive } from "../src/builtin-installs";
 import { exitOnInstallFailure } from "../src/cli-exit";
+import { customDomainInstallInput, type CustomDomainConfigFields } from "../src/custom-domain";
 
-interface StarkeepConfig {
+interface StarkeepConfig extends CustomDomainConfigFields {
   stackPrefix: string;
   accountId?: string;
   userPoolId: string;
@@ -61,6 +62,8 @@ interface StarkeepConfig {
   authorizerId?: string;
   s3Bucket?: string;
   auroraEndpoint?: string;
+  /** The distribution's name, which a reinstall must not mistake for its own. */
+  cloudfrontDomain?: string;
 }
 
 function regionFromUserPoolId(userPoolId: string): string {
@@ -343,6 +346,18 @@ await uninstallCloudDataServer({
   pulumiStateBucket,
   userPoolId: config.userPoolId,
   userPoolClientId: config.userPoolClientId,
+  ...customDomainInstallInput(config),
 }).catch(exitOnInstallFailure);
+
+// The uninstall deleted the distribution, the custom domain's records and
+// every certificate. Nothing of the domain is left for a reinstall to act on,
+// and the old distribution's name would mislead its DNS check.
+const cleared: StarkeepConfig = { ...loadConfig() };
+delete cleared.customDomain;
+delete cleared.customDomainStatus;
+delete cleared.customDomainAttempted;
+delete cleared.customDomainKept;
+delete cleared.cloudfrontDomain;
+writeFileSync(CONFIG_PATH, JSON.stringify(cleared, null, 2), "utf-8");
 
 console.log("\nUninstall complete.");

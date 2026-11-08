@@ -52,10 +52,16 @@ import { AWS_TESTS_ENABLED, STACK_PREFIX, REGION, TEARDOWN } from "./env.js";
 import {
   E2E_DEPLOYMENT_NAME,
   ensureBootstrapStack,
+  stackConfigFrom,
   type BootstrapOutputs,
 } from "./bootstrap-stack.js";
-import { ensureAdminUser } from "./admin-user.js";
-import { signInThisMachine, signInAdmin, runInstallCli, type AdminSession } from "./installers.js";
+import { signInTestAdmin } from "./admin-user.js";
+import {
+  signInThisMachine,
+  runInstallCli,
+  runTeardownScript,
+  type AdminSession,
+} from "./installers.js";
 import { cloudAppTokens, sessionCookieHeader } from "./cloud-app-session.js";
 import {
   runPaths,
@@ -757,20 +763,6 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
     return channel!.result!.filesOwed;
   }
 
-  function runTeardownScript(script: string): void {
-    const result = spawnSync(
-      "bash",
-      [join(REPO_ROOT, "scripts", script), "--yes", "--prefix", STACK_PREFIX, "--region", REGION],
-      {
-        stdio: "inherit",
-        env: { ...process.env, STARKEEP_DIR: paths.dataDir, AWS_REGION: REGION },
-      },
-    );
-    if (result.status !== 0) {
-      throw new Error(`${script} exited with code ${result.status}`);
-    }
-  }
-
   (AWS_TESTS_ENABLED ? describe : describe.skip)(
     `tier-3 cloud journey: ${app.appId} (prefix ${STACK_PREFIX})`,
     () => {
@@ -842,8 +834,8 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
           console.log("[e2e-aws] STARKEEP_AWS_TEARDOWN=none — leaving cloud resources up");
           return;
         }
-        if (TEARDOWN === "apps") runTeardownScript("teardown-cloud-data-server.sh");
-        if (TEARDOWN === "all") runTeardownScript("teardown-bootstrap.sh");
+        if (TEARDOWN === "apps") runTeardownScript("teardown-cloud-data-server.sh", paths);
+        if (TEARDOWN === "all") runTeardownScript("teardown-bootstrap.sh", paths);
       });
 
       it("bootstrap stack: create if missing, verify outputs", async () => {
@@ -856,43 +848,39 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
 
         // Seed (or refresh) the CLI-facing config from stack outputs, keeping
         // any cloud-data-server outputs from a previous kept-up run.
-        const previous = readConfig(paths);
-        config = {
-          ...previous,
-          stackPrefix: STACK_PREFIX,
-          userPoolId: outputs.userPoolId,
-          userPoolClientId: outputs.userPoolClientId,
-          deviceUserPoolClientId: outputs.deviceUserPoolClientId,
-          cognitoDomain: outputs.cognitoDomain,
-          deploymentName: E2E_DEPLOYMENT_NAME,
-          identityPoolId: outputs.identityPoolId,
-          managerRoleArn: outputs.managerRoleArn,
-          permissionsBoundaryArn: outputs.appPermissionsBoundaryArn,
-          foundationalPermissionsBoundaryArn: outputs.appFoundationalPermissionsBoundaryArn,
-          userDataOwnerPermissionsBoundaryArn: outputs.userDataOwnerPermissionsBoundaryArn,
-          pulumiStateBucket: outputs.pulumiStateBucketName,
-          // The app's PARENT, not the app. `resolveAppDir` scans each entry's
-          // children for a manifest whose id matches, so naming the app's own
-          // directory would have it look inside the app for a nested copy of
-          // itself and find nothing. Derived rather than configured: the parent
-          // of an app's directory is a directory that contains that app, by
-          // construction, so there is nothing here for a caller to get wrong.
-          appParentDirs: [dirname(app.appDir)],
-        };
+        config = stackConfigFrom(readConfig(paths), STACK_PREFIX, outputs, app.appDir);
         writeConfig(paths, config);
       });
 
+      it("scripts/update-bootstrap.sh finds nothing to change on the stack just verified", async () => {
+        // The step above brought the stack to this checkout's template, so the
+        // operator's update script must preview no change. A difference means
+        // the script renders a template the suite does not deploy, and every
+        // live deployment would take an update nobody tested.
+        const result = spawnSync(
+          "bash",
+          [
+            join(REPO_ROOT, "scripts", "update-bootstrap.sh"),
+            "--prefix",
+            STACK_PREFIX,
+            "--region",
+            REGION,
+            "--deployment-name",
+            E2E_DEPLOYMENT_NAME,
+          ],
+          {
+            encoding: "utf-8",
+            env: { ...process.env, STARKEEP_DIR: paths.dataDir, AWS_REGION: REGION },
+          },
+        );
+        const output = `${result.stdout}${result.stderr}`;
+        console.log(output);
+        expect(result.status, output).toBe(0);
+        expect(output).toContain("The stack already matches this template.");
+      });
+
       it("admin user exists and signs in through Cognito + Identity Pool", async () => {
-        admin = await ensureAdminUser(paths, outputs.userPoolId);
-        try {
-          session = await signInAdmin(config, admin);
-        } catch (err) {
-          // Another checkout's run against this stack set a new password. Take
-          // the account back with a fresh one, once.
-          if ((err as { name?: string }).name !== "NotAuthorizedException") throw err;
-          admin = await ensureAdminUser(paths, outputs.userPoolId, { resetPassword: true });
-          session = await signInAdmin(config, admin);
-        }
+        ({ admin, session } = await signInTestAdmin(paths, config));
         expect(session.idToken.split(".")).toHaveLength(3);
         expect(session.awsCredentials.accessKeyId).toBeTruthy();
       });

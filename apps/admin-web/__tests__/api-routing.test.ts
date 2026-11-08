@@ -49,6 +49,7 @@ vi.mock("../src/routes/cloud-deploy-status", () => spy("cloud-deploy-status", ["
 vi.mock("../src/routes/cognito-outputs", () => spy("cognito-outputs", ["POST"]));
 vi.mock("../src/routes/config", () => spy("config", ["GET", "PATCH"]));
 vi.mock("../src/routes/costs", () => spy("costs", ["POST"]));
+vi.mock("../src/routes/custom-domain", () => spy("custom-domain", ["PUT", "CHECK", "ZONE"]));
 vi.mock("../src/routes/this-machine", () =>
   spy("this-machine", ["GET", "POST_SIGN_IN", "POST_SIGN_OUT", "POST_CLOUD"]),
 );
@@ -126,6 +127,9 @@ const ROUTES: Array<[string, string, string, string]> = [
   ["POST", "/api/exec/daemon", "exec-daemon", "POST"],
   ["GET", "/api/exec/daemon/status", "exec-daemon-status", "GET"],
   ["GET", "/api/exec/deploy-outputs", "exec-deploy-outputs", "GET"],
+  ["PUT", "/api/custom-domain", "custom-domain", "PUT"],
+  ["POST", "/api/custom-domain/check", "custom-domain", "CHECK"],
+  ["POST", "/api/custom-domain/zone", "custom-domain", "ZONE"],
   ["POST", "/api/exec/stream", "exec-stream", "POST"],
   ["GET", "/api/residency/stand-ins", "stand-ins", "GET"],
   ["PUT", "/api/residency/stand-ins", "stand-ins", "PUT"],

@@ -12,6 +12,10 @@ STARKEEP_AWS_TESTS=1 pnpm test:aws          # from repo root (turbo) or this dir
 Without `STARKEEP_AWS_TESTS=1` the suite reports skipped and makes no AWS calls.
 `pnpm test` (the default unit suite) never runs it.
 
+Custom domains have a live suite of their own, `e2e-aws-custom-domain`, which
+needs a DNS zone you control and never runs under `pnpm test:aws`. Its
+[README](../e2e-aws-custom-domain/README.md) explains the setup.
+
 The browser steps (real Chromium) need the Playwright browser installed once:
 
 ```bash
@@ -48,7 +52,10 @@ registry database, which must not land in a checkout you do not own.
 
 ## What it does (ordered steps)
 
-1. Create-if-missing the bootstrap CloudFormation stack; read its outputs.
+1. Create-if-missing the bootstrap CloudFormation stack; read its outputs. Then
+   run `scripts/update-bootstrap.sh` in preview mode and require it to find
+   nothing to change, so the operator's update script renders the template the
+   suite deploys.
 2. Create-if-missing a Cognito admin user (per-run password) and sign in through
    the real Cognito + Identity Pool chain.
 3. Install cloud-data-server via `cli-install-cloud-data-server` (real Pulumi up:

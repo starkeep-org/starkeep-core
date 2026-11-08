@@ -381,6 +381,13 @@ export function buildTempInstallCloudDataServerPolicy(
   stackPrefix: string,
   accountId: string,
   region: string,
+  customDomains: readonly string[] = [],
+  /**
+   * The uninstall's grants: the certificate reads and deletes even when no
+   * domain is in play, because the uninstall deletes every certificate tagged
+   * with the prefix.
+   */
+  opts: { sweepCertificates?: boolean } = {},
 ): string {
   const appId = "cloud-data-server";
   const pulumiStateBucket = `${stackPrefix}-pulumi-state-${accountId}-${region}`;
@@ -425,15 +432,13 @@ export function buildTempInstallCloudDataServerPolicy(
         },
       },
       {
-        Sid: "TempInstallDsqlAdmin",
-        Effect: "Allow",
-        Action: ["dsql:DbConnectAdmin", "dsql:DbConnect"],
-        Resource: "*",
-      },
-      {
-        Sid: "TempInstallDsqlCluster",
+        // The cluster's lifecycle and the admin connection the shared-schema
+        // DDL runs over, in one statement for the role's inline-policy quota.
+        Sid: "TempInstallDsql",
         Effect: "Allow",
         Action: [
+          "dsql:DbConnectAdmin",
+          "dsql:DbConnect",
           "dsql:CreateCluster",
           "dsql:GetCluster",
           "dsql:UpdateCluster",
@@ -448,57 +453,73 @@ export function buildTempInstallCloudDataServerPolicy(
         Resource: "*",
       },
       {
+        // Bucket-setting reads go through two patterns rather than an
+        // enumeration, for the role's 10,240-character inline-policy quota. No
+        // S3 object action starts with GetBucket or ends with Configuration, so
+        // neither pattern reaches an object; a plain s3:Get* would, because the
+        // bucket glob also matches object ARNs. Writes stay enumerated.
         Sid: "TempInstallS3Bucket",
         Effect: "Allow",
         Action: [
           "s3:CreateBucket",
           "s3:DeleteBucket",
-          "s3:GetBucketLocation",
-          "s3:GetBucketPolicy",
+          "s3:ListBucket",
+          "s3:GetBucket*",
+          "s3:Get*Configuration",
           "s3:PutBucketPolicy",
           "s3:DeleteBucketPolicy",
-          "s3:GetBucketTagging",
           "s3:PutBucketTagging",
-          "s3:GetBucketVersioning",
           "s3:PutBucketVersioning",
-          "s3:GetBucketAcl",
-          "s3:GetBucketCORS",
           "s3:PutBucketCORS",
-          "s3:GetBucketPublicAccessBlock",
           "s3:PutBucketPublicAccessBlock",
-          "s3:GetBucketOwnershipControls",
           "s3:PutBucketOwnershipControls",
-          "s3:GetEncryptionConfiguration",
           "s3:PutEncryptionConfiguration",
-          "s3:GetBucketWebsite",
-          "s3:GetAccelerateConfiguration",
-          "s3:GetBucketLogging",
-          "s3:GetBucketRequestPayment",
-          "s3:GetBucketObjectLockConfiguration",
           // Needed alongside CreateBucket/PutBucketVersioning to create the
           // files bucket with Object Lock enabled. The flag only — no
           // bucket-level default retention is ever written.
           "s3:PutBucketObjectLockConfiguration",
-          "s3:GetReplicationConfiguration",
-          "s3:GetLifecycleConfiguration",
           // Writing the single tag-filtered Deep Archive rule (media plan item 18).
-          // Paired with the Get above, which Pulumi reads on every refresh.
           "s3:PutLifecycleConfiguration",
-          "s3:GetBucketNotification",
           // Subscribing the CDS Lambda to the readability events (lifecycle
           // transition / restore completed / restore expired) that keep stored
           // availability true, plus the inventory-manifest landing. Without the
           // Put the notification is never written and availability silently has
-          // no source — the Get alone only lets Pulumi read what isn't there.
+          // no source — the read alone only lets Pulumi read what isn't there.
           "s3:PutBucketNotification",
-          // The daily availability inventory. Get is read on every refresh;
-          // Put creates it. Neither is implied by the bucket-level Get*
-          // wildcard the foundational boundary uses — this policy enumerates.
-          "s3:GetInventoryConfiguration",
+          // Creates the daily availability inventory.
           "s3:PutInventoryConfiguration",
-          "s3:ListBucket",
         ],
-        Resource: [`arn:aws:s3:::${stackPrefix}-files-*`],
+        Resource: `arn:aws:s3:::${stackPrefix}-files-*`,
+      },
+      {
+        // The cost-and-usage-report bucket: Pulumi creates it, locks it down
+        // and reads its settings, and writes nothing else. An ephemeral
+        // stack's destroy empties it of the test object AWS's billing service
+        // writes: it lists the object versions and deletes each one by version
+        // ID, even in an unversioned bucket. IAM's `*` spans `/`, so the
+        // bucket's resource covers its objects; no action here reads or
+        // writes one. `s3:DeleteObject*` also admits the tag deletes, and
+        // spends fewer of the role's inline-policy characters than the two
+        // verbs it needs.
+        Sid: "TempInstallBillingBucket",
+        Effect: "Allow",
+        Action: [
+          "s3:CreateBucket",
+          "s3:DeleteBucket",
+          "s3:ListBucket",
+          "s3:ListBucketVersions",
+          "s3:DeleteObject*",
+          "s3:GetBucket*",
+          "s3:Get*Configuration",
+          "s3:PutBucketPolicy",
+          "s3:DeleteBucketPolicy",
+          "s3:PutBucketTagging",
+          "s3:PutBucketVersioning",
+          "s3:PutBucketPublicAccessBlock",
+          "s3:PutBucketOwnershipControls",
+          "s3:PutEncryptionConfiguration",
+        ],
+        Resource: `arn:aws:s3:::${stackPrefix}-billing-*`,
       },
       {
         Sid: "TempInstallS3FilesObjects",
@@ -633,40 +654,6 @@ export function buildTempInstallCloudDataServerPolicy(
         },
       },
       {
-        Sid: "TempInstallBillingBucket",
-        Effect: "Allow",
-        Action: [
-          "s3:CreateBucket",
-          "s3:DeleteBucket",
-          "s3:GetBucketAcl",
-          "s3:GetBucketLocation",
-          "s3:GetBucketPolicy",
-          "s3:PutBucketPolicy",
-          "s3:DeleteBucketPolicy",
-          "s3:GetBucketTagging",
-          "s3:PutBucketTagging",
-          "s3:GetBucketVersioning",
-          "s3:PutBucketVersioning",
-          "s3:GetBucketPublicAccessBlock",
-          "s3:PutBucketPublicAccessBlock",
-          "s3:GetBucketOwnershipControls",
-          "s3:PutBucketOwnershipControls",
-          "s3:GetEncryptionConfiguration",
-          "s3:PutEncryptionConfiguration",
-          "s3:GetBucketCORS",
-          "s3:GetBucketWebsite",
-          "s3:GetAccelerateConfiguration",
-          "s3:GetBucketLogging",
-          "s3:GetBucketRequestPayment",
-          "s3:GetBucketObjectLockConfiguration",
-          "s3:GetReplicationConfiguration",
-          "s3:GetLifecycleConfiguration",
-          "s3:GetBucketNotification",
-          "s3:ListBucket",
-        ],
-        Resource: `arn:aws:s3:::${stackPrefix}-billing-*`,
-      },
-      {
         Sid: "TempInstallCur",
         Effect: "Allow",
         Action: [
@@ -692,63 +679,47 @@ export function buildTempInstallCloudDataServerPolicy(
         // keys, key groups, OAC, cache policies, and every List/Create call
         // have no resource-level ARN). This is the ephemeral install grant,
         // detached after install; the foundational boundary caps it (cloudfront:*).
-        // Enumerated (not cloudfront:*) so the actual grant stays auditable —
-        // the boundary is the wildcard ceiling, this is the specific need.
+        // Writes are enumerated (not cloudfront:*) so the actual grant stays
+        // auditable — the boundary is the wildcard ceiling, this is the
+        // specific need. Reads go through Get* and List* for the role's
+        // inline-policy quota: they already span every distribution in the
+        // account, and no CloudFront read returns user data or key material.
         Sid: "TempInstallCloudFront",
         Effect: "Allow",
         Action: [
-          // Distribution lifecycle + refresh reads + tagging.
+          "cloudfront:Get*",
+          "cloudfront:List*",
+          // Distribution lifecycle + tagging.
           "cloudfront:CreateDistribution",
           "cloudfront:CreateDistributionWithTags",
-          "cloudfront:GetDistribution",
-          "cloudfront:GetDistributionConfig",
           "cloudfront:UpdateDistribution",
           "cloudfront:DeleteDistribution",
-          "cloudfront:ListDistributions",
           "cloudfront:TagResource",
           "cloudfront:UntagResource",
-          "cloudfront:ListTagsForResource",
           // Origin Access Control (S3 origin lockdown).
           "cloudfront:CreateOriginAccessControl",
-          "cloudfront:GetOriginAccessControl",
-          "cloudfront:GetOriginAccessControlConfig",
           "cloudfront:UpdateOriginAccessControl",
           "cloudfront:DeleteOriginAccessControl",
-          "cloudfront:ListOriginAccessControls",
-          // Custom cache policy for the shared/* behavior + managed-policy reads.
+          // Custom cache policy for the shared/* behavior.
           "cloudfront:CreateCachePolicy",
-          "cloudfront:GetCachePolicy",
-          "cloudfront:GetCachePolicyConfig",
           "cloudfront:UpdateCachePolicy",
           "cloudfront:DeleteCachePolicy",
-          "cloudfront:ListCachePolicies",
-          "cloudfront:GetOriginRequestPolicy",
-          "cloudfront:ListOriginRequestPolicies",
           // URL-signing public key + key group.
           "cloudfront:CreatePublicKey",
-          "cloudfront:GetPublicKey",
-          "cloudfront:GetPublicKeyConfig",
           "cloudfront:UpdatePublicKey",
           "cloudfront:DeletePublicKey",
-          "cloudfront:ListPublicKeys",
           "cloudfront:CreateKeyGroup",
-          "cloudfront:GetKeyGroup",
-          "cloudfront:GetKeyGroupConfig",
           "cloudfront:UpdateKeyGroup",
           "cloudfront:DeleteKeyGroup",
-          "cloudfront:ListKeyGroups",
           // The signed-out-redirect viewer-request function on the default
           // behavior. PublishFunction is separate from CreateFunction and the
           // resource sets publish: true; DescribeFunction returns the ETag that
-          // update and delete both require; GetFunction and ListFunctions are
-          // Pulumi refresh reads.
+          // update and delete both require.
           "cloudfront:CreateFunction",
           "cloudfront:DescribeFunction",
-          "cloudfront:GetFunction",
           "cloudfront:UpdateFunction",
           "cloudfront:PublishFunction",
           "cloudfront:DeleteFunction",
-          "cloudfront:ListFunctions",
         ],
         Resource: "*",
       },
@@ -768,8 +739,83 @@ export function buildTempInstallCloudDataServerPolicy(
           StringEquals: { "iam:AWSServiceName": "dsql.amazonaws.com" },
         },
       },
+      ...customDomainStatements(stackPrefix, customDomains, opts.sweepCertificates ?? false),
     ],
   });
+}
+
+/**
+ * The grants an install needs for the distribution's custom domain, or none
+ * when the install names no domain. With `sweepCertificates`, the uninstall's
+ * certificate grants come without any domain's record grants.
+ *
+ * `customDomains` holds the domain this install attaches and any domain the
+ * previous install attached, so a removal or a change can still delete the old
+ * domain's records. One statement set serves both DNS modes, because the
+ * installer learns the mode only after this policy is attached.
+ *
+ * Record writes are held to the domains' own names: the domain itself, for the
+ * alias records, and `_*.<domain>`, the shape of ACM's validation record. Route53
+ * compares lowercase names without the trailing dot.
+ */
+function customDomainStatements(
+  stackPrefix: string,
+  customDomains: readonly string[],
+  sweepCertificates: boolean,
+): object[] {
+  if (customDomains.length === 0 && !sweepCertificates) return [];
+  return [
+    {
+      // Every verb but the record writes and the certificate delete, on
+      // Resource "*": ACM and Route53 list calls name no resource, and one
+      // statement keeps the role's inline policies under their shared
+      // 10,240-character quota. A request that carries tags also needs
+      // AddTagsToCertificate. CloudFront reads the certificate when the
+      // distribution attaches it.
+      Sid: "TempInstallCustomDomain",
+      Effect: "Allow",
+      Action: [
+        "acm:RequestCertificate",
+        "acm:DescribeCertificate",
+        "acm:ListCertificates",
+        "acm:AddTagsToCertificate",
+        "acm:RemoveTagsFromCertificate",
+        "acm:ListTagsForCertificate",
+        "route53:ListHostedZones",
+        "route53:GetHostedZone",
+        "route53:ListResourceRecordSets",
+        "route53:GetChange",
+      ],
+      Resource: "*",
+    },
+    {
+      // Only this deployment's own certificates. Both DNS modes tag theirs
+      // with the stack prefix, so a certificate the account holds for anything
+      // else stays out of reach whatever the installer's own filter does.
+      Sid: "TempInstallCustomDomainDeleteCertificate",
+      Effect: "Allow",
+      Action: "acm:DeleteCertificate",
+      Resource: "*",
+      Condition: { StringEquals: { "aws:ResourceTag/starkeep:stackPrefix": stackPrefix } },
+    },
+    ...(customDomains.length === 0
+      ? []
+      : [
+          {
+            Sid: "TempInstallCustomDomainRecords",
+            Effect: "Allow",
+            Action: "route53:ChangeResourceRecordSets",
+            Resource: "arn:aws:route53:::hostedzone/*",
+            Condition: {
+              "ForAllValues:StringLike": {
+                "route53:ChangeResourceRecordSetsNormalizedRecordNames": customDomains.flatMap(
+                  (d) => [d, `_*.${d}`],
+                ),
+              },
+            },
+          },
+        ]),
+  ];
 }
 
 /**
