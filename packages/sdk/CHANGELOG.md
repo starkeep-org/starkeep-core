@@ -1,5 +1,18 @@
 # @starkeep/sdk
 
+## 0.4.7
+
+### Patch Changes
+
+- Updated dependencies [8dbd1c4]
+- Updated dependencies [8dbd1c4]
+- Updated dependencies [c6fb61b]
+  - @starkeep/shared-space-api@0.8.0
+  - @starkeep/protocol-primitives@0.9.0
+  - @starkeep/query-orchestrator@0.4.6
+  - @starkeep/storage-adapter@0.8.2
+  - @starkeep/sync-engine@0.10.1
+
 ## 0.4.6
 
 ### Patch Changes

@@ -1,5 +1,19 @@
 # @starkeep/shared-space-api
 
+## 0.8.0
+
+### Minor Changes
+
+- 8dbd1c4: Add `listFiles` to the app-specific view, and `appFileListingJson` for its wire shape. Both data servers answer `GET /app-data/files` with it, so an app can list its own files by sub-key prefix, with paging. A file-index row the listing cannot read throws `CorruptFileIndexRowError`, which both servers answer with 500.
+- c6fb61b: Both app-syncable appliers refuse a file-index row whose `created_at` is not a serialized HLC, through the new `requireWellFormedFileIndexRow`. The check covers a row a node registers itself and a row a peer pushes over sync. The sync engine treats the refusal as it treats any failed apply: the log names the row, the author's watermark holds, and the response lists the author in `haltedAuthors`.
+
+### Patch Changes
+
+- Updated dependencies [8dbd1c4]
+  - @starkeep/protocol-primitives@0.9.0
+  - @starkeep/storage-adapter@0.8.2
+  - @starkeep/sync-engine@0.10.1
+
 ## 0.7.1
 
 ### Patch Changes
