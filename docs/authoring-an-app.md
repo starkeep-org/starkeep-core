@@ -186,9 +186,14 @@ example and `@starkeep/admin-manifest`'s `appManifestSchema` for the full schema
   installer infer the commands from your lockfile. A command must match the
   approved list in "Installing it", or the installer does not run it.
 
-**Optional fields** — `protocolMinVersion`, `requiredPermissions` /
-`optionalPermissions`, `homepage`, `author`, `license`, plus the
-`appSpecificSyncable` and `compute` blocks covered in §6–§7.
+**Optional fields** — `description`, `protocolMinVersion`,
+`requiredPermissions` / `optionalPermissions`, `homepage`, `author`,
+`license`, plus the `appSpecificSyncable` and `compute` blocks covered in
+§6–§7.
+
+Validation rejects any key the schema does not declare, at every level of the
+manifest, and suggests the declared key when the spelling is close. A
+misspelled optional field would otherwise read as a field left out.
 
 `protocolMinVersion` names the lowest platform protocol version the app
 needs, and defaults to `"1.0.0"`. The platform's version is `PROTOCOL_VERSION`
