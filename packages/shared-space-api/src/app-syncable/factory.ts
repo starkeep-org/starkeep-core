@@ -51,6 +51,15 @@ export interface AppSpecificFactoryOptions {
 const SERIALIZED_HLC = /^[0-9a-f]+:[0-9a-f]+:.+$/;
 
 /**
+ * A file-index row the server cannot read. The fault is in the server's own
+ * data, not in the request, so both data servers answer it with 500 where
+ * every other `listFiles` failure answers 400.
+ */
+export class CorruptFileIndexRowError extends Error {
+  override readonly name = "CorruptFileIndexRowError";
+}
+
+/**
  * A file-index row's `created_at` as an ISO instant.
  *
  * The index has one format, the HLC the registering node stamped, and a row in
@@ -60,7 +69,7 @@ const SERIALIZED_HLC = /^[0-9a-f]+:[0-9a-f]+:.+$/;
  */
 function fileIndexInstant(key: string, value: unknown): string {
   if (typeof value !== "string" || !SERIALIZED_HLC.test(value)) {
-    throw new Error(
+    throw new CorruptFileIndexRowError(
       `File index row ${key} has created_at ${JSON.stringify(value)}, not a serialized HLC`,
     );
   }

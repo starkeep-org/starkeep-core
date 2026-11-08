@@ -315,6 +315,33 @@ describe("GET /app-data/files — listing an app's own files", () => {
     expect((await list(appA, "prefix=/abs")).status).toBe(400);
   });
 
+  it("answers 500 for a file row whose created_at is not an HLC", async () => {
+    // The fault is the server's data, not the request, so the status is 500.
+    await putAppFile(appA, "corrupt/x.json", "{}", "application/json");
+    const table = "testapp_syncable__starkeep_sync_records";
+    const db = new DatabaseSync(join(server.starkeepDir, "data.db"));
+    try {
+      const { id, created_at: was } = db
+        .prepare(`SELECT id, created_at FROM ${table} WHERE id LIKE ?`)
+        .get("%/syncable/corrupt/x.json") as { id: string; created_at: string };
+      db.prepare(`UPDATE ${table} SET created_at = ? WHERE id = ?`).run(
+        "2026-10-27T00:00:00.000Z",
+        id,
+      );
+      try {
+        const res = await list(appA, "prefix=corrupt/");
+        expect(res.status).toBe(500);
+        expect(((await res.json()) as { error: string }).error).toBe(
+          `File index row ${id} has created_at "2026-10-27T00:00:00.000Z", not a serialized HLC`,
+        );
+      } finally {
+        db.prepare(`UPDATE ${table} SET created_at = ? WHERE id = ?`).run(was, id);
+      }
+    } finally {
+      db.close();
+    }
+  });
+
   it("refuses an app that declared files:false", async () => {
     const res = await list(appB, "");
     expect(res.status).toBe(400);

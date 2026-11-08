@@ -38,6 +38,7 @@ export type {
 } from "./app-syncable/types.js";
 export {
   createAppSpecificFactory,
+  CorruptFileIndexRowError,
   type AppSpecificFactoryOptions,
 } from "./app-syncable/factory.js";
 export { appFileListingJson } from "./app-syncable/file-listing.js";

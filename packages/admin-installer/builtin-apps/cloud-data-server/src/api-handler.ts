@@ -112,6 +112,7 @@ import {
 } from "@starkeep/storage-aurora-dsql";
 import {
   createAppSpecificFactory,
+  CorruptFileIndexRowError,
   appFileListingJson,
   assertRecordParams,
   planLabelQuery,
@@ -5622,7 +5623,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           });
           return ok(appFileListingJson(listing));
         } catch (err) {
-          return clientErr(err instanceof Error ? err.message : String(err), 400);
+          // A row the index cannot read is the server's fault, not the
+          // request's.
+          const status = err instanceof CorruptFileIndexRowError ? 500 : 400;
+          return clientErr(err instanceof Error ? err.message : String(err), status);
         }
       }
 
