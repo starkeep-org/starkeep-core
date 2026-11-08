@@ -26,6 +26,7 @@ import * as appsCloudList from "./routes/apps-cloud-list";
 import * as appsCloudInstall from "./routes/apps-cloud-install";
 import * as appsInstallStatus from "./routes/apps-install-status";
 import * as cloudDataServerInstall from "./routes/cloud-data-server-install";
+import * as cloudDataServerBuild from "./routes/cloud-data-server-build";
 import * as cognitoOutputs from "./routes/cognito-outputs";
 import * as config from "./routes/config";
 import * as costs from "./routes/costs";
@@ -67,6 +68,7 @@ api.get("/apps/:appId/install-status", (c) =>
 
 // Cloud setup: the two installs the wizard runs, and the config they write.
 api.post("/cloud-data-server/install", (c) => cloudDataServerInstall.POST(c.req.raw));
+api.post("/cloud-data-server/build", (c) => cloudDataServerBuild.POST(c.req.raw));
 api.post("/drive/install", (c) => driveInstall.POST(c.req.raw));
 api.get("/cloud-deploy/status", () => cloudDeployStatus.GET());
 api.get("/config", () => config.GET());

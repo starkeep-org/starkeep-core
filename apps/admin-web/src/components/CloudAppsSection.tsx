@@ -56,6 +56,9 @@ export function CloudAppsSection({
   // each on top of the app's shared data side.
   const [webIds, setWebIds] = useState<Set<string> | null>(null);
   const [mobileIds, setMobileIds] = useState<Set<string> | null>(null);
+  // What the registry recorded of each app's latest install, and the commit of
+  // the checkout this machine discovers for it, keyed by app id.
+  const [deployed, setDeployed] = useState<Map<string, DeployedApp> | null>(null);
 
   // Resolve the browser-facing base URL from the persisted cloud config so each
   // app's Open ↗ link (`${browserBaseUrl}/apps/${appId}/`) survives a reload.
@@ -99,10 +102,11 @@ export function CloudAppsSection({
         throw new Error(body?.error ?? `cloud registry list failed: ${res.status}`);
       }
       const body = (await res.json()) as {
-        apps: Array<{ appId: string; webApp: boolean; mobileApp: boolean }>;
+        apps: Array<{ appId: string; webApp: boolean; mobileApp: boolean } & DeployedApp>;
       };
       setWebIds(new Set(body.apps.filter((a) => a.webApp).map((a) => a.appId)));
       setMobileIds(new Set(body.apps.filter((a) => a.mobileApp).map((a) => a.appId)));
+      setDeployed(new Map(body.apps.map((a) => [a.appId, a])));
     } catch (err) {
       // The registry read is best-effort: a failure just means no "Installed"
       // badges. Don't surface it as a section-level error.
@@ -241,9 +245,22 @@ export function CloudAppsSection({
                 name={tileName}
                 version={entry.manifest.version ?? "?"}
                 description={
-                  surface === "web"
-                    ? entry.manifest.description
-                    : `The ${name} mobile app can sign in and sync with this cloud.`
+                  surface === "web" ? (
+                    <>
+                      {entry.manifest.description && (
+                        <span className="block">{entry.manifest.description}</span>
+                      )}
+                      {installed && (
+                        <DeployedVersionLine
+                          deployed={deployed?.get(entry.appId)}
+                          localVersion={entry.manifest.version}
+                          name={name}
+                        />
+                      )}
+                    </>
+                  ) : (
+                    `The ${name} mobile app can sign in and sync with this cloud.`
+                  )
                 }
                 actions={actions}
                 badges={
@@ -284,6 +301,48 @@ export function CloudAppsSection({
         }}
       />
     </div>
+  );
+}
+
+interface DeployedApp {
+  version: string;
+  /** The commit of the app checkout the latest cloud install ran from. */
+  sourceCommit: string | null;
+  /** The commit of the checkout this machine discovers for the app now. */
+  localCommit: string | null;
+}
+
+function versionName(version: string | undefined, commit: string | null): string {
+  const shown = version ?? "an unknown version";
+  return commit ? `${shown} (${commit.slice(0, 7)})` : shown;
+}
+
+/**
+ * Names the cloud's version and this computer's when the two differ. A
+ * commit counts only when both sides have one: an app outside a git checkout
+ * records none.
+ */
+function DeployedVersionLine({
+  deployed,
+  localVersion,
+  name,
+}: {
+  deployed: DeployedApp | undefined;
+  localVersion: string | undefined;
+  name: string;
+}) {
+  if (!deployed) return null;
+  const commitsDiffer =
+    deployed.sourceCommit !== null &&
+    deployed.localCommit !== null &&
+    deployed.sourceCommit !== deployed.localCommit;
+  if (deployed.version === localVersion && !commitsDiffer) return null;
+  return (
+    <span className="block text-amber-700 dark:text-amber-300">
+      The cloud runs {versionName(deployed.version, deployed.sourceCommit)}, and this computer has{" "}
+      {versionName(localVersion, deployed.localCommit)}. Choose Redeploy {name} in this card&apos;s
+      menu to update the cloud.
+    </span>
   );
 }
 

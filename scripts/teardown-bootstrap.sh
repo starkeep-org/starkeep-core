@@ -392,7 +392,9 @@ fi
 
 # ── Step 2b: Delete the platform's own parameters ────────────────────────────
 # The deployment's settings (/${STACK_PREFIX}/platform/deployment-settings),
-# written by admin-web through Manager, and any device records a deployment kept
+# written by admin-web through Manager, the record of the cloud data server
+# build the cloud runs (.../platform/cloud-data-server-build), written by the
+# install through Manager, and any device records a deployment kept
 # from before pairing was retired. Nothing uninstalls these, so the sweep is the
 # only thing that removes them.
 PLATFORM_PREFIX="/${STACK_PREFIX}/platform/"

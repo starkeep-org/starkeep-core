@@ -306,6 +306,11 @@ console.log("");
 // env and its bundle. A data-side or mobile install needs none of it.
 const zipBuffer = installsWeb ? prepareWebApp() : undefined;
 
+// The app checkout's commit, which the registry row records so admin-web can
+// say when the cloud runs an older checkout. Null outside a git checkout.
+const gitHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd: appDir, encoding: "utf8" });
+const sourceCommit = gitHead.status === 0 ? gitHead.stdout.trim() : null;
+
 console.log(`\nInstalling ${appId} app…\n`);
 // Registry writes authenticate to DSQL as the admin-app IAM role (mapped to
 // `${stackPrefix}_installer` PG role at schema-init time). The ambient
@@ -323,6 +328,7 @@ await installApp({
   surfaces,
   ...(zipBuffer ? { zipBuffer } : {}),
   version: manifest.version,
+  sourceCommit,
   registryCredentials,
   config: {
     stackPrefix,

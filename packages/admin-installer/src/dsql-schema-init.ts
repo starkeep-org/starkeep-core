@@ -515,6 +515,9 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
       .ifNotExists()
       .addColumn("app_id", "text", (c) => c.notNull().primaryKey())
       .addColumn("version", "text", (c) => c.notNull())
+      // The commit of the app checkout the latest install ran from, null
+      // outside a git checkout. admin-web compares it with the checkout's.
+      .addColumn("source_commit", "text")
       .addColumn("name", "text")
       .addColumn("installed_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
       .addColumn("updated_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))

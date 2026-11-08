@@ -9,8 +9,13 @@
  *    runtimes don't pre-include @aws-sdk/* on Node 22.x, so bundling them is
  *    correct.
  * 3. Zip the bundle output into dist.zip alongside this script.
+ * 4. Write build-info.json beside it: a SHA-256 of the bundled JavaScript, the
+ *    commit and whether the tree had uncommitted changes. The zip's own hash
+ *    changes with every build, because `zip` stores file times, so the install
+ *    records this file instead (`src/cloud-data-server-build.ts`).
  *
  * Output: packages/admin-installer/builtin-apps/cloud-data-server/dist.zip
+ * and build-info.json beside it.
  *
  * The zip is referenced by pulumi-program.ts via
  *   code: new pulumi.asset.FileArchive(distZipPath)
@@ -24,7 +29,8 @@
  */
 
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -34,6 +40,8 @@ const pkgDir = __dirname;
 const repoRoot = resolve(pkgDir, "..", "..", "..", "..");
 const stagingDir = join(pkgDir, ".build-staging");
 const outputZip = join(pkgDir, "dist.zip");
+const outputInfo = join(pkgDir, "build-info.json");
+const ENTRIES = ["api-handler", "session-authorizer"];
 
 // Workspace packages the Lambda depends on, in dependency order.
 const WS_PACKAGES = [
@@ -59,7 +67,7 @@ mkdirSync(stagingDir, { recursive: true });
 
 // CommonJS, because Lambda's default loader expects it unless the zip carries
 // a package.json with type=module or the file is named .mjs.
-for (const entry of ["api-handler", "session-authorizer"]) {
+for (const entry of ENTRIES) {
   console.log(`Bundling ${entry} with esbuild…`);
   await build({
     entryPoints: [join(pkgDir, "src", `${entry}.ts`)],
@@ -79,6 +87,36 @@ execSync(`zip -j "${outputZip}" api-handler.js session-authorizer.js`, {
   stdio: "inherit",
 });
 
+// Each file's name and bytes, in entry order, so a renamed entry changes the hash.
+const bundleHash = createHash("sha256");
+for (const entry of ENTRIES) {
+  bundleHash.update(`${entry}.js\0`);
+  bundleHash.update(readFileSync(join(stagingDir, `${entry}.js`)));
+  bundleHash.update("\0");
+}
+
+function git(args) {
+  try {
+    return execSync(`git ${args}`, { cwd: repoRoot, encoding: "utf8" }).trim();
+  } catch {
+    return null;
+  }
+}
+const status = git("status --porcelain");
+writeFileSync(
+  outputInfo,
+  JSON.stringify(
+    {
+      bundleSha256: bundleHash.digest("hex"),
+      commit: git("rev-parse HEAD"),
+      dirty: status !== null && status !== "",
+    },
+    null,
+    2,
+  ) + "\n",
+);
+
 rmSync(stagingDir, { recursive: true });
 
 console.log(`\nBuilt: ${outputZip}`);
+console.log(`Recorded: ${outputInfo}`);

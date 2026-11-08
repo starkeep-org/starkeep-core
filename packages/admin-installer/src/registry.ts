@@ -54,6 +54,8 @@ export type AppSurface = "web" | "mobile";
 export interface InstalledApp {
   appId: string;
   version: string;
+  /** The commit of the app checkout the install ran from, or null outside a git checkout. */
+  sourceCommit: string | null;
   name: string | null;
   installedAt: string;
   updatedAt: string;
@@ -76,9 +78,16 @@ export interface Registry {
    * Record the app as installed, with `surfaces` added to whatever it already
    * had. Installing the mobile app writes its Android identity in the same
    * transaction as `mobile_app`, so the two always agree: the broker reads the
-   * identity, and admin-web and the CLI read the column.
+   * identity, and admin-web and the CLI read the column. `sourceCommit`
+   * replaces the row's commit, so the row names the checkout of the latest
+   * install.
    */
-  registerApp(manifest: AppManifest, appId: string, surfaces: readonly AppSurface[]): Promise<void>;
+  registerApp(
+    manifest: AppManifest,
+    appId: string,
+    surfaces: readonly AppSurface[],
+    sourceCommit: string | null,
+  ): Promise<void>;
   /**
    * Clear `surfaces` from the app's row and remove their registry parts: the
    * mobile app's Android identity. The row and the data side stay.
@@ -201,7 +210,7 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
       });
     },
 
-    async registerApp(manifest, appId, surfaces) {
+    async registerApp(manifest, appId, surfaces, sourceCommit) {
       const web = surfaces.includes("web");
       const android = manifest.mobile?.android;
       const mobile = surfaces.includes("mobile");
@@ -213,6 +222,7 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
             .values({
               app_id: appId,
               version: manifest.version,
+              source_commit: sourceCommit,
               name: manifest.name ?? null,
               web_app: web,
               mobile_app: mobile,
@@ -220,6 +230,7 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
             .onConflict((oc) =>
               oc.column("app_id").doUpdateSet((eb) => ({
                 version: eb.ref("excluded.version"),
+                source_commit: eb.ref("excluded.source_commit"),
                 name: eb.ref("excluded.name"),
                 updated_at: sql`now()`,
                 // Installing a surface never removes another one.
@@ -297,6 +308,7 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
           .select([
             "app_id",
             "version",
+            "source_commit",
             "name",
             "installed_at",
             "updated_at",
@@ -307,6 +319,7 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
           .execute()) as unknown as Array<{
           app_id: string;
           version: string;
+          source_commit: string | null;
           name: string | null;
           installed_at: Date | string;
           updated_at: Date | string;
@@ -316,6 +329,7 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
         return rows.map((r) => ({
           appId: r.app_id,
           version: r.version,
+          sourceCommit: r.source_commit,
           name: r.name,
           installedAt:
             r.installed_at instanceof Date ? r.installed_at.toISOString() : r.installed_at,

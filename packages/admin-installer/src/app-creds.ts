@@ -55,7 +55,8 @@ export function cloudFrontSigningParameterName(stackPrefix: string): string {
 
 /**
  * The SSM prefix for the platform's own non-secret parameters: the
- * deployment's settings.
+ * deployment's settings and the record of the cloud data server build the
+ * cloud runs (`cloud-data-server-build.ts`).
  *
  * A prefix of its own, rather than a reserved name under `app-creds/*`, so that
  * Manager can read the settings without any read on the app secrets. Manager

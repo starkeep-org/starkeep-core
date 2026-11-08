@@ -1063,6 +1063,8 @@ const CONTEXTS: Record<string, ContextBuilder> = {
       const appCredsArn = `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/app-creds/${id}`;
       // The deployment's settings, under the platform's own non-secret prefix.
       const settingsArn = `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/platform/deployment-settings`;
+      // The record of the cloud data server build the cloud runs.
+      const buildArn = `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/platform/cloud-data-server-build`;
       const ssmViaService = `ssm.${region}.amazonaws.com`;
       return [
         // ---- Mint / heal the per-app role (createAppRole). --------------
@@ -1180,6 +1182,16 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           action: "ssm:GetParameter",
           resource: settingsArn,
           why: "admin-web reads the deployment's settings through Manager before editing them.",
+        },
+        {
+          action: "ssm:PutParameter",
+          resource: buildArn,
+          why: "The cloud data server install records the build it deployed.",
+        },
+        {
+          action: "ssm:GetParameter",
+          resource: buildArn,
+          why: "admin-web reads the deployed build through Manager to compare it with the checkout's.",
         },
         {
           action: "kms:Encrypt",

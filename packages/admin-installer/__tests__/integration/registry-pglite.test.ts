@@ -165,10 +165,10 @@ describe("the registry's surfaces", () => {
   });
 
   it("adds the mobile app to an installed web app, and removes each in turn", async () => {
-    await registry.registerApp(photos, "photos", ["web"]);
+    await registry.registerApp(photos, "photos", ["web"], null);
     await expectSurfaces("photos", true, false);
 
-    await registry.registerApp(photos, "photos", ["mobile"]);
+    await registry.registerApp(photos, "photos", ["mobile"], null);
     await expectSurfaces("photos", true, true);
 
     await registry.removeSurfaces("photos", ["web"]);
@@ -181,14 +181,14 @@ describe("the registry's surfaces", () => {
   });
 
   it("removing the mobile app leaves the web app installed", async () => {
-    await registry.registerApp(photos, "photos", ["web", "mobile"]);
+    await registry.registerApp(photos, "photos", ["web", "mobile"], null);
     await registry.removeSurfaces("photos", ["mobile"]);
     await expectSurfaces("photos", true, false);
   });
 
   it("reinstalling with a manifest that drops the Android build removes the mobile app", async () => {
-    await registry.registerApp(photos, "photos", ["web", "mobile"]);
-    await registry.registerApp(photosWithoutAndroid, "photos", ["web"]);
+    await registry.registerApp(photos, "photos", ["web", "mobile"], null);
+    await registry.registerApp(photosWithoutAndroid, "photos", ["web"], null);
     await expectSurfaces("photos", true, false);
     expect((await registry.listInstalledApps())[0]).toMatchObject({
       version: "0.2.0",
@@ -198,9 +198,9 @@ describe("the registry's surfaces", () => {
   });
 
   it("refuses the mobile app for a manifest with no mobile build, and writes nothing", async () => {
-    await expect(registry.registerApp(photosWithoutAndroid, "photos", ["mobile"])).rejects.toThrow(
-      /declares no mobile build/,
-    );
+    await expect(
+      registry.registerApp(photosWithoutAndroid, "photos", ["mobile"], null),
+    ).rejects.toThrow(/declares no mobile build/);
     expect(await registryRow("photos")).toBeUndefined();
   });
 
@@ -209,12 +209,20 @@ describe("the registry's surfaces", () => {
       { ...photosWithoutAndroid, id: "starkeep-drive" },
       "starkeep-drive",
       [],
+      null,
     );
     await expectSurfaces("starkeep-drive", false, false);
   });
 
+  it("records the commit of the latest install, and clears it for one outside git", async () => {
+    await registry.registerApp(photos, "photos", ["web"], "abc1234");
+    expect((await registry.listInstalledApps())[0]?.sourceCommit).toBe("abc1234");
+    await registry.registerApp(photos, "photos", ["web"], null);
+    expect((await registry.listInstalledApps())[0]?.sourceCommit).toBeNull();
+  });
+
   it("reports both surfaces from listInstalledApps", async () => {
-    await registry.registerApp(photos, "photos", ["mobile"]);
+    await registry.registerApp(photos, "photos", ["mobile"], null);
     expect(await registry.listInstalledApps()).toEqual([
       expect.objectContaining({ appId: "photos", name: "Photos", webApp: false, mobileApp: true }),
     ]);
@@ -233,7 +241,7 @@ describe("the registry's surfaces", () => {
   });
 
   it("deletes the row, the identity and the ledger on a full uninstall", async () => {
-    await registry.registerApp(photos, "photos", ["web", "mobile"]);
+    await registry.registerApp(photos, "photos", ["web", "mobile"], null);
     await registry.recordStep("photos", "install", "register_app", "done");
     await registry.deleteAppRegistryEntry("photos");
     expect(await registryRow("photos")).toBeUndefined();
@@ -247,9 +255,13 @@ describe("schema init on a registry that predates the surface columns", () => {
   async function createOldRegistry(): Promise<void> {
     await state.pg.exec(`
       CREATE SCHEMA shared;
+      -- source_commit postdates the surface columns, but a deployment gets
+      -- it by a one-off ALTER rather than by schema init, so the registry's
+      -- writes here need it in place.
       CREATE TABLE shared.app_registry (
         app_id text PRIMARY KEY,
         version text NOT NULL,
+        source_commit text,
         name text,
         installed_at timestamptz NOT NULL DEFAULT now(),
         updated_at timestamptz NOT NULL DEFAULT now()
@@ -327,7 +339,7 @@ describe("schema init on a registry that predates the surface columns", () => {
     await initSchema();
     const registry = createDsqlRegistry(connection);
     try {
-      await registry.registerApp(photos, "memo", ["mobile"]);
+      await registry.registerApp(photos, "memo", ["mobile"], null);
       expect((await surfacesByApp())["memo"]).toEqual({ web_app: true, mobile_app: true });
     } finally {
       await registry.close();

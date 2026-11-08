@@ -137,6 +137,11 @@ export interface InstallInput {
    */
   registryCredentials: RegistryCredentials;
   /**
+   * The commit of the app checkout the install runs from, recorded in the
+   * app's registry row. Null or omitted outside a git checkout.
+   */
+  sourceCommit?: string | null;
+  /**
    * Set by built-in install wrappers (currently Starkeep Drive) to claim a
    * reserved app id. Third-party installs leave it unset and are rejected on
    * reserved ids.
@@ -554,7 +559,7 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
     "install",
     "register_app",
     done,
-    () => registry.registerApp(manifest, appId, surfaces),
+    () => registry.registerApp(manifest, appId, surfaces, input.sourceCommit ?? null),
     { alwaysRun: true },
   );
 

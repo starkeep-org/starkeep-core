@@ -5,6 +5,7 @@ import { AppCard, type AppCardAction } from "@/components/AppCard";
 import { ACTION_OCCASIONAL, ACTION_OPEN } from "@/lib/action-colors";
 import { StatusBadge } from "./StatusBadge";
 import type { CloudConfig, CognitoSession } from "../lib/cloud-config";
+import { operatorSession } from "../lib/operator-session";
 
 export type CloudHealth =
   | { status: "checking" }
@@ -61,6 +62,125 @@ export function useCloudDataServerHealth(
   return state;
 }
 
+interface BuildRecord {
+  bundleSha256: string;
+  commit: string | null;
+  dirty: boolean;
+}
+
+type BuildCheck =
+  | { status: "idle" }
+  | { status: "error"; message: string }
+  | {
+      status: "ready";
+      comparison: "not-recorded" | "no-local-build" | "local-build-stale" | "match" | "differs";
+      cloud: BuildRecord | null;
+    };
+
+/**
+ * Compares the cloud's build of the data server with this checkout's, through
+ * POST /api/cloud-data-server/build. The record sits behind Manager, so the
+ * check needs the operator's session and stays idle without one.
+ */
+function useCloudBuildCheck(enabled: boolean, refreshKey: number): BuildCheck {
+  const [state, setState] = useState<BuildCheck>({ status: "idle" });
+
+  useEffect(() => {
+    let cancelled = false;
+    setState({ status: "idle" });
+    if (!enabled) return;
+
+    (async () => {
+      try {
+        const session = await operatorSession();
+        const res = await fetch("/api/cloud-data-server/build", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            credentials: session.credentials,
+            stackPrefix: session.stackPrefix,
+            region: session.region,
+          }),
+        });
+        const body = (await res.json()) as {
+          comparison?: Extract<BuildCheck, { status: "ready" }>["comparison"];
+          cloud?: BuildRecord | null;
+          error?: string;
+        };
+        if (cancelled) return;
+        if (!res.ok || !body.comparison) {
+          setState({ status: "error", message: body.error ?? `Request failed (${res.status})` });
+          return;
+        }
+        setState({ status: "ready", comparison: body.comparison, cloud: body.cloud ?? null });
+      } catch (err) {
+        if (!cancelled) {
+          setState({ status: "error", message: err instanceof Error ? err.message : String(err) });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled, refreshKey]);
+
+  return state;
+}
+
+function buildName(build: BuildRecord): string {
+  const commit = build.commit ? build.commit.slice(0, 7) : "an unknown commit";
+  return build.dirty ? `${commit} with uncommitted changes` : commit;
+}
+
+const BUILD_COMMAND = "pnpm --filter @starkeep/builtin-cloud-data-server build";
+
+/** One line about the cloud's build, or null when there is nothing to say. */
+function BuildLine({ check, signedIn }: { check: BuildCheck; signedIn: boolean }) {
+  const muted = "block text-muted-foreground";
+  const warn = "block text-amber-700 dark:text-amber-300";
+  if (!signedIn) {
+    return (
+      <span className={muted}>
+        Sign in to compare the cloud&apos;s build with this checkout&apos;s.
+      </span>
+    );
+  }
+  if (check.status === "idle") return null;
+  if (check.status === "error") {
+    return <span className={muted}>Could not compare builds: {check.message}</span>;
+  }
+  const { comparison, cloud } = check;
+  if (comparison === "not-recorded" || !cloud) {
+    return (
+      <span className={warn}>
+        The cloud records no build, because its last deploy predates the record. Redeploy from
+        Manage deployment in this card&apos;s menu to record one.
+      </span>
+    );
+  }
+  const running = `The cloud runs the build from ${buildName(cloud)}.`;
+  if (comparison === "match") {
+    return <span className={muted}>{running} This checkout builds the same code.</span>;
+  }
+  if (comparison === "differs") {
+    return (
+      <span className={warn}>
+        {running} This checkout builds different code. Redeploy from Manage deployment in this
+        card&apos;s menu to run it.
+      </span>
+    );
+  }
+  return (
+    <span className={warn}>
+      {running}{" "}
+      {comparison === "no-local-build"
+        ? "This checkout has no build to compare."
+        : "This checkout's last build is older than the checkout."}{" "}
+      Run <code>{BUILD_COMMAND}</code> to compare.
+    </span>
+  );
+}
+
 /** Maps the probe onto the tri-state `StatusBadge` reads. */
 export function healthToOnline(health: CloudHealth): boolean | null {
   return health.status === "checking" || health.status === "no-config"
@@ -90,6 +210,7 @@ export function CloudDataServerStatus({
 
   const configured = !!cloudConfig?.apiGatewayUrl;
   const signedIn = !!cognitoSession?.refreshToken;
+  const buildCheck = useCloudBuildCheck(configured && signedIn, refreshKey);
 
   const signInButton = onSignIn && (
     <Button size="sm" className={ACTION_OPEN} onClick={onSignIn}>
@@ -154,13 +275,18 @@ export function CloudDataServerStatus({
         </>
       }
       description={
-        !configured
-          ? "Set up cloud to sync this machine's data beyond it."
-          : state.status === "offline"
-            ? `Could not reach the cloud data server: ${state.reason}`
-            : signedIn
-              ? cognitoSession?.userEmail
-              : undefined
+        !configured ? (
+          "Set up cloud to sync this machine's data beyond it."
+        ) : (
+          <>
+            {state.status === "offline" ? (
+              <span className="block">Could not reach the cloud data server: {state.reason}</span>
+            ) : (
+              signedIn && <span className="block">{cognitoSession?.userEmail}</span>
+            )}
+            <BuildLine check={buildCheck} signedIn={signedIn} />
+          </>
+        )
       }
       primary={primary}
       actions={actions}

@@ -40,6 +40,10 @@ import { pulumiUpInline, pulumiDestroyInline, type StateResource } from "./compu
 import { initializeSharedSchema } from "./dsql-schema-init";
 import { buildCloudDataServerProgram } from "./builtin-programs/cloud-data-server-program";
 import { putCloudFrontSigningParameter, putDeploymentSettingsParameter } from "./app-creds";
+import {
+  putCloudDataServerBuildParameter,
+  readLocalCloudDataServerBuild,
+} from "./cloud-data-server-build";
 import { configureAppSignInClients, findOrCreateAppSignInClients } from "./app-sign-in-clients";
 import {
   assertNoForeignRecords,
@@ -554,6 +558,9 @@ export async function installCloudDataServer(
     // even if the on-disk path is unchanged. Mirrors the per-app installer
     // (pulumi-program.ts) — without it, a fresh dist.zip may not be picked up.
     const bundleHash = cloudDataServerBundleSha256Base64();
+    // Read beside the zip, before Pulumi uploads it, so the record names the
+    // build this run deploys.
+    const build = readLocalCloudDataServerBuild();
     const program = buildCloudDataServerProgram({
       stackPrefix: config.stackPrefix,
       region: config.region,
@@ -667,6 +674,23 @@ export async function installCloudDataServer(
             : "The deployment's settings already exist; leaving them as they are.",
         );
       }
+    }
+
+    // Step 4.7: Record which build the cloud now runs, for the Dashboard's
+    // comparison with the operator's checkout.
+    if (build) {
+      await putCloudDataServerBuildParameter({
+        stackPrefix: config.stackPrefix,
+        build,
+        region: config.region,
+        awsCreds: managerCreds,
+      });
+      console.log(`Recorded the cloud data server build (${build.bundleSha256.slice(0, 12)}).`);
+    } else {
+      console.warn(
+        "No build-info.json beside dist.zip, so the cloud records no build. " +
+          "Run `pnpm --filter @starkeep/builtin-cloud-data-server build` before installing.",
+      );
     }
 
     // Step 5: Initialize the shared schema against the now-existing DSQL
