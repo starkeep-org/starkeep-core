@@ -51,6 +51,7 @@ export {
   FILE_RECORDS_COLUMNS,
   RESERVED_TABLE_NAMES,
   withFileRecordsTable,
+  requireWellFormedFileIndexRow,
   type FileRecordsTableColumn,
 } from "./app-syncable/reserved.js";
 export {

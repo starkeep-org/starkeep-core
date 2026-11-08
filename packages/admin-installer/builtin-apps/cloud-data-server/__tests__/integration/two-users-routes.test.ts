@@ -846,11 +846,11 @@ describe("a mobile app through the broker", () => {
     expect((await list(B, {})).files.map((f) => f.sub_key)).toEqual(["covers/z.jpg"]);
   });
 
-  it("fails the listing loudly on a file row whose created_at is not an HLC", async () => {
+  it("refuses a pushed file row whose created_at is not an HLC", async () => {
     await registerPhotosMobile();
     await createPhotosPrivateTables({ filesEnabled: true });
-    // Nothing on the ingest path checks the column's format, so a peer can
-    // ship an ISO instant. Read as an HLC, that instant would list as 1970.
+    // Read as an HLC, an ISO instant would list as 1970. The applier refuses
+    // the row, which halts its author and still answers 200.
     const iso = fileRow(A, "iso.jpg", "desk-a");
     const pushed = await call(
       A,
@@ -863,15 +863,36 @@ describe("a mobile app through the broker", () => {
       PHOTOS,
     );
     expect(pushed.status, JSON.stringify(pushed.body)).toBe(200);
+    expect(pushed.body["haltedAuthors"]).toEqual(["desk-a"]);
+    expect((await pg.query(`SELECT 1 FROM app_photos.${FILE_RECORDS_TABLE}`)).rows).toEqual([]);
+  });
+
+  it("fails the listing loudly on a stored file row whose created_at is not an HLC", async () => {
+    await registerPhotosMobile();
+    await createPhotosPrivateTables({ filesEnabled: true });
+    // The applier refuses such a row, so the test writes one around it: a row
+    // stored before the refusal existed reaches the listing the same way.
+    const registered = await call(
+      A,
+      "POST",
+      "/app-data/files/covers/iso.jpg/record",
+      { contentHash: HASH, mimeType: "image/jpeg", sizeBytes: 3, originalFilename: "iso.jpg" },
+      PHOTOS,
+    );
+    expect(registered.status, JSON.stringify(registered.body)).toBe(200);
+    const key = `apps/${PHOTOS}/${A}/syncable/covers/iso.jpg`;
+    await pg.query(`UPDATE app_photos.${FILE_RECORDS_TABLE} SET created_at = $1 WHERE id = $2`, [
+      "2026-10-27T00:00:00.000Z",
+      key,
+    ]);
 
     const res = await handler(
       { ...as(A, "GET", "/app-data/files", undefined, PHOTOS), queryStringParameters: {} },
       context,
     );
-    expect(res.statusCode, JSON.stringify({ pushed: pushed.body, list: res.body })).toBe(500);
+    expect(res.statusCode, res.body).toBe(500);
     expect(JSON.parse(res.body).error).toBe(
-      `File index row apps/${PHOTOS}/${A}/syncable/covers/iso.jpg has created_at ` +
-        `"2026-10-27T00:00:00.000Z", not a serialized HLC`,
+      `File index row ${key} has created_at "2026-10-27T00:00:00.000Z", not a serialized HLC`,
     );
   });
 

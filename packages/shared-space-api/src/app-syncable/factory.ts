@@ -18,7 +18,7 @@ import { checkValue } from "../query/values.js";
 import { SYSTEM_COLUMN_NAMES } from "./columns.js";
 import type { ParsedQuery, ParsedQueryResult, QueryTableSchema } from "../query/types.js";
 import { validateTableName } from "./validation.js";
-import { FILE_RECORDS_TABLE, RESERVED_TABLE_NAMES } from "./reserved.js";
+import { FILE_RECORDS_TABLE, RESERVED_TABLE_NAMES, fileIndexCreatedAtProblem } from "./reserved.js";
 
 export interface AppSpecificFactoryOptions {
   namespace: AppSyncableNamespaceStore;
@@ -47,9 +47,6 @@ export interface AppSpecificFactoryOptions {
   userId: () => string;
 }
 
-/** A serialized HLC: hex wall time, hex counter, node id (`serializeHLC`). */
-const SERIALIZED_HLC = /^[0-9a-f]+:[0-9a-f]+:.+$/;
-
 /**
  * A file-index row the server cannot read. The fault is in the server's own
  * data, not in the request, so both data servers answer it with 500 where
@@ -62,18 +59,15 @@ export class CorruptFileIndexRowError extends Error {
 /**
  * A file-index row's `created_at` as an ISO instant.
  *
- * The index has one format, the HLC the registering node stamped, and a row in
- * any other format fails the listing loudly. The check is not
- * `deserializeHLC`'s, because that one splits on `:` alone: an ISO instant
- * holds exactly two colons, passes, and reads as a moment in 1970.
+ * The index has one format, the HLC the registering node stamped. Both
+ * appliers refuse a row in any other format (`requireWellFormedFileIndexRow`),
+ * so this check fires only for a row stored before that refusal existed or
+ * written around the applier, and it fails the listing loudly.
  */
 function fileIndexInstant(key: string, value: unknown): string {
-  if (typeof value !== "string" || !SERIALIZED_HLC.test(value)) {
-    throw new CorruptFileIndexRowError(
-      `File index row ${key} has created_at ${JSON.stringify(value)}, not a serialized HLC`,
-    );
-  }
-  return new Date(deserializeHLC(value).wallTime).toISOString();
+  const problem = fileIndexCreatedAtProblem(key, value);
+  if (problem !== null) throw new CorruptFileIndexRowError(problem);
+  return new Date(deserializeHLC(value as string).wallTime).toISOString();
 }
 
 /**

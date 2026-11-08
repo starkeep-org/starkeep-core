@@ -80,6 +80,39 @@ export const FILE_RECORDS_TABLE_INFO: AppSyncableTableInfo = appSyncableTableInf
   FILE_RECORDS_COLUMNS,
 );
 
+/** A serialized HLC: hex wall time, hex counter, node id (`serializeHLC`). */
+const SERIALIZED_HLC = /^[0-9a-f]+:[0-9a-f]+:.+$/;
+
+/**
+ * What is wrong with a file-index row's `created_at`, or `null` when the value
+ * is a serialized HLC. The check is not `deserializeHLC`'s, because that one
+ * splits on `:` alone: an ISO instant holds exactly two colons, passes, and
+ * reads as a moment in 1970.
+ */
+export function fileIndexCreatedAtProblem(id: unknown, value: unknown): string | null {
+  if (typeof value === "string" && SERIALIZED_HLC.test(value)) return null;
+  return `File index row ${String(id)} has created_at ${JSON.stringify(value)}, not a serialized HLC`;
+}
+
+/**
+ * Refuse a file-index row whose `created_at` is not a serialized HLC.
+ *
+ * Both appliers call this on every entry, so the check covers a row the node
+ * registers itself and a row a peer ships over sync. The throw is the refusal:
+ * the sync engine logs it, holds that author's watermark, and offers the row
+ * again next round, as it does for any entry an applier refuses. An entry that
+ * carries no `created_at`, such as a local delete, passes.
+ */
+export function requireWellFormedFileIndexRow(entry: {
+  readonly table: string;
+  readonly row?: Record<string, unknown>;
+}): void {
+  if (entry.table !== FILE_RECORDS_TABLE || entry.row === undefined) return;
+  if (!("created_at" in entry.row)) return;
+  const problem = fileIndexCreatedAtProblem(entry.row["id"], entry.row["created_at"]);
+  if (problem !== null) throw new Error(problem);
+}
+
 /** Append the reserved table info to a namespace's tables list. */
 export function withFileRecordsTable(
   tables: AppSyncableTableInfo[],
