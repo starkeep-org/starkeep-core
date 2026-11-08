@@ -190,6 +190,17 @@ example and `@starkeep/admin-manifest`'s `appManifestSchema` for the full schema
 `optionalPermissions`, `homepage`, `author`, `license`, plus the
 `appSpecificSyncable` and `compute` blocks covered in §6–§7.
 
+`protocolMinVersion` names the lowest platform protocol version the app
+needs, and defaults to `"1.0.0"`. The platform's version is `PROTOCOL_VERSION`
+in `@starkeep/protocol-primitives`, and both data servers report it on
+`GET /health`. The minor version rises when the platform adds something an app
+can depend on, such as a file type, a route or a manifest field. The major
+version rises when a change breaks apps written for an earlier version. Set
+the field to the version that added the newest feature your app uses. Both
+installers refuse an app whose requirement the platform does not meet, and
+name both versions. A local data server keeps the code it started with, so
+after a `git pull` it can report an older version until it restarts.
+
 > Two grants are reserved and rejected by the validator for normal apps:
 > `infraRequirements.fileAccessAll` (all file types — Drive / User-Data-Owner
 > only) and `brokerPower` (cloud-data-server only). Installable apps enumerate

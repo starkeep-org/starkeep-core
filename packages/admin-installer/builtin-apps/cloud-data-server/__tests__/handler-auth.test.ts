@@ -15,6 +15,7 @@ import { mockClient } from "aws-sdk-client-mock";
 import { SSMClient, GetParameterCommand, ParameterNotFound } from "@aws-sdk/client-ssm";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 import { signRequest } from "@starkeep/app-client";
+import { PROTOCOL_VERSION } from "@starkeep/protocol-primitives";
 import type { APIGatewayEvent, LambdaContext } from "../src/handler-utils.js";
 import { installUserTokenFixture, mintTestUserToken } from "./user-token.js";
 
@@ -96,6 +97,14 @@ describe("unauthenticated routes", () => {
     const res = await handler(makeEvent({ method: "GET", path: "/health" }), context);
     expect(res.statusCode).toBe(200);
     expect(ssmMock.calls()).toHaveLength(0);
+  });
+
+  it("GET /health reports the protocol version the app installer checks", async () => {
+    const res = await handler(makeEvent({ method: "GET", path: "/health" }), context);
+    expect(JSON.parse(res.body as string)).toEqual({
+      status: "ok",
+      protocolVersion: PROTOCOL_VERSION,
+    });
   });
 
   it("OPTIONS returns 200", async () => {

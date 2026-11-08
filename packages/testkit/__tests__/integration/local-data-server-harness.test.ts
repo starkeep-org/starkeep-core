@@ -12,7 +12,7 @@ describe("local-data-server harness", () => {
     try {
       const health = await fetch(`${server.url}/health`);
       expect(health.status).toBe(200);
-      expect(await health.json()).toEqual({ status: "ok" });
+      expect(await health.json()).toMatchObject({ status: "ok" });
 
       // First boot persists a generated nodeId.
       const config = JSON.parse(await readFile(join(server.starkeepDir, "config.json"), "utf8"));

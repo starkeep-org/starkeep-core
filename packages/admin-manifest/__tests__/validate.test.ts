@@ -67,6 +67,14 @@ describe("photos fixture (full real manifest)", () => {
   });
 });
 
+describe("protocolMinVersion", () => {
+  it("rejects a value that is not major.minor.patch", () => {
+    const result = validateManifest(minimal({ protocolMinVersion: "1.1" }));
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("protocolMinVersion"))).toBe(true);
+  });
+});
+
 describe("id-bound privilege flags", () => {
   it("rejects fileAccessAll for any id except starkeep-drive", () => {
     const result = validateManifest(minimal({ infraRequirements: { fileAccessAll: true } }));

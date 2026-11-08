@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { LOGICAL_COLUMN_TYPES } from "@starkeep/protocol-primitives";
+import { LOGICAL_COLUMN_TYPES, parseProtocolVersion } from "@starkeep/protocol-primitives";
 
 export const appTierSchema = z.enum(["official", "verified", "community"]);
 
@@ -440,7 +440,15 @@ export const appManifestSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   version: z.string().min(1),
-  protocolMinVersion: z.string().default("1.0.0"),
+  // The lowest platform protocol version the app needs (`PROTOCOL_VERSION` in
+  // @starkeep/protocol-primitives). Both installers refuse an app whose
+  // requirement the platform does not meet.
+  protocolMinVersion: z
+    .string()
+    .refine((v) => parseProtocolVersion(v) !== null, {
+      message: 'must be a version of the form "major.minor.patch"',
+    })
+    .default("1.0.0"),
   tier: appTierSchema,
   // Install targets. Default ["local"] preserves prior behavior (every
   // discovered app appeared in the local list). A "cloud" app may be static
