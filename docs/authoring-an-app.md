@@ -471,32 +471,46 @@ In the manifest, `infraRequirements.compute`:
 "compute": {
   "enabled": true,
   "handlers": [
-    { "name": "api", "handler": "infra/src/resize-handler.handler",
-      "memoryMb": 512, "timeoutSeconds": 30, "routes": ["POST /api/resize"] },
     { "name": "static", "handler": "index.handler",
-      "routes": [
-        "GET /",
-        "ANY /{proxy+}",
-        { "route": "ANY /api/local-data/{proxy+}", "auth": "jwt" }
-      ],
-      "auth": "public",
-      "publicPaths": ["/", "/_immutable/*", "/starkeep-runtime-config"],
-      "env": { "STARKEEP_API_GATEWAY_URL": "", "STARKEEP_USER_POOL_ID": "", ... } }
+      "memoryMb": 256, "timeoutSeconds": 10,
+      "routes": ["GET /", "ANY /{proxy+}"],
+      "auth": "session",
+      "publicPaths": ["/", "/_immutable/*", "/sign-in", "/api/session/*", "/starkeep-runtime-config"],
+      "staticAssetPaths": ["/", "/_immutable/*"],
+      "env": { "STARKEEP_API_GATEWAY_URL": "", "STARKEEP_USER_POOL_ID": "", ... } },
+    { "name": "api", "handler": "api.handler",
+      "memoryMb": 256, "timeoutSeconds": 10,
+      "routes": ["POST /api/echo"] }
   ]
 }
 ```
 
-Each handler names a Lambda entry point **inside your `dist.zip`**, its routes,
-memory/timeout, `auth` (`"jwt"` default or `"public"`), and the `env` keys the
-platform fills in (these feed `getRuntimeConfig()` from §3).
+This is the example app's manifest. Each handler names a Lambda entry point
+**inside your `dist.zip`**, its routes, memory/timeout, `auth`, and the `env`
+keys the platform fills in (these feed `getRuntimeConfig()` from §3).
+
+`auth` decides how the gateway gates a handler's routes:
+
+- `"session"` — the platform's session cookie, checked by the gateway's
+  session authorizer. This is the answer for a browser app, because a
+  navigation carries the cookie but cannot send an `Authorization` header. The
+  authorizer gates every route on the handler, and each `publicPaths` entry
+  becomes its own more specific route with no authorizer. The validator
+  refuses a `session` handler with no `publicPaths`, because nobody could
+  reach the sign-in page (§8). The example's `static` handler uses this mode.
+- `"jwt"`, the default — a bearer token in `Authorization`, checked by the
+  gateway's Cognito JWT authorizer. Use it for a route your page's own code
+  calls, such as the example's `POST /api/echo`, and never for a page a
+  browser navigates to.
+- `"public"` — no gate at all.
 
 **`auth: "public"` is wider than it looks, and the manifest makes you say so.**
-It removes the Cognito authorizer from the route, and a handler that owns a
-catch-all _is_ the whole app — every server route your bundle mounts, including
-the signing proxy from §4, becomes reachable by anyone on the internet. You
-usually still need it, because a browser navigating to a URL cannot send an
-`Authorization` header and your HTML shell has to be reachable for sign-in to
-render at all. Three things narrow it:
+It removes the authorizer from the route, and a handler that owns a catch-all
+_is_ the whole app — every server route your bundle mounts, including the
+signing proxy from §4, becomes reachable by anyone on the internet. A browser
+app does not need it: `session` serves the shell and the sign-in page through
+`publicPaths` and gates the rest. If you use `public` anyway, three things
+narrow it:
 
 - **`publicPaths`** — required whenever an anonymous route is a catch-all.
   List the sub-paths the opt-out was actually _for_. The installer checks the
@@ -975,11 +989,11 @@ user can be checked is your app's own server code**.
 
 Concretely, in a cloud install:
 
-- The **API Gateway JWT authorizer** is on your routes unless you opted out. It
-  works for XHR-only routes your client can attach a bearer token to (Photos'
-  `POST /api/resize` uses it correctly). It cannot protect a document, because
-  a navigation carries no `Authorization` header, so any app with an HTML shell
-  opts at least that much out (§7).
+- The **API Gateway authorizer** is on your routes unless you opted out (§7).
+  A `jwt` route needs a bearer token, so it suits XHR-only routes your client
+  can attach one to (Photos' `POST /api/resize` uses it correctly). A
+  `session` handler checks the platform's cookie, so it gates documents too,
+  except the `publicPaths` you list.
 - **CloudFront is not a boundary.** The gateway origin stays directly
   reachable, and `data-roles-and-permissions.md` says so explicitly. An edge
   check is an optimization that keeps anonymous traffic off your Lambda; it is
