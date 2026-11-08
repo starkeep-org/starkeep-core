@@ -81,6 +81,7 @@ import {
   DATA_GROUP,
   stampFor,
   hasMetadataTable,
+  PROTOCOL_VERSION,
 } from "@starkeep/protocol-primitives";
 import type {
   Category,
@@ -2900,7 +2901,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
 
     // Unauthenticated health check — no app role needed
     if (method === "GET" && rawPath === "/health") {
-      return ok({ status: "ok" });
+      return ok({ status: "ok", protocolVersion: PROTOCOL_VERSION });
     }
 
     // GET /auth/config — how a desktop or a mobile app signs in, for one that

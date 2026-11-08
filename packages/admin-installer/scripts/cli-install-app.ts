@@ -67,6 +67,7 @@ import {
 import { prompt } from "../src/cli-prompt";
 import type { CommandResolution } from "../src/approved-commands";
 import { useOnlyAwsCredentials, withoutAwsVariables } from "../src/aws-env";
+import { protocolRefusal } from "../src/protocol-check";
 import {
   loadStarkeepCliConfig,
   appDirFor,
@@ -96,6 +97,32 @@ function installAppDependencies(install: CommandResolution): void {
     console.error(`Dependency install failed (${install.display} exited ${result.status}).`);
     process.exit(result.status ?? 1);
   }
+}
+
+/**
+ * The protocol version the cloud data server reports on `GET /health`, or
+ * null for one that reports none. An unreachable cloud stops the install.
+ */
+async function cloudProtocolVersion(apiGatewayUrl: string | undefined): Promise<string | null> {
+  if (!apiGatewayUrl) {
+    console.error(
+      `Error: ${starkeepConfigPath()} has no apiGatewayUrl. Install the cloud data server first.`,
+    );
+    process.exit(1);
+  }
+  let body: { protocolVersion?: unknown };
+  try {
+    const res = await fetch(`${apiGatewayUrl}/health`, { signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    body = (await res.json()) as { protocolVersion?: unknown };
+  } catch (err) {
+    console.error(
+      `Error: could not read the cloud data server's protocol version from ${apiGatewayUrl}/health: ` +
+        (err instanceof Error ? err.message : String(err)),
+    );
+    process.exit(1);
+  }
+  return typeof body.protocolVersion === "string" ? body.protocolVersion : null;
 }
 
 function buildAppBundle(
@@ -315,6 +342,19 @@ try {
 }
 const manifestPath = resolve(appDir, "starkeep.manifest.json");
 const rawManifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+// The protocol check runs before validation and before any build: an app
+// written for a newer platform usually fails the older validator too, and the
+// version mismatch is the message that says to redeploy.
+const protocolProblem = protocolRefusal({
+  appId,
+  rawManifest,
+  platformVersion: await cloudProtocolVersion(config.apiGatewayUrl),
+  target: "cloud",
+});
+if (protocolProblem) {
+  console.error(`Error: ${protocolProblem}`);
+  process.exit(1);
+}
 // Full validation, not a bare schema parse: the cross-field rules are where
 // the "an anonymous catch-all must declare its publicPaths" gate lives, and a
 // cloud install is the only place that gate matters.

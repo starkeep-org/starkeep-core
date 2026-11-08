@@ -2,6 +2,7 @@
   "id": "example-app",
   "name": "Example App",
   "version": "0.1.0",
+  "protocolMinVersion": "1.0.0",
   "description": "Performs every app-facing data operation on invented plaintext files, and shows each request and its result. Safe to run on a real deployment: it reads and writes only its own example type.",
   "tier": "official",
   "targets": ["local", "cloud"],

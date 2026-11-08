@@ -42,7 +42,9 @@ export {
   uninstallLocal,
   LocalInstallError,
   ManifestValidationError,
+  ProtocolVersionError,
 } from "./local/installer";
+export { protocolRefusal } from "./protocol-check";
 export type { InstallLocalResult, UninstallLocalOptions } from "./local/installer";
 export {
   listAppRegistry,
