@@ -9,6 +9,7 @@
     "noUncheckedIndexedAccess": true,
     "skipLibCheck": true,
     "noEmit": true,
+    "resolveJsonModule": true,
     "allowImportingTsExtensions": false
   },
   "include": ["src/**/*.ts", "__tests__/**/*.ts"]
