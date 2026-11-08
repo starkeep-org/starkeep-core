@@ -286,7 +286,11 @@ const outputs = await installCloudDataServer({
 // wizard's second deploy pass) — after this cloud-data-server install completes.
 
 const updated: StarkeepConfig = {
-  ...nextCustomDomainConfig(config, { stage: "succeeded", status: outputs.customDomain }),
+  ...nextCustomDomainConfig(config, {
+    stage: "succeeded",
+    status: outputs.customDomain,
+    kept: outputs.keptCertificate,
+  }),
   accountId,
   permissionsBoundaryArn,
   foundationalPermissionsBoundaryArn,
@@ -329,6 +333,12 @@ if (outputs.customDomain?.status === "pending-validation") {
   );
 } else if (outputs.customDomain) {
   console.log(`  customDomain   : ${outputs.customDomain.name} attached.`);
+}
+if (outputs.keptCertificate) {
+  console.log(
+    `  customDomain   : the certificate for ${outputs.keptCertificate.name} stays on the ` +
+      "distribution, with no alias, until another domain replaces it.",
+  );
 }
 console.log(`  s3Bucket       : ${outputs.bucketName}`);
 console.log(`  auroraEndpoint : ${outputs.auroraHostname}`);

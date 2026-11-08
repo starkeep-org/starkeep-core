@@ -278,7 +278,7 @@ echo "  API Gateway  : $GATEWAY_NAME"
 echo "  Lambdas      : ${CDS_LAMBDA_PREFIX}*"
 echo "  DSQL cluster : (tagged starkeep:stackPrefix=${STACK_PREFIX})$([[ "$FORCE" == "true" ]] && echo "  [--force: will disable deletion protection]")"
 echo "  CloudFront   : distribution + OAC + cache policies + public key + key group (Part B)"
-echo "  Custom domain: a Route53-zone domain's certificate and records (an external-DNS certificate stays)"
+echo "  Custom domain: every certificate tagged with the prefix, and a Route53-zone domain's records"
 echo "  Signing key  : SSM /${STACK_PREFIX}/app-creds/_cloudfront-signing"
 echo "  S3 buckets   : $FILES_BUCKET, $BILLING_BUCKET"
 echo "  CUR report   : $CUR_REPORT"
@@ -505,10 +505,14 @@ fi
 # install that failed before creating them).
 
 step "Deleting CloudFront distribution + signing key material"
-python3 - "$STACK_PREFIX" << 'PYEOF'
+# The certificate deletes below name each failure here, and the script fails at
+# the end when any is listed.
+CERT_FAILURES=$(mktemp)
+python3 - "$STACK_PREFIX" "$CERT_FAILURES" << 'PYEOF'
 import json, subprocess, sys, time
 
 prefix = sys.argv[1]
+cert_failures = sys.argv[2]
 
 DIST_COMMENT = f"{prefix} platform CDN"
 PUBKEY_COMMENT = f"{prefix} shared-file signing key"
@@ -688,15 +692,14 @@ for attempt in range(6):
             break
         time.sleep(20)
 
-# ---- A custom domain the stack owned (Route53 mode) --------------------------
-# The stack's certificate carries the prefix tag and no starkeep:customDomainMode
-# tag; an external-DNS domain's certificate carries mode=external and stays, so
-# a reinstall attaches it with no new DNS validation. For each stack
-# certificate, delete its validation record and the A alias record the stack
-# wrote, then the certificate. Best-effort like everything above. ACM can
-# report a certificate in use for most of an hour after its distribution let
-# go, so a certificate still in use stays for teardown-bootstrap.sh, which
-# waits for it, or for the next install that names the domain.
+# ---- The custom domain's certificates and records ----------------------------
+# Every certificate tagged with the prefix goes: the stack's (Route53 mode, no
+# starkeep:customDomainMode tag) and the installer's (mode=external). For a
+# stack certificate, first delete its validation record and the A alias record
+# the stack wrote. External-mode records live at the operator's DNS provider.
+# The distribution is gone by now, and ACM releases a certificate at once when
+# its distribution is deleted, so a delete that still fails is recorded and
+# fails the script at the end.
 
 
 def aws_json(*args):
@@ -746,12 +749,11 @@ try:
         tags = {t["Key"]: t.get("Value") for t in
                 acm("list-tags-for-certificate", "--certificate-arn", arn).get("Tags", [])}
         if (tags.get("starkeep:stackPrefix") != prefix
-                or tags.get("starkeep:appId") != "cloud-data-server"
-                or "starkeep:customDomainMode" in tags):
+                or tags.get("starkeep:appId") != "cloud-data-server"):
             continue
         cert = acm("describe-certificate", "--certificate-arn", arn)["Certificate"]
         domain = cert["DomainName"].lower()
-        zone = zone_for(domain)
+        zone = None if "starkeep:customDomainMode" in tags else zone_for(domain)
         if zone:
             for option in cert.get("DomainValidationOptions", []):
                 rr = option.get("ResourceRecord")
@@ -767,13 +769,18 @@ try:
             acm("delete-certificate", "--certificate-arn", arn)
             print(f"  Certificate: deleted {arn} ({domain})")
         except Exception as e:  # noqa: BLE001
-            if "ResourceInUseException" in str(e):
-                print(f"  Certificate: {arn} ({domain}) is still in use in ACM; "
-                      "teardown-bootstrap.sh deletes it, as does the next install that names the domain.")
-            else:
-                print(f"  WARN certificate cleanup ({domain}): {e}")
+            in_use = acm("describe-certificate", "--certificate-arn", arn)["Certificate"].get(
+                "InUseBy", [])
+            failure = (f"{arn} ({domain})"
+                       + (f", which ACM reports in use by {', '.join(in_use)}" if in_use else "")
+                       + f": {e}")
+            print(f"  ERROR certificate {failure}")
+            with open(cert_failures, "a") as f:
+                f.write(failure + "\n")
 except Exception as e:  # noqa: BLE001
-    print(f"  WARN custom domain cleanup: {e}")
+    print(f"  ERROR custom domain cleanup: {e}")
+    with open(cert_failures, "a") as f:
+        f.write(f"custom domain cleanup: {e}\n")
 PYEOF
 
 step "Deleting CloudFront signing SecureString: /${STACK_PREFIX}/app-creds/_cloudfront-signing"
@@ -848,9 +855,12 @@ STALE = [
     "apiGatewayUrl",
     "publicBaseUrl",
     "cloudfrontDomain",
-    # Describes the torn-down distribution. `customDomain`, the operator's
-    # choice, stays, so a reinstall attaches the same domain.
+    # The domain's certificates and records are gone with the distribution,
+    # so a reinstall starts with no domain, as after the uninstall CLI.
+    "customDomain",
     "customDomainStatus",
+    "customDomainAttempted",
+    "customDomainKept",
     "apiGatewayId",
     "apiGatewayExecutionArn",
     "authorizerId",
@@ -877,6 +887,15 @@ else
   step "Clearing stale cloud-data-server keys from $CONFIG_FILE"
   skip
 fi
+
+if [[ -s "$CERT_FAILURES" ]]; then
+  echo ""
+  echo "Cloud-data-server teardown finished, but these certificates could not be deleted:"
+  sed 's/^/  /' "$CERT_FAILURES"
+  rm -f "$CERT_FAILURES"
+  exit 1
+fi
+rm -f "$CERT_FAILURES"
 
 echo ""
 echo "Cloud-data-server teardown complete."

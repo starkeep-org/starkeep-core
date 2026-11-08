@@ -67,7 +67,8 @@ export async function PUT(req: Request): Promise<Response> {
 
 /**
  * The next install's grants name this domain, the one the last install acted
- * on, and one an unfinished install attempted. IAM caps the role's inline
+ * on, one an unfinished install attempted, and the one whose certificate the
+ * distribution keeps. IAM caps the role's inline
  * policies together, so a domain that would overflow the cap fails here rather
  * than at the install's PutRolePolicy.
  */
@@ -77,13 +78,17 @@ function quotaRefusal(domain: string): string | null {
     userPoolId?: string;
     customDomainStatus?: CustomDomainStatus;
     customDomainAttempted?: string;
+    customDomainKept?: { name: string };
   };
   if (!config.stackPrefix || !config.userPoolId) return null;
   const inPlay = [
     ...new Set(
-      [domain, config.customDomainStatus?.name, config.customDomainAttempted].filter(
-        (d): d is string => !!d,
-      ),
+      [
+        domain,
+        config.customDomainStatus?.name,
+        config.customDomainAttempted,
+        config.customDomainKept?.name,
+      ].filter((d): d is string => !!d),
     ),
   ];
   if (customDomainPolicyFits(config.stackPrefix, regionFromUserPoolId(config.userPoolId), inPlay)) {

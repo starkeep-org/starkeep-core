@@ -44,7 +44,11 @@ import {
   type Browser,
   type TestStackConfig,
 } from "@starkeep/e2e-aws";
-import { findHostedZone, type CustomDomainStatus } from "@starkeep/admin-installer/custom-domain";
+import {
+  findHostedZone,
+  type CustomDomainStatus,
+  type KeptCertificate,
+} from "@starkeep/admin-installer/custom-domain";
 import { createRecordWithBytes, solidPng, type LdsApp } from "@starkeep/e2e";
 import { signedFetch, USER_TOKEN_HEADER, type AppCredentials } from "@starkeep/app-client";
 import { CUSTOM_DOMAIN_SUITE_ENABLED, CUSTOM_DOMAIN_ZONE } from "./env.js";
@@ -68,6 +72,7 @@ type Config = TestStackConfig & {
   customDomain?: string;
   customDomainStatus?: CustomDomainStatus;
   customDomainAttempted?: string;
+  customDomainKept?: KeptCertificate;
   cloudfrontDomain?: string;
 };
 
@@ -199,33 +204,30 @@ async function fetchEventually(
       );
     }
 
-    /**
-     * Assert that nothing of `domain` is left: no record or validation record,
-     * and its certificate deleted, or at least detached.
-     *
-     * ACM can report a certificate in use for most of an hour after CloudFront
-     * moved to its default certificate. The installer then leaves the
-     * certificate, and a later install or the bootstrap teardown deletes it.
-     * After a removal the suite can only require that the distribution no
-     * longer serves the domain or its certificate. After the cloud-data-server
-     * teardown the distribution is gone, and any certificate is left for the
-     * bootstrap teardown.
-     */
-    async function expectGone(
-      domain: string,
-      certificate: "deleted" | "detached" | "left" = "deleted",
-    ): Promise<void> {
+    /** Assert that nothing of `domain` is left: no record, and no certificate. */
+    async function expectGone(domain: string): Promise<void> {
       const left = recordsAtOrUnder(await recordSets(zone.id), domain);
       expect(left.map((r) => `${r.Type} ${normalizeName(r.Name ?? "")}`)).toEqual([]);
-      if (certificate === "left") return;
+      expect(await stackCertificates(domain)).toEqual([]);
+    }
+
+    /**
+     * Assert that a removal kept `domain`'s certificate on the distribution,
+     * with no alias and no A record, and kept the validation record so the
+     * certificate keeps renewing. ACM holds a certificate for up to an hour
+     * after CloudFront falls back to its default certificate, so a removal
+     * never takes that path.
+     */
+    async function expectKept(domain: string): Promise<void> {
+      const atOrUnder = recordsAtOrUnder(await recordSets(zone.id), domain);
+      expect(atOrUnder.filter((r) => normalizeName(r.Name ?? "") === domain)).toEqual([]);
+      expect(atOrUnder.map((r) => r.Type)).toEqual(["CNAME"]);
       const certificates = await stackCertificates(domain);
-      if (certificate === "deleted") {
-        expect(certificates).toEqual([]);
-        return;
-      }
+      expect(certificates).toHaveLength(1);
       const serving = await distributionServing(config.cloudfrontDomain!);
       expect(serving.aliases).not.toContain(domain);
-      for (const c of certificates) expect(serving.certificateArn).not.toBe(c.arn);
+      expect(serving.certificateArn).toBe(certificates[0]!.arn);
+      expect(config.customDomainKept).toMatchObject({ name: domain, mode: "route53" });
     }
 
     /** Assert that `domain` is attached in Route53 mode and serves the cloud. */
@@ -470,7 +472,7 @@ async function fetchEventually(
       await installCloudDataServer();
       expect(config.customDomainStatus).toBeUndefined();
       expect(config.publicBaseUrl).toBe(`https://${config.cloudfrontDomain}`);
-      await expectGone(SECOND, "detached");
+      await expectKept(SECOND);
     });
 
     // ---- 8. Teardown with a domain attached ---------------------------------
@@ -480,24 +482,27 @@ async function fetchEventually(
       async () => {
         if (TEARDOWN === "none") {
           console.log(
-            "[custom-domain] STARKEEP_AWS_TEARDOWN=none; keeping the stack, with no domain",
+            "[custom-domain] STARKEEP_AWS_TEARDOWN=none; keeping the stack, with the removed name's certificate kept",
           );
           return;
         }
+        // The attach swaps the kept certificate out, and the same install
+        // deletes it with its validation record.
         writeDomain(FIRST);
         await installCloudDataServer();
         await expectAttached(FIRST);
+        await expectGone(SECOND);
+        expect(config.customDomainKept).toBeUndefined();
+        // The teardown deletes the distribution, which releases its
+        // certificate at once, then every certificate of the stack.
         runTeardownScript(
           TEARDOWN === "all" ? "teardown-bootstrap.sh" : "teardown-cloud-data-server.sh",
           paths,
         );
-        // The bootstrap teardown waits for ACM to let go of each certificate.
-        const certificates = TEARDOWN === "all" ? "deleted" : "left";
-        await expectGone(FIRST, certificates);
-        await expectGone(SECOND, certificates);
-        // An attach, the distribution's deletion, and up to 75 minutes of ACM.
+        await expectGone(FIRST);
+        await expectGone(SECOND);
       },
-      150 * 60_000,
+      90 * 60_000,
     );
   },
 );
