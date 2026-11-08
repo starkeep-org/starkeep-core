@@ -82,10 +82,50 @@ const session = (c: { req: { raw: Request; path: string; method: string } }) => 
 app.all("/api/session", session);
 app.all("/api/session/*", session);
 
+/**
+ * The sign-in page's first move in the cloud: trade a live session for a fresh
+ * token, without asking anyone anything.
+ *
+ * `sk_token` lasts about an hour and `sk_session` lasts weeks. The CloudFront
+ * redirect and the gateway both read `sk_token`, so an hour after the last
+ * page load a person who never signed out lands here. `POST
+ * /api/session/refresh` mints a new `sk_token` from `sk_session`, and the page
+ * goes back to the app. A person with no session sees the button at once and
+ * the refresh fails quietly.
+ *
+ * One bounce, not a loop: if the app sends the browser straight back here
+ * after a refresh succeeded, the second visit within 15 seconds shows the
+ * button rather than refreshing again.
+ */
+function restoreSessionScript(base: string): string {
+  return `<script>
+(async () => {
+  const key = "example-app:signInBounce";
+  try {
+    if (Date.now() - Number(sessionStorage.getItem(key)) < 15000) return;
+  } catch {}
+  try {
+    const res = await fetch("${base}/api/session/refresh", {
+      method: "POST",
+      credentials: "same-origin",
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.ok && body.signedIn) {
+      try { sessionStorage.setItem(key, String(Date.now())); } catch {}
+      location.replace("${base}/");
+    }
+  } catch {}
+})();
+</script>`;
+}
+
 // The sign-in page: one button to the platform's own sign-in page. The password
-// goes to the managed login page, never to this app.
+// goes to the managed login page, never to this app. In the cloud the page
+// first tries to restore a live session; locally nothing sends anyone here.
 app.get("/sign-in", () => {
   const base = appBasePath();
+  const restore =
+    process.env.STARKEEP_APP_CLIENT_MODE === "cloud" ? restoreSessionScript(base) : "";
   return new Response(
     `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Example App: sign in</title>
@@ -97,6 +137,7 @@ app.get("/sign-in", () => {
   <input type="hidden" name="return" value="${base}/">
   <button type="submit">Sign in</button>
 </form>
+${restore}
 </body></html>`,
     { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } },
   );

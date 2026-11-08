@@ -62,11 +62,40 @@ function isLoopbackHost(host: string | undefined): boolean {
   return LOOPBACK_HOSTNAMES.has(end > 0 ? lower.slice(0, end) : lower);
 }
 
+/**
+ * The `Host` check does not stop a page on another site from sending this
+ * server a blind `no-cors` POST to `127.0.0.1`: its `Host` is loopback, and no
+ * preflight runs for a `text/plain` body. Every route that signs, the proxy
+ * and any route of the app's own, would sign it. `Sec-Fetch-Site` is the
+ * browser's verdict on where the request came from. `same-site` counts as
+ * another site, because every port on one loopback address is one site. A
+ * request without the header came from no browser page and passes.
+ *
+ * A `GET` or `HEAD` navigation from another site passes, so admin-web's Open
+ * link still works: following a link writes nothing, and the page that sent
+ * the browser here cannot read the answer. A form POST is a navigation too,
+ * and it is refused. `createDataProxyHandler` makes the same check for the
+ * proxy alone; this one covers every route.
+ */
+function fromAnotherSite(
+  site: string | undefined,
+  mode: string | undefined,
+  method: string,
+): boolean {
+  if (site !== "cross-site" && site !== "same-site") return false;
+  return !(mode === "navigate" && (method === "GET" || method === "HEAD"));
+}
+
 const local = new Hono();
 
 local.use("*", async (c, next) => {
   if (!isLoopbackHost(c.req.header("host"))) {
     return c.text("This app answers only on a loopback address.", 403);
+  }
+  if (
+    fromAnotherSite(c.req.header("sec-fetch-site"), c.req.header("sec-fetch-mode"), c.req.method)
+  ) {
+    return c.text("This app refuses requests from other sites.", 403);
   }
   await next();
 });

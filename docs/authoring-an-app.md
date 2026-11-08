@@ -262,6 +262,27 @@ one of:
   when everything behind the proxy is genuinely public. The justification
   string is there to be read by a reviewer, so write one you would defend.
 
+**On the local surface, your server makes two more checks.** The session check
+is exempt there, so whoever reaches the server can make it sign. Bind
+`127.0.0.1`, which keeps other devices out. Then refuse two kinds of request
+from pages in the person's own browser:
+
+- **A `Host` that is not a loopback name.** A DNS-rebinding page reaches
+  `127.0.0.1` under a hostname it controls, and could otherwise read your
+  server's answers as its own.
+- **A `Sec-Fetch-Site` of `cross-site` or `same-site`.** A page on any site can
+  send a blind `no-cors` POST to `127.0.0.1` with a loopback `Host`. Its
+  `text/plain` body needs no preflight, and the data server parses it as JSON.
+  Every port on one loopback address is one site, so `same-site` is another
+  site here. Let a `GET` or `HEAD` navigation through, so a link from
+  admin-web still opens your app. A request with no `Sec-Fetch-Site` came
+  from no browser page.
+
+`createDataProxyHandler` makes the `Sec-Fetch-Site` check for the proxy
+itself. Make both checks in your local server too, so they cover every route
+that signs, not only the proxy. The example app's `web/src/server/local.ts`
+makes both.
+
 ## 5. Write a data client
 
 This is where you actually use the platform. Your client resolves the target
@@ -661,7 +682,16 @@ example app's `web/src/server/app.ts` shows all four.
    your app id as `app` and the path to return to as `return`. After the
    managed login page, the platform's `/auth/callback` sets two cookies scoped
    to your app's path. `sk_session` holds the refresh token and lasts weeks.
-   `sk_token` holds an ID token and lasts about an hour.
+   `sk_token` holds an ID token and lasts about an hour. The page must first
+   try `POST /api/session/refresh`, and return to your app when the refresh
+   answers `signedIn: true`. The platform sends a browser to `/sign-in`
+   whenever `sk_token` has expired, so about an hour after the last page load
+   every signed-in person lands there with a live `sk_session`. Without the
+   refresh, each of them goes back through the managed login. Show the button
+   at once, and guard against a loop: a second visit within a few seconds of
+   a successful refresh should show the button instead of refreshing again.
+   The example's `restoreSessionScript` and Photos' `src/SignInPage.tsx` both
+   do this.
 2. **The session routes under `/api/session`.** Mount the routes that
    `createSessionRoutes({ appId })` from `@starkeep/app-client/auth` returns.
    `GET /api/session` reports who is signed in. `POST /api/session/refresh`

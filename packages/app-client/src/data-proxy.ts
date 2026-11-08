@@ -90,6 +90,37 @@ function isCloudMode(): boolean {
 }
 
 /**
+ * Whether a browser sent this request from a page on another site.
+ *
+ * On the local surface the proxy signs for anyone who reaches it, and a page on
+ * any site reaches it: a `no-cors` POST with a `text/plain` body needs no
+ * preflight, the browser sends it to `127.0.0.1` with a loopback `Host`, and
+ * the data server parses the body as JSON whatever its type. The page cannot
+ * read the answer, but the write lands. A loopback `Host` check stops DNS
+ * rebinding and not this.
+ *
+ * `Sec-Fetch-Site` is the browser's own verdict on where the request came
+ * from, and no page can set it. `same-site` is refused too, because every port
+ * on one loopback address is one site, so another local server's page is
+ * same-site. An `Origin` comparison would not work here: behind CloudFront and
+ * the gateway, the host this server sees is not the host the page was served
+ * from. A request without the header passes. It came from a server, a script,
+ * a phone or an old browser, none of which is a page on another site.
+ *
+ * A `GET` or `HEAD` navigation from another site passes: following a link
+ * writes nothing, and the page that sent the browser here cannot read the
+ * answer. A form POST is a navigation too, and it is refused.
+ */
+function fromAnotherSite(req: MinimalRequest): boolean {
+  const site = req.headers.get("sec-fetch-site");
+  if (site !== "cross-site" && site !== "same-site") return false;
+  const method = req.method.toUpperCase();
+  const followsLink =
+    req.headers.get("sec-fetch-mode") === "navigate" && (method === "GET" || method === "HEAD");
+  return !followsLink;
+}
+
+/**
  * Returns a handler that answers every verb (GET/POST/PUT/PATCH/DELETE) by
  * forwarding to the configured data server with the app's HMAC signature.
  * Browser-driven apps mount it behind a catch-all route so the HMAC secret
@@ -111,6 +142,16 @@ export function createDataProxyHandler(opts: DataProxyOptions) {
     req: MinimalRequest,
     ctx: { params: Promise<DataProxyParams> },
   ): Promise<Response> {
+    // Another site's page never reaches the signer, on either surface. In the
+    // cloud the `SameSite=Lax` session cookies already keep such a request
+    // out; locally this is the only check that does.
+    if (fromAnotherSite(req)) {
+      return new Response(JSON.stringify({ error: "Cross-site request refused" }), {
+        status: 403,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
     // Before anything else, and specifically before the credential load: a
     // request that fails the end-user check must never cause the app's HMAC
     // secret to be read, let alone used to sign an upstream call.

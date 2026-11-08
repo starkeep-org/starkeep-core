@@ -128,6 +128,52 @@ test("Connection: the local server refuses a non-loopback Host", async () => {
   expect(await statusFor(`localhost:${appUrl.port}`)).toBe(200);
 });
 
+test("Connection: the local server refuses a write from another site", async () => {
+  // A page on another site can send a blind `no-cors` POST to 127.0.0.1 with
+  // a loopback `Host`, and the proxy would sign it. Only `Sec-Fetch-Site`
+  // tells it apart, and node:http sends it as given.
+  const appUrl = new URL(page.url());
+  const send = (method: string, path: string, headers: Record<string, string>) =>
+    new Promise<number>((resolve, reject) => {
+      const req = http.request(
+        { host: appUrl.hostname, port: appUrl.port, method, path, headers },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        },
+      );
+      req.on("error", reject);
+      req.end(method === "POST" ? JSON.stringify({ labels: [] }) : undefined);
+    });
+  const labels = "/api/local-data/data/labels";
+  const plain = { "Content-Type": "text/plain" };
+  expect(
+    await send("POST", labels, {
+      ...plain,
+      "Sec-Fetch-Site": "cross-site",
+      "Sec-Fetch-Mode": "no-cors",
+    }),
+  ).toBe(403);
+  expect(
+    await send("POST", labels, {
+      ...plain,
+      "Sec-Fetch-Site": "same-site",
+      "Sec-Fetch-Mode": "navigate",
+    }),
+  ).toBe(403);
+  // admin-web's Open link is a same-site GET navigation, and the page opens.
+  expect(
+    await send("GET", "/", { "Sec-Fetch-Site": "same-site", "Sec-Fetch-Mode": "navigate" }),
+  ).toBe(200);
+  // The page's own requests are same-origin and go through.
+  expect(
+    await send("GET", "/api/local-data/data/types", {
+      "Sec-Fetch-Site": "same-origin",
+      "Sec-Fetch-Mode": "cors",
+    }),
+  ).toBe(200);
+});
+
 test("Example files: create one from text, with its counts inline", async () => {
   await page.getByLabel("File name").fill("hello.skexample");
   await page
