@@ -527,22 +527,15 @@ export async function tagCounts(): Promise<{ value: string; n: number }[]> {
 }
 
 export interface LabelKey {
-  app_id?: string;
-  appId?: string;
+  app_id: string;
   key: string;
-  description?: string | null;
+  label: string;
+  description: string | null;
 }
 
 /** `GET /data/label-keys`: every installed app's declared keys. */
 export async function labelKeys(): Promise<LabelKey[]> {
-  const body = expectOk(
-    await data<{ labelKeys?: LabelKey[]; keys?: LabelKey[] } | LabelKey[]>(
-      "GET",
-      "/data/label-keys",
-    ),
-  );
-  if (Array.isArray(body)) return body;
-  return body.labelKeys ?? body.keys ?? [];
+  return expectOk(await data<{ labelKeys: LabelKey[] }>("GET", "/data/label-keys")).labelKeys;
 }
 
 // ---------------------------------------------------------------------------
@@ -671,11 +664,25 @@ export async function saveSnapshot(): Promise<string> {
   return subKey;
 }
 
-/** `GET /app-data/files?prefix=snapshots/`: the app's snapshot files. */
+/**
+ * `GET /app-data/files?prefix=snapshots/`: every snapshot file, one page at a
+ * time. A page holds 30 files by default, and the listing answers a
+ * `page_token` while more remain.
+ */
 export async function listSnapshots(): Promise<Snapshot[]> {
-  return expectOk(
-    await data<{ files: Snapshot[] }>("GET", `/app-data/files${q({ prefix: SNAPSHOT_PREFIX })}`),
-  ).files;
+  const files: Snapshot[] = [];
+  let pageToken: string | undefined;
+  do {
+    const page = expectOk(
+      await data<{ files: Snapshot[]; truncated: boolean; page_token: string | null }>(
+        "GET",
+        `/app-data/files${q({ prefix: SNAPSHOT_PREFIX, page_token: pageToken })}`,
+      ),
+    );
+    files.push(...page.files);
+    pageToken = page.truncated && page.page_token ? page.page_token : undefined;
+  } while (pageToken !== undefined);
+  return files;
 }
 
 /** `GET /app-data/files/<subKey>`, then the URL: one snapshot's content. */

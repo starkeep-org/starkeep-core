@@ -310,6 +310,29 @@ describe("GET /app-data/files — listing an app's own files", () => {
     expect(keys).toContain("listing/a.json");
   });
 
+  it("lists the same files for a fully qualified prefix", async () => {
+    // Every other file route accepts `apps/<appId>/<userId>/syncable/…` as
+    // well as a bare sub-key, so the listing does too.
+    const db = new DatabaseSync(join(server.starkeepDir, "data.db"), { readOnly: true });
+    let id: string;
+    try {
+      ({ id } = db
+        .prepare("SELECT id FROM testapp_syncable__starkeep_sync_records WHERE id LIKE ?")
+        .get("%/syncable/listing/a.json") as { id: string });
+    } finally {
+      db.close();
+    }
+    const qualified = id.slice(0, -"a.json".length);
+    const body = (await (
+      await list(appA, `prefix=${encodeURIComponent(qualified)}`)
+    ).json()) as Listing;
+    expect(body.files.map((f) => f.sub_key)).toEqual([
+      "listing/a.json",
+      "listing/b.json",
+      "listing/c.json",
+    ]);
+  });
+
   it("refuses a prefix that would leave the app's namespace", async () => {
     expect((await list(appA, "prefix=../other")).status).toBe(400);
     expect((await list(appA, "prefix=/abs")).status).toBe(400);

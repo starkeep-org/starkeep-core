@@ -391,15 +391,17 @@ export function createAppSpecificFactory(
         ensureFilesEnabled();
         const keyPrefix = appSyncableObjectPrefix(appId, userId());
         const subPrefix = opts?.prefix ?? "";
-        // The same checks a sub-key gets, so a prefix cannot reach outside the
-        // app's own namespace either.
-        if (subPrefix !== "") appSyncableObjectKey(appId, userId(), subPrefix);
+        // The same checks and the same forms a sub-key gets, so a prefix cannot
+        // reach outside the app's own namespace either, and a fully qualified
+        // prefix lists what a fully qualified key would name.
+        const listPrefix =
+          subPrefix === "" ? keyPrefix : appSyncableObjectKey(appId, userId(), subPrefix);
         // The framework reading its own index, as `readFileRecord` does: the
         // app names only a prefix and a page, never the reserved table. The
         // query still goes through the parser, so the limit's default and cap
         // and the page token's checks are the table query's own.
         const params: { where: string; order: string; limit?: string; page_token?: string } = {
-          where: JSON.stringify({ id: { prefix: keyPrefix + subPrefix } }),
+          where: JSON.stringify({ id: { prefix: listPrefix } }),
           order: "id.asc",
         };
         if (opts?.limit !== undefined) params.limit = opts.limit;
