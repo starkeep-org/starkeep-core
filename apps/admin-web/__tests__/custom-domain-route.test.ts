@@ -16,6 +16,7 @@ import { jsonRequest, makeDataDir, writeAdminConfig } from "./helpers";
 const dnsMock = {
   resolveCname: vi.fn<(name: string) => Promise<string[]>>(),
   resolve4: vi.fn<(name: string) => Promise<string[]>>(),
+  reverse: vi.fn<(address: string) => Promise<string[]>>(),
 };
 vi.mock("node:dns", () => ({ promises: dnsMock }));
 
@@ -42,6 +43,7 @@ beforeEach(() => {
   findHostedZone.mockReset();
   dnsMock.resolveCname.mockReset();
   dnsMock.resolve4.mockReset();
+  dnsMock.reverse.mockReset();
   writeAdminConfig(dataDir, { stackPrefix: "sk", userPoolId: "us-east-2_x" });
 });
 
@@ -82,8 +84,66 @@ describe("PUT", () => {
     });
     const res = await route.PUT(jsonRequest("/api/custom-domain", { domain: long("b") }, "PUT"));
     expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toMatch(/quota/);
+    const { error } = (await res.json()) as { error: string };
+    expect(error).toMatch(/quota/);
+    // The new name fits alone; the old one, whose records the install must
+    // still delete, pushes the grants over.
+    expect(error).toContain(`does not fit beside ${long("a")}`);
     expect(onDisk().customDomain).toBeUndefined();
+  });
+
+  describe("after a failed attempt at another domain", () => {
+    beforeEach(() => {
+      writeAdminConfig(dataDir, {
+        stackPrefix: "sk",
+        userPoolId: "us-east-2_x",
+        customDomain: "failed.example.com",
+        customDomainAttempted: "failed.example.com",
+      });
+    });
+
+    it("refuses a new domain until the attempt is cleaned up", async () => {
+      const res = await route.PUT(
+        jsonRequest("/api/custom-domain", { domain: "new.example.com" }, "PUT"),
+      );
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain(
+        "An install for failed.example.com failed",
+      );
+      expect(onDisk().customDomain).toBe("failed.example.com");
+    });
+
+    it("allows a retry of the same domain, and clearing it", async () => {
+      expect(
+        (
+          await route.PUT(
+            jsonRequest("/api/custom-domain", { domain: "failed.example.com" }, "PUT"),
+          )
+        ).status,
+      ).toBe(200);
+      expect(
+        (await route.PUT(jsonRequest("/api/custom-domain", { domain: null }, "PUT"))).status,
+      ).toBe(200);
+      expect("customDomain" in onDisk()).toBe(false);
+    });
+
+    it("allows a new domain when the last install's status covers the attempt", async () => {
+      writeAdminConfig(dataDir, {
+        stackPrefix: "sk",
+        userPoolId: "us-east-2_x",
+        customDomainAttempted: "old.example.com",
+        customDomainStatus: {
+          name: "old.example.com",
+          mode: "route53",
+          status: "active",
+          aliasTarget: "d1.cloudfront.net",
+        },
+      });
+      const res = await route.PUT(
+        jsonRequest("/api/custom-domain", { domain: "new.example.com" }, "PUT"),
+      );
+      expect(res.status).toBe(200);
+    });
   });
 
   it("clears the domain", async () => {
@@ -143,16 +203,15 @@ describe("POST /check", () => {
     );
   });
 
-  it("accepts a flattened record that resolves to the distribution's addresses", async () => {
+  it("accepts a flattened record whose addresses are CloudFront edges", async () => {
     writeAdminConfig(dataDir, {
       stackPrefix: "sk",
       customDomainStatus: { ...status, status: "active" },
     });
     acm.on(DescribeCertificateCommand).resolves({ Certificate: { Status: "ISSUED" } });
     dnsMock.resolveCname.mockRejectedValue(new Error("ENODATA"));
-    dnsMock.resolve4.mockImplementation(async (name) =>
-      name === "photos.example.com" ? ["1.2.3.4"] : ["1.2.3.4", "5.6.7.8"],
-    );
+    dnsMock.resolve4.mockResolvedValue(["13.32.164.46"]);
+    dnsMock.reverse.mockResolvedValue(["server-13-32-164-46.ord58.r.cloudfront.net."]);
 
     const res = await route.CHECK(
       jsonRequest("/api/custom-domain/check", { credentials: CREDENTIALS }),
@@ -160,6 +219,21 @@ describe("POST /check", () => {
     expect(((await res.json()) as { pointsAtDistribution: boolean }).pointsAtDistribution).toBe(
       true,
     );
+  });
+
+  it("refuses a malformed body and another site's page", async () => {
+    const malformed = await route.CHECK(jsonRequest("/api/custom-domain/check", "{"));
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toEqual({ error: "Invalid JSON body" });
+    const crossSite = await route.CHECK(
+      jsonRequest(
+        "/api/custom-domain/check",
+        { credentials: CREDENTIALS },
+        "POST",
+        "https://evil.example",
+      ),
+    );
+    expect(crossSite.status).toBe(403);
   });
 
   it("says so when no install has acted on a domain", async () => {
@@ -200,6 +274,33 @@ describe("POST /zone", () => {
   it("refuses an invalid name before it reads Route53", async () => {
     const res = await zone("*.example.com");
     expect(res.status).toBe(400);
+    expect(findHostedZone).not.toHaveBeenCalled();
+  });
+
+  it("refuses a new domain while a failed attempt waits, before it reads Route53", async () => {
+    writeAdminConfig(dataDir, {
+      stackPrefix: "sk",
+      userPoolId: "us-east-2_x",
+      customDomainAttempted: "failed.example.com",
+    });
+    const res = await zone("photos.example.com");
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("failed.example.com");
+    expect(findHostedZone).not.toHaveBeenCalled();
+  });
+
+  it("refuses a malformed body and another site's page", async () => {
+    const malformed = await route.ZONE(jsonRequest("/api/custom-domain/zone", "not json"));
+    expect(malformed.status).toBe(400);
+    const crossSite = await route.ZONE(
+      jsonRequest(
+        "/api/custom-domain/zone",
+        { domain: "photos.example.com", credentials: CREDENTIALS },
+        "POST",
+        "https://evil.example",
+      ),
+    );
+    expect(crossSite.status).toBe(403);
     expect(findHostedZone).not.toHaveBeenCalled();
   });
 

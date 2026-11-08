@@ -121,6 +121,37 @@ describe("findHostedZone", () => {
     resolveNs.mockRejectedValue(Object.assign(new Error("ENOTFOUND"), { code: "ENOTFOUND" }));
     expect(await findHostedZone("aaron.starkeep.app", CREDS)).toBeNull();
   });
+
+  describe("a name between the zone and the domain", () => {
+    const noDelegation = Object.assign(new Error("ENODATA"), { code: "ENODATA" });
+
+    it("refuses the zone when public DNS delegates that name to other servers", async () => {
+      zones();
+      resolveNs.mockImplementation(async (n) => {
+        if (n === "aaron.starkeep.app") return ["ns-1.awsdns-01.org"];
+        if (n === "b.aaron.starkeep.app") return ["dns1.other-provider.example"];
+        throw noDelegation;
+      });
+      expect(await findHostedZone("a.b.aaron.starkeep.app", CREDS)).toBeNull();
+      expect(resolveNs).toHaveBeenCalledWith("a.b.aaron.starkeep.app");
+      expect(resolveNs).toHaveBeenCalledWith("b.aaron.starkeep.app");
+    });
+
+    it("keeps the zone when no name below it is delegated", async () => {
+      zones();
+      resolveNs.mockImplementation(async (n) => {
+        if (n === "aaron.starkeep.app") return ["ns-1.awsdns-01.org"];
+        throw noDelegation;
+      });
+      expect((await findHostedZone("a.b.aaron.starkeep.app", CREDS))?.id).toBe("ZAARON");
+    });
+
+    it("keeps the zone when the name answers with the zone's own servers", async () => {
+      zones();
+      resolveNs.mockResolvedValue(["ns-2.awsdns-02.com."]);
+      expect((await findHostedZone("photos.aaron.starkeep.app", CREDS))?.id).toBe("ZAARON");
+    });
+  });
 });
 
 /** One install's path: list once, then ensure the domain's certificate. */
@@ -240,6 +271,57 @@ describe("ensureExternalCertificate", () => {
     expect(acm.commandCalls(RequestCertificateCommand)[0]!.args[0].input.IdempotencyToken).toBe(
       undefined,
     );
+  });
+
+  it("leaves a dead certificate the distribution still holds, and requests a new one", async () => {
+    acm.on(ListCertificatesCommand).resolves({
+      CertificateSummaryList: [
+        { CertificateArn: "arn:expired", DomainName: "photos.example.com", Status: "EXPIRED" },
+      ],
+    });
+    acm.on(ListTagsForCertificateCommand).resolves({ Tags: EXTERNAL_TAGS });
+    acm
+      .on(DeleteCertificateCommand)
+      .rejects(Object.assign(new Error("in use"), { name: "ResourceInUseException" }));
+    acm.on(RequestCertificateCommand).resolves({ CertificateArn: "arn:fresh" });
+    acm.on(DescribeCertificateCommand).resolves({
+      Certificate: {
+        Status: "PENDING_VALIDATION",
+        DomainValidationOptions: [{ DomainName: "x", ResourceRecord: RECORD }],
+      },
+    });
+
+    const result = await ensure("photos.example.com");
+
+    expect(result.certificateArn).toBe("arn:fresh");
+    expect(result.issued).toBe(false);
+  });
+
+  it("keeps the issued certificate among duplicates, whatever order ACM lists them in", async () => {
+    acm.on(ListCertificatesCommand).resolves({
+      CertificateSummaryList: [
+        {
+          CertificateArn: "arn:pending",
+          DomainName: "photos.example.com",
+          Status: "PENDING_VALIDATION",
+        },
+        { CertificateArn: "arn:issued", DomainName: "photos.example.com", Status: "ISSUED" },
+      ],
+    });
+    acm.on(ListTagsForCertificateCommand).resolves({ Tags: EXTERNAL_TAGS });
+    acm.on(DescribeCertificateCommand).resolves({
+      Certificate: {
+        Status: "ISSUED",
+        DomainValidationOptions: [{ DomainName: "x", ResourceRecord: RECORD }],
+      },
+    });
+
+    const result = await ensure("photos.example.com");
+
+    expect(result.certificateArn).toBe("arn:issued");
+    expect(acm.commandCalls(DeleteCertificateCommand).map((c) => c.args[0].input)).toEqual([
+      { CertificateArn: "arn:pending" },
+    ]);
   });
 
   it("makes no new request on a rerun while this deployment's certificate is pending", async () => {

@@ -121,21 +121,33 @@ export function validateCustomDomain(domain: string): string {
 
 /**
  * Whether public DNS sends `name` to the distribution `aliasTarget`: a CNAME to
- * it, or, for a provider that flattens the record or a Route53 alias, the same
- * addresses.
+ * it, or, with no CNAME, for a provider that flattens the record or a Route53
+ * alias, addresses that all belong to CloudFront.
+ *
+ * A flattening provider resolves the distribution from its own location, so
+ * its edge addresses differ from the ones this machine's resolver returns for
+ * `aliasTarget`. Any CloudFront edge serves the name the same way: CloudFront
+ * holds each alias on one distribution only, and the install attaches the alias
+ * to this one. Every edge address's reverse name ends in `.cloudfront.net`, as
+ * `server-13-32-164-46.ord58.r.cloudfront.net` does.
  */
 export async function domainPointsAt(name: string, aliasTarget: string): Promise<boolean> {
   const target = aliasTarget.toLowerCase().replace(/\.$/, "");
   try {
     const cnames = await dns.resolveCname(name);
-    if (cnames.some((c) => c.toLowerCase().replace(/\.$/, "") === target)) return true;
+    // A CNAME elsewhere, such as to an earlier distribution, is a mistake to
+    // report, not a flattened record.
+    return cnames.some((c) => c.toLowerCase().replace(/\.$/, "") === target);
   } catch {
     // No CNAME: an alias or a flattened record may still answer.
   }
   try {
-    const [mine, theirs] = await Promise.all([dns.resolve4(name), dns.resolve4(target)]);
-    const theirSet = new Set(theirs);
-    return mine.length > 0 && mine.every((a) => theirSet.has(a));
+    const addresses = await dns.resolve4(name);
+    if (addresses.length === 0) return false;
+    const reverse = await Promise.all(addresses.map((a) => dns.reverse(a)));
+    return reverse.every((names) =>
+      names.some((n) => n.toLowerCase().replace(/\.$/, "").endsWith(".cloudfront.net")),
+    );
   } catch {
     return false;
   }
@@ -289,11 +301,42 @@ export interface CustomDomainConfigFields {
 }
 
 /**
+ * The failed attempt that blocks setting `domain`, or null.
+ *
+ * A failed attach can leave records and a certificate that only the attempted
+ * name's grants can delete. A new domain would replace the attempt in
+ * `customDomainAttempted`, and the next install would lose those grants and
+ * fail on the leftovers. So a new domain waits until an update with no domain
+ * has cleaned the attempt up. Clearing the domain, or retrying the same one,
+ * stays allowed, and an attempt the last install's status already names is
+ * covered by that status.
+ */
+export function pendingAttemptBlocking(
+  config: Pick<CustomDomainConfigFields, "customDomainAttempted" | "customDomainStatus">,
+  domain: string | null | undefined,
+): string | null {
+  const attempted = config.customDomainAttempted;
+  if (!domain || !attempted) return null;
+  if (domain === attempted || attempted === config.customDomainStatus?.name) return null;
+  return attempted;
+}
+
+/** The refusal text for a blocked domain; see pendingAttemptBlocking. */
+export function pendingAttemptRefusal(attempted: string): string {
+  return (
+    `An install for ${attempted} failed and may have left records behind. ` +
+    `Remove ${attempted} and update the cloud, then set another domain.`
+  );
+}
+
+/**
  * The config's custom-domain fields after one step of an install:
  *
  * - `starting`, written before the install touches AWS: the domain the run
  *   attaches becomes `customDomainAttempted`. A run that names no domain
- *   keeps an earlier attempt, so the attempt's leftovers stay in play.
+ *   keeps an earlier attempt, so the attempt's leftovers stay in play. A run
+ *   that names another domain while an attempt waits throws; see
+ *   pendingAttemptBlocking.
  * - `succeeded`: the run's status and kept certificate replace the attempt.
  * - `failed`: nothing changes, so the attempt carries into the next run.
  */
@@ -306,9 +349,12 @@ export function nextCustomDomainConfig<T extends CustomDomainConfigFields>(
 ): T {
   const next = { ...previous };
   switch (outcome.stage) {
-    case "starting":
+    case "starting": {
+      const blocking = pendingAttemptBlocking(previous, previous.customDomain);
+      if (blocking) throw new Error(pendingAttemptRefusal(blocking));
       if (previous.customDomain) next.customDomainAttempted = previous.customDomain;
       return next;
+    }
     case "succeeded":
       delete next.customDomainAttempted;
       if (outcome.status) next.customDomainStatus = outcome.status;
@@ -337,13 +383,21 @@ export function customDomainInstallInput(config: {
   previousCustomDomain?: string;
   attemptedCustomDomain?: string;
   heldCertificate?: KeptCertificate;
+  activeExternalDomain?: string;
   cloudfrontDomain?: string;
 } {
+  const status = config.customDomainStatus;
   return {
     customDomain: config.customDomain || undefined,
-    previousCustomDomain: config.customDomainStatus?.name,
+    previousCustomDomain: status?.name,
     attemptedCustomDomain: config.customDomainAttempted,
-    heldCertificate: certificateOnDistribution(config.customDomainStatus, config.customDomainKept),
+    heldCertificate: certificateOnDistribution(status, config.customDomainKept),
+    activeExternalDomain:
+      status?.mode === "external" &&
+      status.status === "active" &&
+      status.aliasTarget === config.cloudfrontDomain
+        ? status.name
+        : undefined,
     cloudfrontDomain: config.cloudfrontDomain,
   };
 }
@@ -366,7 +420,10 @@ function acmClient(creds: AwsCredentials): ACMClient {
  * The longest zone name that equals the domain or ends it wins. A zone counts
  * only when public DNS delegates to it: a zone nobody delegated to would take
  * the validation record and ACM would never see it, so the install would wait
- * out the validation timeout. Such a domain takes external mode instead.
+ * out the validation timeout. Such a domain takes external mode instead. For
+ * the same reason, a name between the zone and the domain that public DNS
+ * delegates to other name servers hides the zone's records, and the domain
+ * takes external mode.
  */
 export async function findHostedZone(
   domain: string,
@@ -403,6 +460,29 @@ export async function findHostedZone(
         "treating the domain as hosted elsewhere.",
     );
     return null;
+  }
+  // Each name strictly between the domain and the zone, deepest first.
+  const labels = domain.split(".");
+  const depth = labels.length - best.name.split(".").length;
+  for (let i = 0; i < depth; i++) {
+    const name = labels.slice(i).join(".");
+    let servers: string[];
+    try {
+      servers = await dns.resolveNs(name);
+    } catch {
+      // ENODATA or ENOTFOUND: the name has no delegation of its own.
+      continue;
+    }
+    if (
+      servers.length > 0 &&
+      !servers.some((n) => assigned.has(n.toLowerCase().replace(/\.$/, "")))
+    ) {
+      console.log(
+        `${name} is delegated to ${servers.join(", ")}, not to Route53 zone ${best.name}; ` +
+          "treating the domain as hosted elsewhere.",
+      );
+      return null;
+    }
   }
   return best;
 }
@@ -599,11 +679,30 @@ export async function ensureExternalCertificate(opts: {
   const tags = externalTags(opts.stackPrefix);
   const mine = opts.certificates.filter((c) => c.external && c.domain === opts.domain);
 
+  // An issued certificate first: it is the one most likely attached, and the
+  // one this run keeps among duplicates.
+  const rank = (status: string) =>
+    status === CertificateStatus.ISSUED
+      ? 0
+      : status === CertificateStatus.PENDING_VALIDATION
+        ? 1
+        : 2;
+  const ordered = [...mine].sort((a, b) => rank(a.status) - rank(b.status));
+
   let arn: string | undefined;
-  for (const cert of mine) {
+  for (const cert of ordered) {
     if (DEAD_STATUSES.has(cert.status) || arn) {
       console.log(`Deleting certificate ${cert.arn} (${cert.status}) for ${opts.domain}.`);
-      await acm.send(new DeleteCertificateCommand({ CertificateArn: cert.arn }));
+      try {
+        await acm.send(new DeleteCertificateCommand({ CertificateArn: cert.arn }));
+      } catch (err) {
+        const name = (err as { name?: string }).name;
+        if (name !== "ResourceInUseException" && name !== "ResourceNotFoundException") throw err;
+        // The distribution still holds it. The run attaches a live certificate
+        // once ACM issues one, and that swap releases this one at once; the
+        // run's cleanup then deletes it.
+        console.log(`Leaving certificate ${cert.arn} until a live one replaces it: ${name}.`);
+      }
     } else {
       arn = cert.arn;
     }

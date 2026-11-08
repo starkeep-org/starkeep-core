@@ -296,6 +296,19 @@ describe("Remove, for an attached external domain", () => {
   });
 });
 
+describe("a cleared domain whose removal has not run yet", () => {
+  it.each([
+    ["pending-validation", "never served"],
+    ["awaiting-dns", "no link uses it"],
+    ["active", "still answers on"],
+  ] as const)("describes a %s domain truthfully", async (state, text) => {
+    config = { customDomainStatus: external(state) };
+    await open();
+    expect(screen.getByText(new RegExp(text))).toBeDefined();
+    expect(screen.getByRole("button", { name: "Update cloud" })).toBeDefined();
+  });
+});
+
 describe("a saved domain no install has applied", () => {
   it("offers Remove, which clears the domain without running the install", async () => {
     config = { customDomain: DOMAIN };

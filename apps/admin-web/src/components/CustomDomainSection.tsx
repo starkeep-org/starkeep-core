@@ -298,8 +298,22 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
     body = (
       <>
         <p className="text-sm">
-          The cloud still answers on <span className="font-mono">{status.name}</span>. Update the
-          cloud to finish removing the domain.
+          {status.status === "pending-validation" ? (
+            <>
+              The cloud never served <span className="font-mono">{status.name}</span>. Update the
+              cloud to delete the certificate requested for it.
+            </>
+          ) : status.status === "awaiting-dns" ? (
+            <>
+              The cloud still accepts <span className="font-mono">{status.name}</span>, but no link
+              uses it. Update the cloud to finish removing the domain.
+            </>
+          ) : (
+            <>
+              The cloud still answers on <span className="font-mono">{status.name}</span>. Update
+              the cloud to finish removing the domain.
+            </>
+          )}
         </p>
         <div>
           <Button
