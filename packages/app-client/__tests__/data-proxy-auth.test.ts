@@ -182,3 +182,65 @@ describe("sessionAuth()", () => {
     expect(proxyMock.proxyToDataServer).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * A page on another site can send the local proxy a blind `no-cors` POST, and
+ * the local surface exempts the session check, so this is the only thing
+ * standing between such a page and the app's signature.
+ */
+describe("a request from another site's page", () => {
+  const local = () => createDataProxyHandler({ appId: "testapp", endUserAuth: sessionAuth() });
+
+  it.each(["cross-site", "same-site"])(
+    "refuses Sec-Fetch-Site: %s with 403 and never signs",
+    async (site) => {
+      const res = await local()(request({ "sec-fetch-site": site }), ctx);
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: "Cross-site request refused" });
+      expect(proxyMock.proxyToDataServer).not.toHaveBeenCalled();
+    },
+  );
+
+  it("refuses it on an anonymous proxy too", async () => {
+    const handler = createDataProxyHandler({
+      appId: "testapp",
+      endUserAuth: { auth: "anonymous", justification: "test" },
+    });
+    const res = await handler(request({ "sec-fetch-site": "cross-site" }), ctx);
+    expect(res.status).toBe(403);
+    expect(proxyMock.proxyToDataServer).not.toHaveBeenCalled();
+  });
+
+  it.each(["same-origin", "none"])("forwards Sec-Fetch-Site: %s", async (site) => {
+    const res = await local()(request({ "sec-fetch-site": site }), ctx);
+    expect(res.status).toBe(200);
+    expect(proxyMock.proxyToDataServer).toHaveBeenCalledOnce();
+  });
+
+  it("forwards a GET navigation from another site: following a link writes nothing", async () => {
+    const res = await local()(
+      request({ "sec-fetch-site": "same-site", "sec-fetch-mode": "navigate" }),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    expect(proxyMock.proxyToDataServer).toHaveBeenCalledOnce();
+  });
+
+  it("refuses a form POST from another site, although it is a navigation", async () => {
+    const res = await local()(
+      {
+        ...request({ "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate" }),
+        method: "POST",
+      },
+      ctx,
+    );
+    expect(res.status).toBe(403);
+    expect(proxyMock.proxyToDataServer).not.toHaveBeenCalled();
+  });
+
+  it("forwards a request with no Sec-Fetch-Site, which no browser page sent", async () => {
+    const res = await local()(request(), ctx);
+    expect(res.status).toBe(200);
+    expect(proxyMock.proxyToDataServer).toHaveBeenCalledOnce();
+  });
+});

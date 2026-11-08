@@ -58,6 +58,28 @@ function isLoopbackHost(host: string | undefined): boolean {
   return LOOPBACK_HOSTNAMES.has(end > 0 ? lower.slice(0, end) : lower);
 }
 
+/**
+ * The `Host` check does not stop a page on another site from sending Drive a
+ * blind `no-cors` POST to `127.0.0.1`, such as one that creates a public link
+ * or restores a deleted file: its `Host` is loopback, and a `text/plain` body
+ * needs no preflight. `Sec-Fetch-Site` is the browser's verdict on where the
+ * request came from. `same-site` counts as another site, because every port
+ * on one loopback address is one site. A request without the header came from
+ * no browser page and passes.
+ *
+ * A `GET` or `HEAD` navigation from another site passes, so admin-web's link to
+ * Drive still works: following a link writes nothing, and the page that sent
+ * the browser here cannot read the answer. A form POST is a navigation too,
+ * and it is refused.
+ */
+function fromAnotherSite(req: IncomingMessage): boolean {
+  const site = req.headers["sec-fetch-site"];
+  if (site !== "cross-site" && site !== "same-site") return false;
+  const followsLink =
+    req.headers["sec-fetch-mode"] === "navigate" && (req.method === "GET" || req.method === "HEAD");
+  return !followsLink;
+}
+
 function portFromArgv(argv: string[]): number {
   const at = argv.findIndex((a) => a === "--port" || a === "-p");
   const value =
@@ -144,6 +166,11 @@ async function main(): Promise<void> {
     if (!isLoopbackHost(req.headers.host)) {
       res.writeHead(403, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: "Drive answers on its loopback address only" }));
+      return;
+    }
+    if (fromAnotherSite(req)) {
+      res.writeHead(403, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "Drive refuses requests from other sites" }));
       return;
     }
     const pathname = new URL(req.url ?? "/", "http://localhost").pathname;

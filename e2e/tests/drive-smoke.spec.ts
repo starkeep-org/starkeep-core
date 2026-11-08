@@ -5,6 +5,7 @@
  * same-origin /api/events SSE proxy and re-fetches on each kick).
  */
 
+import http from "node:http";
 import { expect, test } from "@playwright/test";
 import { createRecordWithBytes, driveCreds, solidPng } from "@starkeep/e2e";
 
@@ -70,4 +71,54 @@ test("live-updates when a record is added underneath it via an /events kick", as
   await expect(page.getByRole("row").filter({ hasText: "live-update.png" })).toBeVisible({
     timeout: 30_000,
   });
+});
+
+/**
+ * Drive's server refuses a write from another site's page. Such a page can
+ * send a blind `no-cors` POST to 127.0.0.1 with a loopback `Host`, so only
+ * `Sec-Fetch-Site` tells the two apart. node:http sends the browser's headers
+ * as given, which Playwright's request context does not.
+ */
+test("refuses a POST from another site, and still opens from another site's link", async () => {
+  const drive = new URL(driveUrl());
+  const send = (method: string, path: string, headers: Record<string, string>) =>
+    new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const req = http.request(
+        { host: drive.hostname, port: drive.port, method, path, headers },
+        (res) => {
+          let body = "";
+          res.setEncoding("utf8");
+          res.on("data", (chunk) => (body += chunk));
+          res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+        },
+      );
+      req.on("error", reject);
+      req.end(method === "POST" ? "{}" : undefined);
+    });
+  const restore = "/api/trash/no-such-record/restore";
+
+  for (const site of ["cross-site", "same-site"]) {
+    const refused = await send("POST", restore, {
+      "Content-Type": "text/plain",
+      "Sec-Fetch-Site": site,
+      "Sec-Fetch-Mode": "no-cors",
+    });
+    expect(refused.status, site).toBe(403);
+    expect(JSON.parse(refused.body)).toEqual({ error: "Drive refuses requests from other sites" });
+  }
+  // A form POST is a navigation, and it is refused too.
+  expect(
+    (await send("POST", restore, { "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate" }))
+      .status,
+  ).toBe(403);
+  // admin-web's link to Drive is a same-site GET navigation, and it opens.
+  expect(
+    (await send("GET", "/", { "Sec-Fetch-Site": "same-site", "Sec-Fetch-Mode": "navigate" }))
+      .status,
+  ).toBe(200);
+  // A caller that is no browser page sends no Sec-Fetch-Site and reaches the
+  // route, which answers for the record it cannot find.
+  expect((await send("POST", restore, { "Content-Type": "application/json" })).status).not.toBe(
+    403,
+  );
 });
