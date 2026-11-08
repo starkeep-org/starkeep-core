@@ -175,16 +175,35 @@ import {
 import type { AnyRecord, RecordLabel, DataRecord } from "@starkeep/protocol-primitives";
 import type { MetadataRow, StarkeepId } from "@starkeep/protocol-primitives";
 import { starkeepDir } from "@starkeep/app-client";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { stat as fsStat, readFile, writeFile, mkdir, unlink, rm, chmod } from "node:fs/promises";
 import { Readable } from "node:stream";
 import { parseRangeHeader } from "./range.js";
 import { pipeline } from "node:stream/promises";
 import { openSync, mkdirSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createFileWatchManager } from "./watcher.js";
 import { bindLibrary, libraryUserSegment, LibraryBoundElsewhereError } from "./library-binding.js";
+
+/**
+ * The checkout commit this process started from, or null outside a git
+ * checkout. The server runs from source and keeps the code it started with, so
+ * admin-web compares this with the checkout's current commit and offers a
+ * restart when the two differ.
+ */
+const STARTED_FROM_COMMIT = (() => {
+  try {
+    return execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: dirname(fileURLToPath(import.meta.url)),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return null;
+  }
+})();
 
 // Signing key for self-hosted file tokens — regenerated each startup so
 // all outstanding tokens are invalidated on restart (revocable by design).
@@ -1378,7 +1397,7 @@ async function main() {
 
     try {
       if (path === "/health") {
-        json(res, { status: "ok" });
+        json(res, { status: "ok", startedFromCommit: STARTED_FROM_COMMIT });
         return;
       }
 

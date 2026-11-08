@@ -50,6 +50,7 @@ vi.mock("../src/routes/cognito-outputs", () => spy("cognito-outputs", ["POST"]))
 vi.mock("../src/routes/config", () => spy("config", ["GET", "PATCH"]));
 vi.mock("../src/routes/costs", () => spy("costs", ["POST"]));
 vi.mock("../src/routes/custom-domain", () => spy("custom-domain", ["PUT", "CHECK", "ZONE"]));
+vi.mock("../src/routes/checkout", () => spy("checkout", ["GET"]));
 vi.mock("../src/routes/this-machine", () =>
   spy("this-machine", ["GET", "POST_SIGN_IN", "POST_SIGN_OUT", "POST_CLOUD"]),
 );
@@ -112,6 +113,7 @@ const ROUTES: Array<[string, string, string, string]> = [
   ["PATCH", "/api/config", "config", "PATCH"],
   ["POST", "/api/cognito-outputs", "cognito-outputs", "POST"],
   ["POST", "/api/costs", "costs", "POST"],
+  ["GET", "/api/checkout", "checkout", "GET"],
   ["GET", "/api/this-machine", "this-machine", "GET"],
   ["POST", "/api/users/list", "users", "LIST"],
   ["POST", "/api/users", "users", "CREATE"],

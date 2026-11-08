@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { execFileSync } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { startLocalDataServer } from "../../src/local-data-server.js";
@@ -12,7 +13,10 @@ describe("local-data-server harness", () => {
     try {
       const health = await fetch(`${server.url}/health`);
       expect(health.status).toBe(200);
-      expect(await health.json()).toEqual({ status: "ok" });
+      // The commit the server started from, which admin-web compares with the
+      // checkout's to offer a restart after a pull.
+      const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      expect(await health.json()).toEqual({ status: "ok", startedFromCommit: head });
 
       // First boot persists a generated nodeId.
       const config = JSON.parse(await readFile(join(server.starkeepDir, "config.json"), "utf8"));

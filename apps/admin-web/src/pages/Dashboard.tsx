@@ -85,6 +85,9 @@ export function DashboardPage() {
 
   // Local data server
   const [localOnline, setLocalOnline] = useState<boolean | null>(null);
+  // Set when the running data server started from an older commit than the
+  // checkout holds now: it runs from source and keeps the code it started with.
+  const [staleLocal, setStaleLocal] = useState<{ running: string; checkout: string } | null>(null);
   const [localCognitoConfig, setLocalCognitoConfig] = useState<CognitoConfig | null>(null);
   const [watches, setWatches] = useState<Watch[] | null>(null);
   const [addingBack, setAddingBack] = useState<string | null>(null);
@@ -204,6 +207,20 @@ export function DashboardPage() {
     }, 90_000);
   }
 
+  async function restartDaemon(id: string) {
+    setDaemonLoading((l) => ({ ...l, [id]: true }));
+    try {
+      await fetch("/api/exec/daemon", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "restart", id }),
+      });
+    } finally {
+      setDaemonLoading((l) => ({ ...l, [id]: false }));
+      setLocalRefreshKey((k) => k + 1);
+    }
+  }
+
   async function stopDaemon(id: string) {
     setDaemonLoading((l) => ({ ...l, [id]: true }));
     try {
@@ -236,6 +253,19 @@ export function DashboardPage() {
           return;
         }
         setLocalOnline(true);
+        const health = (await healthResp.json().catch(() => ({}))) as {
+          startedFromCommit?: unknown;
+        };
+        const checkout = (await fetch("/api/checkout", { signal: controller.signal })
+          .then((r) => r.json())
+          .catch(() => ({}))) as { commit?: unknown };
+        setStaleLocal(
+          typeof health.startedFromCommit === "string" &&
+            typeof checkout.commit === "string" &&
+            health.startedFromCommit !== checkout.commit
+            ? { running: health.startedFromCommit, checkout: checkout.commit }
+            : null,
+        );
       } catch {
         if (!controller.signal.aborted) setLocalOnline(false);
         return;
@@ -552,6 +582,13 @@ export function DashboardPage() {
                       // only how much is watched, so its height stays fixed.
                       <>
                         <span className="block">Indexes and syncs local files.</span>
+                        {staleLocal && (
+                          <span className="block text-amber-700 dark:text-amber-300">
+                            Started from {staleLocal.running.slice(0, 7)}, and this checkout is now
+                            at {staleLocal.checkout.slice(0, 7)}. Choose Restart in this card&apos;s
+                            menu to run the current code.
+                          </span>
+                        )}
                         {watches === null ? (
                           <Skeleton className="h-4 w-40" />
                         ) : watchCount === 0 ? (
@@ -566,6 +603,11 @@ export function DashboardPage() {
                     localOnline === true
                       ? [
                           { label: "Storage…", href: "/storage" },
+                          {
+                            label: "Restart",
+                            onSelect: () => restartDaemon("local-data-server"),
+                            disabled: !!daemonLoading["local-data-server"],
+                          },
                           {
                             label: "Stop",
                             onSelect: () => stopDaemon("local-data-server"),
