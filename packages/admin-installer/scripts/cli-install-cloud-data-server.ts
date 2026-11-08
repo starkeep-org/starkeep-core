@@ -48,6 +48,7 @@ import {
   getIdentityPoolCredentials,
 } from "../src/cognito-auth";
 import { prompt } from "../src/cli-prompt";
+import { useOnlyAwsCredentials } from "../src/aws-env";
 import { isDeploymentName } from "@starkeep/aws-bootstrap";
 import {
   customDomainInstallInput,
@@ -157,6 +158,14 @@ if (nonInteractive) {
     );
     process.exit(1);
   }
+  useOnlyAwsCredentials(
+    {
+      accessKeyId: AWS_ACCESS_KEY_ID,
+      secretAccessKey: AWS_SECRET_ACCESS_KEY,
+      sessionToken: AWS_SESSION_TOKEN,
+    },
+    process.env.AWS_REGION ?? region,
+  );
 } else {
   const email = await prompt("Email: ");
   const password = await prompt("Password: ", true);
@@ -176,10 +185,7 @@ if (nonInteractive) {
   console.log("Fetching temporary AWS credentials…");
   const creds = await getIdentityPoolCredentials(config, idToken);
 
-  process.env.AWS_ACCESS_KEY_ID = creds.accessKeyId;
-  process.env.AWS_SECRET_ACCESS_KEY = creds.secretAccessKey;
-  process.env.AWS_SESSION_TOKEN = creds.sessionToken;
-  process.env.AWS_REGION = region;
+  useOnlyAwsCredentials(creds, region);
 }
 
 // Derive account ID from STS if not already in config.

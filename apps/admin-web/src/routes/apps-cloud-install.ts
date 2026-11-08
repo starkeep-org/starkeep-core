@@ -3,6 +3,7 @@ import { starkeepDir } from "@starkeep/app-client";
 import { appSource, pinnedSourceState } from "../lib/app-scan";
 import { REPO_ROOT } from "../lib/exec-commands";
 import { installStream } from "../lib/install-stream";
+import { installerEnv } from "@starkeep/admin-installer/aws-env";
 
 const STARKEEP_DIR = starkeepDir();
 
@@ -76,11 +77,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
   const sdkTraceFilePath = join(STARKEEP_DIR, `${appId}-install.sdk.trace`);
 
   const spawnEnv = {
-    ...process.env,
-    AWS_ACCESS_KEY_ID: body.accessKeyId,
-    AWS_SECRET_ACCESS_KEY: body.secretAccessKey,
-    AWS_SESSION_TOKEN: body.sessionToken,
-    AWS_REGION: body.region,
+    ...installerEnv(
+      {
+        accessKeyId: body.accessKeyId,
+        secretAccessKey: body.secretAccessKey,
+        sessionToken: body.sessionToken,
+      },
+      body.region,
+    ),
     ...(PULUMI_VERBOSE_TRACE
       ? {
           TF_LOG: "DEBUG",

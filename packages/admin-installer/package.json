@@ -9,6 +9,7 @@
     "./app-discovery": "./src/app-discovery.ts",
     "./approved-commands": "./src/approved-commands.ts",
     "./app-creds": "./src/app-creds.ts",
+    "./aws-env": "./src/aws-env.ts",
     "./custom-domain": "./src/custom-domain.ts",
     "./session": "./src/session.ts"
   },
