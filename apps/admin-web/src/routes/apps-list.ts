@@ -27,7 +27,7 @@ export async function GET() {
   for (const row of registry ?? []) {
     const found = scannedById.get(row.appId);
     if (row.sourceDir !== null) {
-      const source = pinnedSourceState({ ...row, sourceDir: row.sourceDir });
+      const source = pinnedSourceState(row.sourceDir, row.manifest);
       apps.push({
         appId: row.appId,
         manifest: row.manifest as ManifestSummary,

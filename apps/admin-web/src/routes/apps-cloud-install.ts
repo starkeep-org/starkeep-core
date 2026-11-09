@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
-import { appSource } from "../lib/app-scan";
+import { appSource, pinnedSourceState } from "../lib/app-scan";
 import { REPO_ROOT } from "../lib/exec-commands";
 import { installStream } from "../lib/install-stream";
 
@@ -49,6 +49,18 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
   if (source.kind === "pinned-missing") {
     return Response.json(
       { error: `App ${appId}'s source folder ${source.appDir} no longer holds a manifest` },
+      { status: 409 },
+    );
+  }
+  // The CLI deploys the manifest in the folder, and the tile asked for
+  // consent against the manifest the user approved locally. Deploy only
+  // when the two are the same, so the cloud never runs a manifest nobody
+  // approved.
+  if (source.kind === "pinned" && pinnedSourceState(source.appDir, source.manifest) !== null) {
+    return Response.json(
+      {
+        error: `App ${appId}'s folder ${source.appDir} holds a manifest you have not approved. Choose Update from folder on its local card first.`,
+      },
       { status: 409 },
     );
   }
