@@ -11,6 +11,7 @@ import { protocolRefusal } from "../src/protocol-check.js";
 
 const [major, minor] = parseProtocolVersion(PROTOCOL_VERSION)!;
 const NEXT_MINOR = `${major}.${minor + 1}.0`;
+const NEXT_MAJOR = `${major + 1}.0.0`;
 
 const MANIFEST = {
   id: "version-app",
@@ -49,6 +50,19 @@ describe("protocolRefusal", () => {
     expect(refusal).toContain(`needs Starkeep protocol ${NEXT_MINOR}`);
     expect(refusal).toContain(`speaks ${PROTOCOL_VERSION}`);
     expect(refusal).toMatch(/restart the local data server/);
+  });
+
+  it("says to update the app when the platform is on a later major version", () => {
+    const refusal = protocolRefusal({
+      appId: "version-app",
+      rawManifest: { ...MANIFEST, protocolMinVersion: PROTOCOL_VERSION },
+      platformVersion: NEXT_MAJOR,
+      target: "local",
+    });
+    expect(refusal).toContain(`needs Starkeep protocol ${PROTOCOL_VERSION}`);
+    expect(refusal).toContain(`speaks ${NEXT_MAJOR}`);
+    expect(refusal).toContain(`install a version of version-app built for protocol ${major + 1}.x`);
+    expect(refusal).not.toMatch(/Update the starkeep-core checkout/);
   });
 
   it("refuses against a cloud data server that reports no version", () => {
