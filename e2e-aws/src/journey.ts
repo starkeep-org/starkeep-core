@@ -46,7 +46,12 @@ import { cloudDataServerBundleSha256Base64, createDsqlRegistry } from "@starkeep
 import { LambdaClient, GetFunctionConfigurationCommand } from "@aws-sdk/client-lambda";
 import { S3Client, GetObjectTaggingCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
-import { compareHLC, deserializeHLC, type HLCTimestamp } from "@starkeep/protocol-primitives";
+import {
+  compareHLC,
+  deserializeHLC,
+  typeCategory,
+  type HLCTimestamp,
+} from "@starkeep/protocol-primitives";
 import { appSyncableTableName, sqliteCompiler } from "@starkeep/storage-sqlite";
 import { AWS_TESTS_ENABLED, STACK_PREFIX, REGION, TEARDOWN } from "./env.js";
 import {
@@ -71,7 +76,7 @@ import {
   type TestStackConfig,
   type AdminCredentials,
 } from "./run-state.js";
-import type { JourneyApp, JourneyContext } from "./journey-app.js";
+import type { JourneyApp, JourneyContext, JourneySharedFile } from "./journey-app.js";
 import { defineMemberSteps } from "./member-steps.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -128,15 +133,26 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
   // record (and its exact bytes) apply down into the local registry.
   let browserUploadName: string;
   let browserUploadBytes: Buffer;
-  // Unique per run: the cloud is kept up between runs and dedupes records by
-  // content hash on live rows, so a constant image would ship only on its very
-  // first run and report shipped: 0 thereafter. Random colour + size give each
-  // run a fresh content hash (well over the 24-bit colour space, so collisions
-  // stay negligible even across a long-lived stack) so the sync genuinely ships.
-  const photoBytes = solidPng(
-    [...randomBytes(3)] as [number, number, number],
-    16 + (randomBytes(1)[0] % 48), // 16–63 px; still tiny, still a valid PNG
-  );
+  // The shared file the app writes, unique per run: the cloud is kept up between
+  // runs and dedupes records by content hash on live rows, so a constant file
+  // would ship only on its very first run and report shipped: 0 thereafter. The
+  // default PNG takes a random colour + size (well over the 24-bit colour space,
+  // so collisions stay negligible even across a long-lived stack).
+  const sharedFile: JourneySharedFile = app.sharedFile ?? {
+    type: "image/png",
+    contentType: "image/png",
+    fileName: "tier3.png",
+    bytes: () =>
+      solidPng(
+        [...randomBytes(3)] as [number, number, number],
+        16 + (randomBytes(1)[0] % 48), // 16–63 px; still tiny, still a valid PNG
+      ),
+    metadata: { width: 1, height: 1 },
+  };
+  const sharedFileBytes = sharedFile.bytes();
+  // The stand-in steps write image originals and image stand-ins as the app,
+  // and the platform takes stand-ins for images and video alone.
+  const appWritesImages = typeCategory(sharedFile.type) === "image";
 
   /**
    * What an app's own steps read. Getters rather than values: the steps are
@@ -1051,8 +1067,10 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
 
       it(`syncs a record to the cloud: row + blob under Drive, origin ${app.appId}`, async () => {
         const { record } = await createRecordWithBytes(appUnderTest, {
-          bytes: photoBytes,
-          fileName: "tier3.png",
+          type: sharedFile.type,
+          contentType: sharedFile.contentType,
+          bytes: sharedFileBytes,
+          fileName: sharedFile.fileName,
         });
         syncedRecordId = record.id;
 
@@ -1108,7 +1126,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         const { url } = (await urlRes.json()) as { url: string };
         const blob = await fetch(url);
         expect(blob.status).toBe(200);
-        expect(Buffer.from(await blob.arrayBuffer()).equals(photoBytes)).toBe(true);
+        expect(Buffer.from(await blob.arrayBuffer()).equals(sharedFileBytes)).toBe(true);
       });
 
       it("cross-app labels round-trip against real DSQL: write, hydrate, reverse query, retract", async () => {
@@ -1254,148 +1272,163 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         expect(perApp.find((e) => e.appId === "starkeep-drive")?.lastError).toBeNull();
       });
 
-      it("a row reaches the cloud ahead of its file, and the cloud's bytes watermark waits for the file", async () => {
-        // A photograph and its stand-in whose bytes this node has lost, so
-        // their uploads fail every round until the bytes come back. Under
-        // bytes-first the rows waited here for their files. Now the rows ship
-        // at once, and the cloud's bytes watermark is what remembers the owed
-        // uploads. The real parts under test are the `_starkeep_byte_coverage`
-        // table in Drive's schema under Drive's role, and the cloud's walk,
-        // which checks each file with an S3 HEAD.
-        const files = await rowAheadOfItsFile(randomBytes(64_000));
-        const { original, standIn } = files;
-        await expectBytesWatermark(drive, original.version, "below");
-
-        // The cloud lists the photograph but signs no URL for it or for its
-        // stand-in, so a browser shows a placeholder rather than a broken image.
-        await expectCloudReads(files, { original: "awaiting-upload", standIn: "awaiting-upload" });
-
-        // The bytes appear on the desktop. Sync stays paused until the
-        // desktop has counted them, so no round uploads them first. A node
-        // counts only files it holds, so the count waits for the bytes too.
-        const pause = await drive.fetch("/sync/pause", { method: "POST" });
-        expect(pause.status, await pause.clone().text()).toBe(200);
-        try {
-          await restoreDesktopBytes(original);
-          await restoreDesktopBytes(standIn);
-          expect(
-            await driveFilesOwed(),
-            "the desktop counts no file owed to the cloud",
-          ).toBeGreaterThan(0);
-        } finally {
-          const resume = await drive.fetch("/sync/resume", { method: "POST" });
-          expect(resume.status, await resume.clone().text()).toBe(200);
-        }
-
-        // The next rounds upload both files without re-shipping the rows, and
-        // the cloud's walk moves past them.
-        await eventually(
-          async () => {
-            await syncDesktop();
-            for (const { key } of [original, standIn]) {
-              if (!(await inS3(key))) throw new Error(`${key} has not reached S3`);
-            }
-            await expectBytesWatermark(drive, standIn.version, "past");
-          },
-          { timeoutMs: 120_000, intervalMs: 3_000 },
-        );
-        await expectCloudReads(files, { original: "served", standIn: "served" });
-        expect(await driveFilesOwed(), "files still owed once the walk passed every row").toBe(0);
-      });
-
-      it("a file that reaches S3 before the cloud's walk does is served at once", async () => {
-        // The window a phone opens on every upload: its file is in S3, and
-        // the cloud's bytes watermark has not moved, because the cloud walks
-        // only when an exchange arrives. The lazy reads must find the file
-        // with a HEAD rather than wait for the walk.
-        //
-        // The desktop's own uploader could close that window at any moment
-        // with an exchange. The bytes go up through the cloud's own upload
-        // route instead, with the desktop paused, so no exchange reaches the
-        // cloud in between. They go
-        // up in the phone's order: the stand-in first, then the original.
-        const files = await rowAheadOfItsFile(randomBytes(56_000));
-        const { original, standIn } = files;
-        await expectCloudReads(files, { original: "awaiting-upload", standIn: "awaiting-upload" });
-
-        const pause = await drive.fetch("/sync/pause", { method: "POST" });
-        expect(pause.status, await pause.clone().text()).toBe(200);
-        try {
-          // The stand-in lands while the original is still on the phone. A
-          // grid paints the stand-in, and nothing hands out the original.
-          await uploadThroughCloud(standIn);
-          await expectCloudReads(files, { original: "awaiting-upload", standIn: "served" });
-
-          // The walk passes a file only in order, so a stand-in in S3 does not
-          // carry the watermark past the original it waits behind.
+      (appWritesImages ? it : it.skip)(
+        "a row reaches the cloud ahead of its file, and the cloud's bytes watermark waits for the file",
+        async () => {
+          // A photograph and its stand-in whose bytes this node has lost, so
+          // their uploads fail every round until the bytes come back. Under
+          // bytes-first the rows waited here for their files. Now the rows ship
+          // at once, and the cloud's bytes watermark is what remembers the owed
+          // uploads. The real parts under test are the `_starkeep_byte_coverage`
+          // table in Drive's schema under Drive's role, and the cloud's walk,
+          // which checks each file with an S3 HEAD.
+          const files = await rowAheadOfItsFile(randomBytes(64_000));
+          const { original, standIn } = files;
           await expectBytesWatermark(drive, original.version, "below");
 
-          await uploadThroughCloud(original);
+          // The cloud lists the photograph but signs no URL for it or for its
+          // stand-in, so a browser shows a placeholder rather than a broken image.
+          await expectCloudReads(files, {
+            original: "awaiting-upload",
+            standIn: "awaiting-upload",
+          });
+
+          // The bytes appear on the desktop. Sync stays paused until the
+          // desktop has counted them, so no round uploads them first. A node
+          // counts only files it holds, so the count waits for the bytes too.
+          const pause = await drive.fetch("/sync/pause", { method: "POST" });
+          expect(pause.status, await pause.clone().text()).toBe(200);
+          try {
+            await restoreDesktopBytes(original);
+            await restoreDesktopBytes(standIn);
+            expect(
+              await driveFilesOwed(),
+              "the desktop counts no file owed to the cloud",
+            ).toBeGreaterThan(0);
+          } finally {
+            const resume = await drive.fetch("/sync/resume", { method: "POST" });
+            expect(resume.status, await resume.clone().text()).toBe(200);
+          }
+
+          // The next rounds upload both files without re-shipping the rows, and
+          // the cloud's walk moves past them.
+          await eventually(
+            async () => {
+              await syncDesktop();
+              for (const { key } of [original, standIn]) {
+                if (!(await inS3(key))) throw new Error(`${key} has not reached S3`);
+              }
+              await expectBytesWatermark(drive, standIn.version, "past");
+            },
+            { timeoutMs: 120_000, intervalMs: 3_000 },
+          );
           await expectCloudReads(files, { original: "served", standIn: "served" });
+          expect(await driveFilesOwed(), "files still owed once the walk passed every row").toBe(0);
+        },
+      );
 
-          // The walk, which this exchange runs, now passes both rows. The
-          // desktop never uploaded either file.
-          await expectBytesWatermark(drive, standIn.version, "past");
-          await restoreDesktopBytes(original);
-          await restoreDesktopBytes(standIn);
-        } finally {
-          const resume = await drive.fetch("/sync/resume", { method: "POST" });
-          expect(resume.status, await resume.clone().text()).toBe(200);
-        }
-        expect(await driveFilesOwed(), "files still owed once the walk passed every row").toBe(0);
-      });
-
-      it("sends a stand-in before the larger original it stands in for, authored earlier", async () => {
-        // The uploader's order: another node's photo list paints from
-        // stand-ins, so the fast tier goes first. Written while sync is paused,
-        // so both files are queued before the uploader looks, and the original
-        // is the older row of the two.
-        const pause = await drive.fetch("/sync/pause", { method: "POST" });
-        expect(pause.status, await pause.clone().text()).toBe(200);
-        let originalKey: string;
-        let standInKey: string;
-        try {
-          const original = await writeRecord(appUnderTest, {
-            type: "image/jpeg",
-            contentType: "image/jpeg",
-            bytes: randomBytes(8 * 1024 * 1024),
-            fidelity: 480,
+      (appWritesImages ? it : it.skip)(
+        "a file that reaches S3 before the cloud's walk does is served at once",
+        async () => {
+          // The window a phone opens on every upload: its file is in S3, and
+          // the cloud's bytes watermark has not moved, because the cloud walks
+          // only when an exchange arrives. The lazy reads must find the file
+          // with a HEAD rather than wait for the walk.
+          //
+          // The desktop's own uploader could close that window at any moment
+          // with an exchange. The bytes go up through the cloud's own upload
+          // route instead, with the desktop paused, so no exchange reaches the
+          // cloud in between. They go
+          // up in the phone's order: the stand-in first, then the original.
+          const files = await rowAheadOfItsFile(randomBytes(56_000));
+          const { original, standIn } = files;
+          await expectCloudReads(files, {
+            original: "awaiting-upload",
+            standIn: "awaiting-upload",
           });
-          expectCreated(original, "the original");
-          const standIn = await writeRecord(appUnderTest, {
-            type: "image/avif",
-            contentType: "image/avif",
-            bytes: randomBytes(40_000),
-            parentId: original.body.record!.id,
-            standIn: { role: "smaller", fidelity: 320 },
-          });
-          expectCreated(standIn, "the stand-in");
-          originalKey = (original.body.record as unknown as { object_storage_key: string })
-            .object_storage_key;
-          standInKey = (standIn.body.record as unknown as { object_storage_key: string })
-            .object_storage_key;
-        } finally {
-          const resume = await drive.fetch("/sync/resume", { method: "POST" });
-          expect(resume.status, await resume.clone().text()).toBe(200);
-        }
 
-        await eventually(
-          async () => {
-            await syncDesktop();
-            for (const key of [originalKey, standInKey]) {
-              if (!(await inS3(key))) throw new Error(`${key} has not reached S3`);
-            }
-          },
-          { timeoutMs: 180_000, intervalMs: 3_000 },
-        );
-        // S3 stamps an object when its PUT completes, to the second. The
-        // stand-in's PUT starts first and is a fraction of the size.
-        const [standInAt, originalAt] = await Promise.all([
-          s3LastModified(standInKey),
-          s3LastModified(originalKey),
-        ]);
-        expect(standInAt!.getTime()).toBeLessThanOrEqual(originalAt!.getTime());
-      });
+          const pause = await drive.fetch("/sync/pause", { method: "POST" });
+          expect(pause.status, await pause.clone().text()).toBe(200);
+          try {
+            // The stand-in lands while the original is still on the phone. A
+            // grid paints the stand-in, and nothing hands out the original.
+            await uploadThroughCloud(standIn);
+            await expectCloudReads(files, { original: "awaiting-upload", standIn: "served" });
+
+            // The walk passes a file only in order, so a stand-in in S3 does not
+            // carry the watermark past the original it waits behind.
+            await expectBytesWatermark(drive, original.version, "below");
+
+            await uploadThroughCloud(original);
+            await expectCloudReads(files, { original: "served", standIn: "served" });
+
+            // The walk, which this exchange runs, now passes both rows. The
+            // desktop never uploaded either file.
+            await expectBytesWatermark(drive, standIn.version, "past");
+            await restoreDesktopBytes(original);
+            await restoreDesktopBytes(standIn);
+          } finally {
+            const resume = await drive.fetch("/sync/resume", { method: "POST" });
+            expect(resume.status, await resume.clone().text()).toBe(200);
+          }
+          expect(await driveFilesOwed(), "files still owed once the walk passed every row").toBe(0);
+        },
+      );
+
+      (appWritesImages ? it : it.skip)(
+        "sends a stand-in before the larger original it stands in for, authored earlier",
+        async () => {
+          // The uploader's order: another node's photo list paints from
+          // stand-ins, so the fast tier goes first. Written while sync is paused,
+          // so both files are queued before the uploader looks, and the original
+          // is the older row of the two.
+          const pause = await drive.fetch("/sync/pause", { method: "POST" });
+          expect(pause.status, await pause.clone().text()).toBe(200);
+          let originalKey: string;
+          let standInKey: string;
+          try {
+            const original = await writeRecord(appUnderTest, {
+              type: "image/jpeg",
+              contentType: "image/jpeg",
+              bytes: randomBytes(8 * 1024 * 1024),
+              fidelity: 480,
+            });
+            expectCreated(original, "the original");
+            const standIn = await writeRecord(appUnderTest, {
+              type: "image/avif",
+              contentType: "image/avif",
+              bytes: randomBytes(40_000),
+              parentId: original.body.record!.id,
+              standIn: { role: "smaller", fidelity: 320 },
+            });
+            expectCreated(standIn, "the stand-in");
+            originalKey = (original.body.record as unknown as { object_storage_key: string })
+              .object_storage_key;
+            standInKey = (standIn.body.record as unknown as { object_storage_key: string })
+              .object_storage_key;
+          } finally {
+            const resume = await drive.fetch("/sync/resume", { method: "POST" });
+            expect(resume.status, await resume.clone().text()).toBe(200);
+          }
+
+          await eventually(
+            async () => {
+              await syncDesktop();
+              for (const key of [originalKey, standInKey]) {
+                if (!(await inS3(key))) throw new Error(`${key} has not reached S3`);
+              }
+            },
+            { timeoutMs: 180_000, intervalMs: 3_000 },
+          );
+          // S3 stamps an object when its PUT completes, to the second. The
+          // stand-in's PUT starts first and is a fraction of the size.
+          const [standInAt, originalAt] = await Promise.all([
+            s3LastModified(standInKey),
+            s3LastModified(originalKey),
+          ]);
+          expect(standInAt!.getTime()).toBeLessThanOrEqual(originalAt!.getTime());
+        },
+      );
 
       // The same property on the app's own channel, which carries the app's
       // private files in its reserved `_starkeep_sync_records` table. The
@@ -1520,7 +1553,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         const metaRes = await fetch(`${proxyBase}/data/records/${syncedRecordId}/metadata`, {
           method: "POST",
           headers: { "Content-Type": "application/json", cookie },
-          body: JSON.stringify({ typeId: "image", metadata: { width: 1, height: 1 } }),
+          body: JSON.stringify({ typeId: sharedFile.type, metadata: sharedFile.metadata }),
         });
         expect(metaRes.status).toBe(200);
       });
@@ -1621,7 +1654,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
             init: {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ typeId: "image", metadata: { width: 1, height: 1 } }),
+              body: JSON.stringify({ typeId: sharedFile.type, metadata: sharedFile.metadata }),
             },
           });
         }
@@ -2003,7 +2036,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // Bytes round-trip through the edge and match what was uploaded.
         const first = await fetchWhenReady(url);
         expect(first.status).toBe(200);
-        expect(Buffer.from(await first.arrayBuffer()).equals(photoBytes)).toBe(true);
+        expect(Buffer.from(await first.arrayBuffer()).equals(sharedFileBytes)).toBe(true);
 
         // Edge hit — specifically on a FRESHLY SIGNED url, not a re-fetch of the
         // same one. This is the property that makes Part B deliver anything: the

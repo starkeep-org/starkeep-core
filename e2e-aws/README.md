@@ -27,7 +27,8 @@ pnpm exec playwright install chromium
 The journey is app-agnostic. `src/journey.ts` exports `defineCloudJourney(app)`,
 which registers only **platform** assertions; the app arrives as a `JourneyApp`
 describing what differs between apps — its id, its directory, the label keys and
-table its manifest declared, the route behind its JWT authorizer.
+table its manifest declared, the route behind its JWT authorizer, and the shared
+file it writes.
 
 | `STARKEEP_AWS_APP_DIR` | What runs                                                                                                                                           |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -37,6 +38,12 @@ table its manifest declared, the route behind its JWT authorizer.
 A path holding no `starkeep.manifest.json` **fails the run** rather than falling
 back. Asking for a real app and silently getting the fixture would report a
 green journey that never tested what was asked for.
+
+A configured app writes its shared file in the first `readwrite` grant that also
+holds `metadataWrite`. An image grant writes the journey's default PNG. Any other
+grant writes a line of text under the grant's first type, and its metadata write
+sets the category's first integer column. A manifest with no such grant fails
+the run.
 
 App-level assertions — anything true of one application and not of the platform
 — live in that application's own repository, which consumes this package the way
@@ -68,8 +75,8 @@ registry database, which must not land in a checkout you do not own.
    have the cloud app write an app-private row. Then sign the machine out,
    install the app locally (it works at once; its sync channel does not
    start), sign back in, and assert the channel starts and pulls the row down.
-8. Create a record locally, `POST /sync/now`, assert the row + blob landed in the
-   cloud under Drive with the app as origin.
+8. Create a record of the app's shared-file type locally, `POST /sync/now`, and
+   assert the row + blob landed in the cloud under Drive with the app as origin.
 9. Cross-app labels against real DSQL: write, hydrate, reverse query, retract.
    The keys come from the app's manifest, because the broker rejects an
    undeclared key with a 400 and an invented one would fail here rather than at
@@ -86,13 +93,16 @@ registry database, which must not land in a checkout you do not own.
       the `stand-in-urls` listing's size summary, `file-url` and the batch
       `file-urls` sign no URL for it and report it as awaiting upload, and
       `/sync/verify` counts it in `filesOwed`. Afterwards every read signs a
-      URL that fetches the bytes, and `filesOwed` reads 0.
+      URL that fetches the bytes, and `filesOwed` reads 0. Skipped for an app
+      whose shared file is not an image, since stand-ins exist only for images
+      and video.
     - **A file in S3 ahead of the cloud's walk.** The bytes land through the
       cloud's own upload route while the desktop is paused, so no exchange
       moves the watermark. They land in the phone's order. Once the stand-in
       lands, the reads must find it with a real S3 HEAD and serve it while
       the original still reads as awaiting upload, and the watermark must stay
       below the original. Once the original lands, every read serves both.
+      Skipped for an app whose shared file is not an image.
     - **Rows ahead of bytes, the app's own channel.** The same property for an
       app-private file in `_starkeep_sync_records`, through the per-app
       handler and the app's own role. Skipped for an app whose manifest
