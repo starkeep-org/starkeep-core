@@ -39,6 +39,7 @@ import {
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { uninstallCloudDataServer, uninstallDrive } from "../src/builtin-installs";
 import { exitOnInstallFailure } from "../src/cli-exit";
+import { useOnlyAwsCredentials } from "../src/aws-env";
 import { customDomainInstallInput, type CustomDomainConfigFields } from "../src/custom-domain";
 
 interface StarkeepConfig extends CustomDomainConfigFields {
@@ -223,6 +224,14 @@ if (nonInteractive) {
     );
     process.exit(1);
   }
+  useOnlyAwsCredentials(
+    {
+      accessKeyId: AWS_ACCESS_KEY_ID,
+      secretAccessKey: AWS_SECRET_ACCESS_KEY,
+      sessionToken: AWS_SESSION_TOKEN,
+    },
+    process.env.AWS_REGION ?? region,
+  );
 } else {
   const email = await prompt("Email: ");
   const password = await prompt("Password: ", true);
@@ -233,10 +242,7 @@ if (nonInteractive) {
   console.log("Fetching temporary AWS credentials…");
   const creds = await getSTSCredentials(config, idToken);
 
-  process.env.AWS_ACCESS_KEY_ID = creds.accessKeyId;
-  process.env.AWS_SECRET_ACCESS_KEY = creds.secretAccessKey;
-  process.env.AWS_SESSION_TOKEN = creds.sessionToken;
-  process.env.AWS_REGION = region;
+  useOnlyAwsCredentials(creds, region);
 }
 
 let accountId: string;
