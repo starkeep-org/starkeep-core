@@ -34,7 +34,7 @@ if (!onPath()) {
   console.error(
     "\nstarkeep-core needs a `pnpm` command on your PATH: the install's build step\n" +
       "runs turbo, which looks pnpm up there. Install one with `npm install -g pnpm@10`,\n" +
-      "or run `corepack enable pnpm`, then run `pnpm install` again.\n",
+      "then run `pnpm install` again.\n",
   );
   process.exit(1);
 }
