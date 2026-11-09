@@ -3,17 +3,21 @@
  * off the approved list, before it authenticates or deploys anything.
  *
  * The CLI runs for real, as a child process, against a throwaway Starkeep
- * directory whose config names an account, so nothing before the check needs
- * the network. A check that ran after the deploy began would leave a
+ * directory whose config names an account, and a local stand-in answers the
+ * cloud data server's `/health`, so nothing before the check needs the
+ * network. A check that ran after the deploy began would leave a
  * half-installed app behind; this one exits first.
  */
 
-import { describe, expect, it } from "vitest";
-import { spawnSync } from "node:child_process";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { spawn } from "node:child_process";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { cpSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { PROTOCOL_VERSION } from "@starkeep/protocol-primitives";
 import { DEFAULT_APPS_DIR } from "../src/app-discovery.js";
 
 const PACKAGE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -29,7 +33,20 @@ function appWithBundle(bundle: unknown): string {
   return dir;
 }
 
-function runCli(appDir: string) {
+// Stands in for the cloud data server's `/health`, which the protocol check reads.
+let health: Server;
+let apiGatewayUrl: string;
+beforeAll(async () => {
+  health = createServer((_req, res) => {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ status: "ok", protocolVersion: PROTOCOL_VERSION }));
+  });
+  await new Promise<void>((done) => health.listen(0, "127.0.0.1", done));
+  apiGatewayUrl = `http://127.0.0.1:${(health.address() as AddressInfo).port}`;
+});
+afterAll(() => new Promise<void>((done) => health.close(() => done())));
+
+function runCli(appDir: string): Promise<{ status: number | null; stdout: string; stderr: string }> {
   const starkeepDir = mkdtempSync(join(tmpdir(), "cli-bundle-sk-"));
   writeFileSync(
     join(starkeepDir, "config.json"),
@@ -43,10 +60,11 @@ function runCli(appDir: string) {
       authorizerId: "auth",
       s3Bucket: "bucket",
       auroraEndpoint: "abc.dsql.us-east-1.on.aws",
+      apiGatewayUrl,
       cloudAppsUserPoolClientId: "cloud-apps",
     }),
   );
-  return spawnSync(
+  const child = spawn(
     "npx",
     [
       "tsx",
@@ -59,7 +77,6 @@ function runCli(appDir: string) {
     ],
     {
       cwd: PACKAGE_DIR,
-      encoding: "utf-8",
       env: {
         ...process.env,
         STARKEEP_DIR: starkeepDir,
@@ -71,11 +88,16 @@ function runCli(appDir: string) {
       timeout: 60_000,
     },
   );
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => (stdout += chunk));
+  child.stderr.on("data", (chunk) => (stderr += chunk));
+  return new Promise((done) => child.on("close", (status) => done({ status, stdout, stderr })));
 }
 
 describe("cli:install-app and the bundle command", () => {
-  it("refuses an unapproved bundle command before installing anything", () => {
-    const result = runCli(appWithBundle({ command: "node", args: ["scripts/bundle.mjs"] }));
+  it("refuses an unapproved bundle command before installing anything", async () => {
+    const result = await runCli(appWithBundle({ command: "node", args: ["scripts/bundle.mjs"] }));
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
       "The manifest's bundle command `node scripts/bundle.mjs` is not approved",
