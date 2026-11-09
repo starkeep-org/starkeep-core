@@ -1076,10 +1076,13 @@ The install path is identical for first-party and third-party apps:
 3. Install runs that command in the app's folder and shows its output. The
    command is the manifest's `installDependencies`, or the frozen install your
    lockfile implies: `pnpm install --frozen-lockfile`, `npm ci`,
-   `yarn install --immutable` or `bun install --frozen-lockfile`. An app that a
-   pnpm workspace lists installs at the workspace root. A pnpm install inside a
-   workspace that does not list the app gains `--ignore-workspace`. A folder
-   with no `package.json` installs nothing. Then Admin POSTs to
+   `yarn install --immutable` (`--frozen-lockfile` for a Yarn 1 lockfile) or
+   `bun install --frozen-lockfile`. An app that a pnpm workspace lists
+   installs at the workspace root. A pnpm install inside a workspace that does
+   not list the app gains `--ignore-workspace`. An app inside an npm, Yarn or
+   Bun project with no lockfile of its own installs nothing; the dialog names
+   the project's install for you to run. A folder with no `package.json`
+   installs nothing. Then Admin POSTs to
    `local-data-server` to register the app and provision its per-app HMAC
    credential. Install pins
    the app's folder and the manifest you approved: **Start** runs that folder
@@ -1096,7 +1099,7 @@ Install runs only these command shapes, matched by the program's bare name on
 | ------- | ------------------------------------------------------------------- | -------------- |
 | `pnpm`  | `install`, with `--frozen-lockfile`, `--ignore-workspace`, `--prod` | `run <script>` |
 | `npm`   | `ci`, or `install` with `--omit=dev`                                | `run <script>` |
-| `yarn`  | `install`, with `--immutable`                                       | `run <script>` |
+| `yarn`  | `install`, with `--immutable`, `--frozen-lockfile`                  | `run <script>` |
 | `bun`   | `install`, with `--frozen-lockfile`, `--production`                 | `run <script>` |
 
 A script name holds only letters, digits, `:`, `_` and `-`. When the manifest
