@@ -356,6 +356,22 @@ describe("an app installed on this machine", () => {
     expect(((await res.json()) as { error: string }).error).toContain("Update from folder");
     expect(spawnedChildren()).toHaveLength(0);
   });
+
+  it("refuses while its folder holds an invalid manifest, says to fix it, and spawns nothing", async () => {
+    const pinned = makeAppDir(
+      join(dataDir, "elsewhere"),
+      "dice",
+      testAppManifest({ id: "dice", name: "Dice" }),
+    );
+    registryAnswers([pinnedRow("dice", pinned)]);
+    makeAppDir(join(dataDir, "elsewhere"), "dice", testAppManifest({ id: "other", name: "Dice" }));
+    const res = await appInstall({ appId: "dice" });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      `App dice's folder ${pinned} holds an invalid manifest (id: "other" is not this app's id "dice"). Fix the manifest first.`,
+    );
+    expect(spawnedChildren()).toHaveLength(0);
+  });
 });
 
 describe("the one run slot every cloud app install shares", () => {
