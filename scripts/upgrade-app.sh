@@ -26,11 +26,14 @@
 #   scripts/upgrade-app.sh --diff             # every installed app
 #   STARKEEP_PORT=9821 scripts/upgrade-app.sh photos
 #
-# Apps are resolved the way admin-web resolves them (`scanApps` in
+# An app reapplies the manifest in the folder it was installed from, which the
+# registry pins. An app installed before the registry pinned folders resolves
+# the way admin-web resolves it (`scanApps` in
 # packages/admin-installer/src/app-discovery.ts): an `appParentDirs` entry in
 # ~/.starkeep/config.json that holds a `starkeep.manifest.json` is one app, and
 # any other entry is scanned one level deep, skipping node_modules and
-# dot-folders. The first folder wins. The data server must be running —
+# dot-folders. Two folders with one id are refused, and the reapply pins the
+# folder it used. The data server must be running —
 # `/admin/apps/install` is localhost-only and takes no HMAC, and going through
 # it rather than writing SQLite directly is what makes the server pick up the
 # change: it rescans the sync supervisor and refreshes the size-class keys.
@@ -44,7 +47,7 @@ APPS=()
 for arg in "$@"; do
   case "$arg" in
     --diff) DIFF_ONLY=1 ;;
-    -h|--help) sed -n '2,34p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) echo "unknown flag: $arg" >&2; exit 2 ;;
     *) APPS+=("$arg") ;;
   esac
@@ -68,22 +71,34 @@ DB_PATH = STARKEEP_DIR / "data.db"
 CONFIG_PATH = STARKEEP_DIR / "config.json"
 
 
-def stored_manifests():
-    """The registry's own copy, read-only. The server holds this DB open."""
+def registry_rows():
+    """The registry's own rows, read-only. The server holds this DB open."""
     if not DB_PATH.is_file():
         sys.exit(f"no registry database at {DB_PATH}")
     db = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     try:
-        return {
-            app_id: json.loads(raw) if raw else None
-            for app_id, raw in db.execute("SELECT app_id, manifest FROM shared_app_registry")
-        }
+        return list(db.execute("SELECT app_id, manifest, source_dir FROM shared_app_registry"))
     finally:
         db.close()
 
 
-# First parent wins, matching app-scan's de-dupe by manifest id.
-on_disk = {}
+def stored_manifests():
+    return {app_id: json.loads(raw) if raw else None for app_id, raw, _ in registry_rows()}
+
+
+def read_manifest(app_dir):
+    manifest_path = app_dir / "starkeep.manifest.json"
+    if not (app_dir.is_dir() and manifest_path.is_file()):
+        return None
+    try:
+        return manifest_path, json.loads(manifest_path.read_text())
+    except ValueError:
+        return None
+
+
+# Every scanned folder for each id. Like app-scan, folder order picks no
+# winner: an unpinned id that two folders hold is refused below.
+scanned = {}
 try:
     parents = [
         Path(os.path.expanduser(d))
@@ -103,16 +118,15 @@ for parent in parents:
             if d.name != "node_modules" and not d.name.startswith(".")
         ]
     for app_dir in candidates:
-        manifest_path = app_dir / "starkeep.manifest.json"
-        if not (app_dir.is_dir() and manifest_path.is_file()):
+        found = read_manifest(app_dir)
+        if found is None:
             continue
-        try:
-            manifest = json.loads(manifest_path.read_text())
-        except ValueError:
-            continue
-        on_disk.setdefault(manifest.get("id") or app_dir.name, (manifest_path, manifest))
+        key = found[1].get("id") or app_dir.name
+        if all(p.parent.resolve() != app_dir.resolve() for p, _ in scanned.get(key, [])):
+            scanned.setdefault(key, []).append(found)
 
 before = stored_manifests()
+pins = {app_id: pin for app_id, _, pin in registry_rows() if pin}
 targets = WANTED or sorted(before)
 
 missing = [a for a in targets if a not in before]
@@ -121,12 +135,27 @@ if missing:
         f"not installed: {', '.join(missing)}\n"
         "this reapplies an existing install; install it from admin-web first"
     )
-unscanned = [a for a in targets if a not in on_disk]
-if unscanned:
-    sys.exit(
-        f"no manifest found on disk for: {', '.join(unscanned)}\n"
-        f"checked appParentDirs in {CONFIG_PATH}"
-    )
+# An installed app's pinned folder, else its one scanned folder.
+on_disk = {}
+problems = []
+for app_id in targets:
+    if app_id in pins:
+        found = read_manifest(Path(os.path.expanduser(pins[app_id])))
+        if found is None:
+            problems.append(f"{app_id}: its pinned folder {pins[app_id]} holds no manifest")
+        else:
+            on_disk[app_id] = found
+        continue
+    copies = scanned.get(app_id, [])
+    if len(copies) == 1:
+        on_disk[app_id] = copies[0]
+    elif copies:
+        folders = ", ".join(str(p.parent) for p, _ in copies)
+        problems.append(f"{app_id}: two folders hold it ({folders})")
+    else:
+        problems.append(f"{app_id}: no manifest found in appParentDirs in {CONFIG_PATH}")
+if problems:
+    sys.exit("\n".join(problems))
 
 
 def leaves(value, path=""):
