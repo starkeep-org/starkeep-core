@@ -1054,9 +1054,10 @@ The install path is identical for first-party and third-party apps:
 
 1. Add the app's folder, or a folder that holds it, in **Discover apps** on
    the Dashboard. The sibling `starkeep-apps/` is seeded by default. A folder
-   that holds `starkeep.manifest.json` is an app; any other folder is scanned
-   for app subfolders. The Dashboard lists every folder the scan skipped and
-   why, such as a manifest that is not valid JSON or a duplicate app id.
+   that holds `starkeep.manifest.json` is one app. In any other folder, each
+   direct subfolder that holds a manifest is an app; the scan skips
+   `node_modules` and dot-folders and goes no deeper. Discover apps shows what
+   each folder contributed and why any folder was skipped.
 2. Install the app's dependencies with `pnpm install` in the app's folder.
    admin-web runs the app straight from that folder and never installs
    anything itself. An app placed inside another repository's pnpm workspace,

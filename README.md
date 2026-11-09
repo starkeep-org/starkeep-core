@@ -100,7 +100,7 @@ The files from your folder appear in Drive, which confirms that the data server 
 
 ### 6. (Recommended) Install and open Photos
 
-Admin finds apps by scanning folders that you register. Each folder inside a registered folder that holds a `starkeep.manifest.json` file counts as an app.
+Admin finds apps by scanning folders that you register. A registered folder that holds a `starkeep.manifest.json` file is one app. In any other registered folder, each folder directly inside it that holds a `starkeep.manifest.json` file counts as an app. **Discover apps** shows the apps each folder contributed and the reason for any folder that it skipped.
 
 If your `starkeep-apps` checkout is a sibling directory of `starkeep-core`, the Photos card will show automatically.
 
