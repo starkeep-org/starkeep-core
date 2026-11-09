@@ -40,9 +40,15 @@ export function protocolRefusal(opts: {
     opts.platformVersion === null
       ? `${server} reports no protocol version, so it predates version checks`
       : `${server} speaks ${opts.platformVersion}`;
+  // A platform on a later major version has dropped the contract the app was
+  // written against, so the app needs the update, not the platform.
+  const platformMajor =
+    opts.platformVersion === null ? null : parseProtocolVersion(opts.platformVersion)?.[0];
   const remedy =
-    opts.target === "local"
-      ? "Update the starkeep-core checkout and restart the local data server; a data server started before a pull keeps running its old code."
-      : "Update the starkeep-core checkout and redeploy the cloud data server.";
+    platformMajor != null && platformMajor > parseProtocolVersion(required)![0]
+      ? `The app was written for an older protocol; install a version of ${opts.appId} built for protocol ${platformMajor}.x.`
+      : opts.target === "local"
+        ? "Update the starkeep-core checkout and restart the local data server; a data server started before a pull keeps running its old code."
+        : "Update the starkeep-core checkout and redeploy the cloud data server.";
   return `${opts.appId} needs Starkeep protocol ${required}, and ${speaks}. ${remedy}`;
 }
