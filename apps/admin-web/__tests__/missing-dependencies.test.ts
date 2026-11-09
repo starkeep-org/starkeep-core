@@ -64,6 +64,16 @@ describe("missingDependencies", () => {
     expect(result?.message).toContain(`Run \`pnpm install\` in ${root}.`);
   });
 
+  it("names a missing package that only devDependencies declares", () => {
+    const app = mkdtempSync(join(tmpdir(), "deps-dev-"));
+    writeJson(join(app, "package.json"), {
+      dependencies: { hono: "^4.0.0" },
+      devDependencies: { vite: "^8.0.0" },
+    });
+    installPackage(app, "hono");
+    expect(missingDependencies("app", app)?.missing).toEqual(["vite"]);
+  });
+
   it("ignores a folder with no package.json", () => {
     expect(missingDependencies("app", mkdtempSync(join(tmpdir(), "deps-none-")))).toBeNull();
   });

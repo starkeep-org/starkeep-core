@@ -125,6 +125,7 @@ test.beforeAll(async () => {
 
   // A checkout that was never `pnpm install`ed: package.json, no node_modules.
   // The likeliest real failure — it's what the repo READMEs now warn about.
+  // Start checks declared dependencies, so the fixture must declare one.
   await writeFixtureApp(
     "nodeps-app",
     manifest({
@@ -132,7 +133,13 @@ test.beforeAll(async () => {
       name: "Nodeps App",
       localRun: { command: process.execPath, args: ["server.mjs"] },
     }),
-    { "package.json": JSON.stringify({ name: "nodeps-app" }), "server.mjs": "" },
+    {
+      "package.json": JSON.stringify({
+        name: "nodeps-app",
+        dependencies: { "nodeps-fixture-dep": "1.0.0" },
+      }),
+      "server.mjs": "",
+    },
   );
 
   // Binds a hardcoded port (no portFlag, so admin allocates nothing) — starting
@@ -205,6 +212,7 @@ test("an app with no node_modules is refused with a pnpm install hint", async ({
   const alert = errorAlert(page);
   await expect(alert).toContainText("pnpm install");
   await expect(alert).toContainText("nodeps-app");
+  await expect(alert).toContainText("nodeps-fixture-dep");
   await expect(card.getByRole("button", { name: /^Start / })).toBeVisible();
 });
 
