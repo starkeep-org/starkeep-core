@@ -56,13 +56,17 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
   // consent against the manifest the user approved locally. Deploy only
   // when the two are the same, so the cloud never runs a manifest nobody
   // approved.
-  if (source.kind === "pinned" && pinnedSourceState(source.appDir, source.manifest) !== null) {
-    return Response.json(
-      {
-        error: `App ${appId}'s folder ${source.appDir} holds a manifest you have not approved. Choose Update from folder on its local card first.`,
-      },
-      { status: 409 },
-    );
+  if (source.kind === "pinned") {
+    const state = pinnedSourceState(source.appDir, source.manifest);
+    const refusal =
+      state?.sourceState === "changed"
+        ? `App ${appId}'s folder ${source.appDir} holds a manifest you have not approved. Choose Update from folder on its local card first.`
+        : state?.sourceState === "invalid"
+          ? `App ${appId}'s folder ${source.appDir} holds an invalid manifest (${state.sourceError}). Fix the manifest first.`
+          : state?.sourceState === "missing"
+            ? `App ${appId}'s source folder ${source.appDir} no longer holds a manifest`
+            : null;
+    if (refusal) return Response.json({ error: refusal }, { status: 409 });
   }
 
   // iam-permission-tests POC capture — gated by PULUMI_VERBOSE_TRACE above:
