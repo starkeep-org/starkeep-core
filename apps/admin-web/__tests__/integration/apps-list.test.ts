@@ -149,6 +149,7 @@ describe("with the local-data-server up", () => {
   let goneDir: string;
   let changingDir: string;
   let invalidDir: string;
+  let renamedIdDir: string;
 
   async function installOnLds(manifest: Record<string, unknown>, sourceDir?: string) {
     const res = await fetch(`${lds!.url}/admin/apps/install`, {
@@ -206,6 +207,15 @@ describe("with the local-data-server up", () => {
       name: undefined,
     });
 
+    // Installed, then its folder's manifest names another app.
+    renamedIdDir = makeAppDir(
+      dataDir,
+      "renamed-id",
+      testAppManifest({ id: "renamed-id-app", name: "Renamed" }),
+    );
+    await installOnLds(testAppManifest({ id: "renamed-id-app", name: "Renamed" }), renamedIdDir);
+    makeAppDir(dataDir, "renamed-id", testAppManifest({ id: "other-app", name: "Renamed" }));
+
     // Installed before the registry pinned folders: no sourceDir.
     makeAppDir(parentA, "legacy", testAppManifest({ id: "legacy-app", name: "Legacy" }));
     await installOnLds(testAppManifest({ id: "legacy-app", name: "Legacy" }));
@@ -259,6 +269,17 @@ describe("with the local-data-server up", () => {
     });
     expect((invalid!.manifest as { version: string }).version).toBe("1.0.0");
     expect(invalid).not.toHaveProperty("folderManifest");
+  });
+
+  it("marks an installed app whose folder now names another app id as invalid, with no Update from folder", async () => {
+    const renamed = (await list()).find((a) => a.appId === "renamed-id-app");
+    expect(renamed).toMatchObject({
+      sourceDir: renamedIdDir,
+      sourceState: "invalid",
+      sourceError: `id: "other-app" is not this app's id "renamed-id-app"`,
+      status: "active",
+    });
+    expect(renamed).not.toHaveProperty("folderManifest");
   });
 
   it("resolves an installed app with no pinned folder through the scan", async () => {
