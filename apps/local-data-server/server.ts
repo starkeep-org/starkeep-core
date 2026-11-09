@@ -4496,13 +4496,22 @@ async function main() {
       }
 
       // POST /admin/apps/install — run the local installer for a manifest.
-      // Body: the app's manifest.json. Returns { appId, hmacSecret } on success.
-      // Called by admin-web on user-initiated install. Localhost-only, no HMAC
-      // (the app has no secret yet — this is the bootstrapping primitive).
+      // Body: `{ manifest, sourceDir? }`, where `sourceDir` is the folder the
+      // manifest came from, pinned in the registry. Returns
+      // { appId, hmacSecret } on success. Called by admin-web on
+      // user-initiated install. Localhost-only, no HMAC (the app has no secret
+      // yet — this is the bootstrapping primitive).
       if (path === "/admin/apps/install" && req.method === "POST") {
-        const body = JSON.parse(await readBody(req));
+        const body = JSON.parse(await readBody(req)) as { manifest?: unknown; sourceDir?: unknown };
+        if (body.sourceDir !== undefined && typeof body.sourceDir !== "string") {
+          res.writeHead(400);
+          json(res, { error: "sourceDir must be a string" });
+          return;
+        }
         try {
-          const result = installLocal(localDb, body);
+          const result = installLocal(localDb, body.manifest, {
+            ...(typeof body.sourceDir === "string" ? { sourceDir: body.sourceDir } : {}),
+          });
           // Bring up a sync loop for the freshly-installed app.
           supervisor?.rescan();
           json(res, { appId: result.appId, hmacSecret: result.hmacSecret });
@@ -4555,9 +4564,10 @@ async function main() {
         return;
       }
 
-      // GET /admin/apps — list registered apps. The HMAC secret is NOT
-      // returned here; it is only exposed at install time so the caller can
-      // hand it directly to the installed app.
+      // GET /admin/apps — list registered apps, each with the manifest the
+      // user approved and the folder it was installed from. The HMAC secret
+      // is NOT returned here; it is only exposed at install time so the caller
+      // can hand it directly to the installed app.
       if (path === "/admin/apps" && req.method === "GET") {
         const apps = listAppRegistry(localDb).map((row) => ({
           appId: row.appId,
@@ -4568,6 +4578,8 @@ async function main() {
           installedAt: row.installedAt,
           fileAccess: row.manifest.infraRequirements.fileAccess,
           fileAccessAll: row.manifest.infraRequirements.fileAccessAll,
+          manifest: row.manifest,
+          sourceDir: row.sourceDir,
         }));
         json(res, { apps });
         return;

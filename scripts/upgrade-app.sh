@@ -183,7 +183,9 @@ for app_id in targets:
     manifest_path, manifest = on_disk[app_id]
     request = urllib.request.Request(
         f"{BASE}/admin/apps/install",
-        data=json.dumps(manifest).encode(),
+        data=json.dumps(
+            {"manifest": manifest, "sourceDir": str(manifest_path.parent)}
+        ).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
     )

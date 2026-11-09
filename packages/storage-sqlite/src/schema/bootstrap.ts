@@ -27,7 +27,8 @@ import { compiler as qb } from "../query-builder.js";
  *
  * No migration system: this is a fresh-start schema. The user removes
  * ~/.starkeep/data.db (or the local-data-server's STARKEEP_DIR is fresh)
- * before this code runs.
+ * before this code runs. One temporary guard is the exception: it adds
+ * `shared_app_registry.source_dir` to a registry created before the column.
  */
 /**
  * Connection settings the query grammar's portability depends on.
@@ -319,8 +320,20 @@ function applyLocalSchemaDdl(db: RawDatabase): void {
       .addColumn("hmac_secret", "text", (c) => c.notNull())
       .addColumn("installed_at", "text", (c) => c.notNull().defaultTo(sql`(datetime('now'))`))
       .addColumn("updated_at", "text", (c) => c.notNull().defaultTo(sql`(datetime('now'))`))
+      // The folder the app was installed from; null for a built-in app.
+      .addColumn("source_dir", "text")
       .compile().sql,
   );
+  // TEMPORARY: adds source_dir to a registry created before it existed. Replaced
+  // by ~/projects/starkeep/plan-schema-and-bootstrap-versioning-2026-11-08.md.
+  const registryColumns = db
+    .prepare("SELECT name FROM pragma_table_info('shared_app_registry')")
+    .all() as Array<{ name: string }>;
+  if (!registryColumns.some((c) => c.name === "source_dir")) {
+    db.exec(
+      qb.schema.alterTable("shared_app_registry").addColumn("source_dir", "text").compile().sql,
+    );
+  }
 
   db.exec(
     qb.schema

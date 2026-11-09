@@ -8,7 +8,7 @@
  * cases.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { getFreePort, startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
 import { makeDataDir, makeAppDir, testAppManifest, writeAdminConfig } from "../helpers";
@@ -104,7 +104,6 @@ describe("with the local-data-server down", () => {
     const a = dirs.find((d) => d.dir === parentA)!;
     expect(a.apps).toEqual([
       { appId: "alpha-app", name: "Alpha" },
-      { appId: "dup-app", name: "From A" },
       { appId: "renamed-app", name: "Renamed" },
     ]);
     expect(a.problems).toEqual([
@@ -113,12 +112,17 @@ describe("with the local-data-server down", () => {
         dir: join(parentA, "broken"),
         reason: expect.stringMatching(/^Invalid manifest found for broken: /),
       },
+      {
+        configuredDir: parentA,
+        dir: join(parentA, "dup-from-a"),
+        reason: `dup-from-a uses the app id "dup-app", which ${join(parentB, "dup-from-b")} also uses.`,
+      },
     ]);
 
     const b = dirs.find((d) => d.dir === parentB)!;
     expect(b.apps).toEqual([]);
     expect(b.problems.map((p) => p.reason)).toEqual([
-      `dup-from-b uses the app id "dup-app", which ${join(parentA, "dup-from-a")} already uses.`,
+      `dup-from-b uses the app id "dup-app", which ${join(parentA, "dup-from-a")} also uses.`,
     ]);
 
     expect(dirs.find((d) => d.dir === directApp)).toEqual({
@@ -131,36 +135,114 @@ describe("with the local-data-server down", () => {
     ]);
   });
 
-  it("lists every problem flat as well, and cards only valid apps", async () => {
+  it("lists every problem flat as well, and cards only valid apps with one folder each", async () => {
     const { apps, problems } = await body();
-    expect(problems).toHaveLength(3);
-    expect(apps.map((a) => a.appId).sort()).toEqual([
-      "alpha-app",
-      "direct-app",
-      "dup-app",
-      "renamed-app",
-    ]);
-    expect(apps.find((a) => a.appId === "dup-app")?.sourceDir).toBe(join(parentA, "dup-from-a"));
+    expect(problems).toHaveLength(4);
+    // Two folders hold dup-app, so neither gets a card: folder order picks no winner.
+    expect(apps.map((a) => a.appId).sort()).toEqual(["alpha-app", "direct-app", "renamed-app"]);
     expect(apps.find((a) => a.appId === "direct-app")?.sourceDir).toBe(directApp);
   });
 });
 
 describe("with the local-data-server up", () => {
-  beforeAll(async () => {
-    lds = await startLocalDataServer({ port: ldsPort });
-    // Install alpha-app directly on the LDS; the list route should join it.
-    const res = await fetch(`${lds.url}/admin/apps/install`, {
+  let pinnedHome: string;
+  let goneDir: string;
+  let changingDir: string;
+
+  async function installOnLds(manifest: Record<string, unknown>, sourceDir?: string) {
+    const res = await fetch(`${lds!.url}/admin/apps/install`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(testAppManifest({ id: "alpha-app", name: "Alpha" })),
+      body: JSON.stringify({ manifest, ...(sourceDir ? { sourceDir } : {}) }),
     });
     expect(res.ok).toBe(true);
+  }
+
+  beforeAll(async () => {
+    lds = await startLocalDataServer({ port: ldsPort });
+    const dataDir = process.env.STARKEEP_DIR!;
+
+    // Installed from its scanned folder.
+    await installOnLds(testAppManifest({ id: "alpha-app", name: "Alpha" }), join(parentA, "alpha"));
+
+    // Installed from a folder no configured entry reaches, with a second copy
+    // in a configured folder.
+    pinnedHome = makeAppDir(
+      join(dataDir, "elsewhere"),
+      "pinned",
+      testAppManifest({ id: "pinned-app", name: "Pinned" }),
+    );
+    makeAppDir(parentB, "pinned-copy", testAppManifest({ id: "pinned-app", name: "Copy" }));
+    await installOnLds(testAppManifest({ id: "pinned-app", name: "Pinned" }), pinnedHome);
+
+    // Installed from a folder that is then deleted.
+    goneDir = makeAppDir(dataDir, "gone", testAppManifest({ id: "gone-app", name: "Gone" }));
+    await installOnLds(testAppManifest({ id: "gone-app", name: "Gone" }), goneDir);
+    rmSync(goneDir, { recursive: true });
+
+    // Installed, then its folder's manifest changes.
+    changingDir = makeAppDir(
+      parentA,
+      "changing",
+      testAppManifest({ id: "changing-app", name: "Changing" }),
+    );
+    await installOnLds(testAppManifest({ id: "changing-app", name: "Changing" }), changingDir);
+    makeAppDir(
+      parentA,
+      "changing",
+      testAppManifest({ id: "changing-app", name: "Changing", version: "2.0.0" }),
+    );
+
+    // Installed before the registry pinned folders: no sourceDir.
+    makeAppDir(parentA, "legacy", testAppManifest({ id: "legacy-app", name: "Legacy" }));
+    await installOnLds(testAppManifest({ id: "legacy-app", name: "Legacy" }));
   });
 
   it("joins install status from the registry; others stay not_installed", async () => {
     const apps = await list();
     expect(apps.find((a) => a.appId === "alpha-app")?.status).toBe("active");
     expect(apps.find((a) => a.appId === "renamed-app")?.status).toBe("not_installed");
+  });
+
+  it("cards an installed app from its pinned folder, with no source state while it is unchanged", async () => {
+    const alpha = (await list()).find((a) => a.appId === "alpha-app");
+    expect(alpha).toMatchObject({ sourceDir: join(parentA, "alpha"), configuredDir: parentA });
+    expect(alpha).not.toHaveProperty("sourceState");
+  });
+
+  it("keeps an installed app whose pin no configured folder reaches, and reports the other copy", async () => {
+    const { apps, dirs } = await body();
+    const pinned = apps.filter((a) => a.appId === "pinned-app");
+    expect(pinned).toHaveLength(1);
+    expect(pinned[0]).toMatchObject({ sourceDir: pinnedHome, status: "active" });
+    expect(pinned[0]).not.toHaveProperty("configuredDir");
+    expect((pinned[0]!.manifest as { name: string }).name).toBe("Pinned");
+    expect(dirs.find((d) => d.dir === parentB)!.problems.map((p) => p.reason)).toContain(
+      `pinned-copy uses the app id "pinned-app", which is already installed from ${pinnedHome}.`,
+    );
+  });
+
+  it("marks an installed app whose pinned folder is gone, rather than dropping it", async () => {
+    const gone = (await list()).find((a) => a.appId === "gone-app");
+    expect(gone).toMatchObject({ sourceDir: goneDir, sourceState: "missing", status: "active" });
+  });
+
+  it("marks an installed app whose folder now holds a different manifest, and keeps the approved one", async () => {
+    const changing = (await list()).find((a) => a.appId === "changing-app");
+    expect(changing).toMatchObject({ sourceDir: changingDir, sourceState: "changed" });
+    expect((changing!.manifest as { version: string }).version).toBe("1.0.0");
+    expect((changing as { folderManifest?: { version: string } }).folderManifest?.version).toBe(
+      "2.0.0",
+    );
+  });
+
+  it("resolves an installed app with no pinned folder through the scan", async () => {
+    const legacy = (await list()).find((a) => a.appId === "legacy-app");
+    expect(legacy).toMatchObject({
+      sourceDir: join(parentA, "legacy"),
+      configuredDir: parentA,
+      status: "active",
+    });
   });
 
   it("reports the registry as readable", async () => {

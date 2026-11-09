@@ -317,3 +317,34 @@ describe("reapplying an install upgrades it", () => {
     expect(columns.find((c) => c.name === "reps")?.type.toUpperCase()).toBe("INTEGER");
   });
 });
+
+describe("the folder an app was installed from", () => {
+  function sourceDirOf(db: DatabaseSync): string | null {
+    return (
+      db.prepare(`SELECT source_dir FROM shared_app_registry WHERE app_id = 'memo'`).get() as {
+        source_dir: string | null;
+      }
+    ).source_dir;
+  }
+
+  it("is stored at install, and null when the caller names none", () => {
+    const pinned = new DatabaseSync(":memory:");
+    initializeLocalSchema(pinned as never);
+    installLocal(pinned as never, MANIFEST as never, { sourceDir: "/apps/memo" });
+    expect(sourceDirOf(pinned)).toBe("/apps/memo");
+
+    expect(sourceDirOf(install() as unknown as DatabaseSync)).toBeNull();
+  });
+
+  it("moves when a reinstall names a folder, and stays when it names none", () => {
+    const db = new DatabaseSync(":memory:");
+    initializeLocalSchema(db as never);
+    installLocal(db as never, MANIFEST as never, { sourceDir: "/apps/memo" });
+
+    installLocal(db as never, MANIFEST as never);
+    expect(sourceDirOf(db)).toBe("/apps/memo");
+
+    installLocal(db as never, MANIFEST as never, { sourceDir: "/apps/memo-2" });
+    expect(sourceDirOf(db)).toBe("/apps/memo-2");
+  });
+});

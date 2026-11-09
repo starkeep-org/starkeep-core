@@ -56,7 +56,20 @@ export class ManifestValidationError extends LocalInstallError {
  * Returns the new (or existing) HMAC secret so the caller can hand it to the
  * app process for request signing.
  */
-export function installLocal(db: RawDatabase, rawManifest: unknown): InstallLocalResult {
+export interface InstallLocalOptions {
+  /**
+   * The folder the manifest came from. Start, Update from folder and cloud
+   * deploys use it, so the app keeps running the copy the user approved.
+   * Omitted for a built-in app; omitted on a reinstall, the pin stays.
+   */
+  sourceDir?: string;
+}
+
+export function installLocal(
+  db: RawDatabase,
+  rawManifest: unknown,
+  options: InstallLocalOptions = {},
+): InstallLocalResult {
   const validation = validateManifest(rawManifest);
   if (!validation.valid || !validation.manifest) {
     throw new ManifestValidationError(validation.errors);
@@ -94,9 +107,9 @@ export function installLocal(db: RawDatabase, rawManifest: unknown): InstallLoca
         // `installed_at` and `status` are preserved — re-minting the secret
         // would strand every signer holding the old one, and the cloud
         // verifier with it.
-        updateAppRegistryManifest(db, appId, manifest);
+        updateAppRegistryManifest(db, appId, manifest, options.sourceDir);
       } else {
-        insertAppRegistry(db, appId, manifest, hmacSecret);
+        insertAppRegistry(db, appId, manifest, hmacSecret, options.sourceDir ?? null);
       }
     },
     alwaysRun,

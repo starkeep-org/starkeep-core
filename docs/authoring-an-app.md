@@ -1067,7 +1067,11 @@ The install path is identical for first-party and third-party apps:
    names the missing packages.
 3. Click **Install** on the app's card. Admin reads and validates the manifest,
    prompts you to approve the requested grants, and POSTs to `local-data-server`
-   to register the app and provision its per-app HMAC credential.
+   to register the app and provision its per-app HMAC credential. Install pins
+   the app's folder and the manifest you approved: **Start** runs that folder
+   with that manifest whatever the scan finds later. When the folder's manifest
+   changes, the card offers **Update from folder**, which asks for approval
+   again only when the app's file access changed.
 4. For a cloud target, the installer additionally runs your `pnpm bundle` and
    deploys the resulting handlers.
 

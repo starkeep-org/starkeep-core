@@ -85,8 +85,34 @@ describe("successful install", () => {
     expect(creds.dataServerUrl).toBe(lds.url);
 
     const listRes = await fetch(`${lds.url}/admin/apps`);
-    const { apps } = (await listRes.json()) as { apps: Array<{ appId: string; status: string }> };
-    expect(apps.find((a) => a.appId === "inst-app")?.status).toBe("active");
+    const { apps } = (await listRes.json()) as {
+      apps: Array<{ appId: string; status: string; sourceDir: string | null }>;
+    };
+    expect(apps.find((a) => a.appId === "inst-app")).toMatchObject({
+      status: "active",
+      // Install pins the folder the manifest came from.
+      sourceDir: join(dataDir, "apps", "inst"),
+    });
+  });
+
+  it("reinstalls from the pinned folder, not another folder the scan finds", async () => {
+    // A second copy with the same id appears in a newly configured folder.
+    const other = join(dataDir, "other-apps");
+    makeAppDir(other, "inst-copy", testAppManifest({ id: "inst-app", name: "Copy" }));
+    writeAdminConfig(dataDir, { appParentDirs: [other, join(dataDir, "apps")] });
+    try {
+      const res = await install({ appId: "inst-app", approved: true });
+      expect(res.status).toBe(200);
+      const { apps } = (await (await fetch(`${lds.url}/admin/apps`)).json()) as {
+        apps: Array<{ appId: string; name: string; sourceDir: string | null }>;
+      };
+      expect(apps.find((a) => a.appId === "inst-app")).toMatchObject({
+        name: "Installable",
+        sourceDir: join(dataDir, "apps", "inst"),
+      });
+    } finally {
+      writeAdminConfig(dataDir, { appParentDirs: [join(dataDir, "apps")] });
+    }
   });
 
   it("reinstall keeps the same secret and re-tightens loosened file perms to 0600", async () => {

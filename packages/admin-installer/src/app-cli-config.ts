@@ -7,6 +7,8 @@
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { configPath } from "@starkeep/app-client";
+import { appManifestSchema, type AppManifest } from "@starkeep/admin-manifest";
+import type { Registry } from "./registry";
 import { expandHome, MANIFEST_FILE, scanApps } from "./app-discovery";
 
 export interface StarkeepCliConfig {
@@ -143,6 +145,25 @@ export function appDirFor(
     throw new Error(`${manifestPath} names the app "${String(id)}", not "${appId}"`);
   }
   return dir;
+}
+
+/**
+ * The manifest a cloud uninstall tears down: the one the cloud registry
+ * stored at install. A registry row that predates the stored manifest falls
+ * back to the app's source folder, which `folder` resolves only when needed.
+ */
+export async function manifestForUninstall(
+  registry: Pick<Registry, "storedManifest">,
+  appId: string,
+  folder: () => string,
+): Promise<{ manifest: AppManifest; from: "registry" | "folder" }> {
+  const stored = await registry.storedManifest(appId);
+  if (stored) return { manifest: stored, from: "registry" };
+  const manifestPath = join(folder(), MANIFEST_FILE);
+  return {
+    manifest: appManifestSchema.parse(JSON.parse(readFileSync(manifestPath, "utf-8"))),
+    from: "folder",
+  };
 }
 
 export interface DerivedInstallerArns {

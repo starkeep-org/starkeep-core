@@ -520,6 +520,9 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
       .addColumn("updated_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
       .addColumn("web_app", "boolean", (c) => c.notNull().defaultTo(false))
       .addColumn("mobile_app", "boolean", (c) => c.notNull().defaultTo(false))
+      // The validated manifest the app was installed with, so uninstall needs
+      // no source checkout.
+      .addColumn("manifest", "text")
       .execute();
     await sql
       .raw(`GRANT INSERT, UPDATE, DELETE, SELECT ON shared.app_registry TO "${installer}"`)
@@ -533,6 +536,11 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
         .raw(`ALTER TABLE shared.app_registry ADD COLUMN IF NOT EXISTS ${column} boolean`)
         .execute(db);
     }
+    // TEMPORARY: adds the manifest column to a registry that predates it.
+    // Replaced by ~/projects/starkeep/plan-schema-and-bootstrap-versioning-2026-11-08.md.
+    await sql
+      .raw(`ALTER TABLE shared.app_registry ADD COLUMN IF NOT EXISTS manifest text`)
+      .execute(db);
     const registry = db as unknown as Kysely<Record<string, Record<string, unknown>>>;
     await registry
       .updateTable("shared.app_registry")

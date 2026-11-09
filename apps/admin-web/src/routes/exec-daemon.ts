@@ -8,7 +8,7 @@ import {
   stopById,
   type StartOutcome,
 } from "../lib/daemon-control";
-import { findApp } from "../lib/app-scan";
+import { appSource } from "../lib/app-scan";
 
 // Ask the kernel for a free TCP port by binding to port 0, then release it.
 // There's a tiny race between close() and the child binding the same port,
@@ -92,12 +92,21 @@ export async function POST(req: Request) {
 
     // Installed-app daemon: spawn shape comes from the app's manifest, not a
     // hand-curated map. Apps without a localRun block can be installed but
-    // not started from the admin UI.
-    const found = findApp(id);
-    if (!found) {
+    // not started from the admin UI. An installed app runs from the folder
+    // Install pinned, with the manifest the user approved there.
+    const found = await appSource(id);
+    if (found.kind === "not-found") {
       return Response.json(
         { error: `No manifest found for app '${id}' in configured app parent dirs` },
         { status: 404 },
+      );
+    }
+    if (found.kind === "pinned-missing") {
+      return Response.json(
+        {
+          error: `'${id}' cannot start: its source folder ${found.appDir} no longer holds a starkeep.manifest.json. Restore the folder, or uninstall the app and install it from its new folder.`,
+        },
+        { status: 409 },
       );
     }
     const localRun = found.manifest.localRun as LocalRunBlock | undefined;

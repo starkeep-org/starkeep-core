@@ -68,9 +68,23 @@ export interface ManifestSummary {
 export interface LocalAppEntry {
   appId: string;
   manifest: ManifestSummary;
+  /** The folder the app runs from: its Install pin, or the scan's find. */
   sourceDir: string;
-  /** The Discover apps entry the app was found under, as configured. */
-  configuredDir: string;
+  /**
+   * The Discover apps entry the app was found under, as configured. Absent for
+   * an installed app whose pinned folder no configured entry reaches.
+   */
+  configuredDir?: string;
+  /**
+   * Set for an installed app whose pinned folder no longer holds a manifest
+   * ("missing"), or holds a different one than the user approved ("changed").
+   */
+  sourceState?: "missing" | "changed";
+  /**
+   * The manifest the pinned folder holds now, for a "changed" app whose new
+   * manifest is valid. Update from folder installs it.
+   */
+  folderManifest?: ManifestSummary;
   /**
    * True for core's example app found through the folder a new config seeds.
    * Its card offers Hide, which removes that folder from Discover apps.
@@ -97,6 +111,24 @@ export interface InstallStep {
   status: "pending" | "done" | "failed";
   error: string | null;
   updatedAt: string;
+}
+
+/**
+ * Whether `next` asks for different file access than `current`, so updating
+ * an installed app to it needs the user's approval again.
+ */
+export function grantsDiffer(current: ManifestSummary, next: ManifestSummary): boolean {
+  const grants = (m: ManifestSummary) => ({
+    all: m.infraRequirements?.fileAccessAll === true,
+    fileAccess: (m.infraRequirements?.fileAccess ?? [])
+      .map((f) => ({
+        types: [...f.types].sort(),
+        access: f.access,
+        metadataWrite: f.metadataWrite === true,
+      }))
+      .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+  });
+  return JSON.stringify(grants(current)) !== JSON.stringify(grants(next));
 }
 
 /** Membership comes from each app's manifest `targets` (default ["local"]). */

@@ -9,6 +9,7 @@ import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
 import { APPS_CHANGED_EVENT } from "@/components/AppDiscovery";
 import { ACTION_OCCASIONAL, ACTION_OPEN, ACTION_START } from "@/lib/action-colors";
 import {
+  grantsDiffer,
   publicSharingConsent,
   type DaemonStatus,
   type InstallStep,
@@ -211,6 +212,18 @@ export function LocalAppsSection({
     }
   };
 
+  // Apply the manifest an installed app's pinned folder holds now. New file
+  // access goes through the consent dialog; anything else reinstalls at once,
+  // which reapplies every idempotent install step.
+  const handleUpdateFromFolder = (entry: LocalAppEntry) => {
+    const next = entry.folderManifest;
+    if (next && grantsDiffer(entry.manifest, next)) {
+      setPendingConsent({ ...entry, manifest: next });
+      return;
+    }
+    void handleApprove(entry);
+  };
+
   // Hide core's example app by removing its folder from Discover apps.
   const handleHide = async (entry: LocalAppEntry) => {
     const name = entry.manifest.name ?? entry.appId;
@@ -265,6 +278,8 @@ export function LocalAppsSection({
           const port = status?.port;
           const busy = !!want;
           const installBusy = busyAppId === entry.appId;
+          const sourceMissing = installed && entry.sourceState === "missing";
+          const sourceChanged = installed && entry.sourceState === "changed";
 
           // One primary button per state: install what is not installed, start
           // what is stopped, open what is running. Everything else — stopping,
@@ -275,6 +290,13 @@ export function LocalAppsSection({
               label: want === "stop" ? "Stopping…" : "Stop",
               onSelect: () => handleStop(entry.appId),
               disabled: busy,
+            });
+          }
+          if (sourceChanged) {
+            actions.push({
+              label: installBusy ? "Updating…" : "Update from folder",
+              onSelect: () => handleUpdateFromFolder(entry),
+              disabled: installBusy || !localOnline,
             });
           }
           if (installed) {
@@ -303,6 +325,18 @@ export function LocalAppsSection({
               version={entry.manifest.version ?? "?"}
               description={entry.manifest.description}
               actions={actions}
+              children={
+                sourceMissing ? (
+                  <p className="text-xs break-all text-destructive">
+                    Source folder not found: <code>{entry.sourceDir}</code>
+                  </p>
+                ) : sourceChanged ? (
+                  <p className="text-xs text-muted-foreground">
+                    Its folder holds a changed manifest. Choose <b>Update from folder</b> to apply
+                    it.
+                  </p>
+                ) : undefined
+              }
               badges={
                 <>
                   {installed && (
@@ -405,7 +439,7 @@ export function LocalAppsSection({
                     size="sm"
                     className={ACTION_START}
                     onClick={() => handleStart(entry.appId)}
-                    disabled={busy}
+                    disabled={busy || sourceMissing}
                   >
                     {want === "start" && (
                       <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />

@@ -117,25 +117,68 @@ describe("scanApps", () => {
     expect(result.dirs[0]!.apps).toEqual([{ appId: "good", name: "Good" }]);
   });
 
-  it("keeps the first of two apps with one id and reports the second", () => {
+  it("offers neither of two folders with one id, and reports both", () => {
     const first = folder(root, "dup-case", "first");
     const second = folder(root, "dup-case", "second");
-    const kept = app(first, "dice", manifest("dice", "Dice"));
-    const skipped = app(second, "dice-copy", manifest("dice", "Dice copy"));
+    const a = app(first, "dice", manifest("dice", "Dice"));
+    const b = app(second, "dice-copy", manifest("dice", "Dice copy"));
 
     const result = scanApps([first, second]);
-    expect(result.apps.map((a) => a.appDir)).toEqual([kept]);
+    expect(result.apps).toEqual([]);
+    expect(result.dirs).toEqual([
+      {
+        dir: first,
+        apps: [],
+        problems: [
+          {
+            configuredDir: first,
+            dir: a,
+            reason: `dice uses the app id "dice", which ${b} also uses.`,
+          },
+        ],
+      },
+      {
+        dir: second,
+        apps: [],
+        problems: [
+          {
+            configuredDir: second,
+            dir: b,
+            reason: `dice-copy uses the app id "dice", which ${a} also uses.`,
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("treats an installed app's pinned folder as that app, and any other copy as a conflict", () => {
+    const first = folder(root, "pin-case", "first");
+    const second = folder(root, "pin-case", "second");
+    const copy = app(first, "dice-copy", manifest("dice", "Dice copy"));
+    const pinned = app(second, "dice", manifest("dice", "Dice"));
+
+    const result = scanApps([first, second], { pinned: new Map([["dice", pinned]]) });
+    expect(result.apps.map((x) => x.appDir)).toEqual([pinned]);
+    expect(result.dirs[0]!.problems.map((p) => [p.dir, p.reason])).toEqual([
+      [copy, `dice-copy uses the app id "dice", which is already installed from ${pinned}.`],
+    ]);
     expect(result.dirs[1]).toEqual({
       dir: second,
-      apps: [],
-      problems: [
-        {
-          configuredDir: second,
-          dir: skipped,
-          reason: `dice-copy uses the app id "dice", which ${kept} already uses.`,
-        },
-      ],
+      apps: [{ appId: "dice", name: "Dice" }],
+      problems: [],
     });
+  });
+
+  it("reports every scanned copy of a pinned app whose pinned folder is gone", () => {
+    const container = folder(root, "pin-gone-case");
+    app(container, "dice", manifest("dice", "Dice"));
+    const result = scanApps([container], {
+      pinned: new Map([["dice", join(root, "pin-gone-case-moved")]]),
+    });
+    expect(result.apps).toEqual([]);
+    expect(result.problems.map((p) => p.reason)).toEqual([
+      `dice uses the app id "dice", which is already installed from ${join(root, "pin-gone-case-moved")}.`,
+    ]);
   });
 
   it("reports nothing for a folder reached twice, and credits it to both configured folders", () => {
@@ -188,6 +231,16 @@ describe("resolveAppDir", () => {
   it("finds a directly configured app folder", () => {
     const direct = app(folder(root, "resolve-direct"), "dice", manifest("dice", "Dice"));
     expect(resolveAppDir(config([direct]), "dice")).toBe(direct);
+  });
+
+  it("refuses an id that two folders hold, naming both", () => {
+    const first = folder(root, "resolve-dup", "first");
+    const second = folder(root, "resolve-dup", "second");
+    const a = app(first, "dice", manifest("dice", "Dice"));
+    const b = app(second, "dice", manifest("dice", "Dice"));
+    expect(() => resolveAppDir(config([first, second]), "dice")).toThrow(
+      `${a}: dice uses the app id "dice", which ${b} also uses.`,
+    );
   });
 
   it("finds an app in a container", () => {

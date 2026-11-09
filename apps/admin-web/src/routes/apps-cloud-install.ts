@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
-import { findApp } from "../lib/app-scan";
+import { appSource } from "../lib/app-scan";
 import { REPO_ROOT } from "../lib/exec-commands";
 import { installStream } from "../lib/install-stream";
 
@@ -37,12 +37,19 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
   }
 
   // Resolve the folder here and hand it to the CLI, so the install deploys
-  // the copy the Dashboard shows.
-  const scanned = findApp(appId);
-  if (!scanned) {
+  // the copy the Dashboard shows: the local pin when the app is installed on
+  // this machine, otherwise the scan's find.
+  const source = await appSource(appId);
+  if (source.kind === "not-found") {
     return Response.json(
       { error: `App ${appId} not found in any configured app folder` },
       { status: 404 },
+    );
+  }
+  if (source.kind === "pinned-missing") {
+    return Response.json(
+      { error: `App ${appId}'s source folder ${source.appDir} no longer holds a manifest` },
+      { status: 409 },
     );
   }
 
@@ -94,7 +101,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
       appId,
       "--non-interactive",
       "--app-dir",
-      scanned.appDir,
+      source.appDir,
       ...surfaceFlags.map((surface) => `--${surface}`),
     ],
     cwd: REPO_ROOT,

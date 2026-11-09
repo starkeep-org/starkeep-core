@@ -16,15 +16,18 @@ export interface LdsApp extends AppCredentials {
  * Install an app straight into the LDS (loopback /admin route) and return its
  * credentials. Re-posting an active app's manifest is the supported way to
  * recover an existing secret, so this also serves as `builtinAppCreds`.
+ * `sourceDir` pins the folder the manifest came from, as admin-web's Install
+ * does.
  */
 export async function installAppDirect(
   ldsUrl: string,
   manifest: Record<string, unknown>,
+  sourceDir?: string,
 ): Promise<LdsApp> {
   const res = await fetch(`${ldsUrl}/admin/apps/install`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(manifest),
+    body: JSON.stringify({ manifest, ...(sourceDir !== undefined ? { sourceDir } : {}) }),
   });
   if (!res.ok) {
     throw new Error(`install failed: ${res.status} ${await res.text()}`);

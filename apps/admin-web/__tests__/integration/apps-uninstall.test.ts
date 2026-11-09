@@ -36,7 +36,7 @@ beforeAll(async () => {
   const res = await fetch(`${lds.url}/admin/apps/install`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(testAppManifest({ id: "doomed-app" })),
+    body: JSON.stringify({ manifest: testAppManifest({ id: "doomed-app" }) }),
   });
   expect(res.ok).toBe(true);
   const { appId, hmacSecret } = (await res.json()) as { appId: string; hmacSecret: string };

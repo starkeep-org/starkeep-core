@@ -2,7 +2,8 @@ import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { starkeepDir } from "@starkeep/app-client";
 import { join } from "node:path";
 import { stopById } from "../lib/daemon-control";
-import { findApp } from "../lib/app-scan";
+import { readFolderManifest } from "@starkeep/admin-installer/app-discovery";
+import { appSource } from "../lib/app-scan";
 import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
 
 const STARKEEP_DIR = starkeepDir();
@@ -29,25 +30,38 @@ export async function POST(req: Request) {
     );
   }
 
-  // Resolve the app via the same filesystem scan that discovery uses, so
-  // first-party (starkeep-apps/) and third-party (any configured parent dir)
-  // apps install through one path. The scan also de-dupes by manifest id, so
-  // the manifest we read here is the one the user saw in the app list.
-  const scanned = findApp(appId);
-  if (!scanned) {
+  // A first install reads the manifest the scan found, which is the one the
+  // user saw on the card. A reinstall ("Update from folder") reads the
+  // installed app's pinned folder again, so the app never switches source.
+  const source = await appSource(appId);
+  if (source.kind === "not-found") {
     return Response.json(
       { error: `App ${appId} not found in any configured parent dir` },
       { status: 404 },
     );
   }
-  const manifest = scanned.manifest;
+  const sourceDir = source.appDir;
+  const folder = readFolderManifest(sourceDir);
+  if (folder.kind === "missing") {
+    return Response.json(
+      { error: `App ${appId}'s source folder ${sourceDir} no longer holds a manifest` },
+      { status: 409 },
+    );
+  }
+  if (folder.kind === "invalid") {
+    return Response.json(
+      { error: "The app's manifest failed validation.", details: [folder.error] },
+      { status: 400 },
+    );
+  }
+  const manifest = folder.raw;
 
   let installResp: Response;
   try {
     installResp = await fetch(`${localDataServerUrlFromEnv()}/admin/apps/install`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(manifest),
+      body: JSON.stringify({ manifest, sourceDir }),
     });
   } catch (err) {
     return Response.json(
