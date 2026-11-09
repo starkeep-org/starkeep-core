@@ -21,6 +21,31 @@ import {
 } from "@/lib/app-types";
 import { runInstallStream } from "@/lib/install-stream-client";
 
+/** One row of `shared.app_registry`, as POST /api/apps/cloud/list returns it. */
+interface CloudRegistryRow {
+  appId: string;
+  name: string | null;
+  version: string;
+  webApp: boolean;
+  mobileApp: boolean;
+}
+
+/** Why a tile from the registry alone cannot redeploy or re-register. */
+function noFolder(surface: AppSurface): string {
+  return `Add the app's folder in Discover apps to ${surface === "web" ? "redeploy" : "re-register"}`;
+}
+
+function InstalledBadge({ verb }: { verb: string }) {
+  return (
+    <Badge
+      variant="secondary"
+      className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
+    >
+      {verb}
+    </Badge>
+  );
+}
+
 export function CloudAppsSection({
   apps,
   leading,
@@ -56,6 +81,10 @@ export function CloudAppsSection({
   // each on top of the app's shared data side.
   const [webIds, setWebIds] = useState<Set<string> | null>(null);
   const [mobileIds, setMobileIds] = useState<Set<string> | null>(null);
+  // The registry's rows, for the installed apps whose folder no scanned folder
+  // holds. Their tiles come from the registry, so an installed app's tile
+  // stays when its folder leaves Discover apps.
+  const [registryRows, setRegistryRows] = useState<CloudRegistryRow[] | null>(null);
 
   // Resolve the browser-facing base URL from the persisted cloud config so each
   // app's Open ↗ link (`${browserBaseUrl}/apps/${appId}/`) survives a reload.
@@ -98,9 +127,8 @@ export function CloudAppsSection({
         const body = (await res.json().catch(() => null)) as { error?: string } | null;
         throw new Error(body?.error ?? `cloud registry list failed: ${res.status}`);
       }
-      const body = (await res.json()) as {
-        apps: Array<{ appId: string; webApp: boolean; mobileApp: boolean }>;
-      };
+      const body = (await res.json()) as { apps: CloudRegistryRow[] };
+      setRegistryRows(body.apps);
       setWebIds(new Set(body.apps.filter((a) => a.webApp).map((a) => a.appId)));
       setMobileIds(new Set(body.apps.filter((a) => a.mobileApp).map((a) => a.appId)));
     } catch (err) {
@@ -148,6 +176,9 @@ export function CloudAppsSection({
     setInstalling({ appId, appName, endpoint, surface });
   };
 
+  const listedIds = new Set((apps ?? []).map((a) => a.appId));
+  const unlisted = apps === null ? [] : (registryRows ?? []).filter((r) => !listedIds.has(r.appId));
+
   return (
     <div className="flex flex-col gap-3">
       {credError && (
@@ -158,7 +189,7 @@ export function CloudAppsSection({
       )}
 
       {apps === null && <p className="text-sm text-muted-foreground">Loading…</p>}
-      {apps !== null && apps.length === 0 && (
+      {apps !== null && apps.length === 0 && unlisted.length === 0 && (
         <p className="text-sm text-muted-foreground">No cloud apps found.</p>
       )}
 
@@ -248,12 +279,7 @@ export function CloudAppsSection({
                 actions={actions}
                 badges={
                   installed ? (
-                    <Badge
-                      variant="secondary"
-                      className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200"
-                    >
-                      {verb}
-                    </Badge>
+                    <InstalledBadge verb={verb} />
                   ) : (
                     <Badge variant="outline" className="text-xs">
                       Not {verb.toLowerCase()}
@@ -261,6 +287,44 @@ export function CloudAppsSection({
                   )
                 }
                 primary={primary}
+              />
+            );
+          });
+        })}
+        {unlisted.flatMap((row) => {
+          const name = row.name ?? row.appId;
+          const url = browserBaseUrl ? `${browserBaseUrl}/apps/${row.appId}/` : null;
+          const surfaces: AppSurface[] = [
+            ...(row.webApp ? (["web"] as const) : []),
+            ...(row.mobileApp ? (["mobile"] as const) : []),
+          ];
+          // Redeploy and Re-register build from the app's folder, which no
+          // scanned folder holds.
+          return surfaces.map((surface) => {
+            const tileName = surface === "web" ? name : `${name} Mobile`;
+            return (
+              <AppCard
+                key={`${row.appId}:${surface}`}
+                name={tileName}
+                version={row.version}
+                description="Installed in the cloud. Its folder is not in Discover apps."
+                actions={[
+                  {
+                    label: surface === "web" ? `Redeploy ${name}` : `Re-register ${tileName}`,
+                    disabled: true,
+                    title: noFolder(surface),
+                  },
+                ]}
+                badges={<InstalledBadge verb={surface === "web" ? "Installed" : "Registered"} />}
+                primary={
+                  surface === "web" && url ? (
+                    <Button asChild size="sm" className={ACTION_OPEN}>
+                      <a href={url} target="_blank" rel="noopener noreferrer" title={url}>
+                        Open {name} ↗
+                      </a>
+                    </Button>
+                  ) : null
+                }
               />
             );
           });

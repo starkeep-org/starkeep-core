@@ -49,7 +49,13 @@ vi.mock("@/lib/install-stream-client", () => ({
 const { CloudAppsSection } = await import("../src/components/CloudAppsSection");
 
 /** What the registry answers for each app id. */
-let registry: Array<{ appId: string; webApp: boolean; mobileApp: boolean }>;
+let registry: Array<{
+  appId: string;
+  webApp: boolean;
+  mobileApp: boolean;
+  name?: string | null;
+  version?: string;
+}>;
 
 beforeEach(() => {
   installs.length = 0;
@@ -218,6 +224,52 @@ describe("the actions each tile offers", () => {
         .queryAllByRole("button")
         .map((b) => b.getAttribute("aria-label") ?? b.textContent),
     ).toEqual(["More actions for Photos Mobile"]);
+  });
+});
+
+describe("an installed app whose folder no scanned folder holds", () => {
+  const EXAMPLE = { appId: "example-app", name: "Example App", version: "0.2.0" };
+
+  it("keeps a tile for each installed surface, from the registry row", async () => {
+    await renderWith([{ ...EXAMPLE, webApp: true, mobileApp: true }], [MEMO]);
+    await tile("Example App Mobile");
+    expect(tileNames()).toEqual(["Memo", "Example App", "Example App Mobile"]);
+    const web = await tile("Example App");
+    expect(within(web).getByText("Installed")).toBeTruthy();
+    expect(within(web).getByText("v0.2.0")).toBeTruthy();
+    const link = within(web).getByRole("link", { name: "Open Example App ↗" });
+    expect(link.getAttribute("href")).toBe("https://d1.cloudfront.net/apps/example-app/");
+    const mobile = await tile("Example App Mobile");
+    expect(within(mobile).getByText("Registered")).toBeTruthy();
+    expect(within(mobile).queryByRole("link")).toBeNull();
+  });
+
+  it.each([
+    ["Example App", "Redeploy Example App", "redeploy"],
+    ["Example App Mobile", "Re-register Example App Mobile", "re-register"],
+  ])("disables %s's %s, and says the folder is missing", async (name, label, verb) => {
+    await renderWith([{ ...EXAMPLE, webApp: true, mobileApp: true }], []);
+    const user = userEvent.setup();
+    await user.click(
+      within(await tile(name)).getByRole("button", { name: `More actions for ${name}` }),
+    );
+    const item = await screen.findByRole("menuitem", { name: label });
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    expect(item.getAttribute("title")).toBe(`Add the app's folder in Discover apps to ${verb}`);
+    await user.click(item);
+    expect(installs).toHaveLength(0);
+  });
+
+  it("shows no tile for a surface the registry row does not have", async () => {
+    await renderWith([{ ...EXAMPLE, webApp: false, mobileApp: false }], [MEMO]);
+    await tile("Memo");
+    expect(tileNames()).toEqual(["Memo"]);
+  });
+
+  it("names the tile by the app id when the row has no name", async () => {
+    await renderWith([{ ...EXAMPLE, name: null, webApp: true, mobileApp: false }], []);
+    expect(await tile("example-app")).toBeTruthy();
+    expect(screen.queryByText("No cloud apps found.")).toBeNull();
   });
 });
 
