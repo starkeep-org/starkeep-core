@@ -280,6 +280,10 @@ export function LocalAppsSection({
           const installBusy = busyAppId === entry.appId;
           const sourceMissing = installed && entry.sourceState === "missing";
           const sourceChanged = installed && entry.sourceState === "changed";
+          // The approved manifest still drives the app, so this is a note,
+          // not a warning. It replaces the description, which comes from the
+          // approved manifest too.
+          const sourceInvalid = installed && entry.sourceState === "invalid";
 
           // One primary button per state: install what is not installed, start
           // what is stopped, open what is running. Everything else — stopping,
@@ -323,7 +327,16 @@ export function LocalAppsSection({
               key={entry.appId}
               name={name}
               version={entry.manifest.version ?? "?"}
-              description={entry.manifest.description}
+              description={
+                sourceInvalid ? (
+                  <>
+                    <b>Note:</b> The app&rsquo;s folder holds an invalid manifest (
+                    {entry.sourceError}). Starkeep keeps using the manifest you approved at install.
+                  </>
+                ) : (
+                  entry.manifest.description
+                )
+              }
               actions={actions}
               children={
                 sourceMissing ? (

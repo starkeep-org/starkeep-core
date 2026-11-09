@@ -34,8 +34,9 @@ export async function GET() {
         sourceDir: row.sourceDir,
         status: row.status as LocalAppEntry["status"],
         ...(found ? { configuredDir: found.configuredDir } : {}),
-        // `sourceState`, and `folderManifest` for a valid changed manifest.
-        ...(source as Pick<LocalAppEntry, "sourceState" | "folderManifest"> | null),
+        // `sourceState`, with `sourceError` for an invalid manifest and
+        // `folderManifest` for a changed one.
+        ...(source as Pick<LocalAppEntry, "sourceState" | "sourceError" | "folderManifest"> | null),
       });
     } else if (found) {
       // Installed before the registry pinned folders: the scan still says

@@ -76,6 +76,29 @@ describe("a pinned folder that is gone", () => {
   });
 });
 
+describe("a pinned folder whose manifest fails validation", () => {
+  it("replaces the description with a note, keeps Start and Uninstall, and offers no update", async () => {
+    serve();
+    show({
+      ...installed,
+      manifest: { ...approved, description: "Roll some dice" },
+      sourceState: "invalid",
+      sourceError: "name: Required",
+    });
+    expect(screen.getByText(/^Note:/).closest("[data-slot=card-description]")?.textContent).toBe(
+      "Note: The app’s folder holds an invalid manifest (name: Required). Starkeep keeps using the manifest you approved at install.",
+    );
+    expect(screen.queryByText("Roll some dice")).toBeNull();
+    expect((screen.getByRole("button", { name: "Start Dice" }) as HTMLButtonElement).disabled).toBe(
+      false,
+    );
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "More actions for Dice" }));
+    expect(await screen.findByRole("menuitem", { name: "Uninstall" })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: "Update from folder" })).toBeNull();
+  });
+});
+
 describe("Update from folder", () => {
   it("reinstalls at once when the folder's manifest asks for the same file access", async () => {
     serve();

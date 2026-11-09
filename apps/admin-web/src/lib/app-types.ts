@@ -77,12 +77,15 @@ export interface LocalAppEntry {
   configuredDir?: string;
   /**
    * Set for an installed app whose pinned folder no longer holds a manifest
-   * ("missing"), or holds a different one than the user approved ("changed").
+   * ("missing"), holds one that fails validation ("invalid"), or holds a
+   * valid one other than the user approved ("changed").
    */
-  sourceState?: "missing" | "changed";
+  sourceState?: "missing" | "invalid" | "changed";
+  /** Why the pinned folder's manifest fails validation, for an "invalid" app. */
+  sourceError?: string;
   /**
-   * The manifest the pinned folder holds now, for a "changed" app whose new
-   * manifest is valid. Update from folder installs it.
+   * The manifest the pinned folder holds now, for a "changed" app. Update
+   * from folder installs it.
    */
   folderManifest?: ManifestSummary;
   /**
