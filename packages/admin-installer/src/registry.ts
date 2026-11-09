@@ -92,6 +92,11 @@ export interface Registry {
   clearSteps(appId: string): Promise<void>;
   deleteAppRegistryEntry(appId: string): Promise<void>;
   listInstalledApps(): Promise<InstalledApp[]>;
+  /**
+   * The manifest the app was last installed with, or null when the app has no
+   * row or its row predates the stored manifest.
+   */
+  storedManifest(appId: string): Promise<AppManifest | null>;
   close(): Promise<void>;
 }
 
@@ -216,11 +221,13 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
               name: manifest.name ?? null,
               web_app: web,
               mobile_app: mobile,
+              manifest: JSON.stringify(manifest),
             })
             .onConflict((oc) =>
               oc.column("app_id").doUpdateSet((eb) => ({
                 version: eb.ref("excluded.version"),
                 name: eb.ref("excluded.name"),
+                manifest: eb.ref("excluded.manifest"),
                 updated_at: sql`now()`,
                 // Installing a surface never removes another one.
                 ...(web ? { web_app: true } : {}),
@@ -323,6 +330,17 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
           webApp: r.web_app === true,
           mobileApp: r.mobile_app === true,
         }));
+      });
+    },
+
+    async storedManifest(appId) {
+      return await withRetry(async (k) => {
+        const row = (await k
+          .selectFrom("shared.app_registry")
+          .select("manifest")
+          .where("app_id", "=", appId)
+          .executeTakeFirst()) as { manifest: string | null } | undefined;
+        return row?.manifest ? (JSON.parse(row.manifest) as AppManifest) : null;
       });
     },
 

@@ -29,6 +29,8 @@ vi.mock("node:child_process", async (importOriginal) => ({
 const dataDir = makeDataDir("adminweb-install-stream-");
 const configPath = join(dataDir, "config.json");
 process.env.STARKEEP_DIR = dataDir;
+// Nothing listens here: no app is installed, so the route resolves through the scan.
+process.env.STARKEEP_LOCAL_DATA_SERVER_URL = "http://127.0.0.1:9";
 
 // The apps an app install can name. The route resolves the app's folder and
 // passes it to the installer with --app-dir.

@@ -7,9 +7,10 @@
  * records the app created are deliberately left in place (they belong to the
  * user, not the app).
  *
- * The manifest is still resolved from the app's source dir (`--app-dir`, or
- * the same discovery as install) because the uninstall DDL needs the declared
- * app-specific tables.
+ * The uninstall DDL needs the app's declared app-specific tables, so it reads
+ * the manifest the cloud registry stored at install. A registry row that
+ * predates the stored manifest falls back to the app's source folder
+ * (`--app-dir`, or the same discovery as install).
  *
  * Usage:
  *   pnpm --filter @starkeep/admin-installer cli:uninstall-app <appId>
@@ -26,11 +27,10 @@
 
 // First import: load repo-root .env / .env.local so STARKEEP_DIR is populated.
 import "@starkeep/app-client/load-env";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-import { appManifestSchema } from "@starkeep/admin-manifest";
+import type { AppManifest } from "@starkeep/admin-manifest";
 import { uninstallApp, type AppSurface } from "../src/orchestrator";
+import { createDsqlRegistry } from "../src/registry";
 import { exitOnInstallFailure } from "../src/cli-exit";
 import {
   regionFromUserPoolId,
@@ -42,6 +42,7 @@ import {
   loadStarkeepCliConfig,
   appDirFor,
   deriveInstallerArns,
+  manifestForUninstall,
   takeAppDirFlag,
   starkeepConfigPath,
 } from "../src/app-cli-config";
@@ -144,27 +145,39 @@ const {
   artifactsBucket,
 } = deriveInstallerArns(config, accountId, region);
 
-let appDir: string;
+const registryCredentials = {
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+  sessionToken: process.env.AWS_SESSION_TOKEN!,
+};
+
+const manifestRegistry = createDsqlRegistry({
+  hostname: config.auroraEndpoint,
+  region,
+  stackPrefix,
+  credentials: registryCredentials,
+});
+let manifest: AppManifest;
 try {
-  appDir = appDirFor(config, appId, appDirFlag);
+  const found = await manifestForUninstall(manifestRegistry, appId, () =>
+    appDirFor(config, appId, appDirFlag),
+  );
+  manifest = found.manifest;
+  if (found.from === "folder") {
+    console.log("The cloud registry holds no manifest for this app; using its source folder.");
+  }
 } catch (err) {
   console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);
+} finally {
+  await manifestRegistry.close();
 }
-const manifestPath = resolve(appDir, "starkeep.manifest.json");
-const manifest = appManifestSchema.parse(JSON.parse(readFileSync(manifestPath, "utf-8")));
 
 console.log(`\nStarkeep ${appId} cloud uninstall`);
 console.log(`  Region : ${region}`);
 console.log(`  Stage  : ${stackPrefix}`);
 console.log(`  Account: ${accountId}`);
 console.log("");
-
-const registryCredentials = {
-  accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
-  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
-  sessionToken: process.env.AWS_SESSION_TOKEN!,
-};
 
 await uninstallApp({
   appId,

@@ -31,7 +31,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "n
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { validateManifest } from "@starkeep/admin-manifest";
+import { validateManifest, type AppManifest } from "@starkeep/admin-manifest";
 
 export const MANIFEST_FILE = "starkeep.manifest.json";
 
@@ -92,19 +92,70 @@ export interface ScanResult {
   dirs: ScannedDir[];
 }
 
+/** What a folder's `starkeep.manifest.json` holds. */
+export type FolderManifest =
+  | { kind: "valid"; raw: Record<string, unknown>; manifest: AppManifest }
+  | { kind: "missing" }
+  | { kind: "invalid"; error: string };
+
+/** Read and validate the manifest in `dir`, with the validator Install runs. */
+export function readFolderManifest(dir: string): FolderManifest {
+  const manifestPath = join(dir, MANIFEST_FILE);
+  if (!existsSync(manifestPath)) return { kind: "missing" };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(manifestPath, "utf-8"));
+  } catch (err) {
+    return { kind: "invalid", error: err instanceof Error ? err.message : String(err) };
+  }
+  const validation = validateManifest(raw);
+  if (!validation.valid || !validation.manifest) {
+    return {
+      kind: "invalid",
+      error: validation.errors[0] ?? "it does not match the manifest schema.",
+    };
+  }
+  return { kind: "valid", raw: raw as Record<string, unknown>, manifest: validation.manifest };
+}
+
+export interface ScanOptions {
+  /**
+   * The folder each locally installed app was installed from, by app id. A
+   * scanned folder with a pinned id is that installed app when it is the
+   * pinned folder, and a conflict when it is any other folder.
+   */
+  pinned?: ReadonlyMap<string, string>;
+}
+
+function realpathOrNull(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Scan `configuredDirs` for apps, by the rule in this module's header.
  *
- * Apps are de-duped by manifest id, and the first one found wins. A folder
- * reached twice, for example once directly and once as a container's child,
- * is the same app and reports nothing the second time.
+ * An app id names one folder. When two folders hold one id, both are
+ * reported and neither is offered, so folder order never picks a winner.
+ * When an installed app pins the id, the pinned folder is that app and every
+ * other folder with the id is reported. A folder reached twice, for example
+ * once directly and once as a container's child, is the same app and reports
+ * nothing the second time.
  */
-export function scanApps(configuredDirs: string[]): ScanResult {
-  const byId = new Map<string, string>();
-  // Real path of each app folder already scanned, to its contribution.
-  const visited = new Map<string, { appId: string; name: string } | null>();
-  const apps: ScannedApp[] = [];
-  const problems: ScanProblem[] = [];
+export function scanApps(configuredDirs: string[], options: ScanOptions = {}): ScanResult {
+  interface Candidate {
+    app: ScannedApp;
+    name: string;
+    real: string;
+    /** The entry that found the folder first, then any that reached it again. */
+    entries: ScannedDir[];
+  }
+  // Real path of each app folder already scanned; null for an invalid one.
+  const visited = new Map<string, Candidate | null>();
+  const candidates: Candidate[] = [];
   const dirs: ScannedDir[] = [];
 
   for (const configuredDir of configuredDirs) {
@@ -112,55 +163,38 @@ export function scanApps(configuredDirs: string[]): ScanResult {
     const entry: ScannedDir = { dir: configuredDir, apps: [], problems: [] };
     dirs.push(entry);
     const problem = (dir: string, reason: string) => {
-      const p = { configuredDir, dir, reason };
-      entry.problems.push(p);
-      problems.push(p);
+      entry.problems.push({ configuredDir, dir, reason });
     };
 
     const addApp = (appDir: string) => {
       const real = realpathSync(appDir);
       if (visited.has(real)) {
         const seen = visited.get(real);
-        if (seen && !entry.apps.some((a) => a.appId === seen.appId)) entry.apps.push(seen);
+        if (seen && !seen.entries.includes(entry)) seen.entries.push(entry);
         return;
       }
       visited.set(real, null);
 
-      const folder = basename(appDir);
-      const manifestPath = join(appDir, MANIFEST_FILE);
-      let raw: unknown;
-      try {
-        raw = JSON.parse(readFileSync(manifestPath, "utf-8"));
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        problem(appDir, `Invalid manifest found for ${folder}: ${detail}`);
+      const read = readFolderManifest(appDir);
+      if (read.kind !== "valid") {
+        const detail = read.kind === "invalid" ? read.error : "the manifest disappeared.";
+        problem(appDir, `Invalid manifest found for ${basename(appDir)}: ${detail}`);
         return;
       }
-      const validation = validateManifest(raw);
-      if (!validation.valid || !validation.manifest) {
-        problem(
+      const candidate: Candidate = {
+        app: {
+          appId: read.manifest.id,
           appDir,
-          `Invalid manifest found for ${folder}: ${validation.errors[0] ?? "it does not match the manifest schema."}`,
-        );
-        return;
-      }
-      const appId = validation.manifest.id;
-      const first = byId.get(appId);
-      if (first) {
-        problem(appDir, `${folder} uses the app id "${appId}", which ${first} already uses.`);
-        return;
-      }
-      const found = { appId, name: validation.manifest.name };
-      byId.set(appId, appDir);
-      visited.set(real, found);
-      entry.apps.push(found);
-      apps.push({
-        appId,
-        appDir,
-        configuredDir,
-        manifestPath,
-        manifest: raw as Record<string, unknown>,
-      });
+          configuredDir,
+          manifestPath: join(appDir, MANIFEST_FILE),
+          manifest: read.raw,
+        },
+        name: read.manifest.name,
+        real,
+        entries: [entry],
+      };
+      visited.set(real, candidate);
+      candidates.push(candidate);
     };
 
     let isDir: boolean;
@@ -197,5 +231,35 @@ export function scanApps(configuredDirs: string[]): ScanResult {
       if (existsSync(join(appDir, MANIFEST_FILE))) addApp(appDir);
     }
   }
-  return { apps, problems, dirs };
+
+  const byId = new Map<string, Candidate[]>();
+  for (const c of candidates) byId.set(c.app.appId, [...(byId.get(c.app.appId) ?? []), c]);
+
+  const apps: ScannedApp[] = [];
+  for (const c of candidates) {
+    const { appId, appDir, configuredDir } = c.app;
+    const folder = basename(appDir);
+    const conflict = (reason: string) =>
+      c.entries[0]!.problems.push({ configuredDir, dir: appDir, reason });
+
+    const pin = options.pinned?.get(appId);
+    if (pin !== undefined) {
+      if (c.real !== realpathOrNull(resolve(expandHome(pin)))) {
+        conflict(`${folder} uses the app id "${appId}", which is already installed from ${pin}.`);
+        continue;
+      }
+    } else {
+      const others = byId.get(appId)!.filter((o) => o !== c);
+      if (others.length > 0) {
+        conflict(
+          `${folder} uses the app id "${appId}", which ${others.map((o) => o.app.appDir).join(", ")} also uses.`,
+        );
+        continue;
+      }
+    }
+    apps.push(c.app);
+    for (const e of c.entries) e.apps.push({ appId, name: c.name });
+  }
+
+  return { apps, problems: dirs.flatMap((d) => d.problems), dirs };
 }

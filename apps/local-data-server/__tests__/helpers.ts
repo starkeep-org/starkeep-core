@@ -64,11 +64,12 @@ export interface InstalledApp extends AppCredentials {
 export async function installApp(
   server: LocalDataServer,
   manifest: Record<string, unknown>,
+  sourceDir?: string,
 ): Promise<InstalledApp> {
   const res = await fetch(`${server.url}/admin/apps/install`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(manifest),
+    body: JSON.stringify({ manifest, ...(sourceDir !== undefined ? { sourceDir } : {}) }),
   });
   if (!res.ok) {
     throw new Error(`install failed: ${res.status} ${await res.text()}`);

@@ -68,6 +68,7 @@ vi.mock("pg", () => {
 
 import { initializeSharedSchema } from "../../src/dsql-schema-init";
 import { createDsqlRegistry, type Registry } from "../../src/registry";
+import { manifestForUninstall } from "../../src/app-cli-config";
 
 const REGISTRY_TABLES = /\b(app_registry|app_install_steps|app_mobile_identities)\b/;
 
@@ -332,6 +333,71 @@ describe("schema init on a registry that predates the surface columns", () => {
     } finally {
       await registry.close();
     }
+  });
+});
+
+describe("the stored manifest", () => {
+  let registry: Registry;
+  const noFolder = () => {
+    throw new Error("the source folder is gone");
+  };
+
+  beforeEach(async () => {
+    await initSchema();
+    registry = createDsqlRegistry(connection);
+  });
+
+  afterEach(async () => {
+    await registry.close();
+  });
+
+  it("is written at install and replaced by a reinstall", async () => {
+    await registry.registerApp(photos, "photos", ["web"]);
+    expect(await registry.storedManifest("photos")).toEqual(photos);
+    await registry.registerApp(photosWithoutAndroid, "photos", ["web"]);
+    expect((await registry.storedManifest("photos"))?.version).toBe("0.2.0");
+    expect(await registry.storedManifest("not-installed")).toBeNull();
+  });
+
+  it("lets uninstall read the manifest with the source folder absent", async () => {
+    await registry.registerApp(photos, "photos", ["web"]);
+    expect(await manifestForUninstall(registry, "photos", noFolder)).toEqual({
+      manifest: photos,
+      from: "registry",
+    });
+  });
+
+  it("sends uninstall to the source folder for a row that predates the stored manifest", async () => {
+    await state.pg.exec(
+      `INSERT INTO shared.app_registry (app_id, version) VALUES ('old-app', '1')`,
+    );
+    await expect(manifestForUninstall(registry, "old-app", noFolder)).rejects.toThrow(
+      "the source folder is gone",
+    );
+  });
+});
+
+describe("schema init on a registry that predates the stored manifest", () => {
+  it("adds the column, nullable, and keeps the rows", async () => {
+    await state.pg.exec(`
+      CREATE SCHEMA shared;
+      CREATE TABLE shared.app_registry (
+        app_id text PRIMARY KEY,
+        version text NOT NULL,
+        name text,
+        installed_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        web_app boolean NOT NULL DEFAULT false,
+        mobile_app boolean NOT NULL DEFAULT false
+      );
+      INSERT INTO shared.app_registry (app_id, version) VALUES ('photos', '1');
+    `);
+    await initSchema();
+    await initSchema();
+    const { rows } = await state.pg.query<{ app_id: string; manifest: string | null }>(
+      "SELECT app_id, manifest FROM shared.app_registry",
+    );
+    expect(rows).toEqual([{ app_id: "photos", manifest: null }]);
   });
 });
 

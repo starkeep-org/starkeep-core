@@ -114,6 +114,7 @@ const APP_REGISTRY_COLUMNS = [
   "hmac_secret",
   "installed_at",
   "updated_at",
+  "source_dir",
 ] as const;
 
 export function appRegistryRow(db: RawDatabase, appId: string): RegisteredApp | null {
@@ -152,6 +153,7 @@ function toRegisteredApp(row: RegisteredAppRow): RegisteredApp {
     hmacSecret: row.hmac_secret,
     installedAt: row.installed_at,
     updatedAt: row.updated_at,
+    sourceDir: row.source_dir,
   };
 }
 
@@ -160,6 +162,7 @@ export function insertAppRegistry(
   appId: string,
   manifest: AppManifest,
   hmacSecret: string,
+  sourceDir: string | null,
 ): void {
   run(
     db,
@@ -173,6 +176,7 @@ export function insertAppRegistry(
         manifest: JSON.stringify(manifest),
         status: "installing",
         hmac_secret: hmacSecret,
+        source_dir: sourceDir,
       })
       .compile(),
   );
@@ -185,12 +189,14 @@ export function insertAppRegistry(
  * every signer holding the old one — the cloud verifier reads the local secret
  * through SSM, so a new secret 401s every signed request until the mirror step
  * runs — and `installed_at` because it records when the app arrived, not when
- * it was last reconciled. `status` is left to `setAppStatus`.
+ * it was last reconciled. `status` is left to `setAppStatus`. `source_dir`
+ * changes only when the caller names a folder.
  */
 export function updateAppRegistryManifest(
   db: RawDatabase,
   appId: string,
   manifest: AppManifest,
+  sourceDir: string | undefined,
 ): void {
   run(
     db,
@@ -201,6 +207,7 @@ export function updateAppRegistryManifest(
         version: manifest.version,
         tier: manifest.tier,
         manifest: JSON.stringify(manifest),
+        ...(sourceDir !== undefined ? { source_dir: sourceDir } : {}),
         updated_at: sql`datetime('now')`,
       })
       .where("app_id", "=", appId)
@@ -335,6 +342,12 @@ export interface RegisteredApp {
   hmacSecret: string;
   installedAt: string;
   updatedAt: string;
+  /**
+   * The folder the app was installed from, pinned at Install. Null for a
+   * built-in app, and for an app installed before the column existed until
+   * it is reinstalled.
+   */
+  sourceDir: string | null;
 }
 
 interface RegisteredAppRow {
@@ -347,4 +360,5 @@ interface RegisteredAppRow {
   hmac_secret: string;
   installed_at: string;
   updated_at: string;
+  source_dir: string | null;
 }

@@ -1,43 +1,71 @@
 import { resolve } from "node:path";
 import { DEFAULT_APPS_DIR, expandHome } from "@starkeep/admin-installer/app-discovery";
-import { scanApps } from "../lib/app-scan";
-import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
+import { pinnedSourceState, pinsOf, readRegistry, scanApps } from "../lib/app-scan";
+import type { LocalAppEntry, ManifestSummary } from "../lib/app-types";
 
-interface InstalledApp {
-  appId: string;
-  status: string;
-}
-
+/**
+ * The Dashboard's local app list: installed apps from the local data
+ * server's registry, then the scanned apps not installed yet.
+ *
+ * An installed app's card comes from the registry, with the manifest the
+ * user approved and the folder Install pinned, so the card never vanishes or
+ * switches source when the scanned folders change. A scanned folder whose id
+ * an installed app pins is that app when it is the pinned folder, and a
+ * conflict otherwise; the scan reports the conflict under its folder.
+ */
 export async function GET() {
-  const { apps: scanned, problems, dirs } = scanApps();
-
   // null means "we could not ask" — the data server was unreachable or errored.
   // That is not the same fact as "the registry has no row for this app", and
   // collapsing the two made every card read "Not installed" whenever the data
   // server was down, which is the opposite of the truth for installed apps.
-  let installed: InstalledApp[] | null = null;
-  try {
-    const res = await fetch(`${localDataServerUrlFromEnv()}/admin/apps`);
-    if (res.ok) {
-      const body = (await res.json()) as { apps: InstalledApp[] };
-      installed = body.apps;
+  const registry = await readRegistry();
+  const { apps: scanned, problems, dirs } = scanApps({ pinned: pinsOf(registry) });
+  const scannedById = new Map(scanned.map((s) => [s.appId, s]));
+  const registryIds = new Set((registry ?? []).map((r) => r.appId));
+
+  const apps: LocalAppEntry[] = [];
+  for (const row of registry ?? []) {
+    const found = scannedById.get(row.appId);
+    if (row.sourceDir !== null) {
+      const source = pinnedSourceState({ ...row, sourceDir: row.sourceDir });
+      apps.push({
+        appId: row.appId,
+        manifest: row.manifest as ManifestSummary,
+        sourceDir: row.sourceDir,
+        status: row.status as LocalAppEntry["status"],
+        ...(found ? { configuredDir: found.configuredDir } : {}),
+        // `sourceState`, and `folderManifest` for a valid changed manifest.
+        ...(source as Pick<LocalAppEntry, "sourceState" | "folderManifest"> | null),
+      });
+    } else if (found) {
+      // Installed before the registry pinned folders: the scan still says
+      // where it is, until a reinstall pins it. A built-in app has no folder
+      // and no card.
+      apps.push({
+        appId: row.appId,
+        manifest: found.manifest as ManifestSummary,
+        sourceDir: found.appDir,
+        status: row.status as LocalAppEntry["status"],
+        configuredDir: found.configuredDir,
+      });
     }
-  } catch {
-    // local-data-server not running — leave `installed` null so the apps below
-    // report an unknown status rather than a fabricated one.
   }
-  const installedById = installed && new Map(installed.map((a) => [a.appId, a]));
 
-  const apps = scanned.map((s) => ({
-    appId: s.appId,
-    manifest: s.manifest,
-    sourceDir: s.appDir,
-    status: installedById ? (installedById.get(s.appId)?.status ?? "not_installed") : "unknown",
-    configuredDir: s.configuredDir,
-    // The example app core ships, from the folder a new config seeds. Matched
-    // by folder rather than id, because authors copy the app.
-    ...(resolve(expandHome(s.configuredDir)) === DEFAULT_APPS_DIR ? { bundledExample: true } : {}),
-  }));
+  for (const s of scanned) {
+    if (registryIds.has(s.appId)) continue;
+    apps.push({
+      appId: s.appId,
+      manifest: s.manifest as ManifestSummary,
+      sourceDir: s.appDir,
+      status: registry ? "not_installed" : "unknown",
+      configuredDir: s.configuredDir,
+      // The example app core ships, from the folder a new config seeds.
+      // Matched by folder rather than id, because authors copy the app.
+      ...(resolve(expandHome(s.configuredDir)) === DEFAULT_APPS_DIR
+        ? { bundledExample: true }
+        : {}),
+    });
+  }
 
-  return Response.json({ apps, problems, dirs, dataServerReachable: installedById !== null });
+  return Response.json({ apps, problems, dirs, dataServerReachable: registry !== null });
 }

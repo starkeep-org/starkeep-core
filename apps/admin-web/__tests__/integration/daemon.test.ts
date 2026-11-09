@@ -95,6 +95,8 @@ beforeAll(async () => {
   writeFileSync(join(parent, "nodeps-app", "server.mjs"), SERVER_MJS);
 
   process.env.STARKEEP_DIR = dataDir;
+  // Nothing listens here: no app is installed, so Start resolves through the scan.
+  process.env.STARKEEP_LOCAL_DATA_SERVER_URL = "http://127.0.0.1:9";
   daemonPOST = (await import("../../src/routes/exec-daemon")).POST;
   statusGET = (await import("../../src/routes/exec-daemon-status")).GET;
 });

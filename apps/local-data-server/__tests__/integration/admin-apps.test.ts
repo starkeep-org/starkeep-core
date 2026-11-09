@@ -72,6 +72,28 @@ describe("install", () => {
     }
   });
 
+  it("lists each app with its approved manifest and its pinned folder", async () => {
+    await installApp(server, testAppManifest({ id: "pinned-app", name: "Pinned" }), "/apps/pinned");
+    const res = await fetch(`${server.url}/admin/apps`);
+    const { apps } = (await res.json()) as {
+      apps: Array<{ appId: string; manifest: { id: string; name: string }; sourceDir: unknown }>;
+    };
+    const pinned = apps.find((a) => a.appId === "pinned-app")!;
+    expect(pinned.sourceDir).toBe("/apps/pinned");
+    expect(pinned.manifest).toMatchObject({ id: "pinned-app", name: "Pinned" });
+    // A built-in has no folder.
+    expect(apps.find((a) => a.appId === "starkeep-drive")!.sourceDir).toBeNull();
+  });
+
+  it("refuses a sourceDir that is not a string", async () => {
+    const res = await fetch(`${server.url}/admin/apps/install`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ manifest: testAppManifest({ id: "odd-app" }), sourceDir: 7 }),
+    });
+    expect(res.status).toBe(400);
+  });
+
   it("re-install of an active app is a no-op returning the same secret", async () => {
     const first = await installApp(server, testAppManifest({ id: "reinstall-app" }));
     const second = await installApp(server, testAppManifest({ id: "reinstall-app" }));
@@ -82,7 +104,9 @@ describe("install", () => {
     const res = await fetch(`${server.url}/admin/apps/install`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: "bad-app", infraRequirements: { fileAccessAll: true } }),
+      body: JSON.stringify({
+        manifest: { id: "bad-app", infraRequirements: { fileAccessAll: true } },
+      }),
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string; details: string[] };
