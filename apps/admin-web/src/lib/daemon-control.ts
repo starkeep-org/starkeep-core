@@ -224,8 +224,10 @@ export function missingDependencies(
   try {
     const pkg = JSON.parse(readFileSync(join(pkgDir, "package.json"), "utf-8")) as {
       dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
     };
-    declared = Object.keys(pkg.dependencies ?? {});
+    // A dev run needs its build tools, so devDependencies count too.
+    declared = Object.keys({ ...pkg.dependencies, ...pkg.devDependencies });
   } catch {
     return null;
   }
