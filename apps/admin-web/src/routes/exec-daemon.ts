@@ -8,6 +8,10 @@ import {
   stopById,
   type StartOutcome,
 } from "../lib/daemon-control";
+import {
+  resolveInstallCommand,
+  type CommandSource,
+} from "@starkeep/admin-installer/approved-commands";
 import { appSource } from "../lib/app-scan";
 
 // Ask the kernel for a free TCP port by binding to port 0, then release it.
@@ -126,7 +130,14 @@ export async function POST(req: Request) {
     }
     const cwd = resolve(found.appDir, localRun.cwd ?? ".");
     return startResponse(
-      await spawnDaemon({ id, command: localRun.command, args: spawnArgs, cwd, port }),
+      await spawnDaemon({
+        id,
+        command: localRun.command,
+        args: spawnArgs,
+        cwd,
+        port,
+        install: resolveInstallCommand(found.appDir, found.manifest as CommandSource),
+      }),
     );
   }
 

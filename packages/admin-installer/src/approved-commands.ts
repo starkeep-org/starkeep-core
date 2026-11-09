@@ -48,7 +48,7 @@ type Manager = "pnpm" | "npm" | "yarn" | "bun";
 const INSTALL_SHAPES: Record<Manager, { subcommands: string[]; flags: string[] }> = {
   pnpm: { subcommands: ["install"], flags: ["--frozen-lockfile", "--ignore-workspace", "--prod"] },
   npm: { subcommands: ["ci", "install"], flags: ["--omit=dev"] },
-  yarn: { subcommands: ["install"], flags: ["--immutable"] },
+  yarn: { subcommands: ["install"], flags: ["--immutable", "--frozen-lockfile"] },
   bun: { subcommands: ["install"], flags: ["--frozen-lockfile", "--production"] },
 };
 
@@ -58,9 +58,33 @@ const SCRIPT_NAME = /^[A-Za-z0-9:_-]+$/;
 const LOCKFILES: Array<{ file: string; manager: Manager; frozen: string[] }> = [
   { file: "pnpm-lock.yaml", manager: "pnpm", frozen: ["install", "--frozen-lockfile"] },
   { file: "package-lock.json", manager: "npm", frozen: ["ci"] },
+  { file: "npm-shrinkwrap.json", manager: "npm", frozen: ["ci"] },
   { file: "yarn.lock", manager: "yarn", frozen: ["install", "--immutable"] },
   { file: "bun.lock", manager: "bun", frozen: ["install", "--frozen-lockfile"] },
+  // Bun's binary lockfile, from before Bun 1.2.
+  { file: "bun.lockb", manager: "bun", frozen: ["install", "--frozen-lockfile"] },
 ];
+
+/** The frozen install for `lock` in `dir`. Yarn 1 spells it `--frozen-lockfile`. */
+function frozenInstall(dir: string, lock: (typeof LOCKFILES)[number]): string[] {
+  if (lock.manager !== "yarn") return lock.frozen;
+  const v1 = readFileSync(join(dir, lock.file), "utf-8").includes("# yarn lockfile v1");
+  return v1 ? ["install", "--frozen-lockfile"] : lock.frozen;
+}
+
+/**
+ * The nearest folder above `dir` that holds a lockfile of a manager other
+ * than pnpm: the root of an npm, Yarn or Bun workspace that `dir` sits in.
+ */
+function enclosingOtherLockfile(
+  dir: string,
+): { root: string; lock: (typeof LOCKFILES)[number] } | null {
+  for (let d = dirname(resolve(dir)); ; d = dirname(d)) {
+    const lock = LOCKFILES.find((l) => l.manager !== "pnpm" && existsSync(join(d, l.file)));
+    if (lock) return { root: d, lock };
+    if (dirname(d) === d) return null;
+  }
+}
 
 function isManager(program: string): program is Manager {
   return Object.hasOwn(INSTALL_SHAPES, program);
@@ -141,6 +165,9 @@ function declaredCwd(appDir: string, cwd: string | undefined): string | null {
  * - a folder with no package.json installs nothing;
  * - a lockfile beside package.json picks its manager's frozen install;
  * - an app a pnpm workspace covers installs at the workspace root;
+ * - an app inside an npm, Yarn or Bun project runs nothing, and the refusal
+ *   names that project's install, because a manifest cannot point outside
+ *   the app's folder;
  * - anything else runs `pnpm install`.
  */
 export function resolveInstallCommand(appDir: string, manifest: CommandSource): CommandResolution {
@@ -173,11 +200,20 @@ export function resolveInstallCommand(appDir: string, manifest: CommandSource): 
     return { kind: "skip", reason: "The app's folder has no package.json." };
   }
   const own = LOCKFILES.find((l) => existsSync(join(appDir, l.file)));
-  if (own) return run(own.manager, own.frozen, appDir);
+  if (own) return run(own.manager, frozenInstall(appDir, own), appDir);
   const ws = enclosingWorkspace(appDir);
   if (ws?.covers) {
     const frozen = existsSync(join(ws.root, "pnpm-lock.yaml")) ? ["--frozen-lockfile"] : [];
     return run("pnpm", ["install", ...frozen], ws.root);
+  }
+  const other = enclosingOtherLockfile(appDir);
+  if (other) {
+    return {
+      kind: "refused",
+      display: display(other.lock.manager, frozenInstall(other.root, other.lock)),
+      cwd: other.root,
+      reason: `The app sits inside the ${other.lock.manager} project at ${other.root}, outside the app's folder.`,
+    };
   }
   return run("pnpm", ["install"], appDir);
 }

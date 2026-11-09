@@ -9,7 +9,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { starkeepDir } from "@starkeep/app-client";
-import { enclosingWorkspace } from "@starkeep/admin-installer/approved-commands";
+import {
+  enclosingWorkspace,
+  type CommandResolution,
+} from "@starkeep/admin-installer/approved-commands";
 import { dirname, join, resolve } from "node:path";
 import { DAEMON_COMMANDS, REPO_ROOT, type DaemonId } from "./exec-commands";
 
@@ -211,6 +214,7 @@ export function readLogTail(logPath: string, maxBytes = 2_000): string {
 export function missingDependencies(
   id: string,
   cwd: string,
+  install?: CommandResolution,
 ): { missing: string[]; message: string } | null {
   let pkgDir: string | null = null;
   for (let dir = cwd; ; dir = dirname(dir)) {
@@ -238,13 +242,17 @@ export function missingDependencies(
 
   const shown = missing.length > 5 ? `${missing.slice(0, 5).join(", ")}, …` : missing.join(", ");
   const count = missing.length === 1 ? "1 dependency is" : `${missing.length} dependencies are`;
-  // The same workspace lookup Install's dependency step uses.
+  // An installed app names the command Install runs; a workspace daemon
+  // falls back to the same workspace lookup.
   const ws = enclosingWorkspace(pkgDir);
-  const where = !ws
-    ? `Run \`pnpm install\` in ${pkgDir}.`
-    : ws.covers
-      ? `Run \`pnpm install\` in ${ws.root}.`
-      : `${pkgDir} sits inside the pnpm workspace at ${ws.root}, which does not list it. Run \`pnpm install --ignore-workspace\` in ${pkgDir}.`;
+  const where =
+    install && install.kind !== "skip"
+      ? `Run \`${install.display}\` in ${install.cwd}.`
+      : !ws
+        ? `Run \`pnpm install\` in ${pkgDir}.`
+        : ws.covers
+          ? `Run \`pnpm install\` in ${ws.root}.`
+          : `${pkgDir} sits inside the pnpm workspace at ${ws.root}, which does not list it. Run \`pnpm install --ignore-workspace\` in ${pkgDir}.`;
   return {
     missing,
     message: `'${id}' cannot start: ${count} not installed (${shown}). ${where} Then try again.`,
@@ -303,6 +311,8 @@ export interface SpawnDaemonOptions {
   args: string[];
   cwd: string;
   port?: number;
+  /** The dependency install Install runs for an installed app, for the hint when dependencies are missing. */
+  install?: CommandResolution;
 }
 
 // Shared spawn path for all daemons (fixed workspace daemons and installed
@@ -312,10 +322,10 @@ export interface SpawnDaemonOptions {
 // missing deps, port collision) produces an actionable error instead of a
 // green light and an empty log.
 export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<StartOutcome> {
-  const { id, command, args, cwd, port } = opts;
+  const { id, command, args, cwd, port, install } = opts;
   mkdirSync(PIDS_DIR, { recursive: true });
 
-  const deps = missingDependencies(id, cwd);
+  const deps = missingDependencies(id, cwd, install);
   if (deps) return { ok: false, error: deps.message };
 
   const logPath = resolve(PIDS_DIR, `${id}.log`);

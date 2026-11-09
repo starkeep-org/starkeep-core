@@ -66,6 +66,21 @@ describe("missingDependencies", () => {
     expect(missingDependencies("photos", app)?.message).toContain(`Run \`pnpm install\` in ${ws}.`);
   });
 
+  it("names the command Install runs for an installed app", () => {
+    const app = dir(mkdtempSync(join(tmpdir(), "deps-npm-")), "notes");
+    writeJson(join(app, "package.json"), { dependencies: { hono: "^4.0.0" } });
+    const install = {
+      kind: "run" as const,
+      command: "npm",
+      args: ["ci"],
+      cwd: app,
+      display: "npm ci",
+    };
+    expect(missingDependencies("notes", app, install)?.message).toContain(
+      `Run \`npm ci\` in ${app}. Then try again.`,
+    );
+  });
+
   it("checks from the nearest package.json above a localRun cwd", () => {
     const root = mkdtempSync(join(tmpdir(), "deps-cwd-"));
     writeJson(join(root, "package.json"), { dependencies: { hono: "^4.0.0" } });
