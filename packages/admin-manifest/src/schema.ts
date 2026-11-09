@@ -228,7 +228,7 @@ const RESERVED_SYNC_COLUMNS = new Set(["updated_at", "deleted_at"]);
  * discipline lets the platform *check*.
  */
 export const syncableTableColumnSchema = z
-  .object({
+  .strictObject({
     name: z.string().regex(/^[a-z_][a-z0-9_]*$/),
     type: z.enum(LOGICAL_COLUMN_TYPES),
     notNull: z.boolean().default(false),
@@ -264,7 +264,7 @@ export const syncableTableIndexSchema = z.strictObject({
 });
 
 export const syncableTableSchema = z
-  .object({
+  .strictObject({
     // Becomes "<appId>_syncable_<name>" in the local SQLite schema.
     name: z.string().regex(/^[a-z_][a-z0-9_]*$/),
     columns: z.array(syncableTableColumnSchema).min(1),
@@ -340,7 +340,7 @@ export const infraRequirementsSchema = z.strictObject({
   // must enumerate types in `fileAccess` instead.
   fileAccessAll: z.boolean().default(false),
   compute: z
-    .object({
+    .strictObject({
       enabled: z.boolean().default(false),
       handlers: z.array(appComputeHandlerSchema).default([]),
     })
@@ -396,7 +396,7 @@ export const localRunSchema = z.strictObject({
  * admin-web never passes it through a shell. Omitted, the installer infers the
  * command from the lockfile in `cwd`.
  */
-export const installCommandSchema = z.object({
+export const installCommandSchema = z.strictObject({
   command: z.string().min(1),
   args: z.array(z.string()).default([]),
   // Working directory relative to the manifest's directory. Defaults to ".".

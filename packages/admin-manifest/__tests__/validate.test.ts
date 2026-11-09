@@ -102,6 +102,91 @@ describe("unknown keys (#137)", () => {
     expect(result.errors).toEqual(['unknown key "color"']);
   });
 
+  // A manifest that fills every object schema, so a stray key can go into each.
+  function everyObject(): Record<string, unknown> {
+    return minimal({
+      targets: ["local", "cloud"],
+      requiredPermissions: [
+        {
+          subjectType: "app",
+          resourceType: "type",
+          resourceId: "image/jpeg",
+          permissions: ["read"],
+          rationale: "Shows photos.",
+        },
+      ],
+      infraRequirements: {
+        fileAccess: [{ types: ["image/jpeg"], access: "read", rationale: "Shows photos." }],
+        compute: {
+          enabled: true,
+          handlers: [
+            {
+              name: "api",
+              handler: "dist/api.handler",
+              routes: [{ route: "GET /api/items", auth: "jwt" }],
+            },
+          ],
+        },
+        additionalResources: [{ kind: "custom", name: "thing", providerId: "p", config: {} }],
+        appSpecificSyncable: {
+          tables: [
+            {
+              name: "items",
+              columns: [{ name: "id", type: "text", primaryKey: true }],
+              indexes: [{ columns: ["id"] }],
+            },
+          ],
+        },
+        labelKeys: [{ key: "mood", description: "How the photo feels." }],
+      },
+      localRun: { command: "pnpm", args: ["start"] },
+      installDependencies: { command: "pnpm", args: ["install"] },
+      bundle: { command: "pnpm", args: ["bundle"] },
+      mobile: {
+        android: {
+          package: "app.example.test",
+          signingCertSha256: ["0".repeat(64)],
+          callbackScheme: "testapp",
+        },
+      },
+    });
+  }
+
+  it("accepts the manifest that fills every object schema", () => {
+    expect(validateManifest(everyObject()).errors).toEqual([]);
+  });
+
+  it.each([
+    "",
+    "requiredPermissions.0",
+    "infraRequirements",
+    "infraRequirements.fileAccess.0",
+    "infraRequirements.compute",
+    "infraRequirements.compute.handlers.0",
+    "infraRequirements.compute.handlers.0.routes.0",
+    "infraRequirements.additionalResources.0",
+    "infraRequirements.appSpecificSyncable",
+    "infraRequirements.appSpecificSyncable.tables.0",
+    "infraRequirements.appSpecificSyncable.tables.0.columns.0",
+    "infraRequirements.appSpecificSyncable.tables.0.indexes.0",
+    "infraRequirements.labelKeys.0",
+    "localRun",
+    "installDependencies",
+    "bundle",
+    "mobile",
+    "mobile.android",
+  ])("rejects a stray key at %s", (path) => {
+    const manifest = everyObject();
+    let node: Record<string, unknown> = manifest;
+    for (const segment of path ? path.split(".") : []) {
+      node = node[segment] as Record<string, unknown>;
+    }
+    node.zzz = true;
+    expect(validateManifest(manifest).errors).toEqual([
+      path ? `${path}: unknown key "zzz"` : 'unknown key "zzz"',
+    ]);
+  });
+
   it("accepts description, which the Dashboard cards show", () => {
     const result = validateManifest(minimal({ description: "Rolls dice." }));
     expect(result.errors).toEqual([]);
