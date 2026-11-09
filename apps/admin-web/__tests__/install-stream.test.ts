@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { jsonRequest, makeAppDir, makeDataDir, testAppManifest } from "./helpers";
 import { lastChild, resetSpawns, spawnedChildren, type FakeChild } from "./fake-spawn";
 import { lines, readSse } from "./sse";
+import { readFolderManifest } from "@starkeep/admin-installer/app-discovery";
 
 vi.mock("node:child_process", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:child_process")>()),
@@ -298,6 +299,62 @@ describe("an app install", () => {
     const child = lastChild();
     expect(child.options.env).toMatchObject({ AWS_REGION: "eu-west-1" });
     await finish(res, child);
+  });
+});
+
+describe("an app installed on this machine", () => {
+  // The local data server's registry answers with these rows; every other
+  // fetch is unexpected here.
+  function registryAnswers(rows: Array<Record<string, unknown>>) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        url.endsWith("/admin/apps")
+          ? Response.json({ apps: rows })
+          : Response.json({ error: `unexpected ${url}` }, { status: 404 }),
+      ),
+    );
+  }
+
+  function pinnedRow(appId: string, dir: string) {
+    const folder = readFolderManifest(dir);
+    if (folder.kind !== "valid") throw new Error(`${dir} holds no valid manifest`);
+    return { appId, status: "active", manifest: folder.manifest, sourceDir: dir };
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("deploys from its pinned folder, not the copy the scan finds", async () => {
+    const pinned = makeAppDir(
+      join(dataDir, "elsewhere"),
+      "photos",
+      testAppManifest({ id: "photos", name: "Photos" }),
+    );
+    registryAnswers([pinnedRow("photos", pinned)]);
+    const res = await appInstall({ appId: "photos" });
+    const child = lastChild();
+    expect(child.args.slice(5, 7)).toEqual(["--app-dir", pinned]);
+    await finish(res, child);
+  });
+
+  it("refuses while its folder holds a manifest the user has not approved, and spawns nothing", async () => {
+    const pinned = makeAppDir(
+      join(dataDir, "elsewhere"),
+      "dice",
+      testAppManifest({ id: "dice", name: "Dice" }),
+    );
+    registryAnswers([pinnedRow("dice", pinned)]);
+    makeAppDir(
+      join(dataDir, "elsewhere"),
+      "dice",
+      testAppManifest({ id: "dice", name: "Dice", version: "2.0.0" }),
+    );
+    const res = await appInstall({ appId: "dice" });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain("Update from folder");
+    expect(spawnedChildren()).toHaveLength(0);
   });
 });
 

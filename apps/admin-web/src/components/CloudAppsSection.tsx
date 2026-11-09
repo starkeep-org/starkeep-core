@@ -203,11 +203,19 @@ export function CloudAppsSection({
           const endpoint = `/api/apps/${entry.appId}/cloud-install`;
           const url = browserBaseUrl ? `${browserBaseUrl}/apps/${entry.appId}/` : null;
           // One run at a time across every tile, and none before cloud is set up.
+          // A locally installed app deploys only the manifest the user
+          // approved, so its folder must still hold that manifest.
           const blocked = !cloudReady
             ? "Set up cloud before installing apps"
             : running
               ? "Another cloud install is running"
-              : undefined;
+              : entry.sourceState === "changed"
+                ? "Its folder holds a changed manifest. Choose Update from folder on its local card first"
+                : entry.sourceState === "invalid"
+                  ? "Its folder holds an invalid manifest. Fix the manifest first"
+                  : entry.sourceState === "missing"
+                    ? "Its source folder is not found"
+                    : undefined;
 
           // One tile per surface the manifest offers. Each tile reads only its
           // own registry column and installs only its own surface.

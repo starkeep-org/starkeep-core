@@ -273,6 +273,37 @@ describe("an installed app whose folder no scanned folder holds", () => {
   });
 });
 
+describe("a locally installed app whose folder holds a manifest the user has not approved", () => {
+  const DICE = app("dice", "Dice", { web: true, mobile: false });
+  const CHANGED_TITLE =
+    "Its folder holds a changed manifest. Choose Update from folder on its local card first";
+
+  it("disables the cloud install, and says to update from the folder first", async () => {
+    await renderWith([], [{ ...DICE, status: "active", sourceState: "changed" }]);
+    const button = within(await tile("Dice")).getByRole("button", {
+      name: "Install Dice in cloud",
+    });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect(button.parentElement!.getAttribute("title")).toBe(CHANGED_TITLE);
+  });
+
+  it("disables the redeploy of an installed app", async () => {
+    await renderWith(
+      [{ appId: "dice", webApp: true, mobileApp: false }],
+      [{ ...DICE, status: "active", sourceState: "changed" }],
+    );
+    const user = userEvent.setup();
+    await user.click(
+      within(await tile("Dice")).getByRole("button", { name: "More actions for Dice" }),
+    );
+    const item = await screen.findByRole("menuitem", { name: "Redeploy Dice" });
+    expect(item.getAttribute("aria-disabled")).toBe("true");
+    expect(item.getAttribute("title")).toBe(CHANGED_TITLE);
+    await user.click(item);
+    expect(installs).toHaveLength(0);
+  });
+});
+
 describe("the surface each action asks for, and the dialog it opens", () => {
   it.each([
     ["Photos", "Install Photos in cloud", ["web"], "Install Photos in cloud"],
