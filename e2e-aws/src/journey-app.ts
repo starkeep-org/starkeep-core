@@ -58,11 +58,41 @@ export interface JourneyBrowserSurface {
   readonly uploadControl?: string;
 }
 
+/**
+ * The shared file the journey creates as the app, and the metadata it writes on
+ * that file.
+ *
+ * The broker authorizes a write by the category of the file's type, so the type
+ * must sit in a category the manifest grants `readwrite` and `metadataWrite`.
+ */
+export interface JourneySharedFile {
+  /** A canonical Starkeep type id, e.g. "image/png". */
+  readonly type: string;
+  /** The HTTP content type the bytes upload with. */
+  readonly contentType: string;
+  readonly fileName: string;
+  /**
+   * Fresh bytes on every call. The cloud stays up between runs and dedupes
+   * records by content hash, so constant bytes would ship only on the first run.
+   */
+  bytes(): Buffer;
+  /** A metadata row valid for the type's category. */
+  readonly metadata: Record<string, unknown>;
+}
+
 export interface JourneyApp {
   /** Manifest id. The journey installs, drives and uninstalls this app. */
   readonly appId: string;
   /** Absolute path to the app's source directory (holding `starkeep.manifest.json`). */
   readonly appDir: string;
+  /**
+   * The shared file the app writes. Omitted, the app writes a small PNG, so
+   * the app must hold `readwrite` and `metadataWrite` on `image`.
+   *
+   * The stand-in steps run only for a file in the `image` category, because
+   * the platform takes stand-ins for images and video alone.
+   */
+  readonly sharedFile?: JourneySharedFile;
   /** Label keys the manifest declares, for the cross-app label step. */
   readonly labelKeys: JourneyLabelKeys;
   /** The app-private table the app-data step writes to. */

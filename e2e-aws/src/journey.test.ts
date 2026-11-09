@@ -14,13 +14,15 @@
  * mode, is the platform journey.
  */
 
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getCategory, typeCategory } from "@starkeep/protocol-primitives";
 import { defineCloudJourney } from "./journey.js";
 import { APP_DIR } from "./env.js";
 import { probeApp } from "./probe-app.js";
-import type { JourneyApp } from "./journey-app.js";
+import type { JourneyApp, JourneySharedFile } from "./journey-app.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -43,6 +45,7 @@ function configuredApp(dir: string): JourneyApp {
   const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as {
     id?: string;
     infraRequirements?: {
+      fileAccess?: Array<{ types: string[]; access: string; metadataWrite?: boolean }>;
       labelKeys?: Array<{ key: string; sizeClass?: boolean }>;
       appSpecificSyncable?: { tables?: Array<{ name: string; columns: Array<{ name: string }> }> };
       compute?: { handlers?: Array<{ routes?: string[]; auth?: string }> };
@@ -54,6 +57,34 @@ function configuredApp(dir: string): JourneyApp {
   // down here, so the profile cannot drift from what the app actually declared
   // — a stale name would fail as a broker 400 and read as a platform fault.
   const ir = manifest.infraRequirements ?? {};
+
+  // The shared file goes in the first category the app may write files and
+  // metadata in. An image grant keeps the journey's default PNG.
+  const fileType = (ir.fileAccess ?? []).find((g) => g.access === "readwrite" && g.metadataWrite)
+    ?.types[0];
+  if (!fileType) {
+    throw new Error(
+      `${manifest.id} declares no readwrite fileAccess grant with metadataWrite; the record ` +
+        "sync and proxy write steps need one.",
+    );
+  }
+  let sharedFile: JourneySharedFile | undefined;
+  const category = typeCategory(fileType);
+  if (category !== "image") {
+    const column = getCategory(category)?.metadataColumns.find((c) => c.type === "integer");
+    if (!column) {
+      throw new Error(
+        `${fileType}'s category has no integer metadata column; the proxy write step needs one.`,
+      );
+    }
+    sharedFile = {
+      type: fileType,
+      contentType: "application/octet-stream",
+      fileName: `tier3-${manifest.id}`,
+      bytes: () => Buffer.from(`tier-3 ${manifest.id} ${randomUUID()}\n`),
+      metadata: { [column.name]: 1 },
+    };
+  }
 
   // Any two declared keys that are not the size-class key. A size-class label
   // claims the record is a derived rung of some original, which would make the
@@ -97,6 +128,7 @@ function configuredApp(dir: string): JourneyApp {
   return {
     appId: manifest.id,
     appDir,
+    sharedFile,
     labelKeys: { flag: keys[0]!, valued: keys[1]! },
     appTable: {
       name: table.name,

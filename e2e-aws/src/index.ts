@@ -16,6 +16,7 @@ export {
   type JourneyAppTable,
   type JourneyJwtRoute,
   type JourneyBrowserSurface,
+  type JourneySharedFile,
 } from "./journey-app.js";
 export { AWS_TESTS_ENABLED, STACK_PREFIX, REGION, TEARDOWN, APP_DIR } from "./env.js";
 export {
