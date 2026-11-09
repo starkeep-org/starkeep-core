@@ -4,18 +4,10 @@
  * CLIs own their console output and exit codes.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join, resolve, dirname } from "node:path";
-import { homedir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { configPath } from "@starkeep/app-client";
-
-const SRC_DIR = dirname(fileURLToPath(import.meta.url));
-// packages/admin-installer/src -> admin-installer -> packages -> starkeep-core -> workspace root
-const REPO_ROOT = resolve(SRC_DIR, "..", "..", "..", "..");
-// Default app parent dir: the sibling `starkeep-apps/` checkout. Matches the
-// default in admin-web's /api/apps/list route.
-const DEFAULT_APPS_DIR = resolve(REPO_ROOT, "starkeep-apps");
+import { expandHome, MANIFEST_FILE, scanApps } from "./app-discovery";
 
 export interface StarkeepCliConfig {
   stackPrefix: string;
@@ -94,56 +86,63 @@ export function loadStarkeepCliConfig(): StarkeepCliConfig {
   }
 }
 
-// Expand a leading "~" to the user's home dir (mirrors /api/apps/list).
-function expandHome(p: string): string {
-  if (p === "~") return homedir();
-  if (p.startsWith("~/")) return join(homedir(), p.slice(2));
-  return p;
-}
-
-function appParentDirs(config: StarkeepCliConfig): string[] {
+/**
+ * Find the source folder of the app whose manifest id is `appId`, with the
+ * scan admin-web's app list uses (see `app-discovery.ts`). An empty
+ * `appParentDirs` scans nothing.
+ */
+export function resolveAppDir(config: StarkeepCliConfig, appId: string): string {
   const configured = (config.appParentDirs ?? []).filter(
     (d): d is string => typeof d === "string" && d.length > 0,
   );
-  const dirs = configured.length > 0 ? configured : [DEFAULT_APPS_DIR];
-  return dirs.map(expandHome);
+  const { apps, problems } = scanApps(configured);
+  const found = apps.find((a) => a.appId === appId);
+  if (found) return found.appDir;
+  const lines = [
+    configured.length === 0
+      ? `no app with manifest id "${appId}": the config names no app folders (appParentDirs is empty)`
+      : `no app with manifest id "${appId}" found in ${configured.join(", ")}`,
+    ...problems.map((p) => `  - ${p.dir}: ${p.reason}`),
+  ];
+  throw new Error(lines.join("\n"));
 }
 
 /**
- * Find the source dir of the app whose manifest id === appId by scanning the
- * configured app parent dirs (first match wins, earlier dirs take precedence).
- *
- * TODO: This whole filesystem-scan discovery model needs to be replaced —
- * not extended — as part of publishing starkeep-core as a package. The
- * current shape (admin scans configured parent directories on their
- * workstation for any subdir containing a `starkeep.manifest.json`) only
- * makes sense while every app lives in a sibling checkout next to
- * starkeep-core. Once external apps install from their own published
- * packages (npm, a registry, a URL, etc.), "what is the app's source
- * dir?" stops being a meaningful question — the manifest and bundle
- * arrive via the package, not via a directory scan. Don't bolt sibling
- * checkout support onto this; rethink the discovery + resolution model
- * end-to-end when that work happens.
+ * Split `--app-dir <path>` out of a CLI's arguments. admin-web passes the
+ * folder it resolved, so the CLI does not scan again.
  */
-export function resolveAppDir(config: StarkeepCliConfig, appId: string): string {
-  for (const parentDir of appParentDirs(config)) {
-    if (!existsSync(parentDir)) continue;
-    for (const name of readdirSync(parentDir)) {
-      const appDir = resolve(parentDir, name);
-      if (!statSync(appDir).isDirectory()) continue;
-      const manifestPath = resolve(appDir, "starkeep.manifest.json");
-      if (!existsSync(manifestPath)) continue;
-      try {
-        const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as { id?: unknown };
-        if (manifest.id === appId) return appDir;
-      } catch {
-        // Skip malformed manifests.
-      }
-    }
+export function takeAppDirFlag(args: string[]): { appDir?: string; rest: string[] } {
+  const i = args.indexOf("--app-dir");
+  if (i === -1) return { rest: args };
+  const appDir = args[i + 1];
+  if (!appDir || appDir.startsWith("--")) throw new Error("--app-dir needs a folder");
+  return { appDir, rest: [...args.slice(0, i), ...args.slice(i + 2)] };
+}
+
+/**
+ * The app's source folder: `appDir` when given, after checking that its
+ * manifest names `appId`; otherwise the scan's answer.
+ */
+export function appDirFor(
+  config: StarkeepCliConfig,
+  appId: string,
+  appDir: string | undefined,
+): string {
+  if (appDir === undefined) return resolveAppDir(config, appId);
+  const dir = resolve(expandHome(appDir));
+  const manifestPath = join(dir, MANIFEST_FILE);
+  let id: unknown;
+  try {
+    id = (JSON.parse(readFileSync(manifestPath, "utf-8")) as { id?: unknown }).id;
+  } catch (err) {
+    throw new Error(
+      `could not read ${manifestPath}: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
-  throw new Error(
-    `no app with manifest id "${appId}" found in ${appParentDirs(config).join(", ")}`,
-  );
+  if (id !== appId) {
+    throw new Error(`${manifestPath} names the app "${String(id)}", not "${appId}"`);
+  }
+  return dir;
 }
 
 export interface DerivedInstallerArns {

@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
+import { findApp } from "../lib/app-scan";
 import { REPO_ROOT } from "../lib/exec-commands";
 import { installStream } from "../lib/install-stream";
 
@@ -32,6 +33,16 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
     return new Response(
       JSON.stringify({ error: "accessKeyId, secretAccessKey, sessionToken, region required" }),
       { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+  }
+
+  // Resolve the folder here and hand it to the CLI, so the install deploys
+  // the copy the Dashboard shows.
+  const scanned = findApp(appId);
+  if (!scanned) {
+    return Response.json(
+      { error: `App ${appId} not found in any configured app folder` },
+      { status: 404 },
     );
   }
 
@@ -82,6 +93,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
       "cli:install-app",
       appId,
       "--non-interactive",
+      "--app-dir",
+      scanned.appDir,
       ...surfaceFlags.map((surface) => `--${surface}`),
     ],
     cwd: REPO_ROOT,

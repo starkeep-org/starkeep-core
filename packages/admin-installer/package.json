@@ -6,6 +6,7 @@
   "main": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
+    "./app-discovery": "./src/app-discovery.ts",
     "./app-creds": "./src/app-creds.ts",
     "./custom-domain": "./src/custom-domain.ts",
     "./session": "./src/session.ts"

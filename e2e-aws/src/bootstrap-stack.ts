@@ -180,12 +180,10 @@ async function describeStack(
  * The CLI-facing config for a run, from the bootstrap stack's outputs, keeping
  * any cloud-data-server outputs a previous kept-up run wrote.
  *
- * `appDir` is the app the run installs. The config names its PARENT, not the
- * app: `resolveAppDir` scans each entry's children for a manifest whose id
- * matches, so naming the app's own directory would have it look inside the app
- * for a nested copy of itself and find nothing. Derived rather than configured:
- * the parent of an app's directory is a directory that contains that app, by
- * construction, so there is nothing here for a caller to get wrong.
+ * `appDir` is the app the run installs. The config names its parent, a
+ * container that `resolveAppDir` scans for a manifest whose id matches. The
+ * app's own folder would work too, since the scan treats a folder holding a
+ * manifest as one app.
  */
 export function stackConfigFrom(
   previous: TestStackConfig | undefined,
