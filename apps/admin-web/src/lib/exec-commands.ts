@@ -21,11 +21,6 @@ export type StreamCommandId = "reset-local-data" | "local-deploy";
 // against the wrong tree.
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 
-// Default app parent dir: the sibling-of-starkeep-core `starkeep-apps/` checkout.
-// Seeded into `appParentDirs` in ~/.starkeep/config.json on first read by the
-// config route so it shows up as a normal, removable entry in the UI list.
-export const DEFAULT_APPS_DIR = resolve(REPO_ROOT, "..", "starkeep-apps");
-
 // Each daemon resolves its own listen port from the environment, and admin-web
 // must read the *same* variable: daemons are spawned as children and inherit
 // this process's env, so a hardcoded copy here would silently disagree with the

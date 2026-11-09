@@ -29,10 +29,24 @@
 
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { validateManifest } from "@starkeep/admin-manifest";
 
 export const MANIFEST_FILE = "starkeep.manifest.json";
+
+/**
+ * The example app that ships with core. admin-web seeds it as the only
+ * discovery folder in a new config, so a first run shows an app to install.
+ */
+// packages/admin-installer/src -> admin-installer -> packages -> starkeep-core
+export const DEFAULT_APPS_DIR = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "..",
+  "example-app",
+);
 
 /** Expand a leading `~` to the user's home folder. */
 export function expandHome(p: string): string {
@@ -44,6 +58,8 @@ export function expandHome(p: string): string {
 export interface ScannedApp {
   appId: string;
   appDir: string;
+  /** The configured folder the app was found in, as configured. */
+  configuredDir: string;
   manifestPath: string;
   /** The manifest as the file holds it; it passed `validateManifest`. */
   manifest: Record<string, unknown>;
@@ -138,7 +154,13 @@ export function scanApps(configuredDirs: string[]): ScanResult {
       byId.set(appId, appDir);
       visited.set(real, found);
       entry.apps.push(found);
-      apps.push({ appId, appDir, manifestPath, manifest: raw as Record<string, unknown> });
+      apps.push({
+        appId,
+        appDir,
+        configuredDir,
+        manifestPath,
+        manifest: raw as Record<string, unknown>,
+      });
     };
 
     let isDir: boolean;

@@ -1,3 +1,5 @@
+import { resolve } from "node:path";
+import { DEFAULT_APPS_DIR, expandHome } from "@starkeep/admin-installer/app-discovery";
 import { scanApps } from "../lib/app-scan";
 import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
 
@@ -31,6 +33,10 @@ export async function GET() {
     manifest: s.manifest,
     sourceDir: s.appDir,
     status: installedById ? (installedById.get(s.appId)?.status ?? "not_installed") : "unknown",
+    configuredDir: s.configuredDir,
+    // The example app core ships, from the folder a new config seeds. Matched
+    // by folder rather than id, because authors copy the app.
+    ...(resolve(expandHome(s.configuredDir)) === DEFAULT_APPS_DIR ? { bundledExample: true } : {}),
   }));
 
   return Response.json({ apps, problems, dirs, dataServerReachable: installedById !== null });

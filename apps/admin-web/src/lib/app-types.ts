@@ -69,6 +69,13 @@ export interface LocalAppEntry {
   appId: string;
   manifest: ManifestSummary;
   sourceDir: string;
+  /** The Discover apps entry the app was found under, as configured. */
+  configuredDir: string;
+  /**
+   * True for core's example app found through the folder a new config seeds.
+   * Its card offers Hide, which removes that folder from Discover apps.
+   */
+  bundledExample?: boolean;
   // "unknown" means the install registry could not be read — the local data
   // server was down when the list was built. It is distinct from
   // "not_installed", which is a registry answer.

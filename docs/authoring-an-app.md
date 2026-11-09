@@ -3,7 +3,7 @@
 This is a how-to guide for building an installable Starkeep app. It walks through
 the parts an app is made of — what each one is for, and which are required vs.
 optional. The worked example is the **example app** in
-[`examples/example-app`](../examples/example-app), a small app that performs every
+[`example-app`](../example-app), a small app that performs every
 app-facing data operation and shows each request on its page. Copy that folder to
 start an app. The **Photos** app in the sibling
 [`starkeep-apps/`](../../starkeep-apps) repo is the full-size reference: a real
@@ -76,7 +76,7 @@ Four rules govern what a browser reaches, and the manifest states each one:
 
 ### The example app
 
-[`examples/example-app`](../examples/example-app) is the shape to copy. It is
+[`example-app`](../example-app) is the shape to copy. It is
 one folder holding one app: one manifest at the root, one pnpm workspace, and a
 package per flavor. Its `web` package serves both web surfaces from one Hono
 app, `src/server/app.ts`. The local surface starts `src/server/local.ts` and the
@@ -138,7 +138,7 @@ runtime. Declare the Starkeep platform packages, the ones published from
 `starkeep-core`, by published version range. Never point them at a path into a
 core checkout, through `workspace:*`, `link:` or `file:`: a copy of your app
 then fails to install anywhere that checkout is absent. See
-`examples/example-app/web/package.json`. Your app's own packages are a different
+`example-app/web/package.json`. Your app's own packages are a different
 case. The example's flavors depend on `@example-app/common` as `workspace:*`,
 which is fine because the dependency never leaves the app's own folder. (To
 iterate on core and an app together, use `pnpm link` / `overrides`; that's a
@@ -1053,7 +1053,7 @@ The checklist before a cloud install:
 The install path is identical for first-party and third-party apps:
 
 1. Add the app's folder, or a folder that holds it, in **Discover apps** on
-   the Dashboard. The sibling `starkeep-apps/` is seeded by default. A folder
+   the Dashboard. A new install registers core's `example-app/` by default. A folder
    that holds `starkeep.manifest.json` is one app. In any other folder, each
    direct subfolder that holds a manifest is an app; the scan skips
    `node_modules` and dot-folders and goes no deeper. Discover apps shows what
@@ -1078,7 +1078,7 @@ end-user local/cloud setup walkthrough.
 ## Testing your app
 
 Test an app against a real platform at two tiers. The example app carries both
-set up, in `examples/example-app/e2e/` and `examples/example-app/scripts/`.
+set up, in `example-app/e2e/` and `example-app/scripts/`.
 
 **Tier 2, a local platform.** core's harness, `@starkeep/e2e`, boots
 local-data-server, admin-web and Drive from a starkeep-core checkout. Your suite
@@ -1131,7 +1131,7 @@ declares the schemas once. Put the rest in one package every flavor imports.
 The example app shows the layout:
 
 ```
-examples/example-app/
+example-app/
   starkeep.manifest.json   one manifest for every flavor
   package.json             the scripts the platform calls: start, bundle
   pnpm-workspace.yaml      one workspace holding every flavor
