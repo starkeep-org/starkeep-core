@@ -45,15 +45,12 @@ beforeAll(async () => {
   // Malformed manifest — must be skipped, not break the scan.
   makeAppDir(parentA, "broken", "{ this is not json");
   // Manifest id wins over the directory name.
-  makeAppDir(parentA, "some-dir-name", testAppManifest({ id: "renamed-app" }));
-  // Manifest without an id falls back to the directory name.
-  const { id: _drop, ...idless } = testAppManifest();
-  makeAppDir(parentA, "idless-app", idless);
+  makeAppDir(parentA, "some-dir-name", testAppManifest({ id: "renamed-app", name: "Renamed" }));
   // Same manifest id in both parents — the first parent dir wins.
   makeAppDir(parentA, "dup-from-a", testAppManifest({ id: "dup-app", name: "From A" }));
   makeAppDir(parentB, "dup-from-b", testAppManifest({ id: "dup-app", name: "From B" }));
 
-  makeAppDir(dataDir, "direct", testAppManifest({ id: "direct-app" }));
+  makeAppDir(dataDir, "direct", testAppManifest({ id: "direct-app", name: "Direct" }));
 
   ldsPort = await getFreePort();
   process.env.STARKEEP_DIR = dataDir;
@@ -68,7 +65,11 @@ afterAll(async () => {
 type ListBody = {
   apps: ListedApp[];
   problems: Array<{ configuredDir: string; dir: string; reason: string }>;
-  dirs: Array<{ dir: string; appCount: number }>;
+  dirs: Array<{
+    dir: string;
+    apps: Array<{ appId: string; name: string }>;
+    problems: Array<{ configuredDir: string; dir: string; reason: string }>;
+  }>;
 };
 
 async function body(): Promise<ListBody> {
@@ -96,45 +97,51 @@ describe("with the local-data-server down", () => {
     expect(body.dataServerReachable).toBe(false);
   });
 
-  it("skips a malformed manifest and reports the parse error", async () => {
+  it("groups apps and problems under the configured folder they came from", async () => {
+    const { dirs } = await body();
+    expect(dirs.map((d) => d.dir)).toEqual([parentA, parentB, directApp, missingDir]);
+
+    const a = dirs.find((d) => d.dir === parentA)!;
+    expect(a.apps).toEqual([
+      { appId: "alpha-app", name: "Alpha" },
+      { appId: "dup-app", name: "From A" },
+      { appId: "renamed-app", name: "Renamed" },
+    ]);
+    expect(a.problems).toEqual([
+      {
+        configuredDir: parentA,
+        dir: join(parentA, "broken"),
+        reason: expect.stringMatching(/^Invalid manifest found for broken: /),
+      },
+    ]);
+
+    const b = dirs.find((d) => d.dir === parentB)!;
+    expect(b.apps).toEqual([]);
+    expect(b.problems.map((p) => p.reason)).toEqual([
+      `dup-from-b uses the app id "dup-app", which ${join(parentA, "dup-from-a")} already uses.`,
+    ]);
+
+    expect(dirs.find((d) => d.dir === directApp)).toEqual({
+      dir: directApp,
+      apps: [{ appId: "direct-app", name: "Direct" }],
+      problems: [],
+    });
+    expect(dirs.find((d) => d.dir === missingDir)?.problems.map((p) => p.reason)).toEqual([
+      "The folder does not exist.",
+    ]);
+  });
+
+  it("lists every problem flat as well, and cards only valid apps", async () => {
     const { apps, problems } = await body();
-    expect(apps.map((a) => a.appId)).not.toContain("broken");
-    expect(apps.map((a) => a.sourceDir)).not.toContain(join(parentA, "broken"));
-    const broken = problems.find((p) => p.dir === join(parentA, "broken"));
-    expect(broken?.configuredDir).toBe(parentA);
-    expect(broken?.reason).toMatch(/could not be read as JSON/);
-  });
-
-  it("treats a configured folder that holds a manifest as an app", async () => {
-    const { apps, dirs } = await body();
+    expect(problems).toHaveLength(3);
+    expect(apps.map((a) => a.appId).sort()).toEqual([
+      "alpha-app",
+      "direct-app",
+      "dup-app",
+      "renamed-app",
+    ]);
+    expect(apps.find((a) => a.appId === "dup-app")?.sourceDir).toBe(join(parentA, "dup-from-a"));
     expect(apps.find((a) => a.appId === "direct-app")?.sourceDir).toBe(directApp);
-    expect(dirs.find((d) => d.dir === directApp)?.appCount).toBe(1);
-  });
-
-  it("reports a configured folder that does not exist", async () => {
-    const { problems, dirs } = await body();
-    expect(problems.find((p) => p.dir === missingDir)?.reason).toBe("The folder does not exist.");
-    expect(dirs.find((d) => d.dir === missingDir)?.appCount).toBe(0);
-  });
-
-  it("keys apps by manifest id, falling back to the dir name when id is missing", async () => {
-    const apps = await list();
-    const ids = apps.map((a) => a.appId);
-    expect(ids).toContain("renamed-app");
-    expect(ids).not.toContain("some-dir-name");
-    expect(ids).toContain("idless-app");
-  });
-
-  it("de-dupes a manifest id present in two parent dirs — first parent wins", async () => {
-    const apps = await list();
-    const dups = apps.filter((a) => a.appId === "dup-app");
-    expect(dups).toHaveLength(1);
-    expect(dups[0]!.sourceDir).toBe(join(parentA, "dup-from-a"));
-    expect(dups[0]!.manifest.name).toBe("From A");
-    const { problems } = await body();
-    expect(problems.find((p) => p.dir === join(parentB, "dup-from-b"))?.reason).toBe(
-      `Another app already uses the id "dup-app", in ${join(parentA, "dup-from-a")}.`,
-    );
   });
 });
 

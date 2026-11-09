@@ -12,8 +12,10 @@
  *              STARKEEP_BUNDLE_OUT    = <abs path to write dist.zip>
  *     out:     app writes dist.zip to STARKEEP_BUNDLE_OUT
  *
- * The app is located by scanning the configured app parent dirs (same
- * discovery as admin-web's /api/apps/list) for the manifest whose id matches.
+ * `--app-dir <folder>` names the app's source folder; admin-web passes the
+ * folder it resolved. Without it, the app is located by scanning the
+ * configured app folders (`scanApps` in src/app-discovery.ts, the scan
+ * admin-web's /api/apps/list uses) for the manifest whose id matches.
  *
  * Reads ~/.starkeep/config.json. Requires apiGatewayUrl, apiGatewayId,
  * authorizerId, s3Bucket, and auroraEndpoint to be present (written by
@@ -24,6 +26,7 @@
  *   pnpm --filter @starkeep/admin-installer cli:install-app <appId> --non-interactive
  *   pnpm --filter @starkeep/admin-installer cli:install-app <appId> --mobile
  *   pnpm --filter @starkeep/admin-installer cli:install-app <appId> --web
+ *   pnpm --filter @starkeep/admin-installer cli:install-app <appId> --app-dir <folder>
  *
  * Every install creates the app's data side: its role, schema, tables, grants
  * and namespace. `--web` adds the cloud web app (its compute), and `--mobile`
@@ -61,8 +64,9 @@ import {
 import { prompt } from "../src/cli-prompt";
 import {
   loadStarkeepCliConfig,
-  resolveAppDir,
+  appDirFor,
   deriveInstallerArns,
+  takeAppDirFlag,
   starkeepConfigPath,
 } from "../src/app-cli-config";
 
@@ -163,7 +167,14 @@ function prepareWebApp(): Buffer {
 // Main
 // ---------------------------------------------------------------------------
 
-const flags = process.argv.slice(2);
+let flags: string[];
+let appDirFlag: string | undefined;
+try {
+  ({ appDir: appDirFlag, rest: flags } = takeAppDirFlag(process.argv.slice(2)));
+} catch (err) {
+  console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+}
 const nonInteractive = flags.includes("--non-interactive");
 const requestedSurfaces: AppSurface[] = [
   ...(flags.includes("--web") ? (["web"] as const) : []),
@@ -172,7 +183,9 @@ const requestedSurfaces: AppSurface[] = [
 const appId = flags.find((f) => !f.startsWith("--"));
 
 if (!appId) {
-  console.error("Usage: cli:install-app <appId> [--non-interactive] [--web] [--mobile]");
+  console.error(
+    "Usage: cli:install-app <appId> [--non-interactive] [--web] [--mobile] [--app-dir <folder>]",
+  );
   process.exit(1);
 }
 
@@ -254,7 +267,7 @@ const {
 // Locate the app and load its manifest.
 let appDir: string;
 try {
-  appDir = resolveAppDir(config, appId);
+  appDir = appDirFor(config, appId, appDirFlag);
 } catch (err) {
   console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);

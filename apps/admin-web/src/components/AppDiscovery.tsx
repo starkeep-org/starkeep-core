@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { TriangleAlertIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -10,51 +11,118 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ACTION_START } from "@/lib/action-colors";
-import type { AppList, ScanProblem } from "@/lib/app-types";
+import type { AppList, ScannedDir } from "@/lib/app-types";
 
 // ---------------------------------------------------------------------------
 // App parent directories editor — the "Discover apps" button in the shell
 // header, which opens a modal for managing the directories scanned for apps.
+// Under each directory the modal says which apps it contributed and why any
+// folder in it was skipped, and the button carries an alert icon while any
+// directory has a problem.
 //
 // The button lives in the shell header, away from the dashboard state it
 // affects, so saving announces itself on `window` instead of calling back
-// through props. The dashboard listens and re-scans.
+// through props. The dashboard listens and re-scans, and so does the button.
 // ---------------------------------------------------------------------------
 
 /** Fired after the scanned-directory list changes. */
 export const APPS_CHANGED_EVENT = "starkeep:app-dirs-changed";
 
+/**
+ * What each scanned directory contributed, or null before the first scan
+ * answers. Rescans on mount, on every APPS_CHANGED_EVENT, and whenever
+ * `rescanKey` changes.
+ */
+function useScannedDirs(rescanKey: unknown): ScannedDir[] | null {
+  const [dirs, setDirs] = useState<ScannedDir[] | null>(null);
+  useEffect(() => {
+    let live = true;
+    const refresh = async () => {
+      try {
+        const res = await fetch("/api/apps/list");
+        if (!res.ok) return;
+        const body = (await res.json()) as AppList;
+        if (live) setDirs(body.dirs);
+      } catch {
+        // The Dashboard reports a failed list; the header stays quiet.
+      }
+    };
+    void refresh();
+    window.addEventListener(APPS_CHANGED_EVENT, refresh);
+    return () => {
+      live = false;
+      window.removeEventListener(APPS_CHANGED_EVENT, refresh);
+    };
+  }, [rescanKey]);
+  return dirs;
+}
+
 export function AppDiscovery() {
   const [open, setOpen] = useState(false);
+  // Opening the modal rescans, so a folder fixed on disk shows as fixed.
+  const scanned = useScannedDirs(open);
+  const hasProblems = (scanned ?? []).some((d) => d.problems.length > 0);
 
   return (
     <>
-      <Button size="sm" className={ACTION_START} onClick={() => setOpen(true)}>
-        Discover apps
-      </Button>
-      <AppDiscoveryModal open={open} onOpenChange={setOpen} />
+      <div className="flex items-center gap-2">
+        {hasProblems && (
+          <TriangleAlertIcon
+            role="img"
+            aria-label="App discovery found problems"
+            className="size-4 text-amber-600"
+          />
+        )}
+        <Button size="sm" className={ACTION_START} onClick={() => setOpen(true)}>
+          Discover apps
+        </Button>
+      </div>
+      <AppDiscoveryModal open={open} onOpenChange={setOpen} scanned={scanned} />
     </>
+  );
+}
+
+/**
+ * The apps line under a scanned directory: "Found Photos", "Found Photos and
+ * Drive", "Found Photos, Drive, and 2 more apps". Null when the directory
+ * holds no app, where the line is "No apps found" or the problems alone.
+ */
+export function foundAppsLine(names: string[]): string | null {
+  if (names.length === 0) return null;
+  if (names.length === 1) return `Found ${names[0]}`;
+  if (names.length === 2) return `Found ${names[0]} and ${names[1]}`;
+  const more = names.length - 2;
+  return `Found ${names[0]}, ${names[1]}, and ${more} more ${more === 1 ? "app" : "apps"}`;
+}
+
+function DirStatus({ status }: { status: ScannedDir | undefined }) {
+  if (!status) return null;
+  const found = foundAppsLine(status.apps.map((a) => a.name));
+  return (
+    <div className="flex flex-col gap-0.5 text-xs text-muted-foreground">
+      {found ? <p>{found}</p> : status.problems.length === 0 && <p>No apps found</p>}
+      {status.problems.map((p) => (
+        <p key={p.dir + p.reason} className="text-amber-700 dark:text-amber-400">
+          {p.reason}
+        </p>
+      ))}
+    </div>
   );
 }
 
 function AppDiscoveryModal({
   open,
   onOpenChange,
+  scanned,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  scanned: ScannedDir[] | null;
 }) {
   const [dirs, setDirs] = useState<string[] | null>(null);
   const [newDir, setNewDir] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  // What the last added directory contributed, so an author who picked the
-  // wrong folder hears so at once rather than seeing nothing change.
-  const [report, setReport] = useState<{
-    dir: string;
-    appCount: number;
-    problems: ScanProblem[];
-  } | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
@@ -73,10 +141,9 @@ function AppDiscoveryModal({
     if (open) load();
   }, [open, load]);
 
-  const save = useCallback(async (next: string[]): Promise<boolean> => {
+  const save = useCallback(async (next: string[]) => {
     setSaving(true);
     setError(null);
-    setReport(null);
     try {
       const res = await fetch("/api/config", {
         method: "PATCH",
@@ -86,10 +153,8 @@ function AppDiscoveryModal({
       if (!res.ok) throw new Error(`config save failed: ${res.status}`);
       setDirs(next);
       window.dispatchEvent(new Event(APPS_CHANGED_EVENT));
-      return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-      return false;
     } finally {
       setSaving(false);
     }
@@ -102,21 +167,7 @@ function AppDiscoveryModal({
       return;
     }
     setNewDir("");
-    void save([...(dirs ?? []), d]).then(async (saved) => {
-      if (!saved) return;
-      try {
-        const res = await fetch("/api/apps/list");
-        if (!res.ok) return;
-        const body = (await res.json()) as AppList;
-        setReport({
-          dir: d,
-          appCount: body.dirs.find((x) => x.dir === d)?.appCount ?? 0,
-          problems: body.problems.filter((p) => p.configuredDir === d),
-        });
-      } catch {
-        // The list itself reports on the Dashboard; the dialog stays quiet.
-      }
-    });
+    save([...(dirs ?? []), d]);
   };
 
   const remove = (d: string) => save((dirs ?? []).filter((x) => x !== d));
@@ -127,9 +178,8 @@ function AppDiscoveryModal({
         <DialogHeader>
           <DialogTitle>App discovery</DialogTitle>
           <DialogDescription>
-            Directories scanned for apps. A directory holding a{" "}
-            <code className="text-xs">starkeep.manifest.json</code> is an app; any other directory
-            is scanned for app subdirectories.
+            A directory that holds a <code className="text-xs">starkeep.manifest.json</code> is one
+            app, and in any other directory each subdirectory with a manifest is an app.
           </DialogDescription>
         </DialogHeader>
 
@@ -149,8 +199,11 @@ function AppDiscoveryModal({
         ) : (
           <ul className="flex flex-col gap-2">
             {dirs.map((d) => (
-              <li key={d} className="flex items-center justify-between gap-2 rounded-md border p-2">
-                <code className="min-w-0 flex-1 truncate text-xs">{d}</code>
+              <li key={d} className="flex items-start justify-between gap-2 rounded-md border p-2">
+                <div className="flex min-w-0 flex-1 flex-col gap-1">
+                  <code className="truncate text-xs">{d}</code>
+                  <DirStatus status={scanned?.find((x) => x.dir === d)} />
+                </div>
                 <Button
                   size="sm"
                   variant="ghost"
@@ -167,7 +220,7 @@ function AppDiscoveryModal({
 
         <div className="flex gap-2">
           <Input
-            placeholder="/path/to/app-parent-dir  (or ~/...)"
+            placeholder="~/starkeep-apps"
             className="h-8 text-sm"
             value={newDir}
             onChange={(e) => setNewDir(e.target.value)}
@@ -180,26 +233,6 @@ function AppDiscoveryModal({
             Add directory
           </Button>
         </div>
-
-        {report && (
-          <div className="flex flex-col gap-1 text-sm">
-            <p>
-              {report.appCount === 0
-                ? "No app found in "
-                : `Found ${report.appCount} ${report.appCount === 1 ? "app" : "apps"} in `}
-              <code className="text-xs">{report.dir}</code>.
-            </p>
-            {report.problems.length > 0 && (
-              <ul className="flex flex-col gap-1 text-muted-foreground">
-                {report.problems.map((p) => (
-                  <li key={p.dir}>
-                    <code className="text-xs break-all">{p.dir}</code>: {p.reason}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
       </DialogContent>
     </Dialog>
   );

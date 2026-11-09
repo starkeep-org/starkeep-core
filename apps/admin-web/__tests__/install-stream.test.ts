@@ -17,7 +17,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { jsonRequest, makeDataDir } from "./helpers";
+import { jsonRequest, makeAppDir, makeDataDir, testAppManifest } from "./helpers";
 import { lastChild, resetSpawns, spawnedChildren, type FakeChild } from "./fake-spawn";
 import { lines, readSse } from "./sse";
 
@@ -29,6 +29,12 @@ vi.mock("node:child_process", async (importOriginal) => ({
 const dataDir = makeDataDir("adminweb-install-stream-");
 const configPath = join(dataDir, "config.json");
 process.env.STARKEEP_DIR = dataDir;
+
+// The apps an app install can name. The route resolves the app's folder and
+// passes it to the installer with --app-dir.
+const appsDir = join(dataDir, "apps");
+const photosDir = makeAppDir(appsDir, "photos", testAppManifest({ id: "photos", name: "Photos" }));
+const diceDir = makeAppDir(appsDir, "dice", testAppManifest({ id: "dice", name: "Dice" }));
 
 /** Everything the two later passes require of the earlier one. */
 const FULL_CONFIG = {
@@ -42,6 +48,7 @@ const FULL_CONFIG = {
   authorizerId: "auth123",
   sessionAuthorizerId: "sess123",
   apiGatewayExecutionArn: "arn:aws:execute-api:us-east-2:1:gw123",
+  appParentDirs: [appsDir],
 };
 
 function writeConfig(config: unknown): void {
@@ -215,23 +222,39 @@ describe("an app install", () => {
   it("reads the app id from the path and passes it to the installer", async () => {
     // The id arrives as a promise of the route parameters. A router change
     // reshapes that argument, and nothing else would catch a mis-wire.
-    const res = await appInstall({ appId: "memo" });
+    const res = await appInstall({ appId: "dice" });
     const child = lastChild();
     expect(child.args).toEqual([
       "--filter",
       "@starkeep/admin-installer",
       "cli:install-app",
-      "memo",
+      "dice",
       "--non-interactive",
+      "--app-dir",
+      diceDir,
     ]);
     await finish(res, child);
   });
 
   it("names the app in its done event, so a client can tell two installs apart", async () => {
-    const res = await appInstall({ appId: "memo" });
+    const res = await appInstall({ appId: "dice" });
     const events = await finish(res, lastChild());
     expect(events.at(-1)!.event).toBe("done");
-    expect(JSON.parse(events.at(-1)!.data)).toEqual({ appId: "memo" });
+    expect(JSON.parse(events.at(-1)!.data)).toEqual({ appId: "dice" });
+  });
+
+  it("passes the folder the scan found, so the installer deploys the copy the Dashboard shows", async () => {
+    const res = await appInstall({ appId: "photos" });
+    const child = lastChild();
+    expect(child.args.slice(5, 7)).toEqual(["--app-dir", photosDir]);
+    await finish(res, child);
+  });
+
+  it("refuses an app the scan does not find, and spawns nothing", async () => {
+    const res = await appInstall({ appId: "no-such-app" });
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: string }).error).toContain("no-such-app");
+    expect(spawnedChildren()).toHaveLength(0);
   });
 
   it.each([
@@ -245,7 +268,7 @@ describe("an app install", () => {
   ])("passes surfaces %j to the installer as %j", async (surfaces, flags) => {
     const res = await appInstall({ appId: "photos", surfaces });
     const child = lastChild();
-    expect(child.args.slice(5)).toEqual(flags);
+    expect(child.args.slice(7)).toEqual(flags);
     await finish(res, child);
   });
 
@@ -253,7 +276,10 @@ describe("an app install", () => {
     const res = await appInstall({ appId: "photos" });
     const child = lastChild();
     expect(
-      child.args.filter((a) => a.startsWith("--") && a !== "--filter" && a !== "--non-interactive"),
+      child.args.filter(
+        (a) =>
+          a.startsWith("--") && a !== "--filter" && a !== "--non-interactive" && a !== "--app-dir",
+      ),
     ).toEqual([]);
     await finish(res, child);
   });
@@ -261,7 +287,7 @@ describe("an app install", () => {
   it("ignores a surface it does not know rather than passing it on", async () => {
     const res = await appInstall({ appId: "photos", surfaces: ["desktop", "mobile"] });
     const child = lastChild();
-    expect(child.args.slice(5)).toEqual(["--mobile"]);
+    expect(child.args.slice(7)).toEqual(["--mobile"]);
     await finish(res, child);
   });
 
@@ -276,7 +302,7 @@ describe("an app install", () => {
 describe("the one run slot every cloud app install shares", () => {
   it.each([
     ["another surface of the same app", { appId: "photos", surfaces: ["mobile"] }],
-    ["another app", { appId: "memo", surfaces: ["web"] }],
+    ["another app", { appId: "dice", surfaces: ["web"] }],
     ["the same app with every surface", { appId: "photos" }],
   ])(
     "answers a POST mid-run for %s with a 409 naming the running install",
@@ -316,7 +342,7 @@ describe("the one run slot every cloud app install shares", () => {
     const second = await appInstall({ appId: "photos", surfaces: ["mobile"] });
     expect(second.status).toBe(200);
     expect(spawnedChildren()).toHaveLength(2);
-    expect(lastChild().args.slice(5)).toEqual(["--mobile"]);
+    expect(lastChild().args.slice(7)).toEqual(["--mobile"]);
     await finish(second, lastChild());
   });
 });

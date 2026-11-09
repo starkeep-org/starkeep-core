@@ -31,7 +31,7 @@ beforeAll(async () => {
   mkdirSync(parent, { recursive: true });
   writeAdminConfig(dataDir, { appParentDirs: [parent] });
   makeAppDir(parent, "inst", testAppManifest({ id: "inst-app", name: "Installable" }));
-  // Scans fine (valid JSON) but fails the LDS validator (no name/version/tier).
+  // Valid JSON that fails the manifest validator (no name/version/tier).
   makeAppDir(parent, "invalid", { id: "invalid-app" });
 
   lds = await startLocalDataServer();
@@ -119,12 +119,11 @@ describe("successful install", () => {
 });
 
 describe("local-data-server error paths", () => {
-  it("forwards the LDS validator rejection for a manifest that scans but fails validation", async () => {
+  it("refuses an app whose manifest fails validation, because the scan never offers it", async () => {
+    // The scan runs the validator Install runs, so Discover apps reports the
+    // manifest and the Dashboard shows no card to install.
     const res = await install({ appId: "invalid-app", approved: true });
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string; details: string[] };
-    expect(body.error).toBe("The app's manifest failed validation.");
-    expect(body.details.length).toBeGreaterThan(0);
+    expect(res.status).toBe(404);
   });
 
   it("returns 502 when the local-data-server is unreachable", async () => {

@@ -11,18 +11,24 @@ export type AppTarget = "local" | "cloud";
  */
 export type AppSurface = "web" | "mobile";
 
-/** A folder app discovery skipped, as `/api/apps/list` reports it. */
+/**
+ * A folder app discovery skipped, as `/api/apps/list` reports it. Mirrors
+ * admin-installer's `ScanProblem`, which browser code cannot import.
+ */
 export interface ScanProblem {
   /** The configured directory the folder was found under, as configured. */
   configuredDir: string;
   dir: string;
+  /** A complete sentence, shown as is. */
   reason: string;
 }
 
 /** What one configured directory contributed to the app list. */
 export interface ScannedDir {
+  /** As configured, before `~` expands. */
   dir: string;
-  appCount: number;
+  apps: Array<{ appId: string; name: string }>;
+  problems: ScanProblem[];
 }
 
 /** The body of `GET /api/apps/list`. */

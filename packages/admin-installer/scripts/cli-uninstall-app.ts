@@ -7,14 +7,16 @@
  * records the app created are deliberately left in place (they belong to the
  * user, not the app).
  *
- * The manifest is still resolved from the app's source dir (same discovery as
- * install) because the uninstall DDL needs the declared app-specific tables.
+ * The manifest is still resolved from the app's source dir (`--app-dir`, or
+ * the same discovery as install) because the uninstall DDL needs the declared
+ * app-specific tables.
  *
  * Usage:
  *   pnpm --filter @starkeep/admin-installer cli:uninstall-app <appId>
  *   pnpm --filter @starkeep/admin-installer cli:uninstall-app <appId> --non-interactive
  *   pnpm --filter @starkeep/admin-installer cli:uninstall-app <appId> --web
  *   pnpm --filter @starkeep/admin-installer cli:uninstall-app <appId> --mobile
+ *   pnpm --filter @starkeep/admin-installer cli:uninstall-app <appId> --app-dir <folder>
  *
  * `--web` removes only the cloud web app (its compute), and `--mobile` only the
  * mobile app (its Android identity and sign-in callback). Either keeps the
@@ -38,12 +40,20 @@ import {
 import { prompt } from "../src/cli-prompt";
 import {
   loadStarkeepCliConfig,
-  resolveAppDir,
+  appDirFor,
   deriveInstallerArns,
+  takeAppDirFlag,
   starkeepConfigPath,
 } from "../src/app-cli-config";
 
-const flags = process.argv.slice(2);
+let flags: string[];
+let appDirFlag: string | undefined;
+try {
+  ({ appDir: appDirFlag, rest: flags } = takeAppDirFlag(process.argv.slice(2)));
+} catch (err) {
+  console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+}
 const nonInteractive = flags.includes("--non-interactive");
 // The surfaces to remove; none named removes the app entirely.
 const surfaces: AppSurface[] = [
@@ -53,7 +63,9 @@ const surfaces: AppSurface[] = [
 const appId = flags.find((f) => !f.startsWith("--"));
 
 if (!appId) {
-  console.error("Usage: cli:uninstall-app <appId> [--non-interactive] [--web] [--mobile]");
+  console.error(
+    "Usage: cli:uninstall-app <appId> [--non-interactive] [--web] [--mobile] [--app-dir <folder>]",
+  );
   process.exit(1);
 }
 
@@ -134,7 +146,7 @@ const {
 
 let appDir: string;
 try {
-  appDir = resolveAppDir(config, appId);
+  appDir = appDirFor(config, appId, appDirFlag);
 } catch (err) {
   console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);

@@ -26,9 +26,11 @@
 #   scripts/upgrade-app.sh --diff             # every installed app
 #   STARKEEP_PORT=9821 scripts/upgrade-app.sh photos
 #
-# Apps are resolved the way admin-web resolves them: each `appParentDirs` entry
-# in ~/.starkeep/config.json is scanned one level deep for a directory holding a
-# `starkeep.manifest.json`, first parent wins. The data server must be running —
+# Apps are resolved the way admin-web resolves them (`scanApps` in
+# packages/admin-installer/src/app-discovery.ts): an `appParentDirs` entry in
+# ~/.starkeep/config.json that holds a `starkeep.manifest.json` is one app, and
+# any other entry is scanned one level deep, skipping node_modules and
+# dot-folders. The first folder wins. The data server must be running —
 # `/admin/apps/install` is localhost-only and takes no HMAC, and going through
 # it rather than writing SQLite directly is what makes the server pick up the
 # change: it rescans the sync supervisor and refreshes the size-class keys.
@@ -93,7 +95,14 @@ except (OSError, ValueError):
 for parent in parents:
     if not parent.is_dir():
         continue
-    for app_dir in sorted(parent.iterdir()):
+    if (parent / "starkeep.manifest.json").is_file():
+        candidates = [parent]
+    else:
+        candidates = [
+            d for d in sorted(parent.iterdir())
+            if d.name != "node_modules" and not d.name.startswith(".")
+        ]
+    for app_dir in candidates:
         manifest_path = app_dir / "starkeep.manifest.json"
         if not (app_dir.is_dir() and manifest_path.is_file()):
             continue
