@@ -24,6 +24,7 @@ import * as appsInstall from "./routes/apps-install";
 import * as appsUninstall from "./routes/apps-uninstall";
 import * as appsCloudList from "./routes/apps-cloud-list";
 import * as appsCloudInstall from "./routes/apps-cloud-install";
+import * as appsDependencies from "./routes/apps-dependencies";
 import * as appsInstallStatus from "./routes/apps-install-status";
 import * as cloudDataServerInstall from "./routes/cloud-data-server-install";
 import * as cognitoOutputs from "./routes/cognito-outputs";
@@ -59,6 +60,13 @@ api.post("/public-shares/drive-capability", (c) => publicShares.driveCapability(
 // stated in both places rather than relying on either alone.
 api.post("/apps/:appId/cloud-install", (c) =>
   appsCloudInstall.POST(c.req.raw, { params: Promise.resolve(c.req.param()) }),
+);
+// The dependency install Install runs first: which command, then the run.
+api.get("/apps/:appId/dependencies", (c) =>
+  appsDependencies.GET(c.req.raw, { params: Promise.resolve(c.req.param()) }),
+);
+api.post("/apps/:appId/dependencies", (c) =>
+  appsDependencies.POST(c.req.raw, { params: Promise.resolve(c.req.param()) }),
 );
 api.get("/apps/:appId/install-status", (c) =>
   appsInstallStatus.GET(c.req.raw, { params: Promise.resolve(c.req.param()) }),

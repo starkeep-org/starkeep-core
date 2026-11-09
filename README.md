@@ -45,15 +45,15 @@ The cloud setup (Part B) also needs an AWS account. The setup wizard explains ho
 
 ### 1. Install dependencies
 
-1. Run the following command at the root of `starkeep-core`:
+Run the following command at the root of `starkeep-core`:
 
-   ```sh
-   pnpm install
-   ```
+```sh
+pnpm install
+```
 
-   The install also builds the workspace packages. To rebuild later without reinstalling, run `pnpm build`.
+The install also builds the workspace packages. To rebuild later without reinstalling, run `pnpm build`.
 
-2. Run the same command in `starkeep-core/example-app` and at the root of `starkeep-apps`. Installed apps run straight out of their source folders, so each app's dependencies must be present before admin-web can start the app.
+Admin installs each app's dependencies when you install the app, so apps such as Photos and the Example App need no separate install step.
 
 ### 2. Start Starkeep Admin
 

@@ -54,7 +54,16 @@ describe("missingDependencies", () => {
     const result = missingDependencies("dice", app);
     expect(result?.missing).toEqual(["hono"]);
     expect(result?.message).toContain("1 dependency is not installed (hono)");
-    expect(result?.message).toContain(`not listed in that workspace's pnpm-workspace.yaml`);
+    expect(result?.message).toContain(`inside the pnpm workspace at ${ws}, which does not list it`);
+    expect(result?.message).toContain(`Run \`pnpm install --ignore-workspace\` in ${app}.`);
+  });
+
+  it("sends an app its workspace lists to the workspace root", () => {
+    const ws = mkdtempSync(join(tmpdir(), "deps-listed-"));
+    writeFileSync(join(ws, "pnpm-workspace.yaml"), 'packages:\n  - "photos"\n');
+    const app = dir(ws, "photos");
+    writeJson(join(app, "package.json"), { dependencies: { hono: "^4.0.0" } });
+    expect(missingDependencies("photos", app)?.message).toContain(`Run \`pnpm install\` in ${ws}.`);
   });
 
   it("checks from the nearest package.json above a localRun cwd", () => {

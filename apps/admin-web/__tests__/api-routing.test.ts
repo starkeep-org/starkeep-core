@@ -42,6 +42,7 @@ vi.mock("../src/routes/apps-uninstall", () => spy("apps-uninstall", ["POST"]));
 vi.mock("../src/routes/apps-cloud-list", () => spy("apps-cloud-list", ["POST"]));
 vi.mock("../src/routes/apps-cloud-install", () => spy("apps-cloud-install", ["POST"]));
 vi.mock("../src/routes/apps-install-status", () => spy("apps-install-status", ["GET"]));
+vi.mock("../src/routes/apps-dependencies", () => spy("apps-dependencies", ["GET", "POST"]));
 vi.mock("../src/routes/cloud-data-server-install", () =>
   spy("cloud-data-server-install", ["POST"]),
 );
@@ -107,6 +108,8 @@ const ROUTES: Array<[string, string, string, string]> = [
   ["POST", "/api/public-shares/drive-capability", "public-shares", "driveCapability"],
   ["POST", "/api/apps/photos/cloud-install", "apps-cloud-install", "POST"],
   ["GET", "/api/apps/photos/install-status", "apps-install-status", "GET"],
+  ["GET", "/api/apps/photos/dependencies", "apps-dependencies", "GET"],
+  ["POST", "/api/apps/photos/dependencies", "apps-dependencies", "POST"],
   ["POST", "/api/cloud-data-server/install", "cloud-data-server-install", "POST"],
   ["GET", "/api/config", "config", "GET"],
   ["PATCH", "/api/config", "config", "PATCH"],

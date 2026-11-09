@@ -57,9 +57,9 @@ pnpm typecheck
 pnpm test
 ```
 
-admin-web shows this app by default, because a new install registers this folder in **Discover apps**. Run `pnpm install` here first, then install and start the app from admin-web. To run a copy, add the copy's folder in **Discover apps**. The manifest's `localRun` runs `pnpm start` in `web/`, which builds the page and serves it.
+admin-web shows this app by default, because a new install registers this folder in **Discover apps**. Install and start the app from admin-web; Install runs `pnpm install --frozen-lockfile` here first. To run a copy, add the copy's folder in **Discover apps**. The manifest's `localRun` runs `pnpm start` in `web/`, which builds the page and serves it.
 
-To install it to your cloud, use admin-web's cloud install. The installer runs `pnpm bundle` here. The cloud's data server must know the `example` category, so a cloud deployed before the category existed needs a redeploy first. Until then, the install fails with "Unknown type id: example/plaintext".
+To install it to your cloud, use admin-web's cloud install. The installer runs `pnpm install --frozen-lockfile` and then `pnpm run bundle` here. The cloud's data server must know the `example` category, so a cloud deployed before the category existed needs a redeploy first. Until then, the install fails with "Unknown type id: example/plaintext".
 
 ## Testing it
 

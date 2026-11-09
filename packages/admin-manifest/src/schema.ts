@@ -390,6 +390,20 @@ export const localRunSchema = z.object({
 });
 
 /**
+ * A command admin-web runs in the app's folder at install: `installDependencies`
+ * installs the app's packages before Install registers it, and `bundle` builds
+ * the cloud bundle. Each must match the installer's approved command list, and
+ * admin-web never passes it through a shell. Omitted, the installer infers the
+ * command from the lockfile in `cwd`.
+ */
+export const installCommandSchema = z.object({
+  command: z.string().min(1),
+  args: z.array(z.string()).default([]),
+  // Working directory relative to the manifest's directory. Defaults to ".".
+  cwd: z.string().default("."),
+});
+
+/**
  * One Android build of the app: the identity Android Key Attestation reports
  * for it. The cloud maps an attested key to the app whose package name and
  * signing certificate match, and then lets the key act only within that app's
@@ -436,6 +450,8 @@ export const appManifestSchema = z.object({
   optionalPermissions: z.array(permissionEntrySchema).default([]),
   infraRequirements: infraRequirementsSchema.default({}),
   localRun: localRunSchema.optional(),
+  installDependencies: installCommandSchema.optional(),
+  bundle: installCommandSchema.optional(),
   mobile: mobileSchema.optional(),
   homepage: z.string().url().optional(),
   author: z.string().optional(),
@@ -453,6 +469,7 @@ export type SyncableTableColumn = z.infer<typeof syncableTableColumnSchema>;
 export type SyncableTable = z.infer<typeof syncableTableSchema>;
 export type AppSpecificSyncable = z.infer<typeof appSpecificSyncableSchema>;
 export type LocalRun = z.infer<typeof localRunSchema>;
+export type InstallCommand = z.infer<typeof installCommandSchema>;
 export type PermissionEntry = z.infer<typeof permissionEntrySchema>;
 export type InfraRequirements = z.infer<typeof infraRequirementsSchema>;
 export type AndroidIdentity = z.infer<typeof androidIdentitySchema>;

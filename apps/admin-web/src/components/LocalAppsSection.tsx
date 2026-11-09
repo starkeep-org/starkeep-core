@@ -7,11 +7,14 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { ChevronDownIcon } from "lucide-react";
 import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
 import { APPS_CHANGED_EVENT } from "@/components/AppDiscovery";
+import { CommandOutput } from "@/components/CommandOutput";
+import { runInstallStream } from "@/lib/install-stream-client";
 import { ACTION_OCCASIONAL, ACTION_OPEN, ACTION_START } from "@/lib/action-colors";
 import {
   consentDiffers,
   publicSharingConsent,
   type DaemonStatus,
+  type DependencyPlan,
   type InstallStep,
   type LocalAppEntry,
   type ManifestSummary,
@@ -52,6 +55,15 @@ export function LocalAppsSection({
   // Why the last install failed, shown in the step-ledger dialog that the
   // failure opens. Cleared when the dialog closes.
   const [installFailure, setInstallFailure] = useState<InstallFailure | null>(null);
+  // A command Install would not run, for the user to run by hand.
+  const [notice, setNotice] = useState<string | null>(null);
+  // The dependency install Install runs before it registers an app.
+  const [depsRun, setDepsRun] = useState<{
+    name: string;
+    display: string;
+    lines: string[];
+    status: "running" | "failure";
+  } | null>(null);
   // Per-app pending transition. We keep this set until the polled status
   // reflects the target state (running for "start", not-running for "stop"),
   // so the spinner survives the first poll round.
@@ -168,6 +180,10 @@ export function LocalAppsSection({
       setStepsOpenFor(entry.appId);
     };
     try {
+      if (!(await installDependencies(entry))) {
+        setBusyAppId(null);
+        return;
+      }
       const res = await fetch("/api/apps/install", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -219,6 +235,48 @@ export function LocalAppsSection({
     }
   };
 
+  // Install the app's dependencies with the approved command, streaming its
+  // output. False when the command ran and failed: the install stops there.
+  // A command off the approved list does not run; the notice names it, and
+  // Start's dependency check catches what it would have installed.
+  const installDependencies = async (entry: LocalAppEntry): Promise<boolean> => {
+    const name = entry.manifest.name ?? entry.appId;
+    const endpoint = `/api/apps/${encodeURIComponent(entry.appId)}/dependencies`;
+    setNotice(null);
+    const planRes = await fetch(endpoint);
+    if (!planRes.ok) {
+      const data = (await planRes.json().catch(() => null)) as { error?: string } | null;
+      setError(data?.error ?? `dependency check failed: ${planRes.status}`);
+      return false;
+    }
+    const plan = (await planRes.json()) as DependencyPlan;
+    if (plan.kind === "skip") return true;
+    if (plan.kind === "refused") {
+      setNotice(
+        `Install did not run \`${plan.display}\`: ${plan.reason} Run it yourself in ${plan.cwd} before you start ${name}.`,
+      );
+      return true;
+    }
+    setDepsRun({ name, display: plan.display, lines: [], status: "running" });
+    const outcome = await runInstallStream(
+      endpoint,
+      {},
+      {
+        onLine: (line) =>
+          setDepsRun((run) => (run ? { ...run, lines: [...run.lines, line] } : run)),
+      },
+    );
+    if (outcome.kind === "done") {
+      // Success needs no reading; the output stays up only to explain a failure.
+      setDepsRun(null);
+      return true;
+    }
+    setDepsRun((run) =>
+      run ? { ...run, status: "failure", lines: [...run.lines, `Error: ${outcome.message}`] } : run,
+    );
+    return false;
+  };
+
   // Apply the manifest an installed app's pinned folder holds now. New file
   // access or public links go through the consent dialog; anything else reinstalls at once,
   // which reapplies every idempotent install step.
@@ -262,6 +320,13 @@ export function LocalAppsSection({
         <Alert variant="destructive">
           <AlertTitle>Error</AlertTitle>
           <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+
+      {notice && (
+        <Alert>
+          <AlertTitle>Dependencies not installed</AlertTitle>
+          <AlertDescription>{notice}</AlertDescription>
         </Alert>
       )}
 
@@ -482,6 +547,23 @@ export function LocalAppsSection({
         />
       )}
 
+      <Dialog
+        open={depsRun !== null}
+        onOpenChange={(open) => {
+          if (!open && depsRun?.status !== "running") setDepsRun(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>Installing {depsRun?.name}&rsquo;s dependencies</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">
+            <code className="text-xs">{depsRun?.display}</code>
+          </p>
+          <CommandOutput lines={depsRun?.lines ?? []} status={depsRun?.status ?? "idle"} />
+        </DialogContent>
+      </Dialog>
+
       <InstallStepsDialog
         appId={stepsOpenFor}
         failure={installFailure?.appId === stepsOpenFor ? installFailure : null}
@@ -687,6 +769,7 @@ function ConsentModal({
   const allAccess = entry.manifest.infraRequirements?.fileAccessAll ?? false;
   const quality = useQualityStep(entry.manifest);
   const [saving, setSaving] = useState(false);
+  const dependencies = useDependencyPlan(entry.appId);
 
   const approve = async () => {
     if (quality && !draftsEqual(quality.draft, draftOf(quality.state.current))) {
@@ -762,6 +845,21 @@ function ConsentModal({
           </div>
         )}
 
+        {dependencies?.kind === "run" && (
+          <p className="text-sm text-muted-foreground">
+            Install runs <code className="text-xs">{dependencies.display}</code> in{" "}
+            <code className="text-xs break-all">{dependencies.cwd}</code>, which runs the
+            app&rsquo;s own install scripts.
+          </p>
+        )}
+        {dependencies?.kind === "refused" && (
+          <p className="text-sm text-muted-foreground">
+            Install will not run <code className="text-xs">{dependencies.display}</code>:{" "}
+            {dependencies.reason} Run it yourself in{" "}
+            <code className="text-xs break-all">{dependencies.cwd}</code>.
+          </p>
+        )}
+
         {quality && (
           <div className="border-t pt-4 flex flex-col gap-3">
             <h4 className="text-sm font-medium">Quality kept when originals archive</h4>
@@ -802,6 +900,24 @@ function ConsentModal({
       </div>
     </div>
   );
+}
+
+/** The dependency command Install would run for `appId`, or null before the answer. */
+function useDependencyPlan(appId: string): DependencyPlan | null {
+  const [plan, setPlan] = useState<DependencyPlan | null>(null);
+  useEffect(() => {
+    let live = true;
+    fetch(`/api/apps/${encodeURIComponent(appId)}/dependencies`)
+      .then(async (res) => (res.ok ? ((await res.json()) as DependencyPlan) : null))
+      .then((p) => live && setPlan(p))
+      .catch(() => {
+        // The dialog shows no command line; Install reports any failure.
+      });
+    return () => {
+      live = false;
+    };
+  }, [appId]);
+  return plan;
 }
 
 /**

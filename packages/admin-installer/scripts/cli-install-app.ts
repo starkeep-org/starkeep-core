@@ -5,9 +5,12 @@
  * Generic across cloud apps: this script owns the platform-side orchestration
  * (Cognito auth, config load, ARN derivation, manifest validation, the
  * installApp state machine). The app-specific bundle build lives in the app
- * itself — this script invokes it via the convention:
+ * itself. For a web app, this script first installs the app's dependencies,
+ * then runs its bundle command: the manifest's `installDependencies` and
+ * `bundle`, or the commands its lockfile implies (`<manager> run bundle`),
+ * each checked against the approved list in src/approved-commands.ts:
  *
- *   pnpm bundle   (run in the app's source dir)
+ *   <manager> run bundle   (run in the app's source dir)
  *     env in:  STARKEEP_APP_BASE_PATH = /apps/<appId>
  *              STARKEEP_BUNDLE_OUT    = <abs path to write dist.zip>
  *     out:     app writes dist.zip to STARKEEP_BUNDLE_OUT
@@ -62,22 +65,48 @@ import {
   getIdentityPoolCredentials,
 } from "../src/cognito-auth";
 import { prompt } from "../src/cli-prompt";
+import type { CommandResolution } from "../src/approved-commands";
 import {
   loadStarkeepCliConfig,
   appDirFor,
+  cloudBuildCommands,
   deriveInstallerArns,
   takeAppDirFlag,
   starkeepConfigPath,
 } from "../src/app-cli-config";
 
-function buildAppBundle(appDir: string, appBasePath: string): Buffer {
+function installAppDependencies(install: CommandResolution): void {
+  if (install.kind === "skip") return;
+  if (install.kind === "refused") {
+    console.warn(
+      `\nWarning: not running the manifest's install command \`${install.display}\`: ${install.reason} ` +
+        `Run it yourself in ${install.cwd} if the bundle build needs it.`,
+    );
+    return;
+  }
+  console.log(`\nInstalling dependencies (${install.display} in ${install.cwd})…`);
+  const result = spawnSync(install.command, install.args, {
+    cwd: install.cwd,
+    stdio: "inherit",
+    env: process.env,
+  });
+  if (result.status !== 0) {
+    console.error(`Dependency install failed (${install.display} exited ${result.status}).`);
+    process.exit(result.status ?? 1);
+  }
+}
+
+function buildAppBundle(
+  bundle: Extract<CommandResolution, { kind: "run" }>,
+  appBasePath: string,
+): Buffer {
   const stagingDir = join(tmpdir(), `starkeep-app-bundle-${Date.now()}`);
   const distZip = join(stagingDir, "dist.zip");
   try {
     mkdirSync(stagingDir, { recursive: true });
-    console.log(`\nBuilding app bundle (pnpm bundle in ${appDir})…`);
-    const result = spawnSync("pnpm", ["bundle"], {
-      cwd: appDir,
+    console.log(`\nBuilding app bundle (${bundle.display} in ${bundle.cwd})…`);
+    const result = spawnSync(bundle.command, bundle.args, {
+      cwd: bundle.cwd,
       stdio: "inherit",
       env: {
         ...process.env,
@@ -87,7 +116,7 @@ function buildAppBundle(appDir: string, appBasePath: string): Buffer {
     });
     if (result.status !== 0) {
       console.error(
-        `App bundle build failed (pnpm bundle exited ${result.status}). ` +
+        `App bundle build failed (${bundle.display} exited ${result.status}). ` +
           `Cloud-installable apps must provide a "bundle" script that writes ` +
           `dist.zip to STARKEEP_BUNDLE_OUT.`,
       );
@@ -103,7 +132,10 @@ function buildAppBundle(appDir: string, appBasePath: string): Buffer {
   }
 }
 
-function prepareWebApp(): Buffer {
+function prepareWebApp(build: {
+  install: CommandResolution;
+  bundle: Extract<CommandResolution, { kind: "run" }>;
+}): Buffer {
   // Print the anonymous surface before doing any work, so it is visible whether
   // or not the install goes on to succeed. `validateManifest` has already
   // refused an undeclared anonymous catch-all, so anything printed here is
@@ -155,10 +187,11 @@ function prepareWebApp(): Buffer {
     }
   }
 
-  // Build the app bundle via the app's own `pnpm bundle` script. The base path
-  // /apps/<appId> is the platform's routing convention (the shared API Gateway
-  // forwards requests under it; see pulumi-program).
-  const zip = buildAppBundle(appDir, `/apps/${appId}`);
+  // Install the app's dependencies, then build the bundle with its own
+  // script. The base path /apps/<appId> is the platform's routing convention
+  // (the shared API Gateway forwards requests under it; see pulumi-program).
+  installAppDependencies(build.install);
+  const zip = buildAppBundle(build.bundle, `/apps/${appId}`);
   console.log(`\nBundle size: ${(zip.length / 1024 / 1024).toFixed(1)} MB`);
   return zip;
 }
@@ -299,6 +332,14 @@ for (const surface of surfaces) {
   }
 }
 const installsWeb = surfaces.includes("web");
+// Checked before anything deploys: a web app without an approved bundle
+// command has nothing to deploy.
+const resolvedBuild = installsWeb ? cloudBuildCommands(appDir, manifest) : null;
+if (resolvedBuild && !resolvedBuild.ok) {
+  console.error(`Error: ${resolvedBuild.message}`);
+  process.exit(1);
+}
+const buildCommands = resolvedBuild?.ok ? resolvedBuild : null;
 if (surfaces.includes("mobile") && !config.mobileAppsUserPoolClientId) {
   console.error(
     `Error: ${starkeepConfigPath()} has no mobileAppsUserPoolClientId. ` +
@@ -317,7 +358,7 @@ console.log("");
 
 // The web app's preparation: its anonymous surface, its handlers' platform
 // env and its bundle. A data-side or mobile install needs none of it.
-const zipBuffer = installsWeb ? prepareWebApp() : undefined;
+const zipBuffer = buildCommands ? prepareWebApp(buildCommands) : undefined;
 
 console.log(`\nInstalling ${appId} app…\n`);
 // Registry writes authenticate to DSQL as the admin-app IAM role (mapped to

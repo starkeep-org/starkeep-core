@@ -233,6 +233,8 @@ describe("the install flow's quality step", () => {
       "GET /api/library/stand-in-standards": () => ({ body }),
       "PUT /api/deployment-settings": () => ({ body: { ok: true } }),
       "POST /api/apps/install": () => ({ body: { ok: true } }),
+      "GET /api/apps/photos/dependencies": () => ({ body: { kind: "skip", reason: "none" } }),
+      "GET /api/apps/notes/dependencies": () => ({ body: { kind: "skip", reason: "none" } }),
       "POST /api/apps/status": () => ({ body: {} }),
     });
   }

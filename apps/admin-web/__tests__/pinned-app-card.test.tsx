@@ -29,9 +29,14 @@ const installed: LocalAppEntry = {
 };
 
 let installs: unknown[] = [];
+let plan: unknown = { kind: "skip", reason: "The app's folder has no package.json." };
+/** The dependency stream's frames, or null for a stream that is never requested. */
+let depsStream: string | null = null;
+let depsPosts = 0;
 
 function serve() {
   installs = [];
+  depsPosts = 0;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: RequestInit) => {
@@ -39,6 +44,13 @@ function serve() {
         installs.push(JSON.parse(init!.body as string));
         return Response.json({ ok: true });
       }
+      if (url === "/api/apps/dice/dependencies" && init?.method === "POST") {
+        depsPosts++;
+        return new Response(depsStream ?? "", {
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
+      if (url === "/api/apps/dice/dependencies") return Response.json(plan);
       if (url.startsWith("/api/exec/daemon/status")) return Response.json({ running: false });
       return Response.json({});
     }),
@@ -48,6 +60,8 @@ function serve() {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  plan = { kind: "skip", reason: "The app's folder has no package.json." };
+  depsStream = null;
 });
 
 function show(entry: LocalAppEntry) {
@@ -205,5 +219,65 @@ describe("consentDiffers", () => {
         infraRequirements: { ...base.infraRequirements, publicSharing: false },
       }),
     ).toBe(false);
+  });
+});
+
+describe("the dependency install at Install", () => {
+  const notInstalled: LocalAppEntry = { ...installed, status: "not_installed" };
+
+  async function approve() {
+    const user = userEvent.setup();
+    show(notInstalled);
+    await user.click(screen.getByRole("button", { name: "Install Dice" }));
+    return user;
+  }
+
+  it("names the command and folder in the consent dialog", async () => {
+    plan = { kind: "run", display: "pnpm install --frozen-lockfile", cwd: "/apps/dice" };
+    serve();
+    await approve();
+    const line = await screen.findByText(/which runs the app.s own install scripts/);
+    expect(line.textContent).toBe(
+      "Install runs pnpm install --frozen-lockfile in /apps/dice, which runs the app\u2019s own install scripts.",
+    );
+  });
+
+  it("runs the command, then registers the app and closes its output", async () => {
+    plan = { kind: "run", display: "pnpm install --frozen-lockfile", cwd: "/apps/dice" };
+    depsStream = 'data: "Packages: +12"\n\n' + 'event: done\ndata: {"appId":"dice"}\n\n';
+    serve();
+    const user = await approve();
+    await user.click(await screen.findByRole("button", { name: "Approve & Install" }));
+    await vi.waitFor(() => expect(installs).toEqual([{ appId: "dice", approved: true }]));
+    expect(depsPosts).toBe(1);
+    expect(screen.queryByText(/Installing Dice.s dependencies/)).toBeNull();
+  });
+
+  it("stops before registering when the command fails", async () => {
+    plan = { kind: "run", display: "pnpm install --frozen-lockfile", cwd: "/apps/dice" };
+    depsStream = 'event: error\ndata: {"message":"`pnpm install` exited with code 1"}\n\n';
+    serve();
+    const user = await approve();
+    await user.click(await screen.findByRole("button", { name: "Approve & Install" }));
+    // The output stays up to explain the failure.
+    expect(await screen.findByText(/Installing Dice.s dependencies/)).toBeTruthy();
+    expect(await screen.findByText(/exited with code 1/)).toBeTruthy();
+    expect(installs).toEqual([]);
+  });
+
+  it("registers without running a refused command, and says what to run by hand", async () => {
+    plan = {
+      kind: "refused",
+      display: "make deps",
+      cwd: "/apps/dice",
+      reason: "make is not an approved package manager.",
+    };
+    serve();
+    const user = await approve();
+    expect(await screen.findByText(/Install will not run/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Approve & Install" }));
+    await vi.waitFor(() => expect(installs).toEqual([{ appId: "dice", approved: true }]));
+    expect(depsPosts).toBe(0);
+    expect(screen.getByText(/Run it yourself in \/apps\/dice before you start Dice/)).toBeTruthy();
   });
 });

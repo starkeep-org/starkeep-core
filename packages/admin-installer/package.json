@@ -7,6 +7,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./app-discovery": "./src/app-discovery.ts",
+    "./approved-commands": "./src/approved-commands.ts",
     "./app-creds": "./src/app-creds.ts",
     "./custom-domain": "./src/custom-domain.ts",
     "./session": "./src/session.ts"
