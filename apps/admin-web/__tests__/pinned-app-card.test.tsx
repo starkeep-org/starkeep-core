@@ -65,7 +65,9 @@ describe("a pinned folder that is gone", () => {
   it("names the folder, keeps Uninstall, and disables Start", async () => {
     serve();
     show({ ...installed, sourceState: "missing" });
-    expect(screen.getByText(/Source folder not found/).textContent).toContain("/apps/dice");
+    const note = screen.getByText(/Source folder not found/).textContent;
+    expect(note).toContain("/apps/dice");
+    expect(note).toContain("Uninstalling deletes its data on this machine.");
     expect((screen.getByRole("button", { name: "Start Dice" }) as HTMLButtonElement).disabled).toBe(
       true,
     );
@@ -73,6 +75,18 @@ describe("a pinned folder that is gone", () => {
     await user.click(screen.getByRole("button", { name: "More actions for Dice" }));
     expect(await screen.findByRole("menuitem", { name: "Uninstall" })).toBeTruthy();
     expect(screen.queryByRole("menuitem", { name: "Update from folder" })).toBeNull();
+  });
+
+  it("warns that Uninstall deletes the app's data on this machine, and uninstalls nothing on cancel", async () => {
+    serve();
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirm);
+    show({ ...installed, sourceState: "missing" });
+    await chooseFromMenu("Uninstall");
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining("This deletes Dice's own data on this machine"),
+    );
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => url)).not.toContain("/api/apps/uninstall");
   });
 });
 
