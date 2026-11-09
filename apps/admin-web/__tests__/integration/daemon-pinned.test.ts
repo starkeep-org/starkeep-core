@@ -18,6 +18,7 @@ let daemonPOST: (req: Request) => Promise<Response>;
 let lds: LocalDataServer;
 let pinnedDir: string;
 let goneDir: string;
+let changedDir: string;
 
 /** An app folder whose server answers with `label`, so a test can tell copies apart. */
 function serverApp(parent: string, dir: string, id: string, label: string): string {
@@ -63,6 +64,9 @@ beforeAll(async () => {
 
   goneDir = serverApp(dataDir, "gone", "gone-app", "gone");
 
+  // Its folder's manifest changes after install to run a second server.
+  changedDir = serverApp(join(dataDir, "elsewhere"), "changed", "changed-app", "approved copy");
+
   lds = await startLocalDataServer();
   process.env.STARKEEP_DIR = dataDir;
   process.env.STARKEEP_LOCAL_DATA_SERVER_URL = lds.url;
@@ -75,12 +79,29 @@ beforeAll(async () => {
   await install(manifestOf("legacy-app"));
   await install(manifestOf("gone-app"), goneDir);
   rmSync(goneDir, { recursive: true });
+  await install(manifestOf("changed-app"), changedDir);
+  writeFileSync(
+    join(changedDir, "starkeep.manifest.json"),
+    JSON.stringify(
+      testAppManifest({
+        id: "changed-app",
+        localRun: { command: process.execPath, args: ["unapproved.mjs"], portFlag: "--port" },
+      }),
+    ),
+  );
+  writeFileSync(
+    join(changedDir, "unapproved.mjs"),
+    `import { createServer } from "node:http";
+const port = Number(process.argv[process.argv.indexOf("--port") + 1]);
+createServer((req, res) => res.end("unapproved")).listen(port, "127.0.0.1");
+`,
+  );
 
   daemonPOST = (await import("../../src/routes/exec-daemon")).POST;
 });
 
 afterAll(async () => {
-  for (const id of ["pinned-app", "legacy-app"]) {
+  for (const id of ["pinned-app", "legacy-app", "changed-app"]) {
     await daemonPOST(jsonRequest("/api/exec/daemon", { action: "stop", id }));
   }
   await lds.stop();
@@ -96,6 +117,10 @@ async function startAndAsk(id: string): Promise<string> {
 describe("Start for an installed app", () => {
   it("runs the pinned folder, not another folder the scan finds with the same id", async () => {
     expect(await startAndAsk("pinned-app")).toBe("pinned copy");
+  });
+
+  it("runs the approved localRun after the folder's manifest changes", async () => {
+    expect(await startAndAsk("changed-app")).toBe("approved copy");
   });
 
   it("runs an app with no pinned folder from the scan", async () => {
