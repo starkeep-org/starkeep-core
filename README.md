@@ -35,7 +35,7 @@ This guide installs Starkeep on your computer, adds the Starkeep Photos flagship
 You need the following on your computer:
 
 - Node.js 22 or later.
-- pnpm 10.20 or later, as a `pnpm` command on your `PATH`. Install it with `npm install -g pnpm@10`, or run `corepack enable pnpm`. Running pnpm as `corepack pnpm` is not enough, because the install's build step looks `pnpm` up on `PATH`.
+- pnpm 10.20 or later, as a `pnpm` command on your `PATH`.
 - A checkout of this repository, `starkeep-core`.
 - A checkout of [`starkeep-apps`](https://github.com/starkeep-org/starkeep-apps) is optional but highly recommended so you can try out the Starkeep Photos app and examine its implementation.
 
