@@ -117,12 +117,14 @@ export interface InstallStep {
 }
 
 /**
- * Whether `next` asks for different file access than `current`, so updating
- * an installed app to it needs the user's approval again.
+ * Whether `next` asks for anything the consent dialog shows that `current`
+ * does not — different file access, or public links — so updating an
+ * installed app to it needs the user's approval again.
  */
-export function grantsDiffer(current: ManifestSummary, next: ManifestSummary): boolean {
+export function consentDiffers(current: ManifestSummary, next: ManifestSummary): boolean {
   const grants = (m: ManifestSummary) => ({
     all: m.infraRequirements?.fileAccessAll === true,
+    publicSharing: m.infraRequirements?.publicSharing === true,
     fileAccess: (m.infraRequirements?.fileAccess ?? [])
       .map((f) => ({
         types: [...f.types].sort(),
