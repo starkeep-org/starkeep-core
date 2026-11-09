@@ -3,9 +3,9 @@
  * config seeds, so its card can offer Hide. A copy of the app elsewhere is an
  * author's app and gets no mark.
  */
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, vi } from "vitest";
 import { cpSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { DEFAULT_APPS_DIR } from "@starkeep/admin-installer/app-discovery";
 import { makeDataDir, writeAdminConfig } from "../helpers";
 
@@ -33,6 +33,20 @@ describe("the bundled example app", () => {
   it("is marked when found through core's example-app folder", async () => {
     const [app] = await list();
     expect(app).toMatchObject({ sourceDir: DEFAULT_APPS_DIR, bundledExample: true });
+  });
+
+  it("is marked when the folder is configured in ~ form", async () => {
+    // homedir() reads HOME, so core's root stands in for the home folder.
+    vi.stubEnv("HOME", dirname(DEFAULT_APPS_DIR));
+    try {
+      writeAdminConfig(process.env.STARKEEP_DIR!, {
+        appParentDirs: [`~/${basename(DEFAULT_APPS_DIR)}`],
+      });
+      const [app] = await list();
+      expect(app).toMatchObject({ sourceDir: DEFAULT_APPS_DIR, bundledExample: true });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("is not marked when the same app is found in a copy", async () => {
