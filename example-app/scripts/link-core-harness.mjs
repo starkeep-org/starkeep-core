@@ -13,7 +13,7 @@
  *
  * 1. `STARKEEP_CORE_DIR`, when set.
  * 2. An enclosing starkeep-core checkout. The example app sits inside core, at
- *    `examples/example-app`.
+ *    `example-app`.
  * 3. `starkeep-core` beside this repository's root.
  *
  * Copy this file into your own app, unchanged. Run it as

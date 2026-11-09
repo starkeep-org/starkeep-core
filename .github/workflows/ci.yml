@@ -107,28 +107,28 @@ jobs:
           cache: pnpm
           cache-dependency-path: |
             pnpm-lock.yaml
-            examples/example-app/pnpm-lock.yaml
+            example-app/pnpm-lock.yaml
       # Core's install: the platform the harness boots.
       - run: pnpm install --frozen-lockfile
       - run: pnpm install --frozen-lockfile
-        working-directory: examples/example-app
+        working-directory: example-app
       # Playwright strips the suite's types without checking them, and the
       # root `typecheck` skips the suite, because it needs core's harness.
       - run: pnpm typecheck:e2e
-        working-directory: examples/example-app
+        working-directory: example-app
         env:
           STARKEEP_CORE_DIR: ${{ github.workspace }}
       - run: pnpm --filter @example-app/e2e exec playwright install --with-deps chromium
-        working-directory: examples/example-app
+        working-directory: example-app
       - run: pnpm test:e2e
-        working-directory: examples/example-app
+        working-directory: example-app
         env:
           STARKEEP_CORE_DIR: ${{ github.workspace }}
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: example-tier-2-test-results
-          path: examples/example-app/e2e/test-results/
+          path: example-app/e2e/test-results/
           retention-days: 14
 
   # The example app copied out of this repository, the way an author copies
@@ -145,11 +145,11 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-          cache-dependency-path: examples/example-app/pnpm-lock.yaml
+          cache-dependency-path: example-app/pnpm-lock.yaml
       - name: Copy the example out of the checkout
         run: |
           mkdir -p "$RUNNER_TEMP/example-app"
-          git archive HEAD:examples/example-app | tar -x -C "$RUNNER_TEMP/example-app"
+          git archive HEAD:example-app | tar -x -C "$RUNNER_TEMP/example-app"
       - run: pnpm install --frozen-lockfile
         working-directory: ${{ runner.temp }}/example-app
       - run: pnpm typecheck
