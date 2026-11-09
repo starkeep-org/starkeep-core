@@ -19,8 +19,9 @@
  * consent dialog says so.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /** A manifest's `installDependencies` or `bundle`, as the file holds it. */
 export interface DeclaredCommand {
@@ -53,6 +54,24 @@ const INSTALL_SHAPES: Record<Manager, { subcommands: string[]; flags: string[] }
 };
 
 const SCRIPT_NAME = /^[A-Za-z0-9:_-]+$/;
+
+// packages/admin-installer/src -> admin-installer -> packages -> starkeep-core
+const CORE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+
+/**
+ * Whether `dir` is an app core's own workspace lists, such as Probe. Core's
+ * own install, at setup, already installed it, and an install at core's root
+ * would run core's postinstall build under the admin-web it runs from.
+ */
+function inCoreWorkspace(dir: string): boolean {
+  const ws = enclosingWorkspace(dir);
+  if (!ws?.covers) return false;
+  try {
+    return realpathSync(ws.root) === realpathSync(CORE_ROOT);
+  } catch {
+    return false;
+  }
+}
 
 /** Lockfile to the manager that writes it, and that manager's frozen install. */
 const LOCKFILES: Array<{ file: string; manager: Manager; frozen: string[] }> = [
@@ -160,7 +179,8 @@ function declaredCwd(appDir: string, cwd: string | undefined): string | null {
 /**
  * The approved dependency install for the app in `appDir`, or why there is
  * none. A pnpm install inside a workspace that does not cover the app gains
- * `--ignore-workspace`. Without a declared command:
+ * `--ignore-workspace`. An app core's own workspace lists installs nothing,
+ * declared or not. Without a declared command:
  *
  * - a folder with no package.json installs nothing;
  * - a lockfile beside package.json picks its manager's frozen install;
@@ -171,6 +191,9 @@ function declaredCwd(appDir: string, cwd: string | undefined): string | null {
  * - anything else runs `pnpm install`.
  */
 export function resolveInstallCommand(appDir: string, manifest: CommandSource): CommandResolution {
+  if (inCoreWorkspace(appDir)) {
+    return { kind: "skip", reason: "Core's own install installs the apps in core's workspace." };
+  }
   const declared = manifest.installDependencies;
   if (declared) {
     const args = declared.args ?? [];
