@@ -190,7 +190,14 @@ export function LocalAppsSection({
   };
 
   const handleUninstall = async (entry: LocalAppEntry) => {
-    if (!confirm(`Uninstall ${entry.appId}? Records it produced will remain in shared storage.`))
+    // Uninstall drops the app's own tables and files on this machine, and
+    // writes no tombstones, so the deletion stays here. Shared records stay.
+    const name = entry.manifest.name ?? entry.appId;
+    if (
+      !confirm(
+        `Uninstall ${name}? This deletes ${name}'s own data on this machine: its tables and files. Reinstalling may not bring it back. Records it shared with other apps stay.`,
+      )
+    )
       return;
     setBusyAppId(entry.appId);
     setError(null);
@@ -341,7 +348,8 @@ export function LocalAppsSection({
               children={
                 sourceMissing ? (
                   <p className="text-xs break-all text-destructive">
-                    Source folder not found: <code>{entry.sourceDir}</code>
+                    Source folder not found: <code>{entry.sourceDir}</code>. Restore the folder to
+                    start the app. Uninstalling deletes its data on this machine.
                   </p>
                 ) : sourceChanged ? (
                   <p className="text-xs text-muted-foreground">

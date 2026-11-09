@@ -104,7 +104,7 @@ export async function POST(req: Request) {
     if (found.kind === "pinned-missing") {
       return Response.json(
         {
-          error: `'${id}' cannot start: its source folder ${found.appDir} no longer holds a starkeep.manifest.json. Restore the folder, or uninstall the app and install it from its new folder.`,
+          error: `'${id}' cannot start: its source folder ${found.appDir} no longer holds a starkeep.manifest.json. Restore the folder to start it. Uninstalling and installing from a new folder deletes the app's data on this machine.`,
         },
         { status: 409 },
       );

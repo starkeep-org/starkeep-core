@@ -127,11 +127,13 @@ describe("Start for an installed app", () => {
     expect(await startAndAsk("legacy-app")).toBe("legacy");
   });
 
-  it("refuses an app whose pinned folder is gone, naming the folder", async () => {
+  it("refuses an app whose pinned folder is gone, naming the folder and warning about uninstall", async () => {
     const res = await daemonPOST(
       jsonRequest("/api/exec/daemon", { action: "start", id: "gone-app" }),
     );
     expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toContain(goneDir);
+    const { error } = (await res.json()) as { error: string };
+    expect(error).toContain(goneDir);
+    expect(error).toContain("deletes the app's data on this machine");
   });
 });
