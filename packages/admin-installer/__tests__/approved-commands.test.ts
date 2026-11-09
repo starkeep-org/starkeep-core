@@ -7,7 +7,8 @@
 import { describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   enclosingWorkspace,
   resolveBundleCommand,
@@ -79,6 +80,16 @@ describe("resolveInstallCommand, inferred", () => {
       display: "pnpm install --frozen-lockfile",
       cwd: app,
     });
+  });
+
+  it("installs nothing for an app core's own workspace lists, even a declared command", () => {
+    const probe = resolve(dirname(fileURLToPath(import.meta.url)), "../../../test-apps/probe");
+    for (const manifest of [{}, { installDependencies: { command: "pnpm", args: ["install"] } }]) {
+      expect(resolveInstallCommand(probe, manifest)).toEqual({
+        kind: "skip",
+        reason: "Core's own install installs the apps in core's workspace.",
+      });
+    }
   });
 
   it("picks Yarn 1's frozen install for a v1 yarn.lock", () => {
