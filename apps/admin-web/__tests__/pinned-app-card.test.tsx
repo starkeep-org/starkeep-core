@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { LocalAppsSection } from "../src/components/LocalAppsSection";
-import { grantsDiffer, type LocalAppEntry, type ManifestSummary } from "../src/lib/app-types";
+import { consentDiffers, type LocalAppEntry, type ManifestSummary } from "../src/lib/app-types";
 
 vi.mock("@/lib/operator-session", () => ({ operatorSessionIfSignedIn: async () => null }));
 
@@ -129,9 +129,24 @@ describe("Update from folder", () => {
     await user.click(await screen.findByRole("button", { name: "Approve & Install" }));
     await vi.waitFor(() => expect(installs).toEqual([{ appId: "dice", approved: true }]));
   });
+
+  it("asks for approval first when the folder's manifest turns on public links", async () => {
+    serve();
+    show({
+      ...installed,
+      sourceState: "changed",
+      folderManifest: {
+        ...approved,
+        infraRequirements: { ...approved.infraRequirements, publicSharing: true },
+      },
+    });
+    await chooseFromMenu("Update from folder");
+    expect(await screen.findByText(/can publish files to public links/)).toBeTruthy();
+    expect(installs).toEqual([]);
+  });
 });
 
-describe("grantsDiffer", () => {
+describe("consentDiffers", () => {
   it("ignores order and an absent metadataWrite, and sees access, types and all-access", () => {
     const base: ManifestSummary = {
       infraRequirements: {
@@ -149,14 +164,32 @@ describe("grantsDiffer", () => {
         ],
       },
     };
-    expect(grantsDiffer(base, reordered)).toBe(false);
+    expect(consentDiffers(base, reordered)).toBe(false);
     expect(
-      grantsDiffer(base, {
+      consentDiffers(base, {
         infraRequirements: { fileAccess: [...base.infraRequirements!.fileAccess!].slice(1) },
       }),
     ).toBe(true);
     expect(
-      grantsDiffer(base, { infraRequirements: { ...base.infraRequirements, fileAccessAll: true } }),
+      consentDiffers(base, {
+        infraRequirements: { ...base.infraRequirements, fileAccessAll: true },
+      }),
     ).toBe(true);
+  });
+
+  it("sees public links turned on with the same file access", () => {
+    const base: ManifestSummary = {
+      infraRequirements: { fileAccess: [{ types: ["image/png"], access: "read", rationale: "a" }] },
+    };
+    expect(
+      consentDiffers(base, {
+        infraRequirements: { ...base.infraRequirements, publicSharing: true },
+      }),
+    ).toBe(true);
+    expect(
+      consentDiffers(base, {
+        infraRequirements: { ...base.infraRequirements, publicSharing: false },
+      }),
+    ).toBe(false);
   });
 });

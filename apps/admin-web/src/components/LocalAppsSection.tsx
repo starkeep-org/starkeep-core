@@ -9,7 +9,7 @@ import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
 import { APPS_CHANGED_EVENT } from "@/components/AppDiscovery";
 import { ACTION_OCCASIONAL, ACTION_OPEN, ACTION_START } from "@/lib/action-colors";
 import {
-  grantsDiffer,
+  consentDiffers,
   publicSharingConsent,
   type DaemonStatus,
   type InstallStep,
@@ -213,11 +213,11 @@ export function LocalAppsSection({
   };
 
   // Apply the manifest an installed app's pinned folder holds now. New file
-  // access goes through the consent dialog; anything else reinstalls at once,
+  // access or public links go through the consent dialog; anything else reinstalls at once,
   // which reapplies every idempotent install step.
   const handleUpdateFromFolder = (entry: LocalAppEntry) => {
     const next = entry.folderManifest;
-    if (next && grantsDiffer(entry.manifest, next)) {
+    if (next && consentDiffers(entry.manifest, next)) {
       setPendingConsent({ ...entry, manifest: next });
       return;
     }
