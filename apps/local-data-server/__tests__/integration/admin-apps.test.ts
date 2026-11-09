@@ -85,6 +85,44 @@ describe("install", () => {
     expect(apps.find((a) => a.appId === "starkeep-drive")!.sourceDir).toBeNull();
   });
 
+  it("refuses an install from a web page, and leaves the installed manifest alone", async () => {
+    const manifest = testAppManifest({ id: "origin-app", name: "Approved" });
+    await installApp(server, manifest, "/apps/origin-app");
+    const res = await fetch(`${server.url}/admin/apps/install`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "https://evil.example" },
+      body: JSON.stringify({
+        manifest: { ...manifest, name: "Replaced", localRun: { command: "/bin/sh" } },
+      }),
+    });
+    expect(res.status).toBe(403);
+
+    const list = (await (await fetch(`${server.url}/admin/apps`)).json()) as {
+      apps: Array<{ appId: string; manifest: Record<string, unknown> }>;
+    };
+    const row = list.apps.find((a) => a.appId === "origin-app")!;
+    expect(row.manifest["name"]).toBe("Approved");
+    expect(row.manifest["localRun"]).toBeUndefined();
+  });
+
+  it("refuses an uninstall and a registry read from a web page, even with Origin null", async () => {
+    await installApp(server, testAppManifest({ id: "origin-null-app" }));
+    const uninstall = await fetch(`${server.url}/admin/apps/origin-null-app`, {
+      method: "DELETE",
+      headers: { Origin: "null" },
+    });
+    expect(uninstall.status).toBe(403);
+    const read = await fetch(`${server.url}/admin/apps`, {
+      headers: { Origin: "https://evil.example" },
+    });
+    expect(read.status).toBe(403);
+
+    const list = (await (await fetch(`${server.url}/admin/apps`)).json()) as {
+      apps: Array<{ appId: string }>;
+    };
+    expect(list.apps.map((a) => a.appId)).toContain("origin-null-app");
+  });
+
   it("refuses a sourceDir that is not a string", async () => {
     const res = await fetch(`${server.url}/admin/apps/install`, {
       method: "POST",

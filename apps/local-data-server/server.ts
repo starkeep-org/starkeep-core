@@ -1440,6 +1440,16 @@ async function main() {
         return;
       }
 
+      // The app admin routes, on the same reasoning. Install writes the
+      // manifest whose `localRun` admin-web's Start spawns, and uninstall
+      // drops the app's tables and files. Admin-web and `upgrade-app.sh` call
+      // them without an `Origin`; a web page cannot.
+      if ((path === "/admin" || path.startsWith("/admin/")) && req.headers.origin !== undefined) {
+        res.writeHead(403);
+        json(res, { error: "Manage apps from admin-web" });
+        return;
+      }
+
       // GET /auth/status — whether this machine is signed in, and as whom.
       if (path === "/auth/status" && req.method === "GET") {
         json(res, {
