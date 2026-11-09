@@ -143,6 +143,11 @@ for app_id in targets:
         found = read_manifest(Path(os.path.expanduser(pins[app_id])))
         if found is None:
             problems.append(f"{app_id}: its pinned folder {pins[app_id]} holds no manifest")
+        elif found[1].get("id") != app_id:
+            # Reapplying would install that other app, pinned to this folder.
+            problems.append(
+                f"{app_id}: its pinned folder {pins[app_id]} now holds app {found[1].get('id')!r}"
+            )
         else:
             on_disk[app_id] = found
         continue

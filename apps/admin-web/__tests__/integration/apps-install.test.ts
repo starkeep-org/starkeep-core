@@ -144,6 +144,31 @@ describe("successful install", () => {
   });
 });
 
+describe("a pinned folder that now holds another app", () => {
+  it("refuses Update from folder, installs nothing, and leaves the app's secret alone", async () => {
+    const parent = join(dataDir, "apps");
+    makeAppDir(parent, "moving", testAppManifest({ id: "moving-app", name: "Moving" }));
+    expect((await install({ appId: "moving-app", approved: true })).status).toBe(200);
+    const secretPath = join(credsDir, "moving-app.json");
+    const before = readFileSync(secretPath, "utf-8");
+
+    makeAppDir(parent, "moving", testAppManifest({ id: "moved-app", name: "Moved" }));
+    const res = await install({ appId: "moving-app", approved: true });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: `App moving-app's folder ${join(parent, "moving")} now holds another app's manifest.`,
+      details: [`id: "moved-app" is not this app's id "moving-app"`],
+    });
+
+    const { apps } = (await (await fetch(`${lds.url}/admin/apps`)).json()) as {
+      apps: Array<{ appId: string }>;
+    };
+    expect(apps.map((a) => a.appId)).not.toContain("moved-app");
+    expect(readFileSync(secretPath, "utf-8")).toBe(before);
+    expect(existsSync(join(credsDir, "moved-app.json"))).toBe(false);
+  });
+});
+
 describe("local-data-server error paths", () => {
   it("refuses an app whose manifest fails validation, because the scan never offers it", async () => {
     // The scan runs the validator Install runs, so Discover apps reports the

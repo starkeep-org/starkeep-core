@@ -3,7 +3,7 @@ import { starkeepDir } from "@starkeep/app-client";
 import { join } from "node:path";
 import { stopById } from "../lib/daemon-control";
 import { readFolderManifest } from "@starkeep/admin-installer/app-discovery";
-import { appSource } from "../lib/app-scan";
+import { appSource, idMismatch } from "../lib/app-scan";
 import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
 
 const STARKEEP_DIR = starkeepDir();
@@ -52,6 +52,17 @@ export async function POST(req: Request) {
     return Response.json(
       { error: "The app's manifest failed validation.", details: [folder.error] },
       { status: 400 },
+    );
+  }
+  // A pinned folder may now hold another app. Installing it would register
+  // that app and write its secret into this app's credentials file.
+  if (folder.manifest.id !== appId) {
+    return Response.json(
+      {
+        error: `App ${appId}'s folder ${sourceDir} now holds another app's manifest.`,
+        details: [idMismatch(folder.manifest.id, appId)],
+      },
+      { status: 409 },
     );
   }
   const manifest = folder.raw;

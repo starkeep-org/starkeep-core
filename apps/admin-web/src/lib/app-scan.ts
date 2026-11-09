@@ -81,7 +81,8 @@ export function pinsOf(registry: RegistryApp[] | null): Map<string, string> {
  * How an installed app's pinned folder compares with the manifest the user
  * approved: gone, holding a manifest that fails validation (with the error),
  * holding a different valid manifest (with that manifest), or unchanged
- * (null).
+ * (null). A folder whose manifest names another app id is invalid for this
+ * app, because installing it would install that other app.
  */
 export function pinnedSourceState(
   sourceDir: string,
@@ -94,8 +95,16 @@ export function pinnedSourceState(
   const folder = readFolderManifest(sourceDir);
   if (folder.kind === "missing") return { sourceState: "missing" };
   if (folder.kind === "invalid") return { sourceState: "invalid", sourceError: folder.error };
+  if (folder.manifest.id !== approved.id) {
+    return { sourceState: "invalid", sourceError: idMismatch(folder.manifest.id, approved.id) };
+  }
   if (JSON.stringify(folder.manifest) === JSON.stringify(approved)) return null;
   return { sourceState: "changed", folderManifest: folder.raw };
+}
+
+/** Why a folder's manifest is not the installed app's: it names another id. */
+export function idMismatch(folderId: string, appId: unknown): string {
+  return `id: "${folderId}" is not this app's id "${String(appId)}"`;
 }
 
 /** Where an app's code is: its installed pin, else the scan. */
