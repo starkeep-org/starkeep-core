@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ChevronDownIcon } from "lucide-react";
 import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
+import { APPS_CHANGED_EVENT } from "@/components/AppDiscovery";
 import { ACTION_OCCASIONAL, ACTION_OPEN, ACTION_START } from "@/lib/action-colors";
 import {
   publicSharingConsent,
@@ -210,6 +211,31 @@ export function LocalAppsSection({
     }
   };
 
+  // Hide core's example app by removing its folder from Discover apps.
+  const handleHide = async (entry: LocalAppEntry) => {
+    const name = entry.manifest.name ?? entry.appId;
+    if (
+      !confirm(`Hide the ${name}? To show it again, add ${entry.configuredDir} in Discover apps.`)
+    )
+      return;
+    setError(null);
+    try {
+      const res = await fetch("/api/config");
+      if (!res.ok) throw new Error(`config load failed: ${res.status}`);
+      const body = (await res.json()) as { config: { appParentDirs?: string[] } | null };
+      const dirs = body.config?.appParentDirs ?? [];
+      const saved = await fetch("/api/config", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ appParentDirs: dirs.filter((d) => d !== entry.configuredDir) }),
+      });
+      if (!saved.ok) throw new Error(`config save failed: ${saved.status}`);
+      window.dispatchEvent(new Event(APPS_CHANGED_EVENT));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   return (
     <div className="flex flex-col gap-3">
       {error && (
@@ -263,6 +289,11 @@ export function LocalAppsSection({
               destructive: true,
               title: running ? "Stop the app before uninstalling" : undefined,
             });
+          }
+          // Only a registry answer of "not installed" offers Hide. An unknown
+          // status may hide an installed app.
+          if (entry.bundledExample && entry.status === "not_installed") {
+            actions.push({ label: "Hide", onSelect: () => handleHide(entry) });
           }
 
           return (

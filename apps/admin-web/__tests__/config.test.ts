@@ -4,7 +4,8 @@
  */
 import { describe, it, expect, beforeAll } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { jsonRequest, makeDataDir, writeAdminConfig } from "./helpers";
 
 let GET: () => Promise<Response>;
@@ -20,7 +21,7 @@ beforeAll(async () => {
   const route = await import("../src/routes/config");
   GET = route.GET;
   PATCH = route.PATCH;
-  ({ DEFAULT_APPS_DIR } = await import("../src/lib/exec-commands"));
+  ({ DEFAULT_APPS_DIR } = await import("@starkeep/admin-installer/app-discovery"));
 });
 
 function onDisk(): Record<string, unknown> {
@@ -46,12 +47,15 @@ describe("cross-site requests", () => {
 });
 
 describe("GET seeding", () => {
-  it("first read with no config file seeds appParentDirs with the default apps dir", async () => {
+  it("first read with no config file seeds appParentDirs with core's example app", async () => {
     expect(existsSync(configPath)).toBe(false);
     const res = await GET();
     expect(res.status).toBe(200);
     const { config } = (await res.json()) as { config: Record<string, unknown> };
-    expect(config.appParentDirs).toEqual([DEFAULT_APPS_DIR]);
+    const exampleApp = resolve(dirname(fileURLToPath(import.meta.url)), "../../../example-app");
+    expect(DEFAULT_APPS_DIR).toBe(exampleApp);
+    expect(existsSync(join(exampleApp, "starkeep.manifest.json"))).toBe(true);
+    expect(config.appParentDirs).toEqual([exampleApp]);
     // Seeding is persisted, not just reported.
     expect(onDisk().appParentDirs).toEqual([DEFAULT_APPS_DIR]);
   });

@@ -202,6 +202,7 @@ describe("the install flow's quality step", () => {
   const photos: LocalAppEntry = {
     appId: "photos",
     sourceDir: "/apps/photos",
+    configuredDir: "/apps",
     status: "not_installed",
     manifest: {
       id: "photos",

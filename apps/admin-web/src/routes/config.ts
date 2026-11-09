@@ -16,7 +16,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
-import { DEFAULT_APPS_DIR } from "../lib/exec-commands";
+import { DEFAULT_APPS_DIR } from "@starkeep/admin-installer/app-discovery";
 import { crossSiteRefusal, fromOwnPage } from "../lib/same-origin";
 
 const STARKEEP_DIR = starkeepDir();
@@ -36,8 +36,8 @@ function writeConfig(config: Record<string, unknown>): void {
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
 }
 
-// Seed `appParentDirs` with the default sibling `starkeep-apps/` dir the first
-// time the config is read without one. A defined empty array means the user
+// Seed `appParentDirs` with core's example app the first time the config is
+// read without one. A defined empty array means the user
 // explicitly cleared the list and is left alone.
 function seedAppParentDirs(config: Record<string, unknown> | null): Record<string, unknown> {
   if (config && Array.isArray(config.appParentDirs)) return config;

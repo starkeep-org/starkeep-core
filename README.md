@@ -37,7 +37,7 @@ You need the following on your computer:
 - Node.js 22 or later.
 - pnpm 10.20 or later, as a `pnpm` command on your `PATH`.
 - A checkout of this repository, `starkeep-core`.
-- A checkout of [`starkeep-apps`](https://github.com/starkeep-org/starkeep-apps) is optional but highly recommended so you can try out the Starkeep Photos app and examine its implementation.
+- A checkout of [`starkeep-apps`](https://github.com/starkeep-org/starkeep-apps) is optional but highly recommended so you can try out the Starkeep Photos app and examine its implementation. A typical location is `~/starkeep-apps`.
 
 The cloud setup (Part B) also needs an AWS account. The setup wizard explains how to create one.
 
@@ -53,7 +53,7 @@ The cloud setup (Part B) also needs an AWS account. The setup wizard explains ho
 
    The install also builds the workspace packages. To rebuild later without reinstalling, run `pnpm build`.
 
-2. Run the same command at the root of `starkeep-apps`. Installed apps run straight out of their source checkout, so each app's dependencies must be present before admin-web can start the app.
+2. Run the same command in `starkeep-core/example-app` and at the root of `starkeep-apps`. Installed apps run straight out of their source folders, so each app's dependencies must be present before admin-web can start the app.
 
 ### 2. Start Starkeep Admin
 
@@ -102,9 +102,9 @@ The files from your folder appear in Drive, which confirms that the data server 
 
 Admin finds apps by scanning folders that you register. A registered folder that holds a `starkeep.manifest.json` file is one app. In any other registered folder, each folder directly inside it that holds a `starkeep.manifest.json` file counts as an app. **Discover apps** shows the apps each folder contributed and the reason for any folder that it skipped.
 
-If your `starkeep-apps` checkout is a sibling directory of `starkeep-core`, the Photos card will show automatically.
+A new install registers one folder, `starkeep-core/example-app`, so the Example App card shows by default. The Example App performs every operation an app can, on invented files. To hide its card, choose **Hide** from the card's menu.
 
-If you don't see it, click **Discover apps** in the header and add the absolute path of your `starkeep-apps` checkout.
+To show Photos, click **Discover apps** in the header and add the path of your `starkeep-apps` checkout, such as `~/starkeep-apps`.
 
 1. On the Photos card, click **Install Photos**.
 2. Click **Approve & Install** to finish the install. This gives Photos permission to read and write photo and video files to your common storage.
