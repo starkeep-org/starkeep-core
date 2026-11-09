@@ -148,6 +148,7 @@ describe("with the local-data-server up", () => {
   let pinnedHome: string;
   let goneDir: string;
   let changingDir: string;
+  let invalidDir: string;
 
   async function installOnLds(manifest: Record<string, unknown>, sourceDir?: string) {
     const res = await fetch(`${lds!.url}/admin/apps/install`, {
@@ -193,6 +194,18 @@ describe("with the local-data-server up", () => {
       testAppManifest({ id: "changing-app", name: "Changing", version: "2.0.0" }),
     );
 
+    // Installed, then its folder's manifest stops validating.
+    invalidDir = makeAppDir(
+      dataDir,
+      "invalid",
+      testAppManifest({ id: "invalid-app", name: "Invalid" }),
+    );
+    await installOnLds(testAppManifest({ id: "invalid-app", name: "Invalid" }), invalidDir);
+    makeAppDir(dataDir, "invalid", {
+      ...testAppManifest({ id: "invalid-app", name: "Invalid", version: "2.0.0" }),
+      name: undefined,
+    });
+
     // Installed before the registry pinned folders: no sourceDir.
     makeAppDir(parentA, "legacy", testAppManifest({ id: "legacy-app", name: "Legacy" }));
     await installOnLds(testAppManifest({ id: "legacy-app", name: "Legacy" }));
@@ -234,6 +247,18 @@ describe("with the local-data-server up", () => {
     expect((changing as { folderManifest?: { version: string } }).folderManifest?.version).toBe(
       "2.0.0",
     );
+  });
+
+  it("keeps an installed app whose folder's manifest fails validation, with the error and the approved manifest", async () => {
+    const invalid = (await list()).find((a) => a.appId === "invalid-app");
+    expect(invalid).toMatchObject({
+      sourceDir: invalidDir,
+      sourceState: "invalid",
+      sourceError: expect.stringMatching(/^name: /),
+      status: "active",
+    });
+    expect((invalid!.manifest as { version: string }).version).toBe("1.0.0");
+    expect(invalid).not.toHaveProperty("folderManifest");
   });
 
   it("resolves an installed app with no pinned folder through the scan", async () => {

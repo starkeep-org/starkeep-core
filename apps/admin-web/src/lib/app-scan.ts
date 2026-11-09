@@ -79,18 +79,20 @@ export function pinsOf(registry: RegistryApp[] | null): Map<string, string> {
 
 /**
  * How an installed app's pinned folder compares with what it was installed
- * from: gone, holding a different manifest (with that manifest when it is
- * valid), or unchanged (null).
+ * from: gone, holding a manifest that fails validation (with the error),
+ * holding a different valid manifest (with that manifest), or unchanged
+ * (null).
  */
 export function pinnedSourceState(
   row: RegistryApp & { sourceDir: string },
 ):
   | { sourceState: "missing" }
-  | { sourceState: "changed"; folderManifest?: Record<string, unknown> }
+  | { sourceState: "invalid"; sourceError: string }
+  | { sourceState: "changed"; folderManifest: Record<string, unknown> }
   | null {
   const folder = readFolderManifest(row.sourceDir);
   if (folder.kind === "missing") return { sourceState: "missing" };
-  if (folder.kind === "invalid") return { sourceState: "changed" };
+  if (folder.kind === "invalid") return { sourceState: "invalid", sourceError: folder.error };
   if (JSON.stringify(folder.manifest) === JSON.stringify(row.manifest)) return null;
   return { sourceState: "changed", folderManifest: folder.raw };
 }
