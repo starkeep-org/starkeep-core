@@ -136,6 +136,12 @@ export function consentDiffers(current: ManifestSummary, next: ManifestSummary):
   return JSON.stringify(grants(current)) !== JSON.stringify(grants(next));
 }
 
+/** What `GET /api/apps/:appId/dependencies` says Install will run first. */
+export type DependencyPlan =
+  | { kind: "run"; display: string; cwd: string }
+  | { kind: "skip"; reason: string }
+  | { kind: "refused"; display: string; cwd: string; reason: string };
+
 /** Membership comes from each app's manifest `targets` (default ["local"]). */
 export function targetsOf(a: LocalAppEntry): AppTarget[] {
   return a.manifest.targets ?? ["local"];

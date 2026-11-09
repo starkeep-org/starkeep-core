@@ -9,6 +9,12 @@ import { join, resolve } from "node:path";
 import { configPath } from "@starkeep/app-client";
 import { appManifestSchema, type AppManifest } from "@starkeep/admin-manifest";
 import type { Registry } from "./registry";
+import {
+  resolveBundleCommand,
+  resolveInstallCommand,
+  type CommandResolution,
+  type CommandSource,
+} from "./approved-commands";
 import { expandHome, MANIFEST_FILE, scanApps } from "./app-discovery";
 
 export interface StarkeepCliConfig {
@@ -164,6 +170,37 @@ export async function manifestForUninstall(
     manifest: appManifestSchema.parse(JSON.parse(readFileSync(manifestPath, "utf-8"))),
     from: "folder",
   };
+}
+
+/**
+ * The two commands a cloud web app install runs in the app's folder before it
+ * deploys: the dependency install, then the bundle build. A bundle command
+ * off the approved list stops the install, because there is no bundle to
+ * deploy without it. An install command off the list does not run; the
+ * caller says what to run by hand, and the bundle step finds out.
+ */
+export function cloudBuildCommands(
+  appDir: string,
+  manifest: CommandSource,
+):
+  | {
+      ok: true;
+      install: CommandResolution;
+      bundle: Extract<CommandResolution, { kind: "run" }>;
+    }
+  | { ok: false; message: string } {
+  const bundle = resolveBundleCommand(appDir, manifest);
+  if (bundle.kind !== "run") {
+    return {
+      ok: false,
+      message:
+        bundle.kind === "refused"
+          ? `The manifest's bundle command \`${bundle.display}\` is not approved: ${bundle.reason} ` +
+            `Build the bundle with an approved command, \`<manager> run <script>\`, in ${bundle.cwd}.`
+          : bundle.reason,
+    };
+  }
+  return { ok: true, install: resolveInstallCommand(appDir, manifest), bundle };
 }
 
 export interface DerivedInstallerArns {

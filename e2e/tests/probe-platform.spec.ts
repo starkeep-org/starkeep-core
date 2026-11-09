@@ -100,9 +100,13 @@ test("install through the admin consent flow, with the manifest's grants shown",
   // that some list did.
   await consent.getByRole("button", { name: "3 types" }).click();
   await expect(consent.getByText("png, jpeg, avif")).toBeVisible();
+  // Install installs the app's dependencies first, and the dialog names the
+  // command. Probe is in core's workspace, so the install runs at core's root.
+  await expect(consent.getByText(/Install runs pnpm install --frozen-lockfile in/)).toBeVisible();
 
   await page.getByRole("button", { name: "Approve & Install" }).click();
-  await expect(card.getByText("Installed", { exact: true })).toBeVisible({ timeout: 60_000 });
+  // The dependency install runs core's postinstall build before registration.
+  await expect(card.getByText("Installed", { exact: true })).toBeVisible({ timeout: 150_000 });
 });
 
 test("start from the admin UI and reach the app on its allocated port", async ({ page }) => {
@@ -199,7 +203,8 @@ test("reinstall re-exposes shared records; app-private rows are gone", async ({ 
   // Exact, because a substring match also finds the "Not installed" badge and
   // passes before the install returns. The install route stops the app's
   // daemon as its last step, so a daemon started early gets that SIGTERM.
-  await expect(card.getByText("Installed", { exact: true })).toBeVisible({ timeout: 60_000 });
+  // The dependency install runs first, as in the first install.
+  await expect(card.getByText("Installed", { exact: true })).toBeVisible({ timeout: 150_000 });
 
   const { url } = await startAppDaemonViaAdmin(adminUrl(), "probe");
   probeUrl = url;

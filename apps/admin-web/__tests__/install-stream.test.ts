@@ -38,6 +38,15 @@ process.env.STARKEEP_LOCAL_DATA_SERVER_URL = "http://127.0.0.1:9";
 const appsDir = join(dataDir, "apps");
 const photosDir = makeAppDir(appsDir, "photos", testAppManifest({ id: "photos", name: "Photos" }));
 const diceDir = makeAppDir(appsDir, "dice", testAppManifest({ id: "dice", name: "Dice" }));
+// An app with a pnpm lockfile, whose dependency install Install runs first.
+writeFileSync(join(diceDir, "package.json"), "{}");
+writeFileSync(join(diceDir, "pnpm-lock.yaml"), "");
+// An app whose manifest names a command off the approved list.
+makeAppDir(
+  appsDir,
+  "odd",
+  testAppManifest({ id: "odd", name: "Odd", installDependencies: { command: "make" } }),
+);
 
 /** Everything the two later passes require of the earlier one. */
 const FULL_CONFIG = {
@@ -65,6 +74,8 @@ const CREDS = { accessKeyId: "AKIA", secretAccessKey: "secret", sessionToken: "t
 let cloudDataServer: Call;
 let drive: Call;
 let appInstall: Call;
+let depsPlan: (appId: string) => Promise<Response>;
+let depsInstall: (appId: string, body?: Record<string, unknown>) => Promise<Response>;
 
 beforeAll(async () => {
   const cds = await import("../src/routes/cloud-data-server-install");
@@ -78,6 +89,14 @@ beforeAll(async () => {
     (dr.POST as unknown as (r: Request) => Promise<Response>)(
       jsonRequest("/api/drive/install", { ...CREDS, ...body }),
     );
+
+  const deps = await import("../src/routes/apps-dependencies");
+  depsPlan = async (appId) =>
+    deps.GET(new Request("http://localhost/"), { params: Promise.resolve({ appId }) });
+  depsInstall = async (appId, body = {}) =>
+    deps.POST(jsonRequest(`/api/apps/${appId}/dependencies`, body), {
+      params: Promise.resolve({ appId }),
+    });
 
   const app = await import("../src/routes/apps-cloud-install");
   appInstall = (body = {}) => {
@@ -370,6 +389,50 @@ describe("an app installed on this machine", () => {
     expect(((await res.json()) as { error: string }).error).toBe(
       `App dice's folder ${pinned} holds an invalid manifest (id: "other" is not this app's id "dice"). Fix the manifest first.`,
     );
+    expect(spawnedChildren()).toHaveLength(0);
+  });
+});
+
+describe("an app's dependency install", () => {
+  it("names the command Install would run, and where", async () => {
+    const res = await depsPlan("dice");
+    expect(await res.json()).toEqual({
+      kind: "run",
+      display: "pnpm install --frozen-lockfile",
+      cwd: diceDir,
+    });
+  });
+
+  it("runs the approved command in the app's folder and streams its output to the exit", async () => {
+    const res = await depsInstall("dice");
+    const child = lastChild();
+    expect(child.command).toBe("pnpm");
+    expect(child.args).toEqual(["install", "--frozen-lockfile"]);
+    expect(child.options.cwd).toBe(diceDir);
+    const stream = readSse(res);
+    child.say("Packages: +12\n");
+    child.exit(0);
+    const events = await stream.rest();
+    expect(lines(events)).toEqual(["Packages: +12"]);
+    expect(events.at(-1)).toEqual({ event: "done", data: JSON.stringify({ appId: "dice" }) });
+  });
+
+  it("ends a failed command with an error naming it", async () => {
+    const res = await depsInstall("dice");
+    const events = await finish(res, lastChild(), 1);
+    expect(events.at(-1)!.event).toBe("error");
+    expect(events.at(-1)!.data).toContain("pnpm install --frozen-lockfile");
+    expect(events.at(-1)!.data).toContain("code 1");
+  });
+
+  it("refuses a command off the approved list, and spawns nothing", async () => {
+    expect(await (await depsPlan("odd")).json()).toMatchObject({
+      kind: "refused",
+      display: "make",
+    });
+    const res = await depsInstall("odd");
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain("not an approved");
     expect(spawnedChildren()).toHaveLength(0);
   });
 });

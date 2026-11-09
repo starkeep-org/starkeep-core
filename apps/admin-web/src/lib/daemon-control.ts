@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { starkeepDir } from "@starkeep/app-client";
+import { enclosingWorkspace } from "@starkeep/admin-installer/approved-commands";
 import { dirname, join, resolve } from "node:path";
 import { DAEMON_COMMANDS, REPO_ROOT, type DaemonId } from "./exec-commands";
 
@@ -212,10 +213,11 @@ export function missingDependencies(
   cwd: string,
 ): { missing: string[]; message: string } | null {
   let pkgDir: string | null = null;
-  let wsRoot: string | null = null;
   for (let dir = cwd; ; dir = dirname(dir)) {
-    if (!pkgDir && existsSync(join(dir, "package.json"))) pkgDir = dir;
-    if (!wsRoot && existsSync(join(dir, "pnpm-workspace.yaml"))) wsRoot = dir;
+    if (existsSync(join(dir, "package.json"))) {
+      pkgDir = dir;
+      break;
+    }
     if (dirname(dir) === dir) break;
   }
   if (!pkgDir) return null;
@@ -236,9 +238,13 @@ export function missingDependencies(
 
   const shown = missing.length > 5 ? `${missing.slice(0, 5).join(", ")}, …` : missing.join(", ");
   const count = missing.length === 1 ? "1 dependency is" : `${missing.length} dependencies are`;
-  const where = wsRoot
-    ? `Run \`pnpm install\` in ${wsRoot}. If ${pkgDir} is not listed in that workspace's pnpm-workspace.yaml, list it there or move the app out of the workspace.`
-    : `Run \`pnpm install\` in ${pkgDir}.`;
+  // The same workspace lookup Install's dependency step uses.
+  const ws = enclosingWorkspace(pkgDir);
+  const where = !ws
+    ? `Run \`pnpm install\` in ${pkgDir}.`
+    : ws.covers
+      ? `Run \`pnpm install\` in ${ws.root}.`
+      : `${pkgDir} sits inside the pnpm workspace at ${ws.root}, which does not list it. Run \`pnpm install --ignore-workspace\` in ${pkgDir}.`;
   return {
     missing,
     message: `'${id}' cannot start: ${count} not installed (${shown}). ${where} Then try again.`,

@@ -111,18 +111,18 @@ would test the build step. Copy the example app rather than Probe.
 
 ## The pieces, at a glance
 
-| Part                               | Required?             | What it's for                                                                                                                                    |
-| ---------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `starkeep.manifest.json`           | **Required**          | Declares identity, install targets, and the file/table access the app needs.                                                                     |
-| `@starkeep/app-client`             | **Required**          | Request signing, the signing proxy, and the runtime-config handler. The only `@starkeep/*` package Photos needs at runtime.                      |
-| `@starkeep/admin-manifest`         | Optional              | The manifest schema + `validateManifest()` — useful in tests to catch manifest errors before install.                                            |
-| Runtime-config route               | **Required**          | Tells the browser whether this build is paired with a cloud data server or the local one.                                                        |
-| Signing proxy route                | **Required**          | Server-side proxy that signs browser requests with the app's HMAC credential. Serves both surfaces, and carries the end-user decision (§4, §10). |
-| A data client                      | **Required**          | The code that actually calls `/data/records`, `/files/presign`, etc.                                                                             |
-| `appSpecificSyncable` tables/files | Optional              | App-private rows and blobs that sync alongside shared records.                                                                                   |
-| `compute` handlers + `pnpm bundle` | Optional (cloud only) | Lambda handlers and the deployment-zip builder for a cloud install.                                                                              |
-| Sign-in page + session routes      | Required in cloud     | A `/sign-in` page and the platform's `/api/session` routes, so a person can sign in to the cloud surface (§8). Enforcement is §4 and §10.        |
-| Server-side end-user check         | **Required in cloud** | Nothing upstream of your app checks who the end user is. See §10.                                                                                |
+| Part                                   | Required?             | What it's for                                                                                                                                    |
+| -------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `starkeep.manifest.json`               | **Required**          | Declares identity, install targets, and the file/table access the app needs.                                                                     |
+| `@starkeep/app-client`                 | **Required**          | Request signing, the signing proxy, and the runtime-config handler. The only `@starkeep/*` package Photos needs at runtime.                      |
+| `@starkeep/admin-manifest`             | Optional              | The manifest schema + `validateManifest()` — useful in tests to catch manifest errors before install.                                            |
+| Runtime-config route                   | **Required**          | Tells the browser whether this build is paired with a cloud data server or the local one.                                                        |
+| Signing proxy route                    | **Required**          | Server-side proxy that signs browser requests with the app's HMAC credential. Serves both surfaces, and carries the end-user decision (§4, §10). |
+| A data client                          | **Required**          | The code that actually calls `/data/records`, `/files/presign`, etc.                                                                             |
+| `appSpecificSyncable` tables/files     | Optional              | App-private rows and blobs that sync alongside shared records.                                                                                   |
+| `compute` handlers + a `bundle` script | Optional (cloud only) | Lambda handlers and the deployment-zip builder for a cloud install.                                                                              |
+| Sign-in page + session routes          | Required in cloud     | A `/sign-in` page and the platform's `/api/session` routes, so a person can sign in to the cloud surface (§8). Enforcement is §4 and §10.        |
+| Server-side end-user check             | **Required in cloud** | Nothing upstream of your app checks who the end user is. See §10.                                                                                |
 
 ---
 
@@ -179,6 +179,12 @@ example and `@starkeep/admin-manifest`'s `appManifestSchema` for the full schema
   operator starting the app from the Dashboard is running the product, and a
   compile-on-demand server there costs seconds on every navigation and ships a
   development build of React.
+- `installDependencies` and `bundle` (optional) — the commands the installer
+  runs in the app's folder: the dependency install at **Install**, and the
+  cloud bundle build (§7). Each is `{ command, args, cwd }`, with `cwd`
+  relative to the manifest and inside the app's folder. Omit them to let the
+  installer infer the commands from your lockfile. A command must match the
+  approved list in "Installing it", or the installer does not run it.
 
 **Optional fields** — `protocolMinVersion`, `requiredPermissions` /
 `optionalPermissions`, `homepage`, `author`, `license`, plus the
@@ -548,8 +554,13 @@ narrow it:
 - **The `endUserAuth` decision on your proxy (§4)** — the origin check, and the
   one that actually holds. See §10.
 
-Then provide a `pnpm bundle` script — the app-owned half of the install contract.
-The installer invokes it with two env vars and consumes the zip it writes:
+Then provide a `bundle` script — the app-owned half of the install contract.
+The installer runs `<manager> run bundle` in the app's folder, with the package
+manager your lockfile names (pnpm when there is none). To run another script or
+from a subfolder, set the manifest's `bundle` field, for example
+`{ "command": "pnpm", "args": ["run", "build:cloud"], "cwd": "web" }`. The
+installer runs only `<manager> run <script>` and refuses any other command. It
+invokes the script with two env vars and consumes the zip it writes:
 
 ```
 env in:  STARKEEP_APP_BASE_PATH = /apps/<appId>   (route prefix to bake in)
@@ -1058,22 +1069,42 @@ The install path is identical for first-party and third-party apps:
    direct subfolder that holds a manifest is an app; the scan skips
    `node_modules` and dot-folders and goes no deeper. Discover apps shows what
    each folder contributed and why any folder was skipped.
-2. Install the app's dependencies with `pnpm install` in the app's folder.
-   admin-web runs the app straight from that folder and never installs
-   anything itself. An app placed inside another repository's pnpm workspace,
-   such as `starkeep-apps/`, gets its dependencies from that workspace's
-   install only when the workspace's `pnpm-workspace.yaml` lists the app.
-   **Start** refuses an app whose declared dependencies do not resolve, and
-   names the missing packages.
-3. Click **Install** on the app's card. Admin reads and validates the manifest,
-   prompts you to approve the requested grants, and POSTs to `local-data-server`
-   to register the app and provision its per-app HMAC credential. Install pins
+2. Click **Install** on the app's card. Admin reads and validates the manifest
+   and prompts you to approve the requested grants. The dialog names the
+   command that installs the app's dependencies, which runs the app's own
+   install scripts.
+3. Install runs that command in the app's folder and shows its output. The
+   command is the manifest's `installDependencies`, or the frozen install your
+   lockfile implies: `pnpm install --frozen-lockfile`, `npm ci`,
+   `yarn install --immutable` or `bun install --frozen-lockfile`. An app that a
+   pnpm workspace lists installs at the workspace root. A pnpm install inside a
+   workspace that does not list the app gains `--ignore-workspace`. A folder
+   with no `package.json` installs nothing. Then Admin POSTs to
+   `local-data-server` to register the app and provision its per-app HMAC
+   credential. Install pins
    the app's folder and the manifest you approved: **Start** runs that folder
    with that manifest whatever the scan finds later. When the folder's manifest
    changes, the card offers **Update from folder**, which asks for approval
    again only when the app's file access changed.
-4. For a cloud target, the installer additionally runs your `pnpm bundle` and
-   deploys the resulting handlers.
+4. For a cloud target, the installer installs the app's dependencies the same
+   way, runs your bundle command, and deploys the resulting handlers.
+
+Install runs only these command shapes, matched by the program's bare name on
+`PATH` and never through a shell:
+
+| Program | Install                                                             | Bundle         |
+| ------- | ------------------------------------------------------------------- | -------------- |
+| `pnpm`  | `install`, with `--frozen-lockfile`, `--ignore-workspace`, `--prod` | `run <script>` |
+| `npm`   | `ci`, or `install` with `--omit=dev`                                | `run <script>` |
+| `yarn`  | `install`, with `--immutable`                                       | `run <script>` |
+| `bun`   | `install`, with `--frozen-lockfile`, `--production`                 | `run <script>` |
+
+A script name holds only letters, digits, `:`, `_` and `-`. When the manifest
+names any other install command, Install does not run it: the dialog shows the
+command and its folder, and you run it yourself before **Start**. **Start**
+still refuses an app whose declared dependencies do not resolve, and names the
+missing packages. Any other bundle command stops the cloud install before it
+deploys anything.
 
 See [`starkeep-apps/README.md`](../../starkeep-apps/README.md) for the install steps
 from the app-author's side, and the root [`README.md`](../README.md) for the
@@ -1148,7 +1179,7 @@ example-app/
 
 Three details make the root manifest work. `localRun.cwd` is relative to the
 manifest, so `"cwd": "web"` starts the server in the web folder. The installer
-runs `pnpm bundle` in the manifest's folder, so the root `bundle` script
-delegates to `web`. And `workspace:*` between the flavors is legitimate, because
+runs `pnpm run bundle` in the manifest's folder, the command the example's
+lockfile implies, so the root `bundle` script delegates to `web`. And `workspace:*` between the flavors is legitimate, because
 the dependency never leaves the app's folder. Keep `common/` free of DOM and Node
 imports, so a phone bundler and both halves of a desktop app can all build it.
