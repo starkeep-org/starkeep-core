@@ -22,7 +22,9 @@
  * `--web` removes only the cloud web app (its compute), and `--mobile` only the
  * mobile app (its Android identity and sign-in callback). Either keeps the
  * app's data side, which the other surface and the desktop's sync may still
- * use. With neither flag, the uninstall removes the app entirely.
+ * use. With neither flag, the uninstall removes the app entirely, and an
+ * interactive run asks the operator to type the app id first, because it
+ * deletes the app's own cloud data. `--non-interactive` skips that question.
  */
 
 // First import: load repo-root .env / .env.local so STARKEEP_DIR is populated.
@@ -178,6 +180,23 @@ console.log(`  Region : ${region}`);
 console.log(`  Stage  : ${stackPrefix}`);
 console.log(`  Account: ${accountId}`);
 console.log("");
+
+// A full uninstall deletes the app's own cloud data. Removing one surface
+// keeps the data side, so it asks nothing. A non-interactive run is the
+// caller's own decision, as with its credentials.
+if (surfaces.length === 0 && !nonInteractive) {
+  console.log(
+    `This deletes ${appId}'s own data in the cloud: the tables in its ` +
+      `app_${appId.replace(/-/g, "_")} schema, its files under apps/${appId}/ in ` +
+      `${config.s3Bucket}, and its public links. Records it shared with other ` +
+      "apps stay.\n",
+  );
+  const answer = await prompt(`Type ${appId} to uninstall it: `);
+  if (answer.trim() !== appId) {
+    console.log("Uninstall cancelled. Nothing changed.");
+    process.exit(1);
+  }
+}
 
 await uninstallApp({
   appId,
