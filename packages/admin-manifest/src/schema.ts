@@ -114,6 +114,21 @@ export function publicPathCovers(entry: string, path: string): boolean {
   return path === entry;
 }
 
+const assetsDirSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (dir) =>
+      !dir.startsWith("/") &&
+      !dir.includes("\\") &&
+      dir.split("/").every((segment) => segment !== ".." && segment !== ""),
+    {
+      message:
+        "assetsDir must be a relative directory inside dist.zip, with / separators, " +
+        'no empty segment and no ".." segment',
+    },
+  );
+
 // `handler` is the Lambda entry point inside the app's `dist.zip` (e.g.
 // `index.handler` or `infra/src/resize-handler.handler`). The app's
 // `pnpm bundle` script is responsible for producing a zip whose contents
@@ -176,7 +191,29 @@ const appComputeHandlerObjectSchema = z.strictObject({
    * failure — a blank page with 404s in the console — rather than a silent one.
    */
   staticAssetPaths: z.array(publicPathSchema).default([]),
+  /**
+   * The directory inside `dist.zip` that holds this handler's build output,
+   * for example `"assets"`.
+   *
+   * In the cloud, the platform serves `/_immutable/*` and `/_static/*` from
+   * S3 through CloudFront, so those requests never reach Lambda. The installer
+   * copies the files under `<assetsDir>/_immutable/` and `<assetsDir>/_static/`
+   * that `staticAssetPaths` declares out of the bundle into the app assets
+   * bucket. A handler whose `staticAssetPaths`
+   * reach into either prefix must name the directory, because without it the
+   * installer has nothing to copy and the browser gets 403s.
+   *
+   * Relative to the zip's root, with `/` separators and no `..` segment.
+   */
+  assetsDir: assetsDirSchema.optional(),
 });
+
+/**
+ * The prefixes CloudFront serves from the app assets bucket rather than from
+ * the app's Lambda. Each is a directory directly under the handler's
+ * `assetsDir`.
+ */
+export const SERVED_ASSET_PREFIXES = ["_immutable", "_static"] as const;
 
 /**
  * Every `staticAssetPaths` entry must sit inside `publicPaths`.
@@ -193,6 +230,20 @@ const appComputeHandlerObjectSchema = z.strictObject({
  * probe form is what the check compares.
  */
 export const appComputeHandlerSchema = appComputeHandlerObjectSchema.superRefine((handler, ctx) => {
+  if (handler.assetsDir === undefined) {
+    for (const entry of handler.staticAssetPaths) {
+      const prefix = SERVED_ASSET_PREFIXES.find((p) => reachesPrefix(entry, `/${p}`));
+      if (!prefix) continue;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["assetsDir"],
+        message:
+          `"${entry}" is served from /${prefix}/, which the cloud serves from S3 rather than ` +
+          `from this handler's Lambda. Declare "assetsDir", the directory inside dist.zip ` +
+          `that holds ${prefix}/, so the installer can copy those files.`,
+      });
+    }
+  }
   for (const entry of handler.staticAssetPaths) {
     const probe = entry.endsWith("/*") ? `${entry.slice(0, -2)}/x` : entry;
     if (handler.publicPaths.some((p) => publicPathCovers(p, probe))) continue;
@@ -208,6 +259,13 @@ export const appComputeHandlerSchema = appComputeHandlerObjectSchema.superRefine
     });
   }
 });
+
+/** Does a `publicPaths`-style entry cover any path under `prefix`? */
+function reachesPrefix(entry: string, prefix: string): boolean {
+  return (
+    entry === prefix || entry.startsWith(`${prefix}/`) || publicPathCovers(entry, `${prefix}/x`)
+  );
+}
 
 const RESERVED_SYNC_COLUMNS = new Set(["updated_at", "deleted_at"]);
 

@@ -7,6 +7,7 @@ export {
   appComputeRouteSchema,
   appComputeHandlerSchema,
   publicPathCovers,
+  SERVED_ASSET_PREFIXES,
   appSpecificSyncableSchema,
   syncableTableSchema,
   syncableTableColumnSchema,

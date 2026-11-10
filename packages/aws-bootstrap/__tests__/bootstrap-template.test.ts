@@ -85,7 +85,7 @@ describe("bootstrap template structure", () => {
     ]);
   });
 
-  it("creates the Cognito auth chain and the two buckets", () => {
+  it("creates the Cognito auth chain and the three buckets", () => {
     expect(resources.UserPool.Type).toBe("AWS::Cognito::UserPool");
     expect(resources.UserPoolClient.Type).toBe("AWS::Cognito::UserPoolClient");
     expect(resources.DeviceUserPoolClient.Type).toBe("AWS::Cognito::UserPoolClient");
@@ -94,9 +94,46 @@ describe("bootstrap template structure", () => {
       "AWS::Cognito::IdentityPoolRoleAttachment",
     );
     expect(resourcesOfType("AWS::S3::Bucket").sort()).toEqual([
+      "AppAssetsBucket",
       "ArtifactsBucket",
       "PulumiStateBucket",
     ]);
+  });
+
+  it("lets CloudFront read only the two served prefixes of the app assets bucket", () => {
+    // The bucket is public through CloudFront by design. The policy must not
+    // reach the deployment record or anything outside the two prefixes, and
+    // nothing but CloudFront in this account may read it.
+    const bucket = resources.AppAssetsBucket!.Properties;
+    expect(bucket.PublicAccessBlockConfiguration).toEqual({
+      BlockPublicAcls: true,
+      BlockPublicPolicy: true,
+      IgnorePublicAcls: true,
+      RestrictPublicBuckets: true,
+    });
+    const policy = resources.AppAssetsBucketPolicy!;
+    expect(policy.Type).toBe("AWS::S3::BucketPolicy");
+    const statements = (policy.Properties.PolicyDocument as { Statement: unknown[] }).Statement;
+    expect(statements).toEqual([
+      {
+        Sid: "CloudFrontReadsServedPrefixes",
+        Effect: "Allow",
+        Principal: { Service: "cloudfront.amazonaws.com" },
+        Action: "s3:GetObject",
+        Resource: [
+          { "Fn::Sub": "arn:aws:s3:::${AppAssetsBucket}/apps/*/_immutable/*" },
+          { "Fn::Sub": "arn:aws:s3:::${AppAssetsBucket}/apps/*/_static/*" },
+        ],
+        Condition: {
+          StringLike: {
+            "AWS:SourceArn": { "Fn::Sub": "arn:aws:cloudfront::${AWS::AccountId}:distribution/*" },
+          },
+        },
+      },
+    ]);
+    // No output: the installer and the cloud-data-server program derive the
+    // name, and the template sits close to CloudFormation's inline cap.
+    expect(template.Outputs).not.toHaveProperty("AppAssetsBucketName");
   });
 
   it("interpolates a custom stack prefix into generation-time strings", () => {

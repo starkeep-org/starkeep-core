@@ -46,6 +46,7 @@
     "@starkeep/shared-space-api": "workspace:*",
     "@starkeep/storage-adapter": "workspace:*",
     "@starkeep/storage-sqlite": "workspace:*",
+    "fflate": "^0.8.2",
     "kysely": "^0.28.17",
     "pg": "^8.0.0"
   },

@@ -126,6 +126,22 @@ export function buildTempInstallInfraPolicy(
         ],
       },
       {
+        // uploadStaticAssets writes this app's /_immutable/ and /_static/
+        // files and its deployment record, then deletes the files neither of
+        // the last two deployments named.
+        Sid: "TempInstallInfraAppAssets",
+        Effect: "Allow",
+        Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+        Resource: `arn:aws:s3:::${stackPrefix}-app-assets-*/apps/${appId}/*`,
+      },
+      {
+        Sid: "TempInstallInfraAppAssetsList",
+        Effect: "Allow",
+        Action: "s3:ListBucket",
+        Resource: `arn:aws:s3:::${stackPrefix}-app-assets-*`,
+        Condition: { StringLike: { "s3:prefix": `apps/${appId}/*` } },
+      },
+      {
         Sid: "TempInstallInfraLambda",
         Effect: "Allow",
         Action: [
@@ -299,6 +315,20 @@ export function buildTempUninstallInfraPolicy(
           `arn:aws:s3:::${stackPrefix}-artifacts-*`,
           `arn:aws:s3:::${stackPrefix}-artifacts-*/apps/${appId}/*`,
         ],
+      },
+      {
+        // deleteStaticAssets removes everything under apps/<appId>/.
+        Sid: "TempUninstallInfraAppAssets",
+        Effect: "Allow",
+        Action: "s3:DeleteObject",
+        Resource: `arn:aws:s3:::${stackPrefix}-app-assets-*/apps/${appId}/*`,
+      },
+      {
+        Sid: "TempUninstallInfraAppAssetsList",
+        Effect: "Allow",
+        Action: "s3:ListBucket",
+        Resource: `arn:aws:s3:::${stackPrefix}-app-assets-*`,
+        Condition: { StringLike: { "s3:prefix": `apps/${appId}/*` } },
       },
       {
         Sid: "TempUninstallInfraLambda",

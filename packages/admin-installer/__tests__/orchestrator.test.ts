@@ -85,6 +85,15 @@ vi.mock("../src/s3", () => ({
   deleteAppArtifactsObjects: vi.fn(async () => {}),
 }));
 
+vi.mock("../src/static-assets", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../src/static-assets")>();
+  return {
+    ...real,
+    uploadStaticAssets: vi.fn(async () => {}),
+    deleteStaticAssets: vi.fn(async () => {}),
+  };
+});
+
 vi.mock("../src/app-sign-in-clients", () => ({
   setMobileAppCallback: vi.fn(async () => {}),
 }));
@@ -112,6 +121,7 @@ import { installComputeStack, uninstallComputeStack } from "../src/compute-stack
 import { setMobileAppCallback } from "../src/app-sign-in-clients";
 import { validateManifest, type AppManifest } from "@starkeep/admin-manifest";
 import { readFileSync as rf } from "node:fs";
+import { zipSync } from "fflate";
 import { fileURLToPath } from "node:url";
 
 const photosManifest: AppManifest = validateManifest(
@@ -187,6 +197,7 @@ const INSTALL_STEPS_WITH_COMPUTE = [
   "put_s3_keep_file",
   "attach_temp_install_infra_policy",
   "upload_bundle",
+  "upload_static_assets",
   "install_compute_stack",
   "detach_temp_install_infra_policy",
   "register_app",
@@ -442,6 +453,33 @@ describe("install", () => {
     expect(vi.mocked(uploadAppBundle)).not.toHaveBeenCalled();
     expect(vi.mocked(installComputeStack)).toHaveBeenCalled();
     expect(doneSteps("install")).not.toContain("upload_bundle");
+    // An empty upload would retire the live files, so no bundle means no
+    // asset step at all.
+    expect(doneSteps("install")).not.toContain("upload_static_assets");
+  });
+
+  it("refuses a bundle with no files under assetsDir before any step runs", async () => {
+    const handlers = photosManifest.infraRequirements.compute.handlers.map((h, i) =>
+      i === 0 ? { ...h, assetsDir: "assets" } : h,
+    );
+    const manifest: AppManifest = {
+      ...photosManifest,
+      infraRequirements: {
+        ...photosManifest.infraRequirements,
+        compute: { ...photosManifest.infraRequirements.compute, handlers },
+      },
+    };
+    await expect(
+      installApp({
+        appId: "photos",
+        manifest,
+        zipBuffer: Buffer.from(zipSync({ "index.mjs": new Uint8Array([1]) })),
+        version: "0.1.0",
+        config,
+        registryCredentials,
+      }),
+    ).rejects.toThrow(/has no files under assets\//);
+    expect(ledger).toEqual([]);
   });
 });
 
@@ -457,6 +495,7 @@ describe("uninstall", () => {
       "attach_temp_uninstall_infra_policy",
       "uninstall_compute_stack",
       "delete_s3_artifacts",
+      "delete_static_assets",
       "detach_temp_uninstall_infra_policy",
       "delete_s3_files",
       "attach_temp_install_ddl_policy",
@@ -485,7 +524,7 @@ describe("uninstall", () => {
       registryCredentials,
     });
     // Uninstall ran fully even though install's ledger was complete.
-    expect(doneSteps("uninstall")).toHaveLength(12);
+    expect(doneSteps("uninstall")).toHaveLength(13);
   });
 });
 
@@ -505,6 +544,7 @@ describe("an app that ships a mobile build", () => {
     "create_iam_exec_role",
     "attach_temp_install_infra_policy",
     "upload_bundle",
+    "upload_static_assets",
     "install_compute_stack",
     "detach_temp_install_infra_policy",
   ];
