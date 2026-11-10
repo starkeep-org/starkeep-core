@@ -30,10 +30,15 @@
  * cover.
  */
 
-import { readFile, stat } from "node:fs/promises";
-import { join, normalize, sep } from "node:path";
-import { fileURLToPath } from "node:url";
 import { createLambdaEntry, type UpstreamHandler } from "./lambda.js";
+import {
+  coveredByAny,
+  createStaticResponder,
+  resolveAssetsDir,
+  type StaticResponder,
+} from "./static.js";
+
+export { contentTypeFor, pathCoveredBy } from "./static.js";
 
 /** API Gateway v2, payload format 2.0 — the shape the platform's routes emit. */
 export interface ApiGatewayV2Event {
@@ -181,73 +186,6 @@ export interface RequestUpstreamOptions extends CommonOptions {
 
 export type WebAppHandlerOptions = EventUpstreamOptions | RequestUpstreamOptions;
 
-const MIME: Record<string, string> = {
-  ".js": "application/javascript; charset=utf-8",
-  ".mjs": "application/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".webmanifest": "application/manifest+json; charset=utf-8",
-  ".map": "application/json; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-  ".avif": "image/avif",
-  ".ico": "image/x-icon",
-  ".woff": "font/woff",
-  ".woff2": "font/woff2",
-  ".ttf": "font/ttf",
-  ".otf": "font/otf",
-  ".txt": "text/plain; charset=utf-8",
-  ".html": "text/html; charset=utf-8",
-  ".xml": "application/xml; charset=utf-8",
-};
-
-const TEXT_EXT = new Set([
-  ".js",
-  ".mjs",
-  ".css",
-  ".json",
-  ".webmanifest",
-  ".map",
-  ".svg",
-  ".txt",
-  ".html",
-  ".xml",
-]);
-
-/** The SPA shell's file name inside `assetsDir`, when `shellPaths` is declared. */
-const DEFAULT_SHELL_FILE = "index.html";
-
-/** The content type for a file, defaulting to bytes rather than to a guess. */
-export function contentTypeFor(path: string): string {
-  const dot = path.lastIndexOf(".");
-  if (dot < 0) return "application/octet-stream";
-  return MIME[path.slice(dot).toLowerCase()] ?? "application/octet-stream";
-}
-
-/**
- * Does a `publicPaths`-style entry cover this app-relative path?
- *
- * `/x/*` covers `/x` and everything under `/x/`; a literal entry covers only
- * itself. The same relation the manifest schema enforces between
- * `staticAssetPaths` and `publicPaths`, so the allow-list the adapter applies
- * and the one the installer checks cannot mean different things.
- */
-export function pathCoveredBy(entry: string, path: string): boolean {
-  if (entry.endsWith("/*")) {
-    const bare = entry.slice(0, -2);
-    return path === bare || path.startsWith(`${bare}/`);
-  }
-  return path === entry;
-}
-
-function coveredByAny(entries: string[], path: string): boolean {
-  return entries.some((entry) => pathCoveredBy(entry, path));
-}
-
 /**
  * The app-relative path for a raw gateway path, with the mount prefix removed.
  *
@@ -306,7 +244,11 @@ export async function toResult(res: Response): Promise<ApiGatewayV2Result> {
 
   const buf = Buffer.from(await res.arrayBuffer());
   const contentType = res.headers.get("content-type") ?? "";
-  const isText = /^text\/|json|javascript|xml/i.test(contentType);
+  // A body with any Content-Encoding is compressed bytes whatever its
+  // Content-Type says. Decoding gzip as UTF-8 text corrupts it, which is what
+  // happened to a pre-compressed `text/javascript` response before this check.
+  const encoded = (res.headers.get("content-encoding") ?? "identity").toLowerCase() !== "identity";
+  const isText = !encoded && /^text\/|json|javascript|xml/i.test(contentType);
   return {
     statusCode: res.status,
     headers,
@@ -314,56 +256,6 @@ export async function toResult(res: Response): Promise<ApiGatewayV2Result> {
     body: isText ? buf.toString("utf8") : buf.toString("base64"),
     ...(isText ? {} : { isBase64Encoded: true }),
   };
-}
-
-function resolveAssetsDir(dir: string | URL | undefined): string | null {
-  if (dir === undefined) return null;
-  if (dir instanceof URL) return fileURLToPath(dir).replace(/[/\\]+$/, "");
-  return dir.startsWith("file:")
-    ? fileURLToPath(dir).replace(/[/\\]+$/, "")
-    : dir.replace(/[/\\]+$/, "");
-}
-
-/**
- * Answer an app-relative path from the assets directory, or null on a miss.
- *
- * `normalize()` collapses any `../` segments before the filesystem is touched;
- * anything that still escapes the directory afterwards is refused rather than
- * read. A directory is a miss, not a listing.
- */
-async function serveAsset(
-  assetsDir: string,
-  path: string,
-  immutable: boolean,
-): Promise<ApiGatewayV2Result | null> {
-  const rest = path.replace(/^\/+/, "");
-  const filePath = join(assetsDir, normalize(rest));
-  if (filePath !== assetsDir && !filePath.startsWith(assetsDir + sep)) {
-    return { statusCode: 400, headers: { "content-type": "text/plain" }, body: "Bad path" };
-  }
-  try {
-    const s = await stat(filePath);
-    if (!s.isFile()) return null;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
-      console.error("Static asset read error:", err);
-    }
-    return null;
-  }
-
-  const ct = contentTypeFor(filePath);
-  const dot = filePath.lastIndexOf(".");
-  const ext = dot < 0 ? "" : filePath.slice(dot).toLowerCase();
-  const cacheControl = immutable
-    ? "public, max-age=31536000, immutable"
-    : "public, max-age=0, must-revalidate";
-  const headers = { "content-type": ct, "cache-control": cacheControl };
-
-  if (TEXT_EXT.has(ext)) {
-    return { statusCode: 200, headers, body: await readFile(filePath, "utf8") };
-  }
-  const buf = await readFile(filePath);
-  return { statusCode: 200, headers, body: buf.toString("base64"), isBase64Encoded: true };
 }
 
 /**
@@ -404,15 +296,12 @@ export async function createWebAppHandler(
   const basePath = (opts.basePath ?? "").replace(/\/+$/, "");
   const assetsDir = resolveAssetsDir(opts.assetsDir);
   const staticPaths = opts.staticPaths ?? [];
-  const immutablePaths = opts.immutablePaths;
   const shellPaths = opts.shellPaths ?? [];
-  const shellFile = opts.shellFile ?? DEFAULT_SHELL_FILE;
-  const staticMiss = opts.staticMiss ?? "upstream";
 
   if (shellPaths.length > 0 && !assetsDir) {
     throw new Error(
       `Starkeep web adapter: shellPaths declares ${shellPaths.length} client route(s) answered ` +
-        `with ${shellFile} from disk but no assetsDir was given. Pass assetsDir, or declare no ` +
+        `with ${opts.shellFile ?? "index.html"} from disk but no assetsDir was given. Pass assetsDir, or declare no ` +
         `shellPaths.`,
     );
   }
@@ -424,6 +313,19 @@ export async function createWebAppHandler(
         `assetsDir, or declare no staticAssetPaths in the manifest.`,
     );
   }
+
+  // The same responder the local surface mounts through `serveStatic`, so the
+  // two surfaces cannot disagree about a static file.
+  const responder: StaticResponder | null = assetsDir
+    ? createStaticResponder({
+        assetsDir,
+        staticPaths,
+        immutablePaths: opts.immutablePaths,
+        shellPaths,
+        ...(opts.shellFile !== undefined ? { shellFile: opts.shellFile } : {}),
+        ...(opts.staticMiss !== undefined ? { staticMiss: opts.staticMiss } : {}),
+      })
+    : null;
 
   const isEventUpstream = opts.upstream !== undefined;
   const upstream = await createLambdaEntry({
@@ -452,25 +354,11 @@ export async function createWebAppHandler(
     const rawPath = event?.rawPath ?? "/";
     const path = stripBasePath(basePath, rawPath) ?? rawPath;
     try {
-      if (assetsDir && coveredByAny(staticPaths, path)) {
-        const served = await serveAsset(assetsDir, path, coveredByAny(immutablePaths, path));
-        if (served) return served;
-        if (staticMiss === "notFound") {
-          return {
-            statusCode: 404,
-            headers: { "content-type": "text/plain; charset=utf-8" },
-            body: "Not found",
-          };
-        }
-      }
-      // The SPA shell, after the file branch and before the app: a client route
-      // has no file of its own, and the app half has no page to answer it with.
-      // A missing shell falls through to the upstream rather than 404ing, so a
-      // build that never ran reads as "the app answered" rather than as a
-      // routing bug.
-      if (assetsDir && coveredByAny(shellPaths, path)) {
-        const shell = await serveAsset(assetsDir, `/${shellFile}`, false);
-        if (shell) return shell;
+      // Only a declared path builds a Request, so a dynamic route pays nothing
+      // for the static branch it does not use.
+      if (responder && (coveredByAny(staticPaths, path) || coveredByAny(shellPaths, path))) {
+        const served = await responder(toRequest(event), path);
+        if (served) return await toResult(served);
       }
       return await callUpstream(event, context, path);
     } catch (err) {

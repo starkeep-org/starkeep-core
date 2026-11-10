@@ -12,7 +12,8 @@
  * platform asks every app to take. The other specs reach Probe through the
  * admin daemon route, which proves it starts; this one talks to it directly and
  * checks the routes themselves, including the two spellings of the app root and
- * the immutable asset the cloud surface serves from disk instead.
+ * the immutable asset, which both surfaces serve from disk through the
+ * platform's static responder.
  */
 
 import { expect, test } from "@playwright/test";
@@ -56,6 +57,12 @@ test("serves the immutable asset the shell references, cached forever", async ({
   expect(asset.status()).toBe(200);
   expect(asset.headers()["content-type"]).toContain("application/javascript");
   expect(asset.headers()["cache-control"]).toBe("public, max-age=31536000, immutable");
+
+  // The platform's static responder answers it, so a revalidation costs a 304.
+  const etag = asset.headers()["etag"];
+  expect(etag).toBeTruthy();
+  const again = await request.get(`${server.url}${ASSET}`, { headers: { "if-none-match": etag! } });
+  expect(again.status()).toBe(304);
 });
 
 test("serves the sign-in page the session routes belong to", async ({ request }) => {

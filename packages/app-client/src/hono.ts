@@ -14,6 +14,9 @@
  *      written `/api/records` and matches on both surfaces.
  *   2. **The origin gate.** `honoOriginGate` is `createOriginGate` as Hono
  *      middleware, mounted with `app.use("*", ...)`.
+ *   3. **Static files on the local surface.** `serveStatic` mounts the same
+ *      responder the cloud adapter uses (`./static.ts`), so an app's local
+ *      server answers its build output exactly as the cloud does.
  *
  * The alternative resolution for (1) was for each app to call
  * `app.basePath(process.env.STARKEEP_APP_BASE_PATH)`. It is rejected because it
@@ -33,6 +36,7 @@
  */
 
 import { createOriginGate, type AuthGateOptions } from "./edge.js";
+import { createStaticResponder, type StaticResponderOptions } from "./static.js";
 import type { RequestUpstreamHandler } from "./web.js";
 
 /** The `fetch` half of a Hono app — all the adapter needs from one. */
@@ -130,6 +134,44 @@ export function honoOriginGate(
     const refused = gate(c.req.raw);
     if (refused) {
       c.res = refused;
+      return;
+    }
+    await next();
+  };
+}
+
+/**
+ * The platform's static responder as Hono middleware, for the local surface:
+ * `app.use("*", serveStatic({ ... }))`.
+ *
+ * ```js
+ * app.use("*", serveStatic({
+ *   assetsDir: new URL("../client/", import.meta.url),
+ *   staticPaths: manifestHandler.staticAssetPaths,
+ *   immutablePaths: ["/_immutable/*"],
+ *   shellPaths: ["/", "/settings"],
+ * }));
+ * ```
+ *
+ * Takes the options `createWebAppHandler` takes for its static branch, and
+ * answers through the same function, so content types, cache headers, `ETag`
+ * revalidation, the client-route shell and the path-escape check match the
+ * cloud. A request it does not answer goes on to the app's routes.
+ *
+ * Mount it where the cloud adapter sits: ahead of the app's own routes. The
+ * cloud adapter serves static paths before the app runs, so a local server
+ * that mounted this after a route would answer that path differently from the
+ * cloud.
+ */
+export function serveStatic(
+  opts: StaticResponderOptions,
+): (c: GateContext, next: () => Promise<void>) => Promise<void> {
+  const respond = createStaticResponder(opts);
+  return async (c, next) => {
+    const path = new URL(c.req.raw.url).pathname;
+    const served = await respond(c.req.raw, path);
+    if (served) {
+      c.res = served;
       return;
     }
     await next();

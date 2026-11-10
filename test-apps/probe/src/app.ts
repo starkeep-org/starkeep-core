@@ -34,7 +34,7 @@ import { createSessionRoutes, SIGN_IN_START_PATH } from "@starkeep/app-client/au
 import { createDataProxyHandler, sessionAuth } from "@starkeep/app-client";
 import { appBasePath, honoOriginGate } from "@starkeep/app-client/hono";
 import manifest from "../starkeep.manifest.json" with { type: "json" };
-import { ASSET_NAME, assetScript } from "./assets.js";
+import { ASSET_NAME } from "./assets.js";
 
 /** The app id, fixed to match `starkeep.manifest.json`. */
 export const APP_ID = "probe";
@@ -118,26 +118,6 @@ export const app = new Hono();
 // app served outside the gateway would still have, and because a fixture that
 // does not mount it would not prove it mounts.
 app.use("*", honoOriginGate({ publicPaths: PUBLIC_PATHS, signInPath: "/sign-in" }));
-
-// The immutable asset. Cached hard on purpose: the platform's CloudFront
-// behavior for this path is CachingOptimized, and an edge hit on it is what
-// the tier-3 suite asserts.
-//
-// This route answers the local surface. In the cloud the bundle stages the same
-// bytes to disk and the web adapter serves them ahead of this app, which is what
-// makes Probe a test of the adapter's static path rather than only of its
-// payload encoding. Both answers come from `assetScript()`, so the two surfaces
-// cannot drift.
-app.get(
-  `/_immutable/${ASSET_NAME}`,
-  () =>
-    new Response(assetScript(), {
-      headers: {
-        "Content-Type": "application/javascript; charset=utf-8",
-        "Cache-Control": "public, max-age=31536000, immutable",
-      },
-    }),
-);
 
 app.get("/sign-in", () => html(signInPage(appBasePath())));
 

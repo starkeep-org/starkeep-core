@@ -87,9 +87,11 @@ describe("the lambda and web subpaths carry no runtime dependencies", () => {
   it("imports nothing outside node builtins from src/web.ts", () => {
     const { files, external } = sourceGraph(resolve(PKG_DIR, "src", "web.ts"));
     // The whole graph, spelled out: the adapter composes with the entry helper
-    // and nothing else. A new file here is a decision worth making on purpose.
+    // and the static responder it shares with the local surface, and nothing
+    // else. A new file here is a decision worth making on purpose.
     expect(files.map((f) => f.slice(PKG_DIR.length + 1)).sort()).toEqual([
       "src/lambda.ts",
+      "src/static.ts",
       "src/web.ts",
     ]);
     expect(external.filter((s) => !NODE_BUILTIN.test(s))).toEqual([]);
