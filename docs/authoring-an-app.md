@@ -747,6 +747,11 @@ paths from the same directory with the same headers. The manifest schema
 refuses a handler whose `staticAssetPaths` reach either prefix without an
 `assetsDir`.
 
+Both prefixes are public. CloudFront serves them to anyone who has the URL,
+signed in or not. Keep secrets out of build output: an API key, a token or a
+private configuration value belongs in the server half's `env` or behind a
+route that checks the session, never in a file under either prefix.
+
 An update keeps the previous deployment's files in the bucket, so a tab opened
 before the update still loads the files its page names. The update after that
 removes them.

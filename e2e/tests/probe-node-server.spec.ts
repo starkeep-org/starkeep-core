@@ -22,6 +22,7 @@ import { join } from "node:path";
 
 const PROBE_DIR = join(CORE_FIXTURE_APPS_DIR, "probe");
 const ASSET = "/_immutable/probe.5f3a9c21.js";
+const STATIC = "/_static/probe.css";
 
 let server: Awaited<ReturnType<typeof startWebServer>>;
 
@@ -62,6 +63,25 @@ test("serves the immutable asset the shell references, cached forever", async ({
   const etag = asset.headers()["etag"];
   expect(etag).toBeTruthy();
   const again = await request.get(`${server.url}${ASSET}`, { headers: { "if-none-match": etag! } });
+  expect(again.status()).toBe(304);
+});
+
+test("serves the stable-named asset the shell references, revalidated by ETag", async ({
+  request,
+}) => {
+  const shell = await (await request.get(server.url)).text();
+  expect(shell).toContain(`href="${STATIC}"`);
+
+  const asset = await request.get(`${server.url}${STATIC}`);
+  expect(asset.status()).toBe(200);
+  expect(asset.headers()["content-type"]).toContain("text/css");
+  expect(asset.headers()["cache-control"]).toBe("public, max-age=0, must-revalidate");
+
+  const etag = asset.headers()["etag"];
+  expect(etag).toBeTruthy();
+  const again = await request.get(`${server.url}${STATIC}`, {
+    headers: { "if-none-match": etag! },
+  });
   expect(again.status()).toBe(304);
 });
 

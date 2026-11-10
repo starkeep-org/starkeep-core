@@ -16,9 +16,10 @@ Photos' own suites (in the `starkeep-apps` checkout) cover what is true of Photo
 Probe is deliberately the smallest app that touches every surface the platform
 offers an app:
 
-- a served shell and an immutable asset under `_immutable/`, the platform's
-  reserved prefix for content-addressed output and the one path CloudFront
-  caches forever;
+- a served shell, an immutable asset under `_immutable/` and a stable-named
+  stylesheet under `_static/`, the platform's two reserved prefixes for build
+  output. CloudFront serves both from S3; the first is cached forever and the
+  second revalidates by `ETag`;
 - a sign-in page and the `/api/session/*` routes, taken from
   `@starkeep/app-client` rather than reimplemented;
 - an `/api/local-data/*` signing proxy, the browser's only route to the data
