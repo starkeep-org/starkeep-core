@@ -28,3 +28,4 @@ export {
   requireSession,
 } from "./session.js";
 export { type SessionRouteOptions, createSessionRoutes } from "./routes.js";
+export { type SignInPageOptions, createSignInPage } from "./sign-in-page.js";

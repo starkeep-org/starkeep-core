@@ -18,9 +18,10 @@
  * **Every route here is written app-relative.** In the cloud the platform mounts
  * the app at `/apps/probe` and the Lambda sees that prefix, but `honoUpstream`
  * rewrites the request's URL to the app-relative path before Hono routes it, so
- * nothing below names the mount. The two places that still need it — the shell's
- * script tag and the sign-in page's form action, both of which emit URLs a
- * browser will resolve — read it from `appBasePath()`.
+ * nothing below names the mount. The one place that still needs it, the shell's
+ * script tag, emits a URL a browser will resolve, so it reads the mount from
+ * `appBasePath()`. The sign-in page is the platform's `createSignInPage`, which
+ * builds its own URLs.
  *
  * Everything session- and signing-related comes from `@starkeep/app-client`
  * rather than being reimplemented here. That is the point: an app author is
@@ -30,7 +31,7 @@
  */
 
 import { Hono } from "hono";
-import { createSessionRoutes, SIGN_IN_START_PATH } from "@starkeep/app-client/auth";
+import { createSessionRoutes, createSignInPage } from "@starkeep/app-client/auth";
 import { createDataProxyHandler, sessionAuth } from "@starkeep/app-client";
 import { appBasePath, honoOriginGate } from "@starkeep/app-client/hono";
 import manifest from "../starkeep.manifest.json" with { type: "json" };
@@ -73,24 +74,6 @@ function json(body: unknown, status = 200): Response {
 }
 
 /**
- * The sign-in page: one button to the platform's sign-in page. The password goes
- * to the managed login page, never to this app.
- */
-function signInPage(base: string): string {
-  // A plain GET form, so the button works with no script at all.
-  return `<!doctype html>
-<html><head><title>Probe — Sign in</title><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body>
-<h1>Probe</h1>
-<form method="get" action="${SIGN_IN_START_PATH}">
-  <input type="hidden" name="app" value="${APP_ID}">
-  <input type="hidden" name="return" value="${base}/">
-  <button type="submit">Sign in</button>
-</form>
-</body></html>`;
-}
-
-/**
  * The app shell.
  *
  * The upload control is labelled "Upload" and every tile carries its file name
@@ -119,7 +102,10 @@ export const app = new Hono();
 // does not mount it would not prove it mounts.
 app.use("*", honoOriginGate({ publicPaths: PUBLIC_PATHS, signInPath: "/sign-in" }));
 
-app.get("/sign-in", () => html(signInPage(appBasePath())));
+// The platform's default sign-in page: one button to the managed login page,
+// which takes the password, so this app never sees it.
+const signInPage = createSignInPage({ appId: APP_ID, appName: "Probe" });
+app.get("/sign-in", () => signInPage());
 
 // Session probe / sign-out / refresh, straight from the platform library.
 app.all("/api/session/*", (c) => {
