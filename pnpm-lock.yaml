@@ -535,7 +535,7 @@ importers:
         specifier: workspace:*
         version: link:../storage-sqlite
       fflate:
-        specifier: 0.8.2
+        specifier: ^0.8.2
         version: 0.8.2
       kysely:
         specifier: ^0.28.17

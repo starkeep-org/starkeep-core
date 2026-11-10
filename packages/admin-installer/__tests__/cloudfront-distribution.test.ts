@@ -180,7 +180,9 @@ describe("app build output — served from the app assets bucket", () => {
   it("reads the bootstrap bucket through Origin Access Control", () => {
     const origins = distribution.inputs.origins as Array<Record<string, unknown>>;
     const assets = origins.find((o) => o.originId === "app-assets-s3");
-    expect(assets?.domainName).toMatch(/^starkeep-app-assets-\d+-[a-z0-9-]+\.s3\.[a-z0-9-]+\.amazonaws\.com$/);
+    expect(assets?.domainName).toMatch(
+      /^starkeep-app-assets-\d+-[a-z0-9-]+\.s3\.[a-z0-9-]+\.amazonaws\.com$/,
+    );
     expect(assets?.originAccessControlId).toBeTruthy();
     expect(assets).not.toHaveProperty("s3OriginConfig");
   });
