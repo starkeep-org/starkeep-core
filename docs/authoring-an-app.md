@@ -52,7 +52,9 @@ app to know which surface it runs on:
 - **Cloud** — `createWebAppHandler` from `@starkeep/app-client/web`, given
   `app.fetch` through `honoUpstream` from `@starkeep/app-client/hono`. See §7.
 - **Local** — `@hono/node-server`'s `serve({ fetch: app.fetch, port })`, started
-  by admin-web from the manifest's `localRun`. See §2.
+  by admin-web from the manifest's `localRun`. See §2. Mount `serveStatic` from
+  `@starkeep/app-client/hono` ahead of your routes, and the local server answers
+  your build output with the same responder the cloud adapter uses. See §7.
 
 Four rules govern what a browser reaches, and the manifest states each one:
 
@@ -114,15 +116,40 @@ would test the build step. Copy the example app rather than Probe.
 | Part                                   | Required?             | What it's for                                                                                                                                    |
 | -------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `starkeep.manifest.json`               | **Required**          | Declares identity, install targets, and the file/table access the app needs.                                                                     |
-| `@starkeep/app-client`                 | **Required**          | Request signing, the signing proxy, and the runtime-config handler. The only `@starkeep/*` package Photos needs at runtime.                      |
+| `@starkeep/app-client`                 | **Required**          | Static file serving on both surfaces, request signing, the signing proxy, sign-in and the runtime-config handler.                                |
 | `@starkeep/admin-manifest`             | Optional              | The manifest schema + `validateManifest()` — useful in tests to catch manifest errors before install.                                            |
-| Runtime-config route                   | **Required**          | Tells the browser whether this build is paired with a cloud data server or the local one.                                                        |
-| Signing proxy route                    | **Required**          | Server-side proxy that signs browser requests with the app's HMAC credential. Serves both surfaces, and carries the end-user decision (§4, §10). |
-| A data client                          | **Required**          | The code that actually calls `/data/records`, `/files/presign`, etc.                                                                             |
+| Runtime-config route                   | If the app uses data  | Tells the browser whether this build is paired with a cloud data server or the local one.                                                        |
+| Signing proxy route                    | If the app uses data  | Server-side proxy that signs browser requests with the app's HMAC credential. Serves both surfaces, and carries the end-user decision (§4, §10). |
+| A data client                          | If the app uses data  | The code that actually calls `/data/records`, `/files/presign`, etc.                                                                             |
 | `appSpecificSyncable` tables/files     | Optional              | App-private rows and blobs that sync alongside shared records.                                                                                   |
 | `compute` handlers + a `bundle` script | Optional (cloud only) | Lambda handlers and the deployment-zip builder for a cloud install.                                                                              |
-| Sign-in page + session routes          | Required in cloud     | A `/sign-in` page and the platform's `/api/session` routes, so a person can sign in to the cloud surface (§8). Enforcement is §4 and §10.        |
+| Sign-in page + session routes          | Required in cloud     | A `/sign-in` page (`createSignInPage`, or your own) and the `/api/session` routes, so a person can sign in to the cloud surface (§8).            |
 | Server-side end-user check             | **Required in cloud** | Nothing upstream of your app checks who the end user is. See §10.                                                                                |
+
+"If the app uses data" means the app reads or writes Starkeep data: shared
+records, files, labels or its own app-specific tables. An app that keeps no
+data with Starkeep needs none of those rows, and nothing checks for them.
+
+### The smallest app
+
+An existing web app can install on both surfaces before it touches Starkeep
+data. The smallest app has these parts:
+
+- **A manifest** with `localRun`, and for the cloud a `compute` block with one
+  `static` handler (§2, §7).
+- **A Hono server half** that mounts `serveStatic` ahead of its routes for the
+  local surface (§7).
+- **For the cloud,** a bundle whose entry calls `createWebAppHandler`, a
+  `/sign-in` page from `createSignInPage`, and the routes from
+  `createSessionRoutes` (§7, §8). Every cloud app page requires sign-in, because
+  a cloud app serves the members of one deployment.
+
+Add the data pieces when the app first needs them. An app that keeps state in
+the browser's `localStorage` is the common case: that state stays on one
+browser, and a new origin loses it. Moving the state into an app-specific
+syncable table (§6) syncs it between devices and keeps it through a change of
+origin. That move needs the runtime-config route, the signing proxy and a data
+client.
 
 ---
 
@@ -653,8 +680,38 @@ Gateway v2 events to and from web `Request`/`Response`, carrying cookies across
 that conversion in both directions, serving your declared paths from a staged
 directory with MIME resolution, refusing a path that escapes that directory, and
 answering `immutable` for content-addressed assets and `must-revalidate` for
-everything else. It composes with `createLambdaEntry`, so adopting it gets you
-the INIT guarantee without having to know the invariant exists.
+everything else. Every static response carries an `ETag`, so a browser
+revalidates an unchanged file with a `304` instead of downloading it again. It
+composes with `createLambdaEntry`, so adopting it gets you the INIT guarantee
+without having to know the invariant exists.
+
+The local surface serves the same files through the same responder.
+`serveStatic` from `@starkeep/app-client/hono` takes the static options above
+and answers as Hono middleware, so a local server does not need its own file
+server:
+
+```js
+import { serve } from "@hono/node-server";
+import { serveStatic } from "@starkeep/app-client/hono";
+import { Hono } from "hono";
+import { app } from "./app.js";
+
+const local = new Hono();
+local.use(
+  "*",
+  serveStatic({
+    assetsDir: new URL("../dist/", import.meta.url),
+    staticPaths: shell.staticAssetPaths,
+    immutablePaths: ["/_immutable/*"],
+    shellPaths: ["/", "/browse", "/settings"],
+  }),
+);
+local.all("*", (c) => app.fetch(c.req.raw));
+serve({ fetch: local.fetch, port, hostname: "127.0.0.1" });
+```
+
+Mount it ahead of your routes, which is where the cloud adapter serves static
+files. Probe's `src/serve.ts` does this.
 
 `requestUpstream` hands your handler a web `Request` and the app-relative path.
 `honoUpstream` rewrites the request's URL to that path before Hono routes it, so
@@ -695,6 +752,38 @@ not already cover, so a path your bundle serves from disk can never be one the
 manifest failed to declare — or, equivalently, one the gateway refuses while
 your bundle stands ready to serve it.
 
+#### Limits on what your Lambda can return
+
+Every request that does not hit the CloudFront cache reaches your Lambda through
+API Gateway, and these limits apply to each one:
+
+- **Response size:** 6 MB per response. The adapter base64-encodes a binary
+  body, so the largest binary response is about 4.5 MB. A static file larger
+  than that cannot be served from your bundle.
+- **Request size:** 6 MB per request body, with the same base64 cost for a
+  binary upload.
+- **Time:** API Gateway ends any request that runs longer than 30 seconds,
+  whatever your handler's `timeoutSeconds` says.
+- **Concurrency:** every running request counts against one Lambda concurrency
+  pool per AWS account and region, which every app in the deployment shares. A
+  new AWS account usually starts at 10 concurrent executions, although AWS's
+  documented regional default is 1,000. Ask AWS to raise the limit through a
+  Service Quotas request in the AWS console. AWS also raises the limit over time
+  as the account's usage grows.
+
+Keep large bytes off the Lambda path:
+
+| Bytes                                              | Where they belong                | How the browser gets them                                                                 |
+| -------------------------------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------- |
+| Content-hashed build output                        | `/_immutable/`                   | CloudFront caches each file at the edge, so Lambda serves it once per edge location       |
+| A person's shared data                             | Shared records with files (§5)   | `POST /files/presign` to upload, a signed file URL to download                            |
+| App-private bytes that the app or a person creates | `appSpecificSyncable.files` (§6) | `POST /app-data/files/presign` to upload, `GET /app-data/files/<subKey>` for a signed URL |
+| A large result your server half computes           | `appSpecificSyncable.files` (§6) | Write the file, then answer with a signed URL instead of the bytes                        |
+
+App-private storage holds data. Do not use it for files that ship with your
+build: every node syncs every app-private file and keeps it, an uninstall that
+keeps data keeps those files too, and each fetch needs a fresh signed URL.
+
 What is still yours: which bundler and server library (the platform's answers
 are Vite and Hono, and neither is enforced), the build command that produces
 your output, native dependencies, any handler beyond the shell, and which of
@@ -708,7 +797,12 @@ app held would sign in to every other app too. The platform runs the sign-in
 flow and sets the session cookies. Your app supplies four small pieces, and the
 example app's `web/src/server/app.ts` shows all four.
 
-1. **A sign-in page at `/sign-in`.** The page needs one form or link to
+1. **A sign-in page at `/sign-in`.** `createSignInPage({ appId, appName })`
+   from `@starkeep/app-client/auth` builds the whole page, including the
+   session restore described below. Mount it with
+   `app.get("/sign-in", () => signInPage())`, as Probe does. To draw your own
+   page instead, mount it at `/sign-in` and follow the rest of this item. The
+   page needs one form or link to
    `SIGN_IN_START_PATH` (`/auth/start`) from `@starkeep/app-client/auth`, with
    your app id as `app` and the path to return to as `return`. After the
    managed login page, the platform's `/auth/callback` sets two cookies scoped
