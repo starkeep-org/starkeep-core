@@ -20,6 +20,7 @@
  */
 
 import * as aws from "@pulumi/aws";
+import { appAssetsBucketName } from "../static-assets";
 import * as pulumi from "@pulumi/pulumi";
 import * as tls from "@pulumi/tls";
 import {
@@ -1157,6 +1158,13 @@ export function buildCloudDataServerProgram(
     );
 
     const filesOriginId = "shared-files-s3";
+    // Each web app's /_immutable/ and /_static/ build output. The bootstrap
+    // stack owns this bucket and its policy, which admits CloudFront on those
+    // two prefixes only, so this program creates neither and the role that
+    // runs it gains no S3 power. The installer uploads the files under
+    // install-infra.
+    const appAssetsOriginId = "app-assets-s3";
+    const appAssetsBucketDomain = `${appAssetsBucketName(ctx.stackPrefix, ctx.accountId, ctx.region)}.s3.${ctx.region}.amazonaws.com`;
 
     // CUR and CloudFront's certificates both live only in us-east-1, whatever
     // the deployment region.
@@ -1245,17 +1253,40 @@ export function buildCloudDataServerProgram(
           // distribution to restore it.
           originAccessControlId: filesOac.id,
         },
+        {
+          // One OAC signs for both buckets: it names no bucket, and each
+          // bucket's own policy decides what CloudFront may read.
+          originId: appAssetsOriginId,
+          domainName: appAssetsBucketDomain,
+          originAccessControlId: filesOac.id,
+        },
       ],
       orderedCacheBehaviors: [
         {
           // The platform's reserved prefix for an app's content-hashed build
           // output — immutable, safe for long TTLs, and the *only* prefix
           // cached forever: an app that wants an asset cached names it here
-          // by hashing it, not by asking for another behavior. Public (no
+          // by hashing it, not by asking for another behavior. Served from
+          // the app assets bucket, so no request reaches Lambda. Public (no
           // auth headers), so CachingOptimized needs no origin request
           // policy.
           pathPattern: "/apps/*/_immutable/*",
-          targetOriginId: gatewayOriginId,
+          targetOriginId: appAssetsOriginId,
+          viewerProtocolPolicy: "redirect-to-https",
+          allowedMethods: ["GET", "HEAD"],
+          cachedMethods: ["GET", "HEAD"],
+          cachePolicyId: cachingOptimizedId,
+          compress: true,
+        },
+        {
+          // The reserved prefix for build output with stable names, such as
+          // Flutter's main.dart.js. The objects say `max-age=0,
+          // must-revalidate`, so CachingOptimized keeps each one for its
+          // one-second minimum and then revalidates against S3 with the
+          // object's ETag. A browser's revalidation costs a 304 from the
+          // edge and no Lambda.
+          pathPattern: "/apps/*/_static/*",
+          targetOriginId: appAssetsOriginId,
           viewerProtocolPolicy: "redirect-to-https",
           allowedMethods: ["GET", "HEAD"],
           cachedMethods: ["GET", "HEAD"],

@@ -38,7 +38,12 @@ import {
   type StaticResponder,
 } from "./static.js";
 
-export { contentTypeFor, pathCoveredBy } from "./static.js";
+export {
+  contentTypeFor,
+  pathCoveredBy,
+  IMMUTABLE_CACHE_CONTROL,
+  REVALIDATE_CACHE_CONTROL,
+} from "./static.js";
 
 /** API Gateway v2, payload format 2.0 — the shape the platform's routes emit. */
 export interface ApiGatewayV2Event {

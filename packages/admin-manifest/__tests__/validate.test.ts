@@ -887,7 +887,12 @@ describe("staticAssetPaths", () => {
 
   it("accepts a declared subset of publicPaths", () => {
     const result = validateManifest(
-      withHandlers([shell({ staticAssetPaths: ["/_immutable/*", "/manifest.webmanifest"] })]),
+      withHandlers([
+        shell({
+          staticAssetPaths: ["/_immutable/*", "/manifest.webmanifest"],
+          assetsDir: "assets",
+        }),
+      ]),
     );
     expect(result.errors).toEqual([]);
   });
@@ -923,6 +928,7 @@ describe("staticAssetPaths", () => {
         shell({
           publicPaths: ["/", "/_immutable/*", "/sign-in", "/api/session/*"],
           staticAssetPaths: ["/_immutable/fonts/*"],
+          assetsDir: "assets",
         }),
       ]),
     );
@@ -932,6 +938,53 @@ describe("staticAssetPaths", () => {
   it("rejects a relative entry at the schema level", () => {
     const result = validateManifest(withHandlers([shell({ staticAssetPaths: ["_immutable/*"] })]));
     expect(result.valid).toBe(false);
+  });
+});
+
+describe("assetsDir", () => {
+  function withHandlers(handlers: Record<string, unknown>[]): Record<string, unknown> {
+    return minimal({ infraRequirements: { compute: { enabled: true, handlers } } });
+  }
+
+  const shell = (over: Record<string, unknown> = {}) => ({
+    name: "static",
+    handler: "index.handler",
+    auth: "session",
+    routes: ["GET /", "ANY /{proxy+}"],
+    publicPaths: ["/", "/_immutable/*", "/_static/*", "/favicon.ico", "/sign-in", "/api/session/*"],
+    ...over,
+  });
+
+  it("is required when staticAssetPaths reach a prefix the cloud serves from S3", () => {
+    // CloudFront answers these prefixes from the app assets bucket, so a
+    // handler that never names its build output would install and then 403.
+    for (const entry of ["/_immutable/*", "/_static/*", "/_static/main.dart.js"]) {
+      const result = validateManifest(withHandlers([shell({ staticAssetPaths: [entry] })]));
+      expect(result.valid, entry).toBe(false);
+      expect(result.errors.some((e) => e.includes('Declare "assetsDir"'))).toBe(true);
+    }
+  });
+
+  it("is optional for static paths outside the served prefixes", () => {
+    const result = validateManifest(withHandlers([shell({ staticAssetPaths: ["/favicon.ico"] })]));
+    expect(result.errors).toEqual([]);
+  });
+
+  it("accepts a nested relative directory", () => {
+    const result = validateManifest(
+      withHandlers([shell({ staticAssetPaths: ["/_static/*"], assetsDir: "web/build" })]),
+    );
+    expect(result.errors).toEqual([]);
+    expect(result.manifest!.infraRequirements.compute.handlers[0]!.assetsDir).toBe("web/build");
+  });
+
+  it("refuses a directory that could leave the bundle", () => {
+    for (const assetsDir of ["/assets", "../assets", "a/../../b", "a//b", "assets/", "a\\b", ""]) {
+      const result = validateManifest(
+        withHandlers([shell({ staticAssetPaths: ["/_static/*"], assetsDir })]),
+      );
+      expect(result.valid, JSON.stringify(assetsDir)).toBe(false);
+    }
   });
 });
 

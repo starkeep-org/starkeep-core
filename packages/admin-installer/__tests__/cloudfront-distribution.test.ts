@@ -149,24 +149,47 @@ describe("default behavior — auth headers must survive the edge", () => {
   });
 });
 
-describe("immutable app assets", () => {
-  it("caches /apps/*/_immutable/* optimally against the gateway origin", () => {
+describe("app build output — served from the app assets bucket", () => {
+  it("caches /apps/*/_immutable/* optimally against the app assets bucket", () => {
     const behavior = behaviorFor("/apps/*/_immutable/*");
     expect(behavior).toBeDefined();
     expect(behavior!.cachePolicyId).toBe("cache:Managed-CachingOptimized");
-    expect(behavior!.targetOriginId).toBe("api-gateway");
+    expect(behavior!.targetOriginId).toBe("app-assets-s3");
   });
 
-  it("caches no second prefix — /_immutable/* is the only forever-cached one", () => {
-    // The distribution used to name `/apps/*/_next/static/*` beside it while
-    // apps still built with Next. A behavior that caches a path the build does
-    // not content-hash is unrecoverable at the edge until the TTL expires, so
-    // the platform offers exactly one prefix and an app opts in by emitting
-    // into it.
+  it("serves /apps/*/_static/* from the same bucket, read-only", () => {
+    // The objects carry `max-age=0, must-revalidate` (static-assets.test.ts),
+    // so the edge revalidates against S3 and no request reaches Lambda.
+    const behavior = behaviorFor("/apps/*/_static/*");
+    expect(behavior).toBeDefined();
+    expect(behavior!.targetOriginId).toBe("app-assets-s3");
+    expect(behavior!.allowedMethods).toEqual(["GET", "HEAD"]);
+  });
+
+  it("names only the two reserved prefixes under /apps/", () => {
+    // The distribution used to name `/apps/*/_next/static/*` while apps still
+    // built with Next. A behavior for a path the platform does not upload
+    // would answer 403 from S3, so the platform offers exactly the prefixes
+    // the installer copies.
     const appBehaviors = orderedBehaviors
       .map((b) => b.pathPattern)
       .filter((p) => p.startsWith("/apps/"));
-    expect(appBehaviors).toEqual(["/apps/*/_immutable/*"]);
+    expect(appBehaviors).toEqual(["/apps/*/_immutable/*", "/apps/*/_static/*"]);
+  });
+
+  it("reads the bootstrap bucket through Origin Access Control", () => {
+    const origins = distribution.inputs.origins as Array<Record<string, unknown>>;
+    const assets = origins.find((o) => o.originId === "app-assets-s3");
+    expect(assets?.domainName).toMatch(/^starkeep-app-assets-\d+-[a-z0-9-]+\.s3\.[a-z0-9-]+\.amazonaws\.com$/);
+    expect(assets?.originAccessControlId).toBeTruthy();
+    expect(assets).not.toHaveProperty("s3OriginConfig");
+  });
+
+  it("creates no bucket or bucket policy for it, which the bootstrap stack owns", () => {
+    const own = created.filter(
+      (r) => r.type.startsWith("aws:s3/") && r.name.includes("app-assets"),
+    );
+    expect(own).toEqual([]);
   });
 });
 

@@ -49,6 +49,12 @@ import {
   deleteAppArtifactsObjects,
 } from "./s3";
 import {
+  appAssetsBucketName,
+  collectStaticAssets,
+  deleteStaticAssets,
+  uploadStaticAssets,
+} from "./static-assets";
+import {
   installComputeStack,
   uninstallComputeStack,
   type ComputeContext,
@@ -265,6 +271,9 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
   const mobileCallback = surfaces.includes("mobile")
     ? mobileCallbackTarget(manifest, config)
     : null;
+  // Read before any step, so a bundle the installer would refuse changes
+  // nothing: a missing assetsDir, or a file too large for the Lambda to serve.
+  const staticAssets = web && zipBuffer ? collectStaticAssets(manifest, zipBuffer) : [];
   const done = await registry.getCompletedSteps(appId, "install");
 
   const managerCreds = await roleChain([config.managerRoleArn]);
@@ -468,6 +477,27 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
             appId,
             config.artifactsBucket,
             zipBuffer,
+            config.region,
+            infraCreds,
+          ),
+        { alwaysRun: true },
+      );
+
+      // Before the compute stack, so the new Lambda never serves a shell that
+      // names a file CloudFront cannot find yet. alwaysRun for the same reason
+      // as upload_bundle: a redeploy ships new files. Only with a bundle in
+      // hand, because an empty upload would retire the live files.
+      await runStep(
+        registry,
+        appId,
+        "install",
+        "upload_static_assets",
+        done,
+        () =>
+          uploadStaticAssets(
+            appId,
+            appAssetsBucketName(config.stackPrefix, config.accountId, config.region),
+            staticAssets,
             config.region,
             infraCreds,
           ),
@@ -748,6 +778,15 @@ async function removeComputeSteps(
 
   await runStep(registry, appId, "uninstall", "delete_s3_artifacts", done, () =>
     deleteAppArtifactsObjects(appId, config.artifactsBucket, config.region, infraCreds),
+  );
+
+  await runStep(registry, appId, "uninstall", "delete_static_assets", done, () =>
+    deleteStaticAssets(
+      appId,
+      appAssetsBucketName(config.stackPrefix, config.accountId, config.region),
+      config.region,
+      infraCreds,
+    ),
   );
 
   await runStep(registry, appId, "uninstall", "detach_temp_uninstall_infra_policy", done, () =>

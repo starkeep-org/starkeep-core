@@ -744,6 +744,7 @@ const CONTEXTS: Record<string, ContextBuilder> = {
       const artifactsBucket = `${stackPrefix}-artifacts-${accountId}-${region}`;
       const artifactsBucketArn = `arn:aws:s3:::${artifactsBucket}`;
       const artifactKey = `arn:aws:s3:::${artifactsBucket}/apps/${id}/latest/dist.zip`;
+      const assetsBucketArn = `arn:aws:s3:::${stackPrefix}-app-assets-${accountId}-${region}`;
       const lambdaArn = `arn:aws:lambda:${region}:${accountId}:function:${stackPrefix}-app-${id}-api`;
       const logGroupArn = `arn:aws:logs:${region}:${accountId}:log-group:/aws/lambda/${stackPrefix}-app-${id}-api`;
       const appRoleArn = `arn:aws:iam::${accountId}:role/${stackPrefix}-app-${id}-role`;
@@ -798,6 +799,29 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           action: "s3:ListBucket",
           resource: artifactsBucketArn,
           why: "Pulumi enumerates artifacts under apps/<appId>/.",
+        },
+
+        // Served build output: upload, deployment record, prune.
+        {
+          action: "s3:PutObject",
+          resource: `${assetsBucketArn}/apps/${id}/_immutable/app.3f2a.js`,
+          why: "uploadStaticAssets writes the app's /_immutable/ and /_static/ files.",
+        },
+        {
+          action: "s3:GetObject",
+          resource: `${assetsBucketArn}/apps/${id}/.deployments.json`,
+          why: "uploadStaticAssets reads which files the last two deployments named.",
+        },
+        {
+          action: "s3:DeleteObject",
+          resource: `${assetsBucketArn}/apps/${id}/_immutable/old.1b2c.js`,
+          why: "uploadStaticAssets prunes files neither of the last two deployments named.",
+        },
+        {
+          action: "s3:ListBucket",
+          resource: assetsBucketArn,
+          contextVariables: { "s3:prefix": `apps/${id}/` },
+          why: "uploadStaticAssets lists apps/<appId>/ to find stale files.",
         },
 
         // Lambda admin on the per-app function.

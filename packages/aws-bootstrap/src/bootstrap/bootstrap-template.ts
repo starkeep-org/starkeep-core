@@ -531,6 +531,48 @@ ${installInfraBoundaryPolicyYaml}
         - Key: StackPrefix
           Value: !Ref StackPrefix
 
+  # App assets bucket: web apps' /_immutable/ and /_static/ build output, which
+  # CloudFront serves without Lambda. install-infra writes it. Public by
+  # design, never user data, rebuilt from each bundle, so unversioned.
+  AppAssetsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '\${StackPrefix}-app-assets-\${AWS::AccountId}-\${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      Tags:
+        - Key: starkeep:managed
+          Value: 'true'
+        - Key: StackPrefix
+          Value: !Ref StackPrefix
+
+  # CloudFront reads the two served prefixes only. The distribution does not
+  # exist yet, so any distribution in this account qualifies.
+  AppAssetsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AppAssetsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: CloudFrontReadsServedPrefixes
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource:
+              - !Sub 'arn:aws:s3:::\${AppAssetsBucket}/apps/*/_immutable/*'
+              - !Sub 'arn:aws:s3:::\${AppAssetsBucket}/apps/*/_static/*'
+            Condition:
+              StringLike:
+                'AWS:SourceArn': !Sub 'arn:aws:cloudfront::\${AWS::AccountId}:distribution/*'
+
   # The Pulumi passphrase, an SSM SecureString at
   # /\${StackPrefix}/pulumi/passphrase, is NOT created here: AWS::SSM::Parameter
   # cannot make a SecureString. ensurePulumiPassphrase in the admin-installer

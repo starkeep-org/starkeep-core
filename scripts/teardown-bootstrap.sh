@@ -140,6 +140,7 @@ export AWS_DEFAULT_REGION="$REGION"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 BUCKET="${STACK_PREFIX}-pulumi-state-${ACCOUNT_ID}-${REGION}"
 ARTIFACTS_BUCKET="${STACK_PREFIX}-artifacts-${ACCOUNT_ID}-${REGION}"
+APP_ASSETS_BUCKET="${STACK_PREFIX}-app-assets-${ACCOUNT_ID}-${REGION}"
 SSM_PARAM="/${STACK_PREFIX}/pulumi/passphrase"
 
 # ── Confirmation ────────────────────────────────────────────────────────────
@@ -152,6 +153,7 @@ echo "  Phase 3 — bootstrap    :"
 echo "    CloudFormation stack : $STACK_NAME  (region: $REGION)"
 echo "    S3 bucket            : $BUCKET"
 echo "    S3 bucket            : $ARTIFACTS_BUCKET"
+echo "    S3 bucket            : $APP_ASSETS_BUCKET"
 echo "    SSM parameter        : $SSM_PARAM"
 echo "    IAM role             : ${STACK_PREFIX}-app-admin-role"
 echo "    IAM role             : ${STACK_PREFIX}-manager-role"
@@ -358,6 +360,15 @@ else
   skip
 fi
 
+# Unversioned, which the helper handles: S3 lists each object once, with the
+# version id "null".
+step "Emptying S3 bucket: $APP_ASSETS_BUCKET"
+if aws s3api head-bucket --bucket "$APP_ASSETS_BUCKET" 2>/dev/null; then
+  empty_versioned_bucket "$APP_ASSETS_BUCKET"
+else
+  skip
+fi
+
 # ── Step 2: Delete SSM parameter ─────────────────────────────────────────────
 step "Deleting SSM parameter: $SSM_PARAM"
 if aws ssm get-parameter --name "$SSM_PARAM" --region "$REGION" >/dev/null 2>&1; then
@@ -491,6 +502,14 @@ fi
 step "Deleting S3 bucket: $ARTIFACTS_BUCKET"
 if aws s3api head-bucket --bucket "$ARTIFACTS_BUCKET" 2>/dev/null; then
   aws s3api delete-bucket --bucket "$ARTIFACTS_BUCKET" --region "$REGION"
+  echo "  Deleted."
+else
+  skip
+fi
+
+step "Deleting S3 bucket: $APP_ASSETS_BUCKET"
+if aws s3api head-bucket --bucket "$APP_ASSETS_BUCKET" 2>/dev/null; then
+  aws s3api delete-bucket --bucket "$APP_ASSETS_BUCKET" --region "$REGION"
   echo "  Deleted."
 else
   skip

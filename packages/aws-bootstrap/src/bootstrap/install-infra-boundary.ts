@@ -75,6 +75,20 @@ export function installInfraBoundaryStatements(stackPrefix: string): IamStatemen
       ],
     },
     {
+      // App assets bucket: install-infra uploads each web app's /_immutable/
+      // and /_static/ files, reads and writes the deployment record that says
+      // which files to keep, and deletes the rest. CloudFront serves the
+      // bucket, so these files are public by construction and hold no user
+      // data.
+      Sid: "InstallInfraAppAssets",
+      Effect: "Allow",
+      Action: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
+      Resource: [
+        `arn:aws:s3:::${stackPrefix}-app-assets-*`,
+        `arn:aws:s3:::${stackPrefix}-app-assets-*/apps/*`,
+      ],
+    },
+    {
       // Full Lambda admin on per-app function ARNs. AddPermission/GetPolicy
       // are required to attach the API-Gateway-invoke resource policy
       // statement that Pulumi's aws.lambda.Permission resource creates. The
