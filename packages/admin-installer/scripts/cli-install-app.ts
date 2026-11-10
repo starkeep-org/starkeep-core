@@ -90,7 +90,7 @@ function installAppDependencies(install: CommandResolution): void {
   const result = spawnSync(install.command, install.args, {
     cwd: install.cwd,
     stdio: "inherit",
-    // The app's install scripts get none of the installer's AWS credentials.
+    // Hygiene, not isolation: see the module comment in src/aws-env.ts.
     env: withoutAwsVariables(process.env),
   });
   if (result.status !== 0) {
@@ -137,7 +137,7 @@ function buildAppBundle(
     const result = spawnSync(bundle.command, bundle.args, {
       cwd: bundle.cwd,
       stdio: "inherit",
-      // The app's own build gets none of the installer's AWS credentials.
+      // Hygiene, not isolation: see the module comment in src/aws-env.ts.
       env: {
         ...withoutAwsVariables(process.env),
         STARKEEP_APP_BASE_PATH: appBasePath,
