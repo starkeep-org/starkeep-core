@@ -7,10 +7,17 @@
  * profile left in the shell that started admin-web would silently win (#134).
  * Other `AWS_*` variables (`AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`,
  * `AWS_CONTAINER_CREDENTIALS_*`, `AWS_CONFIG_FILE`) select credential sources
- * too, so every one goes.
+ * too, so every one goes. Settings that select no credentials, such as
+ * `AWS_CA_BUNDLE`, go as well: the rule is all or nothing, never a hidden
+ * keep-list. Passing chosen settings through would be a later, explicit
+ * opt-in.
  *
- * An app's own build step needs no AWS access at all. Removing the variables
- * there keeps the administrator's credentials away from app code.
+ * An app's own dependency install and build step need no AWS access at all,
+ * so they get none of the installer's AWS variables. That is hygiene, not
+ * isolation: it stops a build tool from logging the credentials, baking them
+ * into the bundle, or calling AWS with them by accident. App code still runs
+ * as the operator's OS user and can read the installer's own environment
+ * (`ps -Eww <pid>` on macOS).
  */
 
 /** The credentials an installer runs with. */
