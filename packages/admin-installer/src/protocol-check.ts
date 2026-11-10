@@ -1,16 +1,28 @@
 /**
  * The install-time check of an app's `protocolMinVersion` against the
- * platform's protocol version. Both installers run it before they validate
- * the rest of the manifest, because an app written for a newer platform
- * usually also fails validation on an older one (a file type or manifest
- * field the older validator does not know), and the version mismatch is the
- * message that tells the operator what to do.
+ * platform's protocol version. Both installers and app discovery run it
+ * before they validate the rest of the manifest, because an app written for a
+ * newer platform usually also fails validation on an older one (a file type
+ * or manifest field the older validator does not know), and the version
+ * mismatch is the message that tells the operator what to do.
  */
 
 import { parseProtocolVersion, protocolSatisfies } from "@starkeep/protocol-primitives";
 
-/** The data server whose protocol version the app is checked against. */
-export type ProtocolCheckTarget = "local" | "cloud";
+/**
+ * What the app's requirement is checked against: a data server, or the
+ * starkeep-core checkout whose validator app discovery runs.
+ */
+export type ProtocolCheckTarget = "local" | "cloud" | "checkout";
+
+/** The manifest's `id` before validation, for a message only. */
+export function rawAppId(rawManifest: unknown): string {
+  const id =
+    typeof rawManifest === "object" && rawManifest !== null
+      ? (rawManifest as { id?: unknown }).id
+      : undefined;
+  return typeof id === "string" && id ? id : "The app";
+}
 
 /**
  * Why `appId` cannot install against a data server at `platformVersion`, or
@@ -35,7 +47,11 @@ export function protocolRefusal(opts: {
     return null;
   }
   const server =
-    opts.target === "local" ? "this computer's local data server" : "the cloud data server";
+    opts.target === "local"
+      ? "this computer's local data server"
+      : opts.target === "cloud"
+        ? "the cloud data server"
+        : "this starkeep-core checkout";
   const speaks =
     opts.platformVersion === null
       ? `${server} reports no protocol version, so it predates version checks`
@@ -49,6 +65,8 @@ export function protocolRefusal(opts: {
       ? `The app was written for an older protocol; install a version of ${opts.appId} built for protocol ${platformMajor}.x.`
       : opts.target === "local"
         ? "Update the starkeep-core checkout and restart the local data server; a data server started before a pull keeps running its old code."
-        : "Update the starkeep-core checkout and redeploy the cloud data server.";
+        : opts.target === "cloud"
+          ? "Update the starkeep-core checkout and redeploy the cloud data server."
+          : "Update the starkeep-core checkout, then restart admin-web and the local data server.";
   return `${opts.appId} needs Starkeep protocol ${required}, and ${speaks}. ${remedy}`;
 }

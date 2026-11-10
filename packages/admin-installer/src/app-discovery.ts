@@ -12,7 +12,9 @@
  *   manifest is an app. The scan skips `node_modules` and dot-folders, and
  *   never goes deeper than one level.
  * - Each manifest is validated with `validateManifest`, the validator Install
- *   runs, so a manifest the scan offers is one Install accepts.
+ *   runs, so a manifest the scan offers is one Install accepts. The
+ *   protocol check runs first, so an app that needs a newer platform is
+ *   reported as that, not as the validation errors it also has.
  * - Every skipped folder is reported with its reason. A container child with
  *   no manifest is not a problem, because containers hold other things too.
  *
@@ -32,6 +34,8 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateManifest, type AppManifest } from "@starkeep/admin-manifest";
+import { PROTOCOL_VERSION } from "@starkeep/protocol-primitives";
+import { protocolRefusal, rawAppId } from "./protocol-check";
 
 export const MANIFEST_FILE = "starkeep.manifest.json";
 
@@ -108,6 +112,16 @@ export function readFolderManifest(dir: string): FolderManifest {
   } catch (err) {
     return { kind: "invalid", error: err instanceof Error ? err.message : String(err) };
   }
+  // The protocol check runs first, as in both installers: an app written for
+  // a newer platform usually fails this checkout's validator too, and only the
+  // version mismatch says what to do.
+  const refusal = protocolRefusal({
+    appId: rawAppId(raw),
+    rawManifest: raw,
+    platformVersion: PROTOCOL_VERSION,
+    target: "checkout",
+  });
+  if (refusal) return { kind: "invalid", error: refusal };
   const validation = validateManifest(raw);
   if (!validation.valid || !validation.manifest) {
     return {

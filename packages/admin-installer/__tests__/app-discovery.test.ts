@@ -7,6 +7,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PROTOCOL_VERSION, parseProtocolVersion } from "@starkeep/protocol-primitives";
 import { scanApps } from "../src/app-discovery.js";
 import { appDirFor, resolveAppDir, takeAppDirFlag } from "../src/app-cli-config.js";
 
@@ -115,6 +116,27 @@ describe("scanApps", () => {
       /^Invalid manifest found for no-name: name: /,
     );
     expect(result.dirs[0]!.apps).toEqual([{ appId: "good", name: "Good" }]);
+  });
+
+  it("reports an app that needs a newer protocol as that, not as its unknown key", () => {
+    const [major, minor] = parseProtocolVersion(PROTOCOL_VERSION)!;
+    const next = `${major}.${minor + 1}.0`;
+    const container = folder(root, "protocol-case");
+    // A manifest field this checkout's validator does not know, as an app
+    // written for a newer platform would declare.
+    app(container, "future", {
+      ...manifest("future", "Future"),
+      protocolMinVersion: next,
+      futureField: true,
+    });
+
+    const result = scanApps([container]);
+    expect(result.apps).toEqual([]);
+    expect(result.problems.map((p) => p.reason)).toEqual([
+      `Invalid manifest found for future: future needs Starkeep protocol ${next}, and this ` +
+        `starkeep-core checkout speaks ${PROTOCOL_VERSION}. Update the starkeep-core checkout, ` +
+        "then restart admin-web and the local data server.",
+    ]);
   });
 
   it("offers neither of two folders with one id, and reports both", () => {
