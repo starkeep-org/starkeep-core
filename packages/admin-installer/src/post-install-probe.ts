@@ -25,7 +25,13 @@
  * 404, which usually means the route was never created — is reported but not
  * fatal, because it is not evidence of exposure.
  */
-import { probePathFor, type AppComputeHandler, type AppManifest } from "@starkeep/admin-manifest";
+import {
+  probePathFor,
+  publicPathCovers,
+  SERVED_ASSET_PREFIXES,
+  type AppComputeHandler,
+  type AppManifest,
+} from "@starkeep/admin-manifest";
 
 /**
  * How long the first request to a freshly deployed handler took, against the
@@ -104,6 +110,18 @@ async function probe(url: string, fetchImpl: typeof fetch): Promise<ProbeResult>
   } catch (err) {
     return { url, status: null, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/**
+ * Is this path under a prefix CloudFront answers from the app assets bucket?
+ *
+ * Such a request never reaches the gateway, so its route table has nothing to
+ * say about it. A made-up file there answers 403, because S3 hides a missing
+ * key from a reader that cannot list the bucket, and the probe would read that
+ * 403 as the gateway refusing a declared public path.
+ */
+function servedFromAssetsBucket(path: string): boolean {
+  return SERVED_ASSET_PREFIXES.some((prefix) => publicPathCovers(`/${prefix}/*`, path));
 }
 
 /** A status that proves the platform refused an unauthenticated caller. */
@@ -200,7 +218,10 @@ export async function probeAnonymousSurface(
 
   const declared = new Set<string>();
   for (const handler of manifest.infraRequirements.compute.handlers) {
-    for (const entry of handler.publicPaths) declared.add(probePathFor(entry));
+    for (const entry of handler.publicPaths) {
+      const path = probePathFor(entry);
+      if (!servedFromAssetsBucket(path)) declared.add(path);
+    }
   }
   const paths = [...declared];
   const publicPaths = await Promise.all(
