@@ -2012,6 +2012,12 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
 
         const asset = await fetchWhenReady(assetUrl);
         expect(asset.status).toBe(200);
+        // From the app assets bucket, not the app's Lambda: the installer
+        // copied it there with the responder's headers, and the request cost
+        // no invocation.
+        expect(asset.headers.get("server")).toBe("AmazonS3");
+        expect(asset.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+        expect(asset.headers.get("content-type")).toMatch(/javascript|css/);
         const xCache = await pollForEdgeHit(assetUrl);
         expect(xCache, `no edge hit for ${assetUrl} (last x-cache: ${xCache})`).toMatch(
           /Hit from cloudfront/i,
