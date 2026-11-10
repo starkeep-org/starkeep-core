@@ -66,10 +66,12 @@ Four rules govern what a browser reaches, and the manifest states each one:
   literal path or a file-backed prefix.** The static branch answers before the
   app's own gate runs, which makes each entry an enforcement bypass by
   construction. The schema enforces the subset relation.
-- **`/_immutable/*` is the reserved prefix for content-hashed output, and
-  nothing else is cached forever.** Point Vite's `assetsDir` at that prefix and
-  pass the prefix as `immutablePaths`. CloudFront caches that one prefix and no
-  other.
+- **`/_immutable/*` and `/_static/*` are the reserved prefixes for build
+  output.** `/_immutable/` holds content-hashed files and is the only prefix
+  cached forever. `/_static/` holds files with stable names, which every
+  request revalidates. In the cloud, CloudFront serves both prefixes from S3,
+  so no request for them reaches your Lambda. Name the build-output directory
+  in the handler's `assetsDir` so the installer can copy them.
 - **App routes are written app-relative.** `honoUpstream` strips the
   `/apps/<appId>` mount before Hono routes the request, so one route table
   matches on both surfaces. Call `appBasePath()` for the two cases where a
@@ -547,6 +549,7 @@ In the manifest, `infraRequirements.compute`:
       "auth": "session",
       "publicPaths": ["/", "/_immutable/*", "/sign-in", "/api/session/*", "/starkeep-runtime-config"],
       "staticAssetPaths": ["/", "/_immutable/*"],
+      "assetsDir": "assets",
       "env": { "STARKEEP_API_GATEWAY_URL": "", "STARKEEP_USER_POOL_ID": "", ... } },
     { "name": "api", "handler": "api.handler",
       "memoryMb": 256, "timeoutSeconds": 10,
@@ -718,11 +721,31 @@ derives the prefix from a request. Pass `upstream` instead of `requestUpstream`
 only for a server half that emits a Lambda handler and cannot speak `Request`;
 no Starkeep app does today.
 
-`/_immutable/*` is the platform's reserved prefix for content-addressed build
-output. Everything under that prefix is cacheable forever, which is what earns
-it CloudFront's `CachingOptimized` behavior while the rest of your app gets
-`must-revalidate`. Set Vite's `build.assetsDir` to `_immutable` and pass the
-prefix as `immutablePaths`.
+The platform reserves two prefixes for build output:
+
+- **`/_immutable/*`** holds content-addressed files, whose bytes never change
+  at a given name. Responses say `max-age=31536000, immutable`. Set Vite's
+  `build.assetsDir` to `_immutable` and pass the prefix as `immutablePaths`.
+- **`/_static/*`** holds files with stable names, such as Flutter's
+  `main.dart.js` or a font a stylesheet names. Responses say `max-age=0,
+must-revalidate` with an `ETag`, so a browser revalidates each one and gets a
+  304 when the file has not changed.
+
+In the cloud, CloudFront serves both prefixes from the platform's app assets
+bucket, and no request for them reaches your Lambda. The files therefore cost
+no Lambda concurrency and have no size limit. At install, the platform copies
+the files under `<assetsDir>/_immutable/` and `<assetsDir>/_static/` that
+`staticAssetPaths` declares out of your `dist.zip` into the bucket, where
+`assetsDir` is the handler field naming your build output's directory inside
+the zip. An undeclared file stays out of the bucket, because the bucket serves
+anyone, signed in or not. Locally, `serveStatic` answers the same
+paths from the same directory with the same headers. The manifest schema
+refuses a handler whose `staticAssetPaths` reach either prefix without an
+`assetsDir`.
+
+An update keeps the previous deployment's files in the bucket, so a tab opened
+before the update still loads the files its page names. The update after that
+removes them.
 
 `immutablePaths` is required and has no default. A default would decide your
 cache headers for you, and a path cached forever by mistake stays wrong at the
@@ -748,14 +771,40 @@ not already cover, so a path your bundle serves from disk can never be one the
 manifest failed to declare — or, equivalently, one the gateway refuses while
 your bundle stands ready to serve it.
 
+#### Build tools that emit stable names
+
+A build tool that cannot hash its output's names puts that output under
+`/_static/`, and keeps the shell at the app's root. Two common setups:
+
+- **Vite.** Hashed output goes to `_immutable/` through `build.assetsDir`.
+  Files in Vite's `public/` directory keep their names, so put them in
+  `public/_static/`, and Vite copies them to `<outDir>/_static/`.
+- **Flutter.** Build with `flutter build web --base-href
+"$STARKEEP_APP_BASE_PATH/"`, so the page resolves relative URLs against the
+  app's root on either surface. Move everything in `build/web/` except
+  `index.html` into `_static/`. In a custom `web/flutter_bootstrap.js`, pass
+  `entrypointBaseUrl: "_static/"`, `assetBase: "_static/"` and
+  `canvasKitBaseUrl: "_static/canvaskit/"` in the `config` object of
+  `_flutter.loader.load()`, and point `index.html`'s script tag at
+  `_static/flutter_bootstrap.js`.
+
+Declare the prefix in both lists, and name the directory:
+
+```jsonc
+"publicPaths": ["/", "/_static/*", "/sign-in", "/api/session/*"],
+"staticAssetPaths": ["/_static/*"],
+"assetsDir": "assets"
+```
+
 #### Limits on what your Lambda can return
 
 Every request that does not hit the CloudFront cache reaches your Lambda through
 API Gateway, and these limits apply to each one:
 
 - **Response size:** 6 MB per response. The adapter base64-encodes a binary
-  body, so the largest binary response is about 4.5 MB. A static file larger
-  than that cannot be served from your bundle.
+  body, so the largest binary response is about 4.5 MB. The installer refuses a
+  bundle whose Lambda would serve a static file over 4 MB, and names the file.
+  Move such a file under `/_static/` or `/_immutable/`.
 - **Request size:** 6 MB per request body, with the same base64 cost for a
   binary upload.
 - **Time:** API Gateway ends any request that runs longer than 30 seconds,
@@ -771,7 +820,7 @@ Keep large bytes off the Lambda path:
 
 | Bytes                                              | Where they belong                | How the browser gets them                                                                 |
 | -------------------------------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------- |
-| Content-hashed build output                        | `/_immutable/`                   | CloudFront caches each file at the edge, so Lambda serves it once per edge location       |
+| Build output: code, WebAssembly, fonts, models     | `/_immutable/` or `/_static/`    | CloudFront serves each file from S3, with no Lambda and no size limit                     |
 | A person's shared data                             | Shared records with files (§5)   | `POST /files/presign` to upload, a signed file URL to download                            |
 | App-private bytes that the app or a person creates | `appSpecificSyncable.files` (§6) | `POST /app-data/files/presign` to upload, `GET /app-data/files/<subKey>` for a signed URL |
 | A large result your server half computes           | `appSpecificSyncable.files` (§6) | Write the file, then answer with a signed URL instead of the bytes                        |
