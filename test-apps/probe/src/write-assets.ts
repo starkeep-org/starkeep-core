@@ -1,9 +1,9 @@
 /**
- * Stage Probe's static assets into a directory the cloud bundle ships.
+ * Stage Probe's static assets into a directory.
  *
- * Run by `build.mjs` during the cloud build, and only there. The local surface
- * answers the same bytes from `handleRequest`, so nothing here is a second
- * source of truth: both call `assetScript()`.
+ * Run by `build.mjs` for both surfaces: the cloud build ships the directory in
+ * the Lambda zip, and the local build writes it beside `serve.mjs`. Both
+ * surfaces then answer the same bytes through the platform's static responder.
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";

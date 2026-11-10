@@ -42,6 +42,23 @@ if (!cloud) {
     },
   });
   console.log(`Built: ${join(pkgDir, "serve.mjs")}`);
+
+  // The assets `serve.mjs` answers through the platform's `serveStatic`,
+  // staged by the same script the cloud build runs.
+  const localAssets = join(pkgDir, "assets");
+  if (existsSync(localAssets)) rmSync(localAssets, { recursive: true });
+  const writeLocalAssets = join(pkgDir, ".write-assets.mjs");
+  await build({
+    entryPoints: [join(pkgDir, "src", "write-assets.ts")],
+    bundle: true,
+    platform: "node",
+    target: "node22",
+    format: "esm",
+    outfile: writeLocalAssets,
+    external: ["node:*"],
+  });
+  execSync(`node "${writeLocalAssets}" "${localAssets}"`, { stdio: "inherit" });
+  rmSync(writeLocalAssets);
 } else {
   const out = process.env.STARKEEP_BUNDLE_OUT;
   if (!out) throw new Error("STARKEEP_BUNDLE_OUT is not set (cli-install-app sets it)");

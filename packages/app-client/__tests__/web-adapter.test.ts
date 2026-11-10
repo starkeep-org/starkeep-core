@@ -30,6 +30,7 @@ beforeAll(() => {
   writeFileSync(join(assetsDir, "version"), "abc123");
   writeFileSync(join(assetsDir, "index.html"), "<!doctype html><title>shell</title>\n");
   writeFileSync(join(assetsDir, "icon.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  writeFileSync(join(assetsDir, "app.wasm"), Buffer.from([0x00, 0x61, 0x73, 0x6d]));
   mkdirSync(join(assetsDir, "sub"), { recursive: true });
   writeFileSync(join(assetsDir, "..", "outside.txt"), "secret");
 });
@@ -132,6 +133,29 @@ describe("payload encoding", () => {
     expect(bytes).toMatchObject({ isBase64Encoded: true, body: "AQID" });
   });
 
+  it("returns a compressed body as base64 even when its type is text", async () => {
+    // A gzip body is bytes. Decoding it as UTF-8 because the type says
+    // `text/javascript` corrupts it, which is how a pre-compressed bundle broke.
+    const gz = new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0xff]);
+    const res = await toResult(
+      new Response(gz, {
+        headers: { "content-type": "text/javascript", "content-encoding": "gzip" },
+      }),
+    );
+    expect(res.isBase64Encoded).toBe(true);
+    expect(Buffer.from(res.body!, "base64")).toEqual(Buffer.from(gz));
+  });
+
+  it("treats an identity encoding as no encoding", async () => {
+    const res = await toResult(
+      new Response("hi", {
+        headers: { "content-type": "text/plain", "content-encoding": "identity" },
+      }),
+    );
+    expect(res).toMatchObject({ body: "hi" });
+    expect(res.isBase64Encoded).toBeUndefined();
+  });
+
   it("honours x-forwarded-proto", () => {
     const req = toRequest({
       rawPath: "/",
@@ -172,7 +196,7 @@ describe("static assets", () => {
       immutablePaths: ["/_immutable/*"],
       basePath: BASE,
       assetsDir,
-      staticPaths: ["/_immutable/*", "/version", "/icon.png"],
+      staticPaths: ["/_immutable/*", "/version", "/icon.png", "/app.wasm"],
       requestUpstream: requestUpstream(),
       ...over,
     });
@@ -191,6 +215,35 @@ describe("static assets", () => {
     expect(res.headers["content-type"]).toBe("image/png");
     expect(res.isBase64Encoded).toBe(true);
     expect(Buffer.from(res.body!, "base64")).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  });
+
+  it("serves WebAssembly as application/wasm, which streaming compilation requires", async () => {
+    const res = await (await staticHandler())(event(`${BASE}/app.wasm`));
+    expect(res.headers["content-type"]).toBe("application/wasm");
+    expect(Buffer.from(res.body!, "base64")).toEqual(Buffer.from([0x00, 0x61, 0x73, 0x6d]));
+  });
+
+  it("tags a file and answers a matching revalidation with 304 and no body", async () => {
+    const handler = await staticHandler();
+    const first = await handler(event(`${BASE}/icon.png`));
+    const etag = first.headers.etag!;
+    expect(etag).toMatch(/^"[A-Za-z0-9_-]+"$/);
+    const again = await handler(
+      event(`${BASE}/icon.png`, { headers: { host: "probe.example.com", "if-none-match": etag } }),
+    );
+    expect(again.statusCode).toBe(304);
+    expect(again.body ?? "").toBe("");
+    expect(again.headers.etag).toBe(etag);
+  });
+
+  it("sends the whole file when the revalidation names a different tag", async () => {
+    const res = await (
+      await staticHandler()
+    )(
+      event(`${BASE}/icon.png`, { headers: { host: "probe.example.com", "if-none-match": '"x"' } }),
+    );
+    expect(res.statusCode).toBe(200);
+    expect(res.isBase64Encoded).toBe(true);
   });
 
   it("leaves an undeclared path to the upstream even when the file exists", async () => {

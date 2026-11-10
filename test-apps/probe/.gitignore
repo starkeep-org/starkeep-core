@@ -1,2 +1,4 @@
 serve.mjs
 .build-staging/
+/assets/
+.write-assets.mjs

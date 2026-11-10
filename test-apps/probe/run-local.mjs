@@ -2,8 +2,8 @@
 /**
  * What the manifest's `localRun` starts.
  *
- * `serve.mjs` is a build artifact rather than a checked-in file, so this entry
- * point builds it when it is missing and then runs it. Self-healing on purpose:
+ * `serve.mjs` and `assets/` are build artifacts rather than checked-in files, so
+ * this entry point builds them when either is missing and then runs the server. Self-healing on purpose:
  * a fixture app that fails to start because someone forgot a build step would
  * report as a platform failure in whatever suite installed it, which is the
  * hardest kind of test failure to read.
@@ -17,8 +17,8 @@ import { fileURLToPath } from "node:url";
 const pkgDir = dirname(fileURLToPath(import.meta.url));
 const bundle = join(pkgDir, "serve.mjs");
 
-if (!existsSync(bundle)) {
-  console.log("probe: serve.mjs is missing, building it…");
+if (!existsSync(bundle) || !existsSync(join(pkgDir, "assets"))) {
+  console.log("probe: serve.mjs or assets/ is missing, building them…");
   execFileSync(process.execPath, [join(pkgDir, "build.mjs"), "--local"], {
     cwd: pkgDir,
     stdio: "inherit",

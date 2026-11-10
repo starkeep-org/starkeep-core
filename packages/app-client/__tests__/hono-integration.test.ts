@@ -13,9 +13,18 @@
  * the integration is structural on purpose, and a real Hono app is what proves
  * the structure is the one Hono actually has.
  */
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Hono } from "hono";
-import { afterEach, describe, expect, it } from "vitest";
-import { appBasePath, honoOriginGate, honoUpstream, rewritePath } from "../src/hono.js";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import {
+  appBasePath,
+  honoOriginGate,
+  honoUpstream,
+  rewritePath,
+  serveStatic,
+} from "../src/hono.js";
 import { createWebAppHandler, type ApiGatewayV2Event } from "../src/web.js";
 
 const BASE = "/apps/probe";
@@ -229,5 +238,90 @@ describe("honoOriginGate", () => {
   it("is inert on the local surface — local-first means no sign-in on local data", async () => {
     const res = await (await gatedApp())(event(`${BASE}/api/local-data/records`));
     expect(res.body).toBe("records");
+  });
+});
+
+describe("serveStatic — the local surface answers static files as the cloud does", () => {
+  let dir: string;
+  const options = () => ({
+    assetsDir: dir,
+    staticPaths: ["/_immutable/*", "/_static/*", "/favicon.ico"],
+    immutablePaths: ["/_immutable/*"],
+    shellPaths: ["/", "/settings"],
+  });
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), "starkeep-serve-static-"));
+    mkdirSync(join(dir, "_immutable"), { recursive: true });
+    mkdirSync(join(dir, "_static"), { recursive: true });
+    writeFileSync(join(dir, "_immutable", "app.1a2b3c.js"), "console.log(1)\n");
+    writeFileSync(join(dir, "_static", "canvaskit.wasm"), Buffer.from([0x00, 0x61, 0x73, 0x6d]));
+    writeFileSync(join(dir, "favicon.ico"), Buffer.from([0x00, 0x00, 0x01, 0x00]));
+    writeFileSync(join(dir, "index.html"), "<!doctype html><title>shell</title>\n");
+  });
+
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function localApp() {
+    const app = new Hono();
+    app.use("*", serveStatic(options()));
+    app.get("/api/ping", (c) => c.text("pong"));
+    return app;
+  }
+
+  it("serves a hashed file forever-cached and an un-hashed one revalidated", async () => {
+    const app = localApp();
+    const hashed = await app.request("/_immutable/app.1a2b3c.js");
+    expect(hashed.status).toBe(200);
+    expect(hashed.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    const wasm = await app.request("/_static/canvaskit.wasm");
+    expect(wasm.headers.get("content-type")).toBe("application/wasm");
+    expect(wasm.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
+  });
+
+  it("answers a client route with the shell", async () => {
+    const res = await localApp().request("/settings");
+    expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(await res.text()).toContain("<title>shell</title>");
+  });
+
+  it("hands every other path to the app's routes", async () => {
+    expect(await (await localApp().request("/api/ping")).text()).toBe("pong");
+  });
+
+  it("answers a matching revalidation with 304", async () => {
+    const app = localApp();
+    const etag = (await app.request("/_static/canvaskit.wasm")).headers.get("etag")!;
+    const again = await app.request("/_static/canvaskit.wasm", {
+      headers: { "if-none-match": etag },
+    });
+    expect(again.status).toBe(304);
+  });
+
+  it("matches the cloud adapter header for header", async () => {
+    const local = localApp();
+    const cloud = await createWebAppHandler({
+      basePath: BASE,
+      ...options(),
+      requestUpstream: Promise.resolve({ handler: honoUpstream(new Hono()) }),
+    });
+    for (const path of [
+      "/_immutable/app.1a2b3c.js",
+      "/_static/canvaskit.wasm",
+      "/favicon.ico",
+      "/",
+    ]) {
+      const l = await local.request(path);
+      const c = await cloud(event(`${BASE}${path === "/" ? "" : path}`));
+      expect(c.statusCode).toBe(l.status);
+      for (const header of ["content-type", "cache-control", "etag"]) {
+        expect(c.headers[header]).toBe(l.headers.get(header));
+      }
+      const localBytes = Buffer.from(await l.arrayBuffer());
+      const cloudBytes = Buffer.from(c.body!, c.isBase64Encoded ? "base64" : "utf8");
+      expect(cloudBytes).toEqual(localBytes);
+    }
   });
 });
