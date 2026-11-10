@@ -186,13 +186,26 @@ describe("declared public paths that do not answer", () => {
 
   it("turn a wildcard declaration into a concrete path to ask about", async () => {
     const report = await probeAnonymousSurface(
-      manifest(["/_immutable/*"]),
+      manifest(["/photo/*"]),
       "https://cdn.example.com",
       fetchReturning([[/./, 200]]),
     );
-    expect(report.publicPaths.map((r) => new URL(r.url).pathname)).toEqual([
-      "/apps/memo/_immutable/x",
-    ]);
+    expect(report.publicPaths.map((r) => new URL(r.url).pathname)).toEqual(["/apps/memo/photo/x"]);
+  });
+
+  it("skips the prefixes CloudFront serves from S3, where a made-up file answers 403", async () => {
+    // Seen on a live install: `/_immutable/x` answered 403 from S3 and the
+    // probe warned that a declared public path was refused.
+    const report = await probeAnonymousSurface(
+      manifest(["/", "/_immutable/*", "/_static/*"]),
+      "https://cdn.example.com",
+      fetchReturning([
+        [/\/_(immutable|static)\//, 403],
+        [/./, 200],
+      ]),
+    );
+    expect(report.publicPaths.map((r) => new URL(r.url).pathname)).toEqual(["/apps/memo"]);
+    expect(report.unreachablePublicPaths).toEqual([]);
   });
 });
 

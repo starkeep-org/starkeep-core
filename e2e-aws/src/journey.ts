@@ -2017,7 +2017,12 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // no invocation.
         expect(asset.headers.get("server")).toBe("AmazonS3");
         expect(asset.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
-        expect(asset.headers.get("content-type")).toMatch(/javascript|css/);
+        // The installer named the type from the extension. Which file the
+        // shell names first varies by app (Photos' is an SVG icon), so the
+        // check is only that S3 was not left to answer with raw bytes.
+        expect(asset.headers.get("content-type") ?? "").not.toMatch(
+          /^(application\/octet-stream|binary\/octet-stream)?$/,
+        );
         const xCache = await pollForEdgeHit(assetUrl);
         expect(xCache, `no edge hit for ${assetUrl} (last x-cache: ${xCache})`).toMatch(
           /Hit from cloudfront/i,
