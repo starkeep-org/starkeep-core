@@ -46,7 +46,9 @@ beforeAll(async () => {
 });
 afterAll(() => new Promise<void>((done) => health.close(() => done())));
 
-function runCli(appDir: string): Promise<{ status: number | null; stdout: string; stderr: string }> {
+function runCli(
+  appDir: string,
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
   const starkeepDir = mkdtempSync(join(tmpdir(), "cli-bundle-sk-"));
   writeFileSync(
     join(starkeepDir, "config.json"),
