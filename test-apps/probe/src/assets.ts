@@ -18,6 +18,22 @@
 export const ASSET_NAME = "probe.5f3a9c21.js";
 
 /**
+ * A stable-named asset, so the platform's `/apps/*\/_static/*` CloudFront
+ * behavior has something to revalidate. `_static` is the reserved prefix for
+ * build output a tool cannot hash, such as Flutter's `main.dart.js`: the name
+ * stays put across builds, so every request revalidates it by `ETag` instead
+ * of caching it forever.
+ */
+export const STATIC_NAME = "probe.css";
+
+/** The shell's stylesheet, served as the stable-named asset. */
+export function staticStylesheet(): string {
+  return `body { font-family: system-ui, sans-serif; margin: 1rem; }
+#grid img { margin: 2px; }
+`;
+}
+
+/**
  * The shell's script, served as the immutable asset.
  *
  * Uploading is the one flow that differs by surface, and the difference is not

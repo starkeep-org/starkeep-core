@@ -70,8 +70,8 @@
           "timeoutSeconds": 10,
           "routes": ["GET /", "ANY /{proxy+}"],
           "auth": "session",
-          "publicPaths": ["/", "/_immutable/*", "/sign-in", "/api/session/*"],
-          "staticAssetPaths": ["/_immutable/*"],
+          "publicPaths": ["/", "/_immutable/*", "/_static/*", "/sign-in", "/api/session/*"],
+          "staticAssetPaths": ["/_immutable/*", "/_static/*"],
           "assetsDir": "assets",
           "env": {
             "STARKEEP_API_GATEWAY_URL": "",

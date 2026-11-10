@@ -35,7 +35,7 @@ import { createSessionRoutes, createSignInPage } from "@starkeep/app-client/auth
 import { createDataProxyHandler, sessionAuth } from "@starkeep/app-client";
 import { appBasePath, honoOriginGate } from "@starkeep/app-client/hono";
 import manifest from "../starkeep.manifest.json" with { type: "json" };
-import { ASSET_NAME } from "./assets.js";
+import { ASSET_NAME, STATIC_NAME } from "./assets.js";
 
 /** The app id, fixed to match `starkeep.manifest.json`. */
 export const APP_ID = "probe";
@@ -82,7 +82,8 @@ function json(body: unknown, status = 200): Response {
  */
 function shellPage(base: string, cloud: boolean): string {
   return `<!doctype html>
-<html><head><title>Probe</title><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<html><head><title>Probe</title><meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="${base}/_static/${STATIC_NAME}"></head>
 <body>
 <h1>Probe</h1>
 <label>Upload<input type="file" id="file" accept="image/png,image/jpeg"></label>

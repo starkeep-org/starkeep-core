@@ -2027,6 +2027,43 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         expect(xCache, `no edge hit for ${assetUrl} (last x-cache: ${xCache})`).toMatch(
           /Hit from cloudfront/i,
         );
+
+        // A stable-named asset → `/_static/`, the prefix for build output a
+        // tool cannot hash. Asked of every app that declares the prefix, and
+        // skipped for one that does not (Photos hashes everything).
+        const handlers =
+          (
+            JSON.parse(readFileSync(join(app.appDir, "starkeep.manifest.json"), "utf-8")) as {
+              infraRequirements?: {
+                compute?: { handlers?: Array<{ staticAssetPaths?: string[] }> };
+              };
+            }
+          ).infraRequirements?.compute?.handlers ?? [];
+        if (!handlers.some((h) => h.staticAssetPaths?.includes("/_static/*"))) return;
+
+        const staticMatch = html.match(new RegExp(`/apps/${app.appId}/_static/[^"'\\\\]+`));
+        expect(
+          staticMatch,
+          "an app that declares /_static/* should reference a file under it from its shell",
+        ).toBeTruthy();
+        const staticUrl = `${base}${staticMatch![0]}`;
+
+        // From S3 with the revalidating header, so CloudFront keeps it for at
+        // most a second and every browser load asks again.
+        const staticAsset = await fetchWhenReady(staticUrl);
+        expect(staticAsset.status).toBe(200);
+        expect(staticAsset.headers.get("server")).toBe("AmazonS3");
+        expect(staticAsset.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
+        expect(staticAsset.headers.get("content-type") ?? "").not.toMatch(
+          /^(application\/octet-stream|binary\/octet-stream)?$/,
+        );
+
+        // The revalidation the prefix exists for: a matching ETag costs a 304
+        // from the edge, with no body and no Lambda.
+        const etag = staticAsset.headers.get("etag");
+        expect(etag, "S3 should send an ETag for the static asset").toBeTruthy();
+        const revalidated = await fetch(staticUrl, { headers: { "if-none-match": etag! } });
+        expect(revalidated.status).toBe(304);
       });
 
       it("Part B: shared bytes via CloudFront signed URL — edge hit, tamper rejected, apps/* isolated", async () => {
