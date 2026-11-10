@@ -2,7 +2,7 @@ import type { RawDatabase } from "@starkeep/storage-adapter";
 import { randomBytes } from "node:crypto";
 import { validateManifest, type AppManifest } from "@starkeep/admin-manifest";
 import { PROTOCOL_VERSION } from "@starkeep/protocol-primitives";
-import { protocolRefusal } from "../protocol-check.js";
+import { protocolRefusal, rawAppId } from "../protocol-check.js";
 import {
   appRegistryRow,
   clearStepLedger,
@@ -56,15 +56,6 @@ export class ProtocolVersionError extends LocalInstallError {
     super(message);
     this.name = "ProtocolVersionError";
   }
-}
-
-/** The manifest's `id` before validation, for a message only. */
-function rawAppId(rawManifest: unknown): string {
-  const id =
-    typeof rawManifest === "object" && rawManifest !== null
-      ? (rawManifest as { id?: unknown }).id
-      : undefined;
-  return typeof id === "string" && id ? id : "The app";
 }
 
 /**
