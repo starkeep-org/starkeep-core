@@ -716,7 +716,10 @@ serve({ fetch: local.fetch, port, hostname: "127.0.0.1" });
 ```
 
 Mount it ahead of your routes, which is where the cloud adapter serves static
-files. Probe's `src/serve.ts` does this.
+files. The example app's `web/src/server/local.ts` does this. Its
+`web/src/server/static-options.ts` builds the options that `local.ts` and the
+cloud entry `cloud.ts` both pass, so the two surfaces cannot disagree about
+which paths are files.
 
 `requestUpstream` hands your handler a web `Request` and the app-relative path.
 `honoUpstream` rewrites the request's URL to that path before Hono routes it, so
