@@ -155,6 +155,8 @@ describe("input validation", () => {
 });
 
 describe("start → status → stop lifecycle", () => {
+  let firstPort = 0;
+
   it("status of a never-started id reports not running", async () => {
     expect((await status("daemon-app")).running).toBe(false);
   });
@@ -177,6 +179,7 @@ describe("start → status → stop lifecycle", () => {
     });
     const ping = await fetch(`http://127.0.0.1:${body.port}/`);
     expect(ping.ok).toBe(true);
+    firstPort = body.port;
   });
 
   it("stop kills the process group and cleans up pid/meta files", async () => {
@@ -198,6 +201,15 @@ describe("start → status → stop lifecycle", () => {
     expect(res.status).toBe(404);
     const { error } = (await res.json()) as { error: string };
     expect(error).toContain("Not running");
+  });
+
+  it("a second start reuses the first start's port, so the app keeps its origin", async () => {
+    const res = await act({ action: "start", id: "daemon-app" });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { port: number }).port).toBe(firstPort);
+    await eventually(async () => expect((await status("daemon-app")).running).toBe(true));
+    expect((await act({ action: "stop", id: "daemon-app" })).status).toBe(200);
+    await eventually(async () => expect((await status("daemon-app")).running).toBe(false));
   });
 });
 
