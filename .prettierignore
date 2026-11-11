@@ -6,3 +6,11 @@ pnpm-lock.yaml
 # this line a machine that has run the journey fails `pnpm format:check`, and
 # with it `pnpm release:publish`.
 e2e-aws/.run/
+
+# Probe's build outputs, ignored by test-apps/probe/.gitignore. Prettier reads
+# only the root ignore files, so a machine that has built Probe fails
+# `pnpm format:check`, and with it `pnpm release:publish`.
+test-apps/probe/serve.mjs
+test-apps/probe/.build-staging/
+test-apps/probe/assets/
+test-apps/probe/.write-assets.mjs
