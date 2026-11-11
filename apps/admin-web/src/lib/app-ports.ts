@@ -31,8 +31,11 @@ import { localDataServerUrlFromEnv } from "./local-daemon-urls";
  *   `installedAt`. An uninstall, through any path, followed by an install
  *   gives the app a fresh port: the reinstalled app's local data is gone, so
  *   its browser storage goes too.
- * - A port given up that way stays reserved forever. No other app ever lands
- *   on an origin whose browser storage another app left behind.
+ * - When another program holds an app's recorded port, the operator can
+ *   choose another port for the app (`reassign`). The app's browser storage
+ *   stays behind at the old port.
+ * - A port given up either way stays reserved forever. No other app ever
+ *   lands on an origin whose browser storage another app left behind.
  */
 export const DEFAULT_APP_PORT_RANGE: PortRange = { first: 20000, last: 20999 };
 
@@ -81,7 +84,7 @@ interface AppPortEntry {
 
 interface AppPortRecord {
   apps: Record<string, AppPortEntry>;
-  /** Ports that once belonged to an install that is gone; never handed out again. */
+  /** Ports an app gave up, at a reinstall or a reassign; never handed out again. */
   retired: number[];
 }
 
@@ -124,7 +127,12 @@ export function portIsFree(port: number): Promise<boolean> {
 
 export type AppPortOutcome =
   | { ok: true; port: number }
-  | { ok: false; port?: number; error: string };
+  /**
+   * Another process holds the app's recorded port. The operator may check
+   * whether the app already runs there, or move the app with `reassign`.
+   */
+  | { ok: false; reason: "port-in-use"; port: number; error: string }
+  | { ok: false; reason?: undefined; error: string };
 
 export interface AppPortOptions {
   file?: string;
@@ -132,6 +140,12 @@ export interface AppPortOptions {
   /** What sets this instance apart on one machine; see {@link instanceKeyFromEnv}. */
   instance?: string;
   isFree?: (port: number) => Promise<boolean>;
+  /**
+   * Give the app a new port even though its recorded port belongs to the
+   * current install. The old port is retired, as on a reinstall, so the
+   * app's browser storage stays behind and no other app ever inherits it.
+   */
+  reassign?: boolean;
 }
 
 // Starts are concurrent requests; one read-modify-write of the record at a time.
@@ -144,7 +158,8 @@ let queue: Promise<unknown> = Promise.resolve();
  *
  * Fails, without moving the app, when another process holds its recorded
  * port: moving the app would empty its browser storage, which is the bug this
- * module exists to prevent.
+ * module exists to prevent. The operator moves the app on purpose with
+ * `reassign`.
  */
 export function appPort(
   appId: string,
@@ -164,10 +179,9 @@ async function assign(
     range: givenRange,
     instance = instanceKeyFromEnv(),
     isFree = portIsFree,
+    reassign = false,
   }: AppPortOptions,
 ): Promise<AppPortOutcome> {
-  const range = givenRange ?? appPortRangeFromEnv();
-  if ("error" in range) return { ok: false, error: range.error };
   const record = readRecord(file);
   const current = record.apps[appId];
 
@@ -176,7 +190,9 @@ async function assign(
       installedAt !== undefined &&
       current.installedAt !== undefined &&
       current.installedAt !== installedAt;
-    if (!otherInstall) {
+    if (!otherInstall && !reassign) {
+      // A recorded port never consults the range, so a bad range variable
+      // cannot stop an app that already has its port.
       if (installedAt !== undefined && current.installedAt === undefined) {
         record.apps[appId] = { ...current, installedAt };
         writeRecord(file, record);
@@ -184,10 +200,17 @@ async function assign(
       if (await isFree(current.port)) return { ok: true, port: current.port };
       return {
         ok: false,
+        reason: "port-in-use",
         port: current.port,
         error: `'${appId}' cannot start: its port ${current.port} is in use. Is '${appId}' already running at http://localhost:${current.port}?`,
       };
     }
+  }
+
+  const range = givenRange ?? appPortRangeFromEnv();
+  if ("error" in range) return { ok: false, error: range.error };
+
+  if (current) {
     record.retired.push(current.port);
     delete record.apps[appId];
   }

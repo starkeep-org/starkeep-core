@@ -8,8 +8,11 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
+import { createServer as createNetServer, type AddressInfo, type Server } from "node:net";
 import { join } from "node:path";
 import { getFreePort } from "@starkeep/testkit";
+import { portIsFree } from "../../src/lib/app-ports";
 import {
   eventually,
   getRequest,
@@ -24,7 +27,15 @@ import {
 let daemonPOST: (req: Request) => Promise<Response>;
 let statusGET: (req: Request) => Promise<Response>;
 let pidsDir: string;
+let dataDir: string;
+let daemonAppDir: string;
 const strays: number[] = [];
+// No local data server listens here, so Start resolves through the scan.
+const NO_DATA_SERVER = "http://127.0.0.1:9";
+const daemonAppManifest = testAppManifest({
+  id: "daemon-app",
+  localRun: { command: process.execPath, args: ["server.mjs"], portFlag: "--port" },
+});
 
 // A real HTTP server the route can spawn via localRun: binds the port given
 // by --port, like an app dev server would.
@@ -35,21 +46,14 @@ createServer((req, res) => res.end("ok")).listen(port, "127.0.0.1");
 `;
 
 beforeAll(async () => {
-  const dataDir = makeDataDir();
+  dataDir = makeDataDir();
   pidsDir = join(dataDir, "pids");
   const parent = join(dataDir, "apps");
   mkdirSync(parent, { recursive: true });
   writeAdminConfig(dataDir, { appParentDirs: [parent] });
 
-  const appDir = makeAppDir(
-    parent,
-    "daemon-app",
-    testAppManifest({
-      id: "daemon-app",
-      localRun: { command: process.execPath, args: ["server.mjs"], portFlag: "--port" },
-    }),
-  );
-  writeFileSync(join(appDir, "server.mjs"), SERVER_MJS);
+  daemonAppDir = makeAppDir(parent, "daemon-app", daemonAppManifest);
+  writeFileSync(join(daemonAppDir, "server.mjs"), SERVER_MJS);
   makeAppDir(parent, "norun-app", testAppManifest({ id: "norun-app" }));
 
   // An app whose daemon prints an error and dies immediately (like a dev
@@ -96,7 +100,7 @@ beforeAll(async () => {
 
   process.env.STARKEEP_DIR = dataDir;
   // Nothing listens here: no app is installed, so Start resolves through the scan.
-  process.env.STARKEEP_LOCAL_DATA_SERVER_URL = "http://127.0.0.1:9";
+  process.env.STARKEEP_LOCAL_DATA_SERVER_URL = NO_DATA_SERVER;
   daemonPOST = (await import("../../src/routes/exec-daemon")).POST;
   statusGET = (await import("../../src/routes/exec-daemon-status")).GET;
 });
@@ -210,6 +214,133 @@ describe("start → status → stop lifecycle", () => {
     await eventually(async () => expect((await status("daemon-app")).running).toBe(true));
     expect((await act({ action: "stop", id: "daemon-app" })).status).toBe(200);
     await eventually(async () => expect((await status("daemon-app")).running).toBe(false));
+    await eventually(async () => expect(await portIsFree(firstPort)).toBe(true));
+  });
+});
+
+/** The port `app-ports.json` records for `appId`, and the retired ports. */
+function recordedPorts(appId: string): { port: number | undefined; retired: number[] } {
+  const record = JSON.parse(readFileSync(join(dataDir, "app-ports.json"), "utf-8")) as {
+    apps: Record<string, { port: number }>;
+    retired: number[];
+  };
+  return { port: record.apps[appId]?.port, retired: record.retired };
+}
+
+/** Start `id` and return its port, once it is up; then stop it. */
+async function startAndStop(body: Record<string, unknown>): Promise<number> {
+  const res = await act({ action: "start", ...body });
+  expect(res.status).toBe(200);
+  const { port } = (await res.json()) as { port: number };
+  await eventually(async () => {
+    const s = await status(body.id as string);
+    expect(s.running).toBe(true);
+    expect(s.port).toBe(port);
+  });
+  expect((await act({ action: "stop", id: body.id })).status).toBe(200);
+  await eventually(async () => expect((await status(body.id as string)).running).toBe(false));
+  // Status turns false when the pid file goes; the process may hold the port
+  // a moment longer.
+  await eventually(async () => expect(await portIsFree(port)).toBe(true));
+  return port;
+}
+
+describe("a recorded port another program holds", () => {
+  let holder: Server;
+  let held = 0;
+
+  beforeAll(async () => {
+    held = recordedPorts("daemon-app").port!;
+    // The lifecycle tests' last stop may not have released the port yet.
+    await eventually(async () => expect(await portIsFree(held)).toBe(true));
+    holder = createNetServer();
+    await new Promise<void>((resolveP, rejectP) => {
+      holder.once("error", rejectP);
+      holder.listen(held, "127.0.0.1", resolveP);
+    });
+  });
+
+  afterAll(async () => {
+    if (holder.listening) await new Promise((resolveP) => holder.close(resolveP));
+  });
+
+  it("start is 409 with the reason and the port, so the UI can offer another port", async () => {
+    const res = await act({ action: "start", id: "daemon-app" });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: `'daemon-app' cannot start: its port ${held} is in use. Is 'daemon-app' already running at http://localhost:${held}?`,
+      reason: "port-in-use",
+      port: held,
+    });
+    expect(recordedPorts("daemon-app").port).toBe(held);
+  });
+
+  it("start with reassignPort moves the app to a new port and retires the held one", async () => {
+    const moved = await startAndStop({ id: "daemon-app", reassignPort: true });
+    expect(moved).not.toBe(held);
+    expect(recordedPorts("daemon-app")).toEqual({ port: moved, retired: [held] });
+
+    // The old port is free again, and the app keeps the port it moved to.
+    await new Promise((resolveP) => holder.close(resolveP));
+    expect(await startAndStop({ id: "daemon-app" })).toBe(moved);
+  });
+});
+
+describe("a reinstall that the registry reports", () => {
+  let registry: HttpServer;
+  let row: Record<string, unknown>;
+
+  beforeAll(async () => {
+    // A stand-in local data server that answers only the registry listing.
+    registry = createHttpServer((req, res) => {
+      if (req.url === "/admin/apps") {
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ apps: [row] }));
+        return;
+      }
+      res.statusCode = 404;
+      res.end();
+    });
+    await new Promise<void>((resolveP) => registry.listen(0, "127.0.0.1", resolveP));
+    const { port } = registry.address() as AddressInfo;
+    process.env.STARKEEP_LOCAL_DATA_SERVER_URL = `http://127.0.0.1:${port}`;
+  });
+
+  afterAll(async () => {
+    process.env.STARKEEP_LOCAL_DATA_SERVER_URL = NO_DATA_SERVER;
+    await new Promise((resolveP) => registry.close(resolveP));
+  });
+
+  const installed = (installedAt: string, sourceDir: string | null) => {
+    row = {
+      appId: "daemon-app",
+      status: "active",
+      manifest: daemonAppManifest,
+      sourceDir,
+      installedAt,
+    };
+  };
+
+  it("keeps the recorded port for the install the registry reports first", async () => {
+    const before = recordedPorts("daemon-app").port;
+    installed("2026-11-11 10:00:00", daemonAppDir);
+    expect(await startAndStop({ id: "daemon-app" })).toBe(before);
+  });
+
+  it("gives a reinstalled app pinned to its folder a new port", async () => {
+    const before = recordedPorts("daemon-app").port!;
+    installed("2026-11-11 11:00:00", daemonAppDir);
+    const after = await startAndStop({ id: "daemon-app" });
+    expect(after).not.toBe(before);
+    expect(recordedPorts("daemon-app").retired).toContain(before);
+  });
+
+  it("gives a reinstalled app found through the scan a new port", async () => {
+    const before = recordedPorts("daemon-app").port!;
+    installed("2026-11-11 12:00:00", null);
+    const after = await startAndStop({ id: "daemon-app" });
+    expect(after).not.toBe(before);
+    expect(recordedPorts("daemon-app").retired).toContain(before);
   });
 });
 

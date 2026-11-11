@@ -33,7 +33,12 @@ function startResponse(outcome: StartOutcome): Response {
 }
 
 export async function POST(req: Request) {
-  const body = (await req.json()) as { action: "start" | "stop" | "restart"; id: string };
+  const body = (await req.json()) as {
+    action: "start" | "stop" | "restart";
+    id: string;
+    /** Start only: move the app off a recorded port another program holds. */
+    reassignPort?: boolean;
+  };
   const { action, id } = body;
 
   if (action === "restart") {
@@ -105,9 +110,20 @@ export async function POST(req: Request) {
     let port: number | undefined;
     if (localRun.portFlag) {
       // One port per install, so the app's browser origin, and with it the
-      // app's localStorage and IndexedDB, survives restarts (#135).
-      const assigned = await appPort(id, found.installedAt);
-      if (!assigned.ok) return Response.json({ error: assigned.error }, { status: 409 });
+      // app's localStorage and IndexedDB, survives restarts (#135). A held
+      // port answers with its reason and port, so the UI can offer to choose
+      // another port.
+      const assigned = await appPort(id, found.installedAt, {
+        reassign: body.reassignPort === true,
+      });
+      if (!assigned.ok) {
+        return Response.json(
+          assigned.reason === "port-in-use"
+            ? { error: assigned.error, reason: assigned.reason, port: assigned.port }
+            : { error: assigned.error },
+          { status: 409 },
+        );
+      }
       port = assigned.port;
       spawnArgs.push(localRun.portFlag, String(port));
     }
