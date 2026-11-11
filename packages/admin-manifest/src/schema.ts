@@ -217,6 +217,18 @@ const appComputeHandlerObjectSchema = z.strictObject({
 export const SERVED_ASSET_PREFIXES = ["_immutable", "_static"] as const;
 
 /**
+ * Does this handler serve any file from the app assets bucket? True when a
+ * `staticAssetPaths` entry reaches `/_immutable/` or `/_static/`. A handler
+ * whose static files the Lambda serves still declares `assetsDir`, so
+ * the field alone does not answer this.
+ */
+export function handlerUsesAppAssetsBucket(handler: { staticAssetPaths?: string[] }): boolean {
+  return (handler.staticAssetPaths ?? []).some((entry) =>
+    SERVED_ASSET_PREFIXES.some((prefix) => reachesPrefix(entry, `/${prefix}`)),
+  );
+}
+
+/**
  * Every `staticAssetPaths` entry must sit inside `publicPaths`.
  *
  * The bundle answers these paths ahead of the app's own middleware, so a path
