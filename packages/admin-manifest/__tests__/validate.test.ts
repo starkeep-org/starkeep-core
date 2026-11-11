@@ -890,7 +890,7 @@ describe("staticAssetPaths", () => {
       withHandlers([
         shell({
           staticAssetPaths: ["/_immutable/*", "/manifest.webmanifest"],
-          assetsDir: "assets",
+          bundleAssetsDir: "assets",
         }),
       ]),
     );
@@ -928,7 +928,7 @@ describe("staticAssetPaths", () => {
         shell({
           publicPaths: ["/", "/_immutable/*", "/sign-in", "/api/session/*"],
           staticAssetPaths: ["/_immutable/fonts/*"],
-          assetsDir: "assets",
+          bundleAssetsDir: "assets",
         }),
       ]),
     );
@@ -941,7 +941,7 @@ describe("staticAssetPaths", () => {
   });
 });
 
-describe("assetsDir", () => {
+describe("bundleAssetsDir", () => {
   function withHandlers(handlers: Record<string, unknown>[]): Record<string, unknown> {
     return minimal({ infraRequirements: { compute: { enabled: true, handlers } } });
   }
@@ -961,7 +961,7 @@ describe("assetsDir", () => {
     for (const entry of ["/_immutable/*", "/_static/*", "/_static/main.dart.js"]) {
       const result = validateManifest(withHandlers([shell({ staticAssetPaths: [entry] })]));
       expect(result.valid, entry).toBe(false);
-      expect(result.errors.some((e) => e.includes('Declare "assetsDir"'))).toBe(true);
+      expect(result.errors.some((e) => e.includes('Declare "bundleAssetsDir"'))).toBe(true);
     }
   });
 
@@ -980,18 +980,28 @@ describe("assetsDir", () => {
 
   it("accepts a nested relative directory", () => {
     const result = validateManifest(
-      withHandlers([shell({ staticAssetPaths: ["/_static/*"], assetsDir: "web/build" })]),
+      withHandlers([shell({ staticAssetPaths: ["/_static/*"], bundleAssetsDir: "web/build" })]),
     );
     expect(result.errors).toEqual([]);
-    expect(result.manifest!.infraRequirements.compute.handlers[0]!.assetsDir).toBe("web/build");
+    expect(result.manifest!.infraRequirements.compute.handlers[0]!.bundleAssetsDir).toBe(
+      "web/build",
+    );
   });
 
   it("refuses a directory that could leave the bundle", () => {
-    for (const assetsDir of ["/assets", "../assets", "a/../../b", "a//b", "assets/", "a\\b", ""]) {
+    for (const bundleAssetsDir of [
+      "/assets",
+      "../assets",
+      "a/../../b",
+      "a//b",
+      "assets/",
+      "a\\b",
+      "",
+    ]) {
       const result = validateManifest(
-        withHandlers([shell({ staticAssetPaths: ["/_static/*"], assetsDir })]),
+        withHandlers([shell({ staticAssetPaths: ["/_static/*"], bundleAssetsDir })]),
       );
-      expect(result.valid, JSON.stringify(assetsDir)).toBe(false);
+      expect(result.valid, JSON.stringify(bundleAssetsDir)).toBe(false);
     }
   });
 });

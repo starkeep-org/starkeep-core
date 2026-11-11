@@ -72,7 +72,7 @@
           "auth": "session",
           "publicPaths": ["/", "/_immutable/*", "/_static/*", "/sign-in", "/api/session/*"],
           "staticAssetPaths": ["/_immutable/*", "/_static/*"],
-          "assetsDir": "assets",
+          "bundleAssetsDir": "assets",
           "env": {
             "STARKEEP_API_GATEWAY_URL": "",
             "STARKEEP_USER_POOL_ID": "",

@@ -99,7 +99,12 @@ export function resolveAssetsDir(dir: string | URL | undefined): string | null {
 }
 
 export interface StaticResponderOptions {
-  /** The build output directory, as a path or a `file:` URL. */
+  /**
+   * The build output directory on this process's disk, as a path or a `file:`
+   * URL. Not the manifest's `bundleAssetsDir`, which names the directory
+   * inside `dist.zip` for the installer. In the cloud the two point at the
+   * same files; locally this is wherever the build writes.
+   */
   assetsDir: string | URL;
   /**
    * The paths this app answers from disk: the handler's `staticAssetPaths`

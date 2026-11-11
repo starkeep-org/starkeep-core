@@ -114,7 +114,7 @@ export function publicPathCovers(entry: string, path: string): boolean {
   return path === entry;
 }
 
-const assetsDirSchema = z
+const bundleAssetsDirSchema = z
   .string()
   .min(1)
   .refine(
@@ -124,7 +124,7 @@ const assetsDirSchema = z
       dir.split("/").every((segment) => segment !== ".." && segment !== ""),
     {
       message:
-        "assetsDir must be a relative directory inside dist.zip, with / separators, " +
+        "bundleAssetsDir must be a relative directory inside dist.zip, with / separators, " +
         'no empty segment and no ".." segment',
     },
   );
@@ -197,7 +197,7 @@ const appComputeHandlerObjectSchema = z.strictObject({
    *
    * In the cloud, the platform serves `/_immutable/*` and `/_static/*` from
    * S3 through CloudFront, so those requests never reach Lambda. The installer
-   * copies the files under `<assetsDir>/_immutable/` and `<assetsDir>/_static/`
+   * copies the files under `<bundleAssetsDir>/_immutable/` and `<bundleAssetsDir>/_static/`
    * that `staticAssetPaths` declares out of the bundle into the app assets
    * bucket. Every handler with `staticAssetPaths` must name the directory.
    * Without it, the installer has nothing to copy for the two prefixes, and it
@@ -206,20 +206,20 @@ const appComputeHandlerObjectSchema = z.strictObject({
    *
    * Relative to the zip's root, with `/` separators and no `..` segment.
    */
-  assetsDir: assetsDirSchema.optional(),
+  bundleAssetsDir: bundleAssetsDirSchema.optional(),
 });
 
 /**
  * The prefixes CloudFront serves from the app assets bucket rather than from
  * the app's Lambda. Each is a directory directly under the handler's
- * `assetsDir`.
+ * `bundleAssetsDir`.
  */
 export const SERVED_ASSET_PREFIXES = ["_immutable", "_static"] as const;
 
 /**
  * Does this handler serve any file from the app assets bucket? True when a
  * `staticAssetPaths` entry reaches `/_immutable/` or `/_static/`. A handler
- * whose static files the Lambda serves still declares `assetsDir`, so
+ * whose static files the Lambda serves still declares `bundleAssetsDir`, so
  * the field alone does not answer this.
  */
 export function handlerUsesAppAssetsBucket(handler: { staticAssetPaths?: string[] }): boolean {
@@ -243,7 +243,7 @@ export function handlerUsesAppAssetsBucket(handler: { staticAssetPaths?: string[
  * probe form is what the check compares.
  */
 export const appComputeHandlerSchema = appComputeHandlerObjectSchema.superRefine((handler, ctx) => {
-  if (handler.assetsDir === undefined) {
+  if (handler.bundleAssetsDir === undefined) {
     let lambdaServed = false;
     for (const entry of handler.staticAssetPaths) {
       const prefix = SERVED_ASSET_PREFIXES.find((p) => reachesPrefix(entry, `/${p}`));
@@ -253,10 +253,10 @@ export const appComputeHandlerSchema = appComputeHandlerObjectSchema.superRefine
       }
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["assetsDir"],
+        path: ["bundleAssetsDir"],
         message:
           `"${entry}" is served from /${prefix}/, which the cloud serves from S3 rather than ` +
-          `from this handler's Lambda. Declare "assetsDir", the directory inside dist.zip ` +
+          `from this handler's Lambda. Declare "bundleAssetsDir", the directory inside dist.zip ` +
           `that holds ${prefix}/, so the installer can copy those files.`,
       });
     }
@@ -266,10 +266,10 @@ export const appComputeHandlerSchema = appComputeHandlerObjectSchema.superRefine
     if (lambdaServed) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["assetsDir"],
+        path: ["bundleAssetsDir"],
         message:
           `"staticAssetPaths" names files this handler's Lambda serves from disk. Declare ` +
-          `"assetsDir", the directory inside dist.zip that holds them, so the installer can ` +
+          `"bundleAssetsDir", the directory inside dist.zip that holds them, so the installer can ` +
           `refuse a file too large for a Lambda response before it deploys anything.`,
       });
     }

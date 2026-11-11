@@ -71,7 +71,7 @@ Four rules govern what a browser reaches, and the manifest states each one:
   cached forever. `/_static/` holds files with stable names, which every
   request revalidates. In the cloud, CloudFront serves both prefixes from S3,
   so no request for them reaches your Lambda. A handler with
-  `staticAssetPaths` names its build-output directory in `assetsDir`. The
+  `staticAssetPaths` names its build-output directory in `bundleAssetsDir`. The
   installer copies the two prefixes from it, and measures every other file the
   Lambda serves against the Lambda's response limit.
 - **App routes are written app-relative.** `honoUpstream` strips the
@@ -555,7 +555,7 @@ In the manifest, `infraRequirements.compute`:
       "auth": "session",
       "publicPaths": ["/", "/_immutable/*", "/sign-in", "/api/session/*", "/starkeep-runtime-config"],
       "staticAssetPaths": ["/", "/_immutable/*"],
-      "assetsDir": "assets",
+      "bundleAssetsDir": "assets",
       "env": { "STARKEEP_API_GATEWAY_URL": "", "STARKEEP_USER_POOL_ID": "", ... } },
     { "name": "api", "handler": "api.handler",
       "memoryMb": 256, "timeoutSeconds": 10,
@@ -740,13 +740,23 @@ must-revalidate` with an `ETag`, so a browser revalidates each one and gets a
 In the cloud, CloudFront serves both prefixes from the platform's app assets
 bucket, and no request for them reaches your Lambda. The files therefore cost
 no Lambda concurrency and have no size limit. At install, the platform copies
-the files under `<assetsDir>/_immutable/` and `<assetsDir>/_static/` that
-`staticAssetPaths` declares out of your `dist.zip` into the bucket, where
-`assetsDir` is the handler field naming your build output's directory inside
-the zip. An undeclared file stays out of the bucket, because the bucket serves
-anyone, signed in or not. Locally, `serveStatic` answers the same
-paths from the same directory with the same headers. The manifest schema
-refuses a handler that declares `staticAssetPaths` without an `assetsDir`.
+the files under `<bundleAssetsDir>/_immutable/` and `<bundleAssetsDir>/_static/`
+that `staticAssetPaths` declares out of your `dist.zip` into the bucket. An
+undeclared file stays out of the bucket, because the bucket serves anyone,
+signed in or not. Locally, `serveStatic` answers the same paths with the same
+headers. The manifest schema refuses a handler that declares
+`staticAssetPaths` without a `bundleAssetsDir`.
+
+Two settings name your build output, and they answer different questions:
+
+- **`bundleAssetsDir`**, in the manifest, names the directory inside
+  `dist.zip`, such as `"assets"`. The installer reads it before anything runs,
+  to copy the S3-served files and to check file sizes.
+- **`assetsDir`**, passed to `createWebAppHandler` or `serveStatic`, is where
+  your running server reads files on disk, as a path or a `file:` URL. In the
+  cloud it points at the same directory as `bundleAssetsDir`, unpacked beside
+  your handler. Locally it points wherever your build writes, which is often a
+  different directory.
 
 Both prefixes are public. CloudFront serves them to anyone who has the URL,
 signed in or not. Keep secrets out of build output: an API key, a token or a
@@ -808,7 +818,7 @@ Declare the prefix in both lists, and name the directory:
 ```jsonc
 "publicPaths": ["/", "/_static/*", "/sign-in", "/api/session/*"],
 "staticAssetPaths": ["/_static/*"],
-"assetsDir": "assets"
+"bundleAssetsDir": "assets"
 ```
 
 #### Limits on what your Lambda can return
