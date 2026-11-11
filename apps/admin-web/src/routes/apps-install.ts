@@ -115,7 +115,7 @@ export async function POST(req: Request) {
   // If the app daemon is already running, stop it so the user restarts it and
   // picks up the (possibly rotated) HMAC secret — @starkeep/app-client caches
   // credentials per process and has no file-watch invalidation.
-  stopById(appId);
+  await stopById(appId);
 
   return Response.json({ appId: result.appId, secretPath, ok: true });
 }

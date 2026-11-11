@@ -45,6 +45,11 @@ const port = Number(process.argv[process.argv.indexOf("--port") + 1]);
 createServer((req, res) => res.end("ok")).listen(port, "127.0.0.1");
 `;
 
+// The same server, but it ignores SIGTERM, like a dev server stuck in shutdown.
+const STUBBORN_SERVER_MJS = `${SERVER_MJS}
+process.on("SIGTERM", () => {});
+`;
+
 beforeAll(async () => {
   dataDir = makeDataDir();
   pidsDir = join(dataDir, "pids");
@@ -54,6 +59,15 @@ beforeAll(async () => {
 
   daemonAppDir = makeAppDir(parent, "daemon-app", daemonAppManifest);
   writeFileSync(join(daemonAppDir, "server.mjs"), SERVER_MJS);
+  makeAppDir(
+    parent,
+    "stubborn-app",
+    testAppManifest({
+      id: "stubborn-app",
+      localRun: { command: process.execPath, args: ["server.mjs"], portFlag: "--port" },
+    }),
+  );
+  writeFileSync(join(parent, "stubborn-app", "server.mjs"), STUBBORN_SERVER_MJS);
   makeAppDir(parent, "norun-app", testAppManifest({ id: "norun-app" }));
 
   // An app whose daemon prints an error and dies immediately (like a dev
@@ -107,7 +121,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   // Belt and braces: kill anything the tests started but failed to stop.
-  for (const id of ["daemon-app"]) {
+  for (const id of ["daemon-app", "stubborn-app"]) {
     const pf = join(pidsDir, `${id}.pid`);
     if (existsSync(pf)) {
       const pid = parseInt(readFileSync(pf, "utf-8"), 10);
@@ -206,15 +220,14 @@ describe("start → status → stop lifecycle", () => {
     expect(readFileSync(join(dataDir, "app-ports.json"), "utf-8")).toBe(recordBefore);
   });
 
-  it("stop kills the process group and cleans up pid/meta files", async () => {
+  it("stop answers only once the process group is gone and its port is free", async () => {
     const pid = parseInt(readFileSync(join(pidsDir, "daemon-app.pid"), "utf-8"), 10);
     const res = await act({ action: "stop", id: "daemon-app" });
     expect(res.status).toBe(200);
     expect(((await res.json()) as { stopped: boolean }).stopped).toBe(true);
 
-    await eventually(() => {
-      expect(isAlive(pid)).toBe(false);
-    });
+    expect(isAlive(pid)).toBe(false);
+    expect(await portIsFree(firstPort)).toBe(true);
     expect(existsSync(join(pidsDir, "daemon-app.pid"))).toBe(false);
     expect(existsSync(join(pidsDir, "daemon-app.meta.json"))).toBe(false);
     expect((await status("daemon-app")).running).toBe(false);
@@ -232,10 +245,31 @@ describe("start → status → stop lifecycle", () => {
     expect(res.status).toBe(200);
     expect(((await res.json()) as { port: number }).port).toBe(firstPort);
     await eventually(async () => expect((await status("daemon-app")).running).toBe(true));
-    expect((await act({ action: "stop", id: "daemon-app" })).status).toBe(200);
-    await eventually(async () => expect((await status("daemon-app")).running).toBe(false));
-    await eventually(async () => expect(await portIsFree(firstPort)).toBe(true));
   });
+
+  it("a start right after a stop gets the same port, not 'port in use'", async () => {
+    expect((await act({ action: "stop", id: "daemon-app" })).status).toBe(200);
+    const res = await act({ action: "start", id: "daemon-app" });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { port: number }).port).toBe(firstPort);
+    await eventually(async () => expect((await status("daemon-app")).running).toBe(true));
+    expect((await act({ action: "stop", id: "daemon-app" })).status).toBe(200);
+    expect(await portIsFree(firstPort)).toBe(true);
+  });
+});
+
+describe("a daemon that ignores SIGTERM", () => {
+  it("stop sends SIGKILL after the grace period and answers with the port free", async () => {
+    const res = await act({ action: "start", id: "stubborn-app" });
+    expect(res.status).toBe(200);
+    const { pid, port } = (await res.json()) as { pid: number; port: number };
+    await eventually(async () => expect((await status("stubborn-app")).running).toBe(true));
+
+    expect((await act({ action: "stop", id: "stubborn-app" })).status).toBe(200);
+    expect(isAlive(pid)).toBe(false);
+    expect(await portIsFree(port)).toBe(true);
+    expect((await status("stubborn-app")).running).toBe(false);
+  }, 20_000);
 });
 
 /** The port `app-ports.json` records for `appId`, and the retired ports. */
@@ -258,10 +292,8 @@ async function startAndStop(body: Record<string, unknown>): Promise<number> {
     expect(s.port).toBe(port);
   });
   expect((await act({ action: "stop", id: body.id })).status).toBe(200);
-  await eventually(async () => expect((await status(body.id as string)).running).toBe(false));
-  // Status turns false when the pid file goes; the process may hold the port
-  // a moment longer.
-  await eventually(async () => expect(await portIsFree(port)).toBe(true));
+  expect((await status(body.id as string)).running).toBe(false);
+  expect(await portIsFree(port)).toBe(true);
   return port;
 }
 
@@ -271,8 +303,6 @@ describe("a recorded port another program holds", () => {
 
   beforeAll(async () => {
     held = recordedPorts("daemon-app").port!;
-    // The lifecycle tests' last stop may not have released the port yet.
-    await eventually(async () => expect(await portIsFree(held)).toBe(true));
     holder = createNetServer();
     await new Promise<void>((resolveP, rejectP) => {
       holder.once("error", rejectP);
