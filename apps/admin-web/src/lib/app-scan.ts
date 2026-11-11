@@ -57,6 +57,8 @@ export interface RegistryApp {
    * reinstalled; such an app resolves through the scan.
    */
   sourceDir: string | null;
+  /** When this install happened; a reinstall gives a new value. */
+  installedAt?: string;
 }
 
 /** The local app registry, or null when the local data server cannot be asked. */
@@ -109,9 +111,9 @@ export function idMismatch(folderId: string, appId: unknown): string {
 
 /** Where an app's code is: its installed pin, else the scan. */
 export type AppSource =
-  | { kind: "pinned"; appDir: string; manifest: Record<string, unknown> }
+  | { kind: "pinned"; appDir: string; manifest: Record<string, unknown>; installedAt?: string }
   | { kind: "pinned-missing"; appDir: string }
-  | { kind: "scanned"; appDir: string; manifest: Record<string, unknown> }
+  | { kind: "scanned"; appDir: string; manifest: Record<string, unknown>; installedAt?: string }
   | { kind: "not-found" };
 
 /**
@@ -127,10 +129,20 @@ export async function appSource(appId: string): Promise<AppSource> {
     if (readFolderManifest(row.sourceDir).kind === "missing") {
       return { kind: "pinned-missing", appDir: row.sourceDir };
     }
-    return { kind: "pinned", appDir: row.sourceDir, manifest: row.manifest };
+    return {
+      kind: "pinned",
+      appDir: row.sourceDir,
+      manifest: row.manifest,
+      installedAt: row.installedAt,
+    };
   }
   const found = findApp(appId);
   return found
-    ? { kind: "scanned", appDir: found.appDir, manifest: found.manifest }
+    ? {
+        kind: "scanned",
+        appDir: found.appDir,
+        manifest: found.manifest,
+        installedAt: row?.installedAt,
+      }
     : { kind: "not-found" };
 }

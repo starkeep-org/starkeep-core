@@ -12,7 +12,8 @@
  * An explicit URL wins, for the e2e harness. Otherwise the address follows the
  * port variable that `exec-commands.ts` spawns the daemon with, so a second
  * Starkeep instance on one machine needs only `STARKEEP_PORT` and
- * `STARKEEP_DRIVE_PORT`. Read per call, not captured at load.
+ * `STARKEEP_DRIVE_PORT` for its daemons, plus `STARKEEP_APP_PORT_RANGE` for
+ * its installed apps (see `app-ports.ts`). Read per call, not captured at load.
  */
 import { daemonPort } from "./exec-commands";
 

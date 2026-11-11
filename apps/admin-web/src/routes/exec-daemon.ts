@@ -1,4 +1,3 @@
-import { createServer } from "node:net";
 import { resolve } from "node:path";
 import {
   isWorkspaceDaemonId,
@@ -13,27 +12,7 @@ import {
   type CommandSource,
 } from "@starkeep/admin-installer/approved-commands";
 import { appSource } from "../lib/app-scan";
-
-// Ask the kernel for a free TCP port by binding to port 0, then release it.
-// There's a tiny race between close() and the child binding the same port,
-// but it's good enough for local dev and avoids hardcoded port collisions.
-function findOpenPort(): Promise<number> {
-  return new Promise((resolveP, rejectP) => {
-    const srv = createServer();
-    srv.unref();
-    srv.on("error", rejectP);
-    srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address();
-      if (addr && typeof addr === "object") {
-        const port = addr.port;
-        srv.close(() => resolveP(port));
-      } else {
-        srv.close();
-        rejectP(new Error("Could not determine free port"));
-      }
-    });
-  });
-}
+import { appPort } from "../lib/app-ports";
 
 interface LocalRunBlock {
   command: string;
@@ -125,7 +104,11 @@ export async function POST(req: Request) {
     const spawnArgs = [...(localRun.args ?? [])];
     let port: number | undefined;
     if (localRun.portFlag) {
-      port = await findOpenPort();
+      // One port per install, so the app's browser origin, and with it the
+      // app's localStorage and IndexedDB, survives restarts (#135).
+      const assigned = await appPort(id, found.installedAt);
+      if (!assigned.ok) return Response.json({ error: assigned.error }, { status: 409 });
+      port = assigned.port;
       spawnArgs.push(localRun.portFlag, String(port));
     }
     const cwd = resolve(found.appDir, localRun.cwd ?? ".");

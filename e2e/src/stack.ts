@@ -241,6 +241,9 @@ export async function startPlatformStack(options: PlatformStackOptions): Promise
         STARKEEP_LOCAL_DATA_SERVER_URL: lds.url,
         STARKEEP_PORT: String(daemonPorts.localDataServer),
         STARKEEP_DRIVE_PORT: String(daemonPorts.drive),
+        // The apps this admin-web starts stay off the operator's own app
+        // ports, which sit in the default range.
+        STARKEEP_APP_PORT_RANGE: "22000-22999",
       },
     });
     if (options.drive !== false) {
