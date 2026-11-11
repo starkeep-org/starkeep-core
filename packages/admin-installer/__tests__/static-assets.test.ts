@@ -38,7 +38,10 @@ vi.mock("@aws-sdk/client-s3", () => {
         if (missingBucket) throw s3Error("NoSuchBucket");
         if (cmd instanceof GetObjectCommand) {
           const obj = objects.get(input.Key);
-          if (!obj) throw s3Error("NoSuchKey");
+          // What S3 may answer under install-infra's prefix-conditioned
+          // ListBucket grant: 403, not NoSuchKey. The code must never rely on
+          // a 404 for a missing key, so the fake does not offer one.
+          if (!obj) throw s3Error("AccessDenied");
           return { Body: { transformToString: async () => obj.body } };
         }
         if (cmd instanceof PutObjectCommand) {
@@ -226,6 +229,20 @@ describe("uploadStaticAssets", () => {
     expect(JSON.parse(objects.get("apps/dice/.deployments.json")!.body)).toEqual({
       current: ["_static/a.js"],
       previous: [],
+    });
+  });
+
+  it("reads the deployment record only when the listing shows it", async () => {
+    // First install: no record, so no GetObject. A blind read could cost a
+    // 403 that the access-denied retry spends minutes on.
+    await uploadStaticAssets("dice", BUCKET, [asset("_static/a.js")], "us-east-1", creds);
+    expect(calls).not.toContain("GetObjectCommand");
+    calls.length = 0;
+    await uploadStaticAssets("dice", BUCKET, [asset("_static/b.js")], "us-east-1", creds);
+    expect(calls.filter((c) => c === "GetObjectCommand")).toHaveLength(1);
+    expect(JSON.parse(objects.get("apps/dice/.deployments.json")!.body)).toEqual({
+      current: ["_static/b.js"],
+      previous: ["_static/a.js"],
     });
   });
 

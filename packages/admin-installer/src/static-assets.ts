@@ -208,22 +208,26 @@ function s3Call<T>(label: string, bucket: string, fn: () => Promise<T>): Promise
   );
 }
 
+/**
+ * Read the deployment record, which the caller has already seen in a listing.
+ *
+ * Never called for a key the listing did not show. S3 answers a missing key
+ * with 404 only to a caller that may list the bucket, and install-infra may
+ * list only under `apps/<appId>/`. A `GetObject` carries no `s3:prefix`, so
+ * that grant may not count, and S3 would then answer 403. The retry would
+ * read that 403 as IAM propagation and spend its whole budget on it.
+ */
 async function readRecord(s3: S3Client, bucket: string, key: string): Promise<DeploymentsRecord> {
-  try {
-    const res = await s3Call(`s3:GetObject ${bucket}/${key}`, bucket, () =>
-      s3.send(new GetObjectCommand({ Bucket: bucket, Key: key })),
-    );
-    const parsed = JSON.parse((await res.Body?.transformToString()) ?? "{}") as
-      | Partial<DeploymentsRecord>
-      | undefined;
-    return {
-      current: Array.isArray(parsed?.current) ? parsed.current : [],
-      previous: Array.isArray(parsed?.previous) ? parsed.previous : [],
-    };
-  } catch (err) {
-    if ((err as { name?: string })?.name === "NoSuchKey") return { current: [], previous: [] };
-    throw err;
-  }
+  const res = await s3Call(`s3:GetObject ${bucket}/${key}`, bucket, () =>
+    s3.send(new GetObjectCommand({ Bucket: bucket, Key: key })),
+  );
+  const parsed = JSON.parse((await res.Body?.transformToString()) ?? "{}") as
+    | Partial<DeploymentsRecord>
+    | undefined;
+  return {
+    current: Array.isArray(parsed?.current) ? parsed.current : [],
+    previous: Array.isArray(parsed?.previous) ? parsed.previous : [],
+  };
 }
 
 async function listKeys(s3: S3Client, bucket: string, prefix: string): Promise<string[]> {
@@ -299,7 +303,12 @@ export async function uploadStaticAssets(
   const s3 = makeS3Client(infraCreds, region);
   const prefix = `apps/${appId}/`;
   const recordKey = `${prefix}${DEPLOYMENTS_RECORD}`;
-  const record = await readRecord(s3, bucket, recordKey);
+  // List first: the prune needs the listing anyway, and it says whether the
+  // record exists, so the record is never read blind (see readRecord).
+  const existing = await listKeys(s3, bucket, prefix);
+  const record = existing.includes(recordKey)
+    ? await readRecord(s3, bucket, recordKey)
+    : { current: [], previous: [] };
 
   const queue = [...assets];
   const worker = async (): Promise<void> => {
@@ -338,7 +347,9 @@ export async function uploadStaticAssets(
 
   const keep = new Set([...next.current, ...next.previous].map((k) => `${prefix}${k}`));
   keep.add(recordKey);
-  const stale = (await listKeys(s3, bucket, prefix)).filter((k) => !keep.has(k));
+  // The listing predates this upload, which is safe: every key just put is in
+  // `keep`, so only an older key can be stale.
+  const stale = existing.filter((k) => !keep.has(k));
   await deleteKeys(s3, bucket, stale);
 }
 
