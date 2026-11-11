@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import {
   isWorkspaceDaemonId,
+  liveDaemon,
   restartWorkspaceDaemonIfRunning,
   spawnDaemon,
   startWorkspaceDaemon,
@@ -106,13 +107,30 @@ export async function POST(req: Request) {
         { status: 400 },
       );
     }
+    // A page whose status is stale, such as a second tab, can still offer
+    // Start for an app admin-web runs. A second copy would overwrite the pid
+    // and meta files, and Stop would lose the first copy. A reassign would
+    // also retire the port the running copy serves on. The answer carries no
+    // `reason`, so the UI offers no other port.
+    const live = liveDaemon(id);
+    if (live) {
+      return Response.json(
+        {
+          error:
+            live.port !== undefined
+              ? `'${id}' is already running at http://localhost:${live.port}.`
+              : `'${id}' is already running.`,
+        },
+        { status: 409 },
+      );
+    }
     const spawnArgs = [...(localRun.args ?? [])];
     let port: number | undefined;
     if (localRun.portFlag) {
-      // One port per install, so the app's browser origin, and with it the
-      // app's localStorage and IndexedDB, survives restarts (#135). A held
-      // port answers with its reason and port, so the UI can offer to choose
-      // another port.
+      // One port until a reinstall or a reassign, so the app's browser
+      // origin, and with it the app's localStorage and IndexedDB, survives
+      // restarts (#135). A held port answers with its reason and port, so the
+      // UI can offer to choose another port.
       const assigned = await appPort(id, found.installedAt, {
         reassign: body.reassignPort === true,
       });

@@ -186,6 +186,26 @@ describe("start → status → stop lifecycle", () => {
     firstPort = body.port;
   });
 
+  it("start of a running app is 409 with no port choice, and keeps its pid, meta and port", async () => {
+    const pidBefore = readFileSync(join(pidsDir, "daemon-app.pid"), "utf-8");
+    const metaBefore = readFileSync(join(pidsDir, "daemon-app.meta.json"), "utf-8");
+    const recordBefore = readFileSync(join(dataDir, "app-ports.json"), "utf-8");
+    // A stale page, such as a second tab, sends a plain start or a reassign.
+    for (const body of [
+      { action: "start", id: "daemon-app" },
+      { action: "start", id: "daemon-app", reassignPort: true },
+    ]) {
+      const res = await act(body);
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error: `'daemon-app' is already running at http://localhost:${firstPort}.`,
+      });
+    }
+    expect(readFileSync(join(pidsDir, "daemon-app.pid"), "utf-8")).toBe(pidBefore);
+    expect(readFileSync(join(pidsDir, "daemon-app.meta.json"), "utf-8")).toBe(metaBefore);
+    expect(readFileSync(join(dataDir, "app-ports.json"), "utf-8")).toBe(recordBefore);
+  });
+
   it("stop kills the process group and cleans up pid/meta files", async () => {
     const pid = parseInt(readFileSync(join(pidsDir, "daemon-app.pid"), "utf-8"), 10);
     const res = await act({ action: "stop", id: "daemon-app" });

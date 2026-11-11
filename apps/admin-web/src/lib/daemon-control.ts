@@ -44,6 +44,26 @@ export function isAlive(pid: number): boolean {
   }
 }
 
+/**
+ * The process admin-web started for `id`, when its recorded pid still lives,
+ * with the port it was started on. Null when admin-web has no live record.
+ */
+export function liveDaemon(id: string): { pid: number; port?: number } | null {
+  let pid: number;
+  try {
+    pid = parseInt(readFileSync(pidFile(id), "utf-8"), 10);
+  } catch {
+    return null;
+  }
+  if (isNaN(pid) || !isAlive(pid)) return null;
+  try {
+    const { port } = JSON.parse(readFileSync(metaFile(id), "utf-8")) as { port?: number };
+    return typeof port === "number" ? { pid, port } : { pid };
+  } catch {
+    return { pid };
+  }
+}
+
 function pidByPort(port: number): number | null {
   // -sTCP:LISTEN: only the process listening on the port — a bare tcp:PORT
   // also matches client sockets (e.g. a health probe's lingering connection).
