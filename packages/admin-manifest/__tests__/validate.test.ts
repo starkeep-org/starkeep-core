@@ -965,8 +965,16 @@ describe("assetsDir", () => {
     }
   });
 
-  it("is optional for static paths outside the served prefixes", () => {
+  it("is required for static paths the Lambda serves, so the installer can measure them", () => {
+    // Without it the installer cannot find the files in dist.zip, and a file
+    // past the Lambda response limit would fail only at request time.
     const result = validateManifest(withHandlers([shell({ staticAssetPaths: ["/favicon.ico"] })]));
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("too large for a Lambda response"))).toBe(true);
+  });
+
+  it("is optional for a handler that serves nothing from disk", () => {
+    const result = validateManifest(withHandlers([shell({ staticAssetPaths: [] })]));
     expect(result.errors).toEqual([]);
   });
 
