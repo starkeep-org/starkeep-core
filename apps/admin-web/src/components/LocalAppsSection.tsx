@@ -788,21 +788,22 @@ function ConsentModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
       <div className="bg-background rounded-lg border shadow-lg max-w-lg w-full max-h-full overflow-y-auto flex flex-col gap-4 p-5">
         <h3 className="text-lg font-semibold">Install {entry.manifest.name ?? entry.appId}?</h3>
-        <p className="text-sm text-muted-foreground">
-          {entry.manifest.name ?? entry.appId} asks for access to these files.
-        </p>
-
-        {allAccess && (
+        {allAccess ? (
           <div className="text-sm">
             This app is the <span className="font-medium">User-Data-Owner</span>: read + write
             access to
             <span className="font-mono"> all files</span>, including unclassified ones.
           </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            {entry.manifest.name ?? entry.appId}{" "}
+            {grants.length === 0
+              ? "doesn't access any of your files."
+              : "asks for access to these files."}
+          </p>
         )}
 
-        {grants.length === 0 ? (
-          !allAccess && <p className="text-sm">No file-type grants requested.</p>
-        ) : (
+        {grants.length > 0 && (
           <ul className="flex flex-col gap-2">
             {grants.map((g, i) => {
               // Per design: any access (read or readwrite) implicitly grants
