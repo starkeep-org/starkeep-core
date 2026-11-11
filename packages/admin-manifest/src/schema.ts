@@ -199,9 +199,10 @@ const appComputeHandlerObjectSchema = z.strictObject({
    * S3 through CloudFront, so those requests never reach Lambda. The installer
    * copies the files under `<assetsDir>/_immutable/` and `<assetsDir>/_static/`
    * that `staticAssetPaths` declares out of the bundle into the app assets
-   * bucket. A handler whose `staticAssetPaths`
-   * reach into either prefix must name the directory, because without it the
-   * installer has nothing to copy and the browser gets 403s.
+   * bucket. Every handler with `staticAssetPaths` must name the directory.
+   * Without it, the installer has nothing to copy for the two prefixes, and it
+   * cannot measure the files the Lambda serves against the Lambda's response
+   * size limit.
    *
    * Relative to the zip's root, with `/` separators and no `..` segment.
    */
@@ -231,9 +232,13 @@ export const SERVED_ASSET_PREFIXES = ["_immutable", "_static"] as const;
  */
 export const appComputeHandlerSchema = appComputeHandlerObjectSchema.superRefine((handler, ctx) => {
   if (handler.assetsDir === undefined) {
+    let lambdaServed = false;
     for (const entry of handler.staticAssetPaths) {
       const prefix = SERVED_ASSET_PREFIXES.find((p) => reachesPrefix(entry, `/${p}`));
-      if (!prefix) continue;
+      if (!prefix) {
+        lambdaServed = true;
+        continue;
+      }
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["assetsDir"],
@@ -241,6 +246,19 @@ export const appComputeHandlerSchema = appComputeHandlerObjectSchema.superRefine
           `"${entry}" is served from /${prefix}/, which the cloud serves from S3 rather than ` +
           `from this handler's Lambda. Declare "assetsDir", the directory inside dist.zip ` +
           `that holds ${prefix}/, so the installer can copy those files.`,
+      });
+    }
+    // The Lambda serves every other static path, and a Lambda response has a
+    // size cap. The installer can measure the files against it only when it
+    // knows where they sit in dist.zip.
+    if (lambdaServed) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["assetsDir"],
+        message:
+          `"staticAssetPaths" names files this handler's Lambda serves from disk. Declare ` +
+          `"assetsDir", the directory inside dist.zip that holds them, so the installer can ` +
+          `refuse a file too large for a Lambda response before it deploys anything.`,
       });
     }
   }

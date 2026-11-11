@@ -70,8 +70,10 @@ Four rules govern what a browser reaches, and the manifest states each one:
   output.** `/_immutable/` holds content-hashed files and is the only prefix
   cached forever. `/_static/` holds files with stable names, which every
   request revalidates. In the cloud, CloudFront serves both prefixes from S3,
-  so no request for them reaches your Lambda. Name the build-output directory
-  in the handler's `assetsDir` so the installer can copy them.
+  so no request for them reaches your Lambda. A handler with
+  `staticAssetPaths` names its build-output directory in `assetsDir`. The
+  installer copies the two prefixes from it, and measures every other file the
+  Lambda serves against the Lambda's response limit.
 - **App routes are written app-relative.** `honoUpstream` strips the
   `/apps/<appId>` mount before Hono routes the request, so one route table
   matches on both surfaces. Call `appBasePath()` for the two cases where a
@@ -744,8 +746,7 @@ the files under `<assetsDir>/_immutable/` and `<assetsDir>/_static/` that
 the zip. An undeclared file stays out of the bucket, because the bucket serves
 anyone, signed in or not. Locally, `serveStatic` answers the same
 paths from the same directory with the same headers. The manifest schema
-refuses a handler whose `staticAssetPaths` reach either prefix without an
-`assetsDir`.
+refuses a handler that declares `staticAssetPaths` without an `assetsDir`.
 
 Both prefixes are public. CloudFront serves them to anyone who has the URL,
 signed in or not. Keep secrets out of build output: an API key, a token or a
