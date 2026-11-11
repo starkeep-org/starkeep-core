@@ -272,7 +272,7 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
     ? mobileCallbackTarget(manifest, config)
     : null;
   // Read before any step, so a bundle the installer would refuse changes
-  // nothing: a missing assetsDir, or a file too large for the Lambda to serve.
+  // nothing: a missing bundleAssetsDir, or a file too large for the Lambda to serve.
   const staticAssets = web && zipBuffer ? collectStaticAssets(manifest, zipBuffer) : [];
   // Which side of the app assets bucket this install is on. Most apps never
   // use it, and they make no S3 call for it, so a deployment whose bootstrap

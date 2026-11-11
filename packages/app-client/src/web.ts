@@ -106,6 +106,10 @@ interface CommonOptions {
    * Where the bundle staged its static files. A `file:` URL is accepted so a
    * caller can write `new URL("./assets/", import.meta.url)` without resolving
    * it first.
+   *
+   * A path on the running Lambda's disk, not the manifest's `bundleAssetsDir`.
+   * That field names the same directory as a path inside `dist.zip`, for the
+   * installer; this option is where the adapter reads files at request time.
    */
   assetsDir?: string | URL;
   /**

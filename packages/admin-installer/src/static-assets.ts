@@ -7,7 +7,7 @@
  * of build files per page, and a Flutter or WebAssembly build ships files
  * larger than that limit. So the platform serves two reserved prefixes,
  * `/apps/<appId>/_immutable/*` and `/apps/<appId>/_static/*`, from S3. The
- * installer copies `<assetsDir>/_immutable/` and `<assetsDir>/_static/` out
+ * installer copies `<bundleAssetsDir>/_immutable/` and `<bundleAssetsDir>/_static/` out
  * of `dist.zip` into `apps/<appId>/` in the bucket. CloudFront's request path
  * is the object key, so no rewrite sits between them.
  *
@@ -77,13 +77,13 @@ export class StaticAssetsError extends Error {
  * Read the served files out of `dist.zip`, and refuse a bundle whose Lambda
  * would have to serve a file too large for a Lambda response.
  *
- * Only handlers that declare `assetsDir` contribute. The manifest schema
+ * Only handlers that declare `bundleAssetsDir` contribute. The manifest schema
  * already refuses a handler whose `staticAssetPaths` reach a served prefix
  * without one.
  */
 export function collectStaticAssets(manifest: AppManifest, zip: Uint8Array): StaticAsset[] {
   const handlers = manifest.infraRequirements.compute.handlers.filter(
-    (h): h is typeof h & { assetsDir: string } => h.assetsDir !== undefined,
+    (h): h is typeof h & { bundleAssetsDir: string } => h.bundleAssetsDir !== undefined,
   );
   if (handlers.length === 0) return [];
 
@@ -102,9 +102,9 @@ export function collectStaticAssets(manifest: AppManifest, zip: Uint8Array): Sta
     filter: (file) => {
       if (file.name.endsWith("/")) return false;
       for (const handler of handlers) {
-        const dir = `${handler.assetsDir}/`;
+        const dir = `${handler.bundleAssetsDir}/`;
         if (!file.name.startsWith(dir)) continue;
-        seenDirs.add(handler.assetsDir);
+        seenDirs.add(handler.bundleAssetsDir);
         const rel = file.name.slice(dir.length);
         const declared = handler.staticAssetPaths.some((p) => publicPathCovers(p, `/${rel}`));
         if (!declared) continue;
@@ -119,10 +119,10 @@ export function collectStaticAssets(manifest: AppManifest, zip: Uint8Array): Sta
   });
 
   for (const handler of handlers) {
-    if (!seenDirs.has(handler.assetsDir)) {
+    if (!seenDirs.has(handler.bundleAssetsDir)) {
       throw new StaticAssetsError(
-        `Handler "${handler.name}" declares assetsDir "${handler.assetsDir}", but dist.zip ` +
-          `has no files under ${handler.assetsDir}/. Check the bundle script's zip command.`,
+        `Handler "${handler.name}" declares bundleAssetsDir "${handler.bundleAssetsDir}", but dist.zip ` +
+          `has no files under ${handler.bundleAssetsDir}/. Check the bundle script's zip command.`,
       );
     }
   }
@@ -137,8 +137,8 @@ export function collectStaticAssets(manifest: AppManifest, zip: Uint8Array): Sta
 
   const assets = new Map<string, StaticAsset>();
   for (const [name, body] of Object.entries(files)) {
-    const handler = handlers.find((h) => name.startsWith(`${h.assetsDir}/`))!;
-    const key = name.slice(handler.assetsDir.length + 1);
+    const handler = handlers.find((h) => name.startsWith(`${h.bundleAssetsDir}/`))!;
+    const key = name.slice(handler.bundleAssetsDir.length + 1);
     // A zip entry name is author-controlled. CloudFront normalizes `..` and
     // empty segments out of a request path, so such a key could never be
     // served, and refusing it keeps every key a plain path under the prefix.
@@ -147,7 +147,7 @@ export function collectStaticAssets(manifest: AppManifest, zip: Uint8Array): Sta
     }
     if (assets.has(key)) {
       throw new StaticAssetsError(
-        `Two handlers' assetsDir both hold ${key}. Each served file must come from one handler.`,
+        `Two handlers' bundleAssetsDir both hold ${key}. Each served file must come from one handler.`,
       );
     }
     assets.set(key, {

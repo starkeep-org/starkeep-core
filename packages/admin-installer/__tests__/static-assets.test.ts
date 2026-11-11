@@ -106,7 +106,7 @@ function manifest(handler: Record<string, unknown> = {}): AppManifest {
             auth: "session",
             publicPaths: ["/", "/_immutable/*", "/_static/*", "/big.bin", "/sign-in"],
             staticAssetPaths: ["/_immutable/*", "/_static/*", "/big.bin"],
-            assetsDir: "assets",
+            bundleAssetsDir: "assets",
             ...handler,
           },
         ],
@@ -180,12 +180,12 @@ describe("collectStaticAssets", () => {
     expect(assets.map((a) => a.key)).toEqual(["_immutable/app.js", "_static/fonts/a.woff2"]);
   });
 
-  it("returns nothing for an app with no assetsDir", () => {
-    const m = manifest({ staticAssetPaths: [], assetsDir: undefined });
+  it("returns nothing for an app with no bundleAssetsDir", () => {
+    const m = manifest({ staticAssetPaths: [], bundleAssetsDir: undefined });
     expect(collectStaticAssets(m, zip({ "index.mjs": "x" }))).toEqual([]);
   });
 
-  it("refuses an assetsDir the zip does not contain", () => {
+  it("refuses a bundleAssetsDir the zip does not contain", () => {
     expect(() => collectStaticAssets(manifest(), zip({ "index.mjs": "x" }))).toThrow(
       /has no files under assets\//,
     );
@@ -214,7 +214,7 @@ describe("collectStaticAssets", () => {
     }
   });
 
-  it("refuses two handlers whose assetsDir hold the same served file", () => {
+  it("refuses two handlers whose bundleAssetsDir hold the same served file", () => {
     const result = validateManifest({
       id: "dice",
       name: "Dice",
@@ -233,7 +233,7 @@ describe("collectStaticAssets", () => {
               auth: "session",
               publicPaths: ["/", "/_static/*", "/sign-in"],
               staticAssetPaths: ["/_static/*"],
-              assetsDir: "assets",
+              bundleAssetsDir: "assets",
             },
             {
               name: "admin",
@@ -242,7 +242,7 @@ describe("collectStaticAssets", () => {
               auth: "session",
               publicPaths: ["/_static/*"],
               staticAssetPaths: ["/_static/*"],
-              assetsDir: "admin-assets",
+              bundleAssetsDir: "admin-assets",
             },
           ],
         },
@@ -254,7 +254,7 @@ describe("collectStaticAssets", () => {
         result.manifest!,
         zip({ "assets/_static/a.js": "a", "admin-assets/_static/a.js": "b" }),
       ),
-    ).toThrow(/Two handlers' assetsDir both hold _static\/a\.js/);
+    ).toThrow(/Two handlers' bundleAssetsDir both hold _static\/a\.js/);
   });
 
   it("lets a large file through when it is served from S3 or not served at all", () => {

@@ -460,9 +460,9 @@ describe("install", () => {
     expect(doneSteps("install")).not.toContain("upload_static_assets");
   });
 
-  it("refuses a bundle with no files under assetsDir before any step runs", async () => {
+  it("refuses a bundle with no files under bundleAssetsDir before any step runs", async () => {
     const handlers = photosManifest.infraRequirements.compute.handlers.map((h, i) =>
-      i === 0 ? { ...h, assetsDir: "assets" } : h,
+      i === 0 ? { ...h, bundleAssetsDir: "assets" } : h,
     );
     const manifest: AppManifest = {
       ...photosManifest,
@@ -498,7 +498,7 @@ describe("install", () => {
     };
   }
   const usesBucket = () =>
-    photosWithStatic({ staticAssetPaths: ["/_immutable/*"], assetsDir: "assets" });
+    photosWithStatic({ staticAssetPaths: ["/_immutable/*"], bundleAssetsDir: "assets" });
 
   it("leaves the app assets bucket alone for an app that has never used it", async () => {
     // So a deployment whose bootstrap stack predates the bucket can still
@@ -519,7 +519,7 @@ describe("install", () => {
     const manifest = photosWithStatic({
       publicPaths: ["/", "/favicon.ico", "/sign-in", "/api/session/*"],
       staticAssetPaths: ["/favicon.ico"],
-      assetsDir: "assets",
+      bundleAssetsDir: "assets",
     });
     await installApp({
       appId: "photos",
