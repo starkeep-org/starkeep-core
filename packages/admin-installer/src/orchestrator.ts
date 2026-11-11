@@ -19,7 +19,7 @@
  */
 
 import { createHash } from "node:crypto";
-import type { AppManifest } from "@starkeep/admin-manifest";
+import { handlerUsesAppAssetsBucket, type AppManifest } from "@starkeep/admin-manifest";
 import { roleChain, type AwsCredentials } from "./session";
 import {
   createAppRole,
@@ -274,6 +274,14 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
   // Read before any step, so a bundle the installer would refuse changes
   // nothing: a missing assetsDir, or a file too large for the Lambda to serve.
   const staticAssets = web && zipBuffer ? collectStaticAssets(manifest, zipBuffer) : [];
+  // Which side of the app assets bucket this install is on. Most apps never
+  // use it, and they make no S3 call for it, so a deployment whose bootstrap
+  // stack predates the bucket can still install them. An app whose last
+  // install used the bucket and whose new manifest does not still has public
+  // files there, which this install deletes. The registry row still holds the
+  // last install's manifest here, because register_app runs last.
+  const usesAssetsBucket = web && manifestUsesAppAssetsBucket(manifest);
+  const usedAssetsBucket = manifestUsesAppAssetsBucket(await registry.storedManifest(appId));
   const done = await registry.getCompletedSteps(appId, "install");
 
   const managerCreds = await roleChain([config.managerRoleArn]);
@@ -486,23 +494,25 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
       // Before the compute stack, so the new Lambda never serves a shell that
       // names a file CloudFront cannot find yet. alwaysRun for the same reason
       // as upload_bundle: a redeploy ships new files. Only with a bundle in
-      // hand, because an empty upload would retire the live files.
-      await runStep(
-        registry,
-        appId,
-        "install",
-        "upload_static_assets",
-        done,
-        () =>
-          uploadStaticAssets(
-            appId,
-            appAssetsBucketName(config.stackPrefix, config.accountId, config.region),
-            staticAssets,
-            config.region,
-            infraCreds,
-          ),
-        { alwaysRun: true },
-      );
+      // hand, because without one there is nothing new to upload.
+      if (usesAssetsBucket) {
+        await runStep(
+          registry,
+          appId,
+          "install",
+          "upload_static_assets",
+          done,
+          () =>
+            uploadStaticAssets(
+              appId,
+              appAssetsBucketName(config.stackPrefix, config.accountId, config.region),
+              staticAssets,
+              config.region,
+              infraCreds,
+            ),
+          { alwaysRun: true },
+        );
+      }
     }
 
     // alwaysRun: Pulumi up is the reconcile that actually pushes new code and
@@ -545,6 +555,29 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
       },
       { alwaysRun: true },
     );
+
+    // The app stopped using the bucket, so its files there are public paths
+    // no manifest names any more. After the compute stack, because the old
+    // Lambda's shell names them until the new one replaces it. alwaysRun: the
+    // ledger keeps "done" from an earlier install, and an app can stop using
+    // the bucket more than once.
+    if (zipBuffer && usedAssetsBucket && !usesAssetsBucket) {
+      await runStep(
+        registry,
+        appId,
+        "install",
+        "delete_static_assets",
+        done,
+        () =>
+          deleteStaticAssets(
+            appId,
+            appAssetsBucketName(config.stackPrefix, config.accountId, config.region),
+            config.region,
+            infraCreds,
+          ),
+        { alwaysRun: true },
+      );
+    }
 
     // alwaysRun: mirror the attach above — the policy is re-attached on every
     // run, so it must be torn down on every run too (never left dangling on
@@ -797,3 +830,8 @@ async function removeComputeSteps(
 // Re-export so call sites (cli scripts, admin-web) can name the SSM parameter
 // without reaching into ./app-creds directly.
 export { appCredsParameterName };
+
+/** Does any handler in this manifest serve files from the app assets bucket? */
+function manifestUsesAppAssetsBucket(manifest: AppManifest | null): boolean {
+  return (manifest?.infraRequirements?.compute?.handlers ?? []).some(handlerUsesAppAssetsBucket);
+}

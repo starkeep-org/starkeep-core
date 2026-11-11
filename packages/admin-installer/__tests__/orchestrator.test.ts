@@ -39,6 +39,8 @@ const fakeRegistry = {
       if (ledger[i]!.appId === appId) ledger.splice(i, 1);
   }),
   listInstalledApps: vi.fn(async () => []),
+  // The manifest the last install recorded; null means never installed.
+  storedManifest: vi.fn(async (): Promise<AppManifest | null> => null),
   close: vi.fn(async () => {}),
 };
 
@@ -122,7 +124,7 @@ import { setMobileAppCallback } from "../src/app-sign-in-clients";
 import { validateManifest, type AppManifest } from "@starkeep/admin-manifest";
 import { readFileSync as rf } from "node:fs";
 import { zipSync } from "fflate";
-import { uploadStaticAssets } from "../src/static-assets";
+import { deleteStaticAssets, uploadStaticAssets } from "../src/static-assets";
 import { fileURLToPath } from "node:url";
 
 const photosManifest: AppManifest = validateManifest(
@@ -198,7 +200,6 @@ const INSTALL_STEPS_WITH_COMPUTE = [
   "put_s3_keep_file",
   "attach_temp_install_infra_policy",
   "upload_bundle",
-  "upload_static_assets",
   "install_compute_stack",
   "detach_temp_install_infra_policy",
   "register_app",
@@ -483,17 +484,124 @@ describe("install", () => {
     expect(ledger).toEqual([]);
   });
 
-  it("uploads the bundle's served files to the app assets bucket", async () => {
+  /** Photos with its first handler's static fields replaced. */
+  function photosWithStatic(fields: Record<string, unknown>): AppManifest {
     const handlers = photosManifest.infraRequirements.compute.handlers.map((h, i) =>
-      i === 0 ? { ...h, staticAssetPaths: ["/_immutable/*"], assetsDir: "assets" } : h,
+      i === 0 ? { ...h, ...fields } : h,
     );
-    const manifest: AppManifest = {
+    return {
       ...photosManifest,
       infraRequirements: {
         ...photosManifest.infraRequirements,
         compute: { ...photosManifest.infraRequirements.compute, handlers },
       },
     };
+  }
+  const usesBucket = () =>
+    photosWithStatic({ staticAssetPaths: ["/_immutable/*"], assetsDir: "assets" });
+
+  it("leaves the app assets bucket alone for an app that has never used it", async () => {
+    // So a deployment whose bootstrap stack predates the bucket can still
+    // install such an app.
+    await installApp({
+      appId: "photos",
+      manifest: photosManifest,
+      zipBuffer: Buffer.from("zip"),
+      version: "0.1.0",
+      config,
+      registryCredentials,
+    });
+    expect(uploadStaticAssets).not.toHaveBeenCalled();
+    expect(deleteStaticAssets).not.toHaveBeenCalled();
+  });
+
+  it("leaves the bucket alone when the Lambda serves every static file", async () => {
+    const manifest = photosWithStatic({
+      publicPaths: ["/", "/favicon.ico", "/sign-in", "/api/session/*"],
+      staticAssetPaths: ["/favicon.ico"],
+      assetsDir: "assets",
+    });
+    await installApp({
+      appId: "photos",
+      manifest,
+      zipBuffer: Buffer.from(
+        zipSync({ "index.mjs": new Uint8Array([1]), "assets/favicon.ico": new Uint8Array([2]) }),
+      ),
+      version: "0.1.0",
+      config,
+      registryCredentials,
+    });
+    expect(uploadStaticAssets).not.toHaveBeenCalled();
+    expect(deleteStaticAssets).not.toHaveBeenCalled();
+  });
+
+  it("deletes the app's files after the compute stack when the app stops using the bucket", async () => {
+    // The last install served /_immutable/ from S3; this one serves nothing
+    // there, so those files are public paths no manifest names.
+    fakeRegistry.storedManifest.mockResolvedValueOnce(usesBucket());
+    await installApp({
+      appId: "photos",
+      manifest: photosManifest,
+      zipBuffer: Buffer.from("zip"),
+      version: "0.1.0",
+      config,
+      registryCredentials,
+    });
+    expect(uploadStaticAssets).not.toHaveBeenCalled();
+    expect(deleteStaticAssets).toHaveBeenCalledWith(
+      "photos",
+      "starkeep-app-assets-111122223333-us-east-1",
+      "us-east-1",
+      expect.objectContaining({ accessKeyId: expect.any(String) }),
+    );
+    // The old Lambda's shell names those files until the new one replaces it.
+    const steps = doneSteps("install");
+    expect(steps.indexOf("delete_static_assets")).toBeGreaterThan(
+      steps.indexOf("install_compute_stack"),
+    );
+    expect(steps.indexOf("delete_static_assets")).toBeLessThan(
+      steps.indexOf("detach_temp_install_infra_policy"),
+    );
+  });
+
+  it("deletes again when an app stops using the bucket a second time", async () => {
+    // The ledger keeps "done" across installs, so the step must not be
+    // skipped as already complete.
+    for (let round = 0; round < 2; round++) {
+      fakeRegistry.storedManifest.mockResolvedValueOnce(usesBucket());
+      await installApp({
+        appId: "photos",
+        manifest: photosManifest,
+        zipBuffer: Buffer.from("zip"),
+        version: "0.1.0",
+        config,
+        registryCredentials,
+      });
+    }
+    expect(deleteStaticAssets).toHaveBeenCalledTimes(2);
+  });
+
+  it("uploads, and deletes nothing, for an app that still uses the bucket", async () => {
+    fakeRegistry.storedManifest.mockResolvedValueOnce(usesBucket());
+    await installApp({
+      appId: "photos",
+      manifest: usesBucket(),
+      zipBuffer: Buffer.from(
+        zipSync({
+          "index.mjs": new Uint8Array([1]),
+          "assets/_immutable/app.3f2a.js": new Uint8Array([3]),
+        }),
+      ),
+      version: "0.1.0",
+      config,
+      registryCredentials,
+    });
+    expect(uploadStaticAssets).toHaveBeenCalledTimes(1);
+    expect(deleteStaticAssets).not.toHaveBeenCalled();
+  });
+
+  it("uploads the bundle's served files to the app assets bucket", async () => {
+    const manifest = usesBucket();
     await installApp({
       appId: "photos",
       manifest,
@@ -586,7 +694,6 @@ describe("an app that ships a mobile build", () => {
     "create_iam_exec_role",
     "attach_temp_install_infra_policy",
     "upload_bundle",
-    "upload_static_assets",
     "install_compute_stack",
     "detach_temp_install_infra_policy",
   ];
