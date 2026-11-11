@@ -106,23 +106,77 @@ export interface StopResult {
   error?: string;
 }
 
-export function stopById(id: string): StopResult {
+// Stop waits this long for a daemon to exit and free its port after SIGTERM,
+// then sends SIGKILL and waits STOP_KILL_WAIT_MS more. Stop returns only after
+// the wait, so a Start right after it finds the port free. Each app keeps one
+// port across restarts, so a Start that raced a dying copy met its own port
+// still bound and answered "port in use".
+const STOP_GRACE_MS = 5_000;
+const STOP_KILL_WAIT_MS = 2_000;
+
+/** Send `sig` to a pid, or to a process group as `-pgid`. A target that is already gone is fine. */
+function signal(target: number, sig: NodeJS.Signals | 0): boolean {
+  try {
+    process.kill(target, sig);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Wait until `target` has no live process and nothing listens on `port`. False on timeout. */
+async function exited(
+  target: number,
+  port: number | undefined,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (!signal(target, 0) && (port === undefined || pidByPort(port) === null)) return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(100);
+  }
+}
+
+/** SIGTERM `target`, wait for it to exit and free `port`, and SIGKILL it if it does not. */
+async function terminate(target: number, port: number | undefined): Promise<void> {
+  signal(target, "SIGTERM");
+  if (await exited(target, port, STOP_GRACE_MS)) return;
+  signal(target, "SIGKILL");
+  await exited(target, port, STOP_KILL_WAIT_MS);
+}
+
+/** The port a daemon serves on: the fixed port of a workspace daemon, or the one its meta file records. */
+function recordedPort(id: string): number | undefined {
+  if (isWorkspaceDaemonId(id)) return DAEMON_COMMANDS[id].port;
+  const mf = metaFile(id);
+  if (!existsSync(mf)) return undefined;
+  try {
+    return (JSON.parse(readFileSync(mf, "utf-8")) as { port?: number }).port;
+  } catch {
+    return undefined;
+  }
+}
+
+function removeMetaFile(id: string): void {
+  const mf = metaFile(id);
+  if (existsSync(mf)) unlinkSync(mf);
+}
+
+export async function stopById(id: string): Promise<StopResult> {
   const pf = pidFile(id);
+  const port = recordedPort(id);
   if (existsSync(pf)) {
     const pid = parseInt(readFileSync(pf, "utf-8"), 10);
     if (isAlive(pid)) {
-      // Signal the process's actual group so children die with it. Guard the
-      // call: the process (or its group) can vanish between the liveness check
-      // and the signal, and a stale/mismatched pid must not turn Stop into a 500.
+      // Signal the process's actual group so children die with it. The
+      // process (or its group) can vanish between the liveness check and the
+      // signal, and a stale/mismatched pid must not turn Stop into a 500, so
+      // `terminate` tolerates a target that is already gone.
       const pgid = processGroupId(pid);
-      try {
-        process.kill(pgid != null ? -pgid : pid, "SIGTERM");
-      } catch {
-        /* already gone, or group no longer exists — nothing left to stop */
-      }
-      unlinkSync(pf);
-      const mf = metaFile(id);
-      if (existsSync(mf)) unlinkSync(mf);
+      await terminate(pgid != null ? -pgid : pid, port);
+      if (existsSync(pf)) unlinkSync(pf);
+      removeMetaFile(id);
       return { stopped: true };
     }
     // A dead recorded pid does not mean the daemon is dead. What we record is
@@ -137,19 +191,6 @@ export function stopById(id: string): StopResult {
 
   // No live PID — fall back to the recorded port (from meta) or the fixed
   // workspace-daemon port if applicable.
-  let port: number | undefined;
-  if (isWorkspaceDaemonId(id)) {
-    port = DAEMON_COMMANDS[id].port;
-  } else {
-    const mf = metaFile(id);
-    if (existsSync(mf)) {
-      try {
-        port = (JSON.parse(readFileSync(mf, "utf-8")) as { port?: number }).port;
-      } catch {
-        /* ignore */
-      }
-    }
-  }
   if (port) {
     const pid = pidByPort(port);
     if (pid) {
@@ -160,17 +201,15 @@ export function stopById(id: string): StopResult {
           error: `Port ${port} is bound by pid ${pid} (${cmd ?? "unreadable"}) which does not look like an app daemon; refusing to signal.`,
         };
       }
-      process.kill(pid, "SIGTERM");
-      const mf = metaFile(id);
-      if (existsSync(mf)) unlinkSync(mf);
+      await terminate(pid, port);
+      removeMetaFile(id);
       return { stopped: true };
     }
   }
 
   // Nothing alive under either identity; clear any meta left by the stale-pid
   // path above so status doesn't keep reporting a ghost.
-  const mf = metaFile(id);
-  if (existsSync(mf)) unlinkSync(mf);
+  removeMetaFile(id);
   return { stopped: false, error: "Not running (no live PID, nothing on its port)" };
 }
 
@@ -515,13 +554,8 @@ export async function restartWorkspaceDaemonIfRunning(id: DaemonId): Promise<Sta
   // a daemon that replaced itself, which the stale pid file would otherwise
   // hide — leaving the daemon serving its boot-time config forever.
   if (resolveWorkspaceDaemonPid(id) === null) return null;
-  stopById(id);
-  // Wait for the old instance to release its fixed port; otherwise the start
-  // preflight would see it still bound and "adopt" the dying process.
-  const port = DAEMON_COMMANDS[id].port;
-  if (port) {
-    const deadline = Date.now() + 5_000;
-    while (pidByPort(port) !== null && Date.now() < deadline) await sleep(200);
-  }
+  // Stop returns once the old instance has released its fixed port; otherwise
+  // the start preflight would see it still bound and "adopt" the dying process.
+  await stopById(id);
   return startWorkspaceDaemon(id);
 }

@@ -19,7 +19,7 @@ export async function POST(req: Request) {
   // longer authenticates, and the operator sees a stream of 401s. Best-effort:
   // a "not running" result is fine; we only care that nothing keeps signing in
   // as this app after uninstall.
-  stopById(appId);
+  await stopById(appId);
 
   let resp: Response;
   try {
