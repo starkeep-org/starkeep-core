@@ -47,6 +47,9 @@ export function LocalAppsSection({
   leading?: ReactNode;
 }) {
   const [error, setError] = useState<string | null>(null);
+  // An app whose Start found its recorded port held by another program. The
+  // alert offers to move the app to another port.
+  const [portInUse, setPortInUse] = useState<{ appId: string; port: number } | null>(null);
   const [pendingConsent, setPendingConsent] = useState<LocalAppEntry | null>(null);
   const [busyAppId, setBusyAppId] = useState<string | null>(null);
   const [runStatus, setRunStatus] = useState<Record<string, DaemonStatus>>({});
@@ -119,16 +122,30 @@ export function LocalAppsSection({
     [],
   );
 
-  const handleStart = async (appId: string) => {
+  // `reassignPort` moves the app off a recorded port another program holds.
+  const handleStart = async (appId: string, reassignPort = false) => {
     setPending((p) => ({ ...p, [appId]: "start" }));
+    setPortInUse(null);
     try {
       const res = await fetch("/api/exec/daemon", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "start", id: appId }),
+        body: JSON.stringify({
+          action: "start",
+          id: appId,
+          ...(reassignPort ? { reassignPort: true } : {}),
+        }),
       });
       if (!res.ok) {
-        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        const data = (await res.json().catch(() => null)) as {
+          error?: string;
+          reason?: string;
+          port?: number;
+        } | null;
+        if (data?.reason === "port-in-use" && typeof data.port === "number") {
+          setPortInUse({ appId, port: data.port });
+          return;
+        }
         throw new Error(data?.error ?? `start failed: ${res.status}`);
       }
       const final = await waitForTransition(appId, "start");
@@ -321,6 +338,14 @@ export function LocalAppsSection({
           <AlertTitle>Error</AlertTitle>
           <AlertDescription>{error}</AlertDescription>
         </Alert>
+      )}
+
+      {portInUse && (
+        <PortInUseAlert
+          name={apps?.find((a) => a.appId === portInUse.appId)?.manifest.name ?? portInUse.appId}
+          port={portInUse.port}
+          onChooseAnotherPort={() => void handleStart(portInUse.appId, true)}
+        />
       )}
 
       {notice && (
@@ -573,6 +598,41 @@ export function LocalAppsSection({
         }}
       />
     </div>
+  );
+}
+
+/**
+ * Start found the app's recorded port held. The usual cause is the app itself,
+ * already running there, so the alert links the address first. Moving the app
+ * empties its browser storage, so the alert says so below the button.
+ */
+function PortInUseAlert({
+  name,
+  port,
+  onChooseAnotherPort,
+}: {
+  name: string;
+  port: number;
+  onChooseAnotherPort: () => void;
+}) {
+  const url = `http://localhost:${port}`;
+  return (
+    <Alert variant="destructive">
+      <AlertTitle>{name} cannot start</AlertTitle>
+      <AlertDescription>
+        <p>
+          Its port {port} is in use. Is {name} already running at{" "}
+          <a href={url} target="_blank" rel="noopener noreferrer" className="underline">
+            {url}
+          </a>
+          ?
+        </p>
+        <Button variant="link" size="sm" className="h-auto p-0" onClick={onChooseAnotherPort}>
+          Choose another port
+        </Button>
+        <p>On another port, {name} starts with empty browser storage.</p>
+      </AlertDescription>
+    </Alert>
   );
 }
 
