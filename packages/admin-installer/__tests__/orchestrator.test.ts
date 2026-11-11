@@ -122,6 +122,7 @@ import { setMobileAppCallback } from "../src/app-sign-in-clients";
 import { validateManifest, type AppManifest } from "@starkeep/admin-manifest";
 import { readFileSync as rf } from "node:fs";
 import { zipSync } from "fflate";
+import { uploadStaticAssets } from "../src/static-assets";
 import { fileURLToPath } from "node:url";
 
 const photosManifest: AppManifest = validateManifest(
@@ -480,6 +481,47 @@ describe("install", () => {
       }),
     ).rejects.toThrow(/has no files under assets\//);
     expect(ledger).toEqual([]);
+  });
+
+  it("uploads the bundle's served files to the app assets bucket", async () => {
+    const handlers = photosManifest.infraRequirements.compute.handlers.map((h, i) =>
+      i === 0 ? { ...h, staticAssetPaths: ["/_immutable/*"], assetsDir: "assets" } : h,
+    );
+    const manifest: AppManifest = {
+      ...photosManifest,
+      infraRequirements: {
+        ...photosManifest.infraRequirements,
+        compute: { ...photosManifest.infraRequirements.compute, handlers },
+      },
+    };
+    await installApp({
+      appId: "photos",
+      manifest,
+      zipBuffer: Buffer.from(
+        zipSync({
+          "index.mjs": new Uint8Array([1]),
+          "assets/index.html": new Uint8Array([2]),
+          "assets/_immutable/app.3f2a.js": new Uint8Array([3]),
+        }),
+      ),
+      version: "0.1.0",
+      config,
+      registryCredentials,
+    });
+    expect(uploadStaticAssets).toHaveBeenCalledTimes(1);
+    expect(uploadStaticAssets).toHaveBeenCalledWith(
+      "photos",
+      "starkeep-app-assets-111122223333-us-east-1",
+      [
+        expect.objectContaining({
+          key: "_immutable/app.3f2a.js",
+          contentType: "application/javascript; charset=utf-8",
+          cacheControl: "public, max-age=31536000, immutable",
+        }),
+      ],
+      "us-east-1",
+      expect.objectContaining({ accessKeyId: expect.any(String) }),
+    );
   });
 });
 

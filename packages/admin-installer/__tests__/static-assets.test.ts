@@ -201,6 +201,62 @@ describe("collectStaticAssets", () => {
     ).toThrow(/assets\/big\.bin \(4\.0 MB\).*under _static\//);
   });
 
+  it("refuses a zip entry that is not a plain relative path", () => {
+    // Each would be a key CloudFront could never serve, under a public prefix.
+    for (const name of [
+      "assets/_static/../x.js",
+      "assets/_static//a.js",
+      "assets/_static/./a.js",
+    ]) {
+      expect(() => collectStaticAssets(manifest(), zip({ [name]: "x" })), name).toThrow(
+        /is not a plain relative path/,
+      );
+    }
+  });
+
+  it("refuses two handlers whose assetsDir hold the same served file", () => {
+    const result = validateManifest({
+      id: "dice",
+      name: "Dice",
+      version: "0.1.0",
+      description: "A test app.",
+      tier: "community",
+      targets: ["cloud"],
+      infraRequirements: {
+        compute: {
+          enabled: true,
+          handlers: [
+            {
+              name: "static",
+              handler: "index.handler",
+              routes: ["GET /", "ANY /{proxy+}"],
+              auth: "session",
+              publicPaths: ["/", "/_static/*", "/sign-in"],
+              staticAssetPaths: ["/_static/*"],
+              assetsDir: "assets",
+            },
+            {
+              name: "admin",
+              handler: "admin.handler",
+              routes: ["GET /admin/{proxy+}"],
+              auth: "session",
+              publicPaths: ["/_static/*"],
+              staticAssetPaths: ["/_static/*"],
+              assetsDir: "admin-assets",
+            },
+          ],
+        },
+      },
+    });
+    if (!result.manifest) throw new Error(result.errors.join("\n"));
+    expect(() =>
+      collectStaticAssets(
+        result.manifest!,
+        zip({ "assets/_static/a.js": "a", "admin-assets/_static/a.js": "b" }),
+      ),
+    ).toThrow(/Two handlers' assetsDir both hold _static\/a\.js/);
+  });
+
   it("lets a large file through when it is served from S3 or not served at all", () => {
     const big = new Uint8Array(MAX_LAMBDA_SERVED_FILE_BYTES + 1);
     const assets = collectStaticAssets(
