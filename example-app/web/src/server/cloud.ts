@@ -14,26 +14,11 @@
 import { createWebAppHandler } from "@starkeep/app-client/web";
 import { honoUpstream } from "@starkeep/app-client/hono";
 import manifest from "../../../starkeep.manifest.json" with { type: "json" };
-
-const shell = manifest.infraRequirements.compute.handlers.find((h) => h.name === "static");
-if (!shell?.staticAssetPaths) {
-  throw new Error("the manifest has no `static` compute handler with `staticAssetPaths`");
-}
-const staticAssetPaths = shell.staticAssetPaths;
-
-/** The browser routes that answer with the shell, `index.html`. */
-const SHELL_PATHS = ["/"];
+import { staticOptions } from "./static-options.js";
 
 export const handler = await createWebAppHandler({
   basePath: `/apps/${manifest.id}`,
-  assetsDir: new URL("./assets/", import.meta.url),
-  // From the manifest, never a second copy: the static branch runs before the
-  // app's gate, so this list bypasses the gate by construction. The schema
-  // refuses an entry `publicPaths` does not cover.
-  staticPaths: staticAssetPaths.filter((p) => !SHELL_PATHS.includes(p)),
-  shellPaths: SHELL_PATHS,
-  immutablePaths: ["/_immutable/*"],
-  staticMiss: "notFound",
+  ...staticOptions(new URL("./assets/", import.meta.url)),
   requestUpstream: import("./app.js").then((m) => ({ handler: honoUpstream(m.app) })),
   // Answered rather than thrown: a thrown error becomes a bare 502 that says
   // nothing about what failed.

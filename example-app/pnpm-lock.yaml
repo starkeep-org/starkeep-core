@@ -41,8 +41,8 @@ importers:
         specifier: ^1.19.17
         version: 1.19.18(hono@4.13.17)
       '@starkeep/app-client':
-        specifier: ^0.10.2
-        version: 0.10.2(@hono/node-server@1.19.18(hono@4.13.17))(hono@4.13.17)
+        specifier: ^0.11.0
+        version: 0.11.0(@hono/node-server@1.19.18(hono@4.13.17))(hono@4.13.17)
       hono:
         specifier: ^4.12.30
         version: 4.13.17
@@ -426,8 +426,8 @@ packages:
     resolution: {integrity: sha512-lCA6QG22dPk9ecHbv91jDQZsmtPUjdS1aE2Il6NNPqe7DrYc0dZQi6DhcESk2KYXH2sp5xbAcGdYMZDFnuzA2A==}
     engines: {node: '>=18.0.0'}
 
-  '@starkeep/app-client@0.10.2':
-    resolution: {integrity: sha512-ll7oHQdgxoUw8Q7UgaEefM9kWxNAeQGxWfWlXXIMywsIdJJV0MXWXBVVAPqncGcgb0J6YHjm6lSmenHfuterFA==}
+  '@starkeep/app-client@0.11.0':
+    resolution: {integrity: sha512-C3SBm02R90q98IrljZu+9IGR2XHTXB5dWO1WPuBnMsK7FGOrnm0F7+lVpUTiW5B3rOeE5xaYW8raGi/iZvvSnA==}
     peerDependencies:
       '@hono/node-server': ^1.19.0
       hono: ^4.12.0
@@ -1071,7 +1071,7 @@ snapshots:
     dependencies:
       tslib: 2.9.1
 
-  '@starkeep/app-client@0.10.2(@hono/node-server@1.19.18(hono@4.13.17))(hono@4.13.17)':
+  '@starkeep/app-client@0.11.0(@hono/node-server@1.19.18(hono@4.13.17))(hono@4.13.17)':
     dependencies:
       '@aws-sdk/client-ssm': 3.1164.0
       dotenv: 17.4.2

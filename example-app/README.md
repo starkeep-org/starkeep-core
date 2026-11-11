@@ -38,6 +38,7 @@ web/                     @example-app/web: the local web and cloud web flavors
   src/server/app.ts      the Hono app both surfaces run
   src/server/local.ts    the local entry, which the manifest's localRun starts
   src/server/cloud.ts    the cloud entry of the `static` handler, a Lambda
+  src/server/static-options.ts  the static-file options both entries share
   src/server/api.ts      the cloud entry of the `api` handler: the JWT-gated routes
   src/server/echo.ts     POST /api/echo, the JWT-gated route
   src/browser/           the page

@@ -13,7 +13,7 @@
   "dependencies": {
     "@example-app/common": "workspace:*",
     "@hono/node-server": "^1.19.17",
-    "@starkeep/app-client": "^0.10.2",
+    "@starkeep/app-client": "^0.11.0",
     "hono": "^4.12.30"
   },
   "devDependencies": {
