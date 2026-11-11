@@ -1,5 +1,18 @@
 # @starkeep/storage-sqlite
 
+## 0.7.0
+
+### Minor Changes
+
+- 48fedc2: `shared_app_registry` gains a nullable `source_dir` column, the folder an app was installed from. `initializeLocalSchema` adds the column to a registry created before it, so an existing local data server picks it up at its next start.
+
+### Patch Changes
+
+- Updated dependencies [a3a8ca5]
+  - @starkeep/protocol-primitives@0.10.0
+  - @starkeep/shared-space-api@0.8.1
+  - @starkeep/storage-adapter@0.8.3
+
 ## 0.6.3
 
 ### Patch Changes
