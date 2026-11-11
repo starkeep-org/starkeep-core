@@ -749,9 +749,14 @@ signed in or not. Keep secrets out of build output: an API key, a token or a
 private configuration value belongs in the server half's `env` or behind a
 route that checks the session, never in a file under either prefix.
 
-An update keeps the previous deployment's files in the bucket, so a tab opened
-before the update still loads the files its page names. The update after that
-removes them.
+An update keeps the previous deployment's `/_immutable/` files in the bucket,
+so a tab opened before the update still loads the hashed files its page names.
+The update after that removes them. A `/_static/` file keeps its name across
+deployments, so the update overwrites it in place, and an open tab gets the new
+bytes on its next request. The installer uploads the files before it updates
+the Lambda, so `/_static/` changes slightly before the shell does. Keep a
+stable-named file compatible with the shell before it, or move it to
+`/_immutable/` with a hash in its name.
 
 `immutablePaths` is required and has no default. A default would decide your
 cache headers for you, and a path cached forever by mistake stays wrong at the
