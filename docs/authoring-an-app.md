@@ -175,9 +175,10 @@ example and `@starkeep/admin-manifest`'s `appManifestSchema` for the full schema
 - `localRun` — how admin-web spawns the app's server process (`command`,
   `args`, optional `portFlag`). Without it, the app can't be started from the
   admin UI. With `portFlag`, admin-web appends the app's port. Each installed
-  app keeps one port, and so one browser origin, until it is reinstalled, so
-  the app's `localStorage` and IndexedDB survive restarts. A reinstalled app
-  gets a new port, and with it empty browser storage.
+  app keeps one port, and so one browser origin, so the app's `localStorage`
+  and IndexedDB survive restarts. The app gets a new port, and with it empty
+  browser storage, only when it is reinstalled or when the operator moves it
+  off a port that another program holds.
   Name the command that serves the built app, never a development server: an
   operator starting the app from the Dashboard is running the product, and a
   compile-on-demand server there costs seconds on every navigation and ships a

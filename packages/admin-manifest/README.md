@@ -56,7 +56,7 @@ In addition to schema parsing, the validator enforces:
   - `appSpecificSyncable`: private per-app syncable tables (mapped to `<appId>_syncable_<name>` in local SQLite) and optional `files` opt-in for the `apps/<appId>/syncable/` object-storage prefix. `updated_at` and `deleted_at` are reserved column names.
   - `additionalResources` / `sharedResources`: extra cloud resources (`cloudfront`, `custom`).
   - `brokerPower`: `cloud-data-server` only.
-- `localRun`: how admin-web should spawn the app's local process. With `portFlag` set, admin-web appends `[portFlag, <port>]` to `args`. The port stays the same for each install of the app, so the app keeps one browser origin across restarts.
+- `localRun`: how admin-web should spawn the app's local process. With `portFlag` set, admin-web appends `[portFlag, <port>]` to `args`. The app keeps one port, and so one browser origin, across restarts. The port changes only when the app is reinstalled or the operator moves it off a port that another program holds.
 
 ## Scripts
 

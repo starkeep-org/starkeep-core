@@ -379,8 +379,9 @@ export const permissionEntrySchema = z.strictObject({
 
 // How admin-web should spawn this app's local dev/serve process. Optional —
 // apps without a localRun block cannot be started from the admin UI. When
-// `portFlag` is set, admin-web appends `[portFlag, <port>]` to args, with one
-// port per install of the app so its browser origin survives restarts; apps
+// `portFlag` is set, admin-web appends `[portFlag, <port>]` to args. The app
+// keeps one port, so its browser origin survives restarts, until it is
+// reinstalled or the operator moves it off a port another program holds; apps
 // that pick their own port omit it.
 export const localRunSchema = z.strictObject({
   command: z.string().min(1),
