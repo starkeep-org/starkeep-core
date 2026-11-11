@@ -23,6 +23,7 @@ import {
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
+import { createHash } from "node:crypto";
 import { unzipSync } from "fflate";
 import {
   publicPathCovers,
@@ -164,6 +165,11 @@ export function collectStaticAssets(manifest: AppManifest, zip: Uint8Array): Sta
 interface DeploymentsRecord {
   current: string[];
   previous: string[];
+  /**
+   * `assetSetHash` of the `current` deployment. Absent from a record written
+   * before the field existed, which then never reads as a rerun.
+   */
+  currentHash?: string;
 }
 
 function makeS3Client(creds: AwsCredentials, region: string): S3Client {
@@ -227,6 +233,7 @@ async function readRecord(s3: S3Client, bucket: string, key: string): Promise<De
   return {
     current: Array.isArray(parsed?.current) ? parsed.current : [],
     previous: Array.isArray(parsed?.previous) ? parsed.previous : [],
+    ...(typeof parsed?.currentHash === "string" ? { currentHash: parsed.currentHash } : {}),
   };
 }
 
@@ -275,10 +282,19 @@ async function deleteKeys(s3: S3Client, bucket: string, keys: string[]): Promise
   }
 }
 
-function sameKeys(a: string[], b: string[]): boolean {
-  if (a.length !== b.length) return false;
-  const set = new Set(a);
-  return b.every((k) => set.has(k));
+/**
+ * A hash of every served file's key and bytes. Two uploads match only when
+ * they ship the same files with the same contents, which is what makes the
+ * second one a rerun. File names alone cannot say this: a `/_static/` file
+ * keeps its name when its bytes change.
+ */
+export function assetSetHash(assets: StaticAsset[]): string {
+  const hash = createHash("sha256");
+  for (const asset of [...assets].sort((a, b) => a.key.localeCompare(b.key))) {
+    hash.update(asset.key).update("\0");
+    hash.update(createHash("sha256").update(asset.body).digest()).update("\0");
+  }
+  return hash.digest("base64url");
 }
 
 /**
@@ -289,9 +305,9 @@ function sameKeys(a: string[], b: string[]): boolean {
  * that is not there yet. The previous deployment's files stay one more round,
  * so a tab opened before the update can still load the code it asks for.
  *
- * Idempotent. A rerun of the same bundle after a failure keeps the record's
+ * Idempotent. A rerun of the same files after a failure keeps the record's
  * previous deployment, because the Lambda may still serve that deployment's
- * shell.
+ * shell. A rerun means the same keys with the same bytes (`assetSetHash`).
  */
 export async function uploadStaticAssets(
   appId: string,
@@ -331,9 +347,11 @@ export async function uploadStaticAssets(
   await Promise.all(Array.from({ length: 8 }, worker));
 
   const current = assets.map((a) => a.key);
-  const next: DeploymentsRecord = sameKeys(current, record.current)
-    ? { current, previous: record.previous }
-    : { current, previous: record.current };
+  const currentHash = assetSetHash(assets);
+  const next: DeploymentsRecord =
+    record.currentHash === currentHash
+      ? { current, previous: record.previous, currentHash }
+      : { current, previous: record.current, currentHash };
   await s3Call(`s3:PutObject ${bucket}/${recordKey}`, bucket, () =>
     s3.send(
       new PutObjectCommand({

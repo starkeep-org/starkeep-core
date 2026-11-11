@@ -268,9 +268,9 @@ describe("collectStaticAssets", () => {
 });
 
 describe("uploadStaticAssets", () => {
-  const asset = (key: string) => ({
+  const asset = (key: string, body = key) => ({
     key,
-    body: strToU8(key),
+    body: strToU8(body),
     contentType: "text/plain",
     cacheControl: "public, max-age=0, must-revalidate",
   });
@@ -282,7 +282,7 @@ describe("uploadStaticAssets", () => {
       contentType: "text/plain",
       cacheControl: "public, max-age=0, must-revalidate",
     });
-    expect(JSON.parse(objects.get("apps/dice/.deployments.json")!.body)).toEqual({
+    expect(JSON.parse(objects.get("apps/dice/.deployments.json")!.body)).toMatchObject({
       current: ["_static/a.js"],
       previous: [],
     });
@@ -296,7 +296,7 @@ describe("uploadStaticAssets", () => {
     calls.length = 0;
     await uploadStaticAssets("dice", BUCKET, [asset("_static/b.js")], "us-east-1", creds);
     expect(calls.filter((c) => c === "GetObjectCommand")).toHaveLength(1);
-    expect(JSON.parse(objects.get("apps/dice/.deployments.json")!.body)).toEqual({
+    expect(JSON.parse(objects.get("apps/dice/.deployments.json")!.body)).toMatchObject({
       current: ["_static/b.js"],
       previous: ["_static/a.js"],
     });
@@ -326,6 +326,27 @@ describe("uploadStaticAssets", () => {
     await uploadStaticAssets("dice", BUCKET, [asset("_immutable/v2.js")], "us-east-1", creds);
     await uploadStaticAssets("dice", BUCKET, [asset("_immutable/v2.js")], "us-east-1", creds);
     expect(keys()).toContain("apps/dice/_immutable/v1.js");
+  });
+
+  it("treats new bytes under the same names as a new deployment", async () => {
+    // A /_static/ file keeps its name across builds. Comparing names alone
+    // read v3 as a rerun of v2 and kept v1's files forever.
+    await uploadStaticAssets("dice", BUCKET, [asset("_immutable/v1.js")], "us-east-1", creds);
+    await uploadStaticAssets("dice", BUCKET, [asset("_static/a.js", "v2")], "us-east-1", creds);
+    await uploadStaticAssets("dice", BUCKET, [asset("_static/a.js", "v3")], "us-east-1", creds);
+    expect(keys()).toEqual(["apps/dice/.deployments.json", "apps/dice/_static/a.js"]);
+    expect(objects.get("apps/dice/_static/a.js")!.body).toBe("v3");
+  });
+
+  it("reads a record without a hash as a new deployment, not a rerun", async () => {
+    // The record's shape before currentHash existed.
+    objects.set("apps/dice/.deployments.json", {
+      body: JSON.stringify({ current: ["_immutable/v2.js"], previous: ["_immutable/v1.js"] }),
+    });
+    objects.set("apps/dice/_immutable/v1.js", { body: "v1" });
+    objects.set("apps/dice/_immutable/v2.js", { body: "v2" });
+    await uploadStaticAssets("dice", BUCKET, [asset("_immutable/v2.js")], "us-east-1", creds);
+    expect(keys()).toEqual(["apps/dice/.deployments.json", "apps/dice/_immutable/v2.js"]);
   });
 
   it("never touches another app's files", async () => {
