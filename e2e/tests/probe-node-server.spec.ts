@@ -110,3 +110,25 @@ test("leaves the origin gate inert on the local surface", async ({ request }) =>
   expect([200, 500, 502, 503]).toContain(res.status());
   expect(res.status()).not.toBe(401);
 });
+
+test("refuses, before any route runs, what a web page on another site could send", async ({
+  request,
+}) => {
+  // `serveLocal` applies the platform's local guard to every route. Both
+  // requests below would otherwise reach the signing proxy.
+  const fromAnotherSite = await request.post(`${server.url}/api/local-data/data/records`, {
+    headers: { "sec-fetch-site": "cross-site", "sec-fetch-mode": "no-cors" },
+    data: "{}",
+  });
+  expect(fromAnotherSite.status()).toBe(403);
+
+  // A DNS-rebinding page reaches 127.0.0.1 under a name it controls.
+  const rebound = await request.get(`${server.url}/`, { headers: { host: "evil.example" } });
+  expect(rebound.status()).toBe(403);
+
+  // A link from another site still opens the app.
+  const link = await request.get(`${server.url}/`, {
+    headers: { "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate" },
+  });
+  expect(link.status()).toBe(200);
+});

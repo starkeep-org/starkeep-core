@@ -319,26 +319,46 @@ one of:
   when everything behind the proxy is genuinely public. The justification
   string is there to be read by a reviewer, so write one you would defend.
 
-**On the local surface, your server makes two more checks.** The session check
-is exempt there, so whoever reaches the server can make it sign. Bind
-`127.0.0.1`, which keeps other devices out. Then refuse two kinds of request
-from pages in the person's own browser:
+**On the local surface, serve the app with `serveLocal`.** The session check
+is exempt there, so whoever reaches the server can make it sign. Pages in the
+person's own browser reach it, so the server must refuse two kinds of request
+before any route runs:
 
 - **A `Host` that is not a loopback name.** A DNS-rebinding page reaches
   `127.0.0.1` under a hostname it controls, and could otherwise read your
   server's answers as its own.
-- **A `Sec-Fetch-Site` of `cross-site` or `same-site`.** A page on any site can
-  send a blind `no-cors` POST to `127.0.0.1` with a loopback `Host`. Its
+- **A request from a page on another site.** A page on any site can send a
+  blind `no-cors` POST to `127.0.0.1` with a loopback `Host`. Its
   `text/plain` body needs no preflight, and the data server parses it as JSON.
   Every port on one loopback address is one site, so `same-site` is another
-  site here. Let a `GET` or `HEAD` navigation through, so a link from
-  admin-web still opens your app. A request with no `Sec-Fetch-Site` came
-  from no browser page.
+  site here. A `GET` or `HEAD` navigation still passes, so a link from
+  admin-web opens your app.
 
-`createDataProxyHandler` makes the `Sec-Fetch-Site` check for the proxy
-itself. Make both checks in your local server too, so they cover every route
-that signs, not only the proxy. The example app's `web/src/server/local.ts`
-makes both.
+`serveLocal` from `@starkeep/app-client/local` makes both checks on every
+route. It also reads the port admin-web passes on `--port`, binds `127.0.0.1`
+and serves your static files ahead of your routes, as the cloud adapter does:
+
+```ts
+// src/server/local.ts — what the manifest's `localRun` starts.
+import { serveLocal } from "@starkeep/app-client/local";
+import { app } from "./app.js";
+
+serveLocal({
+  app,
+  static: {
+    assetsDir: new URL("../../dist/", import.meta.url),
+    staticPaths: ["/", "/_immutable/*"], // the handler's staticAssetPaths
+    immutablePaths: ["/_immutable/*"],
+    shellPaths: ["/"],
+  },
+});
+```
+
+Probe's `test-apps/probe/src/serve.ts` is a complete local server built this
+way. An app that builds its own server mounts `localSurfaceGuard()` from
+`@starkeep/app-client/hono` first, ahead of `serveStatic` and every route.
+`createDataProxyHandler` checks `Sec-Fetch-Site` for the proxy itself, on both
+surfaces, but only the local guard covers your other routes.
 
 ## 5. Write a data client
 
@@ -766,35 +786,15 @@ composes with `createLambdaEntry`, so adopting it gets you the INIT guarantee
 without having to know the invariant exists.
 
 The local surface serves the same files through the same responder.
-`serveStatic` from `@starkeep/app-client/hono` takes the static options above
-and answers as Hono middleware, so a local server does not need its own file
-server:
-
-```js
-import { serve } from "@hono/node-server";
-import { serveStatic } from "@starkeep/app-client/hono";
-import { Hono } from "hono";
-import { app } from "./app.js";
-
-const local = new Hono();
-local.use(
-  "*",
-  serveStatic({
-    assetsDir: new URL("../dist/", import.meta.url),
-    staticPaths: shell.staticAssetPaths,
-    immutablePaths: ["/_immutable/*"],
-    shellPaths: ["/", "/browse", "/settings"],
-  }),
-);
-local.all("*", (c) => app.fetch(c.req.raw));
-serve({ fetch: local.fetch, port, hostname: "127.0.0.1" });
-```
-
-Mount it ahead of your routes, which is where the cloud adapter serves static
-files. The example app's `web/src/server/local.ts` does this. Its
-`web/src/server/static-options.ts` builds the options that `local.ts` and the
-cloud entry `cloud.ts` both pass, so the two surfaces cannot disagree about
-which paths are files.
+`serveLocal` from `@starkeep/app-client/local` takes the static options above
+and answers static paths ahead of your routes, which is where the cloud adapter
+serves them (§4 shows the call). An app that builds its own server mounts
+`serveStatic` from `@starkeep/app-client/hono`, the same responder as Hono
+middleware, after `localSurfaceGuard()` and ahead of its routes. Probe's
+`test-apps/probe/src/serve.ts` passes the static options to `serveLocal`.
+Build those options in one module that the local entry and the cloud entry
+both import, as the example app's `web/src/server/static-options.ts` does, so
+the two surfaces cannot disagree about which paths are files.
 
 `requestUpstream` hands your handler a web `Request` and the app-relative path.
 `honoUpstream` rewrites the request's URL to that path before Hono routes it, so

@@ -1,5 +1,6 @@
 import { loadAppCredentials } from "./credentials";
 import { proxyToDataServer } from "./proxy";
+import { fromAnotherSite } from "./local-guard";
 
 // The narrow slice of the web `Request` interface this package reads. Apps
 // hand over whatever their server gives them — `c.req.raw` under Hono, a bare
@@ -89,36 +90,10 @@ function isCloudMode(): boolean {
   return process.env.STARKEEP_APP_CLIENT_MODE === "cloud";
 }
 
-/**
- * Whether a browser sent this request from a page on another site.
- *
- * On the local surface the proxy signs for anyone who reaches it, and a page on
- * any site reaches it: a `no-cors` POST with a `text/plain` body needs no
- * preflight, the browser sends it to `127.0.0.1` with a loopback `Host`, and
- * the data server parses the body as JSON whatever its type. The page cannot
- * read the answer, but the write lands. A loopback `Host` check stops DNS
- * rebinding and not this.
- *
- * `Sec-Fetch-Site` is the browser's own verdict on where the request came
- * from, and no page can set it. `same-site` is refused too, because every port
- * on one loopback address is one site, so another local server's page is
- * same-site. An `Origin` comparison would not work here: behind CloudFront and
- * the gateway, the host this server sees is not the host the page was served
- * from. A request without the header passes. It came from a server, a script,
- * a phone or an old browser, none of which is a page on another site.
- *
- * A `GET` or `HEAD` navigation from another site passes: following a link
- * writes nothing, and the page that sent the browser here cannot read the
- * answer. A form POST is a navigation too, and it is refused.
- */
-function fromAnotherSite(req: MinimalRequest): boolean {
-  const site = req.headers.get("sec-fetch-site");
-  if (site !== "cross-site" && site !== "same-site") return false;
-  const method = req.method.toUpperCase();
-  const followsLink =
-    req.headers.get("sec-fetch-mode") === "navigate" && (method === "GET" || method === "HEAD");
-  return !followsLink;
-}
+// `fromAnotherSite` (./local-guard.ts) is the browser's own `Sec-Fetch-Site`
+// verdict. The proxy makes that check on both surfaces. It does not make the
+// local guard's `Origin` fallback: behind CloudFront and the gateway, the host
+// this server sees is not the host the page was served from.
 
 /**
  * Returns a handler that answers every verb (GET/POST/PUT/PATCH/DELETE) by
