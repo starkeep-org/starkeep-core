@@ -174,6 +174,81 @@ import {
   `STARKEEP_USER_POOL_ID`, etc.) as JSON. Mount it on any GET route. It reads
   the environment on every call, so a Node server needs no build-time opt-out.
 
+## Analysis reads in SQL: `@starkeep/app-client/snapshot`
+
+The row grammar answers what a screen lists. An analysis view, such as weekly
+volume per lift, needs expression aggregates, date buckets and joins, which the
+grammar does not offer. The snapshot helper loads the app's own rows through
+the row API into an in-memory SQLite in the app's server, and runs any
+read-only statement the app writes against the copy.
+
+The data server never runs app SQL. Cloud users share each app table, the two
+engines speak different SQL, and raw SQL would see tombstones and system
+columns. The row API removes all three, so the copy holds only the caller's
+live rows, and every surface runs the same SQLite dialect.
+
+```ts
+import { createSnapshotSql, SnapshotAccessError } from "@starkeep/app-client/snapshot";
+
+const snapshots = createSnapshotSql({
+  appId: APP_ID,
+  tables: manifest.infraRequirements.appSpecificSyncable.tables,
+});
+
+app.get("/api/weekly-volume", async (c) => {
+  const result = await snapshots.query(c.req.raw, {
+    tables: ["sets"],
+    sql: `SELECT strftime('%Y-%W', done_at) AS week, sum(reps * weight) AS volume
+          FROM sets GROUP BY week ORDER BY week`,
+    maxAge: 5 * 60_000,
+    freshAfter: Number(c.req.query("freshAfter") ?? 0),
+  });
+  const res = Response.json({ rows: result.rows, loadedAt: result.loadedAt });
+  if (result.setCookie) res.headers.append("Set-Cookie", result.setCookie);
+  return res;
+});
+```
+
+- **`maxAge`** sets how long, in milliseconds, a snapshot answers before the
+  helper reloads it. Zero reloads on every query.
+- **`freshAfter`** sets a floor in epoch milliseconds. The helper reloads any
+  snapshot loaded before the floor. A Refresh action in the browser sets the
+  floor to `Date.now()` and sends it with every later request. In the cloud each
+  warm Lambda holds its own snapshot, and the floor reaches whichever one
+  answers.
+- **`loadedAt`** on each result is the time the snapshot's load started. Show
+  it beside the Refresh action as "as of 14:32". Changes another device has not
+  synced yet are not in the copy.
+- **`setCookie`** appears when the user's ID token was re-minted. Append it to
+  the response.
+
+The helper applies the signing proxy's rules. A request from another site
+fails with `SnapshotAccessError` status 403. In the cloud, a request without a
+session fails with status 401. A missing app credential fails with status 503.
+A failed page of the load raises `SnapshotLoadError` with the data server's
+status.
+
+Limits and guarantees:
+
+- Each snapshot belongs to one user and one set of tables. In the cloud the key
+  is the ID token's `sub`, so one user's rows never answer another user's query.
+- The cache keeps 16 snapshots by default (`maxEntries`) and evicts the least
+  recently used. A snapshot over 200,000 rows (`maxRows`) raises
+  `SnapshotTooLargeError`. Aggregate on the data server with the row grammar
+  for tables that large.
+- A statement must begin with `SELECT`, `WITH` or `VALUES`. A statement that
+  changes the copy raises `SnapshotReadOnlyError`, and the helper drops the
+  copy. On Node 24.10 and later, a SQLite authorizer also refuses every action
+  but a read.
+- Write the SQL in the app's server code. Never run SQL text that arrived from
+  the browser: the copy holds only the caller's rows, but an arbitrary
+  statement has no cost bound.
+- No transaction spans the pages and tables of one load. A write during a load
+  can leave a child row without its parent until the next load.
+
+`createSnapshotCache` is the cache underneath, for a server that loads rows
+some other way. Each query then passes a `scope` and a `load` function.
+
 ## The server half: Hono
 
 A Starkeep app's server half is a [Hono](https://hono.dev) app, and
