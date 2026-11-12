@@ -202,6 +202,10 @@ export function buildRowProbe(
  * The reason a write changed nothing, from the probe's row and the write's
  * conditions.
  *
+ * A plain insert comes first. It upserts, and it revives a tombstone it
+ * outranks, so it changes nothing only when a newer stamp holds the key: it
+ * lost LWW, whether that stamp is a live row's or a deletion's.
+ *
  * Deleted wins over the rest: a row deleted since the caller read it is gone,
  * and a compare-and-set against it has nothing left to compare.
  *
@@ -219,8 +223,9 @@ export function classifySkippedWrite(
   conditions: RowWriteConditions = {},
 ): RowSkipReason {
   if (probe === undefined) return "missing";
+  if (op === "insert" && !conditions.ifAbsent) return "superseded";
   if (probe.deleted_at !== null && probe.deleted_at !== undefined) return "deleted";
-  if (op === "insert") return conditions.ifAbsent ? "live" : "superseded";
+  if (op === "insert") return "live";
   if (conditions.ifUpdatedAt !== undefined && probe.updated_at !== conditions.ifUpdatedAt) {
     return "stale";
   }

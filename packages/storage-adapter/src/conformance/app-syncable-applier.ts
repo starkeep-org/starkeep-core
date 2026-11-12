@@ -1153,6 +1153,19 @@ export const appSyncableWriteConformance: readonly WriteConformanceCase[] = [
     },
   },
   {
+    // A plain insert revives a tombstone it outranks, so one that changed
+    // nothing lost to a newer deletion. That is a lost LWW, not "deleted".
+    name: "a plain insert that loses LWW to a newer tombstone reports superseded",
+    async run(h) {
+      await seedTombstone(h, "r1");
+      const outcome = await h.applier.apply(writeInsert(h, "r1", hlc(10)), {});
+      expectOutcome(outcome, { changes: 0, skipped: "superseded" }, "older plain insert");
+      const row = await h.readRow("r1");
+      expectEqual(row?.deleted_at === null, false, "row still deleted");
+      expectEqual(row?.updated_at, serialized(hlc(20)), "tombstone stamp");
+    },
+  },
+  {
     name: "a plain update that loses LWW reports superseded",
     async run(h) {
       await h.applier.apply(writeInsert(h, "r1", hlc(20), "newer"), {});
