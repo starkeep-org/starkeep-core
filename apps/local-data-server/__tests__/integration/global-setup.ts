@@ -19,6 +19,12 @@
  *
  * The bundle dir must outlive every file: `restartProcess()` in server.ts
  * re-execs `process.argv[1]`, which is the bundle.
+ *
+ * globalSetup runs once per vitest session, so in watch mode the bundle is
+ * rebuilt before each rerun (`project.onTestsRerun`, awaited before the files
+ * run); otherwise an edit to server.ts or to the `packages/*\/src` it imports
+ * would never reach the spawned server, where the tsx path picked it up per
+ * spawn. The esbuild context keeps that rebuild incremental.
  */
 
 import { mkdtemp, rm } from "node:fs/promises";
@@ -26,7 +32,8 @@ import { builtinModules } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { build, type Plugin } from "esbuild";
+import { context, type Plugin } from "esbuild";
+import type { TestProject } from "vitest/node";
 
 const SERVER_TS = resolve(dirname(fileURLToPath(import.meta.url)), "../../server.ts");
 const BUILTINS = new Set(builtinModules);
@@ -53,10 +60,10 @@ const externalsFromImporter: Plugin = {
   },
 };
 
-export default async function setup(): Promise<() => Promise<void>> {
+export default async function setup(project: TestProject): Promise<() => Promise<void>> {
   const dir = await mkdtemp(join(tmpdir(), "starkeep-lds-bundle-"));
   const entry = join(dir, "server.mjs");
-  await build({
+  const bundle = await context({
     entryPoints: [SERVER_TS],
     outfile: entry,
     bundle: true,
@@ -69,9 +76,14 @@ export default async function setup(): Promise<() => Promise<void>> {
     plugins: [externalsFromImporter],
     logLevel: "warning",
   });
+  await bundle.rebuild();
   process.env.STARKEEP_LDS_ENTRY = entry;
+  project.onTestsRerun(async () => {
+    await bundle.rebuild();
+  });
   return async () => {
     delete process.env.STARKEEP_LDS_ENTRY;
+    await bundle.dispose();
     await rm(dir, { recursive: true, force: true });
   };
 }
