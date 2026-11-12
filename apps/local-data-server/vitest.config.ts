@@ -32,7 +32,12 @@ export default defineConfig({
       },
       {
         extends: true,
-        test: { name: "integration", include: ["__tests__/integration/**/*.test.ts"] },
+        test: {
+          name: "integration",
+          include: ["__tests__/integration/**/*.test.ts"],
+          // Bundles server.ts once so the harness spawns `node server.mjs`, not tsx.
+          globalSetup: ["__tests__/integration/global-setup.ts"],
+        },
       },
     ],
   },
