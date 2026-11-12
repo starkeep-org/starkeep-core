@@ -32,7 +32,7 @@
  */
 
 import { describe, it, afterAll, afterEach } from "vitest";
-import { PGlite } from "@electric-sql/pglite";
+import type { PGlite } from "@electric-sql/pglite";
 import {
   appSyncableApplierConformance,
   type ConformanceHarness,
@@ -43,6 +43,7 @@ import type { DatabaseClient } from "../../src/types.js";
 import { guardNodeWatermarks } from "../../src/node-watermarks.js";
 import { guardSingleFlight } from "../../src/single-flight.js";
 import { createAppNodeWatermarks } from "../pg-shared-schema.js";
+import { createDatabasePool } from "../pglite-pool.js";
 
 const APP = "conformance-app";
 const TABLE = "test_rows";
@@ -59,47 +60,18 @@ const SCHEMA = `app_${APP.replace(/-/g, "_")}`;
  * appId as the sender. Two databases is the honest way to get two stores with
  * one identity.
  *
- * The databases come from a file-level pool, so a case does not pay a PGlite
- * cold boot (about a second) for each database it needs. `takeDatabase` hands
- * out the next unused one, booting another only when none is free, and resets
- * it with `DROP SCHEMA ${SCHEMA} CASCADE` before the harness re-runs its DDL.
- * That schema is the only one these harnesses create, and dropping it also
- * undoes `breakReads`. Every database goes back to the pool after each case.
- *
- * A case needs at most two live databases: its own and one `peer()`. A third
- * means a nested `peer()` the pool was not sized for, and it throws rather
- * than handing out a database another harness in the same case is still using.
+ * The databases come from the file-level pool in `../pglite-pool.ts`, sized
+ * for the most a case needs: its own database and one `peer()`. A third means a
+ * nested `peer()` the pool was not sized for, and `takeDatabase` throws.
  */
 const POOL_LIMIT = 2;
-const pool: { ready: Promise<PGlite>; inUse: boolean }[] = [];
-
-async function takeDatabase(): Promise<PGlite> {
-  let slot = pool.find((s) => !s.inUse);
-  if (!slot) {
-    if (pool.length >= POOL_LIMIT) {
-      throw new Error(
-        `a conformance case asked for more than ${POOL_LIMIT} live databases; ` +
-          "raise POOL_LIMIT if a nested peer() is now intended",
-      );
-    }
-    const pg = new PGlite();
-    slot = { ready: pg.waitReady.then(() => pg), inUse: false };
-    pool.push(slot);
-  }
-  // Claimed before the first await, so concurrent callers never share a slot.
-  slot.inUse = true;
-  const pg = await slot.ready;
-  await pg.exec(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
-  return pg;
-}
-
-afterEach(() => {
-  for (const slot of pool) slot.inUse = false;
+const { takeDatabase, releaseAll, closeAll } = createDatabasePool({
+  schema: SCHEMA,
+  limit: POOL_LIMIT,
 });
 
-afterAll(async () => {
-  await Promise.all(pool.splice(0).map(async (slot) => (await slot.ready).close()));
-});
+afterEach(releaseAll);
+afterAll(closeAll);
 
 /** The `DatabaseClient` shape the applier talks to, over PGlite. */
 function clientFor(pg: PGlite): DatabaseClient {

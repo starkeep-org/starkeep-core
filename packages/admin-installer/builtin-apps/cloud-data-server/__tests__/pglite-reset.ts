@@ -1,20 +1,16 @@
 import type { PGlite } from "@electric-sql/pglite";
 
 /**
- * Drops every user schema in a PGlite database, leaving it as a fresh boot
- * left it, so a test file can boot PGlite once in `beforeAll` and re-run its
- * seed in each `beforeEach` instead of booting per test (a cold boot is about
- * a second; dropping and re-seeding is tens of milliseconds).
- *
- * Dropping, not truncating: tests create schemas and tables of their own and
- * delete seeded rows, and re-running the seed's DDL on an empty database
- * rebuilds exactly what a fresh boot would get. Kept are the system schemas
- * (`pg_catalog`, `information_schema`, `pg_toast*`, `pg_temp*`) and `public`,
- * which the seeds do not write to.
- *
- * storage-aurora-dsql (C2) and admin-installer (C3) copy this file verbatim
- * into their own `__tests__/`; the duplication is accepted so each package's
- * test files stay in its own area (AI-705).
+ * Drops every user schema in a PGlite database, leaving it as a fresh boot left
+ * it, so a test file can boot PGlite once in `beforeAll` (a cold boot is about a
+ * second) and re-run its seed in each `beforeEach` in tens of milliseconds.
+ * Dropping beats truncating because tests create schemas and tables of their
+ * own, and re-running the seed's DDL on an empty database rebuilds exactly what
+ * a fresh boot would get; the system schemas and `public` are kept. This file
+ * is duplicated in admin-installer, builtin-cloud-data-server and
+ * storage-aurora-dsql because the only shared test package, `@starkeep/testkit`,
+ * depends on `@starkeep/admin-installer`, so a shared helper there would create
+ * a dependency cycle for admin-installer.
  */
 export async function dropAllUserSchemas(pg: PGlite): Promise<void> {
   const { rows } = await pg.query<{ nspname: string }>(
