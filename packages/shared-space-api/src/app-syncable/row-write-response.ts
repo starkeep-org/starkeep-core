@@ -12,11 +12,15 @@ export interface RowWriteResponse {
  *
  * - `POST`: 200, except as below. A skipped `ifAbsent` insert is an expected
  *   outcome, so the body carries `changes: 0` and `skipped: "live" | "deleted"`.
- * - `PATCH`: 404 when no live row holds the key. A deleted row answers exactly
- *   as a missing one does. 409 when the row's stamp no longer matches.
+ * - `PATCH`: 404 with `skipped: "missing"` when no live row holds the key. A
+ *   deleted row answers exactly as a missing one does. 409 when the row's
+ *   stamp no longer matches.
  * - `DELETE`: 200 with `changes: 0` and `skipped: "deleted"` for a row already
- *   deleted, so a retried delete succeeds. 404 for a key no row ever held. 409
- *   when the row's stamp no longer matches.
+ *   deleted, so a retried delete succeeds. 404 with `skipped: "missing"` for a
+ *   key no row ever held. 409 when the row's stamp no longer matches.
+ * - Every row 404 carries `skipped: "missing"`. The route's other 404s, such as
+ *   an app with no app-syncable namespace, carry no `skipped`, so a client can
+ *   tell "no row" from "no route".
  * - All three: 409 with `skipped: "superseded"` when the row carries a newer
  *   stamp than the write, so last-writer-wins kept the row as it was.
  */
@@ -51,5 +55,10 @@ export function rowWriteResponse(
   if (method === "DELETE" && skipped === "deleted") {
     return { status: 200, body: { changes, skipped } };
   }
-  return { status: 404, body: { error: "No live row holds that key", changes } };
+  // A deleted row reports `missing` here too, so a PATCH of one answers exactly
+  // as a PATCH of a key no row ever held.
+  return {
+    status: 404,
+    body: { error: "No live row holds that key", changes, skipped: "missing" },
+  };
 }

@@ -1802,6 +1802,8 @@ describe("/app-data routes", () => {
     );
     expect(res.statusCode).toBe(404);
     expect(bodyOf(res)["error"]).toMatch(/did not declare appSpecificSyncable/);
+    // Only a row 404 names a skip reason, so a client can tell the two apart.
+    expect(bodyOf(res)).not.toHaveProperty("skipped");
   });
 
   it("inserts rows into a declared table via the LWW applier", async () => {
@@ -1987,6 +1989,7 @@ describe("/app-data routes", () => {
     expect(missing.statusCode).toBe(404);
     expect(deleted.statusCode).toBe(404);
     expect(bodyOf(deleted)).toEqual(bodyOf(missing));
+    expect(bodyOf(missing)).toMatchObject({ changes: 0, skipped: "missing" });
   });
 
   it("409s a patch whose ifUpdatedAt no longer matches", async () => {
@@ -2056,6 +2059,7 @@ describe("/app-data routes", () => {
     setDbFactory(unchangedWrites([]));
     const missing = await handler(signedEvent(del), context);
     expect(missing.statusCode).toBe(404);
+    expect(bodyOf(missing)).toMatchObject({ changes: 0, skipped: "missing" });
   });
 
   it("400s writes to an undeclared table", async () => {
