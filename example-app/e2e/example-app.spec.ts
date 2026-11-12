@@ -225,6 +225,25 @@ test("Notes: write, pin and search a note on the open file", async () => {
   await expectLogged("GET", /^\/app-data\/db\/notes\?/, 200);
 });
 
+test("Analysis: SQL over a cached snapshot, as of its load time, until a Refresh", async () => {
+  // The page loaded the analysis before any note existed, and the snapshot
+  // lives five minutes, so the note the previous step saved is not in it yet.
+  const asOf = page.getByLabel("Analysis as of");
+  await expect(table("Notes per day")).toContainText("Nothing yet.");
+  const before = Number(await asOf.getAttribute("data-loaded-at"));
+  expect(before).toBeGreaterThan(0);
+
+  // A Refresh sends a floor of now, and the server reloads the copy.
+  await click("Refresh analysis", "Refresh analysis");
+  await expect(await column("Notes per day", "Notes")).toHaveText(["1"]);
+  await expect(await column("Notes per day", "Pinned")).toHaveText(["0"]);
+  await expect(await column("Notes per day", "Average length")).toHaveText([
+    String("first note".length),
+  ]);
+  expect(Number(await asOf.getAttribute("data-loaded-at"))).toBeGreaterThan(before);
+  await expectLogged("GET", /^\/api\/notes-by-day\?/, 200);
+});
+
 test("Labels: add, set exactly, count and retract tags", async () => {
   await click("Open hello.skexample", "Open");
   await page.getByLabel("Tags", { exact: true }).fill("draft, idea");
@@ -301,21 +320,21 @@ test("Metadata: the category table and its totals", async () => {
   await expect(await cell("Example files", "hello.skexample", "Words")).toHaveText("7");
 });
 
-test("Snapshots: save the notes as a private file, list, open and delete it", async () => {
-  await click("Save snapshot", "Save snapshot");
-  const row = table("Snapshots").getByRole("row").filter({ hasText: "snapshots/notes-" });
+test("Note exports: save the notes as a private file, list, open and delete it", async () => {
+  await click("Save export", "Save export");
+  const row = table("Note exports").getByRole("row").filter({ hasText: "exports/notes-" });
   await expect(row).toHaveCount(1);
-  await expectLogged("POST", /^\/app-data\/files\/snapshots\/notes-[^/]+\.json\/record$/, 200);
-  await expectLogged("GET", /^\/app-data\/files\?prefix=snapshots%2F$/, 200);
+  await expectLogged("POST", /^\/app-data\/files\/exports\/notes-[^/]+\.json\/record$/, 200);
+  await expectLogged("GET", /^\/app-data\/files\?prefix=exports%2F$/, 200);
   const subKey = (await row.getByRole("cell").first().textContent())!;
-  await click(`Open ${subKey}`, "Open snapshot");
+  await click(`Open ${subKey}`, "Open export");
   await expect(page.locator("pre").filter({ hasText: "first note" })).toBeVisible();
-  await click("Get snapshot URLs", "Get snapshot URLs");
+  await click("Get export URLs", "Get export URLs");
   await expect(page.getByText("1 URLs fetched in one call.")).toBeVisible();
   await expectLogged("POST", /^\/app-data\/file-urls$/, 200);
-  await click(`Delete ${subKey}`, "Delete snapshot");
-  await expect(table("Snapshots")).toContainText("Nothing yet.");
-  await expectLogged("DELETE", /^\/app-data\/files\/snapshots\//, 200);
+  await click(`Delete ${subKey}`, "Delete export");
+  await expect(table("Note exports")).toContainText("Nothing yet.");
+  await expectLogged("DELETE", /^\/app-data\/files\/exports\//, 200);
 });
 
 test("Deleted: a deletion appears in the reconcile, restores, and takes derived copies and notes", async () => {

@@ -455,13 +455,13 @@ and show only the originals. Guidance:
   `image_enriched` table (caption, title, date override).
 - `files: true` — opt into an `apps/<appId>/syncable/` object-storage prefix for
   app-private blobs. Leave false for row-only apps. An app names each file by a
-  sub-key of its choosing, such as `snapshots/notes-1.json`:
+  sub-key of its choosing, such as `exports/notes-1.json`:
   - `POST /app-data/files/presign`, the `PUT`, then
     `POST /app-data/files/<subKey>/record` stores one;
   - `GET /app-data/files/<subKey>` and `POST /app-data/file-urls` sign URLs to
     read them;
   - `DELETE /app-data/files/<subKey>` deletes one;
-  - `GET /app-data/files?prefix=snapshots/&limit=…&page_token=…` lists them in
+  - `GET /app-data/files?prefix=exports/&limit=…&page_token=…` lists them in
     sub-key order. The response is `{files, truncated, page_token}`, and each
     file carries `sub_key`, `size_bytes`, `mime_type`, `original_filename` and
     `created_at`.
@@ -635,6 +635,19 @@ fractional order key is a string that sorts between its two neighbors, so a move
 rewrites only the moved row with one `PATCH`. A fractional-indexing library
 generates the keys. Keep the primary-key tiebreak, since two surfaces that
 insert into the same gap can generate equal keys.
+
+### 6c. Analysis reads in SQL over a snapshot
+
+An analysis view, such as weekly volume per lift, needs expression aggregates,
+date buckets and joins, which the grammar in section 6a does not offer. Use
+`createSnapshotSql` from `@starkeep/app-client/snapshot` in the app's server.
+The helper loads the app's own rows through the row API into an in-memory
+SQLite, caches the copy per user, and runs the app's read-only SQL against it.
+Each result carries `loadedAt`, the copy's load time, for an "as of" label. A
+Refresh action sends a `freshAfter` floor that reloads an older copy. The
+package README's section "Analysis reads in SQL: `@starkeep/app-client/snapshot`"
+describes the options and limits, and Probe's `GET /api/notes-summary` is a
+working route.
 
 ### 7. Cloud compute + the bundle (cloud target only)
 

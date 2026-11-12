@@ -164,6 +164,55 @@ test("a record one app writes is visible to another; its app-private rows are no
   expect(probeNotes.status, "Drive read another app's private table").not.toBe(200);
 });
 
+test("an analysis read answers from a cached snapshot until a Refresh floor reloads it", async ({
+  page,
+}) => {
+  await page.goto(probeUrl);
+
+  // The page's own fetch, as an app's analysis view would make it.
+  const summary = (freshAfter?: number) =>
+    page.evaluate(async (floor) => {
+      const res = await fetch(
+        floor === undefined ? "/api/notes-summary" : `/api/notes-summary?freshAfter=${floor}`,
+      );
+      return {
+        status: res.status,
+        body: (await res.json()) as {
+          summary: { notes: number; characters: number };
+          loadedAt: number;
+        },
+      };
+    }, freshAfter);
+
+  // SQL over the snapshot sees the note the previous test wrote.
+  const first = await summary(Date.now());
+  expect(first.status).toBe(200);
+  expect(first.body.summary).toEqual({ notes: 1, characters: NOTE.length });
+
+  const written = await page.evaluate(async () => {
+    const res = await fetch("/api/local-data/app-data/db/probe_notes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ row: { record_id: "probe-e2e-2", note: "second" } }),
+    });
+    return res.status;
+  });
+  expect(written).toBe(200);
+
+  // Within the five-minute life, the copy answers and says how old it is.
+  const cached = await summary();
+  expect(cached.body.summary.notes).toBe(1);
+  expect(cached.body.loadedAt).toBe(first.body.loadedAt);
+
+  // A Refresh moves the floor to now, and the copy reloads.
+  const refreshed = await summary(Date.now());
+  expect(refreshed.body.summary).toEqual({
+    notes: 2,
+    characters: NOTE.length + "second".length,
+  });
+  expect(refreshed.body.loadedAt).toBeGreaterThan(first.body.loadedAt);
+});
+
 test("re-uploading identical bytes dedups at the platform layer", async ({ page }) => {
   await page.goto(probeUrl);
   await expect(page.getByAltText(FIXTURE_NAME).first()).toBeVisible({ timeout: 60_000 });
