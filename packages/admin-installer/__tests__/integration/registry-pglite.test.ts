@@ -20,9 +20,10 @@
  * See `~/projects/starkeep/findings-test-coverage-mobile-private-channel-2026-10-27.md`,
  * problems 2 and 3.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import type { AppManifest } from "@starkeep/admin-manifest";
+import { dropAllUserSchemas } from "../pglite-reset";
 
 const state = vi.hoisted(() => ({
   pg: null as unknown as import("@electric-sql/pglite").PGlite,
@@ -110,12 +111,18 @@ const photos: AppManifest = {
 /** The same app after a release that stops shipping the Android build. */
 const photosWithoutAndroid: AppManifest = { ...photos, version: "0.2.0", mobile: undefined };
 
-beforeEach(async () => {
+// One PGlite per file: each test starts from an empty database with no
+// `shared` schema, which the "predates" describes need to build an older one.
+beforeAll(async () => {
   state.pg = new PGlite();
   await state.pg.waitReady;
 });
 
-afterEach(async () => {
+beforeEach(async () => {
+  await dropAllUserSchemas(state.pg);
+});
+
+afterAll(async () => {
   await state.pg.close();
 });
 

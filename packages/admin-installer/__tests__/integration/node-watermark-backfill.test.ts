@@ -7,7 +7,7 @@
  * and never lower an entry: an entry above every live row is coverage the
  * cloud really had. See `src/node-watermark-ddl.ts`.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { Kysely, PostgresDialect } from "kysely";
 import {
@@ -16,11 +16,12 @@ import {
   backfillNodeWatermarks,
   createNodeWatermarkTable,
 } from "../../src/node-watermark-ddl";
+import { dropAllUserSchemas } from "../pglite-reset";
 
 let pg: PGlite;
 let db: Kysely<Record<string, never>>;
 
-beforeEach(async () => {
+beforeAll(async () => {
   pg = new PGlite();
   await pg.waitReady;
   const query = async (text: string, values?: unknown[]) => {
@@ -36,6 +37,11 @@ beforeEach(async () => {
       pool: { connect: async () => ({ query, release() {} }), end: async () => {} },
     }),
   });
+});
+
+// One PGlite per file: drop every schema, then rebuild them from empty.
+beforeEach(async () => {
+  await dropAllUserSchemas(pg);
   await pg.exec(`
     CREATE SCHEMA shared;
     CREATE TABLE shared.records (
@@ -64,7 +70,7 @@ beforeEach(async () => {
   );
 });
 
-afterEach(async () => {
+afterAll(async () => {
   await db.destroy();
   await pg.close();
 });
