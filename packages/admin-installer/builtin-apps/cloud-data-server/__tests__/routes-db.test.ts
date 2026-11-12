@@ -2006,6 +2006,26 @@ describe("/app-data routes", () => {
     expect(db.calls(/update "app_appdata1"\."notes"/)[0]!.values).toContain("1:0:n");
   });
 
+  it("409s a plain write that lost LWW as superseded, on all three routes", async () => {
+    // A live row with no stamp condition: the write's own stamp lost, and the
+    // answer must not claim the write named a stamp.
+    const writes = [
+      { method: "POST" as const, body: { row: { id: "n1", text: "new" } } },
+      { method: "PATCH" as const, body: { where: { id: "n1" }, patch: { text: "new" } } },
+      { method: "DELETE" as const, body: { where: { id: "n1" } } },
+    ];
+    for (const { method, body } of writes) {
+      setDbFactory(unchangedWrites([{ deleted_at: null, updated_at: "9999999999999:0:phone" }]));
+      const res = await handler(
+        signedEvent({ appId: "appdata1", method, subPath: "/app-data/db/notes", body }),
+        context,
+      );
+      expect(res.statusCode, method).toBe(409);
+      expect(bodyOf(res), method).toMatchObject({ changes: 0, skipped: "superseded" });
+      expect(String(bodyOf(res)["error"]), method).not.toMatch(/stamp/);
+    }
+  });
+
   it("400s an ifUpdatedAt that is not a serialized HLC", async () => {
     setDbFactory(unchangedWrites([]));
     const res = await handler(

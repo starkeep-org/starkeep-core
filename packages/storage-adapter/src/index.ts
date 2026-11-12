@@ -175,10 +175,13 @@ export {
   buildRowProbe,
   classifySkippedWrite,
   keyedWhereFor,
+  probeKeyFor,
+  requireInsertKey,
   requireKeyedWhere,
   rowToWireEntry,
   type KeyedRowEntry,
   type RowSkipReason,
+  type RowWriteConditions,
 } from "./database/app-syncable-rows.js";
 
 export type { RawDatabase, RawStatement } from "./database/raw-database.js";

@@ -592,21 +592,27 @@ The rest of this section lists the patterns that keep the rule from losing data.
 
 Each route reports what the write did:
 
-| Route                                  | Answer                                                 | Meaning                                                                     |
-| -------------------------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------- |
-| `POST`                                 | 200 `{"ok": true, "changes": 1}`                       | The row was written.                                                        |
-| `POST` with `ifAbsent`                 | 200 `{"ok": true, "changes": 0, "skipped": "live"}`    | A live row holds the key. Nothing was written.                              |
-| `POST` with `ifAbsent`                 | 200 `{"ok": true, "changes": 0, "skipped": "deleted"}` | A deleted row holds the key. Nothing was written.                           |
-| `PATCH`                                | 200 `{"changes": 1}`                                   | The live row was patched.                                                   |
-| `PATCH`                                | 404                                                    | No live row holds the key. A deleted row answers the same as a missing one. |
-| `DELETE`                               | 200 `{"changes": 1}`                                   | The live row was deleted.                                                   |
-| `DELETE`                               | 200 `{"changes": 0, "skipped": "deleted"}`             | The row was already deleted, so a retried delete succeeds.                  |
-| `DELETE`                               | 404                                                    | No row, live or deleted, ever held the key.                                 |
-| `PATCH` or `DELETE` with `ifUpdatedAt` | 409 `{"changes": 0, "skipped": "stale"}`               | The row changed since the read (see "Guard a read-modify-write" below).     |
+| Route                                  | Answer                                                 | Meaning                                                                              |
+| -------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `POST`                                 | 200 `{"ok": true, "changes": 1}`                       | The row was written.                                                                 |
+| `POST` with `ifAbsent`                 | 200 `{"ok": true, "changes": 0, "skipped": "live"}`    | A live row holds the key. Nothing was written.                                       |
+| `POST` with `ifAbsent`                 | 200 `{"ok": true, "changes": 0, "skipped": "deleted"}` | A deleted row holds the key. Nothing was written.                                    |
+| `PATCH`                                | 200 `{"changes": 1}`                                   | The live row was patched.                                                            |
+| `PATCH`                                | 404                                                    | No live row holds the key. A deleted row answers the same as a missing one.          |
+| `DELETE`                               | 200 `{"changes": 1}`                                   | The live row was deleted.                                                            |
+| `DELETE`                               | 200 `{"changes": 0, "skipped": "deleted"}`             | The row was already deleted, so a retried delete succeeds.                           |
+| `DELETE`                               | 404                                                    | No row, live or deleted, ever held the key.                                          |
+| `PATCH` or `DELETE` with `ifUpdatedAt` | 409 `{"changes": 0, "skipped": "stale"}`               | The row changed since the read (see "Guard a read-modify-write" below).              |
+| Any of the three                       | 409 `{"changes": 0, "skipped": "superseded"}`          | The row carries a newer stamp than the write, so the write lost and changed nothing. |
 
 An MCP tool or an API built on these routes can pass the 404 straight through
 as "not found". No read beforehand is needed, and a read beforehand would race
 the write anyway.
+
+A `superseded` answer is rare. A row that synced from a surface whose clock
+runs ahead can carry a stamp above the stamp of this surface's next write. Read
+the row again to see the state that won, and decide from there whether to write
+again.
 
 Edit with `PATCH`, and name only the changed columns. Never read a row, change
 one field and `POST` the whole row back. Two clients of one data server, such as

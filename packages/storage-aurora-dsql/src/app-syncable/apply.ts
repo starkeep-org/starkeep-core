@@ -23,9 +23,10 @@ import {
   buildRowProbe,
   buildScanSinceForNode,
   classifySkippedWrite,
-  keyedWhereFor,
   collectSince,
   planNodeScans,
+  probeKeyFor,
+  requireInsertKey,
   requireKeyedWhere,
   rowToWireEntry,
   toDigestBuckets,
@@ -143,15 +144,9 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
             // An app's own write that changed nothing: say why. Read inside the
             // transaction, so the answer describes the state the write saw, and
             // a replay after an OCC conflict asks again.
-            const key =
-              keyedWhereFor(
-                entry.op === "insert" ? (entry.row ?? {}) : (entry.where ?? {}),
-                pkColumns,
-              ) ??
-              entry.where ??
-              {};
+            const key = probeKeyFor(entry, pkColumns);
             const probe = (await this.run(buildRowProbe(this.qb, schemaTable, key))).rows[0];
-            outcome = { changes: 0, skipped: classifySkippedWrite(entry.op, probe) };
+            outcome = { changes: 0, skipped: classifySkippedWrite(entry.op, probe, conditions) };
           }
           for (const raise of raises) await this.run(raise);
           await this.client.query("COMMIT");
@@ -176,11 +171,7 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
     const cols = Object.keys(row);
     if (cols.length === 0) return 0;
 
-    if (conditions?.ifAbsent && keyedWhereFor(entry.row ?? {}, pkColumns) === null) {
-      throw new Error(
-        `ifAbsent insert for ${entry.appId}.${entry.table} needs the table's whole primary key in the row`,
-      );
-    }
+    if (conditions?.ifAbsent) requireInsertKey(entry, pkColumns);
 
     if (pkColumns.length === 0) {
       return this.count(
