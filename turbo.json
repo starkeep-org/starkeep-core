@@ -1,32 +1,46 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  // Persisted `lint` and `typecheck` hits must not survive a change to the
+  // root config every package extends.
+  "globalDependencies": ["eslint.config.js", "tsconfig.base.json"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**"]
     },
+    // Test tasks never replay from cache: CI persists `.turbo/cache`, and a
+    // test's hash misses inputs it reads from other packages (admin-installer's
+    // tests read cloud-data-server's `dist.zip`). A `pkg#test` entry replaces
+    // this definition rather than inheriting it, so each one repeats it.
     "test": {
-      "dependsOn": ["build"]
+      "dependsOn": ["build"],
+      "cache": false
     },
     "admin-web#test": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["^build"],
+      "cache": false
     },
     "@starkeep/drive#test": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["^build"],
+      "cache": false
     },
     "@starkeep/builtin-cloud-data-server#test": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["^build"],
+      "cache": false
     },
     // Integration tests (`__tests__/integration/`) boot a process, a socket or
     // a database engine; they run apart from the unit tests, outside tier 1.
     "test:integration": {
-      "dependsOn": ["build"]
+      "dependsOn": ["build"],
+      "cache": false
     },
     "admin-web#test:integration": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["^build"],
+      "cache": false
     },
     "@starkeep/builtin-cloud-data-server#test:integration": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["^build"],
+      "cache": false
     },
     "test:e2e": {
       // admin-web's and Drive's clients are real builds now rather than
@@ -42,6 +56,11 @@
     "@starkeep/drive#build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**"]
+    },
+    // Its build writes a Lambda bundle, `dist.zip`, not `dist/`.
+    "@starkeep/builtin-cloud-data-server#build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist.zip"]
     },
     "test:aws": {
       "dependsOn": ["^build"],
