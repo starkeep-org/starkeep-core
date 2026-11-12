@@ -14,6 +14,22 @@ For the system this app plugs into — the data servers, how data is classified,
 and how it syncs — read [`system-design.md`](system-design.md) first. For the
 trust boundaries, see [`data-roles-and-permissions.md`](data-roles-and-permissions.md).
 
+## Working with an agent
+
+The `starkeep` Claude Code plugin in [`plugins/starkeep`](../plugins/starkeep/README.md)
+carries skills that route an agent to the sections of this doc and
+[`system-design.md`](system-design.md) that answer its question. Install it with
+the two commands in that README's [Install](../plugins/starkeep/README.md#install)
+section. Skills are invoked as `/starkeep:<skill>`:
+
+- `/starkeep:starkeep-app-anatomy` — Use when creating, restructuring or debugging the shape of a Starkeep app — its folder layout, starkeep.manifest.json, install lifecycle, publicPaths, browser mount and build mode.
+- `/starkeep:starkeep-data-model` — Use before designing or porting a Starkeep app's data, to put each fact in the right place (record, metadata, label, app table, scratch) and to stay inside what the row API can and cannot do.
+- `/starkeep:starkeep-run-local` — Use when a Starkeep app must run against a real local platform — bring up admin-web and the data server, install and start the app, send it signed requests, run its e2e suite, and pass the checklist before calling the work done.
+- `/starkeep:starkeep-cloud-and-sign-in` — Use when a Starkeep app targets the cloud — its compute handlers and bundle, the /sign-in page and session routes, publicPaths, who checks the end user, and an MCP route — or when a cloud install answers 401.
+
+The skills link into this document, so when it and a skill disagree, this
+document wins and the skill has a bug.
+
 ## What an app is
 
 An app is **any directory that contains a `starkeep.manifest.json`, is
