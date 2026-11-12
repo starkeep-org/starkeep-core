@@ -30,16 +30,21 @@ Debian package `aws-emulator_1.0.322-1_amd64.deb`. The spike pins this version; 
 
 ### Measured numbers
 
-| Where                                                                   | Install mode           | Download s | Install s (download + verify + install)       | Startup s (launch → health `ok`) | Binary size             | S3 round trip |
-| ----------------------------------------------------------------------- | ---------------------- | ---------- | --------------------------------------------- | -------------------------------- | ----------------------- | ------------- |
-| Agent sandbox (Debian 12 container, x86_64, no root), 2026-11-12, run 1 | `extract` (`dpkg-deb`) | 1.68       | 5.81 (signature not yet verified in this run) | 0.26                             | 970 692 256 B (925 MiB) | ok            |
-| Agent sandbox, run 2 (lint and tests running alongside)                 | `extract` (`dpkg-deb`) | 1.81       | 9.31 (not verified)                           | 0.48                             | same                    | ok            |
-| Agent sandbox, run 3 (final script, signature verified with `gpgv`)     | `extract` (`dpkg-deb`) | 1.53       | 7.55                                          | 0.25                             | same                    | ok            |
-| GitHub Actions `ubuntu-latest`                                          | `apt` (`sudo apt-get`) | _pending_  | _pending_                                     | _pending_                        | _pending_               | _pending_     |
+| Where                                                                                        | Install mode           | Download s | Install s (download + verify + install)       | Startup s (launch → health `ok`) | Binary size             | S3 round trip |
+| -------------------------------------------------------------------------------------------- | ---------------------- | ---------- | --------------------------------------------- | -------------------------------- | ----------------------- | ------------- |
+| Agent sandbox (Debian 12 container, x86_64, no root), 2026-11-12, run 1                      | `extract` (`dpkg-deb`) | 1.68       | 5.81 (signature not yet verified in this run) | 0.26                             | 970 692 256 B (925 MiB) | ok            |
+| Agent sandbox, run 2 (lint and tests running alongside)                                      | `extract` (`dpkg-deb`) | 1.81       | 9.31 (not verified)                           | 0.48                             | same                    | ok            |
+| Agent sandbox, run 3 (final script, signature verified with `gpgv`)                          | `extract` (`dpkg-deb`) | 1.53       | 7.55                                          | 0.25                             | same                    | ok            |
+| GitHub Actions `ubuntu-latest` (Ubuntu 26.04), 2026-11-12, run 43139326209                   | `apt` (`sudo apt-get`) | 0.47       | 13.71 (signature verified with `gpgv`)        | 0.16                             | 970 692 256 B (925 MiB) | ok            |
+| GitHub Actions `ubuntu-latest` (Ubuntu 26.04), 2026-11-12, run 43141161803 (PR's final head) | `apt` (`sudo apt-get`) | 0.44       | 17.62 (signature verified with `gpgv`)        | 0.20                             | same                    | ok            |
 
-The Actions row is filled from the first run of `aws-emulator-spike.yml` on the AI-679 pull request: the
-agent that wrote this cannot push, so it could not trigger the workflow. The job's summary box prints
-every value in this table.
+The Actions rows come from runs [43139326209](https://github.com/myleshenderson/starkeep-core/actions/runs/43139326209)
+and [43141161803](https://github.com/myleshenderson/starkeep-core/actions/runs/43141161803) of
+`aws-emulator-spike.yml` on the AI-679 pull request (the job's summary box prints every value in this
+table). Round-trip timings there (64 KiB object), run 43139326209: CreateBucket 60 ms, PutObject 5 ms,
+GetObject 3 ms, ListObjectsV2 3 ms, DeleteObject 2 ms, ListObjectsV2 1 ms, DeleteBucket 1 ms; run
+43141161803: CreateBucket 83 ms, PutObject 10 ms, GetObject 5 ms, ListObjectsV2 4 ms, DeleteObject 3 ms,
+ListObjectsV2 2 ms, DeleteBucket 2 ms.
 
 Round-trip timings in the sandbox (64 KiB object): CreateBucket 86 ms (first call: TLS handshake and
 credential load), PutObject 13 ms, GetObject 9 ms, ListObjectsV2 6 ms, DeleteObject 4 ms,
@@ -198,7 +203,6 @@ which matches the guide.
 
 ## Gaps found
 
-- **No measured Actions numbers in this document yet** (see the table). They come from the PR's workflow run.
 - **Large artifact.** 163 MiB download, 925 MiB on disk. Every CI job that uses it pays the download
   unless the `.deb` is cached (for example `actions/cache` keyed on the pinned version).
 - **No root, no `apt-get`.** The documented install needs root. `dpkg-deb -x` works and is equivalent for
@@ -227,8 +231,8 @@ which matches the guide.
 ## What this means for starkeep-core
 
 - The epic can continue as far as the sandbox is concerned: the emulator installs and starts in the agent
-  sandbox (proven here). The GitHub Actions path (`sudo apt-get install`, Node 22) is proven only once
-  the workflow run on the AI-679 pull request is green; until then treat it as expected, not shown. In the sandbox the S3 SDK path that
+  sandbox (proven here). The GitHub Actions path (`sudo apt-get install`, Node 22) is proven by runs
+  43139326209 and 43141161803 on the AI-679 pull request (S3 round trip ok). In the sandbox the S3 SDK path that
   `packages/storage-s3` uses (same `@aws-sdk/client-s3` version, 3.1009.0) works against it with only
   environment configuration plus `forcePathStyle: true`. `S3ObjectStorageAdapter` builds its `S3Client`
   with `region` and `credentials` only, so pointing it at the emulator would need `endpoint` and
