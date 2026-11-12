@@ -9,7 +9,7 @@
  * in `storage-sqlite/__tests__/app-syncable-query-conformance.test.ts`.
  */
 
-import { describe, it, afterEach } from "vitest";
+import { describe, it, afterAll, afterEach } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import {
   appSyncableQueryConformance,
@@ -31,10 +31,48 @@ const TABLE = "rows_under_test";
 const METADATA_TABLE = "metadata_shaped";
 const SCHEMA = `app_${APP.replace(/-/g, "_")}`;
 
-const open: PGlite[] = [];
+/**
+ * A file-level pool of databases, so a case does not pay a PGlite cold boot
+ * (about a second) for each database it needs. `takeDatabase` hands out the
+ * next unused one, booting another only when none is free, and resets it with
+ * `DROP SCHEMA ${SCHEMA} CASCADE` before the harness re-runs its DDL. That
+ * schema is the only one these harnesses create, and dropping it also undoes
+ * `breakReads`. Every database goes back to the pool after each case.
+ *
+ * The query cases build one harness each, so the pool holds one database; the
+ * limit matches the applier suite's, where a case and its `peer()` need two. Past
+ * it, `takeDatabase` throws rather than handing out a database another harness
+ * in the same case is still using.
+ */
+const POOL_LIMIT = 2;
+const pool: { ready: Promise<PGlite>; inUse: boolean }[] = [];
 
-afterEach(async () => {
-  await Promise.all(open.splice(0).map((db) => db.close()));
+async function takeDatabase(): Promise<PGlite> {
+  let slot = pool.find((s) => !s.inUse);
+  if (!slot) {
+    if (pool.length >= POOL_LIMIT) {
+      throw new Error(
+        `a conformance case asked for more than ${POOL_LIMIT} live databases; ` +
+          "raise POOL_LIMIT if a nested peer() is now intended",
+      );
+    }
+    const pg = new PGlite();
+    slot = { ready: pg.waitReady.then(() => pg), inUse: false };
+    pool.push(slot);
+  }
+  // Claimed before the first await, so concurrent callers never share a slot.
+  slot.inUse = true;
+  const pg = await slot.ready;
+  await pg.exec(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
+  return pg;
+}
+
+afterEach(() => {
+  for (const slot of pool) slot.inUse = false;
+});
+
+afterAll(async () => {
+  await Promise.all(pool.splice(0).map(async (slot) => (await slot.ready).close()));
 });
 
 function clientFor(pg: PGlite): DatabaseClient {
@@ -58,9 +96,7 @@ function clientFor(pg: PGlite): DatabaseClient {
 }
 
 async function makeHarness(): Promise<QueryConformanceHarness> {
-  const pg = new PGlite();
-  await pg.waitReady;
-  open.push(pg);
+  const pg = await takeDatabase();
 
   // The owner leads every primary key, as `dsql-ddl.ts` emits it.
   const withOwner = (cols: typeof QUERY_COLUMNS) =>
