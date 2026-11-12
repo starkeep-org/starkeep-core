@@ -8,6 +8,7 @@ export {
   appComputeHandlerSchema,
   publicPathCovers,
   SERVED_ASSET_PREFIXES,
+  SIGN_IN_PATH,
   handlerUsesAppAssetsBucket,
   appSpecificSyncableSchema,
   syncableTableSchema,
