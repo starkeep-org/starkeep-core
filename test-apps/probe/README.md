@@ -27,6 +27,8 @@ offers an app:
 - a browser upload that presigns, PUTs to S3 and registers a shared record;
 - a declared label vocabulary (`variant` as a size class, `flag` valueless,
   `tag` valued) and an app-private `probe_notes` table;
+- `GET /api/notes-summary`, an analysis read in SQL over a cached snapshot of
+  `probe_notes`, from `@starkeep/app-client/snapshot`;
 - a JWT-gated `POST /api/echo` compute route.
 
 ## How it runs

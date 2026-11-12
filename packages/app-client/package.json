@@ -56,6 +56,11 @@
       "types": "./dist/content-disposition.d.ts",
       "import": "./dist/content-disposition.js",
       "require": "./dist/content-disposition.cjs"
+    },
+    "./snapshot": {
+      "types": "./dist/snapshot.d.ts",
+      "import": "./dist/snapshot.js",
+      "require": "./dist/snapshot.cjs"
     }
   },
   "files": [
