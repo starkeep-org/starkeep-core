@@ -1,0 +1,30 @@
+{
+  "id": "control-app",
+  "name": "Control App",
+  "version": "0.1.0",
+  "protocolMinVersion": "1.0.0",
+  "description": "AI-684 control: a one-line handler behind one public and one JWT route, deployed through the same Pulumi program as example-app.",
+  "tier": "official",
+  "targets": ["cloud"],
+  "infraRequirements": {
+    "compute": {
+      "enabled": true,
+      "handlers": [
+        {
+          "name": "hello",
+          "handler": "index.handler",
+          "memoryMb": 128,
+          "timeoutSeconds": 5,
+          "routes": [
+            "GET /hello",
+            {
+              "route": "POST /echo",
+              "auth": "jwt"
+            }
+          ],
+          "auth": "public"
+        }
+      ]
+    }
+  }
+}
