@@ -8,7 +8,7 @@
     "build": "turbo run build",
     "test": "turbo run test",
     "test:integration": "turbo run test:integration",
-    "test:e2e": "turbo run test:e2e",
+    "test:e2e": "STARKEEP_E2E_CLIENTS_PREBUILT=1 turbo run test:e2e",
     "test:aws": "turbo run test:aws",
     "test:aws:custom-domain": "turbo run test:aws:custom-domain",
     "typecheck": "turbo run typecheck",
