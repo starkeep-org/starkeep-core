@@ -36,6 +36,7 @@
  */
 
 import { createOriginGate, type AuthGateOptions } from "./edge.js";
+import { localRequestRefusal } from "./local-guard.js";
 import { createStaticResponder, type StaticResponderOptions } from "./static.js";
 import type { RequestUpstreamHandler } from "./web.js";
 
@@ -172,6 +173,32 @@ export function serveStatic(
     const served = await respond(c.req.raw, path);
     if (served) {
       c.res = served;
+      return;
+    }
+    await next();
+  };
+}
+
+/**
+ * The local surface's request checks as Hono middleware, for an app that
+ * builds its own local server: `app.use("*", localSurfaceGuard())`.
+ *
+ * Refuses a request whose `Host` is not a loopback name, and a request a page
+ * on another site sent, with `403`. Mount it first, ahead of `serveStatic` and
+ * every route, so no route that signs runs for such a request. `serveLocal`
+ * from `@starkeep/app-client/local` mounts it for you; prefer that.
+ *
+ * Local surface only. Behind CloudFront and the gateway the `Host` is the
+ * deployment's, and the cloud's own gates apply instead.
+ */
+export function localSurfaceGuard(): (c: GateContext, next: () => Promise<void>) => Promise<void> {
+  return async (c, next) => {
+    const refused = localRequestRefusal(c.req.raw);
+    if (refused) {
+      c.res = new Response(refused, {
+        status: 403,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
       return;
     }
     await next();

@@ -10,6 +10,7 @@ export default defineConfig({
     "src/lambda.ts",
     "src/web.ts",
     "src/hono.ts",
+    "src/local.ts",
   ],
   format: ["esm", "cjs"],
   dts: true,
