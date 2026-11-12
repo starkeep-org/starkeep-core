@@ -30,6 +30,7 @@ import {
 } from "@starkeep/app-client";
 import { appBasePath, honoOriginGate } from "@starkeep/app-client/hono";
 import { APP_ID } from "@example-app/common";
+import { notesByDay } from "./analysis.js";
 import { echo } from "./echo.js";
 import manifest from "../../../starkeep.manifest.json" with { type: "json" };
 
@@ -100,6 +101,10 @@ app.all("/api/local-data/*", (c) => {
 // `POST /api/echo` to the manifest's `api` handler instead, so this line never
 // runs there. See `echo.ts`.
 app.post("/api/echo", (c) => echo(c.req.raw));
+
+// An analysis read in SQL, over a snapshot of the app's own notes. See
+// `analysis.ts`.
+app.get("/api/notes-by-day", (c) => notesByDay(c.req.raw));
 
 // The cloud address public links live under, for the local surface. A computer
 // signed in to a cloud records it in `~/.starkeep/config.json`, as Drive reads

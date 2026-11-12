@@ -16,6 +16,7 @@ Each heading is one group of operations, with a table of the current state and a
 | Metadata      | The `example` category's metadata table, queried directly, with totals.                                                                      |
 | Labels        | Add, set and retract tags and a bare flag; count files per tag; list every app's declared keys.                                              |
 | Notes         | The app's own `notes` table: write, pin, search and delete.                                                                                  |
+| Analysis      | Notes per day, in SQL the app's server runs over a snapshot of the notes table, with its load time and a Refresh button.                     |
 | Note exports  | The app's own files: save every note as a private JSON file, then list, open and delete the files.                                           |
 | Deleted       | Every example file deleted since an instant, a restore, and the trash retention window.                                                      |
 | Types         | Record counts for every type the app may read.                                                                                               |
@@ -41,6 +42,7 @@ web/                     @example-app/web: the local web and cloud web flavors
   src/server/static-options.ts  the static-file options both entries share
   src/server/api.ts      the cloud entry of the `api` handler: the JWT-gated routes
   src/server/echo.ts     POST /api/echo, the JWT-gated route
+  src/server/analysis.ts GET /api/notes-by-day, SQL over a snapshot of the notes
   src/browser/           the page
   scripts/bundle.mjs     the cloud bundle
 e2e/                     @example-app/e2e: the tier-2 suite

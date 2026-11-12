@@ -573,6 +573,47 @@ async function renderNotes(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Analysis
+// ---------------------------------------------------------------------------
+
+const analysis = section(
+  "Analysis",
+  "Notes per day, in SQL the app's server runs over a snapshot of the notes table. " +
+    "The snapshot lives five minutes, so a note you save appears here after Refresh or once the snapshot expires.",
+);
+const analysisAsOf = named(el("output", {}, "?"), "Analysis as of");
+/** The Refresh floor: a snapshot loaded before it reloads. */
+let analysisFreshAfter = 0;
+analysis.controls.append(
+  button("Refresh analysis", () =>
+    run("Refresh analysis", async () => {
+      analysisFreshAfter = Date.now();
+      await renderAnalysis();
+    }),
+  ),
+  "As of",
+  analysisAsOf,
+);
+
+async function renderAnalysis(): Promise<void> {
+  const { rows, loadedAt } = await api.notesByDay(analysisFreshAfter);
+  analysisAsOf.value = new Date(loadedAt).toLocaleTimeString();
+  analysisAsOf.dataset["loadedAt"] = String(loadedAt);
+  analysis.body.replaceChildren(
+    renderTable<api.NotesByDay>(
+      "Notes per day",
+      [
+        { heading: "Day", cell: (r) => r.day ?? "undated" },
+        { heading: "Notes", cell: (r) => r.notes },
+        { heading: "Pinned", cell: (r) => r.pinned },
+        { heading: "Average length", cell: (r) => r.average_length },
+      ],
+      rows,
+    ),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Note exports
 // ---------------------------------------------------------------------------
 
@@ -791,6 +832,7 @@ async function refreshAll(): Promise<void> {
     renderMetadata(),
     renderLabels(),
     renderNotes(),
+    renderAnalysis(),
     renderExports(),
     renderDeleted(),
     renderTypes(),

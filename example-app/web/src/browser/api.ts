@@ -618,6 +618,33 @@ export async function pinnedCount(): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
+// Analysis: SQL over a snapshot of the app's own table
+// ---------------------------------------------------------------------------
+
+export interface NotesByDay {
+  day: string | null;
+  notes: number;
+  pinned: number;
+  average_length: number | null;
+}
+
+/**
+ * `GET /api/notes-by-day`: notes per day, in SQL the app's server runs over a
+ * cached snapshot (`web/src/server/analysis.ts`). `freshAfter` is the floor a
+ * Refresh sets: a snapshot loaded before it reloads.
+ */
+export async function notesByDay(
+  freshAfter: number,
+): Promise<{ rows: NotesByDay[]; loadedAt: number }> {
+  return expectOk(
+    await call<{ rows: NotesByDay[]; loadedAt: number }>(
+      "GET",
+      `${BASE}api/notes-by-day${q({ freshAfter })}`,
+    ),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Note exports: the app's own files
 // ---------------------------------------------------------------------------
 

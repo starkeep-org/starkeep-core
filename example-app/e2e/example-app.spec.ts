@@ -225,6 +225,25 @@ test("Notes: write, pin and search a note on the open file", async () => {
   await expectLogged("GET", /^\/app-data\/db\/notes\?/, 200);
 });
 
+test("Analysis: SQL over a cached snapshot, as of its load time, until a Refresh", async () => {
+  // The page loaded the analysis before any note existed, and the snapshot
+  // lives five minutes, so the note the previous step saved is not in it yet.
+  const asOf = page.getByLabel("Analysis as of");
+  await expect(table("Notes per day")).toContainText("Nothing yet.");
+  const before = Number(await asOf.getAttribute("data-loaded-at"));
+  expect(before).toBeGreaterThan(0);
+
+  // A Refresh sends a floor of now, and the server reloads the copy.
+  await click("Refresh analysis", "Refresh analysis");
+  await expect(await column("Notes per day", "Notes")).toHaveText(["1"]);
+  await expect(await column("Notes per day", "Pinned")).toHaveText(["0"]);
+  await expect(await column("Notes per day", "Average length")).toHaveText([
+    String("first note".length),
+  ]);
+  expect(Number(await asOf.getAttribute("data-loaded-at"))).toBeGreaterThan(before);
+  await expectLogged("GET", /^\/api\/notes-by-day\?/, 200);
+});
+
 test("Labels: add, set exactly, count and retract tags", async () => {
   await click("Open hello.skexample", "Open");
   await page.getByLabel("Tags", { exact: true }).fill("draft, idea");
