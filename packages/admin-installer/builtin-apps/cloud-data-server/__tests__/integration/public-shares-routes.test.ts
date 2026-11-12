@@ -32,6 +32,7 @@ import {
   createAppNodeWatermarks,
   createSharedSchema,
 } from "../../../../../storage-aurora-dsql/__tests__/pg-shared-schema.js";
+import { dropAllUserSchemas } from "../pglite-reset.js";
 
 const ssmMock = mockClient(SSMClient);
 const stsMock = mockClient(STSClient);
@@ -83,15 +84,18 @@ beforeAll(async () => {
   tokens[B] = await mintTestUserToken({ sub: B });
   process.env.STARKEEP_DEVICE_USER_POOL_CLIENT_ID = DEVICE_CLIENT_ID;
   deviceToken = await mintTestUserToken({ sub: A, aud: DEVICE_CLIENT_ID });
+  // One PGlite per file; each test starts from dropAllUserSchemas + the seed.
+  pg = new PGlite();
+  await pg.waitReady;
 });
 
-afterAll(() => {
+afterAll(async () => {
+  await pg.close();
   setDbFactory(null);
 });
 
 beforeEach(async () => {
-  pg = new PGlite();
-  await pg.waitReady;
+  await dropAllUserSchemas(pg);
   await createSharedSchema(pg);
   await pg.exec(`
     INSERT INTO shared.access_grants (app_id, type_id, access, metadata_write) VALUES
@@ -153,8 +157,7 @@ beforeEach(async () => {
   s3Mock.on(HeadObjectCommand).resolves({ ContentLength: 3 });
 });
 
-afterEach(async () => {
-  await pg.close();
+afterEach(() => {
   expect(takeOverlapRefusals()).toEqual([]);
 });
 

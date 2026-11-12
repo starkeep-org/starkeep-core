@@ -8,8 +8,9 @@ import { configDefaults, defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     environment: "node",
-    // PGlite boots in `beforeAll` in two-users-routes.test.ts, where the 10s
-    // hook default applies rather than testTimeout; CI runners crossed it.
+    // Each integration file boots one PGlite in `beforeAll`, where the 10s hook
+    // default applies rather than testTimeout; CI runners crossed it. Each
+    // `beforeEach` then drops the user schemas and re-runs the seed.
     testTimeout: 30_000,
     hookTimeout: 30_000,
     projects: [
