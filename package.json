@@ -13,7 +13,7 @@
     "test:aws:custom-domain": "turbo run test:aws:custom-domain",
     "typecheck": "turbo run typecheck",
     "lint": "turbo run lint",
-    "format": "prettier --write .",
+    "format": "node scripts/sync-plugin-ref.mjs && prettier --write .",
     "format:check": "prettier --check .",
     "icons": "tsx scripts/icons.ts",
     "check:icons": "tsx scripts/icons.ts --check",

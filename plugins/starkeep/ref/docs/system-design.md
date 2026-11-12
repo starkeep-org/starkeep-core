@@ -1,0 +1,212 @@
+# Starkeep — System Design Overview
+
+This document describes the intended high-level design of Starkeep: what the major parts are, what kinds of data they handle, and how that data moves through the system. It is a companion to `data-roles-and-permissions.md`, which covers the trust boundaries between these same parts. Where this doc says "the app's data operations are mediated by the cloud-data-server," that doc explains _why_ — and what stops the admin user, an app, or the broker itself from stepping outside the lane.
+
+This is intentionally high-level. Wire formats, table layouts, and manifest schemas live in code and in the package READMEs.
+
+---
+
+## Stance
+
+Three properties drive the design.
+
+1. **Data files are the user's, not the app's.** Apps are tenants on top of a user-owned data plane, and each user's data is a library of its own. One deployment serves every account in `starkeep-users`; no user reaches another user's records, rows or bytes, and nothing is shared between users. Shared data items have an identity and a lifetime that is independent of any one app: they outlive uninstalls, can be operated on by multiple apps simultaneously, and are typed against a global registry that the platform — not any one app — owns. (However, apps may also have app-specific data, and Starkeep provides a common mechanism to sync such app-specific data between local and cloud).
+2. **One service touches cloud data; everything else goes through it.** The cloud-data-server is the sole writer/reader of shared bytes in the cloud. Apps in the cloud do not hold direct credentials for the data store; they invoke the broker, which performs the operation under the _calling app's_ identity. This is what makes the per-app attribution property in `data-roles-and-permissions.md` real at the data plane.
+3. **Local and cloud share the data-plane primitives.** The local-data-server is the on-device analog of the cloud-data-server. They are _separate_ hosts — the SDK (`@starkeep/sdk`) drives the local side, while the cloud side is a standalone Lambda handler — but both are built from the same shared building blocks: the type/category registry and object-key scheme (`@starkeep/protocol-primitives`), the sync engine, the app-specific data plane (`@starkeep/shared-space-api`), and the per-type access-grant predicate (`protocol-primitives/access`). Because the grant→category derivation and the `can*` checks are one shared module, a manifest grant that is wrong, or a type-level filter that is missing, fails in the same shape locally as in the cloud. What each host supplies for itself is only what is genuinely host-specific: its store (SQLite vs DSQL), its credential/transport layer, and its all-access policy.
+
+A consequence: the admin app, which the human user drives, never appears on the data path. It mints, installs, and uninstalls — and stops there.
+
+---
+
+## The major parts
+
+### Bootstrap stack
+
+A one-shot CloudFormation stack that creates the identities, permission boundaries, and supporting resources used by the rest of the system (the Cognito user pool with its admin and device app clients, its managed login domain and the `starkeep-admins` and `starkeep-users` groups, the identity pool, the admin role, Manager, install-ddl, install-infra, the Pulumi state bucket, the artifacts bucket, and the permission boundaries: foundational, per-app, the two install-time boundaries, and the User-Data-Owner boundary). It runs once, in the user's AWS account, before anything else exists. It produces no data-plane resources — those come from the cloud-data-server deploy in the next phase. Note: the reserved User-Data-Owner _role_ is **not** created by this stack; it is minted at Starkeep Drive install, under the User-Data-Owner permissions boundary this stack defines.
+
+`data-roles-and-permissions.md` covers what each identity is and why.
+
+### Admin app
+
+A platform component that the human user logs into. Its job is to drive **deployment, install, and uninstall** — not data access. The admin app:
+
+- Deploys the cloud-data-server (the "Phase 2" deploy in the roles doc) by delegating to Manager.
+- Installs and uninstalls apps by orchestrating Manager's chain of role assumptions through install-ddl (for per-app PG roles, schemas, and grants) and install-infra (for per-app Lambdas, log groups, API Gateway routes).
+- Surfaces install state, grant state, and configuration to the user.
+- Creates and manages the deployment's accounts: who administers it (`starkeep-admins`) and who has a library that syncs (`starkeep-users`).
+- Collects the email and password that sign this computer in to sync, and hands them to the local-data-server, which keeps the session. The admin app itself holds no data credential.
+
+Only accounts in `starkeep-admins` can sign in to the admin app. The admin app **cannot read or write user data in the cloud**. It has no standing data-plane permissions, and the temporary install-time policies it triggers are attached to dedicated install-time roles, never to the admin role itself. If a user wants to view their photos, they do that through the photos app, not through admin.
+
+### Cloud-data-server
+
+A platform component, deployed as a built-in app during Phase 2. It is the data broker — the analog of the local-data-server, but for cloud-side data.
+
+- It is the **only service in the cloud that directly touches shared data** (the records table, the per-type metadata tables, the files bucket).
+- It necessarily holds broad type-level capability to do its job, but it does **not** use its own identity for shared-data reads and writes. For every data request it assumes the calling app's per-app role and runs the operation under those credentials, so every shared byte is attributable to a specific app.
+- It enforces type-level filtering at the application layer for the shared records table (since DSQL has no row-level security), in addition to the PG GRANTs that govern per-metadata-table access.
+- It exposes a uniform request shape that covers both **shared-data** operations (records + type metadata + files) and **app-specific syncable** operations on behalf of the calling app.
+- It authenticates the **user** on every data call, as well as the calling app. Three kinds of caller reach it: an app's own server, which signs with the app's secret and forwards the user's token; a signed-in computer, through its local-data-server and a device token; and a mobile app, with a mobile token and a request signature by a key attested to that app. The user named by the token is the user whose library the request reads and writes.
+- It serves the sign-in routes for cloud apps (`/auth/*`). A person signs in on Cognito's managed login page, and the cloud-data-server sets the app's session cookies, so no app code ever receives a password.
+- It serves **public shares**, the one read that names no user. A person creates a public share from an app approved to publish them, naming one of the app's labels or one record. A Photos album is one label, and a Photos link to one photo is one record. Anyone holding the link reads `/public-shares/<linkToken>/items`, and the cloud-data-server answers with signed URLs to the stand-ins of the members, never to an original. A record share also answers `/public-shares/<linkToken>/file/<name>` with a redirect to one signed file, whose type the link pins so that only safe types show in the browser. Starkeep Drive's links use that route: a file's original, or a photo's or a video's stand-in or original as the person chose. See "A public share's visitor" in `data-roles-and-permissions.md`.
+
+### Apps (e.g. photos)
+
+Apps are installed by the admin app on a user's deployment. From the data plane's point of view, an app is:
+
+- A **manifest** declaring its appId, the shared data types it needs (and read vs read/write), any per-type metadata it owns, and any **app-specific syncable** schema and filespace it wants.
+- A **per-app data role**, minted at install. The cloud-data-server assumes it to run the app's data operations. The role has no install-time verbs; its ceiling is exactly its runtime job.
+- A **per-app execution role** for a web app's Lambda(s). It reaches logs and the app's own signing secret, and no S3, no DSQL and no role assumption, so the app's own code cannot touch data except through the cloud-data-server.
+- A **per-app PG role and schema**, created at install with type-level grants matching the manifest.
+- A **shared API Gateway route** that the app's Lambda is reachable on.
+
+An install always creates the app's **data side**: the data role, the PG role and schema, and the grants. On top of it the operator installs the **web app** (the execution role, the bundle and the Lambdas), the **mobile app** (the Android build's identity and its sign-in callback), or both. A phone syncs the app's data without the web app, so phone sync never depends on cloud compute.
+
+Apps do not touch cloud data directly. All shared and app-specific data operations they perform go through the cloud-data-server, which assumes the app's role and runs the operation under that identity. An app reaches the local-data-server the same way it reaches the cloud — over an HTTP data API, gated by the same per-type access-grant predicate — so the two are interchangeable from the app's point of view.
+
+Install grants the app-specific schema, the app's filespace prefix, and the declared shared-type grants. Uninstall reverses install: it drops the per-app PG role and schema (so app-specific DB rows are removed), clears the app's filespace prefix (so app-specific files are removed), and tears down the app's Lambda + routes. Removing only the web app or only the mobile app keeps the data side. **Shared records and shared files are not deleted** by uninstall — they are owned by the user, not the app, and other apps with grants on those types continue to see them.
+
+### Local-data-server
+
+A platform component that runs **outside the cloud**, on the user's machine. It is the local analog of the cloud-data-server: it mediates access to local SQLite and the local filesystem, built from the same shared data-plane primitives the cloud uses (the type/category registry, the sync engine, the app-specific data plane, and the access-grant predicate).
+
+- It holds no AWS credentials and never talks to S3 or DSQL directly.
+- It syncs only after a person signs the computer in, with the email and password of an account in `starkeep-users`. Its library then belongs to that account.
+- It is the sole local writer/reader of the local data plane.
+- It runs the **sync engine**, which replicates the local data plane to and from the cloud-data-server. Because it carries data for _every_ installed app on the device, it ultimately needs broader data-type capability than any single app does — but, mirroring the cloud-data-server's role on the cloud side, it does not expose that breadth to apps; apps talk to it over its local HTTP API and are filtered to their declared grants.
+
+Because local and cloud share the same access-grant predicate and data-plane primitives, a misconfigured grant denies in development the same way it denies in production.
+
+---
+
+## How data is classified
+
+Starkeep recognises two categories of user data, with very different lifetimes, sharing rules, and storage layouts. The distinction is enforced structurally — by where the bytes live and which schema/prefix owns them — not by convention.
+
+Both categories belong to one user. Every object key carries the owning user's segment (`shared/<userId>/...`, `apps/<appId>/<userId>/syncable/...`), the same key on every node and in S3, and every owned cloud table leads its primary key with `user_id`. A node holds one user's library: it writes under the placeholder segment `local` until a cloud binds it to a user, and then renames that segment once (`storage-sqlite/src/library-owner.ts`). In the cloud, every database statement the cloud-data-server issues is scoped to the request's user by one compiler plugin (`storage-aurora-dsql/src/owner-scope.ts`), and every S3 session carries the user as a session tag that IAM scopes objects by. `data-roles-and-permissions.md` ("One deployment, many users") has the trust side.
+
+### Shared data
+
+Shared data is the user's content, typed against a registry that the platform owns. Defining properties:
+
+- **One item per file.** Each shared-data item is stored as a single file under the `shared/<userId>/<category>/...` prefix in object storage. This makes items portable (they map cleanly onto a filesystem) and makes large items cheap (the database does not carry their bytes).
+- **Indexed by `shared.records`.** A single records table holds one row per item — id, type (the canonical `<category>/<format>` id), timestamps, a `version` counter, the content-addressed object-storage key, and common bookkeeping. The `version` is bumped on each write but is **not** an OCC/concurrency token — nothing reads it to gate a write, and conflict resolution is last-writer-wins on the HLC `updated_at` (see "Sync semantics" below). The records table is the index; the file is the content.
+- **Identified by a canonical type, organized by category.** An item's `type` is a canonical two-level `<category>/<format>` Starkeep type id (e.g. `image/jpeg`, `document/markdown`) in Starkeep's own namespace — **not** an IANA MIME type and **not** a file extension. The writing app declares the type; the filename extension and MIME type are advisory only (a convenience for ingestors, such as the local watcher, that have only a filename) and never decide identity. The platform owns a hardcoded registry of types and categories; a type's category is structurally the prefix of its id. Apps cannot invent new types or categories; they declare types from the registry and are granted access at the category level. Unmapped or extension-less files fall into the terminal **`other/other`** type (category `other`) — visible only to Starkeep Drive (the User-Data-Owner), never to an installable app, because `other` is excluded from the set of grantable categories; Drive reaches it via its cross-category shared IAM ceiling. The **`starkeep`** category is Drive-only in the same way and is reserved for the platform's own files. Its one type, `starkeep/settings`, is retired: the library's settings file moved out of the library to the deployment's settings, an SSM parameter the cloud data server serves to every node (`protocol-primitives/src/settings/deployment-settings.ts`). No extension maps to the category, so only the platform assigns it.
+- **Per-category metadata, deterministic.** Each mapped category has an associated metadata table (e.g. for images: width, height, capture time, camera/EXIF, GPS). These tables are caches/indices of properties that are **deterministically derivable from the file itself** — not a place to hang app-specific commentary. Two apps reading the same image see the same width and height. `other` and `starkeep` have no metadata table.
+- **Shareable across apps.** Multiple apps may hold grants on the same categories, and operate on the same items. The type/category system, the records table, and the per-category metadata tables are the contact surface they share through.
+- **Cross-app record labels.** Apps make **attributed assertions** about shared records — including records they did not create. `alpha` says of a photo it never wrote "I have OCR text for this"; `beta`, holding only a read grant on images, finds those photos without asking `alpha` about each one. These live in `shared.record_labels`, one row per `(record, app, key, value)`, carrying a small scalar value.
+
+  **A key is set-valued.** `value` is in the primary key, so one app may assert the same key many times over one record: `photos/faces=Alice` and `photos/faces=Bob` are two rows on one photo, and `?label=photos/faces&labelValue=Alice` finds it by the equality match the reverse index already serves. Packed into a single row as `"Alice,Bob"` the same question needs a substring scan — unindexable, and wrong besides ("Alice" matches "Alicent"). Values per key per record are capped for the same reason keys per app are: an uncapped set is a way to smuggle content past the key cap and poison the reverse index.
+
+  The consequence writers must know is that **a plain write adds rather than replaces**. Setting `faces=Bob` where `faces=Alice` already sits leaves both, so a key an app treats as single-valued is updated through the set-valued write (`POST /data/labels/values`), which upserts the given values and tombstones the rest of that key's in one atomic step. Nothing in the platform can tell a single-valued key from a set-valued one, so the intent travels with the write.
+
+  **There is no NULL value.** A PK column cannot be nullable, and a bare flag is simply the empty string — the state that carries meaning is row-present vs row-absent, and NULL only ever duplicated what absence already said. This also removes a real backend divergence, SQLite sorting NULLs first in an ASC scan where Postgres sorts them last, which the reverse cursor had to normalize.
+
+  The namespace is an **`app_id` column, server-set from the authenticated caller** — never a string the request supplies. There is no way to _express_ another app's namespace, so squatting is unrepresentable rather than rejected. The `<appId>/<key>` form (`alpha/ocr-available`) exists only as wire and UI rendering.
+
+  Attribution being part of the data is what makes **disagreement representable instead of a conflict**: `alpha/quality=high` and `gamma/quality=low` coexist as two rows, and readers decide whom to believe. Labels are advisory — nothing enforces that a reader honors one.
+
+  Writing a label requires only a **`read` grant** on the record's type. Requiring write access would force every labelling app — an OCR service, a classifier — to hold destructive power over records it only ever reads. Keys must be declared in the app's manifest (capped per app), which both bounds the key space and makes an app's published schema discoverable to others via `GET /data/label-keys`. Reads are gated by the record's type alone: any app that can read the type sees every app's labels on it.
+
+  Labels are shared data and ride the Drive channel with records, but in **their own table with their own LWW domain** — a record's whole-row last-writer-wins would otherwise let a concurrent metadata update silently eat a label. LWW is per primary key, so each _value_ of a set-valued key gets its own domain, and a rename is a retraction plus a set: two rows, both carrying HLCs, both shipped. A label write must never touch `records.updated_at`. Retraction is a tombstone, so the retraction itself syncs. Because they are a separate table, a label filter is a join rather than a column predicate on the records query.
+
+  This replaces the older `records.label` column, which was the degenerate case of the same idea: a single key whose author happened to be the origin app, set once rather than over time.
+
+- **Outlives uninstall.** Uninstalling an app does not delete shared records or shared files anywhere — including at the location where the app was uninstalled. The records belong to the user; another app with a grant on that type continues to see them, and reinstalling the app re-exposes them.
+- **Synced across locations.** Shared data is replicated by the local-data-server ↔ cloud-data-server sync. Because shared items are typed at the platform level, sync is inherently cross-app: a photo written by photos on one device shows up on another device even if the only app installed there is something else that declares a grant on images.
+
+#### Sync semantics for shared data
+
+Records are conflict-resolved by last-writer-wins on a Hybrid Logical Clock `updated_at`; there is no `baseVersion`, no OCC, and no change-log outbox. Sync runs within one user's library: a node exchanges only as the user its library is bound to, and the cloud answers from that user's rows alone, so every watermark, digest and coverage rule below holds within one user's slice. Each side maintains a per-channel `{ [nodeId]: HLC }` watermark map — "what I have seen per replica" — and a single `/sync/exchange` round carries both sides' watermarks and the records each believes the other hasn't seen. Both push and pull synthesize record deltas inline by scanning the records table on `updated_at > watermark[nodeId]`. Shared-record sync flows through a single always-on channel owned by the built-in **Starkeep Drive** app (`starkeep-drive`, the User-Data-Owner): the local-data-server ships every shared record over this one channel and the cloud-data-server serves it under `app-starkeep-drive-role`. There is no per-record re-assumption of the originating app's role — origin attribution is preserved as an immutable `origin_app_id` data attribute on the record, set once at local creation. A record's origin app does **not** need to be cloud-installed for its shared data to sync (that is the point of routing shared sync through Drive). Per-app type confinement is enforced **locally before ship** by the local-data-server's `appCanWrite` check (layer 1) and **bounded in the cloud** by Drive's IAM grant on the user's `shared/<userId>/*` (layer 2). See `data-roles-and-permissions.md` for why this routing exists.
+
+A phone syncs on the same Drive channel, but with its app's grants rather than Drive's. The cloud-data-server narrows every read on the exchange to the types the phone's app may read, and refuses a push that holds any type the app may not write. A phone therefore holds the part of the library its app can see, never the whole library.
+
+File bytes do not travel in the exchange round. The round carries rows; each node's uploader drains a persistent queue of files the cloud does not yet hold, beside the round, and a node downloads the files it wants by signed URL. The cloud withholds a URL for a shared file it does not yet hold and reports the file as awaiting upload, so a reader on another device never gets a broken link.
+
+Cross-app labels ride this same Drive channel as a **second stream** — no new channel — and are applied in merged per-node HLC order with records. Two consequences follow, both easy to get subtly wrong because neither corrupts data when broken: the responder's coverage watermark is a **union over both tables**, and the "holdings are a contiguous per-node prefix" property that makes that watermark valid must hold _across_ the two streams rather than within each. A per-app channel drops inbound labels exactly as it drops shared records. A label arriving before its record is expected and harmless — readers reach labels _from_ records, so an orphan is simply invisible until its record lands, and the apply path therefore never checks record existence (only the API write path does).
+
+### App-specific data
+
+App-specific data is the app's own state — captions on a photo, layout preferences, the photos app's tag taxonomy. It does not interoperate across apps. It exists because apps need to keep state that the shared data plane is intentionally not the right home for.
+
+- **Declared by the app, in a namespaced schema and filespace.** A manifest may declare app-specific syncable tables (`app_<appId>.<table>` in the cloud, `<appId>_syncable_<table>` in SQLite) and an app-specific filespace (`apps/<appId>/<userId>/syncable/...`). The shapes of those tables and the layout of files inside that prefix are entirely up to the app.
+- **Structurally segregated from shared data.** App-specific data lives under its own schema/prefix, not in `shared.records` or `shared/...`. No app can write to another app's namespace, and shared-data tables and prefixes are off-limits to app-specific writes.
+- **Synced only between instances of the same app.** Replication is conditional on the app being installed at the destination: an app-specific row written by photos on device A appears on device B only if photos is also installed on B. There is no cross-app fan-out and no orphan replay. A mobile app syncs its own rows on the app's own channel, so Photos captions written on a phone reach the cloud and every computer with Photos installed.
+- **Does not survive uninstall _at that location_.** Uninstalling an app on a device deletes its app-specific schema, tables, and filespace on that device. Other devices that still have the app installed are unaffected — their copy continues to exist and continues to sync among themselves.
+- **No platform-managed scratch space.** The system does not provide a managed non-syncable namespace for apps. The `apps/<appId>/` prefix is reserved for `apps/<appId>/<userId>/syncable/...` and nothing else. Apps that need non-syncable scratch storage handle it themselves; it must stay out of `shared/...` and `apps/<appId>/...` and is not visible to the data plane. By convention such storage lives at `$STARKEEP_DIR/app-local/<appId>/...` — a sibling of the platform's own directories, owned entirely by the app, not enumerated or cleaned up by uninstall. Photos' on-device face-recognition state is the first user of it.
+- **Downloaded assets are a separate tree from local state.** `$STARKEEP_DIR/app-assets/<appId>/...` (resolved by `starkeepAssetsDir()`) holds only artifacts an app fetches and verifies from a remote — model weights being the first case. The distinction from `app-local/` is not where the bytes came from but whether losing them loses anything: everything under `app-assets/` is reproducible by re-running the app's fetch script, while `app-local/` holds derived user data. That is what lets `app-assets/` be the sole exemption from the under-test guard on `starkeepDir()`, so tests can gate on whether large downloads are installed without reading the operator's real state.
+
+#### Sync semantics for app-specific data
+
+App-specific syncable rows are last-write-wins on `updated_at` (an HLC timestamp), with no OCC and no conflict ledger. The row's `updated_at` column **is** the durable change marker — the client-side change-log outbox is not used for app-syncable rows. Both push and pull synthesize transient app-syncable entries inline by scanning the per-app tables on `updated_at > cursor`. App-syncable rows ride alongside record changes on the wire as a separate top-level field in the sync request/response, sharing the same HLC cursors but never mixed into the record change stream.
+
+The cloud's push handler rejects app-syncable rows whose `appId` is not present in the app-syncable namespaces registry — i.e., rows for an app that is not installed in the cloud. Pull is symmetric: app-specific rows for an app not installed at the destination are not delivered there.
+
+### Three places a fact about a record can live
+
+Given something you know about a shared record, there are three homes for it, and the boundaries are easy to confuse:
+
+- **Per-category metadata** lives in a platform-owned per-category table, must be deterministically derivable from the file, and is visible to every app with a grant on a matching category. Image width and height belong here.
+- **A cross-app label** lives in `shared.record_labels`, is an assertion _by a named app_, and is visible to every app that can read the record's type. "This app holds OCR text for this image" belongs here.
+- **App-specific metadata** lives in the app's own schema, is unconstrained in shape, and is invisible to other apps. A photo caption a user typed belongs here, even though it is "about" a shared image.
+
+Two questions separate them:
+
+1. **Is it derivable from the bytes?** If yes, it is per-category metadata, and it is a _fact_: two apps reading the same image see the same width. If no, it is an _assertion_, and whose assertion it is matters — which is why both remaining homes carry attribution and the metadata tables do not.
+
+2. **Who is the audience?** This is the one that decides between a label and app-specific data, and it is not about the content. A caption and an OCR flag are both "an app's claim about a photo"; the difference is that **a caption is the app talking to itself, and a label is the app talking to other apps**. Only the second earns a place in the shared plane — along with the caps and the manifest declaration that come with it, which exist precisely because shared space is not free.
+
+The corollary: putting an app's private state in a label doesn't just waste quota, it publishes it. And putting a genuinely cross-app assertion in app-specific data makes it unreachable by the apps that need it, which is the gap labels were added to close.
+
+### Per-record residency (a derived state, not a column)
+
+Rows that carry a blob exist in one of six residency states on a given side. Two kinds of row carry a blob: shared records (every `kind:"data"` record is blob-backed), and the file-bearing app-syncable rows that live in the reserved `_starkeep_sync_records` table. **These states are derived at read time from facts already on disk, not stored in a status column.** This is non-obvious enough to be worth stating explicitly, because the absence of a `sync_status` column has historically misled both humans and code-reading agents into thinking the state isn't tracked.
+
+The states:
+
+- **Absent** — no row for this id on this side.
+- **Staged** — the metadata row is present and references an `objectStorageKey`, the side **wants** those bytes, and they are not here yet.
+- **Elided** — the row is present and the side has decided it does **not** want these bytes: the file sits above this node's sync-down ceiling, or a record constraint forbids it here. A standing statement about the node, not a queue position.
+- **Evicted** — the side held these bytes and let them go through "Free up space".
+- **Resident** — the metadata row is present AND (the record carries no blob, OR the blob is present in this side's object storage).
+- **Tombstoned** — `deletedAt` is set on the metadata row. Treated identically to Resident by the sync protocol; the tombstone propagates the same way an update does. Blob garbage collection is a separate concern not handled by sync.
+
+The classification (`residencyOf`) is derived from persisted facts (plus `deletedAt`, which decides Tombstoned) and the node's _current_ policy — never from a stored status:
+
+1. Presence of the metadata row in the appropriate records table.
+2. Presence of the blob in this side's object storage (`localObjectStorage.has(key)`).
+3. Whether the resident-set index records that this side once held these bytes.
+4. What the node's residency rule says about the record right now.
+
+Alongside the state it reports the _reason_ the rule gave, because "arriving" and "above this node's ceiling" read differently to a person.
+
+**The residency rule.** A node may go without a file only because a stand-in can replace it. The node's sync-down ceiling governs the stand-ins and the originals a stand-in can replace — parentless, non-stand-in records whose type has published stand-in standards. Every other file, including derived records, documents and app-private files, arrives on every node and stays there. A node pin fetches a file above the ceiling. Nothing removes a file automatically; "Free up space" is the one path, and it removes only what a stand-in can replace, after proving cloud copies. See `~/projects/starkeep/exploration-shared-forms-generator-2026-09-27.md`, "Residency and eviction".
+
+**Staged has two backstops, and which one applies is the whole of the distinction between it and Evicted.** For a blob an in-flight round is bringing, the backstop is the watermark: while the record is Staged this side's watermark does not advance past its `updated_at`, so the gap persists and the next exchange round surfaces the record again — no retry queue, no reconciliation pass, no `sync_status` column, and zero storage HEAD requests in steady state, because there is no gap to drive any.
+
+For a blob a round declined and the node **now wants**, the backstop is the acquisition queue (`resident_files` rows with `wanted = 1`). A catalogue scan finds every such file — a stand-in a raised ceiling now covers, a record someone pinned, bytes that went away locally — and the acquisition pass fetches the queue. The scan starts each full sweep by reconciling the index against the disk. The queue survives an advanced watermark, which the watermark by construction cannot.
+
+Evicted is its own state precisely because neither backstop is a _round_: the bytes left long after the watermark passed, so the peer considers them delivered. The routes back are an explicit fetch and the acquisition pass.
+
+Rows that never carry a blob skip the Staged state entirely — row-present implies Resident. These are the non-file app-syncable rows, which live in the per-app tables rather than in `_starkeep_sync_records`. (Shared records are always blob-backed, so they never fall in this category; whether an app's syncable row carries a blob is determined by which table it lives in, not by a per-record flag.)
+
+### How a request flows
+
+A request from an app's client to read or write a shared item, in steady state, looks like this:
+
+1. The browser calls the **app's own server** on the same origin, carrying the app's session cookie (the user). The app's server signs a request to the cloud-data-server with the app's secret (the calling app) and forwards the user's ID token.
+2. The **cloud-data-server Lambda** verifies the signature and the token, and **assumes the calling app's per-app data role** for the duration of the request, with the user as the session's `starkeep:userId` tag. The data role's trust policy names the cloud-data-server as a principal, so this is a single hop.
+3. Under those assumed credentials, the cloud-data-server constructs DSQL + S3 adapters scoped to the user and runs the operation. The app's grants — declared in its manifest and enforced both by PG GRANTs and by application-layer type filtering on `shared.records` — determine what it can see and change, within that user's library.
+4. Writes update `shared.records`, the relevant per-category metadata table, and the file in `shared/<userId>/<category>/...`. Reads return a record + metadata + file URL/contents tuple.
+
+For an **app-specific** operation the same shape applies, but the operation targets the app's own schema and filespace: `app_<appId>.<table>` and `apps/<appId>/<userId>/syncable/...`. No other app can see the result; sync only carries it to other locations where the same app is installed.
+
+A **public share** reverses the first step. A visitor's browser calls `/public-shares/<linkToken>/items` with no session, and the cloud-data-server finds the share by its token, assumes the creating app's role tagged with the owner, and reads the labelled records and their stand-ins through the owner-scoped adapter. The browser then fetches the stand-ins from CloudFront's `shared/*` behavior with the signed URLs the page carried. A direct link (`/public-shares/<linkToken>/file/<name>`) takes the same steps for one record and answers with a redirect to its signed URL. The owner creates and manages a share from any device. An app's cloud server calls the cloud-data-server's owner routes directly. A local app calls `/data/public-shares` on the local-data-server, which forwards each request to the cloud with the computer's device token, because shares live only in the cloud.
+
+For **sync**, the local-data-server and cloud-data-server perform a single `/sync/exchange` round per channel: each side advertises its per-replica HLC watermarks and ships the records and app-syncable rows it believes the other hasn't seen. A phone runs the same round on the same channels. Both record changes and app-syncable rows are synthesized inline by scanning the respective tables on `updated_at > watermark[nodeId]` — no client-side change-log outbox is involved. Per-record origin-app re-attribution happens inside the cloud-data-server, not at the sync API boundary — the local-data-server does not carry AWS credentials and is not the writer of cloud bytes.
+
+---
+
+## Why this layout, in one paragraph
+
+The user owns the data; the platform owns the type system, the broker, and the install/uninstall mechanism; apps are tenants with declared, narrow access. Shared data is structurally cross-app and outlives any one app, so it lives in a single platform-owned records table and a typed file layout that the cloud-data-server brokers access to. App-specific data is structurally per-app and dies with the app at a location, so it lives in a namespaced schema and filespace that is invisible to other apps and is torn down on uninstall. The cloud-data-server is the only service in the cloud that touches data, and it does so under the calling app's identity rather than its own, for the user the request names, so every byte is attributable and every library stays its owner's. The local-data-server is its on-device twin, built from the same data-plane primitives and the same access-grant predicate, so authorization and typing mistakes surface in the same shape during development as they do in production. The admin app, which the human user drives, never appears on the data path — it deploys, installs, and uninstalls, and stops there.

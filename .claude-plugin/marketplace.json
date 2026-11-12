@@ -1,0 +1,14 @@
+{
+  "name": "starkeep-core",
+  "owner": { "name": "Aaron Koller and Project Contributors" },
+  "metadata": {
+    "description": "Claude Code plugins published from the starkeep-core repository."
+  },
+  "plugins": [
+    {
+      "name": "starkeep",
+      "source": "./plugins/starkeep",
+      "description": "Skills that route an agent authoring a Starkeep app to the platform's rules in the authoring guide and system design."
+    }
+  ]
+}
