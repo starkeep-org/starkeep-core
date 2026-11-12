@@ -6,7 +6,8 @@
  * particular real application. It is deliberately the *smallest* app that
  * touches every surface the platform offers: a served shell, a sign-in flow, a
  * signing proxy, a shared-record write path, a declared label vocabulary, an
- * app-private table, and a JWT-gated compute route.
+ * app-private table, an analysis read over a snapshot of that table, and a
+ * JWT-gated compute route.
  *
  * It is also the platform's worked example of the shape every Starkeep app
  * takes. The server half is a Hono app; `serve.ts` runs it under
@@ -34,6 +35,11 @@ import { Hono } from "hono";
 import { createSessionRoutes, createSignInPage } from "@starkeep/app-client/auth";
 import { createDataProxyHandler, sessionAuth } from "@starkeep/app-client";
 import { appBasePath, honoOriginGate } from "@starkeep/app-client/hono";
+import {
+  createSnapshotSql,
+  SnapshotAccessError,
+  SnapshotLoadError,
+} from "@starkeep/app-client/snapshot";
 import manifest from "../starkeep.manifest.json" with { type: "json" };
 import { ASSET_NAME, STATIC_NAME } from "./assets.js";
 
@@ -58,6 +64,18 @@ const sessionRoutes = createSessionRoutes({ appId: APP_ID });
 // browser, the data and the person are all on one machine, which is the
 // local-first guarantee the platform makes.
 const proxy = createDataProxyHandler({ appId: APP_ID, endUserAuth: sessionAuth() });
+
+// Analysis reads in SQL, over a cached copy of the app's own rows. The copy
+// lives five minutes; a `freshAfter` from the browser reloads an older one, on
+// whichever instance answers.
+const snapshots = createSnapshotSql({
+  appId: APP_ID,
+  tables: manifest.infraRequirements.appSpecificSyncable.tables,
+});
+const NOTES_SUMMARY_SQL = `
+  SELECT count(*) AS notes, coalesce(sum(length(note)), 0) AS characters
+  FROM probe_notes`;
+const SNAPSHOT_MAX_AGE_MS = 5 * 60_000;
 
 function html(body: string, status = 200): Response {
   return new Response(body, {
@@ -122,6 +140,28 @@ app.all("/api/session/*", (c) => {
 app.all("/api/local-data/*", (c) => {
   const segments = c.req.path.slice("/api/local-data/".length).split("/").filter(Boolean);
   return proxy(c.req.raw, { params: Promise.resolve({ path: segments }) });
+});
+
+// An analysis read: the platform's snapshot helper runs the SQL, and the answer
+// carries the snapshot's load time for an "as of" label.
+app.get("/api/notes-summary", async (c) => {
+  const floor = Number(c.req.query("freshAfter") ?? "");
+  try {
+    const result = await snapshots.query(c.req.raw, {
+      tables: ["probe_notes"],
+      sql: NOTES_SUMMARY_SQL,
+      maxAge: SNAPSHOT_MAX_AGE_MS,
+      freshAfter: Number.isFinite(floor) ? floor : undefined,
+    });
+    const res = json({ summary: result.rows[0], loadedAt: result.loadedAt });
+    if (result.setCookie) res.headers.append("Set-Cookie", result.setCookie);
+    return res;
+  } catch (err) {
+    if (err instanceof SnapshotAccessError || err instanceof SnapshotLoadError) {
+      return json({ error: err.message }, err.status);
+    }
+    throw err;
+  }
 });
 
 // Local-surface upload relay: the server-side signed write path. See

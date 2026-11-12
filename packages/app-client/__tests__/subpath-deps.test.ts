@@ -148,6 +148,47 @@ describe("the lambda and web subpaths carry no runtime dependencies", () => {
   });
 });
 
+describe("node:sqlite stays in the snapshot subpath", () => {
+  // Edge bundles and browser bundles import the main entry and its siblings,
+  // and neither can resolve `node:sqlite`. Node 22 also prints an experimental
+  // warning on the import, which no app that never queries a snapshot should
+  // see.
+  const ENTRIES = [
+    "index.ts",
+    "load-env-auto.ts",
+    "auth/index.ts",
+    "auth/cookies.ts",
+    "edge.ts",
+    "lambda.ts",
+    "web.ts",
+    "hono.ts",
+    "local.ts",
+  ];
+
+  it.each(ENTRIES)("src/%s never reaches node:sqlite", (entry) => {
+    const { external } = sourceGraph(resolve(PKG_DIR, "src", entry));
+    expect(external).not.toContain("node:sqlite");
+  });
+
+  it("src/snapshot.ts does", () => {
+    const { external } = sourceGraph(resolve(PKG_DIR, "src", "snapshot.ts"));
+    expect(external).toContain("node:sqlite");
+  });
+
+  it("ships the snapshot subpath with the node: prefix intact", () => {
+    // tsup strips `node:` by default. A bare `sqlite` names an npm package, not
+    // the builtin, so a stripped import fails the moment an app loads the
+    // subpath — and every source-level test still passes.
+    for (const built of ["dist/snapshot.js", "dist/snapshot.cjs"]) {
+      const file = resolve(PKG_DIR, built);
+      if (!existsSync(file)) continue; // `pnpm build` has not run in this tree.
+      const specs = importsOf(file);
+      expect(specs, built).toContain("node:sqlite");
+      expect(specs, built).not.toContain("sqlite");
+    }
+  });
+});
+
 /** Drop block and line comments, leaving string contents alone. */
 function stripComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
