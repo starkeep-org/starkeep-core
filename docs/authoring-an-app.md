@@ -1244,6 +1244,144 @@ The checklist before a cloud install:
    Do this by hand once; the platform's tier-3 e2e asserts it too, and that
    assertion is the last line of defense for every app.
 
+An MCP client is a caller with no cookie; §11 covers it.
+
+## 11. Exposing an MCP server from your app
+
+An app can answer the Model Context Protocol, so that Claude Code or a
+claude.ai connector calls the app's tools against the person's data. An MCP
+client is not a browser: it sends no session cookie, it cannot sign in on the
+managed login page, and it keeps calling long after anyone last opened your
+app. Each of the platform facts below decides part of how the server must be
+built.
+
+### The route
+
+1. **Serve `POST /mcp` from your app's server, and list `/mcp` in the
+   handler's `publicPaths`.** The client sends no cookie, so a gated route
+   refuses it. Under a `session` handler each `publicPaths` entry becomes its
+   own unauthenticated `ANY /mcp` route (`resolveHandlerRoutes`,
+   `packages/admin-manifest/src/routes.ts`), and that route appears in the
+   installer's anonymous-route report (`anonymousRoutes`, same file; §10).
+2. **Answer every method other than `POST` with `405`.** The route is `ANY`,
+   so `GET`, `DELETE` and the rest reach your handler too.
+3. **Nothing in front of your server stops the request, and nothing checks
+   it.** The origin gate passes any path in `publicPaths` (`createOriginGate`,
+   `packages/app-client/src/edge.ts`). CloudFront's `signed-out-redirect`
+   leaves alone any request whose `Sec-Fetch-Dest` is not `document`, and an
+   MCP client sends none (§8). From here on, the least-authenticated caller
+   of `/mcp` is the anonymous internet, and the only check is the one your
+   handler makes.
+
+### Identity
+
+The data proxy from §4 cannot carry an MCP call unchanged:
+
+- The cloud data server refuses a request with no
+  `X-Starkeep-User-Token` header with `401 Missing X-Starkeep-User-Token`
+  (`packages/admin-installer/builtin-apps/cloud-data-server/src/api-handler.ts`).
+  There is no route carve-out and no manifest opt-out.
+- It accepts only a Cognito ID token whose `aud` is the cloud-apps client
+  (`verifyUserToken`,
+  `packages/admin-installer/builtin-apps/cloud-data-server/src/verify-user-token.ts`).
+- `createDataProxyHandler` mints that token only from the person's
+  `sk_session` cookie (`mintIdToken`, called from
+  `packages/app-client/src/data-proxy.ts`). An MCP call has no cookie, so the
+  proxy forwards no token and the data server answers `401`.
+
+So the app issues its own credential for the MCP client and keeps the person's
+Cognito credential to itself:
+
+1. **A signed-in screen in your app mints the bearer.** The page is behind
+   the session (§8), so the server knows who the person is. Generate an
+   opaque, random bearer token, show it once, and store only a hash of it.
+2. **Keep, server-side and encrypted, what you need to obtain ID tokens
+   later.** That is the person's refresh token, which the signed-in request
+   carries in `sk_session`. Store it against the bearer's hash, encrypted with
+   a key only your server half holds. Never hand it to the MCP client: the
+   bearer is yours to verify and to revoke, and the refresh token is neither.
+3. **On each `/mcp` call, verify the bearer first.** Read
+   `Authorization: Bearer <token>`, hash it, and look it up. A missing, unknown
+   or revoked bearer gets `401` before anything else runs. The rule from §4
+   applies: a request that fails the end-user check must never cause the
+   app's HMAC secret to be loaded.
+4. **Mint an ID token, then sign the call yourself.** Decrypt the stored
+   refresh token and call `refreshTokens(cfg, refreshToken)` from
+   `@starkeep/app-client/auth` (`packages/app-client/src/auth/cognito.ts`),
+   with `cfg` from `poolConfig()`, which the same entry point exports. Pass
+   the returned `idToken` as `userToken` to
+   `proxyToDataServer(creds, { method, path, headers, body, userToken })` from
+   `@starkeep/app-client` (`packages/app-client/src/proxy.ts`), with `creds`
+   from `loadAppCredentials(appId)`. This is the same signature and token the
+   §4 proxy sends; only the source of the token differs.
+
+Read the bearer as what it is in the reachability pass
+(`docs/reachability-review-requirement.md`): it is a credential the anonymous
+internet can present, it reaches your HMAC credential and one person's data,
+and it lasts until you revoke it or the stored refresh token expires.
+Whoever holds it acts as that person through your app's grants. Let the person
+see and revoke the bearers they have minted.
+
+### Limits
+
+Two limits are platform gaps, and changes to both are tracked separately:
+
+- **A headless identity lasts 30 days.** Cloud-apps refresh tokens are valid
+  for 30 days (`CLOUD_APPS_LIFETIMES`,
+  `packages/admin-installer/src/app-sign-in-clients.ts`; the cookie that holds
+  one matches it, `SESSION_MAX_AGE_S` in
+  `packages/app-client/src/auth/cookies.ts`). When the stored refresh token
+  expires, `refreshTokens` fails and the bearer stops working. The person must
+  sign in and mint a new one about once a month. Answer that failure with a
+  `401` whose message says so.
+- **Your app cannot revoke the refresh token at Cognito.**
+  `@starkeep/app-client/auth` exports no `revokeToken`
+  (`packages/app-client/src/auth/index.ts`). Revoking a bearer means deleting
+  its stored refresh token; the token itself stays valid at Cognito until it
+  expires.
+
+### Transport
+
+Use the stateless form of Streamable HTTP: `POST` only, a JSON response, no
+SSE stream and no server-held session.
+
+- API Gateway ends any request that runs longer than 30 seconds (§7, "Limits
+  on what your Lambda can return"), so a stream cannot stay open.
+- The web adapter reads the whole upstream response and returns it as one
+  complete body (`packages/app-client/src/web.ts`), so nothing your handler
+  writes reaches the client before the handler finishes.
+- Lambda instances are not sticky. Two calls from one client can land on two
+  instances, so an `Mcp-Session-Id` held in memory on one instance is unknown
+  to the next. Keep every call self-contained.
+
+### Local recipe
+
+```sh
+claude mcp add <name> --transport http http://localhost:<port>/mcp --header "Authorization: Bearer <token>"
+```
+
+Locally there is no session (§8), the signing proxy exempts local callers
+(`allowAnonymousLocal`, `packages/app-client/src/data-proxy.ts`), and the
+local data server asks for no end user (the `userToken` comment in
+`packages/app-client/src/proxy.ts`). Call `proxyToDataServer` without a
+`userToken` there. That makes the bearer check the only check on the local
+surface, and it must still run: any process on the machine can reach
+`localhost:<port>`. Mint the bearer on the local surface from your app's own
+screen, which needs no sign-in there.
+
+The §4 local checks still apply and still pass: `localhost` is a loopback
+`Host`, and a non-browser client sends no `Sec-Fetch-Site`, so the cross-site
+rule lets it through.
+
+### Cloud recipe
+
+Add a claude.ai custom connector at
+`https://<cloud host>/apps/<appId>/mcp`, with a static `Authorization` header
+carrying `Bearer <token>`. The `/apps/<appId>` prefix is the mount the
+installer gives your app, which your server reads from `appBasePath()`
+(`packages/app-client/src/hono.ts`). Your routes stay app-relative, because
+`honoUpstream` strips the mount, so the route itself is still `/mcp`.
+
 ---
 
 ## Installing it
