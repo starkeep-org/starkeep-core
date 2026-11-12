@@ -51,6 +51,11 @@
       "types": "./dist/local.d.ts",
       "import": "./dist/local.js",
       "require": "./dist/local.cjs"
+    },
+    "./snapshot": {
+      "types": "./dist/snapshot.d.ts",
+      "import": "./dist/snapshot.js",
+      "require": "./dist/snapshot.cjs"
     }
   },
   "files": [

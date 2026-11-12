@@ -11,12 +11,18 @@ export default defineConfig({
     "src/web.ts",
     "src/hono.ts",
     "src/local.ts",
+    "src/snapshot.ts",
   ],
   format: ["esm", "cjs"],
   dts: true,
   clean: true,
   sourcemap: true,
   platform: "node",
+  // Keep the `node:` prefix. tsup strips it by default, and `node:sqlite`, which
+  // the snapshot subpath imports, resolves only with the prefix: a bare
+  // `sqlite` is an npm package name, not a builtin. Every Node this package
+  // supports resolves the prefixed form of every builtin.
+  removeNodeProtocol: false,
   // Chunk splitting stays on, which is tsup's default for ESM and what every
   // published version has shipped.
   //
