@@ -33,7 +33,10 @@
       // something compiled on demand, so the tier-2 stack needs `dist/` present
       // before it boots the servers that serve them.
       "dependsOn": ["^build", "admin-web#build", "@starkeep/drive#build"],
-      "cache": false
+      "cache": false,
+      // Set by the root `test:e2e` script: tells the e2e harness that the
+      // builds above already produced `dist/`, so it skips its own `vite build`.
+      "passThroughEnv": ["STARKEEP_E2E_CLIENTS_PREBUILT"]
     },
     "admin-web#build": {
       "dependsOn": ["^build"],

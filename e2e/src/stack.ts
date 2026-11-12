@@ -19,6 +19,7 @@
  */
 
 import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -143,12 +144,38 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
 }
 
 /**
- * Run `vite build` for an app whose server serves its browser half from
- * `dist/`. Nothing else rebuilds that output before a run, so without this a
- * suite tests whichever client was last built rather than the checkout's
- * source.
+ * Make sure an app whose server serves its browser half from `dist/` serves
+ * this checkout's source rather than whichever client was last built.
+ *
+ * The harness runs `vite build` for each unless the caller sets
+ * `STARKEEP_E2E_CLIENTS_PREBUILT=1`, which says that something upstream has
+ * already built `dist/` from this checkout. The root `test:e2e` script sets it,
+ * because that Turbo task's `dependsOn` names `admin-web#build` and
+ * `@starkeep/drive#build`, so a second build there is pure cost; `turbo.json`
+ * passes the variable through to the task. With the variable set a missing
+ * `dist/index.html` is an error rather than something to paper over. It is an
+ * explicit opt-in rather than "running under Turbo" (`TURBO_HASH`), because
+ * Turbo sets that in every task: a future task that boots the stack without
+ * depending on those builds would otherwise serve a stale `dist/` silently.
+ * Everything else (`playwright test` in `e2e/`, `pnpm --filter @starkeep/e2e
+ * test:e2e`, app repos consuming `@starkeep/e2e`) leaves it unset and builds.
  */
+const CLIENTS_PREBUILT = "STARKEEP_E2E_CLIENTS_PREBUILT";
+
 async function buildClient(appDir: string): Promise<void> {
+  if (process.env[CLIENTS_PREBUILT] === "1") {
+    if (!existsSync(join(appDir, "dist/index.html"))) {
+      throw new Error(
+        `${appDir}/dist/index.html is missing. ${CLIENTS_PREBUILT}=1 says the ` +
+          "client was built before the harness started, so it does not run vite " +
+          "build itself. Run `pnpm build`, run the suite with `pnpm test:e2e` so " +
+          "Turbo builds it first, or unset the variable to build here.",
+      );
+    }
+    console.log(`client build: skipped, ${CLIENTS_PREBUILT}=1, serving ${appDir}/dist`);
+    return;
+  }
+  console.log(`client build: vite build in ${appDir}`);
   try {
     await execFileAsync(join(appDir, "node_modules/.bin/vite"), ["build"], { cwd: appDir });
   } catch (err) {
@@ -227,7 +254,8 @@ export async function startPlatformStack(options: PlatformStackOptions): Promise
     // admin-web is the first app off the framework: its server is a plain Node
     // process serving a built client, so the harness starts what an operator
     // starts rather than a dev server. `tsx` runs the TypeScript entry directly,
-    // the way `apps/local-data-server` is run. The client is rebuilt first so
+    // the way `apps/local-data-server` is run. The client is built first (or,
+    // under Turbo, checked to have been built by `test:e2e`'s `dependsOn`) so
     // the run serves this checkout's source rather than a stale `dist/`.
     const adminDir = join(REPO_ROOT, "apps/admin-web");
     await buildClient(adminDir);
@@ -249,7 +277,8 @@ export async function startPlatformStack(options: PlatformStackOptions): Promise
     if (options.drive !== false) {
       const driveDir = join(REPO_ROOT, "apps/drive");
       // Drive's server builds only a *missing* `dist/`, so a stale one needs
-      // the same rebuild.
+      // the same treatment; under Turbo the `dist/index.html` check also keeps
+      // that silent self-build from ever standing in for Turbo's build.
       await buildClient(driveDir);
       drive = await startWebServer({
         appDir: driveDir,
