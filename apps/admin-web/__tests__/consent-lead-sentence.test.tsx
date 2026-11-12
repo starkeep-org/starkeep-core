@@ -12,15 +12,13 @@ import type { LocalAppEntry } from "../src/lib/app-types";
 
 vi.mock("@/lib/operator-session", () => ({ operatorSessionIfSignedIn: async () => null }));
 
-function stubFetch(appId: string) {
+/** Every request fails, as with no daemon running; the dialog still opens. */
+function stubFetch() {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       const key = `${init?.method ?? "GET"} ${url}`;
-      if (key === `GET /api/apps/${appId}/dependencies`) {
-        return Response.json({ kind: "skip", reason: "none" });
-      }
       throw new TypeError(`fetch failed: ${key}`);
     }),
   );
@@ -46,7 +44,7 @@ function entry(
 }
 
 async function openConsent(app: LocalAppEntry) {
-  stubFetch(app.appId);
+  stubFetch();
   const user = userEvent.setup();
   render(<LocalAppsSection apps={[app]} refresh={async () => undefined} localOnline={true} />);
   await user.click(screen.getByRole("button", { name: `Install ${app.manifest.name}` }));

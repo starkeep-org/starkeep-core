@@ -58,7 +58,10 @@ export function localPort(
   const raw = at >= 0 ? argv[at + 1] : env.PORT;
   const port = Number(raw);
   if (raw === undefined || !Number.isInteger(port) || port <= 0 || port > 65535) {
-    throw new Error("A local app server needs a port: --port <n>. admin-web passes one.");
+    throw new Error(
+      'A local app server needs a port: --port <n>. Set "localRun.portFlag" to "--port" in the ' +
+        "app's manifest, and admin-web passes one.",
+    );
   }
   return port;
 }
