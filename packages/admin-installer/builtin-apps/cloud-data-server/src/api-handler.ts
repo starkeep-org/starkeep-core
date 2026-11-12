@@ -142,6 +142,7 @@ import {
   pageBacklog,
   BACKLOG_KINDS,
   FILE_RECORDS_TABLE,
+  refuseMisplacedConditions,
   rowWriteResponse,
   type ArchiveTrigger,
   type BacklogKind,
@@ -5430,6 +5431,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
                 ? Buffer.from(event.body, "base64").toString("utf8")
                 : (event.body ?? "{}");
             const body = JSON.parse(raw) as { row?: Record<string, unknown>; ifAbsent?: boolean };
+            refuseMisplacedConditions("POST", body);
             if (!body.row) return clientErr("row is required", 400);
             const result = await view.insertRow(table, body.row, { ifAbsent: body.ifAbsent });
             const answer = rowWriteResponse("POST", result);
@@ -5445,6 +5447,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
               patch?: Record<string, unknown>;
               ifUpdatedAt?: string;
             };
+            refuseMisplacedConditions("PATCH", body);
             if (!body.where || !body.patch) {
               return clientErr("where and patch are required", 400);
             }
@@ -5463,6 +5466,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
               where?: Record<string, unknown>;
               ifUpdatedAt?: string;
             };
+            refuseMisplacedConditions("DELETE", body);
             if (!body.where) return clientErr("where is required", 400);
             const result = await view.deleteRow(table, body.where, {
               ifUpdatedAt: body.ifUpdatedAt,

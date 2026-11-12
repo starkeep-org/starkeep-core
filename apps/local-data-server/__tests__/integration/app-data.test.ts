@@ -131,6 +131,23 @@ describe("declared-table CRUD", () => {
     expect(stale.status).toBe(409);
     expect(stale.body).toMatchObject({ changes: 0, skipped: "stale" });
 
+    // A condition the route does not take is refused, not dropped: an
+    // unguarded upsert here would overwrite "a".
+    const misplaced = await send("POST", {
+      row: { note_id: "s1", body: "overwrite" },
+      ifUpdatedAt: stamp,
+    });
+    expect(misplaced.status).toBe(400);
+    expect(misplaced.body["error"]).toMatch(/POST does not take ifUpdatedAt/);
+    expect(
+      (await send("PATCH", { where: { note_id: "s1" }, patch: { body: "c" }, ifAbsent: true }))
+        .status,
+    ).toBe(400);
+    const kept = await appA.fetch(
+      `/app-data/db/notes?select=body&where=${encodeURIComponent(JSON.stringify({ note_id: "s1" }))}`,
+    );
+    expect(((await kept.json()) as { rows: Array<{ body: string }> }).rows[0]!.body).toBe("a");
+
     // Deleted: a reseed stays out, a patch 404s, and a second delete succeeds.
     expect(await send("DELETE", { where: { note_id: "s1" } })).toEqual({
       status: 200,

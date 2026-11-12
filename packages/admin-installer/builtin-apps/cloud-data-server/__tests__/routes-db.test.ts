@@ -2044,6 +2044,39 @@ describe("/app-data routes", () => {
     expect(bodyOf(res)["error"]).toMatch(/ifUpdatedAt/);
   });
 
+  it("400s a condition the route does not take, and writes nothing", async () => {
+    // Dropping the condition would run the write unguarded: an ifUpdatedAt on
+    // a POST would upsert over any change since the read.
+    const writes = [
+      {
+        method: "POST" as const,
+        body: { row: { id: "n1", text: "new" }, ifUpdatedAt: "1:0:n" },
+        refused: /POST does not take ifUpdatedAt/,
+      },
+      {
+        method: "PATCH" as const,
+        body: { where: { id: "n1" }, patch: { text: "new" }, ifAbsent: true },
+        refused: /PATCH does not take ifAbsent/,
+      },
+      {
+        method: "DELETE" as const,
+        body: { where: { id: "n1" }, ifAbsent: true },
+        refused: /DELETE does not take ifAbsent/,
+      },
+    ];
+    for (const { method, body, refused } of writes) {
+      const db = unchangedWrites([]);
+      setDbFactory(db);
+      const res = await handler(
+        signedEvent({ appId: "appdata1", method, subPath: "/app-data/db/notes", body }),
+        context,
+      );
+      expect(res.statusCode, method).toBe(400);
+      expect(String(bodyOf(res)["error"]), method).toMatch(refused);
+      expect(db.calls(/^(update|insert into) "app_appdata1"\."notes"/), method).toHaveLength(0);
+    }
+  });
+
   it("answers a delete of a deleted row with 200, and of a missing row with 404", async () => {
     const del = {
       appId: "appdata1",

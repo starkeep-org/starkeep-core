@@ -15,7 +15,11 @@ import type {
   AppSyncableWriteConditions,
   ChangeEvent,
 } from "@starkeep/sync-engine";
-import { createAppSpecificFactory, rowWriteResponse } from "../src/index.js";
+import {
+  createAppSpecificFactory,
+  refuseMisplacedConditions,
+  rowWriteResponse,
+} from "../src/index.js";
 import type { AppSpecificOperations } from "../src/types.js";
 
 const namespace: AppSyncableNamespace = {
@@ -140,5 +144,46 @@ describe("rowWriteResponse", () => {
       status: 200,
       body: { changes: 0, skipped: "deleted" },
     });
+  });
+});
+
+describe("refuseMisplacedConditions", () => {
+  const stamp = "18f0a1b2c3d:0:node-a";
+
+  it.each([
+    [
+      "POST",
+      { row: {}, ifUpdatedAt: stamp },
+      "POST does not take ifUpdatedAt. It takes ifAbsent only.",
+    ],
+    [
+      "PATCH",
+      { where: {}, patch: {}, ifAbsent: true },
+      "PATCH does not take ifAbsent. It takes ifUpdatedAt only.",
+    ],
+    [
+      "DELETE",
+      { where: {}, ifAbsent: false },
+      "DELETE does not take ifAbsent. It takes ifUpdatedAt only.",
+    ],
+  ] as const)("refuses a %s that names the other route's condition", (method, body, message) => {
+    expect(() => refuseMisplacedConditions(method, body)).toThrow(message);
+  });
+
+  it("refuses a misplaced condition sent as null", () => {
+    expect(() => refuseMisplacedConditions("POST", { row: {}, ifUpdatedAt: null })).toThrow(
+      /ifUpdatedAt/,
+    );
+  });
+
+  it("passes each route's own condition, and a body with none", () => {
+    expect(() => refuseMisplacedConditions("POST", { row: {}, ifAbsent: true })).not.toThrow();
+    expect(() =>
+      refuseMisplacedConditions("PATCH", { where: {}, patch: {}, ifUpdatedAt: stamp }),
+    ).not.toThrow();
+    expect(() =>
+      refuseMisplacedConditions("DELETE", { where: {}, ifUpdatedAt: stamp }),
+    ).not.toThrow();
+    expect(() => refuseMisplacedConditions("DELETE", { where: {} })).not.toThrow();
   });
 });

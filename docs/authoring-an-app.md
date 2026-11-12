@@ -605,6 +605,10 @@ Each route reports what the write did:
 | `PATCH` or `DELETE` with `ifUpdatedAt` | 409 `{"changes": 0, "skipped": "stale"}`               | The row changed since the read (see "Guard a read-modify-write" below).              |
 | Any of the three                       | 409 `{"changes": 0, "skipped": "superseded"}`          | The row carries a newer stamp than the write, so the write lost and changed nothing. |
 
+Each route takes only its own condition: `POST` takes `ifAbsent`, and `PATCH`
+and `DELETE` take `ifUpdatedAt`. A route answers 400 for the other condition and
+writes nothing, so a guard never silently goes missing.
+
 An MCP tool or an API built on these routes can pass the 404 straight through
 as "not found". No read beforehand is needed, and a read beforehand would race
 the write anyway. The route answers other 404s too, such as for an app that

@@ -152,11 +152,12 @@ export interface AppSyncableWriteConditions {
  * Why a write changed nothing.
  *
  * - `live`: a live row holds the key (an `ifAbsent` insert).
- * - `deleted`: only a deleted row holds the key.
+ * - `deleted`: only a deleted row holds the key, and the write does not revive
+ *   deleted rows: an `ifAbsent` insert, an update or a delete.
  * - `missing`: no row, live or deleted, holds the key.
  * - `stale`: the live row's `updated_at` differs from `ifUpdatedAt`.
- * - `superseded`: the live row carries a stamp at or above the write's own, so
- *   last-writer-wins refused the write.
+ * - `superseded`: the row, live or deleted, carries a stamp at or above the
+ *   write's own, so last-writer-wins refused the write.
  */
 export type AppSyncableSkipReason = "live" | "deleted" | "missing" | "stale" | "superseded";
 
