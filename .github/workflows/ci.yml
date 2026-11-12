@@ -13,10 +13,11 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Tier 1: format, lint, typecheck and unit tests. The required check on main.
-  # Integration tests run in their own job below.
+  # Tier 1 is two jobs that run side by side: this one (format, lint,
+  # typecheck) and tier-1-unit (unit tests). Branch protection requires both.
+  # Integration tests run in their own jobs below.
   tier-1:
-    name: Tier 1 (format, lint, typecheck, unit)
+    name: Tier 1 (format, lint, typecheck)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -54,17 +55,12 @@ jobs:
       - run: pnpm format:check
       - run: pnpm check:icons
       - run: pnpm turbo run lint typecheck
-      # Every package's vitest pool at once oversubscribes the runner's four
-      # cores until a worker misses its RPC deadline ("Timeout calling
-      # onTaskUpdate") with every test passing. Two suites at a time does not.
-      - run: pnpm turbo run test --concurrency=2
 
-  # Integration: suites under each package's `__tests__/integration/`, which boot
-  # a process, a socket or a database engine (the local data server as a child
-  # process, the fake cloud on loopback, PGlite). Advisory; branch protection
-  # requires tier 1 only.
-  integration:
-    name: Integration
+  # Tier 1's unit tests, every package's `test` task. Split from tier-1 so they
+  # run alongside lint and typecheck instead of after them. Branch protection
+  # requires both Tier 1 jobs.
+  tier-1-unit:
+    name: Tier 1 (unit)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -83,7 +79,65 @@ jobs:
             turbo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml', 'turbo.json') }}-
             turbo-${{ runner.os }}-${{ github.job }}-
       - run: pnpm install --frozen-lockfile
-      - run: pnpm turbo run test:integration --concurrency=2
+      # Every package's vitest pool at once oversubscribes the runner's four
+      # cores until a worker misses its RPC deadline ("Timeout calling
+      # onTaskUpdate") with every test passing. Two suites at a time does not.
+      - run: pnpm turbo run test --concurrency=2
+
+  # Integration: suites under each package's `__tests__/integration/`, which boot
+  # a process, a socket or a database engine (the local data server as a child
+  # process, the fake cloud on loopback, PGlite). Split in two jobs that run
+  # side by side. Advisory; branch protection requires the two Tier 1 jobs only.
+  #
+  # This job: the PGlite-backed suites, the slowest ones. The same three
+  # packages are excluded by name in integration-processes below, so every
+  # `test:integration` task runs in exactly one of the two jobs.
+  integration-pglite:
+    name: Integration (PGlite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      # Turbo's cache, per job; see tier-1.
+      - uses: actions/cache@v4
+        with:
+          path: .turbo/cache
+          key: turbo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml', 'turbo.json') }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml', 'turbo.json') }}-
+            turbo-${{ runner.os }}-${{ github.job }}-
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm turbo run test:integration --concurrency=2 --filter=@starkeep/builtin-cloud-data-server --filter=@starkeep/storage-aurora-dsql --filter=@starkeep/admin-installer
+
+  # Every other package's integration suite: the local data server as a child
+  # process, the fake cloud on loopback. The filters negate integration-pglite's
+  # three packages, so a package that gains `test:integration` later runs here.
+  integration-processes:
+    name: Integration (processes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      # Turbo's cache, per job; see tier-1.
+      - uses: actions/cache@v4
+        with:
+          path: .turbo/cache
+          key: turbo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml', 'turbo.json') }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml', 'turbo.json') }}-
+            turbo-${{ runner.os }}-${{ github.job }}-
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm turbo run test:integration --concurrency=2 --filter='!@starkeep/builtin-cloud-data-server' --filter='!@starkeep/storage-aurora-dsql' --filter='!@starkeep/admin-installer'
 
   # Tier 2: the local platform end to end, through Playwright. Advisory until
   # it has run two weeks without a flake; branch protection does not require it.
@@ -232,7 +286,7 @@ jobs:
   # the plugin loads with one skill per `skills/*/` directory, and it installs
   # from the marketplace. None of it needs the workspace, so there is no pnpm
   # and no `pnpm install`; the Claude Code CLI runs without a login or API key.
-  # Advisory; branch protection requires tier 1 only.
+  # Advisory; branch protection requires the two Tier 1 jobs only.
   plugin:
     name: Plugin (validate, links, load)
     runs-on: ubuntu-latest
