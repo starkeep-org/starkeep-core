@@ -1,5 +1,36 @@
 import type { RowWriteResult } from "../types.js";
 
+/** The write conditions each row route takes. */
+const ROUTE_CONDITIONS = {
+  POST: ["ifAbsent"],
+  PATCH: ["ifUpdatedAt"],
+  DELETE: ["ifUpdatedAt"],
+} as const;
+
+const ALL_CONDITIONS = ["ifAbsent", "ifUpdatedAt"] as const;
+
+/**
+ * Refuse a write condition that the route does not take. Both data servers
+ * answer the thrown error with 400.
+ *
+ * A route that dropped the condition would run the write unguarded and answer
+ * as if the guard held. An `ifUpdatedAt` sent with a `POST` would upsert over
+ * any change since the read. The factory refuses a condition of the wrong type
+ * for the same reason.
+ */
+export function refuseMisplacedConditions(
+  method: "POST" | "PATCH" | "DELETE",
+  body: unknown,
+): void {
+  if (typeof body !== "object" || body === null) return;
+  const taken: readonly string[] = ROUTE_CONDITIONS[method];
+  for (const condition of ALL_CONDITIONS) {
+    if (taken.includes(condition)) continue;
+    if ((body as Record<string, unknown>)[condition] === undefined) continue;
+    throw new Error(`${method} does not take ${condition}. It takes ${taken.join(" and ")} only.`);
+  }
+}
+
 /** One row route's answer: an HTTP status and its JSON body. */
 export interface RowWriteResponse {
   readonly status: number;

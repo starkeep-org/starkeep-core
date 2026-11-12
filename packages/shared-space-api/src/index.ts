@@ -46,7 +46,11 @@ export {
   type AppSpecificFactoryOptions,
 } from "./app-syncable/factory.js";
 export { appFileListingJson } from "./app-syncable/file-listing.js";
-export { rowWriteResponse, type RowWriteResponse } from "./app-syncable/row-write-response.js";
+export {
+  refuseMisplacedConditions,
+  rowWriteResponse,
+  type RowWriteResponse,
+} from "./app-syncable/row-write-response.js";
 export { quoteIdent, validateTableName, RESERVED_COLUMN_NAMES } from "./app-syncable/validation.js";
 export {
   FILE_RECORDS_TABLE,

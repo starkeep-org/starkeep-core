@@ -1014,6 +1014,54 @@ export const appSyncableWriteConformance: readonly WriteConformanceCase[] = [
     },
   },
   {
+    // The probe that explains a skipped write must read by the whole key. A
+    // probe by `id` alone would find the other tenant's live row and answer
+    // `superseded`.
+    name: "an update or delete reports missing when only another tenant holds the id",
+    async run(h) {
+      await h.applier.apply(
+        {
+          timestamp: hlc(10),
+          appId: h.appId,
+          table: h.compositeTable,
+          op: "insert",
+          row: {
+            tenant: "globex",
+            id: "r1",
+            payload: "globex",
+            updated_at: serialized(hlc(10)),
+            deleted_at: null,
+          },
+        },
+        {},
+      );
+      const where = { tenant: "acme", id: "r1" };
+      expectOutcome(
+        await h.applier.apply(
+          {
+            timestamp: hlc(20),
+            appId: h.appId,
+            table: h.compositeTable,
+            op: "update",
+            row: { payload: "acme", updated_at: serialized(hlc(20)) },
+            where,
+          },
+          {},
+        ),
+        { changes: 0, skipped: "missing" },
+        "update of the other tenant's id",
+      );
+      expectOutcome(
+        await h.applier.apply(
+          { timestamp: hlc(30), appId: h.appId, table: h.compositeTable, op: "delete", where },
+          {},
+        ),
+        { changes: 0, skipped: "missing" },
+        "delete of the other tenant's id",
+      );
+    },
+  },
+  {
     name: "an ifAbsent insert without the whole key is refused",
     async run(h) {
       await expectRejection("ifAbsent insert naming one of two key columns", async () => {

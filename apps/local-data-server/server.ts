@@ -40,6 +40,7 @@ import {
 import { queryParamsFrom } from "../../packages/shared-space-api/src/query/params.js";
 import { appFileListingJson } from "../../packages/shared-space-api/src/app-syncable/file-listing.js";
 import {
+  refuseMisplacedConditions,
   rowWriteResponse,
   type RowWriteResponse,
 } from "../../packages/shared-space-api/src/app-syncable/row-write-response.js";
@@ -2879,6 +2880,7 @@ async function main() {
                 row?: Record<string, unknown>;
                 ifAbsent?: boolean;
               };
+              refuseMisplacedConditions("POST", body);
               if (!body.row) {
                 res.writeHead(400);
                 json(res, { error: "row is required" });
@@ -2894,6 +2896,7 @@ async function main() {
                 patch?: Record<string, unknown>;
                 ifUpdatedAt?: string;
               };
+              refuseMisplacedConditions("PATCH", body);
               if (!body.where || !body.patch) {
                 res.writeHead(400);
                 json(res, { error: "where and patch are required" });
@@ -2910,6 +2913,7 @@ async function main() {
                 where?: Record<string, unknown>;
                 ifUpdatedAt?: string;
               };
+              refuseMisplacedConditions("DELETE", body);
               if (!body.where) {
                 res.writeHead(400);
                 json(res, { error: "where is required" });
