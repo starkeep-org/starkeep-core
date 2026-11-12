@@ -636,6 +636,19 @@ rewrites only the moved row with one `PATCH`. A fractional-indexing library
 generates the keys. Keep the primary-key tiebreak, since two surfaces that
 insert into the same gap can generate equal keys.
 
+### 6c. Analysis reads in SQL over a snapshot
+
+An analysis view, such as weekly volume per lift, needs expression aggregates,
+date buckets and joins, which the grammar in section 6a does not offer. Use
+`createSnapshotSql` from `@starkeep/app-client/snapshot` in the app's server.
+The helper loads the app's own rows through the row API into an in-memory
+SQLite, caches the copy per user, and runs the app's read-only SQL against it.
+Each result carries `loadedAt`, the copy's load time, for an "as of" label. A
+Refresh action sends a `freshAfter` floor that reloads an older copy. The
+package README's section "Analysis reads in SQL: `@starkeep/app-client/snapshot`"
+describes the options and limits, and Probe's `GET /api/notes-summary` is a
+working route.
+
 ### 7. Cloud compute + the bundle (cloud target only)
 
 To install to the cloud, declare compute handlers and ship a bundler.
