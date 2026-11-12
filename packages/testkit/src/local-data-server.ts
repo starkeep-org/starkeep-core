@@ -3,6 +3,10 @@
  *
  * Spawns `tsx apps/local-data-server/server.ts` against a throwaway
  * STARKEEP_DIR on an ephemeral port, waits for /health, and tears down.
+ * When `STARKEEP_LDS_ENTRY` names a pre-bundled `server.mjs` it runs that with
+ * plain `node` instead: apps/local-data-server's integration globalSetup builds
+ * one per run so its ~60 spawns don't each pay tsx's transpile of the server.
+ * Every other consumer leaves it unset and runs from source.
  * Child-process (rather than in-process) boot is deliberate: the server reads
  * its config at module load, and a real process is the honest test surface —
  * restarts, signal handling, and the per-startup file-token secret all behave
@@ -162,7 +166,13 @@ export async function startLocalDataServer(
   } else {
     childEnv.STARKEEP_DIR = starkeepDir;
   }
-  const child = spawn(TSX_BIN, [SERVER_ENTRY], {
+  // A pre-bundled entry, when the caller's run built one, skips tsx's per-spawn
+  // transpile; otherwise run from source.
+  const bundledEntry = process.env.STARKEEP_LDS_ENTRY;
+  const [command, args] = bundledEntry
+    ? [process.execPath, [bundledEntry]]
+    : [TSX_BIN, [SERVER_ENTRY]];
+  const child = spawn(command, args, {
     env: childEnv,
     stdio: ["ignore", "pipe", "pipe"],
   });
