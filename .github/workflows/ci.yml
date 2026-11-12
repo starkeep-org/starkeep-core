@@ -163,3 +163,49 @@ jobs:
         env:
           STARKEEP_APP_BASE_PATH: /apps/example-app
           STARKEEP_BUNDLE_OUT: ${{ runner.temp }}/example-dist.zip
+
+  # The `starkeep` Claude Code plugin and this repository's marketplace: both
+  # manifests pass the strict validator, the synced doc copies under
+  # `plugins/starkeep/ref/` match the originals, every skill link resolves,
+  # the plugin loads with one skill per `skills/*/` directory, and it installs
+  # from the marketplace. None of it needs the workspace, so there is no pnpm
+  # and no `pnpm install`; the Claude Code CLI runs without a login or API key.
+  # Advisory; branch protection requires tier 1 only.
+  plugin:
+    name: Plugin (validate, links, load)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install -g @anthropic-ai/claude-code@2.1.322
+      - run: claude plugin validate plugins/starkeep --strict
+      - run: claude plugin validate . --strict
+      - name: Synced doc copies match the originals
+        run: |
+          node scripts/sync-plugin-ref.mjs
+          # Intent-to-add, so a copy that was never committed shows in the diff.
+          git add --intent-to-add plugins/starkeep/ref
+          git diff --exit-code plugins/starkeep/ref
+      - run: node scripts/check-skill-links.mjs
+      - name: The plugin loads every skill directory
+        run: |
+          expected=0
+          if [ -d plugins/starkeep/skills ]; then
+            expected=$(find plugins/starkeep/skills -mindepth 1 -maxdepth 1 -type d | wc -l)
+          fi
+          details=$(claude --plugin-dir plugins/starkeep plugin details starkeep)
+          echo "$details"
+          actual=$(echo "$details" | sed -n 's/.*Skills (\([0-9]*\)).*/\1/p' | head -n 1)
+          if [ "$actual" != "$expected" ]; then
+            echo "expected Skills ($expected), got Skills (${actual:-none})" >&2
+            exit 1
+          fi
+      - name: The plugin installs from the marketplace
+        run: |
+          claude plugin marketplace add "$GITHUB_WORKSPACE"
+          claude plugin install starkeep@starkeep-core
+          claude plugin list | tee plugins.txt
+          grep -F "starkeep@starkeep-core" plugins.txt
