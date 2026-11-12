@@ -108,6 +108,11 @@ async function tile(name: string): Promise<HTMLElement> {
   return heading.closest("[data-slot=card]") as HTMLElement;
 }
 
+/** Approves the open consent dialog. */
+async function approve(): Promise<void> {
+  await userEvent.setup().click(await screen.findByRole("button", { name: "Approve & Install" }));
+}
+
 /** The tile names on screen, in order. */
 function tileNames(): string[] {
   return Array.from(document.querySelectorAll("[data-slot=card-title] > span:first-child")).map(
@@ -312,6 +317,7 @@ describe("the surface each action asks for, and the dialog it opens", () => {
     const user = userEvent.setup();
     await renderWith([]);
     await user.click(await within(await tile(name)).findByRole("button", { name: button }));
+    await approve();
     await vi.waitFor(() => expect(installs).toHaveLength(1));
     expect(installs[0]).toMatchObject({
       url: "/api/apps/photos/cloud-install",
@@ -329,6 +335,7 @@ describe("the surface each action asks for, and the dialog it opens", () => {
       expect(within(await tile("Photos Mobile")).getByText("Registered")).toBeTruthy(),
     );
     await chooseFromMenu(name, label);
+    await approve();
     await vi.waitFor(() => expect(installs).toHaveLength(1));
     expect(installs[0]!.body["surfaces"]).toEqual(surfaces);
     expect(await screen.findByRole("heading", { name: title })).toBeTruthy();
@@ -345,6 +352,7 @@ describe("one run at a time", () => {
     await user.click(
       await within(await tile("Photos")).findByRole("button", { name: "Install Photos in cloud" }),
     );
+    await approve();
     // The mocked install never settles, so the run stays in progress.
     await screen.findByRole("heading", { name: "Install Photos in cloud" });
 
@@ -361,5 +369,83 @@ describe("one run at a time", () => {
     });
     expect((install as HTMLButtonElement).disabled).toBe(true);
     expect(installs).toHaveLength(1);
+  });
+});
+
+describe("consent before a cloud install", () => {
+  const SHARING = {
+    ...PHOTOS,
+    manifest: {
+      ...PHOTOS.manifest,
+      infraRequirements: {
+        compute: { enabled: true },
+        fileAccess: [{ types: ["image/jpeg"], access: "read" as const }],
+        publicSharing: true,
+      },
+    },
+  } as LocalAppEntry;
+
+  it("shows what an app asks for before installing one that was never approved locally", async () => {
+    const user = userEvent.setup();
+    await renderWith([], [SHARING]);
+    await user.click(
+      await within(await tile("Photos")).findByRole("button", { name: "Install Photos in cloud" }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Install Photos in the cloud?" }),
+    ).toBeTruthy();
+    expect(screen.getByText("asks for access to these files.", { exact: false })).toBeTruthy();
+    expect(screen.getByText("Images")).toBeTruthy();
+    expect(screen.getByText("Public links")).toBeTruthy();
+    expect(installs).toHaveLength(0);
+
+    await approve();
+    await vi.waitFor(() => expect(installs).toHaveLength(1));
+    expect(installs[0]!.body["surfaces"]).toEqual(["web"]);
+  });
+
+  it("installs nothing when the person cancels", async () => {
+    const user = userEvent.setup();
+    await renderWith([], [SHARING]);
+    await user.click(
+      await within(await tile("Photos")).findByRole("button", { name: "Install Photos in cloud" }),
+    );
+    await user.click(await screen.findByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("heading", { name: "Install Photos in the cloud?" })).toBeNull();
+    expect(installs).toHaveLength(0);
+  });
+
+  it("asks before registering a mobile app too, since its grants are the app's", async () => {
+    const user = userEvent.setup();
+    await renderWith([], [SHARING]);
+    await user.click(
+      await within(await tile("Photos Mobile")).findByRole("button", {
+        name: "Register Photos Mobile",
+      }),
+    );
+    expect(await screen.findByRole("heading", { name: "Register Photos Mobile?" })).toBeTruthy();
+    expect(installs).toHaveLength(0);
+  });
+
+  it("asks again before a redeploy, because no cloud approval is recorded", async () => {
+    await renderWith([{ appId: "photos", webApp: true, mobileApp: false }], [SHARING]);
+    await vi.waitFor(async () =>
+      expect(within(await tile("Photos")).getByText("Installed")).toBeTruthy(),
+    );
+    await chooseFromMenu("Photos", "Redeploy Photos");
+    expect(
+      await screen.findByRole("heading", { name: "Install Photos in the cloud?" }),
+    ).toBeTruthy();
+    expect(installs).toHaveLength(0);
+  });
+
+  it("skips the dialog for an app installed locally, whose approved manifest the cloud deploys", async () => {
+    const user = userEvent.setup();
+    await renderWith([], [{ ...SHARING, status: "active" }]);
+    await user.click(
+      await within(await tile("Photos")).findByRole("button", { name: "Install Photos in cloud" }),
+    );
+    await vi.waitFor(() => expect(installs).toHaveLength(1));
+    expect(screen.queryByRole("heading", { name: "Install Photos in the cloud?" })).toBeNull();
   });
 });

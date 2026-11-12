@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { CommandOutput } from "@/components/CommandOutput";
+import { ConsentDialog } from "@/components/ConsentDialog";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   readCloudConfig,
@@ -13,12 +14,7 @@ import {
 import { refreshTokens, getIdentityPoolCredentials, type STSCredentials } from "@/lib/cognito-auth";
 import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
 import { ACTION_OCCASIONAL, ACTION_OPEN } from "@/lib/action-colors";
-import {
-  publicSharingConsent,
-  surfacesOf,
-  type AppSurface,
-  type LocalAppEntry,
-} from "@/lib/app-types";
+import { surfacesOf, type AppSurface, type LocalAppEntry } from "@/lib/app-types";
 import { runInstallStream } from "@/lib/install-stream-client";
 
 /** One row of `shared.app_registry`, as POST /api/apps/cloud/list returns it. */
@@ -85,6 +81,12 @@ export function CloudAppsSection({
   // holds. Their tiles come from the registry, so an installed app's tile
   // stays when its folder leaves Discover apps.
   const [registryRows, setRegistryRows] = useState<CloudRegistryRow[] | null>(null);
+  // The install waiting on the consent dialog, or null when none is open.
+  const [pendingConsent, setPendingConsent] = useState<{
+    entry: LocalAppEntry;
+    title: string;
+    run: () => void;
+  } | null>(null);
 
   // Resolve the browser-facing base URL from the persisted cloud config so each
   // app's Open ↗ link (`${browserBaseUrl}/apps/${appId}/`) survives a reload.
@@ -225,15 +227,25 @@ export function CloudAppsSection({
             // signed in, cloud not set up, or the read errored). The tile
             // then reads as not installed rather than guessing.
             const installed = (surface === "web" ? webIds : mobileIds)?.has(entry.appId) ?? false;
-            // The cloud install has no consent dialog of its own, so the one
-            // capability a person must approve before the cloud acts on it is
-            // asked here: public links are served by the cloud web app.
-            const consent =
-              surface === "web" && !installed ? publicSharingConsent(entry.manifest) : null;
-            const install = () => {
-              if (consent && !confirm(`${consent}\n\nInstall ${name} in the cloud?`)) return;
-              void handleInstall(entry.appId, name, endpoint, surface);
-            };
+            // A local install pins the manifest the person approved, and the
+            // cloud deploys that pinned manifest, so an active local install
+            // already carries consent. Anything else — a cloud-only install, or
+            // a redeploy from a folder nobody approved — asks first, because
+            // nothing records a cloud approval and the folder's manifest may
+            // have changed since the last run.
+            const run = () => void handleInstall(entry.appId, name, endpoint, surface);
+            const install =
+              entry.status === "active"
+                ? run
+                : () =>
+                    setPendingConsent({
+                      entry,
+                      title:
+                        surface === "web"
+                          ? `Install ${name} in the cloud?`
+                          : `Register ${tileName}?`,
+                      run,
+                    });
 
             const actions: AppCardAction[] = installed
               ? [
@@ -338,6 +350,19 @@ export function CloudAppsSection({
           });
         })}
       </AppCardGrid>
+
+      {pendingConsent && (
+        <ConsentDialog
+          entry={pendingConsent.entry}
+          title={pendingConsent.title}
+          onApprove={() => {
+            const { run } = pendingConsent;
+            setPendingConsent(null);
+            run();
+          }}
+          onCancel={() => setPendingConsent(null)}
+        />
+      )}
 
       <CloudAppInstallModal
         opened={installing !== null}

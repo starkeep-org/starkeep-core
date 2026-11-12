@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { APP_GRANTABLE_CATEGORIES } from "../../../packages/protocol-primitives/src/types/core-types";
-import { categoriesOf } from "../src/components/LocalAppsSection";
+import { categoriesOf } from "../src/components/ConsentDialog";
 
 describe("categoriesOf — the install prompt's grant heading", () => {
   it.each(APP_GRANTABLE_CATEGORIES)("names the %s category rather than showing its id", (id) => {
