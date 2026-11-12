@@ -35,7 +35,8 @@ jobs:
       # exact-key hit never saves); `github.job` gives each job its own entry.
       # The `--` after the job id keeps one job's restore-key prefix from
       # matching another job's entries: `tier-1-` is a prefix of `tier-1-unit-`,
-      # but `tier-1--` is not.
+      # but `tier-1--` is not. The last step of the job prunes the cache before
+      # the post step saves it; see there.
       - uses: actions/cache@v4
         with:
           path: .turbo/cache
@@ -58,6 +59,17 @@ jobs:
       - run: pnpm format:check
       - run: pnpm check:icons
       - run: pnpm turbo run lint typecheck
+      # Turbo never evicts its local cache, and the restore-keys above always
+      # bring back the previous run's entry, so without this each job's entry
+      # would grow with every push: hundreds of MB within months, all against
+      # the repository's 10 GB cache quota, with the saves and restores slowing
+      # to match. Dropping entries nothing has written in a week keeps it to
+      # what the last week's runs built. tar keeps mtimes across restore, and a
+      # hit replays an entry without rewriting it, so an output unchanged for a
+      # week is rebuilt once and saved fresh. Runs before actions/cache's post
+      # step saves the directory.
+      - name: Prune Turbo cache entries older than 7 days
+        run: test ! -d .turbo/cache || find .turbo/cache -type f -mtime +7 -delete
 
   # Tier 1's unit tests, every package's `test` task. Split from tier-1 so they
   # run alongside lint and typecheck instead of after them. Branch protection
@@ -86,6 +98,9 @@ jobs:
       # cores until a worker misses its RPC deadline ("Timeout calling
       # onTaskUpdate") with every test passing. Two suites at a time does not.
       - run: pnpm turbo run test --concurrency=2
+      # Prune the Turbo cache before the post step saves it; see tier-1.
+      - name: Prune Turbo cache entries older than 7 days
+        run: test ! -d .turbo/cache || find .turbo/cache -type f -mtime +7 -delete
 
   # Integration: suites under each package's `__tests__/integration/`, which boot
   # a process, a socket or a database engine (the local data server as a child
@@ -116,6 +131,9 @@ jobs:
             turbo-${{ runner.os }}-${{ github.job }}--
       - run: pnpm install --frozen-lockfile
       - run: pnpm turbo run test:integration --concurrency=2 --filter=@starkeep/builtin-cloud-data-server --filter=@starkeep/storage-aurora-dsql --filter=@starkeep/admin-installer
+      # Prune the Turbo cache before the post step saves it; see tier-1.
+      - name: Prune Turbo cache entries older than 7 days
+        run: test ! -d .turbo/cache || find .turbo/cache -type f -mtime +7 -delete
 
   # Every other package's integration suite: the local data server as a child
   # process, the fake cloud on loopback. The filters negate integration-pglite's
@@ -141,6 +159,9 @@ jobs:
             turbo-${{ runner.os }}-${{ github.job }}--
       - run: pnpm install --frozen-lockfile
       - run: pnpm turbo run test:integration --concurrency=2 --filter='!@starkeep/builtin-cloud-data-server' --filter='!@starkeep/storage-aurora-dsql' --filter='!@starkeep/admin-installer'
+      # Prune the Turbo cache before the post step saves it; see tier-1.
+      - name: Prune Turbo cache entries older than 7 days
+        run: test ! -d .turbo/cache || find .turbo/cache -type f -mtime +7 -delete
 
   # Tier 2: the local platform end to end, through Playwright. Advisory until
   # it has run two weeks without a flake; branch protection does not require it.
@@ -179,6 +200,9 @@ jobs:
       - if: steps.playwright-cache.outputs.cache-hit == 'true'
         run: pnpm --filter @starkeep/e2e exec playwright install-deps chromium
       - run: pnpm test:e2e
+      # Prune the Turbo cache before the post step saves it; see tier-1.
+      - name: Prune Turbo cache entries older than 7 days
+        run: test ! -d .turbo/cache || find .turbo/cache -type f -mtime +7 -delete
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -243,6 +267,9 @@ jobs:
         working-directory: example-app
         env:
           STARKEEP_CORE_DIR: ${{ github.workspace }}
+      # Prune the Turbo cache before the post step saves it; see tier-1.
+      - name: Prune Turbo cache entries older than 7 days
+        run: test ! -d .turbo/cache || find .turbo/cache -type f -mtime +7 -delete
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
