@@ -1,4 +1,6 @@
 node_modules/
+# pnpm's store lands at the repo root in agent containers, and the coordinator stages untracked files
+.pnpm-store/
 dist/
 .turbo/
 *.tsbuildinfo
