@@ -8,6 +8,8 @@ Don't implement things that aren't needed now (or only because they're expected 
 
 Conversely, anything that does get implemented must be fully hooked up to the relevant system so we can actually test how it works. Implementing disconnected modules create an impression that more has been done than we thought and causes gotchas later.
 
+The six documents listed in `scripts/sync-plugin-ref.mjs` are mirrored into `plugins/starkeep/ref/`. `pnpm format` refreshes the mirror and CI fails on drift, so any PR that edits one of them commits the refreshed mirror.
+
 When working with shared or app specific data, refer to the "How data is classified" section of docs/system-design.md.
 
 Always write plans, designs, and other long-form output to a file. Never leave substantial detail only in chat — summarize in chat and link the file.
