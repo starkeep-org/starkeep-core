@@ -598,16 +598,18 @@ Each route reports what the write did:
 | `POST` with `ifAbsent`                 | 200 `{"ok": true, "changes": 0, "skipped": "live"}`    | A live row holds the key. Nothing was written.                                       |
 | `POST` with `ifAbsent`                 | 200 `{"ok": true, "changes": 0, "skipped": "deleted"}` | A deleted row holds the key. Nothing was written.                                    |
 | `PATCH`                                | 200 `{"changes": 1}`                                   | The live row was patched.                                                            |
-| `PATCH`                                | 404                                                    | No live row holds the key. A deleted row answers the same as a missing one.          |
+| `PATCH`                                | 404 `{"changes": 0, "skipped": "missing"}`             | No live row holds the key. A deleted row answers the same as a missing one.          |
 | `DELETE`                               | 200 `{"changes": 1}`                                   | The live row was deleted.                                                            |
 | `DELETE`                               | 200 `{"changes": 0, "skipped": "deleted"}`             | The row was already deleted, so a retried delete succeeds.                           |
-| `DELETE`                               | 404                                                    | No row, live or deleted, ever held the key.                                          |
+| `DELETE`                               | 404 `{"changes": 0, "skipped": "missing"}`             | No row, live or deleted, ever held the key.                                          |
 | `PATCH` or `DELETE` with `ifUpdatedAt` | 409 `{"changes": 0, "skipped": "stale"}`               | The row changed since the read (see "Guard a read-modify-write" below).              |
 | Any of the three                       | 409 `{"changes": 0, "skipped": "superseded"}`          | The row carries a newer stamp than the write, so the write lost and changed nothing. |
 
 An MCP tool or an API built on these routes can pass the 404 straight through
 as "not found". No read beforehand is needed, and a read beforehand would race
-the write anyway.
+the write anyway. The route answers other 404s too, such as for an app that
+declares no app-syncable tables. Only a row 404 carries `"skipped": "missing"`,
+so check `skipped` before reading a 404 as "no row".
 
 A `superseded` answer is rare. A row that synced from a surface whose clock
 runs ahead can carry a stamp above the stamp of this surface's next write. Read

@@ -118,8 +118,24 @@ describe("rowWriteResponse", () => {
     });
   });
 
-  it("answers 404 for a PATCH of a deleted row and 200 for a DELETE of one", () => {
-    expect(rowWriteResponse("PATCH", { changes: 0, skipped: "deleted" }).status).toBe(404);
+  it("answers 404 with skipped missing for a write that found no live row", () => {
+    const body = { error: "No live row holds that key", changes: 0, skipped: "missing" };
+    expect(rowWriteResponse("PATCH", { changes: 0, skipped: "missing" })).toEqual({
+      status: 404,
+      body,
+    });
+    expect(rowWriteResponse("DELETE", { changes: 0, skipped: "missing" })).toEqual({
+      status: 404,
+      body,
+    });
+    // A deleted row answers a PATCH exactly as a key no row ever held.
+    expect(rowWriteResponse("PATCH", { changes: 0, skipped: "deleted" })).toEqual({
+      status: 404,
+      body,
+    });
+  });
+
+  it("answers 200 for a DELETE of a deleted row", () => {
     expect(rowWriteResponse("DELETE", { changes: 0, skipped: "deleted" })).toEqual({
       status: 200,
       body: { changes: 0, skipped: "deleted" },
