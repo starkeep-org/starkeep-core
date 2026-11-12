@@ -336,7 +336,9 @@ before any route runs:
 
 `serveLocal` from `@starkeep/app-client/local` makes both checks on every
 route. It also reads the port admin-web passes on `--port`, binds `127.0.0.1`
-and serves your static files ahead of your routes, as the cloud adapter does:
+and serves your static files ahead of your routes, as the cloud adapter does.
+`serveLocal` reads only `--port`, so set the manifest's `localRun.portFlag` to
+`"--port"`. This server is what `localRun` starts:
 
 ```ts
 // src/server/local.ts — what the manifest's `localRun` starts.

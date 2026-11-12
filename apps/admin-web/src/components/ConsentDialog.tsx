@@ -6,6 +6,9 @@
  * does unless the person already approved the same manifest locally, since
  * the cloud deploys the manifest a local install pinned; a cloud-only install
  * would otherwise act on grants nobody was shown.
+ *
+ * The quality step belongs to the local install only: it sets the local
+ * library's stand-in standards, which a cloud action has no business setting.
  */
 import { useEffect, useState } from "react";
 import { ChevronDownIcon } from "lucide-react";
@@ -14,7 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
   publicSharingConsent,
-  type DependencyPlan,
+  type AppSurface,
   type LocalAppEntry,
   type ManifestSummary,
 } from "@/lib/app-types";
@@ -58,11 +61,14 @@ export function categoriesOf(types: readonly string[]): string {
 
 export function ConsentDialog({
   entry,
+  surface = "local",
   title,
   onApprove,
   onCancel,
 }: {
   entry: LocalAppEntry;
+  /** Where the approved install acts. Defaults to the local install. */
+  surface?: "local" | AppSurface;
   /** The question the dialog asks. Defaults to "Install <name>?". */
   title?: string;
   onApprove: () => void;
@@ -70,9 +76,8 @@ export function ConsentDialog({
 }) {
   const grants = entry.manifest.infraRequirements?.fileAccess ?? [];
   const allAccess = entry.manifest.infraRequirements?.fileAccessAll ?? false;
-  const quality = useQualityStep(entry.manifest);
+  const quality = useQualityStep(entry.manifest, surface === "local");
   const [saving, setSaving] = useState(false);
-  const dependencies = useDependencyPlan(entry.appId);
 
   const approve = async () => {
     if (quality && !draftsEqual(quality.draft, draftOf(quality.state.current))) {
@@ -151,21 +156,6 @@ export function ConsentDialog({
           </div>
         )}
 
-        {dependencies?.kind === "run" && (
-          <p className="text-sm text-muted-foreground">
-            Install runs <code className="text-xs">{dependencies.display}</code> in{" "}
-            <code className="text-xs break-all">{dependencies.cwd}</code>, which runs the
-            app&rsquo;s own install scripts.
-          </p>
-        )}
-        {dependencies?.kind === "refused" && (
-          <p className="text-sm text-muted-foreground">
-            Install will not run <code className="text-xs">{dependencies.display}</code>:{" "}
-            {dependencies.reason} Run it yourself in{" "}
-            <code className="text-xs break-all">{dependencies.cwd}</code>.
-          </p>
-        )}
-
         {quality && (
           <div className="border-t pt-4 flex flex-col gap-3">
             <h4 className="text-sm font-medium">Quality kept when originals archive</h4>
@@ -200,7 +190,7 @@ export function ConsentDialog({
               (quality !== null && draftProblems(quality.draft, quality.state.ranges).length > 0)
             }
           >
-            {saving ? "Saving…" : "Approve & Install"}
+            {saving ? "Saving…" : surface === "mobile" ? "Approve & Register" : "Approve & Install"}
           </Button>
         </div>
       </div>
@@ -208,31 +198,17 @@ export function ConsentDialog({
   );
 }
 
-/** The dependency command Install would run for `appId`, or null before the answer. */
-function useDependencyPlan(appId: string): DependencyPlan | null {
-  const [plan, setPlan] = useState<DependencyPlan | null>(null);
-  useEffect(() => {
-    let live = true;
-    fetch(`/api/apps/${encodeURIComponent(appId)}/dependencies`)
-      .then(async (res) => (res.ok ? ((await res.json()) as DependencyPlan) : null))
-      .then((p) => live && setPlan(p))
-      .catch(() => {
-        // The dialog shows no command line; Install reports any failure.
-      });
-    return () => {
-      live = false;
-    };
-  }, [appId]);
-  return plan;
-}
-
 /**
  * The install flow's one-time quality step: shown for an app that reads photos
  * or videos while the person has set no value and the library holds none of
  * those originals yet. Null when the step does not apply, or while the daemon
- * has not answered — installing never waits on it.
+ * has not answered — installing never waits on it. `enabled` is false outside
+ * the local install, and the step then never asks the daemon.
  */
-function useQualityStep(manifest: ManifestSummary): {
+function useQualityStep(
+  manifest: ManifestSummary,
+  enabled: boolean,
+): {
   state: LibraryStandardsResponse;
   draft: LibraryStandardsDraft;
   setDraft: (draft: LibraryStandardsDraft) => void;
@@ -245,7 +221,7 @@ function useQualityStep(manifest: ManifestSummary): {
   const [problems, setProblems] = useState<string[]>([]);
 
   const read = mediaCategoriesRead(manifest);
-  const wanted = read.length > 0;
+  const wanted = enabled && read.length > 0;
   useEffect(() => {
     if (!wanted) return;
     let cancelled = false;
@@ -262,7 +238,7 @@ function useQualityStep(manifest: ManifestSummary): {
     };
   }, [wanted]);
 
-  if (!state || !draft || state.set) return null;
+  if (!wanted || !state || !draft || state.set) return null;
   const categories = read.filter((c) => state.libraryOriginals[c].count === 0);
   if (categories.length === 0) return null;
   return { state, draft, setDraft, categories, problems, setProblems };

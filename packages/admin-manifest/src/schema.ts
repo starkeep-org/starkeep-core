@@ -210,11 +210,6 @@ const appComputeHandlerObjectSchema = z.strictObject({
 });
 
 /**
- * The prefixes CloudFront serves from the app assets bucket rather than from
- * the app's Lambda. Each is a directory directly under the handler's
- * `bundleAssetsDir`.
- */
-/**
  * Where the platform sends a signed-out visitor, relative to the app's mount.
  * The edge's `signed-out-redirect` CloudFront function, which every cloud app
  * sits behind, redirects each sessionless navigation here. The validator
@@ -223,6 +218,11 @@ const appComputeHandlerObjectSchema = z.strictObject({
  */
 export const SIGN_IN_PATH = "/sign-in";
 
+/**
+ * The prefixes CloudFront serves from the app assets bucket rather than from
+ * the app's Lambda. Each is a directory directly under the handler's
+ * `bundleAssetsDir`.
+ */
 export const SERVED_ASSET_PREFIXES = ["_immutable", "_static"] as const;
 
 /**

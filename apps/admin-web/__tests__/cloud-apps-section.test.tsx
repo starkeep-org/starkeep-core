@@ -109,9 +109,11 @@ async function tile(name: string): Promise<HTMLElement> {
   return heading.closest("[data-slot=card]") as HTMLElement;
 }
 
-/** Approves the open consent dialog. */
+/** Approves the open consent dialog, whichever surface it installs. */
 async function approve(): Promise<void> {
-  await userEvent.setup().click(await screen.findByRole("button", { name: "Approve & Install" }));
+  await userEvent
+    .setup()
+    .click(await screen.findByRole("button", { name: /^Approve & (Install|Register)$/ }));
 }
 
 /** The tile names on screen, in order. */
@@ -398,6 +400,7 @@ describe("consent before a cloud install", () => {
     expect(screen.getByText("asks for access to these files.", { exact: false })).toBeTruthy();
     expect(screen.getByText("Images")).toBeTruthy();
     expect(screen.getByText("Public links")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Approve & Install" })).toBeTruthy();
     expect(installs).toHaveLength(0);
 
     await approve();
@@ -425,6 +428,42 @@ describe("consent before a cloud install", () => {
       }),
     );
     expect(await screen.findByRole("heading", { name: "Register Photos Mobile?" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Approve & Register" })).toBeTruthy();
+    expect(installs).toHaveLength(0);
+  });
+
+  // The quality step sets the local library's stand-in standards. Photos reads
+  // images, so a local install of it would ask the daemon whether to show it.
+  it("leaves out the local install's quality step", async () => {
+    const user = userEvent.setup();
+    await renderWith([], [SHARING]);
+    await user.click(
+      await within(await tile("Photos")).findByRole("button", { name: "Install Photos in cloud" }),
+    );
+    await screen.findByRole("heading", { name: "Install Photos in the cloud?" });
+    expect(fetch).not.toHaveBeenCalledWith("/api/library/stand-in-standards");
+    expect(screen.queryByText("Quality kept when originals archive")).toBeNull();
+  });
+
+  // Until the registry answers, no deployed manifest is known, so nothing
+  // counts as approved. Defaulting to "approved" while loading would deploy
+  // grants nobody was shown.
+  it("asks while the registry list has not answered yet", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise<Response>(() => {})),
+    );
+    const user = userEvent.setup();
+    render(<CloudAppsSection apps={[SHARING]} />);
+    await vi.waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith("/api/apps/cloud/list", expect.anything()),
+    );
+    await user.click(
+      await within(await tile("Photos")).findByRole("button", { name: "Install Photos in cloud" }),
+    );
+    expect(
+      await screen.findByRole("heading", { name: "Install Photos in the cloud?" }),
+    ).toBeTruthy();
     expect(installs).toHaveLength(0);
   });
 

@@ -192,25 +192,8 @@ export function validateManifest(raw: unknown): ValidationResult {
     seenLabelKeys.add(entry.key);
   }
 
-  // --- Anonymous routes ------------------------------------------------
+  // --- Sign-in path ----------------------------------------------------
   //
-  // `auth: "public"` removes the Cognito authorizer from a gateway route. On a
-  // catch-all that is the entire app, including whatever server routes the
-  // bundle happens to mount — which is how the signing proxy at
-  // /api/local-data ended up answering the internet (postmortem 2026-08-23,
-  // root causes 3.1 and 3.4). The opt-out is still available, because a
-  // browser navigating to a URL cannot send a bearer token and the HTML shell
-  // has to be reachable. What it now costs is a `publicPaths` declaration
-  // naming the subpaths the opt-out was *for*, checked against the handler's
-  // real route table so it cannot name something the handler does not serve.
-  //
-  // `auth: "session"` is the better answer and the one a browser app should
-  // take: the catch-all carries the session authorizer, and each publicPaths
-  // entry is emitted as its own more-specific unauthenticated route. The
-  // "declare what the opt-out was for" rule therefore does not apply — there
-  // is no opt-out on the catch-all to account for — but the entries still have
-  // to name routes the handler serves, or the declaration describes a
-  // deployment that does not exist.
   // The signed-out redirect at the edge sends every sessionless navigation
   // under /apps/<appId>/ to exactly `/sign-in` (the `signed-out-redirect`
   // CloudFront function in admin-installer's cloud-data-server program). The
@@ -234,6 +217,25 @@ export function validateManifest(raw: unknown): ValidationResult {
     );
   }
 
+  // --- Anonymous routes ------------------------------------------------
+  //
+  // `auth: "public"` removes the Cognito authorizer from a gateway route. On a
+  // catch-all that is the entire app, including whatever server routes the
+  // bundle happens to mount — which is how the signing proxy at
+  // /api/local-data ended up answering the internet (postmortem 2026-08-23,
+  // root causes 3.1 and 3.4). The opt-out is still available, because a
+  // browser navigating to a URL cannot send a bearer token and the HTML shell
+  // has to be reachable. What it now costs is a `publicPaths` declaration
+  // naming the subpaths the opt-out was *for*, checked against the handler's
+  // real route table so it cannot name something the handler does not serve.
+  //
+  // `auth: "session"` is the better answer and the one a browser app should
+  // take: the catch-all carries the session authorizer, and each publicPaths
+  // entry is emitted as its own more-specific unauthenticated route. The
+  // "declare what the opt-out was for" rule therefore does not apply — there
+  // is no opt-out on the catch-all to account for — but the entries still have
+  // to name routes the handler serves, or the declaration describes a
+  // deployment that does not exist.
   for (const handler of manifest.infraRequirements.compute.handlers) {
     const routes = resolveHandlerRoutes(handler);
     // What the manifest actually wrote down, before publicPaths derivation —

@@ -232,16 +232,6 @@ describe("the dependency install at Install", () => {
     return user;
   }
 
-  it("names the command and folder in the consent dialog", async () => {
-    plan = { kind: "run", display: "pnpm install --frozen-lockfile", cwd: "/apps/dice" };
-    serve();
-    await approve();
-    const line = await screen.findByText(/which runs the app.s own install scripts/);
-    expect(line.textContent).toBe(
-      "Install runs pnpm install --frozen-lockfile in /apps/dice, which runs the app\u2019s own install scripts.",
-    );
-  });
-
   it("runs the command, then registers the app and closes its output", async () => {
     plan = { kind: "run", display: "pnpm install --frozen-lockfile", cwd: "/apps/dice" };
     depsStream = 'data: "Packages: +12"\n\n' + 'event: done\ndata: {"appId":"dice"}\n\n';
@@ -274,8 +264,7 @@ describe("the dependency install at Install", () => {
     };
     serve();
     const user = await approve();
-    expect(await screen.findByText(/Install will not run/)).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Approve & Install" }));
+    await user.click(await screen.findByRole("button", { name: "Approve & Install" }));
     await vi.waitFor(() => expect(installs).toEqual([{ appId: "dice", approved: true }]));
     expect(depsPosts).toBe(0);
     expect(screen.getByText(/Run it yourself in \/apps\/dice before you start Dice/)).toBeTruthy();

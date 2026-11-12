@@ -92,6 +92,7 @@ export function CloudAppsSection({
   // The install waiting on the consent dialog, or null when none is open.
   const [pendingConsent, setPendingConsent] = useState<{
     entry: LocalAppEntry;
+    surface: AppSurface;
     title: string;
     run: () => void;
   } | null>(null);
@@ -252,6 +253,7 @@ export function CloudAppsSection({
               : () =>
                   setPendingConsent({
                     entry,
+                    surface,
                     title:
                       surface === "web" ? `Install ${name} in the cloud?` : `Register ${tileName}?`,
                     run,
@@ -364,6 +366,7 @@ export function CloudAppsSection({
       {pendingConsent && (
         <ConsentDialog
           entry={pendingConsent.entry}
+          surface={pendingConsent.surface}
           title={pendingConsent.title}
           onApprove={() => {
             const { run } = pendingConsent;
