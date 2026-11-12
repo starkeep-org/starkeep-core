@@ -2,7 +2,9 @@ import type { HLCTimestamp } from "@starkeep/protocol-primitives";
 import { serializeHLC, deserializeHLC } from "@starkeep/protocol-primitives";
 import type {
   AppSyncableApplier,
+  AppSyncableApplyOutcome,
   AppSyncableRowEntry,
+  AppSyncableWriteConditions,
   AppSyncableNamespaceStore,
   ScanCapableApplier,
   ScanSincePage,
@@ -18,7 +20,10 @@ import {
   type ParsedQuery,
   type ParsedQueryResult,
   buildBucketDigest,
+  buildRowProbe,
   buildScanSinceForNode,
+  classifySkippedWrite,
+  keyedWhereFor,
   collectSince,
   planNodeScans,
   requireKeyedWhere,
@@ -40,6 +45,9 @@ import {
   type WrittenStamp,
 } from "../node-watermarks.js";
 import { fromPgRows, pgConvertersFor, withAggregateOutputs } from "../pg-timestamps.js";
+
+/** Selected by every counted write, so the count is the number of rows written. */
+const WRITTEN = sql<number>`1`.as("written");
 
 /**
  * DSQL-backed implementation of `AppSyncableApplier`.
@@ -79,12 +87,23 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
     };
   }
 
+  /**
+   * Run a write that ends in `RETURNING`, and count the rows it wrote.
+   * `DatabaseClient` reports rows only, so the count comes from them.
+   */
+  private async count(compiled: CompiledQuery): Promise<number> {
+    return (await this.run(compiled)).rows.length;
+  }
+
   // Each branch is a single LWW-guarded statement (upsert / conditional
   // update / soft-delete keyed on `updated_at`), and the raise after it is
   // monotonic, so replaying the whole transaction on an OCC conflict is
   // idempotent. DSQL reports the conflict at COMMIT, so the transaction is the
   // retry unit.
-  async apply(entry: AppSyncableRowEntry): Promise<void> {
+  async apply(
+    entry: AppSyncableRowEntry,
+    conditions?: AppSyncableWriteConditions,
+  ): Promise<AppSyncableApplyOutcome> {
     const ns = this.namespace.get(entry.appId);
     if (!ns) {
       throw new Error(
@@ -107,19 +126,36 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
     const raises = buildWatermarkRaises(this.qb, appSource(entry.appId, entry.table), [
       writtenStampOf(entry),
     ]);
-    await withOccRetry(`applier.apply(${entry.op})`, async () => {
+    return withOccRetry(`applier.apply(${entry.op})`, async () => {
       try {
         await this.client.query("BEGIN");
         try {
+          let changes: number;
           if (entry.op === "insert") {
-            await this.applyInsert(schemaTable, pkColumns, entry);
+            changes = await this.applyInsert(schemaTable, pkColumns, entry, conditions);
           } else if (entry.op === "update") {
-            await this.applyUpdate(schemaTable, pkColumns, entry);
+            changes = await this.applyUpdate(schemaTable, pkColumns, entry, conditions);
           } else {
-            await this.applyDelete(schemaTable, pkColumns, entry);
+            changes = await this.applyDelete(schemaTable, pkColumns, entry, conditions);
+          }
+          let outcome: AppSyncableApplyOutcome = { changes };
+          if (changes === 0 && conditions !== undefined) {
+            // An app's own write that changed nothing: say why. Read inside the
+            // transaction, so the answer describes the state the write saw, and
+            // a replay after an OCC conflict asks again.
+            const key =
+              keyedWhereFor(
+                entry.op === "insert" ? (entry.row ?? {}) : (entry.where ?? {}),
+                pkColumns,
+              ) ??
+              entry.where ??
+              {};
+            const probe = (await this.run(buildRowProbe(this.qb, schemaTable, key))).rows[0];
+            outcome = { changes: 0, skipped: classifySkippedWrite(entry.op, probe) };
           }
           for (const raise of raises) await this.run(raise);
           await this.client.query("COMMIT");
+          return outcome;
         } catch (error) {
           await this.client.query("ROLLBACK");
           throw error;
@@ -134,35 +170,44 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
     schemaTable: string,
     pkColumns: string[],
     entry: AppSyncableRowEntry,
-  ): Promise<void> {
+    conditions: AppSyncableWriteConditions | undefined,
+  ): Promise<number> {
     const row = withNodeId(entry.row ?? {}, entry);
     const cols = Object.keys(row);
-    if (cols.length === 0) return;
+    if (cols.length === 0) return 0;
+
+    if (conditions?.ifAbsent && keyedWhereFor(entry.row ?? {}, pkColumns) === null) {
+      throw new Error(
+        `ifAbsent insert for ${entry.appId}.${entry.table} needs the table's whole primary key in the row`,
+      );
+    }
 
     if (pkColumns.length === 0) {
-      await this.run(
+      return this.count(
         this.qb
           .insertInto(schemaTable)
           .values({ ...row })
           .onConflict((oc) => oc.doNothing())
+          .returning(WRITTEN)
           .compile(),
       );
-      return;
     }
 
+    // `ifAbsent` takes the do-nothing branch too: any row holding the key stops
+    // it, a tombstone included, where the LWW upsert below would revive one.
     const updateCols = cols.filter((c) => !pkColumns.includes(c));
-    if (updateCols.length === 0) {
-      await this.run(
+    if (updateCols.length === 0 || conditions?.ifAbsent) {
+      return this.count(
         this.qb
           .insertInto(schemaTable)
           .values({ ...row })
           .onConflict((oc) => oc.columns(pkColumns as never[]).doNothing())
+          .returning(WRITTEN)
           .compile(),
       );
-      return;
     }
 
-    await this.run(
+    return this.count(
       this.qb
         .insertInto(schemaTable)
         .values({ ...row })
@@ -174,6 +219,7 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
             )
             .where(sql.ref("excluded.updated_at"), ">", sql.ref(`${schemaTable}.updated_at`)),
         )
+        .returning(WRITTEN)
         .compile(),
     );
   }
@@ -182,14 +228,15 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
     schemaTable: string,
     pkColumns: readonly string[],
     entry: AppSyncableRowEntry,
-  ): Promise<void> {
+    conditions: AppSyncableWriteConditions | undefined,
+  ): Promise<number> {
     // node_id rides along whenever updated_at changes (it's derived from it).
     const rawPatch = entry.row ?? {};
     const patch = rawPatch["updated_at"] ? withNodeId(rawPatch, entry) : rawPatch;
     const where = requireKeyedWhere(entry, "update", pkColumns);
     const patchCols = Object.keys(patch);
     const whereCols = Object.keys(where);
-    if (patchCols.length === 0) return;
+    if (patchCols.length === 0) return 0;
 
     const incomingUpdatedAt = patch["updated_at"] as string | undefined;
     let query = this.qb.updateTable(schemaTable).set({ ...patch });
@@ -205,14 +252,21 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
         eb.or([eb("updated_at", "is", null), eb("updated_at", "<", incomingUpdatedAt)]),
       );
     }
-    await this.run(query.compile());
+    // Live rows only, as on SQLite: a patch must not land on a tombstone. Sync
+    // never sends an update, so this binds only an app's own writes.
+    query = query.where("deleted_at", "is", null);
+    if (conditions?.ifUpdatedAt !== undefined) {
+      query = query.where("updated_at", "=", conditions.ifUpdatedAt);
+    }
+    return this.count(query.returning(WRITTEN).compile());
   }
 
   private async applyDelete(
     schemaTable: string,
     pkColumns: readonly string[],
     entry: AppSyncableRowEntry,
-  ): Promise<void> {
+    conditions: AppSyncableWriteConditions | undefined,
+  ): Promise<number> {
     const where = requireKeyedWhere(entry, "delete", pkColumns);
     const whereCols = Object.keys(where);
     const ts = (entry.row?.["updated_at"] as string) ?? serializeHLC(entry.timestamp);
@@ -233,7 +287,7 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
     if (carriesFullRow) {
       const row = withNodeId({ ...entry.row, updated_at: ts, deleted_at: ts }, entry);
       const updateCols = Object.keys(row).filter((c) => !pkColumns.includes(c));
-      await this.run(
+      return this.count(
         this.qb
           .insertInto(schemaTable)
           .values({ ...row })
@@ -245,9 +299,9 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
               )
               .where(sql.ref("excluded.updated_at"), ">", sql.ref(`${schemaTable}.updated_at`)),
           )
+          .returning(WRITTEN)
           .compile(),
       );
-      return;
     }
 
     let query = this.qb
@@ -258,7 +312,13 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
     }
     // LWW guard: tombstone only rows the incoming timestamp supersedes.
     query = query.where((eb) => eb.or([eb("updated_at", "is", null), eb("updated_at", "<", ts)]));
-    await this.run(query.compile());
+    // Live rows only: deleting a tombstone again writes nothing, so the
+    // deletion keeps its stamp.
+    query = query.where("deleted_at", "is", null);
+    if (conditions?.ifUpdatedAt !== undefined) {
+      query = query.where("updated_at", "=", conditions.ifUpdatedAt);
+    }
+    return this.count(query.returning(WRITTEN).compile());
   }
 
   /**

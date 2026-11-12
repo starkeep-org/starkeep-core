@@ -88,6 +88,73 @@ describe("declared-table CRUD", () => {
     expect(((await after.json()) as { rows: unknown[] }).rows).toHaveLength(0);
   });
 
+  it("reports what each write did: ifAbsent, true counts, compare-and-set", async () => {
+    const send = async (method: string, body: unknown) => {
+      const res = await appA.fetch("/app-data/db/notes", {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+    };
+    const stampOf = async (id: string) => {
+      const res = await appA.fetch(
+        `/app-data/db/notes?select=note_id,updated_at&where=${encodeURIComponent(
+          JSON.stringify({ note_id: id }),
+        )}`,
+      );
+      const { rows } = (await res.json()) as { rows: Array<{ updated_at: string }> };
+      return rows[0]!.updated_at;
+    };
+
+    // A seed lands once, then leaves the live row alone.
+    expect(await send("POST", { row: { note_id: "s1", body: "seed" }, ifAbsent: true })).toEqual({
+      status: 200,
+      body: { ok: true, changes: 1 },
+    });
+    await send("PATCH", { where: { note_id: "s1" }, patch: { body: "edited" } });
+    expect(await send("POST", { row: { note_id: "s1", body: "seed" }, ifAbsent: true })).toEqual({
+      status: 200,
+      body: { ok: true, changes: 0, skipped: "live" },
+    });
+
+    // Compare-and-set: the stamp a read returned guards one write.
+    const stamp = await stampOf("s1");
+    expect(
+      await send("PATCH", { where: { note_id: "s1" }, patch: { body: "a" }, ifUpdatedAt: stamp }),
+    ).toEqual({ status: 200, body: { changes: 1 } });
+    const stale = await send("PATCH", {
+      where: { note_id: "s1" },
+      patch: { body: "b" },
+      ifUpdatedAt: stamp,
+    });
+    expect(stale.status).toBe(409);
+    expect(stale.body).toMatchObject({ changes: 0, skipped: "stale" });
+
+    // Deleted: a reseed stays out, a patch 404s, and a second delete succeeds.
+    expect(await send("DELETE", { where: { note_id: "s1" } })).toEqual({
+      status: 200,
+      body: { changes: 1 },
+    });
+    expect(await send("POST", { row: { note_id: "s1", body: "seed" }, ifAbsent: true })).toEqual({
+      status: 200,
+      body: { ok: true, changes: 0, skipped: "deleted" },
+    });
+    expect((await send("PATCH", { where: { note_id: "s1" }, patch: { body: "c" } })).status).toBe(
+      404,
+    );
+    expect(await send("DELETE", { where: { note_id: "s1" } })).toEqual({
+      status: 200,
+      body: { changes: 0, skipped: "deleted" },
+    });
+
+    // Never written: patch and delete both 404.
+    expect((await send("PATCH", { where: { note_id: "nope" }, patch: { body: "x" } })).status).toBe(
+      404,
+    );
+    expect((await send("DELETE", { where: { note_id: "nope" } })).status).toBe(404);
+  });
+
   it("refuses an undeclared table", async () => {
     const res = await appA.fetch("/app-data/db/not_declared", {
       method: "POST",

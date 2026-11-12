@@ -25,6 +25,7 @@
  */
 
 import type { HLCTimestamp } from "@starkeep/protocol-primitives";
+import type { CompiledQuery, Kysely } from "kysely";
 
 /** The part of an app-syncable wire entry these helpers read. */
 export interface KeyedRowEntry {
@@ -142,4 +143,43 @@ export function rowToWireEntry(
     return null;
   }
   return { timestamp, appId, table, op: "delete", row, where };
+}
+
+/** Why an app's own write changed nothing. Mirrors `AppSyncableSkipReason`. */
+export type RowSkipReason = "live" | "deleted" | "missing" | "stale";
+
+/**
+ * The read that explains a write that changed nothing: the row's tombstone and
+ * stamp, by its full key, tombstones included.
+ *
+ * Run only after an app's own write reports zero changes, and on DSQL inside
+ * the write's transaction, so the answer describes the state the write saw.
+ */
+export function buildRowProbe(
+  k: Kysely<Record<string, Record<string, unknown>>>,
+  table: string,
+  where: Record<string, unknown>,
+): CompiledQuery {
+  let query = k.selectFrom(table).select(["deleted_at", "updated_at"]);
+  for (const [column, value] of Object.entries(where)) {
+    query = query.where(column, "=", value);
+  }
+  return query.limit(1).compile();
+}
+
+/**
+ * The reason a write changed nothing, from the probe's row.
+ *
+ * Deleted wins over stale: a row deleted since the caller read it is gone, and
+ * a compare-and-set against it has nothing left to compare. A live row stops an
+ * insert only through `ifAbsent`, and stops an update or delete only through a
+ * stamp mismatch or a newer stamp, so `live` and `stale` split by operation.
+ */
+export function classifySkippedWrite(
+  op: "insert" | "update" | "delete",
+  probe: { readonly deleted_at?: unknown } | undefined,
+): RowSkipReason {
+  if (probe === undefined) return "missing";
+  if (probe.deleted_at !== null && probe.deleted_at !== undefined) return "deleted";
+  return op === "insert" ? "live" : "stale";
 }

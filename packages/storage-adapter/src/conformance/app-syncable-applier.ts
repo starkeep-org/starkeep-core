@@ -838,3 +838,294 @@ export const appSyncableApplierConformance: readonly ConformanceCase[] = [
     },
   },
 ];
+
+// ---------------------------------------------------------------------------
+// An app's own writes: counts, skip reasons and conditions
+// ---------------------------------------------------------------------------
+
+/** What an app's own write did. Mirrors `AppSyncableApplyOutcome`. */
+export interface WriteConformanceOutcome {
+  readonly changes: number;
+  readonly skipped?: "live" | "deleted" | "missing" | "stale";
+}
+
+/** The applier surface the write cases exercise. */
+export interface WriteConformanceApplier {
+  apply(
+    entry: KeyedRowEntry,
+    conditions?: { readonly ifAbsent?: boolean; readonly ifUpdatedAt?: string },
+  ): Promise<WriteConformanceOutcome | void> | WriteConformanceOutcome | void;
+}
+
+/**
+ * One implementation, ready for the write cases. Only the SQL appliers run
+ * these: an app's own writes never reach the sync-engine mock, so the mock has
+ * nothing to agree with.
+ */
+export interface WriteConformanceHarness {
+  readonly applier: WriteConformanceApplier;
+  readonly appId: string;
+  /** A table whose primary key is the single column `id`. */
+  readonly table: string;
+  /** A table whose primary key is `(tenant, id)`. */
+  readonly compositeTable: string;
+  /** The stored row for `id` in {@link table}, tombstones included. */
+  readRow(id: string): Promise<
+    | {
+        readonly payload: unknown;
+        readonly updated_at: unknown;
+        readonly deleted_at: unknown;
+      }
+    | undefined
+  >;
+}
+
+export interface WriteConformanceCase {
+  readonly name: string;
+  run(harness: WriteConformanceHarness): Promise<void>;
+}
+
+function expectOutcome(
+  actual: WriteConformanceOutcome | void,
+  expected: WriteConformanceOutcome,
+  what: string,
+): void {
+  const a = JSON.stringify(actual ?? null);
+  const e = JSON.stringify(expected);
+  if (a !== e) fail(`${what}: expected ${e}, got ${a}`);
+}
+
+function expectEqual(actual: unknown, expected: unknown, what: string): void {
+  if (actual !== expected) {
+    fail(`${what}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+  }
+}
+
+function writeInsert(
+  h: WriteConformanceHarness,
+  id: string,
+  ts: HLCTimestamp,
+  payload = `payload-${id}`,
+): KeyedRowEntry {
+  return {
+    timestamp: ts,
+    appId: h.appId,
+    table: h.table,
+    op: "insert",
+    row: { id, payload, updated_at: serialized(ts), deleted_at: null },
+  };
+}
+
+function writeUpdate(
+  h: WriteConformanceHarness,
+  id: string,
+  ts: HLCTimestamp,
+  payload: string,
+): KeyedRowEntry {
+  return {
+    timestamp: ts,
+    appId: h.appId,
+    table: h.table,
+    op: "update",
+    row: { payload, updated_at: serialized(ts) },
+    where: { id },
+  };
+}
+
+/** A delete as an app issues it: the key and nothing else. */
+function writeDelete(h: WriteConformanceHarness, id: string, ts: HLCTimestamp): KeyedRowEntry {
+  return { timestamp: ts, appId: h.appId, table: h.table, op: "delete", where: { id } };
+}
+
+/** A row written at 10 and deleted at 20. */
+async function seedTombstone(h: WriteConformanceHarness, id: string): Promise<void> {
+  await h.applier.apply(writeInsert(h, id, hlc(10)), {});
+  await h.applier.apply(writeDelete(h, id, hlc(20)), {});
+}
+
+export const appSyncableWriteConformance: readonly WriteConformanceCase[] = [
+  {
+    name: "an ifAbsent insert writes a key no row holds",
+    async run(h) {
+      const outcome = await h.applier.apply(writeInsert(h, "r1", hlc(10)), { ifAbsent: true });
+      expectOutcome(outcome, { changes: 1 }, "insert of a new key");
+      expectEqual((await h.readRow("r1"))?.payload, "payload-r1", "stored payload");
+    },
+  },
+  {
+    name: "an ifAbsent insert leaves a live row alone and says so",
+    async run(h) {
+      await h.applier.apply(writeInsert(h, "r1", hlc(10), "edited"), {});
+      const outcome = await h.applier.apply(writeInsert(h, "r1", hlc(20), "seed"), {
+        ifAbsent: true,
+      });
+      expectOutcome(outcome, { changes: 0, skipped: "live" }, "insert over a live row");
+      expectEqual((await h.readRow("r1"))?.payload, "edited", "payload after the skip");
+    },
+  },
+  {
+    // The case the option exists for: a reseed must not revive a row the user
+    // deleted. Reads hide tombstones, so no read beforehand can tell the two
+    // apart.
+    name: "an ifAbsent insert leaves a deleted row deleted, with its stamp",
+    async run(h) {
+      await seedTombstone(h, "r1");
+      const outcome = await h.applier.apply(writeInsert(h, "r1", hlc(30)), { ifAbsent: true });
+      expectOutcome(outcome, { changes: 0, skipped: "deleted" }, "insert over a tombstone");
+      const row = await h.readRow("r1");
+      expectEqual(row?.deleted_at === null, false, "row still deleted");
+      expectEqual(row?.updated_at, serialized(hlc(20)), "tombstone stamp");
+    },
+  },
+  {
+    name: "a plain insert still revives a deleted row",
+    async run(h) {
+      await seedTombstone(h, "r1");
+      const outcome = await h.applier.apply(writeInsert(h, "r1", hlc(30)), {});
+      expectOutcome(outcome, { changes: 1 }, "plain insert over a tombstone");
+      expectEqual((await h.readRow("r1"))?.deleted_at, null, "row live again");
+    },
+  },
+  {
+    name: "an ifAbsent insert compares the whole composite key",
+    async run(h) {
+      const entry = (tenant: string, ts: HLCTimestamp): KeyedRowEntry => ({
+        timestamp: ts,
+        appId: h.appId,
+        table: h.compositeTable,
+        op: "insert",
+        row: { tenant, id: "r1", payload: tenant, updated_at: serialized(ts), deleted_at: null },
+      });
+      expectOutcome(
+        await h.applier.apply(entry("acme", hlc(10)), { ifAbsent: true }),
+        { changes: 1 },
+        "first tenant",
+      );
+      expectOutcome(
+        await h.applier.apply(entry("globex", hlc(11)), { ifAbsent: true }),
+        { changes: 1 },
+        "second tenant, same id",
+      );
+      expectOutcome(
+        await h.applier.apply(entry("acme", hlc(12)), { ifAbsent: true }),
+        { changes: 0, skipped: "live" },
+        "first tenant again",
+      );
+    },
+  },
+  {
+    name: "an ifAbsent insert without the whole key is refused",
+    async run(h) {
+      await expectRejection("ifAbsent insert naming one of two key columns", async () => {
+        await h.applier.apply(
+          {
+            timestamp: hlc(10),
+            appId: h.appId,
+            table: h.compositeTable,
+            op: "insert",
+            row: { id: "r1", payload: "x", updated_at: serialized(hlc(10)), deleted_at: null },
+          },
+          { ifAbsent: true },
+        );
+      });
+    },
+  },
+  {
+    name: "an update counts the live row it patched",
+    async run(h) {
+      await h.applier.apply(writeInsert(h, "r1", hlc(10)), {});
+      const outcome = await h.applier.apply(writeUpdate(h, "r1", hlc(20), "patched"), {});
+      expectOutcome(outcome, { changes: 1 }, "update of a live row");
+      expectEqual((await h.readRow("r1"))?.payload, "patched", "stored payload");
+    },
+  },
+  {
+    name: "an update of a key no row holds reports missing",
+    async run(h) {
+      const outcome = await h.applier.apply(writeUpdate(h, "r1", hlc(20), "patched"), {});
+      expectOutcome(outcome, { changes: 0, skipped: "missing" }, "update of a missing key");
+      expectEqual(await h.readRow("r1"), undefined, "no row written");
+    },
+  },
+  {
+    // A patch used to land on the tombstone: it wrote its values, bumped the
+    // stamp so the deletion re-shipped, and reported one change.
+    name: "an update of a deleted row writes nothing and reports deleted",
+    async run(h) {
+      await seedTombstone(h, "r1");
+      const outcome = await h.applier.apply(writeUpdate(h, "r1", hlc(30), "patched"), {});
+      expectOutcome(outcome, { changes: 0, skipped: "deleted" }, "update of a tombstone");
+      const row = await h.readRow("r1");
+      expectEqual(row?.payload, "payload-r1", "tombstone payload");
+      expectEqual(row?.updated_at, serialized(hlc(20)), "tombstone stamp");
+    },
+  },
+  {
+    name: "an update with ifUpdatedAt applies while the stamp matches",
+    async run(h) {
+      await h.applier.apply(writeInsert(h, "r1", hlc(10)), {});
+      const outcome = await h.applier.apply(writeUpdate(h, "r1", hlc(20), "patched"), {
+        ifUpdatedAt: serialized(hlc(10)),
+      });
+      expectOutcome(outcome, { changes: 1 }, "update with a matching stamp");
+    },
+  },
+  {
+    name: "an update with a stale ifUpdatedAt writes nothing and reports stale",
+    async run(h) {
+      await h.applier.apply(writeInsert(h, "r1", hlc(10)), {});
+      await h.applier.apply(writeUpdate(h, "r1", hlc(20), "first"), {});
+      const outcome = await h.applier.apply(writeUpdate(h, "r1", hlc(30), "second"), {
+        ifUpdatedAt: serialized(hlc(10)),
+      });
+      expectOutcome(outcome, { changes: 0, skipped: "stale" }, "update with a stale stamp");
+      expectEqual((await h.readRow("r1"))?.payload, "first", "payload kept");
+    },
+  },
+  {
+    name: "a delete counts the live row it deleted",
+    async run(h) {
+      await h.applier.apply(writeInsert(h, "r1", hlc(10)), {});
+      const outcome = await h.applier.apply(writeDelete(h, "r1", hlc(20)), {});
+      expectOutcome(outcome, { changes: 1 }, "delete of a live row");
+    },
+  },
+  {
+    name: "a delete of a deleted row writes nothing and keeps the tombstone's stamp",
+    async run(h) {
+      await seedTombstone(h, "r1");
+      const outcome = await h.applier.apply(writeDelete(h, "r1", hlc(30)), {});
+      expectOutcome(outcome, { changes: 0, skipped: "deleted" }, "delete of a tombstone");
+      expectEqual((await h.readRow("r1"))?.updated_at, serialized(hlc(20)), "tombstone stamp");
+    },
+  },
+  {
+    name: "a delete of a key no row holds reports missing",
+    async run(h) {
+      const outcome = await h.applier.apply(writeDelete(h, "r1", hlc(30)), {});
+      expectOutcome(outcome, { changes: 0, skipped: "missing" }, "delete of a missing key");
+    },
+  },
+  {
+    name: "a delete with a stale ifUpdatedAt leaves the row live",
+    async run(h) {
+      await h.applier.apply(writeInsert(h, "r1", hlc(10)), {});
+      await h.applier.apply(writeUpdate(h, "r1", hlc(20), "edited"), {});
+      const outcome = await h.applier.apply(writeDelete(h, "r1", hlc(30)), {
+        ifUpdatedAt: serialized(hlc(10)),
+      });
+      expectOutcome(outcome, { changes: 0, skipped: "stale" }, "delete with a stale stamp");
+      expectEqual((await h.readRow("r1"))?.deleted_at, null, "row still live");
+    },
+  },
+  {
+    // Replays that change nothing are normal on the sync path, so the applier
+    // spends no read on explaining them.
+    name: "a sync write that changes nothing reports a count and no reason",
+    async run(h) {
+      await h.applier.apply(writeInsert(h, "r1", hlc(10)));
+      const outcome = await h.applier.apply(writeInsert(h, "r1", hlc(10)));
+      expectOutcome(outcome, { changes: 0 }, "replayed insert");
+    },
+  },
+];

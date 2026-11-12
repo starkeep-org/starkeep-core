@@ -13,7 +13,9 @@ import { describe, it } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import {
   appSyncableApplierConformance,
+  appSyncableWriteConformance,
   type ConformanceHarness,
+  type WriteConformanceHarness,
 } from "@starkeep/storage-adapter/conformance";
 import type { AppSyncableNamespace, AppSyncableNamespaceStore } from "@starkeep/shared-space-api";
 import { SqliteAppSyncableApplier } from "../src/app-syncable/apply.js";
@@ -23,7 +25,7 @@ const APP = "conformance-app";
 const TABLE = "test_rows";
 const COMPOSITE_TABLE = "tenant_rows";
 
-function makeHarness(): ConformanceHarness {
+function makeHarness(): ConformanceHarness & WriteConformanceHarness {
   const db = new DatabaseSync(":memory:");
   const fullName = appSyncableTableName(APP, TABLE);
   const compositeName = appSyncableTableName(APP, COMPOSITE_TABLE);
@@ -79,6 +81,11 @@ function makeHarness(): ConformanceHarness {
         .all()
         .map((row) => String((row as { id: string }).id));
     },
+    async readRow(id) {
+      return db
+        .prepare(`SELECT payload, updated_at, deleted_at FROM ${fullName} WHERE id = ?`)
+        .get(id) as { payload: unknown; updated_at: unknown; deleted_at: unknown } | undefined;
+    },
     async breakReads() {
       // The table still exists — `tableExists` goes on answering true — and
       // every read the applier issues names `node_id`, so each of them now
@@ -100,6 +107,14 @@ function makeHarness(): ConformanceHarness {
 
 describe("app-syncable applier conformance — SQLite", () => {
   for (const testCase of appSyncableApplierConformance) {
+    it(testCase.name, async () => {
+      await testCase.run(makeHarness());
+    });
+  }
+});
+
+describe("app-syncable write conformance — SQLite", () => {
+  for (const testCase of appSyncableWriteConformance) {
     it(testCase.name, async () => {
       await testCase.run(makeHarness());
     });

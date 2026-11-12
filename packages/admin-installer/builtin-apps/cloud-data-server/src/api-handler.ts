@@ -142,6 +142,7 @@ import {
   pageBacklog,
   BACKLOG_KINDS,
   FILE_RECORDS_TABLE,
+  rowWriteResponse,
   type ArchiveTrigger,
   type BacklogKind,
   type RecordQueryPlan,
@@ -5428,10 +5429,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
               event.isBase64Encoded && event.body
                 ? Buffer.from(event.body, "base64").toString("utf8")
                 : (event.body ?? "{}");
-            const body = JSON.parse(raw) as { row?: Record<string, unknown> };
+            const body = JSON.parse(raw) as { row?: Record<string, unknown>; ifAbsent?: boolean };
             if (!body.row) return clientErr("row is required", 400);
-            await view.insertRow(table, body.row);
-            return ok({ ok: true });
+            const result = await view.insertRow(table, body.row, { ifAbsent: body.ifAbsent });
+            const answer = rowWriteResponse("POST", result);
+            return ok(answer.body, answer.status);
           }
           if (method === "PATCH") {
             const raw =
@@ -5441,22 +5443,32 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
             const body = JSON.parse(raw) as {
               where?: Record<string, unknown>;
               patch?: Record<string, unknown>;
+              ifUpdatedAt?: string;
             };
             if (!body.where || !body.patch) {
               return clientErr("where and patch are required", 400);
             }
-            const changes = await view.updateRow(table, body.where, body.patch);
-            return ok({ changes });
+            const result = await view.updateRow(table, body.where, body.patch, {
+              ifUpdatedAt: body.ifUpdatedAt,
+            });
+            const answer = rowWriteResponse("PATCH", result);
+            return ok(answer.body, answer.status);
           }
           if (method === "DELETE") {
             const raw =
               event.isBase64Encoded && event.body
                 ? Buffer.from(event.body, "base64").toString("utf8")
                 : (event.body ?? "{}");
-            const body = JSON.parse(raw) as { where?: Record<string, unknown> };
+            const body = JSON.parse(raw) as {
+              where?: Record<string, unknown>;
+              ifUpdatedAt?: string;
+            };
             if (!body.where) return clientErr("where is required", 400);
-            const changes = await view.deleteRow(table, body.where);
-            return ok({ changes });
+            const result = await view.deleteRow(table, body.where, {
+              ifUpdatedAt: body.ifUpdatedAt,
+            });
+            const answer = rowWriteResponse("DELETE", result);
+            return ok(answer.body, answer.status);
           }
           // GET /app-data/db/<table> — the query grammar.
           //

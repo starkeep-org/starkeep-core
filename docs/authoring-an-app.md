@@ -582,10 +582,31 @@ The rest of this section lists the patterns that keep the rule from losing data.
 `/app-data/db/<table>`:
 
 - `POST` with `{"row": {...}}` upserts a row. On an existing key, the write
-  overwrites every column the body names and clears any deletion.
+  overwrites every column the body names and clears any deletion. Add
+  `"ifAbsent": true` to write only when no row holds the key (see "Seed with
+  `ifAbsent`" below).
 - `PATCH` with `{"where": {...}, "patch": {...}}` writes only the columns in
   `patch`. The `where` must name the whole primary key.
 - `DELETE` with `{"where": {...}}` records a deletion, and the deletion syncs.
+  The `where` must name the whole primary key.
+
+Each route reports what the write did:
+
+| Route                                  | Answer                                                 | Meaning                                                                     |
+| -------------------------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------- |
+| `POST`                                 | 200 `{"ok": true, "changes": 1}`                       | The row was written.                                                        |
+| `POST` with `ifAbsent`                 | 200 `{"ok": true, "changes": 0, "skipped": "live"}`    | A live row holds the key. Nothing was written.                              |
+| `POST` with `ifAbsent`                 | 200 `{"ok": true, "changes": 0, "skipped": "deleted"}` | A deleted row holds the key. Nothing was written.                           |
+| `PATCH`                                | 200 `{"changes": 1}`                                   | The live row was patched.                                                   |
+| `PATCH`                                | 404                                                    | No live row holds the key. A deleted row answers the same as a missing one. |
+| `DELETE`                               | 200 `{"changes": 1}`                                   | The live row was deleted.                                                   |
+| `DELETE`                               | 200 `{"changes": 0, "skipped": "deleted"}`             | The row was already deleted, so a retried delete succeeds.                  |
+| `DELETE`                               | 404                                                    | No row, live or deleted, ever held the key.                                 |
+| `PATCH` or `DELETE` with `ifUpdatedAt` | 409 `{"changes": 0, "skipped": "stale"}`               | The row changed since the read (see "Guard a read-modify-write" below).     |
+
+An MCP tool or an API built on these routes can pass the 404 straight through
+as "not found". No read beforehand is needed, and a read beforehand would race
+the write anyway.
 
 Edit with `PATCH`, and name only the changed columns. Never read a row, change
 one field and `POST` the whole row back. Two clients of one data server, such as
@@ -619,6 +640,33 @@ keeps one copy. Two sources work:
   id directly or through a name-based UUID (UUIDv5). The key exists only to
   compute the id and needs no column. The id survives content edits in later
   app versions.
+
+**Seed with `ifAbsent`.** Reads hide deleted rows, so an app cannot tell "the
+user deleted this starter row" from "this starter row was never written". A plain
+`POST` of a starter row therefore brings a deleted starter back. Post each
+starter row with `"ifAbsent": true` instead. The write lands only when no row,
+live or deleted, holds the key, so a reseed adds new starter rows and leaves
+deleted and edited ones alone. Every app version can then reseed on launch
+without a "seeded" flag. The guarantee holds on one surface. A surface that has
+not yet received a deletion from another surface still writes the seed, and the
+later write wins at sync.
+
+**Guard a read-modify-write with `ifUpdatedAt`.** `PATCH` protects the columns
+a patch leaves out, but two clients that change the same column from one read
+still lose one change. Appending to a notes column and incrementing a counter
+both fail this way. To guard such a change, read the row with `updated_at` in
+`select`, compute the new value, and send the stamp back:
+
+```
+PATCH /app-data/db/exercises
+{"where": {"id": "e1"}, "patch": {"notes": "…"}, "ifUpdatedAt": "<updated_at as read>"}
+```
+
+A 409 means another write landed first. Read the row again, recompute, and
+retry. `DELETE` accepts `ifUpdatedAt` too. The guard covers clients of one data
+server only. A row arriving over sync also changes `updated_at`, and two
+surfaces never compare stamps with each other, so the whole-row rule above
+still decides conflicts across surfaces.
 
 **Sort ordered lists with a primary-key tiebreak.** Two surfaces that each
 append to a list before syncing can write the same position. Sort by the
