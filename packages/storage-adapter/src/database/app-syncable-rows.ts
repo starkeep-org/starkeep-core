@@ -146,7 +146,38 @@ export function rowToWireEntry(
 }
 
 /** Why an app's own write changed nothing. Mirrors `AppSyncableSkipReason`. */
-export type RowSkipReason = "live" | "deleted" | "missing" | "stale";
+export type RowSkipReason = "live" | "deleted" | "missing" | "stale" | "superseded";
+
+/** The conditions an app's own write carried. Mirrors `AppSyncableWriteConditions`. */
+export interface RowWriteConditions {
+  readonly ifAbsent?: boolean;
+  readonly ifUpdatedAt?: string;
+}
+
+/**
+ * An `ifAbsent` insert needs the whole primary key in its row: without a key
+ * there is nothing for a row to be absent by.
+ */
+export function requireInsertKey(entry: KeyedRowEntry, pkColumns: readonly string[]): void {
+  if (keyedWhereFor(entry.row ?? {}, pkColumns) === null) {
+    throw new Error(
+      `ifAbsent insert for ${entry.appId}.${entry.table} needs the table's whole primary key in the row`,
+    );
+  }
+}
+
+/**
+ * The key {@link buildRowProbe} reads by: the primary key from an insert's row
+ * or from an update's or delete's `where`, else the `where` as the caller gave
+ * it.
+ */
+export function probeKeyFor(
+  entry: KeyedRowEntry,
+  pkColumns: readonly string[],
+): Record<string, unknown> {
+  const source = entry.op === "insert" ? (entry.row ?? {}) : (entry.where ?? {});
+  return keyedWhereFor(source, pkColumns) ?? entry.where ?? {};
+}
 
 /**
  * The read that explains a write that changed nothing: the row's tombstone and
@@ -168,18 +199,30 @@ export function buildRowProbe(
 }
 
 /**
- * The reason a write changed nothing, from the probe's row.
+ * The reason a write changed nothing, from the probe's row and the write's
+ * conditions.
  *
- * Deleted wins over stale: a row deleted since the caller read it is gone, and
- * a compare-and-set against it has nothing left to compare. A live row stops an
- * insert only through `ifAbsent`, and stops an update or delete only through a
- * stamp mismatch or a newer stamp, so `live` and `stale` split by operation.
+ * Deleted wins over the rest: a row deleted since the caller read it is gone,
+ * and a compare-and-set against it has nothing left to compare.
+ *
+ * A live row leaves three causes, and the conditions tell them apart:
+ *
+ * - `live`: an `ifAbsent` insert found the key held.
+ * - `stale`: the row's stamp no longer equals `ifUpdatedAt`.
+ * - `superseded`: the row carries a stamp at or above the write's own, so LWW
+ *   refused the write. A write with no condition can lose only this way, and so
+ *   can a compare-and-set whose stamp still matched.
  */
 export function classifySkippedWrite(
   op: "insert" | "update" | "delete",
-  probe: { readonly deleted_at?: unknown } | undefined,
+  probe: { readonly deleted_at?: unknown; readonly updated_at?: unknown } | undefined,
+  conditions: RowWriteConditions = {},
 ): RowSkipReason {
   if (probe === undefined) return "missing";
   if (probe.deleted_at !== null && probe.deleted_at !== undefined) return "deleted";
-  return op === "insert" ? "live" : "stale";
+  if (op === "insert") return conditions.ifAbsent ? "live" : "superseded";
+  if (conditions.ifUpdatedAt !== undefined && probe.updated_at !== conditions.ifUpdatedAt) {
+    return "stale";
+  }
+  return "superseded";
 }

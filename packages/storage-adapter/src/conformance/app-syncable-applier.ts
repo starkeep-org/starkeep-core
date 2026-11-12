@@ -846,7 +846,7 @@ export const appSyncableApplierConformance: readonly ConformanceCase[] = [
 /** What an app's own write did. Mirrors `AppSyncableApplyOutcome`. */
 export interface WriteConformanceOutcome {
   readonly changes: number;
-  readonly skipped?: "live" | "deleted" | "missing" | "stale";
+  readonly skipped?: "live" | "deleted" | "missing" | "stale" | "superseded";
 }
 
 /** The applier surface the write cases exercise. */
@@ -1116,6 +1116,71 @@ export const appSyncableWriteConformance: readonly WriteConformanceCase[] = [
       });
       expectOutcome(outcome, { changes: 0, skipped: "stale" }, "delete with a stale stamp");
       expectEqual((await h.readRow("r1"))?.deleted_at, null, "row still live");
+    },
+  },
+  {
+    name: "a delete with ifUpdatedAt applies while the stamp matches",
+    async run(h) {
+      await h.applier.apply(writeInsert(h, "r1", hlc(10)), {});
+      const outcome = await h.applier.apply(writeDelete(h, "r1", hlc(20)), {
+        ifUpdatedAt: serialized(hlc(10)),
+      });
+      expectOutcome(outcome, { changes: 1 }, "delete with a matching stamp");
+      expectEqual((await h.readRow("r1"))?.deleted_at === null, false, "row deleted");
+    },
+  },
+  {
+    // A compare-and-set against a row deleted since the read has nothing left
+    // to compare, so the caller hears that the row is gone.
+    name: "an update with ifUpdatedAt of a deleted row reports deleted, not stale",
+    async run(h) {
+      await seedTombstone(h, "r1");
+      const outcome = await h.applier.apply(writeUpdate(h, "r1", hlc(30), "patched"), {
+        ifUpdatedAt: serialized(hlc(10)),
+      });
+      expectOutcome(outcome, { changes: 0, skipped: "deleted" }, "stamped update of a tombstone");
+    },
+  },
+  {
+    // A row synced from a surface whose clock runs ahead can outrank the next
+    // local write. The write names no stamp, so the reason must not claim one.
+    name: "a plain insert that loses LWW reports superseded",
+    async run(h) {
+      await h.applier.apply(writeInsert(h, "r1", hlc(20), "newer"), {});
+      const outcome = await h.applier.apply(writeInsert(h, "r1", hlc(10), "older"), {});
+      expectOutcome(outcome, { changes: 0, skipped: "superseded" }, "older plain insert");
+      expectEqual((await h.readRow("r1"))?.payload, "newer", "payload kept");
+    },
+  },
+  {
+    name: "a plain update that loses LWW reports superseded",
+    async run(h) {
+      await h.applier.apply(writeInsert(h, "r1", hlc(20), "newer"), {});
+      const outcome = await h.applier.apply(writeUpdate(h, "r1", hlc(10), "older"), {});
+      expectOutcome(outcome, { changes: 0, skipped: "superseded" }, "older plain update");
+      expectEqual((await h.readRow("r1"))?.payload, "newer", "payload kept");
+    },
+  },
+  {
+    name: "a plain delete that loses LWW reports superseded and leaves the row live",
+    async run(h) {
+      await h.applier.apply(writeInsert(h, "r1", hlc(20)), {});
+      const outcome = await h.applier.apply(writeDelete(h, "r1", hlc(10)), {});
+      expectOutcome(outcome, { changes: 0, skipped: "superseded" }, "older plain delete");
+      expectEqual((await h.readRow("r1"))?.deleted_at, null, "row still live");
+    },
+  },
+  {
+    // The stamp check passed, so the row did not change since the read. The
+    // write lost on its own stamp, which is not what `stale` reports.
+    name: "an update with a matching ifUpdatedAt that loses LWW reports superseded",
+    async run(h) {
+      await h.applier.apply(writeInsert(h, "r1", hlc(20), "newer"), {});
+      const outcome = await h.applier.apply(writeUpdate(h, "r1", hlc(10), "older"), {
+        ifUpdatedAt: serialized(hlc(20)),
+      });
+      expectOutcome(outcome, { changes: 0, skipped: "superseded" }, "older stamped update");
+      expectEqual((await h.readRow("r1"))?.payload, "newer", "payload kept");
     },
   },
   {

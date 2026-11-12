@@ -25,10 +25,11 @@ import {
   buildNodeWatermarks,
   buildRowProbe,
   classifySkippedWrite,
-  keyedWhereFor,
   buildScanSinceForNode,
   collectSince,
   planNodeScans,
+  probeKeyFor,
+  requireInsertKey,
   requireKeyedWhere,
   rowToWireEntry,
   toDigestBuckets,
@@ -107,12 +108,8 @@ export class SqliteAppSyncableApplier implements AppSyncableApplier, ScanCapable
 
     // An app's own write that changed nothing: say why. node:sqlite is
     // synchronous, so no other write lands between the statement and this read.
-    const key =
-      keyedWhereFor(entry.op === "insert" ? (entry.row ?? {}) : (entry.where ?? {}), pkColumns) ??
-      entry.where ??
-      {};
-    const probe = this.selectRows(buildRowProbe(qb, fullName, key))[0];
-    return { changes: 0, skipped: classifySkippedWrite(entry.op, probe) };
+    const probe = this.selectRows(buildRowProbe(qb, fullName, probeKeyFor(entry, pkColumns)))[0];
+    return { changes: 0, skipped: classifySkippedWrite(entry.op, probe, conditions) };
   }
 
   private applyInsert(
@@ -471,18 +468,6 @@ export class SqliteAppSyncableApplier implements AppSyncableApplier, ScanCapable
       string,
       unknown
     >[];
-  }
-}
-
-/**
- * An `ifAbsent` insert needs the whole primary key in its row: without a key
- * there is nothing for a row to be absent by.
- */
-function requireInsertKey(entry: AppSyncableRowEntry, pkColumns: readonly string[]): void {
-  if (keyedWhereFor(entry.row ?? {}, pkColumns) === null) {
-    throw new Error(
-      `ifAbsent insert for ${entry.appId}.${entry.table} needs the table's whole primary key in the row`,
-    );
   }
 }
 

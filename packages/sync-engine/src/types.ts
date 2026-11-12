@@ -154,12 +154,16 @@ export interface AppSyncableWriteConditions {
  * - `live`: a live row holds the key (an `ifAbsent` insert).
  * - `deleted`: only a deleted row holds the key.
  * - `missing`: no row, live or deleted, holds the key.
- * - `stale`: the live row's `updated_at` differs from `ifUpdatedAt`, or is
- *   newer than the write's own stamp.
+ * - `stale`: the live row's `updated_at` differs from `ifUpdatedAt`.
+ * - `superseded`: the live row carries a stamp at or above the write's own, so
+ *   last-writer-wins refused the write.
  */
-export type AppSyncableSkipReason = "live" | "deleted" | "missing" | "stale";
+export type AppSyncableSkipReason = "live" | "deleted" | "missing" | "stale" | "superseded";
 
-/** What one write did. `skipped` is set exactly when `changes` is 0. */
+/**
+ * What one write did. `skipped` is set when a write that carried conditions
+ * changed nothing. A sync write that changes nothing reports `changes: 0` alone.
+ */
 export interface AppSyncableApplyOutcome {
   readonly changes: number;
   readonly skipped?: AppSyncableSkipReason;
