@@ -455,13 +455,13 @@ and show only the originals. Guidance:
   `image_enriched` table (caption, title, date override).
 - `files: true` — opt into an `apps/<appId>/syncable/` object-storage prefix for
   app-private blobs. Leave false for row-only apps. An app names each file by a
-  sub-key of its choosing, such as `snapshots/notes-1.json`:
+  sub-key of its choosing, such as `exports/notes-1.json`:
   - `POST /app-data/files/presign`, the `PUT`, then
     `POST /app-data/files/<subKey>/record` stores one;
   - `GET /app-data/files/<subKey>` and `POST /app-data/file-urls` sign URLs to
     read them;
   - `DELETE /app-data/files/<subKey>` deletes one;
-  - `GET /app-data/files?prefix=snapshots/&limit=…&page_token=…` lists them in
+  - `GET /app-data/files?prefix=exports/&limit=…&page_token=…` lists them in
     sub-key order. The response is `{files, truncated, page_token}`, and each
     file carries `sub_key`, `size_bytes`, `mime_type`, `original_filename` and
     `created_at`.
