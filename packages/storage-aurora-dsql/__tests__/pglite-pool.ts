@@ -1,32 +1,23 @@
 import { PGlite } from "@electric-sql/pglite";
+import { dropAllUserSchemas } from "./pglite-reset.js";
 
 /**
  * A file-level pool of PGlite databases for the conformance suites, so a case
  * does not pay a PGlite cold boot (about a second) for each database it needs.
  * `takeDatabase` hands out the next unused one, booting another only when none
- * is free, and resets it with `DROP SCHEMA ${schema} CASCADE` before the
- * harness re-runs its DDL. That schema is the only one the harnesses create,
- * and dropping it also undoes `breakReads`. Every database goes back to the
- * pool when the suite calls `releaseAll` after each case.
- *
- * `limit` is the most live databases a single case may hold. The applier suite
- * needs two (a case and its `peer()`); past the limit `takeDatabase` throws
- * rather than handing out a database another harness in the same case is still
- * using.
+ * is free, and resets it with `dropAllUserSchemas` before the harness re-runs
+ * its DDL; that also undoes `breakReads`. Every database goes back to the pool
+ * when the suite calls `releaseAll` after each case, so the pool settles at the
+ * most databases one case holds: two in the applier suite, for a case and its
+ * `peer()`.
  */
-export function createDatabasePool({ schema, limit }: { schema: string; limit: number }) {
+export function createDatabasePool() {
   const pool: { ready: Promise<PGlite>; inUse: boolean }[] = [];
 
   return {
     async takeDatabase(): Promise<PGlite> {
       let slot = pool.find((s) => !s.inUse);
       if (!slot) {
-        if (pool.length >= limit) {
-          throw new Error(
-            `a conformance case asked for more than ${limit} live databases; ` +
-              "raise POOL_LIMIT if a nested peer() is now intended",
-          );
-        }
         const pg = new PGlite();
         slot = { ready: pg.waitReady.then(() => pg), inUse: false };
         pool.push(slot);
@@ -34,7 +25,7 @@ export function createDatabasePool({ schema, limit }: { schema: string; limit: n
       // Claimed before the first await, so concurrent callers never share a slot.
       slot.inUse = true;
       const pg = await slot.ready;
-      await pg.exec(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+      await dropAllUserSchemas(pg);
       return pg;
     },
 

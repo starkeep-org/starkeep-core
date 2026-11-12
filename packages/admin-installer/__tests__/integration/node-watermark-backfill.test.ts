@@ -16,7 +16,7 @@ import {
   backfillNodeWatermarks,
   createNodeWatermarkTable,
 } from "../../src/node-watermark-ddl";
-import { dropAllUserSchemas } from "../pglite-reset";
+import { dropAllUserSchemas } from "../../../storage-aurora-dsql/__tests__/pglite-reset";
 
 let pg: PGlite;
 let db: Kysely<Record<string, never>>;

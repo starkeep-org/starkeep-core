@@ -60,15 +60,10 @@ const SCHEMA = `app_${APP.replace(/-/g, "_")}`;
  * appId as the sender. Two databases is the honest way to get two stores with
  * one identity.
  *
- * The databases come from the file-level pool in `../pglite-pool.ts`, sized
- * for the most a case needs: its own database and one `peer()`. A third means a
- * nested `peer()` the pool was not sized for, and `takeDatabase` throws.
+ * The databases come from the file-level pool in `../pglite-pool.ts`, which
+ * settles at two: a case's own database and its `peer()`.
  */
-const POOL_LIMIT = 2;
-const { takeDatabase, releaseAll, closeAll } = createDatabasePool({
-  schema: SCHEMA,
-  limit: POOL_LIMIT,
-});
+const { takeDatabase, releaseAll, closeAll } = createDatabasePool();
 
 afterEach(releaseAll);
 afterAll(closeAll);

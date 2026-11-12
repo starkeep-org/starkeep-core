@@ -23,7 +23,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import type { AppManifest } from "@starkeep/admin-manifest";
-import { dropAllUserSchemas } from "../pglite-reset";
+import { dropAllUserSchemas } from "../../../storage-aurora-dsql/__tests__/pglite-reset";
 
 const state = vi.hoisted(() => ({
   pg: null as unknown as import("@electric-sql/pglite").PGlite,

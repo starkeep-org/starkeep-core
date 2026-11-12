@@ -31,7 +31,7 @@ import {
   createAppNodeWatermarks,
   createSharedSchema,
 } from "../../../../../storage-aurora-dsql/__tests__/pg-shared-schema.js";
-import { dropAllUserSchemas } from "../pglite-reset.js";
+import { dropAllUserSchemas } from "../../../../../storage-aurora-dsql/__tests__/pglite-reset.js";
 import { createHash, sign } from "node:crypto";
 import { PutParameterCommand, ParameterAlreadyExists } from "@aws-sdk/client-ssm";
 import {
