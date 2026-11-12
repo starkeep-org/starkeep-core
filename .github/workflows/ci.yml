@@ -29,7 +29,18 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-      # The root `postinstall` builds every package through turbo.
+      # Turbo's local cache, so the postinstall build and `lint`/`typecheck`
+      # replay instead of rerunning. `github.sha` makes every run save (an
+      # exact-key hit never saves); `github.job` gives each job its own entry.
+      - uses: actions/cache@v4
+        with:
+          path: .turbo/cache
+          key: turbo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml', 'turbo.json') }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml', 'turbo.json') }}-
+            turbo-${{ runner.os }}-${{ github.job }}-
+      # The root `postinstall` runs `turbo run build`, which restores unchanged
+      # packages from the cache above and builds the rest.
       - run: pnpm install --frozen-lockfile
       # A pull request that changes what a published package ships must say what
       # it releases. On main, list what awaits the next manual release.
@@ -63,6 +74,14 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      # Turbo's cache, per job; see tier-1.
+      - uses: actions/cache@v4
+        with:
+          path: .turbo/cache
+          key: turbo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml', 'turbo.json') }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml', 'turbo.json') }}-
+            turbo-${{ runner.os }}-${{ github.job }}-
       - run: pnpm install --frozen-lockfile
       - run: pnpm turbo run test:integration --concurrency=2
 
@@ -79,8 +98,29 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      # Turbo's cache, per job; see tier-1.
+      - uses: actions/cache@v4
+        with:
+          path: .turbo/cache
+          key: turbo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml', 'turbo.json') }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml', 'turbo.json') }}-
+            turbo-${{ runner.os }}-${{ github.job }}-
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @starkeep/e2e exec playwright install --with-deps chromium
+      # Chromium from the cache, keyed on the installed Playwright version; on a
+      # hit only the system libraries (apt) still install.
+      - id: playwright-version
+        run: echo "version=$(node -p "require('./node_modules/@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+        working-directory: e2e
+      - id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+      - if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: pnpm --filter @starkeep/e2e exec playwright install --with-deps chromium
+      - if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: pnpm --filter @starkeep/e2e exec playwright install-deps chromium
       - run: pnpm test:e2e
       - if: failure()
         uses: actions/upload-artifact@v4
@@ -108,6 +148,14 @@ jobs:
           cache-dependency-path: |
             pnpm-lock.yaml
             example-app/pnpm-lock.yaml
+      # Turbo's cache, per job; see tier-1.
+      - uses: actions/cache@v4
+        with:
+          path: .turbo/cache
+          key: turbo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml', 'turbo.json') }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('pnpm-lock.yaml', 'turbo.json') }}-
+            turbo-${{ runner.os }}-${{ github.job }}-
       # Core's install: the platform the harness boots.
       - run: pnpm install --frozen-lockfile
       - run: pnpm install --frozen-lockfile
@@ -118,7 +166,21 @@ jobs:
         working-directory: example-app
         env:
           STARKEEP_CORE_DIR: ${{ github.workspace }}
-      - run: pnpm --filter @example-app/e2e exec playwright install --with-deps chromium
+      # Chromium from the cache, keyed on the installed Playwright version; on a
+      # hit only the system libraries (apt) still install.
+      - id: playwright-version
+        run: echo "version=$(node -p "require('./node_modules/@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+        working-directory: example-app/e2e
+      - id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
+      - if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: pnpm --filter @example-app/e2e exec playwright install --with-deps chromium
+        working-directory: example-app
+      - if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: pnpm --filter @example-app/e2e exec playwright install-deps chromium
         working-directory: example-app
       - run: pnpm test:e2e
         working-directory: example-app
