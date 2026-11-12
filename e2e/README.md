@@ -40,5 +40,10 @@ this repository.
   protection treats the bare IP as cross-origin, silently drops the turbopack
   HMR websocket, and hydration never completes (pages render their SSR shell
   and stay frozen).
+- admin-web's and Drive's clients are served from their `dist/`. Outside Turbo
+  the harness runs `vite build` for each before booting it; under Turbo
+  (`TURBO_HASH` set, as in `pnpm test:e2e`) it skips that, because
+  `test:e2e`'s `dependsOn` already built them, and throws if `dist/index.html`
+  is missing.
 - The admin daemon-status badge is a TCP probe; specs wait for a real HTTP 200
   from the app before navigating to it.
