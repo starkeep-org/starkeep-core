@@ -13,8 +13,9 @@ import { configDefaults, defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     exclude: [...configDefaults.exclude, "builtin-apps/**"],
-    // PGlite boots in `beforeEach` in the integration suites, where the 10s
-    // hook default applies rather than testTimeout.
+    // The integration suites boot one PGlite per file in `beforeAll` (a WASM
+    // Postgres cold boot, slow on a loaded CI runner), where the 10s hook
+    // default applies rather than testTimeout.
     testTimeout: 30_000,
     hookTimeout: 30_000,
     projects: [
