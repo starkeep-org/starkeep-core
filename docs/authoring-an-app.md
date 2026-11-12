@@ -1314,12 +1314,14 @@ the same Dashboard. The cloud install does not need a local install first.
    card for an app with compute, and a mobile card for an app with a `mobile`
    block. Both cards come from the same Discover apps folder as the local card.
 2. **Approve.** Click **Install <name> in cloud** on the web card, or
-   **Register <name> Mobile** on the mobile card. Unless the app is installed
-   and running locally, the consent dialog from the local install opens first
-   and lists the app's file access and public links. A local install already
-   carries that approval, because the cloud deploys the manifest the local
-   install pinned. A redeploy of an app that is not installed locally asks
-   again, because the folder's manifest may have changed.
+   **Register <name> Mobile** on the mobile card. The consent dialog from
+   the local install opens first and lists the app's file access and public
+   links, unless an earlier approval covers the install. Two records count as an
+   earlier approval: an active local install, whose pinned manifest the cloud
+   deploys, and the manifest the last cloud install recorded in the app
+   registry. A redeploy or a second surface asks again only when the folder's
+   manifest asks for file access or public links that the recorded manifest
+   did not.
 3. **Watch the install.** The installer installs the app's dependencies the
    same way a local install does, runs the manifest's `bundle` command with
    `STARKEEP_APP_BASE_PATH` and `STARKEEP_BUNDLE_OUT` set (§7), creates the

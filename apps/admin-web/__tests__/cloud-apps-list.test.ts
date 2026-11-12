@@ -101,3 +101,39 @@ describe("credentials", () => {
     expect(((await res.json()) as { error: string }).error).toContain("finish cloud setup");
   });
 });
+
+describe("each row the dashboard reads", () => {
+  const row = {
+    app_id: "photos",
+    version: "1.2.0",
+    name: "Photos",
+    installed_at: new Date("2026-11-01T00:00:00Z"),
+    updated_at: new Date("2026-11-02T00:00:00Z"),
+    web_app: true,
+    mobile_app: null,
+    manifest: JSON.stringify({ id: "photos", infraRequirements: { publicSharing: true } }),
+  };
+
+  it("carries the manifest the last install deployed, parsed", async () => {
+    const { registryApp } = await import("../src/routes/apps-cloud-list");
+    expect(registryApp(row)).toEqual({
+      appId: "photos",
+      version: "1.2.0",
+      name: "Photos",
+      installedAt: "2026-11-01T00:00:00.000Z",
+      updatedAt: "2026-11-02T00:00:00.000Z",
+      webApp: true,
+      mobileApp: false,
+      manifest: { id: "photos", infraRequirements: { publicSharing: true } },
+    });
+  });
+
+  it.each([
+    ["a row that predates the column", null],
+    ["text that does not parse", "{ not json"],
+    ["text that is not an object", "42"],
+  ])("carries no manifest for %s, so the dashboard asks", async (_case, manifest) => {
+    const { registryApp } = await import("../src/routes/apps-cloud-list");
+    expect(registryApp({ ...row, manifest }).manifest).toBeNull();
+  });
+});
