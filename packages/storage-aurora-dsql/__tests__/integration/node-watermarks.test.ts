@@ -9,7 +9,7 @@
  * single-flight guard throws here, where the broker only warns. PGlite stands in for DSQL for
  * the reason `app-syncable-conformance.test.ts` gives.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import {
   createDataRecord,
@@ -42,6 +42,7 @@ import { assertOwnerScoped } from "../../src/owner-scope.js";
 import { ownerScopedCompiler } from "../../src/query-builder.js";
 import type { DatabaseClient } from "../../src/types.js";
 import { createAppNodeWatermarks, createSharedSchema } from "../pg-shared-schema.js";
+import { dropAllUserSchemas } from "../pglite-reset.js";
 
 const A = "user-a";
 const B = "user-b";
@@ -122,9 +123,18 @@ async function uninstallMemo(): Promise<void> {
   memoInstalled = false;
 }
 
-beforeEach(async () => {
+// One PGlite per file; each test starts from dropAllUserSchemas + the DDL below.
+beforeAll(async () => {
   pg = new PGlite();
   await pg.waitReady;
+});
+
+afterAll(async () => {
+  await pg.close();
+});
+
+beforeEach(async () => {
+  await dropAllUserSchemas(pg);
   statements = [];
   await createSharedSchema(pg);
   await pg.exec(`
@@ -138,10 +148,6 @@ beforeEach(async () => {
   `);
   await createAppNodeWatermarks(pg, "app_starkeep_drive");
   await installMemo();
-});
-
-afterEach(async () => {
-  await pg.close();
 });
 
 /** A stamp by `nodeId` at wall time `wall`. */
