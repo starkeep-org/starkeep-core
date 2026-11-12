@@ -129,8 +129,58 @@ export interface AppSyncableRowEntry {
   readonly where?: Record<string, unknown>;
 }
 
+/**
+ * Conditions an app's own write may carry. They never travel on the sync wire:
+ * a peer's entry already won LWW where it was written, so the receiving applier
+ * has nothing to check it against.
+ */
+export interface AppSyncableWriteConditions {
+  /**
+   * Insert only when no row holds the key, counting a deleted row as holding
+   * it. Without this, an insert revives a deleted row.
+   */
+  readonly ifAbsent?: boolean;
+  /**
+   * Update or delete only when the live row's `updated_at` still equals this
+   * serialized HLC. Guards one surface only: a row arriving over sync changes
+   * `updated_at` too, and two surfaces never compare against each other.
+   */
+  readonly ifUpdatedAt?: string;
+}
+
+/**
+ * Why a write changed nothing.
+ *
+ * - `live`: a live row holds the key (an `ifAbsent` insert).
+ * - `deleted`: only a deleted row holds the key.
+ * - `missing`: no row, live or deleted, holds the key.
+ * - `stale`: the live row's `updated_at` differs from `ifUpdatedAt`, or is
+ *   newer than the write's own stamp.
+ */
+export type AppSyncableSkipReason = "live" | "deleted" | "missing" | "stale";
+
+/** What one write did. `skipped` is set exactly when `changes` is 0. */
+export interface AppSyncableApplyOutcome {
+  readonly changes: number;
+  readonly skipped?: AppSyncableSkipReason;
+}
+
 export interface AppSyncableApplier {
-  apply(entry: AppSyncableRowEntry): Promise<void> | void;
+  /**
+   * Apply one row write with LWW on `updated_at`.
+   *
+   * `conditions` marks the write as an app's own write. Only then does the
+   * applier classify a write that changed nothing, which costs one extra read.
+   * The sync path passes none, because replays that change nothing are normal
+   * there and nobody reads the reason.
+   *
+   * An update or a key-only delete matches live rows only. A delete that
+   * arrives over sync carries the whole row and lands either way.
+   */
+  apply(
+    entry: AppSyncableRowEntry,
+    conditions?: AppSyncableWriteConditions,
+  ): Promise<AppSyncableApplyOutcome | void> | AppSyncableApplyOutcome | void;
 }
 
 /** Page returned by `ScanCapableApplier.scanSince`. */

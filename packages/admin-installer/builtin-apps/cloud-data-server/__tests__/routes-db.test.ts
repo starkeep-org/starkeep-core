@@ -1807,7 +1807,7 @@ describe("/app-data routes", () => {
   it("inserts rows into a declared table via the LWW applier", async () => {
     const db = fakeDsqlWithGrants()
       .on(NS_SELECT, [notesNamespace])
-      .on(/insert into "app_appdata1"\."notes"/, []);
+      .on(/insert into "app_appdata1"\."notes"/, [{ written: 1 }]);
     setDbFactory(db);
     const res = await handler(
       signedEvent({
@@ -1819,7 +1819,7 @@ describe("/app-data routes", () => {
       context,
     );
     expect(res.statusCode).toBe(200);
-    expect(bodyOf(res)).toEqual({ ok: true });
+    expect(bodyOf(res)).toEqual({ ok: true, changes: 1 });
     const inserts = db.calls(/insert into "app_appdata1"\."notes"/);
     expect(inserts).toHaveLength(1);
     expect(inserts[0]!.values.slice(0, 2)).toEqual(["n1", "hi"]); // + updated_at, deleted_at
@@ -1914,7 +1914,7 @@ describe("/app-data routes", () => {
   it("updates and soft-deletes rows through the applier", async () => {
     const db = fakeDsqlWithGrants()
       .on(NS_SELECT, [notesNamespace])
-      .on(/update "app_appdata1"\."notes" set/, []);
+      .on(/update "app_appdata1"\."notes" set/, [{ written: 1 }]);
     setDbFactory(db);
     const patchRes = await handler(
       signedEvent({
@@ -1942,6 +1942,100 @@ describe("/app-data routes", () => {
     const updates = db.calls(/update "app_appdata1"\."notes" set/);
     expect(updates).toHaveLength(2);
     expect(updates[1]!.text).toMatch(/set "deleted_at"/);
+    // Both name live rows only, so neither lands on a tombstone.
+    expect(updates[0]!.text).toMatch(/"deleted_at" is null/);
+    expect(updates[1]!.text).toMatch(/"deleted_at" is null/);
+  });
+
+  /** A fake whose writes to `notes` change nothing, and whose probe finds `probe`. */
+  function unchangedWrites(probe: Record<string, unknown>[]) {
+    return fakeDsqlWithGrants()
+      .on(NS_SELECT, [notesNamespace])
+      .on(/^(update|insert into) "app_appdata1"\."notes"/, [])
+      .on(/select "deleted_at", "updated_at" from "app_appdata1"\."notes"/, probe);
+  }
+
+  it("reports a skipped ifAbsent insert with 200 and the reason", async () => {
+    const db = unchangedWrites([{ deleted_at: "1:0:n", updated_at: "1:0:n" }]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "appdata1",
+        method: "POST",
+        subPath: "/app-data/db/notes",
+        body: { row: { id: "n1", text: "seed" }, ifAbsent: true },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(bodyOf(res)).toEqual({ ok: true, changes: 0, skipped: "deleted" });
+    // The do-nothing insert, not the LWW upsert that would revive the row.
+    expect(db.calls(/insert into "app_appdata1"\."notes"/)[0]!.text).toMatch(/do nothing/);
+  });
+
+  it("404s a patch to a deleted row exactly as one to a missing row", async () => {
+    const patch = {
+      appId: "appdata1",
+      method: "PATCH" as const,
+      subPath: "/app-data/db/notes",
+      body: { where: { id: "n1" }, patch: { text: "new" } },
+    };
+    setDbFactory(unchangedWrites([]));
+    const missing = await handler(signedEvent(patch), context);
+    setDbFactory(unchangedWrites([{ deleted_at: "1:0:n", updated_at: "1:0:n" }]));
+    const deleted = await handler(signedEvent(patch), context);
+    expect(missing.statusCode).toBe(404);
+    expect(deleted.statusCode).toBe(404);
+    expect(bodyOf(deleted)).toEqual(bodyOf(missing));
+  });
+
+  it("409s a patch whose ifUpdatedAt no longer matches", async () => {
+    const db = unchangedWrites([{ deleted_at: null, updated_at: "2:0:n" }]);
+    setDbFactory(db);
+    const res = await handler(
+      signedEvent({
+        appId: "appdata1",
+        method: "PATCH",
+        subPath: "/app-data/db/notes",
+        body: { where: { id: "n1" }, patch: { text: "new" }, ifUpdatedAt: "1:0:n" },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(409);
+    expect(bodyOf(res)).toMatchObject({ changes: 0, skipped: "stale" });
+    expect(db.calls(/update "app_appdata1"\."notes"/)[0]!.values).toContain("1:0:n");
+  });
+
+  it("400s an ifUpdatedAt that is not a serialized HLC", async () => {
+    setDbFactory(unchangedWrites([]));
+    const res = await handler(
+      signedEvent({
+        appId: "appdata1",
+        method: "PATCH",
+        subPath: "/app-data/db/notes",
+        body: { where: { id: "n1" }, patch: { text: "new" }, ifUpdatedAt: "yesterday" },
+      }),
+      context,
+    );
+    expect(res.statusCode).toBe(400);
+    expect(bodyOf(res)["error"]).toMatch(/ifUpdatedAt/);
+  });
+
+  it("answers a delete of a deleted row with 200, and of a missing row with 404", async () => {
+    const del = {
+      appId: "appdata1",
+      method: "DELETE" as const,
+      subPath: "/app-data/db/notes",
+      body: { where: { id: "n1" } },
+    };
+    setDbFactory(unchangedWrites([{ deleted_at: "1:0:n", updated_at: "1:0:n" }]));
+    const again = await handler(signedEvent(del), context);
+    expect(again.statusCode).toBe(200);
+    expect(bodyOf(again)).toEqual({ changes: 0, skipped: "deleted" });
+
+    setDbFactory(unchangedWrites([]));
+    const missing = await handler(signedEvent(del), context);
+    expect(missing.statusCode).toBe(404);
   });
 
   it("400s writes to an undeclared table", async () => {

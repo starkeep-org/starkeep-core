@@ -1,6 +1,6 @@
 import type { HLCClock } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
-import type { ChangeEvent, ChangeNotifier } from "@starkeep/sync-engine";
+import type { AppSyncableSkipReason, ChangeEvent, ChangeNotifier } from "@starkeep/sync-engine";
 import type { ParsedQueryResult, QueryParams } from "./query/types.js";
 
 export interface ApiEndpointDefinition {
@@ -35,6 +35,15 @@ export interface ApiResponse {
 export type ApiHandler = (request: ApiRequest, context: ApiContext) => Promise<ApiResponse>;
 
 /**
+ * What one row write did: how many rows it changed and, when none, why.
+ * `skipped` is set exactly when `changes` is 0.
+ */
+export interface RowWriteResult {
+  readonly changes: number;
+  readonly skipped?: AppSyncableSkipReason;
+}
+
+/**
  * App-specific syncable data operations. Scoped to the calling app — the
  * `appId` is fixed at construction time by the harness so handlers cannot
  * accidentally touch another app's tables or files. Tables are referred to by
@@ -43,13 +52,37 @@ export type ApiHandler = (request: ApiRequest, context: ApiContext) => Promise<A
  * `apps/<appId>/syncable/`.
  */
 export interface AppSpecificOperations {
-  insertRow(table: string, row: Record<string, unknown>): Promise<void>;
+  /**
+   * Write a row. Without `ifAbsent` the write is an LWW upsert and revives a
+   * deleted row. With it, any row holding the key, live or deleted, stops the
+   * write, and the result names which one.
+   */
+  insertRow(
+    table: string,
+    row: Record<string, unknown>,
+    options?: { readonly ifAbsent?: boolean },
+  ): Promise<RowWriteResult>;
+  /**
+   * Patch one live row, named by its whole primary key. A deleted row counts
+   * as no match. `ifUpdatedAt` patches only while the row still carries that
+   * stamp.
+   */
   updateRow(
     table: string,
     where: Record<string, unknown>,
     patch: Record<string, unknown>,
-  ): Promise<number>;
-  deleteRow(table: string, where: Record<string, unknown>): Promise<number>;
+    options?: { readonly ifUpdatedAt?: string },
+  ): Promise<RowWriteResult>;
+  /**
+   * Delete one live row, named by its whole primary key. Deleting a deleted
+   * row writes nothing and reports `skipped: "deleted"`. `ifUpdatedAt`
+   * deletes only while the row still carries that stamp.
+   */
+  deleteRow(
+    table: string,
+    where: Record<string, unknown>,
+    options?: { readonly ifUpdatedAt?: string },
+  ): Promise<RowWriteResult>;
   /**
    * Ask a question of one of the app's own tables.
    *

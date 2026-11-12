@@ -10,15 +10,21 @@ import type {
   AppSyncableNamespaceStore,
   AppSyncableApplier,
   AppSyncableRowEntry,
+  AppSyncableWriteConditions,
   ChangeNotifier,
 } from "@starkeep/sync-engine";
-import type { AppFileEntry, AppSpecificOperations, ApiSubject } from "../types.js";
+import type { AppFileEntry, AppSpecificOperations, ApiSubject, RowWriteResult } from "../types.js";
 import { parseQuery } from "../query/parse.js";
 import { checkValue } from "../query/values.js";
 import { SYSTEM_COLUMN_NAMES } from "./columns.js";
 import type { ParsedQuery, ParsedQueryResult, QueryTableSchema } from "../query/types.js";
 import { validateTableName } from "./validation.js";
-import { FILE_RECORDS_TABLE, RESERVED_TABLE_NAMES, fileIndexCreatedAtProblem } from "./reserved.js";
+import {
+  FILE_RECORDS_TABLE,
+  RESERVED_TABLE_NAMES,
+  fileIndexCreatedAtProblem,
+  isSerializedHLC,
+} from "./reserved.js";
 
 export interface AppSpecificFactoryOptions {
   namespace: AppSyncableNamespaceStore;
@@ -68,6 +74,29 @@ function fileIndexInstant(key: string, value: unknown): string {
   const problem = fileIndexCreatedAtProblem(key, value);
   if (problem !== null) throw new CorruptFileIndexRowError(problem);
   return new Date(deserializeHLC(value as string).wallTime).toISOString();
+}
+
+/**
+ * Check a caller's write options before they reach the applier. An option of
+ * the wrong type is a caller error, and silently treating `"true"` as absent
+ * would turn a guarded write into an unguarded one.
+ */
+function writeConditions(options: {
+  readonly ifAbsent?: unknown;
+  readonly ifUpdatedAt?: unknown;
+}): AppSyncableWriteConditions {
+  const conditions: { ifAbsent?: boolean; ifUpdatedAt?: string } = {};
+  if (options.ifAbsent !== undefined) {
+    if (typeof options.ifAbsent !== "boolean") throw new Error("ifAbsent must be a boolean");
+    conditions.ifAbsent = options.ifAbsent;
+  }
+  if (options.ifUpdatedAt !== undefined) {
+    if (!isSerializedHLC(options.ifUpdatedAt)) {
+      throw new Error("ifUpdatedAt must be a row's updated_at, as a read returned it");
+    }
+    conditions.ifUpdatedAt = options.ifUpdatedAt;
+  }
+  return conditions;
 }
 
 /**
@@ -258,6 +287,23 @@ export function createAppSpecificFactory(
       await applier.apply(entry);
     }
 
+    /**
+     * Apply an app's own row write and report what it did. The conditions,
+     * even empty ones, ask the applier to say why a write changed nothing.
+     * Only a write that changed a row wakes the sync loop.
+     */
+    async function applyAppWrite(
+      entry: AppSyncableRowEntry,
+      conditions: AppSyncableWriteConditions,
+    ): Promise<RowWriteResult> {
+      const outcome = await applier.apply(entry, conditions);
+      if (!outcome) {
+        throw new Error("The configured applier reports no outcome for an app's own write");
+      }
+      if (outcome.changes > 0) emitLocalChange();
+      return outcome;
+    }
+
     function ensureFilesEnabled(): void {
       if (!ns!.filesEnabled) {
         throw new Error(`App "${appId}" did not opt in to syncable files`);
@@ -265,8 +311,9 @@ export function createAppSpecificFactory(
     }
 
     return {
-      async insertRow(table, row) {
+      async insertRow(table, row, options = {}) {
         resolveTable(table);
+        const conditions = writeConditions(options);
         const checked = validateRow(table, row);
         const ts = clock.now();
         const entry: AppSyncableRowEntry = {
@@ -276,12 +323,12 @@ export function createAppSpecificFactory(
           op: "insert",
           row: { ...checked, updated_at: serializeHLC(ts), deleted_at: null },
         };
-        await applier.apply(entry);
-        emitLocalChange();
+        return applyAppWrite(entry, conditions);
       },
 
-      async updateRow(table, where, patch) {
+      async updateRow(table, where, patch, options = {}) {
         resolveTable(table);
+        const conditions = writeConditions({ ifUpdatedAt: options.ifUpdatedAt });
         // Both halves: a patch writes values and a `where` compares them, and a
         // value that does not match its column would mean one thing on SQLite's
         // dynamic typing and another on Postgres. Both halves are normalized
@@ -298,14 +345,12 @@ export function createAppSpecificFactory(
           row: { ...checkedPatch, updated_at: serializeHLC(ts) },
           where: checkedWhere,
         };
-        await applier.apply(entry);
-        emitLocalChange();
-        // Return 1 as best-effort signal that the operation was dispatched.
-        return 1;
+        return applyAppWrite(entry, conditions);
       },
 
-      async deleteRow(table, where) {
+      async deleteRow(table, where, options = {}) {
         resolveTable(table);
+        const conditions = writeConditions({ ifUpdatedAt: options.ifUpdatedAt });
         const checkedWhere = validateRow(table, where);
         const ts = clock.now();
         const entry: AppSyncableRowEntry = {
@@ -315,9 +360,7 @@ export function createAppSpecificFactory(
           op: "delete",
           where: checkedWhere,
         };
-        await applier.apply(entry);
-        emitLocalChange();
-        return 1;
+        return applyAppWrite(entry, conditions);
       },
 
       async query(table, params) {

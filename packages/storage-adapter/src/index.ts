@@ -172,10 +172,13 @@ export {
 } from "./database/since-queries.js";
 
 export {
+  buildRowProbe,
+  classifySkippedWrite,
   keyedWhereFor,
   requireKeyedWhere,
   rowToWireEntry,
   type KeyedRowEntry,
+  type RowSkipReason,
 } from "./database/app-syncable-rows.js";
 
 export type { RawDatabase, RawStatement } from "./database/raw-database.js";

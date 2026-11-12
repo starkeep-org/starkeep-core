@@ -35,7 +35,9 @@ import { describe, it, afterAll, afterEach } from "vitest";
 import type { PGlite } from "@electric-sql/pglite";
 import {
   appSyncableApplierConformance,
+  appSyncableWriteConformance,
   type ConformanceHarness,
+  type WriteConformanceHarness,
 } from "@starkeep/storage-adapter/conformance";
 import type { AppSyncableNamespace, AppSyncableNamespaceStore } from "@starkeep/sync-engine";
 import { DsqlAppSyncableApplier } from "../../src/app-syncable/apply.js";
@@ -82,7 +84,7 @@ function clientFor(pg: PGlite): DatabaseClient {
   );
 }
 
-async function makeHarness(): Promise<ConformanceHarness> {
+async function makeHarness(): Promise<ConformanceHarness & WriteConformanceHarness> {
   const pg = await takeDatabase();
 
   // The same column set `dsql-ddl.ts` emits for a syncable table: the owner,
@@ -141,6 +143,14 @@ async function makeHarness(): Promise<ConformanceHarness> {
       );
       return result.rows.map((r) => String(r.id));
     },
+    async readRow(id) {
+      const result = await pg.query<{
+        payload: unknown;
+        updated_at: unknown;
+        deleted_at: unknown;
+      }>(`SELECT payload, updated_at, deleted_at FROM ${SCHEMA}.${TABLE} WHERE id = $1`, [id]);
+      return result.rows[0];
+    },
     async breakReads() {
       // The table still exists — `tableExists` goes on answering true — and
       // every read the applier issues names `node_id`, so each of them now
@@ -156,6 +166,18 @@ async function makeHarness(): Promise<ConformanceHarness> {
 
 describe("app-syncable applier conformance — the DSQL applier, executed", () => {
   for (const testCase of appSyncableApplierConformance) {
+    it(
+      testCase.name,
+      async () => {
+        await testCase.run(await makeHarness());
+      },
+      60_000,
+    );
+  }
+});
+
+describe("app-syncable write conformance — the DSQL applier, executed", () => {
+  for (const testCase of appSyncableWriteConformance) {
     it(
       testCase.name,
       async () => {

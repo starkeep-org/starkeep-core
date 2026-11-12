@@ -40,6 +40,10 @@ import {
 import { queryParamsFrom } from "../../packages/shared-space-api/src/query/params.js";
 import { appFileListingJson } from "../../packages/shared-space-api/src/app-syncable/file-listing.js";
 import {
+  rowWriteResponse,
+  type RowWriteResponse,
+} from "../../packages/shared-space-api/src/app-syncable/row-write-response.js";
+import {
   planLabelQuery,
   planMetadataQuery,
   type SharedQueryPlan,
@@ -2871,39 +2875,50 @@ async function main() {
           const table = decodeURIComponent(dbMatch[1]!);
           try {
             if (req.method === "POST") {
-              const body = JSON.parse(await readBody(req)) as { row?: Record<string, unknown> };
+              const body = JSON.parse(await readBody(req)) as {
+                row?: Record<string, unknown>;
+                ifAbsent?: boolean;
+              };
               if (!body.row) {
                 res.writeHead(400);
                 json(res, { error: "row is required" });
                 return;
               }
-              await view.insertRow(table, body.row);
-              json(res, { ok: true });
+              const result = await view.insertRow(table, body.row, { ifAbsent: body.ifAbsent });
+              sendRowWrite(res, rowWriteResponse("POST", result));
               return;
             }
             if (req.method === "PATCH") {
               const body = JSON.parse(await readBody(req)) as {
                 where?: Record<string, unknown>;
                 patch?: Record<string, unknown>;
+                ifUpdatedAt?: string;
               };
               if (!body.where || !body.patch) {
                 res.writeHead(400);
                 json(res, { error: "where and patch are required" });
                 return;
               }
-              const changes = await view.updateRow(table, body.where, body.patch);
-              json(res, { changes });
+              const result = await view.updateRow(table, body.where, body.patch, {
+                ifUpdatedAt: body.ifUpdatedAt,
+              });
+              sendRowWrite(res, rowWriteResponse("PATCH", result));
               return;
             }
             if (req.method === "DELETE") {
-              const body = JSON.parse(await readBody(req)) as { where?: Record<string, unknown> };
+              const body = JSON.parse(await readBody(req)) as {
+                where?: Record<string, unknown>;
+                ifUpdatedAt?: string;
+              };
               if (!body.where) {
                 res.writeHead(400);
                 json(res, { error: "where is required" });
                 return;
               }
-              const changes = await view.deleteRow(table, body.where);
-              json(res, { changes });
+              const result = await view.deleteRow(table, body.where, {
+                ifUpdatedAt: body.ifUpdatedAt,
+              });
+              sendRowWrite(res, rowWriteResponse("DELETE", result));
               return;
             }
             // GET /app-data/db/<table> — the query grammar.
@@ -4720,6 +4735,12 @@ function isPeerGoneError(err: unknown): boolean {
 function json(res: import("node:http").ServerResponse, body: unknown) {
   if (!res.headersSent) res.setHeader("Content-Type", "application/json");
   res.end(JSON.stringify(body));
+}
+
+/** Send a row write's answer, with the status `rowWriteResponse` chose. */
+function sendRowWrite(res: import("node:http").ServerResponse, answer: RowWriteResponse) {
+  res.statusCode = answer.status;
+  json(res, answer.body);
 }
 
 /**

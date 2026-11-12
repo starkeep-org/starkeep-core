@@ -83,6 +83,11 @@ export const FILE_RECORDS_TABLE_INFO: AppSyncableTableInfo = appSyncableTableInf
 /** A serialized HLC: hex wall time, hex counter, node id (`serializeHLC`). */
 const SERIALIZED_HLC = /^[0-9a-f]+:[0-9a-f]+:.+$/;
 
+/** Whether `value` has the form `serializeHLC` writes. */
+export function isSerializedHLC(value: unknown): value is string {
+  return typeof value === "string" && SERIALIZED_HLC.test(value);
+}
+
 /**
  * What is wrong with a file-index row's `created_at`, or `null` when the value
  * is a serialized HLC. The check is not `deserializeHLC`'s, because that one
@@ -90,7 +95,7 @@ const SERIALIZED_HLC = /^[0-9a-f]+:[0-9a-f]+:.+$/;
  * reads as a moment in 1970.
  */
 export function fileIndexCreatedAtProblem(id: unknown, value: unknown): string | null {
-  if (typeof value === "string" && SERIALIZED_HLC.test(value)) return null;
+  if (isSerializedHLC(value)) return null;
   return `File index row ${String(id)} has created_at ${JSON.stringify(value)}, not a serialized HLC`;
 }
 

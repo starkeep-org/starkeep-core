@@ -1,6 +1,9 @@
 export type {
   AppSyncableRowEntry,
   AppSyncableApplier,
+  AppSyncableApplyOutcome,
+  AppSyncableSkipReason,
+  AppSyncableWriteConditions,
   ScanCapableApplier,
   ScanSincePage,
   SyncTransport,

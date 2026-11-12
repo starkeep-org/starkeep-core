@@ -4,7 +4,9 @@ import type { HLCTimestamp } from "@starkeep/protocol-primitives";
 import { serializeHLC, deserializeHLC } from "@starkeep/protocol-primitives";
 import type {
   AppSyncableApplier,
+  AppSyncableApplyOutcome,
   AppSyncableRowEntry,
+  AppSyncableWriteConditions,
   AppSyncableNamespaceStore,
   ScanCapableApplier,
   ScanSincePage,
@@ -21,6 +23,9 @@ import {
   type ParsedQueryResult,
   buildBucketDigest,
   buildNodeWatermarks,
+  buildRowProbe,
+  classifySkippedWrite,
+  keyedWhereFor,
   buildScanSinceForNode,
   collectSince,
   planNodeScans,
@@ -34,15 +39,22 @@ import { compiler as qb } from "../query-builder.js";
 import { appSyncableTableName } from "./namespace.js";
 import { booleanColumnNames, fromSqliteRows, toSqliteParam } from "../row-values.js";
 
-// Both go through `toSqliteParam` for the reason the read path does: SQLite
-// binds no boolean, and a declared `boolean` column reaches here as one from
-// either writer — an app's own write, normalized by `validateRow`, or a peer's
-// row off the sync wire, which Postgres returns as a real boolean. The casts
-// these two used to carry admitted a boolean and left the driver to reject it.
-function runCompiled(db: RawDatabase, compiled: CompiledQuery): void {
-  db.prepare(compiled.sql).run(...compiled.parameters.map(toSqliteParam));
+/**
+ * Run a write that ends in `RETURNING`, and count the rows it wrote. Counted
+ * from the returned rows rather than from `run()`, whose report differs by
+ * driver (see `RawStatement.run`).
+ */
+function countCompiled(db: RawDatabase, compiled: CompiledQuery): number {
+  return allCompiled<unknown>(db, compiled).length;
 }
 
+/** Selected by every counted write, so the count is the number of rows written. */
+const WRITTEN = sql<number>`1`.as("written");
+
+// Parameters go through `toSqliteParam` for the reason the read path does:
+// SQLite binds no boolean, and a declared `boolean` column reaches here as one
+// from either writer — an app's own write, normalized by `validateRow`, or a
+// peer's row off the sync wire, which Postgres returns as a real boolean.
 function allCompiled<T>(db: RawDatabase, compiled: CompiledQuery): T[] {
   return db.prepare(compiled.sql).all(...compiled.parameters.map(toSqliteParam)) as T[];
 }
@@ -64,7 +76,10 @@ export class SqliteAppSyncableApplier implements AppSyncableApplier, ScanCapable
     private readonly namespace: AppSyncableNamespaceStore,
   ) {}
 
-  apply(entry: AppSyncableRowEntry): void {
+  apply(
+    entry: AppSyncableRowEntry,
+    conditions?: AppSyncableWriteConditions,
+  ): AppSyncableApplyOutcome {
     const ns = this.namespace.get(entry.appId);
     if (!ns) {
       throw new Error(`SqliteAppSyncableApplier: app "${entry.appId}" not installed`);
@@ -80,36 +95,68 @@ export class SqliteAppSyncableApplier implements AppSyncableApplier, ScanCapable
     const fullName = appSyncableTableName(entry.appId, entry.table);
     const { pkColumns } = tableInfo;
 
+    let changes: number;
     if (entry.op === "insert") {
-      this.applyInsert(fullName, pkColumns, entry);
+      changes = this.applyInsert(fullName, pkColumns, entry, conditions);
     } else if (entry.op === "update") {
-      this.applyUpdate(fullName, pkColumns, entry);
+      changes = this.applyUpdate(fullName, pkColumns, entry, conditions);
     } else {
-      this.applyDelete(fullName, pkColumns, entry);
+      changes = this.applyDelete(fullName, pkColumns, entry, conditions);
     }
+    if (changes > 0 || conditions === undefined) return { changes };
+
+    // An app's own write that changed nothing: say why. node:sqlite is
+    // synchronous, so no other write lands between the statement and this read.
+    const key =
+      keyedWhereFor(entry.op === "insert" ? (entry.row ?? {}) : (entry.where ?? {}), pkColumns) ??
+      entry.where ??
+      {};
+    const probe = this.selectRows(buildRowProbe(qb, fullName, key))[0];
+    return { changes: 0, skipped: classifySkippedWrite(entry.op, probe) };
   }
 
-  private applyInsert(fullName: string, pkColumns: string[], entry: AppSyncableRowEntry): void {
+  private applyInsert(
+    fullName: string,
+    pkColumns: string[],
+    entry: AppSyncableRowEntry,
+    conditions: AppSyncableWriteConditions | undefined,
+  ): number {
     const row = withNodeId(entry.row ?? {}, entry);
     const cols = Object.keys(row);
-    if (cols.length === 0) return;
+    if (cols.length === 0) return 0;
+
+    if (conditions?.ifAbsent) {
+      // Any row holding the key stops the insert, a tombstone included: the
+      // point is to tell "deleted" from "never written", which the LWW upsert
+      // below cannot, since it revives a tombstone it outranks.
+      requireInsertKey(entry, pkColumns);
+      return countCompiled(
+        this.db,
+        qb
+          .insertInto(fullName)
+          .values({ ...row })
+          .onConflict((oc) => oc.columns(pkColumns as never[]).doNothing())
+          .returning(WRITTEN)
+          .compile(),
+      );
+    }
 
     const updateCols = cols.filter((c) => !pkColumns.includes(c));
     if (pkColumns.length === 0 || updateCols.length === 0) {
       // No PK declared (or nothing beyond it) — just insert, ignoring duplicates.
-      runCompiled(
+      return countCompiled(
         this.db,
         qb
           .insertInto(fullName)
           .orIgnore()
           .values({ ...row })
+          .returning(WRITTEN)
           .compile(),
       );
-      return;
     }
 
     // UPSERT with LWW: only overwrite if the incoming updated_at is newer.
-    runCompiled(
+    return countCompiled(
       this.db,
       qb
         .insertInto(fullName)
@@ -122,6 +169,7 @@ export class SqliteAppSyncableApplier implements AppSyncableApplier, ScanCapable
             )
             .where(sql.ref("excluded.updated_at"), ">", sql.ref(`${fullName}.updated_at`)),
         )
+        .returning(WRITTEN)
         .compile(),
     );
   }
@@ -130,14 +178,15 @@ export class SqliteAppSyncableApplier implements AppSyncableApplier, ScanCapable
     fullName: string,
     pkColumns: readonly string[],
     entry: AppSyncableRowEntry,
-  ): void {
+    conditions: AppSyncableWriteConditions | undefined,
+  ): number {
     // node_id rides along whenever updated_at changes (it's derived from it).
     const rawPatch = entry.row ?? {};
     const patch = rawPatch["updated_at"] ? withNodeId(rawPatch, entry) : rawPatch;
     const where = requireKeyedWhere(entry, "update", pkColumns);
     const patchCols = Object.keys(patch);
     const whereCols = Object.keys(where);
-    if (patchCols.length === 0) return;
+    if (patchCols.length === 0) return 0;
 
     // Only apply if the incoming updated_at is strictly newer (LWW).
     const incomingUpdatedAt = patch["updated_at"] as string | undefined;
@@ -156,14 +205,24 @@ export class SqliteAppSyncableApplier implements AppSyncableApplier, ScanCapable
         eb.or([eb("updated_at", "is", null), eb("updated_at", "<", incomingUpdatedAt)]),
       );
     }
-    runCompiled(this.db, query.compile());
+    // Live rows only. A patch that landed on a tombstone wrote its values,
+    // bumped the stamp and re-shipped the deletion, while the row stayed
+    // deleted and the caller heard "1 change". Sync never sends an update
+    // (`rowToWireEntry` ships live rows as inserts), so this binds only an
+    // app's own writes.
+    query = query.where("deleted_at", "is", null);
+    if (conditions?.ifUpdatedAt !== undefined) {
+      query = query.where("updated_at", "=", conditions.ifUpdatedAt);
+    }
+    return countCompiled(this.db, query.returning(WRITTEN).compile());
   }
 
   private applyDelete(
     fullName: string,
     pkColumns: readonly string[],
     entry: AppSyncableRowEntry,
-  ): void {
+    conditions: AppSyncableWriteConditions | undefined,
+  ): number {
     const where = requireKeyedWhere(entry, "delete", pkColumns);
     const whereCols = Object.keys(where);
     // Soft-delete: set deleted_at and updated_at (and node_id with it).
@@ -195,7 +254,7 @@ export class SqliteAppSyncableApplier implements AppSyncableApplier, ScanCapable
     if (carriesFullRow) {
       const row = withNodeId({ ...entry.row, updated_at: ts, deleted_at: ts }, entry);
       const updateCols = Object.keys(row).filter((c) => !pkColumns.includes(c));
-      runCompiled(
+      return countCompiled(
         this.db,
         qb
           .insertInto(fullName)
@@ -210,9 +269,9 @@ export class SqliteAppSyncableApplier implements AppSyncableApplier, ScanCapable
               // reason: a replayed tombstone must not move a newer row back.
               .where(sql.ref("excluded.updated_at"), ">", sql.ref(`${fullName}.updated_at`)),
           )
+          .returning(WRITTEN)
           .compile(),
       );
-      return;
     }
 
     let query = qb
@@ -223,7 +282,13 @@ export class SqliteAppSyncableApplier implements AppSyncableApplier, ScanCapable
     }
     // LWW guard: tombstone only rows the incoming timestamp supersedes.
     query = query.where((eb) => eb.or([eb("updated_at", "is", null), eb("updated_at", "<", ts)]));
-    runCompiled(this.db, query.compile());
+    // Live rows only: deleting a tombstone again writes nothing, so the
+    // deletion keeps its stamp and a retried delete re-ships nothing.
+    query = query.where("deleted_at", "is", null);
+    if (conditions?.ifUpdatedAt !== undefined) {
+      query = query.where("updated_at", "=", conditions.ifUpdatedAt);
+    }
+    return countCompiled(this.db, query.returning(WRITTEN).compile());
   }
 
   /**
@@ -406,6 +471,18 @@ export class SqliteAppSyncableApplier implements AppSyncableApplier, ScanCapable
       string,
       unknown
     >[];
+  }
+}
+
+/**
+ * An `ifAbsent` insert needs the whole primary key in its row: without a key
+ * there is nothing for a row to be absent by.
+ */
+function requireInsertKey(entry: AppSyncableRowEntry, pkColumns: readonly string[]): void {
+  if (keyedWhereFor(entry.row ?? {}, pkColumns) === null) {
+    throw new Error(
+      `ifAbsent insert for ${entry.appId}.${entry.table} needs the table's whole primary key in the row`,
+    );
   }
 }
 
