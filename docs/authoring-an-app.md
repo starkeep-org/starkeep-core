@@ -1254,7 +1254,9 @@ The checklist before a cloud install:
 
 ## Installing it
 
-The install path is identical for first-party and third-party apps:
+The install path is identical for first-party and third-party apps.
+
+### Install locally
 
 1. Add the app's folder, or a folder that holds it, in **Discover apps** on
    the Dashboard. A new install registers core's `example-app/` by default. A folder
@@ -1282,8 +1284,7 @@ The install path is identical for first-party and third-party apps:
    with that manifest whatever the scan finds later. When the folder's manifest
    changes, the card offers **Update from folder**, which asks for approval
    again only when the app's file access changed.
-4. For a cloud target, the installer installs the app's dependencies the same
-   way, runs your bundle command, and deploys the resulting handlers.
+4. For a cloud target, see "Install in your cloud" below.
 
 Install runs only these command shapes, matched by the program's bare name on
 `PATH` and never through a shell:
@@ -1301,6 +1302,54 @@ command and its folder, and you run it yourself before **Start**. **Start**
 still refuses an app whose declared dependencies do not resolve, and names the
 missing packages. Any other bundle command stops the cloud install before it
 deploys anything.
+
+### Install in your cloud
+
+An app whose manifest lists `cloud` in `targets` installs in the cloud from
+the same Dashboard. The cloud install does not need a local install first.
+
+1. **Prepare the cloud.** Deploy Starkeep Cloud and sign in to admin-web as
+   its admin, as the root [`README.md`](../README.md) describes in "Part B".
+   The **Cloud** section lists one card per surface the manifest offers: a web
+   card for an app with compute, and a mobile card for an app with a `mobile`
+   block. Both cards come from the same Discover apps folder as the local card.
+2. **Approve.** Click **Install <name> in cloud** on the web card, or
+   **Register <name> Mobile** on the mobile card. Unless the app is installed
+   and running locally, the consent dialog from the local install opens first
+   and lists the app's file access and public links. A local install already
+   carries that approval, because the cloud deploys the manifest the local
+   install pinned. A redeploy of an app that is not installed locally asks
+   again, because the folder's manifest may have changed.
+3. **Watch the install.** The installer installs the app's dependencies the
+   same way a local install does, runs the manifest's `bundle` command with
+   `STARKEEP_APP_BASE_PATH` and `STARKEEP_BUNDLE_OUT` set (§7), creates the
+   app's signing credential and its tables, uploads the `/_immutable/` and
+   `/_static/` files that `staticAssetPaths` declares to the app assets
+   bucket, and deploys the handlers. The
+   install takes a few minutes, and a failed install usually succeeds on
+   **Retry**.
+4. **Read the end of the log.** The installer lists the routes it created
+   without an authorizer, then requests the live app without credentials:
+   - `EXPOSED` marks a data path that answered. The install fails, and the
+     log names the command that takes the app down.
+   - `declared public but refused` marks a path in `publicPaths` that the
+     gateway refused, most often a sign-in page nobody can reach.
+   - `sign-in page does not answer` marks a `/sign-in` that returned an error
+     status, usually because the bundle never mounted the page (§8).
+   - `refused in this spelling only` marks a path that answers without its
+     trailing slash only, which is expected for every path but the app root.
+   - A cold-start line warns when the first request used half or more of the
+     handler's timeout.
+5. **Open the app.** When the card reads **Installed**, click
+   **Open <name> ↗** and sign in on the managed login page with your Starkeep
+   account.
+6. **Sync.** Your cloud app shares one set of tables with each of your
+   machines. A machine's rows reach the cloud once that machine is signed in to
+   sync, which the root README describes in "Part B", step 5.
+7. **Update.** **Redeploy <name>** in the web card's menu rebuilds and
+   redeploys from the folder. When the folder's manifest has changed for an app
+   installed locally, choose **Update from folder** on the local card first;
+   the cloud card refuses until you do.
 
 See [`starkeep-apps/README.md`](../../starkeep-apps/README.md) for the install steps
 from the app-author's side, and the root [`README.md`](../README.md) for the
