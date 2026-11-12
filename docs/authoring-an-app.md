@@ -427,7 +427,8 @@ and show only the originals. Guidance:
 
 **App-specific syncable data.** Starkeep can sync app-specific data so it's available in the cloud and across devices. Declare it under `infraRequirements.appSpecificSyncable`:
 
-- `tables[]` — each becomes `<appId>_syncable_<name>` locally and syncs row-wise.
+- `tables[]` — each becomes `<appId>_syncable_<name>` locally and syncs row-wise
+  (§6b explains how conflicting writes resolve).
   `updated_at` / `deleted_at` are reserved by the sync runtime. Photos declares an
   `image_enriched` table (caption, title, date override).
 - `files: true` — opt into an `apps/<appId>/syncable/` object-storage prefix for
@@ -538,6 +539,80 @@ matches in the cloud matches locally and the reverse.
 
 The response is `{rows, truncated, page_token}`, or `{groups, truncated}` in
 aggregate mode.
+
+### 6b. Writing rows, and how sync resolves conflicts
+
+Each data server accepts writes on its own and syncs with the others later. The
+local data server on each machine and the cloud data server are separate
+surfaces, so a user can change one row on two surfaces before they sync.
+
+**The newer write wins the whole row.** The platform stamps every write with a
+hybrid logical clock (HLC) in `updated_at`, ships each changed row in full, and
+keeps the row with the later stamp. The platform never merges columns, so the
+earlier write's changes disappear, including changes to columns that the later
+write never touched. Suppose a user renames an item on the desktop and archives
+the same item in the cloud before the two sync. After sync, both surfaces keep
+the rename or the archive, not both.
+
+The rest of this section lists the patterns that keep the rule from losing data.
+
+**Create with `POST`, edit with `PATCH`.** Three routes write to
+`/app-data/db/<table>`:
+
+- `POST` with `{"row": {...}}` upserts a row. On an existing key, the write
+  overwrites every column the body names and clears any deletion.
+- `PATCH` with `{"where": {...}, "patch": {...}}` writes only the columns in
+  `patch`. The `where` must name the whole primary key.
+- `DELETE` with `{"where": {...}}` records a deletion, and the deletion syncs.
+
+Edit with `PATCH`, and name only the changed columns. Never read a row, change
+one field and `POST` the whole row back. Two clients of one data server, such as
+two browser tabs or a browser and a headless client on the cloud surface, then
+overwrite each other's edits. `PATCH` prevents that loss on one surface. Across
+surfaces, the whole-row rule above still applies.
+
+**Split fields that change independently into their own table.** Two fields of
+one row may get edited on different surfaces at about the same time, such as an
+item's name and its archived flag. Keep the second field in a separate table
+keyed by the parent's id. Each table resolves conflicts on its own, so both
+edits survive. Starkeep's own labels follow this pattern (`system-design.md`,
+section "Sync semantics"). A split costs an extra write and an extra read, so
+split only fields that face a real chance of concurrent edits.
+
+**Expect duplicates wherever the app assumes uniqueness.** The platform enforces
+no uniqueness beyond the primary key, and no platform could enforce it across
+surfaces that write offline. Two surfaces can each create a row that breaks an
+app-level rule before they sync. Write reads that tolerate the duplicate.
+
+**Give starter rows deterministic ids.** An app that seeds starter rows on first
+launch should compute each starter row's primary key from something every
+surface shares, never from a random generator. Every surface then computes the
+same id for the same starter row, so every surface seeds the same rows, and sync
+keeps one copy. Two sources work:
+
+- **A hash of the row's content.** This option needs nothing extra. A later app
+  version that edits a starter row's content changes the hash, though, so the
+  edited row seeds next to the old one instead of replacing it.
+- **A constant key in the app's code**, such as `"getting-started"`, used as the
+  id directly or through a name-based UUID (UUIDv5). The key exists only to
+  compute the id and needs no column. The id survives content edits in later
+  app versions.
+
+**Sort ordered lists with a primary-key tiebreak.** Two surfaces that each
+append to a list before syncing can write the same position. Sort by the
+position column and then the primary key, for example
+`order=position.asc,id.asc`, so every surface shows duplicates in the same
+order. Compute display numbers such as "Day 3" from the sorted order rather than
+storing them.
+
+**Use fractional order keys for lists that users reorder often.** Renumbering
+integer positions rewrites every row in the list. A reorder on one surface then
+overwrites any concurrent edit to any item on another surface, and two
+concurrent reorders can interleave row by row into an order nobody chose. A
+fractional order key is a string that sorts between its two neighbors, so a move
+rewrites only the moved row with one `PATCH`. A fractional-indexing library
+generates the keys. Keep the primary-key tiebreak, since two surfaces that
+insert into the same gap can generate equal keys.
 
 ### 7. Cloud compute + the bundle (cloud target only)
 
