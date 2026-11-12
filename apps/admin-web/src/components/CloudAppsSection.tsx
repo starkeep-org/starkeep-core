@@ -14,7 +14,13 @@ import {
 import { refreshTokens, getIdentityPoolCredentials, type STSCredentials } from "@/lib/cognito-auth";
 import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
 import { ACTION_OCCASIONAL, ACTION_OPEN } from "@/lib/action-colors";
-import { surfacesOf, type AppSurface, type LocalAppEntry } from "@/lib/app-types";
+import {
+  consentDiffers,
+  surfacesOf,
+  type AppSurface,
+  type LocalAppEntry,
+  type ManifestSummary,
+} from "@/lib/app-types";
 import { runInstallStream } from "@/lib/install-stream-client";
 
 /** One row of `shared.app_registry`, as POST /api/apps/cloud/list returns it. */
@@ -24,6 +30,8 @@ interface CloudRegistryRow {
   version: string;
   webApp: boolean;
   mobileApp: boolean;
+  /** The manifest the last install deployed, or null when the row predates it. */
+  manifest: ManifestSummary | null;
 }
 
 /** Why a tile from the registry alone cannot redeploy or re-register. */
@@ -227,25 +235,27 @@ export function CloudAppsSection({
             // signed in, cloud not set up, or the read errored). The tile
             // then reads as not installed rather than guessing.
             const installed = (surface === "web" ? webIds : mobileIds)?.has(entry.appId) ?? false;
-            // A local install pins the manifest the person approved, and the
-            // cloud deploys that pinned manifest, so an active local install
-            // already carries consent. Anything else — a cloud-only install, or
-            // a redeploy from a folder nobody approved — asks first, because
-            // nothing records a cloud approval and the folder's manifest may
-            // have changed since the last run.
+            // Two records carry a past approval. A local install pins the
+            // manifest the person approved, and the cloud deploys that pinned
+            // manifest. A cloud install records the manifest it deployed in the
+            // registry. Either one covers this install unless the folder's
+            // manifest now asks for something the dialog would show that the
+            // approved one did not. A first cloud install of an app never
+            // installed locally has neither record, and asks.
+            const deployed = registryRows?.find((r) => r.appId === entry.appId)?.manifest ?? null;
+            const approved =
+              entry.status === "active" ||
+              (deployed !== null && !consentDiffers(deployed, entry.manifest));
             const run = () => void handleInstall(entry.appId, name, endpoint, surface);
-            const install =
-              entry.status === "active"
-                ? run
-                : () =>
-                    setPendingConsent({
-                      entry,
-                      title:
-                        surface === "web"
-                          ? `Install ${name} in the cloud?`
-                          : `Register ${tileName}?`,
-                      run,
-                    });
+            const install = approved
+              ? run
+              : () =>
+                  setPendingConsent({
+                    entry,
+                    title:
+                      surface === "web" ? `Install ${name} in the cloud?` : `Register ${tileName}?`,
+                    run,
+                  });
 
             const actions: AppCardAction[] = installed
               ? [

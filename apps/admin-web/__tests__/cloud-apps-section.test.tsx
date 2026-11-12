@@ -55,6 +55,7 @@ let registry: Array<{
   mobileApp: boolean;
   name?: string | null;
   version?: string;
+  manifest?: unknown;
 }>;
 
 beforeEach(() => {
@@ -427,7 +428,54 @@ describe("consent before a cloud install", () => {
     expect(installs).toHaveLength(0);
   });
 
-  it("asks again before a redeploy, because no cloud approval is recorded", async () => {
+  it("redeploys without asking when the deployed manifest asks for the same access", async () => {
+    await renderWith(
+      [{ appId: "photos", webApp: true, mobileApp: false, manifest: SHARING.manifest }],
+      [SHARING],
+    );
+    await vi.waitFor(async () =>
+      expect(within(await tile("Photos")).getByText("Installed")).toBeTruthy(),
+    );
+    await chooseFromMenu("Photos", "Redeploy Photos");
+    await vi.waitFor(() => expect(installs).toHaveLength(1));
+    expect(screen.queryByRole("heading", { name: "Install Photos in the cloud?" })).toBeNull();
+  });
+
+  it("registers a second surface without asking when the first one's manifest covers it", async () => {
+    const user = userEvent.setup();
+    await renderWith(
+      [{ appId: "photos", webApp: true, mobileApp: false, manifest: SHARING.manifest }],
+      [SHARING],
+    );
+    await user.click(
+      await within(await tile("Photos Mobile")).findByRole("button", {
+        name: "Register Photos Mobile",
+      }),
+    );
+    await vi.waitFor(() => expect(installs).toHaveLength(1));
+    expect(installs[0]!.body["surfaces"]).toEqual(["mobile"]);
+  });
+
+  it("asks before a redeploy when the folder's manifest asks for more than the deployed one", async () => {
+    const deployed = {
+      ...SHARING.manifest,
+      infraRequirements: { compute: { enabled: true }, fileAccess: [] },
+    };
+    await renderWith(
+      [{ appId: "photos", webApp: true, mobileApp: false, manifest: deployed }],
+      [SHARING],
+    );
+    await vi.waitFor(async () =>
+      expect(within(await tile("Photos")).getByText("Installed")).toBeTruthy(),
+    );
+    await chooseFromMenu("Photos", "Redeploy Photos");
+    expect(
+      await screen.findByRole("heading", { name: "Install Photos in the cloud?" }),
+    ).toBeTruthy();
+    expect(installs).toHaveLength(0);
+  });
+
+  it("asks before a redeploy when the registry row predates the recorded manifest", async () => {
     await renderWith([{ appId: "photos", webApp: true, mobileApp: false }], [SHARING]);
     await vi.waitFor(async () =>
       expect(within(await tile("Photos")).getByText("Installed")).toBeTruthy(),
