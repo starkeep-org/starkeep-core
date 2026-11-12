@@ -214,6 +214,15 @@ const appComputeHandlerObjectSchema = z.strictObject({
  * the app's Lambda. Each is a directory directly under the handler's
  * `bundleAssetsDir`.
  */
+/**
+ * Where the platform sends a signed-out visitor, relative to the app's mount.
+ * The edge's `signed-out-redirect` CloudFront function, which every cloud app
+ * sits behind, redirects each sessionless navigation here. The validator
+ * requires a `session` handler to declare it public, and the post-install
+ * probe checks that it answers.
+ */
+export const SIGN_IN_PATH = "/sign-in";
+
 export const SERVED_ASSET_PREFIXES = ["_immutable", "_static"] as const;
 
 /**

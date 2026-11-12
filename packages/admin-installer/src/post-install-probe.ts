@@ -29,6 +29,7 @@ import {
   probePathFor,
   publicPathCovers,
   SERVED_ASSET_PREFIXES,
+  SIGN_IN_PATH,
   type AppComputeHandler,
   type AppManifest,
 } from "@starkeep/admin-manifest";
@@ -122,6 +123,15 @@ async function probe(url: string, fetchImpl: typeof fetch): Promise<ProbeResult>
  */
 function servedFromAssetsBucket(path: string): boolean {
   return SERVED_ASSET_PREFIXES.some((prefix) => publicPathCovers(`/${prefix}/*`, path));
+}
+
+/**
+ * A status that shows a page answered: a 2xx, or a 3xx the browser would
+ * follow (an app may redirect `/sign-in` to its trailing-slash spelling). A
+ * request that never completed is not judged here; the report prints its error.
+ */
+function answers(status: number | null): boolean {
+  return status !== null && status >= 200 && status < 400;
 }
 
 /** A status that proves the platform refused an unauthenticated caller. */
@@ -223,6 +233,13 @@ export async function probeAnonymousSurface(
       if (!servedFromAssetsBucket(path)) declared.add(path);
     }
   }
+  // The page the edge sends every signed-out visitor to, asked for by its own
+  // name. A wildcard such as `/sign-in/*` would otherwise probe `/sign-in/x`,
+  // which says nothing about the page itself.
+  const declaresSignIn = manifest.infraRequirements.compute.handlers.some((h) =>
+    h.publicPaths.some((p) => publicPathCovers(p, SIGN_IN_PATH)),
+  );
+  if (declaresSignIn) declared.add(SIGN_IN_PATH);
   const paths = [...declared];
   const publicPaths = await Promise.all(
     paths.map((p) => probe(`${root}${p === "/" ? "" : p}`, fetchImpl)),
@@ -258,8 +275,18 @@ export async function probeAnonymousSurface(
     // navigating there still reaches sign-in, because the same CloudFront
     // function redirects a document load holding no `sk_token` before the
     // gateway ever sees it.
+    //
+    // The sign-in page is held to more than "not refused". The gateway lets a
+    // request for it through by construction, so the defect a live install
+    // shows is an app that never mounted the page: a 404, or a 5xx from a
+    // handler that throws on it. Either one strands every signed-out visitor,
+    // because the edge redirects them there.
     unreachablePublicPaths: [
-      ...publicPaths.filter((r) => isRefusal(r.status)),
+      ...publicPaths.filter(
+        (r, i) =>
+          isRefusal(r.status) ||
+          (paths[i] === SIGN_IN_PATH && r.status !== null && !answers(r.status)),
+      ),
       ...trailingSlashPaths.filter((r, i) => paths[i] === "/" && isRefusal(r.status)),
     ],
     publicPaths,
@@ -277,7 +304,11 @@ export function formatProbeReport(report: ProbeReport): string {
   }
   for (const r of report.publicPaths) {
     const verdict = r.status === null ? `unreachable (${r.error})` : String(r.status);
-    const mark = isRefusal(r.status) ? "  <- declared public but refused" : "";
+    const mark = isRefusal(r.status)
+      ? "  <- declared public but refused"
+      : report.unreachablePublicPaths.includes(r)
+        ? "  <- sign-in page does not answer; signed-out visitors land here"
+        : "";
     lines.push(`  ${r.url} -> ${verdict}${mark}`);
   }
   const warned = new Set(report.unreachablePublicPaths.map((r) => r.url));

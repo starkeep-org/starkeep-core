@@ -184,6 +184,51 @@ describe("declared public paths that do not answer", () => {
     ]);
   });
 
+  it("include a sign-in page that is not mounted, which strands every signed-out visitor", async () => {
+    const report = await probeAnonymousSurface(
+      manifest(["/", "/sign-in"]),
+      "https://cdn.example.com",
+      fetchReturning([
+        [/\/sign-in\/?$/, 404],
+        [/\/(data|files|sync|app-data)\//, 401],
+        [/./, 200],
+      ]),
+    );
+    expect(report.unreachablePublicPaths.map((r) => new URL(r.url).pathname)).toEqual([
+      "/apps/memo/sign-in",
+    ]);
+    expect(formatProbeReport(report)).toContain("sign-in page does not answer");
+  });
+
+  it("hold only the sign-in page to answering, not every declared path", async () => {
+    // A 404 on some other declared path is reported but not warned about: the
+    // edge sends nobody there, so it strands nobody.
+    const report = await probeAnonymousSurface(
+      manifest(["/", "/sign-in", "/about"]),
+      "https://cdn.example.com",
+      fetchReturning([[/\/about$/, 404], ...HEALTHY]),
+    );
+    expect(report.unreachablePublicPaths).toEqual([]);
+  });
+
+  it("accept a redirect from the sign-in page", async () => {
+    const report = await probeAnonymousSurface(
+      manifest(["/", "/sign-in"]),
+      "https://cdn.example.com",
+      fetchReturning([[/\/sign-in$/, 308], ...HEALTHY]),
+    );
+    expect(report.unreachablePublicPaths).toEqual([]);
+  });
+
+  it("ask for the sign-in page by name when a wildcard declares it", async () => {
+    const report = await probeAnonymousSurface(
+      manifest(["/", "/sign-in/*"]),
+      "https://cdn.example.com",
+      fetchReturning(HEALTHY),
+    );
+    expect(report.publicPaths.map((r) => new URL(r.url).pathname)).toContain("/apps/memo/sign-in");
+  });
+
   it("turn a wildcard declaration into a concrete path to ask about", async () => {
     const report = await probeAnonymousSurface(
       manifest(["/photo/*"]),

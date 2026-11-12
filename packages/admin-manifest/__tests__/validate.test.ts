@@ -715,6 +715,52 @@ describe("anonymous routes and publicPaths", () => {
     expect(result.errors.some((e) => e.includes("nobody can sign in"))).toBe(true);
   });
 
+  it('refuses auth "session" without "/sign-in", where the edge sends signed-out visitors', () => {
+    const result = validateManifest(
+      withHandlers([
+        staticHandler({
+          auth: "session",
+          routes: ["GET /", "ANY /{proxy+}"],
+          publicPaths: ["/", "/_immutable/*", "/api/session/*"],
+        }),
+      ]),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes('needs "/sign-in" in "publicPaths"'))).toBe(true);
+  });
+
+  it('accepts "/sign-in" declared on another handler, since the path is one per app', () => {
+    const result = validateManifest(
+      withHandlers([
+        staticHandler({
+          auth: "session",
+          routes: ["GET /", "ANY /{proxy+}"],
+          publicPaths: ["/", "/sign-in"],
+        }),
+        staticHandler({
+          name: "admin",
+          auth: "session",
+          routes: ["GET /admin/{proxy+}"],
+          publicPaths: ["/admin/help"],
+        }),
+      ]),
+    );
+    expect(result.errors.some((e) => e.includes('needs "/sign-in"'))).toBe(false);
+  });
+
+  it('accepts "/sign-in" through a wildcard that covers it', () => {
+    const result = validateManifest(
+      withHandlers([
+        staticHandler({
+          auth: "session",
+          routes: ["GET /", "ANY /{proxy+}"],
+          publicPaths: ["/", "/sign-in/*"],
+        }),
+      ]),
+    );
+    expect(result.errors).toEqual([]);
+  });
+
   it("does not ask a session handler to justify its catch-all", () => {
     // Under "public" the catch-all is wider than the declaration, so the
     // manifest has to say what the opt-out was for. Under "session" the
@@ -723,7 +769,11 @@ describe("anonymous routes and publicPaths", () => {
     // there.
     const result = validateManifest(
       withHandlers([
-        staticHandler({ auth: "session", routes: ["GET /", "ANY /{proxy+}"], publicPaths: ["/"] }),
+        staticHandler({
+          auth: "session",
+          routes: ["GET /", "ANY /{proxy+}"],
+          publicPaths: ["/", "/sign-in"],
+        }),
       ]),
     );
     expect(result.errors.some((e) => e.includes("is a catch-all with auth"))).toBe(false);
@@ -855,7 +905,7 @@ describe("anonymous routes and publicPaths", () => {
           staticHandler({
             auth: "session",
             routes: ["GET /", "ANY /{proxy+}"],
-            publicPaths: ["/", "/_immutable/*", "/api/session/*"],
+            publicPaths: ["/", "/_immutable/*", "/sign-in", "/api/session/*"],
           }),
         ]),
       );

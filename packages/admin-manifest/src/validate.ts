@@ -1,5 +1,5 @@
 import type { AppManifest } from "./schema.js";
-import { appManifestSchema } from "./schema.js";
+import { appManifestSchema, publicPathCovers, SIGN_IN_PATH } from "./schema.js";
 import { z } from "zod";
 import { isKnownType, typeCategory, isGrantableCategory } from "@starkeep/protocol-primitives";
 import {
@@ -211,6 +211,29 @@ export function validateManifest(raw: unknown): ValidationResult {
   // is no opt-out on the catch-all to account for — but the entries still have
   // to name routes the handler serves, or the declaration describes a
   // deployment that does not exist.
+  // The signed-out redirect at the edge sends every sessionless navigation
+  // under /apps/<appId>/ to exactly `/sign-in` (the `signed-out-redirect`
+  // CloudFront function in admin-installer's cloud-data-server program). The
+  // path is fixed and the function does not read this manifest, so an app
+  // with a session handler that leaves the path undeclared redirects every
+  // signed-out visitor to a page the gateway then refuses. Nothing else
+  // catches that before a person tries to sign in. The path is one per app,
+  // so one handler declaring it is enough.
+  const computeHandlers = manifest.infraRequirements.compute.handlers;
+  const sessionHandler = computeHandlers.find((h) => h.auth === "session");
+  if (
+    sessionHandler &&
+    sessionHandler.publicPaths.length > 0 &&
+    !computeHandlers.some((h) => h.publicPaths.some((p) => publicPathCovers(p, SIGN_IN_PATH)))
+  ) {
+    errors.push(
+      `infraRequirements.compute.handlers["${sessionHandler.name}"]: auth "session" needs ` +
+        `"${SIGN_IN_PATH}" in "publicPaths". The platform sends every signed-out visitor to ` +
+        `${SIGN_IN_PATH}, so without it nobody can sign in. Mount createSignInPage from ` +
+        `@starkeep/app-client/auth there (docs/authoring-an-app.md, section "8. Sign-in").`,
+    );
+  }
+
   for (const handler of manifest.infraRequirements.compute.handlers) {
     const routes = resolveHandlerRoutes(handler);
     // What the manifest actually wrote down, before publicPaths derivation —

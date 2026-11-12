@@ -1009,6 +1009,12 @@ public lands on sign-in too. The function leaves four kinds of request alone:
 The function is an optimization, not a gate: it keeps signed-out traffic off
 your Lambda, and the gateway origin stays directly reachable (§10).
 
+The platform checks the page twice. Install refuses a manifest with a
+`session` handler when no handler lists `/sign-in` in `publicPaths`. After a
+cloud install, the post-install probe requests `/sign-in` and warns when the
+page answers with an error status, such as the 404 of a page the bundle never
+mounted.
+
 **A session can expire while the page is open.** `sk_token` lasts about an
 hour, and the gateway then refuses the page's requests with `401`. Call
 `POST /api/session/refresh` once and retry the request. If the refresh fails
