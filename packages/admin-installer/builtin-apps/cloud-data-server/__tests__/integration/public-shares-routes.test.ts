@@ -32,7 +32,7 @@ import {
   createAppNodeWatermarks,
   createSharedSchema,
 } from "../../../../../storage-aurora-dsql/__tests__/pg-shared-schema.js";
-import { dropAllUserSchemas } from "../pglite-reset.js";
+import { dropAllUserSchemas } from "../../../../../storage-aurora-dsql/__tests__/pglite-reset.js";
 
 const ssmMock = mockClient(SSMClient);
 const stsMock = mockClient(STSClient);

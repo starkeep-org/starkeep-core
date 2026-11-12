@@ -34,14 +34,9 @@ const SCHEMA = `app_${APP.replace(/-/g, "_")}`;
 
 /**
  * The databases come from the file-level pool in `../pglite-pool.ts`. The query
- * cases build one harness each, so the pool holds one database; the limit
- * matches the applier suite's, where a case and its `peer()` need two.
+ * cases build one harness each, so the pool holds one database.
  */
-const POOL_LIMIT = 2;
-const { takeDatabase, releaseAll, closeAll } = createDatabasePool({
-  schema: SCHEMA,
-  limit: POOL_LIMIT,
-});
+const { takeDatabase, releaseAll, closeAll } = createDatabasePool();
 
 afterEach(releaseAll);
 afterAll(closeAll);
