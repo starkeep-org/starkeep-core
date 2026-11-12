@@ -573,37 +573,37 @@ async function renderNotes(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Snapshots
+// Note exports
 // ---------------------------------------------------------------------------
 
-const snapshots = section(
-  "Snapshots",
-  "The app's own files: each snapshot saves every note as one private JSON file.",
+const noteExports = section(
+  "Note exports",
+  "The app's own files: each export saves every note as one private JSON file.",
 );
-const snapshotOut = el("pre", { className: "content" });
-snapshots.controls.append(
-  button("Save snapshot", () =>
-    run("Save snapshot", async () => {
-      await api.saveSnapshot();
-      await renderSnapshots();
+const exportOut = el("pre", { className: "content" });
+noteExports.controls.append(
+  button("Save export", () =>
+    run("Save export", async () => {
+      await api.saveExport();
+      await renderExports();
     }),
   ),
-  button("Get snapshot URLs", () =>
-    run("Get snapshot URLs", async () => {
+  button("Get export URLs", () =>
+    run("Get export URLs", async () => {
       // The batch route takes at most 200 sub-keys.
-      const keys = (await api.listSnapshots()).map((s) => s.sub_key).slice(0, 200);
-      if (keys.length === 0) throw new Error("no snapshots yet");
-      const urls = await api.snapshotUrls(keys);
-      snapshotOut.textContent = `${Object.keys(urls).length} URLs fetched in one call.`;
+      const keys = (await api.listExports()).map((s) => s.sub_key).slice(0, 200);
+      if (keys.length === 0) throw new Error("no exports yet");
+      const urls = await api.exportUrls(keys);
+      exportOut.textContent = `${Object.keys(urls).length} URLs fetched in one call.`;
     }),
   ),
 );
 
-async function renderSnapshots(): Promise<void> {
-  const rows = await api.listSnapshots();
-  snapshots.body.replaceChildren(
-    renderTable<api.Snapshot>(
-      "Snapshots",
+async function renderExports(): Promise<void> {
+  const rows = await api.listExports();
+  noteExports.body.replaceChildren(
+    renderTable<api.NoteExport>(
+      "Note exports",
       [
         { heading: "Sub-key", cell: (s) => s.sub_key },
         { heading: "Bytes", cell: (s) => s.size_bytes },
@@ -613,14 +613,14 @@ async function renderSnapshots(): Promise<void> {
           cell: (s) =>
             group(
               button(`Open ${s.sub_key}`, () =>
-                run("Open snapshot", async () => {
-                  snapshotOut.textContent = await api.openSnapshot(s.sub_key);
+                run("Open export", async () => {
+                  exportOut.textContent = await api.openExport(s.sub_key);
                 }),
               ),
               button(`Delete ${s.sub_key}`, () =>
-                run("Delete snapshot", async () => {
-                  await api.deleteSnapshot(s.sub_key);
-                  await renderSnapshots();
+                run("Delete export", async () => {
+                  await api.deleteExport(s.sub_key);
+                  await renderExports();
                 }),
               ),
             ),
@@ -628,7 +628,7 @@ async function renderSnapshots(): Promise<void> {
       ],
       rows,
     ),
-    snapshotOut,
+    exportOut,
   );
 }
 
@@ -791,7 +791,7 @@ async function refreshAll(): Promise<void> {
     renderMetadata(),
     renderLabels(),
     renderNotes(),
-    renderSnapshots(),
+    renderExports(),
     renderDeleted(),
     renderTypes(),
   ]);

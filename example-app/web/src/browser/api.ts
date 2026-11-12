@@ -17,7 +17,7 @@ import {
   APP_ID,
   EXAMPLE_TYPE,
   LABEL_KEYS,
-  SNAPSHOT_PREFIX,
+  EXPORT_PREFIX,
   TABLES,
   decodeNote,
   encodeNote,
@@ -618,10 +618,10 @@ export async function pinnedCount(): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
-// Snapshots: the app's own files
+// Note exports: the app's own files
 // ---------------------------------------------------------------------------
 
-export interface Snapshot {
+export interface NoteExport {
   sub_key: string;
   size_bytes: number;
   mime_type: string;
@@ -633,12 +633,12 @@ export interface Snapshot {
  * Save every note as one private JSON file: `POST /app-data/files/presign`,
  * `PUT <url>`, then `POST /app-data/files/<subKey>/record`.
  */
-export async function saveSnapshot(): Promise<string> {
+export async function saveExport(): Promise<string> {
   const notes = await searchNotes("");
   const bytes = new TextEncoder().encode(JSON.stringify({ notes }, null, 2));
   const contentHash = await sha256Hex(bytes.buffer as ArrayBuffer);
   const name = `notes-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
-  const subKey = `${SNAPSHOT_PREFIX}${name}`;
+  const subKey = `${EXPORT_PREFIX}${name}`;
   const presign = expectOk(
     await data<{ url: string; checksumSha256?: string }>("POST", "/app-data/files/presign", {
       json: { subKey, contentType: "application/json", contentHash },
@@ -665,18 +665,18 @@ export async function saveSnapshot(): Promise<string> {
 }
 
 /**
- * `GET /app-data/files?prefix=snapshots/`: every snapshot file, one page at a
+ * `GET /app-data/files?prefix=exports/`: every export file, one page at a
  * time. A page holds 30 files by default, and the listing answers a
  * `page_token` while more remain.
  */
-export async function listSnapshots(): Promise<Snapshot[]> {
-  const files: Snapshot[] = [];
+export async function listExports(): Promise<NoteExport[]> {
+  const files: NoteExport[] = [];
   let pageToken: string | undefined;
   do {
     const page = expectOk(
-      await data<{ files: Snapshot[]; truncated: boolean; page_token: string | null }>(
+      await data<{ files: NoteExport[]; truncated: boolean; page_token: string | null }>(
         "GET",
-        `/app-data/files${q({ prefix: SNAPSHOT_PREFIX, page_token: pageToken })}`,
+        `/app-data/files${q({ prefix: EXPORT_PREFIX, page_token: pageToken })}`,
       ),
     );
     files.push(...page.files);
@@ -685,16 +685,16 @@ export async function listSnapshots(): Promise<Snapshot[]> {
   return files;
 }
 
-/** `GET /app-data/files/<subKey>`, then the URL: one snapshot's content. */
-export async function openSnapshot(subKey: string): Promise<string> {
+/** `GET /app-data/files/<subKey>`, then the URL: one export's content. */
+export async function openExport(subKey: string): Promise<string> {
   const { url } = expectOk(await data<{ url: string }>("GET", `/app-data/files/${subKey}`));
   const res = await call<unknown>("GET", url, { log: "GET <signed file URL>" });
-  if (!res.ok) throw new ApiError(res.status, "The snapshot could not be read");
+  if (!res.ok) throw new ApiError(res.status, "The export could not be read");
   return typeof res.body === "string" ? res.body : JSON.stringify(res.body, null, 2);
 }
 
-/** `POST /app-data/file-urls`: several snapshot URLs in one call. */
-export async function snapshotUrls(subKeys: string[]): Promise<Record<string, string>> {
+/** `POST /app-data/file-urls`: several export URLs in one call. */
+export async function exportUrls(subKeys: string[]): Promise<Record<string, string>> {
   return expectOk(
     await data<{ urls: Record<string, string> }>("POST", "/app-data/file-urls", {
       json: { subKeys },
@@ -703,7 +703,7 @@ export async function snapshotUrls(subKeys: string[]): Promise<Record<string, st
 }
 
 /** `DELETE /app-data/files/<subKey>`. */
-export async function deleteSnapshot(subKey: string): Promise<void> {
+export async function deleteExport(subKey: string): Promise<void> {
   expectOk(await data("DELETE", `/app-data/files/${subKey}`));
 }
 

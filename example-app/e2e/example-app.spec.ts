@@ -301,21 +301,21 @@ test("Metadata: the category table and its totals", async () => {
   await expect(await cell("Example files", "hello.skexample", "Words")).toHaveText("7");
 });
 
-test("Snapshots: save the notes as a private file, list, open and delete it", async () => {
-  await click("Save snapshot", "Save snapshot");
-  const row = table("Snapshots").getByRole("row").filter({ hasText: "snapshots/notes-" });
+test("Note exports: save the notes as a private file, list, open and delete it", async () => {
+  await click("Save export", "Save export");
+  const row = table("Note exports").getByRole("row").filter({ hasText: "exports/notes-" });
   await expect(row).toHaveCount(1);
-  await expectLogged("POST", /^\/app-data\/files\/snapshots\/notes-[^/]+\.json\/record$/, 200);
-  await expectLogged("GET", /^\/app-data\/files\?prefix=snapshots%2F$/, 200);
+  await expectLogged("POST", /^\/app-data\/files\/exports\/notes-[^/]+\.json\/record$/, 200);
+  await expectLogged("GET", /^\/app-data\/files\?prefix=exports%2F$/, 200);
   const subKey = (await row.getByRole("cell").first().textContent())!;
-  await click(`Open ${subKey}`, "Open snapshot");
+  await click(`Open ${subKey}`, "Open export");
   await expect(page.locator("pre").filter({ hasText: "first note" })).toBeVisible();
-  await click("Get snapshot URLs", "Get snapshot URLs");
+  await click("Get export URLs", "Get export URLs");
   await expect(page.getByText("1 URLs fetched in one call.")).toBeVisible();
   await expectLogged("POST", /^\/app-data\/file-urls$/, 200);
-  await click(`Delete ${subKey}`, "Delete snapshot");
-  await expect(table("Snapshots")).toContainText("Nothing yet.");
-  await expectLogged("DELETE", /^\/app-data\/files\/snapshots\//, 200);
+  await click(`Delete ${subKey}`, "Delete export");
+  await expect(table("Note exports")).toContainText("Nothing yet.");
+  await expectLogged("DELETE", /^\/app-data\/files\/exports\//, 200);
 });
 
 test("Deleted: a deletion appears in the reconcile, restores, and takes derived copies and notes", async () => {

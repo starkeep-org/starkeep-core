@@ -36,5 +36,5 @@ export const TABLES = {
   notes: "notes",
 } as const;
 
-/** Where the app keeps its private snapshot files. */
-export const SNAPSHOT_PREFIX = "snapshots/";
+/** Where the app keeps its private note-export files. */
+export const EXPORT_PREFIX = "exports/";

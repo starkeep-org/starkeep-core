@@ -8,4 +8,4 @@ The structure already commits to three things:
 - The Android identity is reserved: package `app.starkeep.example`, callback scheme `starkeep-example`.
 - The flavor imports the data contract from `@example-app/common`, which holds no DOM or Node imports so that Metro can bundle it.
 
-The platform syncs the app's notes and snapshots between the phone, the cloud and every computer with the example installed, on the app's own channel.
+The platform syncs the app's notes and note exports between the phone, the cloud and every computer with the example installed, on the app's own channel.

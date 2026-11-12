@@ -16,7 +16,7 @@ Each heading is one group of operations, with a table of the current state and a
 | Metadata      | The `example` category's metadata table, queried directly, with totals.                                                                      |
 | Labels        | Add, set and retract tags and a bare flag; count files per tag; list every app's declared keys.                                              |
 | Notes         | The app's own `notes` table: write, pin, search and delete.                                                                                  |
-| Snapshots     | The app's own files: save every note as a private JSON file, then list, open and delete the files.                                           |
+| Note exports  | The app's own files: save every note as a private JSON file, then list, open and delete the files.                                           |
 | Deleted       | Every example file deleted since an instant, a restore, and the trash retention window.                                                      |
 | Types         | Record counts for every type the app may read.                                                                                               |
 | Public links  | Links anyone can open, made with a file's Share button. They need a cloud.                                                                   |
@@ -48,7 +48,7 @@ mobile/                  reserved for a React Native flavor
 desktop/                 reserved for a desktop flavor
 ```
 
-Every flavor shares the app id `example-app`, so the platform syncs the app's notes and snapshots among them. See "Structuring an app with several flavors" in `docs/authoring-an-app.md`.
+Every flavor shares the app id `example-app`, so the platform syncs the app's notes and note exports among them. See "Structuring an app with several flavors" in `docs/authoring-an-app.md`.
 
 ## Running it
 
