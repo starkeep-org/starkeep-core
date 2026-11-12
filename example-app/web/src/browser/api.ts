@@ -575,9 +575,17 @@ export async function patchNote(
   );
 }
 
-/** `DELETE /app-data/db/notes`. */
+/**
+ * `DELETE /app-data/db/notes`. A record with no note is already in the state
+ * the delete asks for, so a 404 that names a missing row counts as done. The
+ * route's other 404s carry no `skipped` and still throw.
+ */
 export async function deleteNote(recordId: string): Promise<void> {
-  expectOk(await data("DELETE", NOTES, { json: { where: { record_id: recordId } } }));
+  const result = await data<{ skipped?: string }>("DELETE", NOTES, {
+    json: { where: { record_id: recordId } },
+  });
+  if (result.status === 404 && result.body?.skipped === "missing") return;
+  expectOk(result);
 }
 
 /**

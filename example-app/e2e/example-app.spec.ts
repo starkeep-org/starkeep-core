@@ -86,6 +86,30 @@ async function expectLogged(method: string, path: RegExp, status: number): Promi
     .toBe(String(status));
 }
 
+/**
+ * Whether any Activity row has this method, a path matching `path` and this
+ * status. For a step that sends several requests to one path, whose order the
+ * step does not fix.
+ */
+async function expectLoggedAny(method: string, path: RegExp, status: number): Promise<void> {
+  await expect
+    .poll(() =>
+      activity()
+        .locator("tbody tr")
+        .evaluateAll(
+          (rows, [m, source, s]) => {
+            const re = new RegExp(source as string);
+            return rows.some((row) => {
+              const cells = Array.from(row.querySelectorAll("td"), (td) => td.textContent ?? "");
+              return cells[1] === m && re.test(cells[2] ?? "") && cells[3] === s;
+            });
+          },
+          [method, path.source, String(status)],
+        ),
+    )
+    .toBe(true);
+}
+
 test("Connection: the local surface, and a refused write outside the grant", async () => {
   await expect(table("Connection")).toContainText("local");
   await click("Run grant check", "Grant check");
@@ -321,6 +345,9 @@ test("Note exports: save the notes as a private file, list, open and delete it",
 test("Deleted: a deletion appears in the reconcile, restores, and takes derived copies and notes", async () => {
   await click("Delete uploaded.skexample", "Delete");
   await expectLogged("DELETE", /^\/data\/records\/[^/?]+$/, 200);
+  // The file carries no note, so the note delete answers 404 with a missing
+  // row, and the app counts the delete as done.
+  await expectLogged("DELETE", /^\/app-data\/db\/notes$/, 404);
   await expect(table("Example files")).not.toContainText("uploaded.skexample");
   await expect(table("Deleted files")).toContainText("uploaded.skexample");
   await expectLogged("GET", /^\/data\/records\?deleted=only&/, 200);
@@ -335,9 +362,10 @@ test("Deleted: a deletion appears in the reconcile, restores, and takes derived 
   await expect(table("Deleted files")).toContainText("hello.skexample");
   await expect(table("Deleted files")).toContainText("hello-upper.skexample");
   // The note on hello.skexample goes with its file. The app deletes it from
-  // the ids the record delete answered.
+  // the ids the record delete answered. The derived copy has no note, so its
+  // note delete answers 404, and the two requests run in the order of the ids.
   await expect(table("Notes")).not.toContainText("first note");
-  await expectLogged("DELETE", /^\/app-data\/db\/notes$/, 200);
+  await expectLoggedAny("DELETE", /^\/app-data\/db\/notes$/, 200);
 
   // The platform's default window, read through GET /data/trash.
   await expect(await cell("Trash", "Retention window", "Value")).toHaveText("30 days");
