@@ -31,7 +31,7 @@
  * that is the claim this closes.
  */
 
-import { describe, it, afterEach } from "vitest";
+import { describe, it, afterAll, afterEach } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import {
   appSyncableApplierConformance,
@@ -58,11 +58,47 @@ const SCHEMA = `app_${APP.replace(/-/g, "_")}`;
  * verbatim into a second node — which means the peer has to answer to the same
  * appId as the sender. Two databases is the honest way to get two stores with
  * one identity.
+ *
+ * The databases come from a file-level pool, so a case does not pay a PGlite
+ * cold boot (about a second) for each database it needs. `takeDatabase` hands
+ * out the next unused one, booting another only when none is free, and resets
+ * it with `DROP SCHEMA ${SCHEMA} CASCADE` before the harness re-runs its DDL.
+ * That schema is the only one these harnesses create, and dropping it also
+ * undoes `breakReads`. Every database goes back to the pool after each case.
+ *
+ * A case needs at most two live databases: its own and one `peer()`. A third
+ * means a nested `peer()` the pool was not sized for, and it throws rather
+ * than handing out a database another harness in the same case is still using.
  */
-const open: PGlite[] = [];
+const POOL_LIMIT = 2;
+const pool: { ready: Promise<PGlite>; inUse: boolean }[] = [];
 
-afterEach(async () => {
-  await Promise.all(open.splice(0).map((db) => db.close()));
+async function takeDatabase(): Promise<PGlite> {
+  let slot = pool.find((s) => !s.inUse);
+  if (!slot) {
+    if (pool.length >= POOL_LIMIT) {
+      throw new Error(
+        `a conformance case asked for more than ${POOL_LIMIT} live databases; ` +
+          "raise POOL_LIMIT if a nested peer() is now intended",
+      );
+    }
+    const pg = new PGlite();
+    slot = { ready: pg.waitReady.then(() => pg), inUse: false };
+    pool.push(slot);
+  }
+  // Claimed before the first await, so concurrent callers never share a slot.
+  slot.inUse = true;
+  const pg = await slot.ready;
+  await pg.exec(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
+  return pg;
+}
+
+afterEach(() => {
+  for (const slot of pool) slot.inUse = false;
+});
+
+afterAll(async () => {
+  await Promise.all(pool.splice(0).map(async (slot) => (await slot.ready).close()));
 });
 
 /** The `DatabaseClient` shape the applier talks to, over PGlite. */
@@ -80,9 +116,7 @@ function clientFor(pg: PGlite): DatabaseClient {
 }
 
 async function makeHarness(): Promise<ConformanceHarness> {
-  const pg = new PGlite();
-  await pg.waitReady;
-  open.push(pg);
+  const pg = await takeDatabase();
 
   // The same column set `dsql-ddl.ts` emits for a syncable table: the owner,
   // the app's own columns plus the three the protocol owns, and the index the
