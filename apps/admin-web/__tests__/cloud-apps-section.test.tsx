@@ -58,6 +58,9 @@ let registry: Array<{
   manifest?: unknown;
 }>;
 
+/** What `GET /api/apps/photos/dependencies` answers. */
+const PHOTOS_DEPS = { kind: "run", display: "pnpm install --frozen-lockfile", cwd: "/apps/photos" };
+
 beforeEach(() => {
   installs.length = 0;
   registry = [];
@@ -65,6 +68,7 @@ beforeEach(() => {
     "fetch",
     vi.fn(async (url: string) => {
       if (url === "/api/apps/cloud/list") return Response.json({ apps: registry });
+      if (url === "/api/apps/photos/dependencies") return Response.json(PHOTOS_DEPS);
       return Response.json({ error: `unexpected ${url}` }, { status: 404 });
     }),
   );
@@ -430,6 +434,34 @@ describe("consent before a cloud install", () => {
     expect(await screen.findByRole("heading", { name: "Register Photos Mobile?" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Approve & Register" })).toBeTruthy();
     expect(installs).toHaveLength(0);
+  });
+
+  // A cloud web install runs the app's install command in its folder before
+  // the bundle build, the same command a local install runs.
+  it("names the dependency command a cloud web install runs", async () => {
+    const user = userEvent.setup();
+    await renderWith([], [SHARING]);
+    await user.click(
+      await within(await tile("Photos")).findByRole("button", { name: "Install Photos in cloud" }),
+    );
+    const line = await screen.findByText(/which runs the app.s own install scripts/);
+    expect(line.textContent).toBe(
+      "Install runs pnpm install --frozen-lockfile in /apps/photos, which runs the app\u2019s own install scripts.",
+    );
+  });
+
+  // A mobile registration runs no command, so the dialog must not claim one.
+  it("names no dependency command for a mobile registration", async () => {
+    const user = userEvent.setup();
+    await renderWith([], [SHARING]);
+    await user.click(
+      await within(await tile("Photos Mobile")).findByRole("button", {
+        name: "Register Photos Mobile",
+      }),
+    );
+    await screen.findByRole("heading", { name: "Register Photos Mobile?" });
+    expect(fetch).not.toHaveBeenCalledWith("/api/apps/photos/dependencies");
+    expect(screen.queryByText(/Install runs/)).toBeNull();
   });
 
   // The quality step sets the local library's stand-in standards. Photos reads

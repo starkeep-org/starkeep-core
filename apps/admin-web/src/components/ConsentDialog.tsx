@@ -9,6 +9,9 @@
  *
  * The quality step belongs to the local install only: it sets the local
  * library's stand-in standards, which a cloud action has no business setting.
+ * The dependency line shows for a local install and a cloud web install, both
+ * of which run the app's install command in its folder. A mobile registration
+ * runs no command, so its dialog names none.
  */
 import { useEffect, useState } from "react";
 import { ChevronDownIcon } from "lucide-react";
@@ -18,6 +21,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import {
   publicSharingConsent,
   type AppSurface,
+  type DependencyPlan,
   type LocalAppEntry,
   type ManifestSummary,
 } from "@/lib/app-types";
@@ -78,6 +82,7 @@ export function ConsentDialog({
   const allAccess = entry.manifest.infraRequirements?.fileAccessAll ?? false;
   const quality = useQualityStep(entry.manifest, surface === "local");
   const [saving, setSaving] = useState(false);
+  const dependencies = useDependencyPlan(entry.appId, surface !== "mobile");
 
   const approve = async () => {
     if (quality && !draftsEqual(quality.draft, draftOf(quality.state.current))) {
@@ -156,6 +161,21 @@ export function ConsentDialog({
           </div>
         )}
 
+        {dependencies?.kind === "run" && (
+          <p className="text-sm text-muted-foreground">
+            Install runs <code className="text-xs">{dependencies.display}</code> in{" "}
+            <code className="text-xs break-all">{dependencies.cwd}</code>, which runs the
+            app&rsquo;s own install scripts.
+          </p>
+        )}
+        {dependencies?.kind === "refused" && (
+          <p className="text-sm text-muted-foreground">
+            Install will not run <code className="text-xs">{dependencies.display}</code>:{" "}
+            {dependencies.reason} Run it yourself in{" "}
+            <code className="text-xs break-all">{dependencies.cwd}</code>.
+          </p>
+        )}
+
         {quality && (
           <div className="border-t pt-4 flex flex-col gap-3">
             <h4 className="text-sm font-medium">Quality kept when originals archive</h4>
@@ -196,6 +216,29 @@ export function ConsentDialog({
       </div>
     </div>
   );
+}
+
+/**
+ * The dependency command Install would run for `appId`, or null before the
+ * answer. `enabled` is false for a mobile registration, which runs no command,
+ * and the hook then never asks.
+ */
+function useDependencyPlan(appId: string, enabled: boolean): DependencyPlan | null {
+  const [plan, setPlan] = useState<DependencyPlan | null>(null);
+  useEffect(() => {
+    if (!enabled) return;
+    let live = true;
+    fetch(`/api/apps/${encodeURIComponent(appId)}/dependencies`)
+      .then(async (res) => (res.ok ? ((await res.json()) as DependencyPlan) : null))
+      .then((p) => live && setPlan(p))
+      .catch(() => {
+        // The dialog shows no command line; Install reports any failure.
+      });
+    return () => {
+      live = false;
+    };
+  }, [appId, enabled]);
+  return enabled ? plan : null;
 }
 
 /**
