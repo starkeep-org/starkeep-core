@@ -147,25 +147,32 @@ export async function startWebServer(options: WebServerOptions): Promise<WebServ
  * Make sure an app whose server serves its browser half from `dist/` serves
  * this checkout's source rather than whichever client was last built.
  *
- * Under Turbo (`pnpm test:e2e`, detected by the `TURBO_HASH` Turbo sets in each
- * task's env), `test:e2e`'s `dependsOn` has already built `dist/` fresh, so a
- * second `vite build` here is pure cost: it is skipped, and a missing
- * `dist/index.html` is an error rather than something to paper over. Outside
- * Turbo (`playwright test` in `e2e/`, `pnpm --filter @starkeep/e2e test:e2e`,
- * app repos consuming `@starkeep/e2e`) nothing else rebuilds that output before
- * a run, so `vite build` runs here.
+ * The harness runs `vite build` for each unless the caller sets
+ * `STARKEEP_E2E_CLIENTS_PREBUILT=1`, which says that something upstream has
+ * already built `dist/` from this checkout. The root `test:e2e` script sets it,
+ * because that Turbo task's `dependsOn` names `admin-web#build` and
+ * `@starkeep/drive#build`, so a second build there is pure cost; `turbo.json`
+ * passes the variable through to the task. With the variable set a missing
+ * `dist/index.html` is an error rather than something to paper over. It is an
+ * explicit opt-in rather than "running under Turbo" (`TURBO_HASH`), because
+ * Turbo sets that in every task: a future task that boots the stack without
+ * depending on those builds would otherwise serve a stale `dist/` silently.
+ * Everything else (`playwright test` in `e2e/`, `pnpm --filter @starkeep/e2e
+ * test:e2e`, app repos consuming `@starkeep/e2e`) leaves it unset and builds.
  */
+const CLIENTS_PREBUILT = "STARKEEP_E2E_CLIENTS_PREBUILT";
+
 async function buildClient(appDir: string): Promise<void> {
-  if (process.env.TURBO_HASH !== undefined) {
+  if (process.env[CLIENTS_PREBUILT] === "1") {
     if (!existsSync(join(appDir, "dist/index.html"))) {
       throw new Error(
-        `${appDir}/dist/index.html is missing. TURBO_HASH is set, so the e2e ` +
-          "harness expects Turbo to have built the client already and does not " +
-          "run vite build itself. Run `pnpm build`, or run the suite with " +
-          "`pnpm test:e2e` so Turbo builds it first.",
+        `${appDir}/dist/index.html is missing. ${CLIENTS_PREBUILT}=1 says the ` +
+          "client was built before the harness started, so it does not run vite " +
+          "build itself. Run `pnpm build`, run the suite with `pnpm test:e2e` so " +
+          "Turbo builds it first, or unset the variable to build here.",
       );
     }
-    console.log(`client build: skipped, TURBO_HASH set, serving ${appDir}/dist`);
+    console.log(`client build: skipped, ${CLIENTS_PREBUILT}=1, serving ${appDir}/dist`);
     return;
   }
   console.log(`client build: vite build in ${appDir}`);
