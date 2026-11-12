@@ -31,6 +31,7 @@ import {
   createAppNodeWatermarks,
   createSharedSchema,
 } from "../../../../../storage-aurora-dsql/__tests__/pg-shared-schema.js";
+import { dropAllUserSchemas } from "../pglite-reset.js";
 import { createHash, sign } from "node:crypto";
 import { PutParameterCommand, ParameterAlreadyExists } from "@aws-sdk/client-ssm";
 import {
@@ -112,15 +113,18 @@ beforeAll(async () => {
     deviceTokens[user] = await mintTestUserToken({ sub: user, aud: DEVICE_CLIENT_ID });
     mobileTokens[user] = await mintTestUserToken({ sub: user, aud: MOBILE_CLIENT_ID });
   }
+  // One PGlite per file; each test starts from dropAllUserSchemas + the seed.
+  pg = new PGlite();
+  await pg.waitReady;
 });
 
-afterAll(() => {
+afterAll(async () => {
+  await pg.close();
   setDbFactory(null);
 });
 
 beforeEach(async () => {
-  pg = new PGlite();
-  await pg.waitReady;
+  await dropAllUserSchemas(pg);
   await createSharedSchema(pg);
   await pg.exec(`
     INSERT INTO shared.app_label_keys (app_id, key, description) VALUES ('${DRIVE}', 'faces', null);
@@ -183,8 +187,7 @@ beforeEach(async () => {
   s3Mock.on(HeadObjectCommand).resolves({ ContentLength: 3 });
 });
 
-afterEach(async () => {
-  await pg.close();
+afterEach(() => {
   // A refused overlap on a path that logs and carries on fails nothing else.
   expect(takeOverlapRefusals()).toEqual([]);
 });
