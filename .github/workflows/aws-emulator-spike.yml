@@ -1,0 +1,52 @@
+# AI-679 spike: install AWS Emulator from its Debian package on ubuntu-latest,
+# start it, and prove an S3 round trip with @aws-sdk/client-s3.
+# Opt-in and path-filtered on purpose: not part of ci.yml, not a required check.
+name: aws-emulator spike (runtime)
+
+on:
+  workflow_dispatch:
+    inputs:
+      emulator_version:
+        description: 'Emulator package version, or "latest" (empty = the version pinned in run.sh)'
+        required: false
+        default: ""
+  pull_request:
+    paths:
+      - "spikes/aws-emulator/runtime/**"
+      - ".github/workflows/aws-emulator-spike.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aws-emulator-spike-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  runtime:
+    name: Install, start, S3 round trip
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run the spike
+        env:
+          EMULATOR_VERSION: ${{ inputs.emulator_version }}
+          # The documented install path (sudo apt-get), which the runner allows.
+          EMULATOR_INSTALL: apt
+        # GitHub's default bash already runs with -eo pipefail, so a failed run.sh fails the step.
+        run: |
+          [ -n "$EMULATOR_VERSION" ] || unset EMULATOR_VERSION
+          bash spikes/aws-emulator/runtime/run.sh 2>&1 | tee "$RUNNER_TEMP/spike.txt"
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo '```'
+            sed -n '/=== AWS Emulator runtime spike/,/^=====/p' "$RUNNER_TEMP/spike.txt" 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
