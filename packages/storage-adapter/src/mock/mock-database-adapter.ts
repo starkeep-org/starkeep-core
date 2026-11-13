@@ -873,6 +873,8 @@ function recordToRow(record: DataRecord): Record<string, unknown> {
     mime_type: record.mimeType,
     size_bytes: record.sizeBytes,
     original_filename: record.originalFilename,
+    original_created_at: record.originalCreatedAt ?? null,
+    original_updated_at: record.originalUpdatedAt ?? null,
     origin_app_id: record.originAppId,
     parent_id: record.parentId,
     stand_in_role: record.standInRole,

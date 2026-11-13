@@ -27,8 +27,9 @@ import { compiler as qb } from "../query-builder.js";
  *
  * No migration system: this is a fresh-start schema. The user removes
  * ~/.starkeep/data.db (or the local-data-server's STARKEEP_DIR is fresh)
- * before this code runs. One temporary guard is the exception: it adds
- * `shared_app_registry.source_dir` to a registry created before the column.
+ * before this code runs. Two temporary guards are the exception: one adds
+ * `shared_app_registry.source_dir` to a registry created before the column,
+ * and one adds the original-date columns to `shared_records`.
  */
 /**
  * Connection settings the query grammar's portability depends on.
@@ -75,6 +76,9 @@ function applyLocalSchemaDdl(db: RawDatabase): void {
       .addColumn("mime_type", "text")
       .addColumn("size_bytes", "integer", (c) => c.notNull())
       .addColumn("original_filename", "text")
+      // The source file's own dates, in ISO 8601; see DataRecord.originalCreatedAt.
+      .addColumn("original_created_at", "text")
+      .addColumn("original_updated_at", "text")
       .addColumn("origin_app_id", "text", (c) => c.notNull())
       .addColumn("parent_id", "text")
       // Stand-ins: a role, a reported fidelity, and the derived slot the unique
@@ -91,6 +95,18 @@ function applyLocalSchemaDdl(db: RawDatabase): void {
       .addColumn("stand_in_slot", "text")
       .compile().sql,
   );
+  // TEMPORARY: adds the source file's dates to a shared_records table created
+  // before 2026-11-13. Replaced by
+  // ~/projects/starkeep/plan-schema-and-bootstrap-versioning-2026-11-08.md.
+  const recordColumns = db
+    .prepare("SELECT name FROM pragma_table_info('shared_records')")
+    .all() as Array<{ name: string }>;
+  for (const column of ["original_created_at", "original_updated_at"]) {
+    if (!recordColumns.some((c) => c.name === column)) {
+      db.exec(qb.schema.alterTable("shared_records").addColumn(column, "text").compile().sql);
+    }
+  }
+
   const sharedRecordsIndexes = [
     qb.schema
       .createIndex("idx_shared_records_type")

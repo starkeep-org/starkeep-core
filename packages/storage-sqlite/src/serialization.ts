@@ -21,6 +21,8 @@ export interface SqliteRow {
   mime_type: string | null;
   size_bytes: number;
   original_filename: string | null;
+  original_created_at: string | null;
+  original_updated_at: string | null;
   origin_app_id: string;
   parent_id: string | null;
   stand_in_role: string | null;
@@ -50,6 +52,8 @@ export function recordToRow(record: DataRecord): SqliteRow {
     mime_type: record.mimeType,
     size_bytes: record.sizeBytes,
     original_filename: record.originalFilename,
+    original_created_at: record.originalCreatedAt ?? null,
+    original_updated_at: record.originalUpdatedAt ?? null,
     origin_app_id: record.originAppId,
     parent_id: record.parentId,
     stand_in_role: record.standInRole,
@@ -74,6 +78,8 @@ export function rowToRecord(row: SqliteRow): DataRecord {
     mimeType: row.mime_type,
     sizeBytes: row.size_bytes,
     originalFilename: row.original_filename,
+    originalCreatedAt: row.original_created_at ?? null,
+    originalUpdatedAt: row.original_updated_at ?? null,
     originAppId: row.origin_app_id,
     parentId: row.parent_id ? createStarkeepId(row.parent_id) : null,
     standInRole: isStandInRole(row.stand_in_role) ? row.stand_in_role : null,

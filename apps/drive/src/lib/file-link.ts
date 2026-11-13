@@ -60,6 +60,7 @@ export interface LinkableRecord {
   id: string;
   type?: string | null;
   object_storage_key?: string | null;
+  original_filename?: string | null;
   sync_status: SyncStatus;
 }
 
@@ -77,9 +78,13 @@ export function isLinkable(r: LinkableRecord): boolean {
  * The in-app URL that streams a record's bytes inline, or `null` when the
  * record isn't locally available (see {@link isLinkable}). The `type` query
  * param carries the record's authoritative Starkeep type so the route can pick
- * a web-renderable Content-Type without re-deriving it.
+ * a web-renderable Content-Type without re-deriving it. The `name` param
+ * carries the record's filename the same way, so a file the browser cannot
+ * show downloads under its own name rather than the URL's last segment.
  */
 export function fileLinkHref(r: LinkableRecord): string | null {
   if (!isLinkable(r)) return null;
-  return `/api/records/${encodeURIComponent(r.id)}/file?type=${encodeURIComponent(r.type ?? "")}`;
+  const query = new URLSearchParams({ type: r.type ?? "" });
+  if (r.original_filename) query.set("name", r.original_filename);
+  return `/api/records/${encodeURIComponent(r.id)}/file?${query.toString()}`;
 }

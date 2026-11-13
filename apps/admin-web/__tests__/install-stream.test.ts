@@ -407,7 +407,13 @@ describe("an app's dependency install", () => {
     const res = await depsInstall("dice");
     const child = lastChild();
     expect(child.command).toBe("pnpm");
-    expect(child.args).toEqual(["install", "--frozen-lockfile"]);
+    // Admin runs pnpm with no terminal, so pnpm may delete a stale node_modules
+    // without asking.
+    expect(child.args).toEqual([
+      "install",
+      "--frozen-lockfile",
+      "--config.confirm-modules-purge=false",
+    ]);
     expect(child.options.cwd).toBe(diceDir);
     const stream = readSse(res);
     child.say("Packages: +12\n");

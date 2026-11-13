@@ -67,6 +67,17 @@ describe("GET file route — success path", () => {
     expect(await res.text()).toBe("PNGDATA");
   });
 
+  it("names the file from the listing's filename, so a download keeps its name", async () => {
+    getFileUrl.mockResolvedValue({ url: "http://lds/token", mimeType: null });
+    mockUpstream(new Response("PK", { status: 200 }));
+
+    const res = await call("rec-1", "?type=archive%2Fzip&name=Caf%C3%A9+report.zip");
+
+    expect(res.headers.get("Content-Disposition")).toBe(
+      `inline; filename="Caf_ report.zip"; filename*=UTF-8''Caf%C3%A9%20report.zip`,
+    );
+  });
+
   it("resolves the bytes for the requested record id", async () => {
     getFileUrl.mockResolvedValue({ url: "http://lds/token", mimeType: null });
     mockUpstream(new Response("x", { status: 200 }));

@@ -1,3 +1,4 @@
+import { contentDisposition } from "@starkeep/app-client/content-disposition";
 import { getFileUrl, DriveNotInstalledError } from "../lib/drive-client";
 import { httpContentType } from "../lib/file-link";
 
@@ -8,9 +9,13 @@ import { httpContentType } from "../lib/file-link";
  * device resolve here (local-only / synced); anything else surfaces the LDS
  * error. `type` is passed by the listing page, which already holds the
  * authoritative value — it only steers presentation of the user's own bytes.
+ * `name` comes from the same listing row and names the file, so a type the
+ * browser cannot render downloads under the record's filename.
  */
 export async function GET(req: Request, id: string) {
-  const type = new URL(req.url).searchParams.get("type") ?? undefined;
+  const params = new URL(req.url).searchParams;
+  const type = params.get("type") ?? undefined;
+  const name = params.get("name");
   try {
     const { url, mimeType } = await getFileUrl(id);
     const upstream = await fetch(url, { cache: "no-store" });
@@ -22,7 +27,7 @@ export async function GET(req: Request, id: string) {
     }
     const headers = new Headers({
       "Content-Type": httpContentType(type, mimeType),
-      "Content-Disposition": "inline",
+      "Content-Disposition": name ? contentDisposition(name, { inline: true }) : "inline",
       "Cache-Control": "private, no-store",
     });
     const len = upstream.headers.get("content-length");

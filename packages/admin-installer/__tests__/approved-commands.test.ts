@@ -11,8 +11,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   enclosingWorkspace,
+  nestedWorkspace,
   resolveBundleCommand,
   resolveInstallCommand,
+  unattendedArgs,
 } from "../src/approved-commands.js";
 
 /** A fresh folder holding `files` (name to content). */
@@ -80,6 +82,29 @@ describe("resolveInstallCommand, inferred", () => {
       display: "pnpm install --frozen-lockfile",
       cwd: app,
     });
+  });
+
+  it("refuses an app that a nested pnpm-workspace.yaml hides from the workspace listing it", () => {
+    // A July checkout of starkeep-apps: the root workspace lists photos, and
+    // a git-ignored photos/pnpm-workspace.yaml survives every pull.
+    const ws = folder({ "pnpm-workspace.yaml": 'packages:\n  - "photos"\n', "pnpm-lock.yaml": "" });
+    const app = folder(
+      { ...PKG, "pnpm-workspace.yaml": "onlyBuiltDependencies:\n  - sharp\n" },
+      ws,
+      "photos",
+    );
+    const file = join(app, "pnpm-workspace.yaml");
+    expect(nestedWorkspace(app)).toEqual({ file, outerRoot: ws });
+    for (const manifest of [{}, { installDependencies: { command: "pnpm", args: ["install"] } }]) {
+      expect(resolveInstallCommand(app, manifest)).toEqual({
+        kind: "refused",
+        display: "pnpm install --frozen-lockfile",
+        cwd: ws,
+        reason:
+          `${file} makes pnpm treat the app's folder as a workspace of its own, ` +
+          `apart from the workspace at ${ws} that lists the app. Delete ${file}.`,
+      });
+    }
   });
 
   it("installs nothing for an app core's own workspace lists, even a declared command", () => {
@@ -222,5 +247,20 @@ describe("enclosingWorkspace", () => {
     expect(enclosingWorkspace(folder({}, ws, "other"))?.covers).toBe(false);
     expect(enclosingWorkspace(folder({}, ws, "packages/ui/deep"))?.covers).toBe(false);
     expect(enclosingWorkspace(folder())).toBeNull();
+  });
+});
+
+describe("unattendedArgs", () => {
+  it("lets a pnpm install delete a stale node_modules without a terminal", () => {
+    expect(unattendedArgs("pnpm", ["install", "--frozen-lockfile"])).toEqual([
+      "install",
+      "--frozen-lockfile",
+      "--config.confirm-modules-purge=false",
+    ]);
+  });
+
+  it("leaves every other command as it is", () => {
+    expect(unattendedArgs("npm", ["ci"])).toEqual(["ci"]);
+    expect(unattendedArgs("pnpm", ["run", "bundle"])).toEqual(["run", "bundle"]);
   });
 });

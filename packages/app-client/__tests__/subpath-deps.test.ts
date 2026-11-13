@@ -77,6 +77,16 @@ describe("the session-cookies subpath imports nothing", () => {
   });
 });
 
+describe("the content-disposition subpath imports nothing", () => {
+  // The broker bundles it to name a public link's file, and must not pull the
+  // rest of app-client into its Lambda.
+  it("has no import at all in src/content-disposition.ts", () => {
+    const { files, external } = sourceGraph(resolve(PKG_DIR, "src", "content-disposition.ts"));
+    expect(files.map((f) => f.slice(PKG_DIR.length + 1))).toEqual(["src/content-disposition.ts"]);
+    expect(external).toEqual([]);
+  });
+});
+
 describe("the lambda and web subpaths carry no runtime dependencies", () => {
   it("imports nothing outside node builtins from src/lambda.ts", () => {
     const { files, external } = sourceGraph(resolve(PKG_DIR, "src", "lambda.ts"));

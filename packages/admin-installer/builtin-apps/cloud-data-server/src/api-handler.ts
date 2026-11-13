@@ -1755,6 +1755,8 @@ function recordToResponse(
     content_hash: record.contentHash,
     object_storage_key: record.objectStorageKey,
     original_filename: record.originalFilename,
+    original_created_at: record.originalCreatedAt,
+    original_updated_at: record.originalUpdatedAt,
     origin_app_id: record.originAppId,
     parent_id: record.parentId,
     stand_in_role: record.standInRole,

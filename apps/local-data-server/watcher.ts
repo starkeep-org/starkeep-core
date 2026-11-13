@@ -743,6 +743,7 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
             type,
             originAppId: appId,
             originalFilename: filename,
+            ...originalDatesOf(fileStat),
           },
           filePath,
           null,
@@ -1099,5 +1100,21 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
       }
       watches.clear();
     },
+  };
+}
+
+/**
+ * A file's own dates, as `DataRecord.originalCreatedAt` and
+ * `originalUpdatedAt` hold them. A filesystem without birth time reports 0,
+ * which means unknown, not 1970.
+ */
+export function originalDatesOf(fileStat: { birthtimeMs: number; mtimeMs: number }): {
+  originalCreatedAt: string | null;
+  originalUpdatedAt: string | null;
+} {
+  const iso = (ms: number) => (ms > 0 ? new Date(ms).toISOString() : null);
+  return {
+    originalCreatedAt: iso(fileStat.birthtimeMs),
+    originalUpdatedAt: iso(fileStat.mtimeMs),
   };
 }

@@ -59,6 +59,14 @@ describe("fileLinkHref", () => {
     expect(href).toBe("/api/records/rec-1/file?type=image%2Fjpeg");
   });
 
+  it("carries the filename, so a download keeps its name", () => {
+    const href = fileLinkHref(
+      record({ id: "rec-1", type: "archive/zip", original_filename: "Q3 & Q4.zip" }),
+    );
+    expect(href).toBe("/api/records/rec-1/file?type=archive%2Fzip&name=Q3+%26+Q4.zip");
+    expect(new URL(href!, "http://drive.local").searchParams.get("name")).toBe("Q3 & Q4.zip");
+  });
+
   it("url-encodes the id and tolerates a missing type", () => {
     const href = fileLinkHref(record({ id: "weird id/&?", type: undefined }));
     expect(href).toBe("/api/records/weird%20id%2F%26%3F/file?type=");

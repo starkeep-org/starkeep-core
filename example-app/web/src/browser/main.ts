@@ -336,7 +336,7 @@ function contentPanel(content: string): HTMLPreElement {
 // The Open panel: one record in full.
 const open = section(
   "Open file",
-  "The selected file: its record, its content, its metadata row, its labels and its note.",
+  "The selected file: its record, its content, its metadata row, its labels and its note. A record's own dates say when Starkeep made and changed the record. The file dates come from the source, and only a watched folder reports them.",
 );
 const noteInput = el("textarea", { rows: 2 });
 const pinnedInput = el("input", { type: "checkbox" });
@@ -359,6 +359,11 @@ async function renderOpen(): Promise<void> {
   const rows: [string, string][] = [
     ["Id", record.id],
     ["Name", record.original_filename ?? ""],
+    ["Size", record.size_bytes === null ? "" : `${record.size_bytes} bytes`],
+    ["Record created", record.created_at],
+    ["Record updated", record.updated_at],
+    ["File created", record.original_created_at ?? "not reported"],
+    ["File modified", record.original_updated_at ?? "not reported"],
     ["Copy of", record.parent_id ?? ""],
     ["Labels", labelsText(record)],
     ["Metadata", metadata ? JSON.stringify(metadata) : "none"],
@@ -712,7 +717,7 @@ async function renderTypes(): Promise<void> {
 
 const sharesSection = section(
   "Public links",
-  "Links anyone can open, made with a file's Share button. They live in the cloud, so a computer reaches them only when it is signed in to one.",
+  "Web links to your example files, made with a file's Share button. Anyone who has a valid link can view the shared content without signing in. The links live in the cloud, so a computer reaches them only when it is signed in to one.",
 );
 
 async function renderShares(): Promise<void> {

@@ -865,7 +865,8 @@ export function DashboardPage() {
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
             This will permanently delete all local object files, the SQLite database, and watch
-            configs on this machine. Cloud data is untouched.
+            configs on this machine. Files you added through an app are deleted. Files in your
+            watched folders stay where they are. Cloud data is untouched.
           </p>
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => setClearConfirmOpen(false)}>

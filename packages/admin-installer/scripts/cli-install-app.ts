@@ -65,7 +65,7 @@ import {
   getIdentityPoolCredentials,
 } from "../src/cognito-auth";
 import { prompt } from "../src/cli-prompt";
-import type { CommandResolution } from "../src/approved-commands";
+import { unattendedArgs, type CommandResolution } from "../src/approved-commands";
 import { useOnlyAwsCredentials, withoutAwsVariables } from "../src/aws-env";
 import { protocolRefusal } from "../src/protocol-check";
 import {
@@ -87,7 +87,8 @@ function installAppDependencies(install: CommandResolution): void {
     return;
   }
   console.log(`\nInstalling dependencies (${install.display} in ${install.cwd})…`);
-  const result = spawnSync(install.command, install.args, {
+  // Admin runs this script with no terminal; see `unattendedArgs`.
+  const result = spawnSync(install.command, unattendedArgs(install.command, install.args), {
     cwd: install.cwd,
     stdio: "inherit",
     // Hygiene, not isolation: see the module comment in src/aws-env.ts.

@@ -42,6 +42,24 @@ export interface DataRecord extends BaseRecord {
   sizeBytes: number;
   originalFilename: string | null;
   /**
+   * The source file's own birth time, as the source reported it when Starkeep
+   * captured these bytes, in ISO 8601. Not `createdAt`, which is when Starkeep
+   * made the record. Only the folder watcher fills it today. Null when the
+   * source reported nothing, which includes filesystems with no birth time.
+   *
+   * A fact the source reported, not one derived from the bytes: two nodes that
+   * capture the same bytes mint the same record and may report different
+   * dates, and the last writer wins. See the top comment in `labels.ts`.
+   */
+  originalCreatedAt: string | null;
+  /**
+   * The source file's modification time when Starkeep captured these bytes,
+   * in ISO 8601. Never changes for a record: new content mints a new record,
+   * and a touch that leaves the content unchanged writes no record. Only the
+   * folder watcher fills it today; null otherwise.
+   */
+  originalUpdatedAt: string | null;
+  /**
    * App identity that produced this record. Set by the data-server at write
    * time from the authenticated subject. Required on every write.
    */

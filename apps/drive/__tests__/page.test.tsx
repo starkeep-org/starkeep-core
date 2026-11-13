@@ -134,7 +134,9 @@ describe("the records table", () => {
     render(<DrivePage />);
 
     const link = await screen.findByRole("link", { name: "holiday.png" });
-    expect(link.getAttribute("href")).toBe("/api/records/rec-1/file?type=image%2Fpng");
+    expect(link.getAttribute("href")).toBe(
+      "/api/records/rec-1/file?type=image%2Fpng&name=holiday.png",
+    );
   });
 
   it("leaves a cloud-only row unlinked, because its bytes are not here", async () => {

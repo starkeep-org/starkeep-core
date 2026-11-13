@@ -8,21 +8,33 @@ The app reads and writes only `example/plaintext`, a type in the `example` categ
 
 Each heading is one group of operations, with a table of the current state and a row of controls:
 
-| Heading       | What it does                                                                                                                                 |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Connection    | Which surface the page runs on, who is signed in, the 403 a write outside the app's grant gets, and a call to the app's own JWT-gated route. |
-| Example files | Create from text, upload through a presigned URL, derive a copy, filter, page, count and delete.                                             |
-| Open file     | One file's record, content, metadata row, labels and note.                                                                                   |
-| Metadata      | The `example` category's metadata table, queried directly, with totals.                                                                      |
-| Labels        | Add, set and retract tags and a bare flag; count files per tag; list every app's declared keys.                                              |
-| Notes         | The app's own `notes` table: write, pin, search and delete.                                                                                  |
-| Note exports  | The app's own files: save every note as a private JSON file, then list, open and delete the files.                                           |
-| Deleted       | Every example file deleted since an instant, a restore, and the trash retention window.                                                      |
-| Types         | Record counts for every type the app may read.                                                                                               |
-| Public links  | Links anyone can open, made with a file's Share button. They need a cloud.                                                                   |
-| Activity      | Every request the page made, with method, path, status and duration.                                                                         |
+| Heading       | What it does                                                                                                                                                             |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Connection    | Which surface the page runs on, who is signed in, the 403 a write outside the app's grant gets, and a call to the app's own JWT-gated route.                             |
+| Example files | Create from text, upload through a presigned URL, derive a copy, filter, page, count and delete.                                                                         |
+| Open file     | One file's record, size, dates, content, metadata row, labels and note.                                                                                                  |
+| Metadata      | The `example` category's metadata table, queried directly, with totals.                                                                                                  |
+| Labels        | Add, set and retract tags and a bare flag; count files per tag; list every app's declared keys.                                                                          |
+| Notes         | The app's own `notes` table: write, pin, search and delete.                                                                                                              |
+| Note exports  | The app's own files: save every note as a private JSON file, then list, open and delete the files.                                                                       |
+| Deleted       | Every example file deleted since an instant, a restore, and the trash retention window.                                                                                  |
+| Types         | Record counts for every type the app may read.                                                                                                                           |
+| Public links  | Web links to your example files, made with a file's Share button. Anyone who has a valid link can view the shared content without signing in. Public links need a cloud. |
+| Activity      | Every request the page made, with method, path, status and duration.                                                                                                     |
 
 `web/src/browser/api.ts` holds one function per operation and names the route each one calls.
+
+### How labels read
+
+The page shows each label as `<app>/<key>=<value>`, such as `example-app/tag=spoon`. The `example-app/` prefix names the app that made the assertion. Another app can put a label with the same key name on the same file, and the prefix keeps the two apart. Every label has a key, and the app declares its keys in `starkeep.manifest.json`. The example app declares three:
+
+- `tag` holds a tag you add, such as `example-app/tag=spoon`.
+- `derived` marks a copy and names how the copy was made, such as `example-app/derived=uppercase`.
+- `reviewed` is a bare flag. A bare flag has an empty value, so the page shows `example-app/reviewed` with no `=`.
+
+### How dates read
+
+The Open file panel shows two kinds of date. "Record created" and "Record updated" say when Starkeep made and changed the record. "File created" and "File modified" are the source file's own dates. Only a file from a watched folder carries file dates. A file made from text or uploaded through the page shows "not reported."
 
 ## Layout
 

@@ -13,6 +13,9 @@ export interface CreateDataRecordInput {
   mimeType?: string | null;
   sizeBytes: number;
   originalFilename?: string | null;
+  /** The source's own file dates; see `DataRecord.originalCreatedAt`. */
+  originalCreatedAt?: string | null;
+  originalUpdatedAt?: string | null;
   parentId?: StarkeepId | null;
   standInRole?: StandInRole | null;
   fidelity?: number | null;
@@ -45,6 +48,8 @@ export function createDataRecord(input: CreateDataRecordInput, clock: HLCClock):
     mimeType: input.mimeType ?? null,
     sizeBytes: input.sizeBytes,
     originalFilename,
+    originalCreatedAt: input.originalCreatedAt ?? null,
+    originalUpdatedAt: input.originalUpdatedAt ?? null,
     originAppId: input.originAppId,
     parentId: input.parentId ?? null,
     standInRole: input.standInRole ?? null,

@@ -1053,6 +1053,10 @@ describe("the no-cloud refusal through the broker", () => {
   async function copyRecord(recordId: string, copyId: string) {
     await pg.query(
       `INSERT INTO shared.records
+         (user_id, id, type, created_at, updated_at, node_id, deleted_at, version,
+          content_hash, object_storage_key, mime_type, size_bytes, original_filename,
+          origin_app_id, parent_id, stand_in_role, fidelity, canonical_threshold,
+          self_canonical, stand_in_slot)
          SELECT user_id, $2, type, created_at, updated_at, node_id, deleted_at, version,
                 content_hash, object_storage_key, mime_type, size_bytes, 'copy.jpg',
                 origin_app_id, parent_id, stand_in_role, fidelity, canonical_threshold,

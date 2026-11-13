@@ -2,10 +2,14 @@
  * Cross-app record labels — attributed assertions one app makes about a shared
  * record, including records it did not create.
  *
- * The shared plane holds exactly two kinds of thing: **facts derived from the
- * bytes** (the per-category metadata tables, `content_hash`, `size_bytes`) and
- * **attributed assertions by a named app** (`origin_app_id`, and these). A
- * label is the second kind. Attribution being part of the data is what makes
+ * The shared plane holds exactly three kinds of thing: **facts derived from the
+ * bytes** (the per-category metadata tables, `content_hash`, `size_bytes`),
+ * **attributed assertions by a named app** (`origin_app_id`, and these), and
+ * **facts the source reported** when Starkeep captured the bytes
+ * (`original_created_at` and `original_updated_at`, the file's own dates). The
+ * third kind is neither derived nor attributed: a filesystem reported it, and
+ * two nodes that capture the same bytes may report different values. A label
+ * is the second kind. Attribution being part of the data is what makes
  * disagreement representable rather than a conflict: `alpha/quality=high` and
  * `gamma/quality=low` coexist as two rows, and readers decide whom to believe.
  *

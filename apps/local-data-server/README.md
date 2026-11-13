@@ -1,13 +1,13 @@
 # Data Server
 
-The data-server is the local hub for all Starkeep data operations. It embeds the SDK and exposes it over HTTP so that multiple apps on the same machine can share a single database, type registry, and sync connection.
+The data-server is the local hub for all Starkeep data operations. It embeds the SDK and exposes it over HTTP so that multiple Starkeep apps on the same machine can share a single database, type registry, and sync connection.
 
 Start the data-server after the admin panel has guided you through initial setup.
 
 ## Running
 
 ```bash
-pnpm --filter @starkeep/data-server dev
+pnpm --filter @starkeep/local-data-server dev
 ```
 
 Listens on port 9820 by default. Set `STARKEEP_PORT` to use a different port.
@@ -22,12 +22,12 @@ Registered record types and their record counts are available at `GET /data/type
 
 ### File Watching
 
-The data-server can watch local directories and automatically index new files as records. When a file is added to a watched directory, the data-server creates a record for it and runs any applicable metadata generators (e.g., extracting EXIF data from a photo).
+The data-server can watch local directories and automatically index new files as records. When a file is added to a watched directory, the data-server creates a record for it. The record keeps the file's own creation and modification dates in `original_created_at` and `original_updated_at`. The watcher extracts no metadata from the file's bytes. An app such as Photos derives metadata later.
 
 Watches are managed via the API:
 
 - `GET /watches` — list active watches
-- `POST /watches` — add a new watch (directory path, target record type, recursive flag)
+- `POST /watches` — add a new watch (directory path, recursive flag, include and exclude patterns)
 - `DELETE /watches/{id}` — remove a watch
 
 Watch configuration is persisted to `~/.starkeep/watches.json` and restored on startup.
