@@ -166,3 +166,10 @@ export function surfacesOf(a: LocalAppEntry): AppSurface[] {
   if (a.manifest.mobile?.android) out.push("mobile");
   return out;
 }
+
+/**
+ * The `code` an install route sends with a 409 when the app's folder no
+ * longer holds the manifest the person approved. The card's manifest is then
+ * out of date, and the same request fails again until the card re-reads it.
+ */
+export const MANIFEST_NOT_APPROVED = "MANIFEST_NOT_APPROVED";

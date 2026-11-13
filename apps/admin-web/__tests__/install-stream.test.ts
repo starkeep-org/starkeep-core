@@ -305,9 +305,11 @@ describe("an app install", () => {
       approvedManifest: testAppManifest({ id: "photos", name: "Photos", version: "9.9.9" }),
     });
     expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toBe(
-      `App photos's folder ${photosDir} changed after you approved its manifest. Review the new manifest and deploy again.`,
-    );
+    expect(await res.json()).toEqual({
+      error: `App photos's folder ${photosDir} changed after you approved its manifest. Review the new manifest and deploy again.`,
+      // The code tells the client its card is stale, so it re-reads the folder.
+      code: "MANIFEST_NOT_APPROVED",
+    });
     expect(spawnedChildren()).toHaveLength(0);
   });
 
@@ -424,9 +426,10 @@ describe("an app installed on this machine", () => {
     );
     const res = await appInstall({ appId: "dice" });
     expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toBe(
-      `App dice's folder ${pinned} holds a changed manifest. Choose Start or Redeploy to update it.`,
-    );
+    expect(await res.json()).toEqual({
+      error: `App dice's folder ${pinned} holds a changed manifest. Choose Start or Redeploy to update it.`,
+      code: "MANIFEST_NOT_APPROVED",
+    });
     expect(spawnedChildren()).toHaveLength(0);
   });
 

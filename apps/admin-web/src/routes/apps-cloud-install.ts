@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
 import { appSource, idMismatch, pinnedSourceState } from "../lib/app-scan";
+import { MANIFEST_NOT_APPROVED } from "../lib/app-types";
 import { REPO_ROOT } from "../lib/exec-commands";
 import { installStream } from "../lib/install-stream";
 import { installerEnv } from "@starkeep/admin-installer/aws-env";
@@ -104,6 +105,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
           error: pinnedChanged
             ? `App ${appId}'s folder ${source.appDir} holds a changed manifest. Choose Start or Redeploy to update it.`
             : `App ${appId}'s folder ${source.appDir} changed after you approved its manifest. Review the new manifest and deploy again.`,
+          code: MANIFEST_NOT_APPROVED,
         },
         { status: 409 },
       );

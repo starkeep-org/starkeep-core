@@ -73,9 +73,10 @@ describe("approval gate", () => {
       approvedManifest: { ...INST, version: "9.9.9" },
     });
     expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toBe(
-      `App inst-app's folder ${join(dataDir, "apps", "inst")} changed after you approved its manifest. Review the new manifest and install again.`,
-    );
+    expect(await res.json()).toEqual({
+      error: `App inst-app's folder ${join(dataDir, "apps", "inst")} changed after you approved its manifest. Review the new manifest and install again.`,
+      code: "MANIFEST_NOT_APPROVED",
+    });
     expect(existsSync(join(credsDir, "inst-app.json"))).toBe(false);
   });
 

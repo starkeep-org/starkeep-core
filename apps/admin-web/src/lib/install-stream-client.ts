@@ -11,7 +11,15 @@
 
 export type InstallOutcome =
   | { kind: "done"; data: string }
-  | { kind: "error"; message: string; tokenExpired: boolean };
+  | {
+      kind: "error";
+      message: string;
+      tokenExpired: boolean;
+      /** The HTTP status of a route that refused the install before it streamed. */
+      status?: number;
+      /** The refusal's `code`, such as `MANIFEST_NOT_APPROVED`, when the route names one. */
+      code?: string;
+    };
 
 export interface InstallStreamClientOptions {
   /** Each line of the installer's output, and the reader's own notices. */
@@ -91,13 +99,21 @@ function errorFrom(data: string): InstallOutcome {
 
 async function errorFromResponse(resp: Response): Promise<InstallOutcome> {
   let message = `${resp.status} ${resp.statusText}`;
+  let code: string | undefined;
   try {
-    const j = (await resp.json()) as { error?: string };
+    const j = (await resp.json()) as { error?: string; code?: unknown };
     if (j.error) message = j.error;
+    if (typeof j.code === "string") code = j.code;
   } catch {
     // Not JSON.
   }
-  return { kind: "error", message, tokenExpired: false };
+  return {
+    kind: "error",
+    message,
+    tokenExpired: false,
+    status: resp.status,
+    ...(code !== undefined ? { code } : {}),
+  };
 }
 
 /**
