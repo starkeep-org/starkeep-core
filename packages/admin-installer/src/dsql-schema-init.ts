@@ -797,6 +797,45 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
          (owner_user_id, app_id, source_kind, label_key, label_value, record_id)`,
     );
 
+    // delegation — outside clients' access, outside the user cut.
+    //
+    // A delegation token names its row, and the broker finds the row before
+    // the row names a user, as with a public share's link token. So the table
+    // sits outside the owner-scope compiler, and the broker checks `user_id`
+    // and `app_id` against the token on every call. The broker reads and
+    // writes rows as Starkeep Drive, the platform's standing identity, and
+    // the installer deletes an app's rows on uninstall. DSQL has no row-level
+    // security, so every role may touch the table, as with public shares; the
+    // stored Cognito refresh token is encrypted under a key only the broker
+    // reads. See `delegation-store.ts` in the cloud-data-server.
+    await db.schema.createSchema("delegation").ifNotExists().execute();
+    await sql.raw(`GRANT USAGE ON SCHEMA delegation TO PUBLIC`).execute(db);
+    await db.schema
+      .createTable("delegation.grants")
+      .ifNotExists()
+      .addColumn("id", "text", (c) => c.notNull().primaryKey())
+      .addColumn("user_id", "text", (c) => c.notNull())
+      .addColumn("app_id", "text", (c) => c.notNull())
+      .addColumn("channel", "text", (c) => c.notNull().check(sql`channel IN ('app', 'platform')`))
+      .addColumn("mode", "text", (c) => c.notNull().check(sql`mode IN ('read', 'readwrite')`))
+      .addColumn("client_name", "text", (c) => c.notNull())
+      .addColumn("cognito_refresh_ciphertext", "text", (c) => c.notNull())
+      .addColumn("created_at_ms", "bigint", (c) => c.notNull())
+      .addColumn("expires_at_ms", "bigint", (c) => c.notNull())
+      .addColumn("revoked_at_ms", "bigint")
+      .addColumn("last_used_at_ms", "bigint")
+      .addColumn("last_write_at_ms", "bigint")
+      .execute();
+    await sql
+      .raw(`GRANT SELECT, INSERT, UPDATE, DELETE ON delegation.grants TO PUBLIC`)
+      .execute(db);
+    // The connections page's list.
+    await ensureIndex(
+      db,
+      `CREATE INDEX ASYNC IF NOT EXISTS idx_delegation_grants_user
+         ON delegation.grants (user_id, app_id)`,
+    );
+
     // DSQL-side IAM-to-PG mapping for the cloud install registry. The
     // orchestrator opens its registry connection as the admin-app IAM role
     // (federated entry point — the same identity the human admin used to
