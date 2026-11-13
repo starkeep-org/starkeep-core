@@ -126,6 +126,14 @@ export async function createSharedSchema(pg: PGlite): Promise<void> {
       expires_at_ms bigint
     );
     CREATE UNIQUE INDEX uq_public_shares_link_token ON public_sharing.public_shares (link_token);
+    CREATE TABLE shared.app_registry (
+      app_id text PRIMARY KEY,
+      version text NOT NULL,
+      name text,
+      web_app boolean NOT NULL DEFAULT false,
+      mobile_app boolean NOT NULL DEFAULT false,
+      manifest text
+    );
     CREATE SCHEMA IF NOT EXISTS delegation;
     CREATE TABLE delegation.grants (
       id text PRIMARY KEY,
