@@ -93,6 +93,12 @@ export interface CloudDataServerProgramContext {
    */
   mobileAppsUserPoolClientId: string;
   /**
+   * The client the consent and connections pages sign in with. The broker
+   * stores one of its refresh tokens per delegation and mints ID tokens from
+   * it to check the user's groups. No data branch accepts its tokens.
+   */
+  connectorsUserPoolClientId: string;
+  /**
    * The client desktops sign in with. The broker accepts its tokens with no
    * app signature, on the device-token branch, and serves its id from
    * `GET /auth/config`.
@@ -510,6 +516,9 @@ export function buildCloudDataServerProgram(
             // The mobile-apps client, whose tokens need an attested key's
             // signature. Unset turns mobile sign-in off, never on.
             STARKEEP_MOBILE_USER_POOL_CLIENT_ID: ctx.mobileAppsUserPoolClientId,
+            // The connectors client, behind the consent and connections
+            // pages. Unset turns delegated access off, never on.
+            STARKEEP_CONNECTORS_USER_POOL_CLIENT_ID: ctx.connectorsUserPoolClientId,
             // Where /auth/start sends a browser to sign in.
             STARKEEP_COGNITO_DOMAIN: ctx.cognitoDomain,
             // Part B: SSM SecureString holding { keyPairId, domain, privateKey }

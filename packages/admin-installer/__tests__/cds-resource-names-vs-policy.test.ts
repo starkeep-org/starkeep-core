@@ -79,6 +79,7 @@ function makeCtx(): CloudDataServerProgramContext {
     userPoolId: "us-east-2_pool",
     cloudAppsUserPoolClientId: "client123",
     mobileAppsUserPoolClientId: "mobileclient789",
+    connectorsUserPoolClientId: "connclient000",
     cognitoDomain: "teststack-123.auth.us-east-1.amazoncognito.com",
     deviceUserPoolClientId: "deviceclient456",
     ephemeral: false,
