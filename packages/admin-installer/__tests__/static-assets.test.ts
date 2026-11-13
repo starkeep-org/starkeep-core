@@ -181,7 +181,11 @@ describe("collectStaticAssets", () => {
   });
 
   it("returns nothing for an app with no bundleAssetsDir", () => {
-    const m = manifest({ staticAssetPaths: [], bundleAssetsDir: undefined });
+    const m = manifest({
+      publicPaths: ["/", "/_immutable/*", "/_static/*", "/sign-in"],
+      staticAssetPaths: [],
+      bundleAssetsDir: undefined,
+    });
     expect(collectStaticAssets(m, zip({ "index.mjs": "x" }))).toEqual([]);
   });
 

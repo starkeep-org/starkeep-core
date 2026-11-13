@@ -21,25 +21,26 @@ function handler(over: Record<string, unknown> = {}) {
 describe("resolveHandlerRoutes", () => {
   it("inherits the handler's auth for bare string routes", () => {
     const routes = resolveHandlerRoutes(
-      handler({ routes: ["GET /", "ANY /{proxy+}"], auth: "public" }),
+      handler({ routes: ["GET /", "ANY /{proxy+}"], auth: "jwt" }),
     );
-    expect(routes.map((r) => r.auth)).toEqual(["public", "public"]);
+    expect(routes.map((r) => r.auth)).toEqual(["jwt", "jwt"]);
     expect(routes.map((r) => r.catchAll)).toEqual([false, true]);
   });
 
-  it("lets a route override the handler's auth in either direction", () => {
+  it("lets a route override the handler's auth", () => {
     const routes = resolveHandlerRoutes(
       handler({
-        auth: "public",
-        routes: ["GET /", { route: "ANY /api/data/{proxy+}", auth: "jwt" }],
+        auth: "jwt",
+        routes: ["GET /", { route: "POST /mcp", auth: "delegated" }],
       }),
     );
-    expect(routes.map((r) => r.auth)).toEqual(["public", "jwt"]);
+    expect(routes.map((r) => r.auth)).toEqual(["jwt", "delegated"]);
+    expect(routes[1]!.authExplicit).toBe(true);
+  });
 
-    const inverted = resolveHandlerRoutes(
-      handler({ auth: "jwt", routes: [{ route: "GET /health", auth: "public" }] }),
-    );
-    expect(inverted[0]!.auth).toBe("public");
+  it("refuses a handler or a route that declares itself anonymous", () => {
+    expect(() => handler({ auth: "public" })).toThrow();
+    expect(() => handler({ routes: [{ route: "GET /health", auth: "public" }] })).toThrow();
   });
 
   it("treats $default as an ANY catch-all", () => {
@@ -63,7 +64,7 @@ describe("prefixAppRouteKey", () => {
 describe("matchRoute — gateway specificity", () => {
   const routes = resolveHandlerRoutes(
     handler({
-      auth: "public",
+      auth: "session",
       routes: ["GET /", "ANY /{proxy+}", { route: "ANY /api/data/{proxy+}", auth: "jwt" }],
     }),
   );
@@ -88,33 +89,21 @@ describe("matchRoute — gateway specificity", () => {
 });
 
 describe("isAnonymouslyReachable", () => {
-  // The exact shape 5.4 of the postmortem proposes: a public shell whose data
-  // subtree is put back behind the authorizer by a more specific route.
-  const split = handler({
-    auth: "public",
-    routes: ["GET /", "ANY /{proxy+}", { route: "ANY /api/data/{proxy+}", auth: "jwt" }],
-    publicPaths: ["/", "/_immutable/*"],
+  // A session shell: the declared public paths are the anonymous reach.
+  const shell = handler({
+    auth: "session",
+    routes: ["GET /", "ANY /{proxy+}", { route: "POST /mcp", auth: "delegated" }],
+    publicPaths: ["/", "/_immutable/*", "/sign-in"],
   });
 
   it("says yes for the shell and its chunks", () => {
-    expect(isAnonymouslyReachable(split, "GET", "/")).toBe(true);
-    expect(isAnonymouslyReachable(split, "GET", "/_immutable/x.js")).toBe(true);
+    expect(isAnonymouslyReachable(shell, "GET", "/")).toBe(true);
+    expect(isAnonymouslyReachable(shell, "GET", "/_immutable/x.js")).toBe(true);
   });
 
-  it("says no for the data subtree", () => {
-    expect(isAnonymouslyReachable(split, "GET", "/api/data/data/records")).toBe(false);
-    expect(isAnonymouslyReachable(split, "DELETE", "/api/data/data/records/abc")).toBe(false);
-  });
-
-  it("says yes for the data subtree when the handler is wholly public", () => {
-    // This is what photos and memo shipped: one public catch-all over
-    // everything, including the signing proxy.
-    const wide = handler({
-      auth: "public",
-      routes: ["GET /", "ANY /{proxy+}"],
-      publicPaths: ["/"],
-    });
-    expect(isAnonymouslyReachable(wide, "GET", "/api/data/data/records")).toBe(true);
+  it("says no for everything else, an outside client's route included", () => {
+    expect(isAnonymouslyReachable(shell, "GET", "/api/local-data/data/records")).toBe(false);
+    expect(isAnonymouslyReachable(shell, "POST", "/mcp")).toBe(false);
   });
 });
 
@@ -133,8 +122,8 @@ describe("anonymousRoutes", () => {
             {
               name: "static",
               handler: "index.handler",
-              auth: "public",
-              routes: ["GET /", "ANY /{proxy+}", { route: "ANY /api/data/{proxy+}", auth: "jwt" }],
+              auth: "session",
+              routes: ["GET /", "ANY /{proxy+}", { route: "POST /mcp", auth: "delegated" }],
               publicPaths: ["/", "/_immutable/*"],
             },
           ],
@@ -145,17 +134,17 @@ describe("anonymousRoutes", () => {
     expect(anonymousRoutes(manifest)).toEqual([
       {
         handlerName: "static",
-        declared: "GET /",
-        routeKey: "GET /apps/photos",
+        declared: "/",
+        routeKey: "ANY /apps/photos",
         catchAll: false,
-        derived: false,
+        derived: true,
       },
       {
         handlerName: "static",
-        declared: "ANY /{proxy+}",
-        routeKey: "ANY /apps/photos/{proxy+}",
+        declared: "/_immutable/*",
+        routeKey: "ANY /apps/photos/_immutable/{proxy+}",
         catchAll: true,
-        derived: false,
+        derived: true,
       },
     ]);
   });
