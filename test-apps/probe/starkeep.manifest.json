@@ -68,7 +68,14 @@
           "handler": "static-handler.handler",
           "memoryMb": 256,
           "timeoutSeconds": 10,
-          "routes": ["GET /", "ANY /{proxy+}"],
+          "routes": [
+            "GET /",
+            "ANY /{proxy+}",
+            {
+              "route": "POST /mcp",
+              "auth": "delegated"
+            }
+          ],
           "auth": "session",
           "publicPaths": ["/", "/_immutable/*", "/_static/*", "/sign-in", "/api/session/*"],
           "staticAssetPaths": ["/_immutable/*", "/_static/*"],

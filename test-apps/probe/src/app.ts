@@ -6,7 +6,8 @@
  * particular real application. It is deliberately the *smallest* app that
  * touches every surface the platform offers: a served shell, a sign-in flow, a
  * signing proxy, a shared-record write path, a declared label vocabulary, an
- * app-private table, and a JWT-gated compute route.
+ * app-private table, a JWT-gated compute route, and an MCP route for outside
+ * clients holding a delegation token.
  *
  * It is also the platform's worked example of the shape every Starkeep app
  * takes. The server half is a Hono app; `serve.ts` runs it under
@@ -36,6 +37,7 @@ import { createDataProxyHandler, sessionAuth } from "@starkeep/app-client";
 import { appBasePath, honoOriginGate } from "@starkeep/app-client/hono";
 import manifest from "../starkeep.manifest.json" with { type: "json" };
 import { ASSET_NAME, STATIC_NAME } from "./assets.js";
+import { handleMcp } from "./mcp.js";
 
 /** The app id, fixed to match `starkeep.manifest.json`. */
 export const APP_ID = "probe";
@@ -95,6 +97,13 @@ function shellPage(base: string, cloud: boolean): string {
 }
 
 export const app = new Hono();
+
+// The outside-client route, ahead of the origin gate below: an MCP client
+// holds a delegation token, never a session cookie, so the gate would send it
+// to the sign-in page. The route checks its caller itself with
+// `verifyDelegation`, and in the cloud the gateway's delegated authorizer has
+// already checked the token. See ./mcp.ts.
+app.post("/mcp", (c) => handleMcp(APP_ID, c.req.raw));
 
 // The origin gate, deny-by-default over the manifest's own `publicPaths`. It is
 // inert on the local surface and redundant with the gateway's session

@@ -164,6 +164,33 @@ test("a record one app writes is visible to another; its app-private rows are no
   expect(probeNotes.status, "Drive read another app's private table").not.toBe(200);
 });
 
+test("a local MCP client reaches the app's tools with no token, as loopback trust allows", async () => {
+  // On the local surface an outside client such as Claude Code calls the
+  // app's delegated route over loopback. The route admits it with full app
+  // power and no token, the way the app's own pages are admitted.
+  async function call(name: string, args: Record<string, unknown> = {}) {
+    const res = await fetch(`${probeUrl.replace(/\/$/, "")}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name, arguments: args },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { result: { content: { text: string }[] } };
+    return JSON.parse(body.result.content[0]!.text) as { status: number; body: unknown };
+  }
+
+  const written = await call("add_note", { recordId: "probe-mcp", note: "from an MCP client" });
+  expect(written.status).toBe(200);
+  const notes = await call("list_notes");
+  expect(notes.status).toBe(200);
+  expect(JSON.stringify(notes.body)).toContain("from an MCP client");
+});
+
 test("re-uploading identical bytes dedups at the platform layer", async ({ page }) => {
   await page.goto(probeUrl);
   await expect(page.getByAltText(FIXTURE_NAME).first()).toBeVisible({ timeout: 60_000 });
