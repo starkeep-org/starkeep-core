@@ -617,24 +617,39 @@ describe("anonymous routes and publicPaths", () => {
     ...over,
   });
 
-  it("refuses an anonymous catch-all with no publicPaths declaration", () => {
-    // The exact shape both shipped apps carried: `auth: "public"` on a handler
-    // that owns `ANY /{proxy+}`, which publishes the app's whole server surface
-    // — data proxy included — to the internet. See the 2026-08-23 postmortem.
+  const sessionShell = (over: Record<string, unknown> = {}) =>
+    staticHandler({
+      auth: "session",
+      routes: ["GET /", "ANY /{proxy+}"],
+      publicPaths: ["/", "/_immutable/*", "/sign-in", "/api/session/*"],
+      ...over,
+    });
+
+  it('refuses auth "public" on a handler, naming what replaces it', () => {
+    // Retired 2026-11-13 (item K): an app's own code may not answer a caller
+    // the platform has not checked.
     const result = validateManifest(
       withHandlers([staticHandler({ auth: "public", routes: ["GET /", "ANY /{proxy+}"] })]),
     );
     expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.includes('is a catch-all with auth "public"'))).toBe(true);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain('compute.handlers.0.auth: auth "public" is retired');
+    expect(result.errors[0]).toContain('auth "delegated"');
   });
 
-  it("accepts the same catch-all once the intended public subpaths are declared", () => {
+  it('refuses auth "public" on a single route, as Exercise\'s POST /mcp declared it', () => {
+    const result = validateManifest(
+      withHandlers([sessionShell({ routes: ["GET /", { route: "POST /mcp", auth: "public" }] })]),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors[0]).toContain('handlers.0.routes.1.auth: auth "public" is retired');
+  });
+
+  it("accepts a delegated route on one path", () => {
     const result = validateManifest(
       withHandlers([
-        staticHandler({
-          auth: "public",
-          routes: ["GET /", "ANY /{proxy+}"],
-          publicPaths: ["/", "/_immutable/*"],
+        sessionShell({
+          routes: ["GET /", "ANY /{proxy+}", { route: "POST /mcp", auth: "delegated" }],
         }),
       ]),
     );
@@ -642,53 +657,59 @@ describe("anonymous routes and publicPaths", () => {
     expect(result.valid).toBe(true);
   });
 
-  it("does not require a declaration for a public route that is not a catch-all", () => {
-    // A named public route is already its own declaration — the manifest says
-    // exactly which path it opened.
-    const result = validateManifest(
-      withHandlers([staticHandler({ routes: [{ route: "GET /health", auth: "public" }] })]),
-    );
-    expect(result.errors).toEqual([]);
-  });
-
-  it("rejects publicPaths on a handler where nothing is anonymous", () => {
-    const result = validateManifest(
-      withHandlers([staticHandler({ routes: ["GET /", "ANY /{proxy+}"], publicPaths: ["/"] })]),
-    );
-    expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.includes("no route on this handler is anonymous"))).toBe(
-      true,
-    );
-  });
-
-  it("rejects a publicPath the handler does not serve", () => {
+  it("refuses a delegated catch-all, which would hand an outside token every path", () => {
     const result = validateManifest(
       withHandlers([
-        staticHandler({ auth: "public", routes: ["GET /"], publicPaths: ["/", "/sign-in"] }),
-      ]),
-    );
-    expect(result.valid).toBe(false);
-    expect(result.errors.some((e) => e.includes("not served by any route"))).toBe(true);
-  });
-
-  it("rejects a publicPath the gateway would route to an authenticated route", () => {
-    // A stale entry left behind after the data subtree was put back behind the
-    // authorizer: the declaration would tell a reviewer the opposite of the truth.
-    const result = validateManifest(
-      withHandlers([
-        staticHandler({
-          auth: "public",
-          routes: ["GET /", "ANY /{proxy+}", { route: "ANY /api/data/{proxy+}", auth: "jwt" }],
-          publicPaths: ["/", "/api/data/*"],
+        sessionShell({
+          routes: ["GET /", "ANY /{proxy+}", { route: "ANY /mcp/{proxy+}", auth: "delegated" }],
         }),
       ]),
     );
     expect(result.valid).toBe(false);
-    expect(
-      result.errors.some(
-        (e) => e.includes("requires\nauthentication") || e.includes("requires authentication"),
-      ),
-    ).toBe(true);
+    expect(result.errors.some((e) => e.includes('"delegated" on a catch-all'))).toBe(true);
+  });
+
+  it("refuses publicPaths on a jwt handler, where nothing is anonymous", () => {
+    const result = validateManifest(
+      withHandlers([staticHandler({ routes: ["GET /", "ANY /{proxy+}"], publicPaths: ["/"] })]),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes('publicPaths needs auth "session"'))).toBe(true);
+  });
+
+  it("refuses a publicPath that is neither a platform page nor a static file", () => {
+    // Without this an author could reopen an endpoint the app guards itself
+    // through publicPaths, the way auth "public" did.
+    const result = validateManifest(
+      withHandlers([
+        sessionShell({ publicPaths: ["/", "/_immutable/*", "/sign-in", "/api/session/*", "/mcp"] }),
+      ]),
+    );
+    expect(result.valid).toBe(false);
+    const error = result.errors.find((e) => e.includes('"/mcp" is neither a platform page'));
+    expect(error).toContain('auth "delegated"');
+  });
+
+  it("accepts a static page the handler serves from disk, such as a public link viewer", () => {
+    const result = validateManifest(
+      withHandlers([
+        sessionShell({
+          publicPaths: ["/", "/_immutable/*", "/sign-in", "/api/session/*", "/p/*"],
+          staticAssetPaths: ["/_immutable/*", "/p/*"],
+          bundleAssetsDir: "assets",
+        }),
+      ]),
+    );
+    expect(result.errors).toEqual([]);
+  });
+
+  it("accepts an entry narrower than a platform wildcard", () => {
+    const result = validateManifest(
+      withHandlers([
+        sessionShell({ publicPaths: ["/", "/_immutable/fonts/*", "/sign-in", "/api/session/*"] }),
+      ]),
+    );
+    expect(result.errors).toEqual([]);
   });
 
   it('accepts auth "session" with the paths sign-in needs', () => {
@@ -748,7 +769,7 @@ describe("anonymous routes and publicPaths", () => {
     expect(result.errors.some((e) => e.includes('needs "/sign-in"'))).toBe(false);
   });
 
-  it('accepts "/sign-in" through a wildcard that covers it', () => {
+  it('refuses "/sign-in/*", which reaches past the sign-in page into app code', () => {
     const result = validateManifest(
       withHandlers([
         staticHandler({
@@ -758,7 +779,10 @@ describe("anonymous routes and publicPaths", () => {
         }),
       ]),
     );
-    expect(result.errors).toEqual([]);
+    expect(result.errors.some((e) => e.includes('needs "/sign-in"'))).toBe(false);
+    expect(result.errors.some((e) => e.includes('"/sign-in/*" is neither a platform page'))).toBe(
+      true,
+    );
   });
 
   it("does not ask a session handler to justify its catch-all", () => {
@@ -818,9 +842,9 @@ describe("anonymous routes and publicPaths", () => {
     const result = validateManifest(
       withHandlers([
         staticHandler({
-          auth: "public",
+          auth: "session",
           routes: ["GET /", "ANY /{proxy+}"],
-          publicPaths: ["/", "/"],
+          publicPaths: ["/", "/", "/sign-in"],
         }),
       ]),
     );
@@ -832,7 +856,7 @@ describe("anonymous routes and publicPaths", () => {
     const result = validateManifest(
       withHandlers([
         staticHandler({
-          auth: "public",
+          auth: "session",
           routes: ["GET /", "ANY /{proxy+}"],
           publicPaths: ["_immutable/*"],
         }),
@@ -883,20 +907,17 @@ describe("anonymous routes and publicPaths", () => {
       expect(wildcard).toContain("data proxy");
     });
 
-    it("refuses it on a public handler too", () => {
+    it("refuses it on a jwt handler too, where publicPaths has no place at all", () => {
       const result = validateManifest(
         withHandlers([
           staticHandler({
-            auth: "public",
             routes: ["GET /", "ANY /{proxy+}"],
             publicPaths: ["/*"],
           }),
         ]),
       );
       expect(result.valid).toBe(false);
-      expect(result.errors.some((e) => e.includes("is a wildcard over the whole handler"))).toBe(
-        true,
-      );
+      expect(result.errors.some((e) => e.includes('publicPaths needs auth "session"'))).toBe(true);
     });
 
     it("leaves a bounded wildcard alone, which is the ordinary declaration", () => {
@@ -924,7 +945,7 @@ describe("staticAssetPaths", () => {
     handler: "index.handler",
     auth: "session",
     routes: ["GET /", "ANY /{proxy+}"],
-    publicPaths: ["/", "/_immutable/*", "/manifest.webmanifest", "/sign-in", "/api/session/*"],
+    publicPaths: ["/", "/_immutable/*", "/sign-in", "/api/session/*"],
     ...over,
   });
 
@@ -939,6 +960,13 @@ describe("staticAssetPaths", () => {
     const result = validateManifest(
       withHandlers([
         shell({
+          publicPaths: [
+            "/",
+            "/_immutable/*",
+            "/manifest.webmanifest",
+            "/sign-in",
+            "/api/session/*",
+          ],
           staticAssetPaths: ["/_immutable/*", "/manifest.webmanifest"],
           bundleAssetsDir: "assets",
         }),
@@ -1001,7 +1029,7 @@ describe("bundleAssetsDir", () => {
     handler: "index.handler",
     auth: "session",
     routes: ["GET /", "ANY /{proxy+}"],
-    publicPaths: ["/", "/_immutable/*", "/_static/*", "/favicon.ico", "/sign-in", "/api/session/*"],
+    publicPaths: ["/", "/_immutable/*", "/_static/*", "/sign-in", "/api/session/*"],
     ...over,
   });
 
@@ -1018,7 +1046,14 @@ describe("bundleAssetsDir", () => {
   it("is required for static paths the Lambda serves, so the installer can measure them", () => {
     // Without it the installer cannot find the files in dist.zip, and a file
     // past the Lambda response limit would fail only at request time.
-    const result = validateManifest(withHandlers([shell({ staticAssetPaths: ["/favicon.ico"] })]));
+    const result = validateManifest(
+      withHandlers([
+        shell({
+          publicPaths: ["/", "/_static/*", "/favicon.ico", "/sign-in", "/api/session/*"],
+          staticAssetPaths: ["/favicon.ico"],
+        }),
+      ]),
+    );
     expect(result.valid).toBe(false);
     expect(result.errors.some((e) => e.includes("too large for a Lambda response"))).toBe(true);
   });

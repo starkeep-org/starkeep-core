@@ -78,6 +78,35 @@ export function plannedRouteResourceNames(manifest: AppManifest): Set<string> {
  * predates the authorizer, and the fix is to reinstall it, not to ship an
  * ungated app.
  */
+/**
+ * The origin authorizer's id, or a refusal. Every anonymous route carries it,
+ * so no app page loads on the gateway's execute-api hostname, where the
+ * consent pages live. Installing without it would leave the app's pages on
+ * that origin; the fix is to reinstall the cloud-data-server.
+ */
+function requireOriginAuthorizer(ctx: ComputeContext): string {
+  if (!ctx.originAuthorizerId) {
+    throw new Error(
+      `App "${ctx.appId}" has routes that answer before sign-in, but the cloud-data-server ` +
+        `stack exposes no originAuthorizerId. Reinstall the cloud-data-server so the origin ` +
+        `authorizer exists, then install this app again.`,
+    );
+  }
+  return ctx.originAuthorizerId;
+}
+
+/** The delegated authorizer's id, or a refusal: a delegated route must never deploy ungated. */
+function requireDelegatedAuthorizer(ctx: ComputeContext): string {
+  if (!ctx.delegatedAuthorizerId) {
+    throw new Error(
+      `App "${ctx.appId}" declares auth "delegated" but the cloud-data-server stack exposes no ` +
+        `delegatedAuthorizerId. Reinstall the cloud-data-server so the delegated authorizer ` +
+        `exists; installing this app without it would publish the route to the internet.`,
+    );
+  }
+  return ctx.delegatedAuthorizerId;
+}
+
 function requireSessionAuthorizer(ctx: ComputeContext): string {
   if (!ctx.sessionAuthorizerId) {
     throw new Error(
@@ -216,11 +245,15 @@ export function buildPulumiProgram(
           }
         }
 
-        // Three ways a route can be gated, and the choice is the app's:
+        // Four gates. The manifest chooses among the last three; `public`
+        // comes only from the resolver:
         //
-        //   public  — no authorizer. Under `session` these are the routes
-        //             derived from publicPaths, each more specific than the
-        //             gated catch-all, so the declaration is the reach.
+        //   public  — the routes a `session` handler's publicPaths derive,
+        //             each more specific than the gated catch-all, so the
+        //             declaration is the reach. No user check, but the origin
+        //             authorizer admits only requests that came through
+        //             CloudFront, so the app's pages never load on the
+        //             execute-api hostname beside the consent pages.
         //   jwt     — the Cognito JWT authorizer, reading a bearer token from
         //             `Authorization`. Right for a route the app's own code
         //             calls; a browser navigation cannot send that header.
@@ -228,15 +261,19 @@ export function buildPulumiProgram(
         //             cookie. The answer for anything a browser navigates to,
         //             and the reason enforcement can live here rather than in
         //             an app's own middleware gating itself.
+        //   delegated — the platform's REQUEST authorizer for an outside
+        //             client's delegation token, on one named route.
         const authorization =
           route.auth === "public"
-            ? {}
+            ? { authorizerId: requireOriginAuthorizer(ctx), authorizationType: "CUSTOM" }
             : route.auth === "session"
               ? {
                   authorizerId: requireSessionAuthorizer(ctx),
                   authorizationType: "CUSTOM",
                 }
-              : { authorizerId: ctx.authorizerId, authorizationType: "JWT" };
+              : route.auth === "delegated"
+                ? { authorizerId: requireDelegatedAuthorizer(ctx), authorizationType: "CUSTOM" }
+                : { authorizerId: ctx.authorizerId, authorizationType: "JWT" };
 
         const resourceName = routeResourceName(handler.name, route.routeKey);
         const created = new aws.apigatewayv2.Route(resourceName, {

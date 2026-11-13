@@ -52,6 +52,8 @@ const ctx: ComputeContext = {
   apiGatewayUrl: "https://api.example.com",
   authorizerId: "auth123",
   sessionAuthorizerId: "session-auth-456",
+  originAuthorizerId: "origin-auth-789",
+  delegatedAuthorizerId: "delegated-auth-012",
   region: "us-east-1",
   accountId: "111122223333",
   pulumiStateBucket: "starkeep-pulumi-state",
@@ -157,7 +159,7 @@ describe("route prefix rewriting", () => {
   it("rewrites GET / to the bare app prefix and nested paths underneath it", async () => {
     await run(
       manifestWithHandlers([
-        { name: "static", routes: ["GET /", "GET /{proxy+}"], auth: "public" },
+        { name: "static", routes: ["GET /", "GET /{proxy+}"] },
         { name: "api", routes: ["POST /api/resize"] },
       ]),
     );
@@ -189,51 +191,59 @@ describe("route prefix rewriting", () => {
 });
 
 describe("auth wiring", () => {
-  it("attaches the JWT authorizer to jwt handlers and none to public ones", async () => {
-    await run(
-      manifestWithHandlers([
-        { name: "api", routes: ["POST /api/x"] }, // auth defaults to jwt
-        { name: "static", routes: ["GET /"], auth: "public" },
-      ]),
-    );
+  it("attaches the JWT authorizer to jwt handlers", async () => {
+    await run(manifestWithHandlers([{ name: "api", routes: ["POST /api/x"] }]));
     const byKey = Object.fromEntries(routes().map((r) => [r.inputs.routeKey as string, r.inputs]));
     expect(byKey["POST /apps/photos/api/x"].authorizationType).toBe("JWT");
     expect(byKey["POST /apps/photos/api/x"].authorizerId).toBe("auth123");
-    expect(byKey["GET /apps/photos"].authorizationType).toBeUndefined();
-    expect(byKey["GET /apps/photos"].authorizerId).toBeUndefined();
   });
 
-  it("lets a per-route override put the authorizer back in front of a subtree", async () => {
-    // Postmortem 5.4: a handler used to be all-or-nothing, so an app that
-    // needed an anonymously-reachable HTML shell published its data plane too.
+  it("lets a per-route override put the JWT authorizer in front of a subtree", async () => {
     // API Gateway prefers the more specific route, so a jwt route for the data
-    // subtree on the SAME Lambda re-gates it while the document stays open.
+    // subtree on the SAME Lambda gates it differently from the catch-all.
     await run(
       manifestWithHandlers([
         {
           name: "static",
-          auth: "public",
+          auth: "session",
           routes: ["GET /", "ANY /{proxy+}", { route: "ANY /api/data/{proxy+}", auth: "jwt" }],
-          publicPaths: ["/", "/_immutable/*"],
+          publicPaths: ["/", "/_immutable/*", "/sign-in"],
         },
       ]),
     );
     const byKey = Object.fromEntries(routes().map((r) => [r.inputs.routeKey as string, r.inputs]));
-    expect(byKey["GET /apps/photos"].authorizationType).toBeUndefined();
-    expect(byKey["ANY /apps/photos/{proxy+}"].authorizationType).toBeUndefined();
+    expect(byKey["ANY /apps/photos/{proxy+}"].authorizerId).toBe("session-auth-456");
     expect(byKey["ANY /apps/photos/api/data/{proxy+}"].authorizationType).toBe("JWT");
     expect(byKey["ANY /apps/photos/api/data/{proxy+}"].authorizerId).toBe("auth123");
   });
 
-  it("lets a per-route override open one path on an otherwise gated handler", async () => {
+  it("puts the delegated authorizer on an outside client's route", async () => {
     await run(
       manifestWithHandlers([
-        { name: "api", routes: ["POST /api/x", { route: "GET /api/health", auth: "public" }] },
+        {
+          name: "static",
+          auth: "session",
+          routes: ["GET /", "ANY /{proxy+}", { route: "POST /mcp", auth: "delegated" }],
+          publicPaths: ["/", "/sign-in"],
+        },
       ]),
     );
     const byKey = Object.fromEntries(routes().map((r) => [r.inputs.routeKey as string, r.inputs]));
-    expect(byKey["POST /apps/photos/api/x"].authorizationType).toBe("JWT");
-    expect(byKey["GET /apps/photos/api/health"].authorizationType).toBeUndefined();
+    expect(byKey["POST /apps/photos/mcp"].authorizationType).toBe("CUSTOM");
+    expect(byKey["POST /apps/photos/mcp"].authorizerId).toBe("delegated-auth-012");
+  });
+
+  it("refuses to install a delegated route when the stack has no delegated authorizer", async () => {
+    const { delegatedAuthorizerId, ...without } = ctx;
+    void delegatedAuthorizerId;
+    await expect(
+      buildPulumiProgram(
+        manifestWithHandlers([
+          { name: "api", routes: [{ route: "POST /mcp", auth: "delegated" }] },
+        ]),
+        without,
+      )(),
+    ).rejects.toThrow(/would publish the route to the internet/);
   });
 });
 
@@ -259,7 +269,9 @@ describe("auth wiring: session", () => {
     expect(byKey["ANY /apps/photos/{proxy+}"].authorizerId).toBe("session-auth-456");
   });
 
-  it("emits one unauthenticated route per declared public path", async () => {
+  it("emits one route per declared public path, behind the origin authorizer alone", async () => {
+    // No user check on these, but no request that skipped CloudFront either,
+    // so the app's pages never load beside the consent pages.
     await run(manifestWithHandlers([sessionHandler]));
     const byKey = Object.fromEntries(routes().map((r) => [r.inputs.routeKey as string, r.inputs]));
     for (const key of [
@@ -269,8 +281,17 @@ describe("auth wiring: session", () => {
       "ANY /apps/photos/api/session/{proxy+}",
     ]) {
       expect(byKey[key], key).toBeDefined();
-      expect(byKey[key].authorizationType, key).toBeUndefined();
+      expect(byKey[key].authorizationType, key).toBe("CUSTOM");
+      expect(byKey[key].authorizerId, key).toBe("origin-auth-789");
     }
+  });
+
+  it("refuses to install when the stack has no origin authorizer", async () => {
+    const { originAuthorizerId, ...without } = ctx;
+    void originAuthorizerId;
+    await expect(
+      buildPulumiProgram(manifestWithHandlers([sessionHandler]), without)(),
+    ).rejects.toThrow(/no originAuthorizerId/);
   });
 
   it("does not leave the declared GET / gated beside a public route for the same path", async () => {
@@ -286,8 +307,9 @@ describe("auth wiring: session", () => {
   it("gates everything the declaration does not name", async () => {
     await run(manifestWithHandlers([sessionHandler]));
     const anonymous = routes()
-      .filter((r) => r.inputs.authorizationType === undefined)
+      .filter((r) => r.inputs.authorizerId === "origin-auth-789")
       .map((r) => r.inputs.routeKey);
+    expect(routes().filter((r) => r.inputs.authorizationType === undefined)).toEqual([]);
     expect(anonymous.sort()).toEqual([
       "ANY /apps/photos",
       "ANY /apps/photos/_immutable/{proxy+}",
@@ -338,7 +360,7 @@ describe("the execution identity", () => {
   it("runs every handler as the exec role, never the data role", async () => {
     await run(
       manifestWithHandlers([
-        { name: "static", routes: ["GET /"], auth: "public" },
+        { name: "static", routes: ["GET /"] },
         { name: "api", routes: ["POST /api/resize"] },
       ]),
     );
