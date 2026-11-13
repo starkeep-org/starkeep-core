@@ -58,6 +58,15 @@ jobs:
           fi
       - run: pnpm format:check
       - run: pnpm check:icons
+      # The example app may carry a core package packed from an unreleased
+      # branch, so its author can try a change before releasing it. Such a
+      # package must never reach main: the example depends on what npm serves.
+      - name: No vendored core package in the example app
+        run: |
+          if [ -d example-app/vendor ]; then
+            echo "::error::example-app/vendor holds core packages packed from an unreleased branch, for trying a change before release. Release core, point the example at the published version, and delete example-app/vendor."
+            exit 1
+          fi
       - run: pnpm turbo run lint typecheck
       # Turbo never evicts its local cache, and the restore-keys above always
       # bring back the previous run's entry, so without this each job's entry
