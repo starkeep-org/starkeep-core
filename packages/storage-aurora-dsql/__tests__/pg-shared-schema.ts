@@ -126,6 +126,21 @@ export async function createSharedSchema(pg: PGlite): Promise<void> {
       expires_at_ms bigint
     );
     CREATE UNIQUE INDEX uq_public_shares_link_token ON public_sharing.public_shares (link_token);
+    CREATE SCHEMA IF NOT EXISTS delegation;
+    CREATE TABLE delegation.grants (
+      id text PRIMARY KEY,
+      user_id text NOT NULL,
+      app_id text NOT NULL,
+      channel text NOT NULL CHECK (channel IN ('app', 'platform')),
+      mode text NOT NULL CHECK (mode IN ('read', 'readwrite')),
+      client_name text NOT NULL,
+      cognito_refresh_ciphertext text NOT NULL,
+      created_at_ms bigint NOT NULL,
+      expires_at_ms bigint NOT NULL,
+      revoked_at_ms bigint,
+      last_used_at_ms bigint,
+      last_write_at_ms bigint
+    );
   `);
   for (const c of CATEGORIES.filter((c) => hasMetadataTable(c.id))) {
     await pg.exec(pgMetadataDdl(c));
