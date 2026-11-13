@@ -112,8 +112,31 @@ describe("runInstallStream", () => {
       kind: "error",
       message: "config.json not found",
       tokenExpired: false,
+      status: 400,
     });
     expect(bodies).toHaveLength(1);
+  });
+
+  // The update panel re-reads the app list on a 409, and offers no Retry for
+  // a manifest the folder no longer holds.
+  it("carries a refusal's status and code", async () => {
+    const { fetchImpl } = scripted(
+      new Response(JSON.stringify({ error: "changed", code: "MANIFEST_NOT_APPROVED" }), {
+        status: 409,
+      }),
+    );
+    const outcome = await runInstallStream(
+      "/api/x",
+      {},
+      { onLine: () => {}, fetchImpl, reconnectDelayMs: 0 },
+    );
+    expect(outcome).toEqual({
+      kind: "error",
+      message: "changed",
+      tokenExpired: false,
+      status: 409,
+      code: "MANIFEST_NOT_APPROVED",
+    });
   });
 
   it("gives up after its reconnects run out", async () => {
