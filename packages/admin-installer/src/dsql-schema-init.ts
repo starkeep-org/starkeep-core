@@ -539,6 +539,10 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
     await sql
       .raw(`GRANT INSERT, UPDATE, DELETE, SELECT ON shared.app_registry TO "${installer}"`)
       .execute(db);
+    // Read by every role, like shared.access_grants: the broker's consent
+    // page lists the installed apps that serve outside clients. The rows
+    // hold app ids, names and manifests, none of them a secret.
+    await sql.raw(`GRANT SELECT ON shared.app_registry TO PUBLIC`).execute(db);
     // The surface columns, for a registry that predates them. Nullable on an
     // upgraded table (limitation 6), so each is filled once from what the
     // install left behind: a completed compute stack is the web app, and an
