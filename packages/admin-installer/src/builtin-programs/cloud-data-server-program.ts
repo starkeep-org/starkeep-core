@@ -794,7 +794,11 @@ export function buildCloudDataServerProgram(
       authorizerType: "REQUEST",
       authorizerPayloadFormatVersion: "2.0",
       enableSimpleResponses: true,
-      identitySources: ["$request.header.Cookie"],
+      // The origin header too, so the gateway refuses a request that skipped
+      // CloudFront before invoking anything, and a decision cached for a
+      // CloudFront request never answers for the same cookie sent straight to
+      // the execute-api hostname.
+      identitySources: ["$request.header.Cookie", `$request.header.${ORIGIN_HEADER}`],
       // Caches the decision per distinct Cookie header, so a signed-in session
       // costs one authorizer invocation per window rather than one per request
       // — which matters against an account concurrency limit of ten.
