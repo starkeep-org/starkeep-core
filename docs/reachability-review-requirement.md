@@ -61,14 +61,17 @@ wrong from memory:
   HMAC, not the end user. End-user identity is each app's own responsibility —
   see `data-roles-and-permissions.md`, "How data access actually flows at
   runtime", and `authoring-an-app.md` §10.
-- **CloudFront is not a security boundary.** The API Gateway origin stays
-  directly reachable by design. Any row that ends at "the edge blocks it" is
-  wrong.
+- **CloudFront authenticates no one.** The API Gateway origin stays directly
+  reachable by design. CloudFront's secret origin header separates two
+  origins: an app's routes refuse a request without it, and the consent and
+  connections pages refuse a request with it. The broker's data plane answers
+  either way. Any row that ends at "the edge blocks it" is wrong.
 - **One CloudFront domain serves everything.** The cloud apps' pages and
   APIs, and every signed `shared/*` file, share one origin. A file that renders
   as a page there runs as the signed-in apps, so a signed file URL's response
   type is part of its reach.
-- A manifest handler's `auth: "public"` on a catch-all makes **every** path
-  under `/apps/<appId>/` anonymous, including routes the app's bundle mounts
-  that the manifest never names. The handler's `publicPaths` declaration states
-  the _intent_; it does not narrow the reach.
+- **No author declares a route anonymous.** `auth: "public"` is retired. The
+  only anonymous app routes are the ones a `session` handler's `publicPaths`
+  derive, and the validator bounds those to platform pages and the handler's
+  static files. A `delegated` route admits anyone holding a delegation token
+  for that app, which any signed-in user can create for their own data.
