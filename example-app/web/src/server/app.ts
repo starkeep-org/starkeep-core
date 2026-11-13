@@ -31,6 +31,7 @@ import {
 import { appBasePath, honoOriginGate } from "@starkeep/app-client/hono";
 import { APP_ID } from "@example-app/common";
 import { echo } from "./echo.js";
+import { handleMcp } from "./mcp.js";
 import manifest from "../../../starkeep.manifest.json" with { type: "json" };
 
 if (manifest.id !== APP_ID) {
@@ -52,6 +53,13 @@ const sessionRoutes = createSessionRoutes({ appId: APP_ID });
 const proxy = createDataProxyHandler({ appId: APP_ID, endUserAuth: sessionAuth() });
 
 export const app = new Hono();
+
+// The MCP endpoint for outside clients, ahead of the origin gate below: an
+// MCP client holds a delegation token, never a session cookie, so the gate
+// would send it to the sign-in page. The route checks its caller itself, and
+// in the cloud the gateway's delegated authorizer has checked the token
+// first. See `mcp.ts`.
+app.post("/mcp", (c) => handleMcp(c.req.raw));
 
 // Deny by default, over the manifest's own `publicPaths`. Inert on the local
 // surface; in the cloud the gateway's session authorizer refuses an anonymous

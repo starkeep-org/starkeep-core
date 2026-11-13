@@ -24,6 +24,13 @@ Each heading is one group of operations, with a table of the current state and a
 
 `web/src/browser/api.ts` holds one function per operation and names the route each one calls.
 
+### MCP for outside clients
+
+`POST /mcp` serves the example's files and notes to an MCP client such as Claude Code: list, read, tag and create files, move a file to the Trash, and write or delete notes.
+
+- **Locally**, any program on the computer reaches it with no token: `claude mcp add --transport http example http://localhost:<port>/mcp`, with the port admin-web shows.
+- **In the cloud**, create a token at `<gateway URL>/connect?app=example-app`, where the gateway URL is `apiGatewayUrl` in `~/.starkeep/config.json`. A `read` token lists, reads and tags; `readwrite` also creates files, moves them to the Trash and writes notes. Then run `claude mcp add --transport http example <cloud URL>/apps/example-app/mcp --header "Authorization: Bearer <token>"`. Your tokens are listed, and can be revoked, at `<gateway URL>/connections`.
+
 ### How labels read
 
 The page shows each label as `<app>/<key>=<value>`, such as `example-app/tag=spoon`. The `example-app/` prefix names the app that made the assertion. Every label has a key, and the app declares its keys in `starkeep.manifest.json`. The example app declares three:
@@ -53,6 +60,7 @@ web/                     @example-app/web: the local web and cloud web flavors
   src/server/static-options.ts  the static-file options both entries share
   src/server/api.ts      the cloud entry of the `api` handler: the JWT-gated routes
   src/server/echo.ts     POST /api/echo, the JWT-gated route
+  src/server/mcp.ts      POST /mcp, the MCP endpoint for outside clients
   src/browser/           the page
   scripts/bundle.mjs     the cloud bundle
 e2e/                     @example-app/e2e: the tier-2 suite
