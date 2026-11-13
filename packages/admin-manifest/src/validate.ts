@@ -7,13 +7,7 @@ import {
 } from "./schema.js";
 import { z } from "zod";
 import { isKnownType, typeCategory, isGrantableCategory } from "@starkeep/protocol-primitives";
-import {
-  declaredHandlerRoutes,
-  matchRoute,
-  probePathFor,
-  publicPathRoutePath,
-  resolveHandlerRoutes,
-} from "./routes.js";
+import { declaredHandlerRoutes, publicPathRoutePath } from "./routes.js";
 
 export interface ValidationResult {
   valid: boolean;

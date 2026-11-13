@@ -373,6 +373,12 @@ describe("the origin split between CloudFront and the execute-api hostname", () 
 
   it("keys the origin authorizer on the header alone, and the delegated one per route", () => {
     const authorizers = byType("apigatewayv2/authorizer:Authorizer");
+    // A session decision cached for a CloudFront request must not answer for
+    // the same cookie sent straight to the execute-api hostname.
+    expect(authorizers.find((a) => a.name === "session-cookie")!.inputs.identitySources).toEqual([
+      "$request.header.Cookie",
+      "$request.header.x-starkeep-origin",
+    ]);
     const origin = authorizers.find((a) => a.name === "origin-header")!;
     expect(origin.inputs.identitySources).toEqual(["$request.header.x-starkeep-origin"]);
     const delegated = authorizers.find((a) => a.name === "delegation-token")!;
