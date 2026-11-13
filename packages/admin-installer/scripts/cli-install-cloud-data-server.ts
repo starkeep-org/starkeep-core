@@ -84,6 +84,8 @@ interface StarkeepConfig extends CustomDomainConfigFields {
   apiGatewayExecutionArn?: string;
   authorizerId?: string;
   sessionAuthorizerId?: string;
+  originAuthorizerId?: string;
+  delegatedAuthorizerId?: string;
   s3Bucket?: string;
   auroraEndpoint?: string;
   /** The deployment's settings this machine held with no cloud; seeds SSM once. */
@@ -314,6 +316,8 @@ const updated: StarkeepConfig = {
   apiGatewayExecutionArn: outputs.apiGatewayExecutionArn,
   authorizerId: outputs.authorizerId,
   sessionAuthorizerId: outputs.sessionAuthorizerId,
+  originAuthorizerId: outputs.originAuthorizerId,
+  delegatedAuthorizerId: outputs.delegatedAuthorizerId,
   s3Bucket: outputs.bucketName,
   auroraEndpoint: outputs.auroraHostname,
   cloudAppsUserPoolClientId: outputs.cloudAppsUserPoolClientId,

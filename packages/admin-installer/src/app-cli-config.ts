@@ -57,6 +57,13 @@ export interface StarkeepCliConfig {
    * program refuses such an install rather than shipping the app ungated.
    */
   sessionAuthorizerId?: string;
+  /**
+   * The authorizers for the routes an app answers before sign-in and for
+   * `auth: "delegated"` routes. Absent in a config written before they
+   * existed; the Pulumi program refuses such an install.
+   */
+  originAuthorizerId?: string;
+  delegatedAuthorizerId?: string;
   s3Bucket?: string;
   auroraEndpoint?: string;
   appParentDirs?: string[];
@@ -314,6 +321,8 @@ export function cloudInstallInput(opts: {
       apiGatewayUrl: config.apiGatewayUrl ?? "",
       authorizerId,
       sessionAuthorizerId: config.sessionAuthorizerId,
+      originAuthorizerId: config.originAuthorizerId,
+      delegatedAuthorizerId: config.delegatedAuthorizerId,
       ...deriveInstallerArns(config, accountId, region),
       ...(config.mobileAppsUserPoolClientId
         ? {

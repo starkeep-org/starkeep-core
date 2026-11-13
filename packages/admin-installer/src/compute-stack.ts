@@ -107,6 +107,20 @@ export interface ComputeContext {
    * look like a successful install.
    */
   sessionAuthorizerId?: string;
+  /**
+   * The origin authorizer, which admits only requests that came through
+   * CloudFront. Every route an app answers before sign-in carries it, so no
+   * app page or script loads on the gateway's execute-api hostname, where the
+   * consent pages live. Optional for the same reason as the session
+   * authorizer, and refused the same way when missing.
+   */
+  originAuthorizerId?: string;
+  /**
+   * The delegated authorizer, for routes declaring `auth: "delegated"`: it
+   * verifies a delegation token an outside client sends. Optional and
+   * refused when missing, as above.
+   */
+  delegatedAuthorizerId?: string;
   region: string;
   accountId: string;
   pulumiStateBucket: string;
