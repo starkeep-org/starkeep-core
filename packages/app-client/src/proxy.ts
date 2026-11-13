@@ -1,5 +1,6 @@
 import { signRequest, USER_TOKEN_HEADER } from "./sign";
 import type { AppCredentials } from "./credentials";
+import { DELEGATION_HEADER } from "./delegation";
 
 export interface ProxyRequest {
   method: string;
@@ -17,6 +18,12 @@ export interface ProxyRequest {
    * the local surface, where the data server asks for no end user.
    */
   userToken?: string;
+  /**
+   * An outside client's delegation token, in place of `userToken`, when the
+   * proxy acts for an outside client rather than for a signed-in browser.
+   * The data server refuses a call that carries both.
+   */
+  delegationToken?: string;
 }
 
 export interface ProxyResponse {
@@ -48,7 +55,8 @@ export async function proxyToDataServer(
     path: req.path,
     body,
   });
-  if (req.userToken) fwdHeaders[USER_TOKEN_HEADER] = req.userToken;
+  if (req.delegationToken) fwdHeaders[DELEGATION_HEADER] = req.delegationToken;
+  else if (req.userToken) fwdHeaders[USER_TOKEN_HEADER] = req.userToken;
   const ct = req.headers["content-type"];
   if (ct) fwdHeaders["Content-Type"] = ct;
 
