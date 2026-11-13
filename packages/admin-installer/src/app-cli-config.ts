@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { configPath } from "@starkeep/app-client";
 import { appManifestSchema, type AppManifest } from "@starkeep/admin-manifest";
 import type { Registry } from "./registry";
+import type { AppSurface, InstallInput, RegistryCredentials } from "./orchestrator";
 import {
   resolveBundleCommand,
   resolveInstallCommand,
@@ -120,11 +121,24 @@ export function resolveAppDir(config: StarkeepCliConfig, appId: string): string 
  * folder it resolved, so the CLI does not scan again.
  */
 export function takeAppDirFlag(args: string[]): { appDir?: string; rest: string[] } {
-  const i = args.indexOf("--app-dir");
+  const { value: appDir, rest } = takeFlagValue(args, "--app-dir", "a folder");
+  return appDir === undefined ? { rest } : { appDir, rest };
+}
+
+/**
+ * Take `flag <value>` out of `args`. Throws when the flag has no value;
+ * `what` names the value the flag needs, such as "a folder".
+ */
+export function takeFlagValue(
+  args: string[],
+  flag: string,
+  what: string,
+): { value?: string; rest: string[] } {
+  const i = args.indexOf(flag);
   if (i === -1) return { rest: args };
-  const appDir = args[i + 1];
-  if (!appDir || appDir.startsWith("--")) throw new Error("--app-dir needs a folder");
-  return { appDir, rest: [...args.slice(0, i), ...args.slice(i + 2)] };
+  const value = args[i + 1];
+  if (!value || value.startsWith("--")) throw new Error(`${flag} needs ${what}`);
+  return { value, rest: [...args.slice(0, i), ...args.slice(i + 2)] };
 }
 
 /**
@@ -249,5 +263,66 @@ export function deriveInstallerArns(
     // Suffixed with account+region to keep the bucket globally unique (the
     // bootstrap ArtifactsBucket has the same name shape).
     artifactsBucket: `${stackPrefix}-artifacts-${accountId}-${region}`,
+  };
+}
+
+/**
+ * The `installApp` input for `cli:install-app`: the app, the surfaces, the
+ * bundle and the deployment the config describes.
+ *
+ * The input names `appDir` as the web app's source, so the install records
+ * the folder's `sourceFingerprint`. Admin's cloud list compares that record
+ * with the folder's fingerprint now, so an input without it would read as
+ * behind after every deploy.
+ *
+ * Throws for a config without the cloud data server's fields, as
+ * `cli:install-app` checks before it gets here.
+ */
+export function cloudInstallInput(opts: {
+  appId: string;
+  appDir: string;
+  manifest: AppManifest;
+  surfaces: readonly AppSurface[];
+  zipBuffer?: Buffer;
+  config: StarkeepCliConfig;
+  region: string;
+  accountId: string;
+  registryCredentials: RegistryCredentials;
+}): InstallInput {
+  const { config, region, accountId } = opts;
+  const { apiGatewayId, authorizerId, s3Bucket, auroraEndpoint } = config;
+  if (!apiGatewayId || !authorizerId || !s3Bucket || !auroraEndpoint) {
+    throw new Error(
+      "The Starkeep config is missing required fields: apiGatewayId, authorizerId, s3Bucket, auroraEndpoint.",
+    );
+  }
+  return {
+    appId: opts.appId,
+    manifest: opts.manifest,
+    surfaces: opts.surfaces,
+    webSourceDir: opts.appDir,
+    ...(opts.zipBuffer ? { zipBuffer: opts.zipBuffer } : {}),
+    version: opts.manifest.version,
+    registryCredentials: opts.registryCredentials,
+    config: {
+      stackPrefix: config.stackPrefix,
+      region,
+      accountId,
+      dsqlHostname: auroraEndpoint,
+      filesBucket: s3Bucket,
+      apiGatewayId,
+      apiGatewayUrl: config.apiGatewayUrl ?? "",
+      authorizerId,
+      sessionAuthorizerId: config.sessionAuthorizerId,
+      ...deriveInstallerArns(config, accountId, region),
+      ...(config.mobileAppsUserPoolClientId
+        ? {
+            mobileSignIn: {
+              userPoolId: config.userPoolId,
+              mobileAppsClientId: config.mobileAppsUserPoolClientId,
+            },
+          }
+        : {}),
+    },
   };
 }

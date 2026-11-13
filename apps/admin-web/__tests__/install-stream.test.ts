@@ -21,6 +21,7 @@ import { jsonRequest, makeAppDir, makeDataDir, testAppManifest } from "./helpers
 import { lastChild, resetSpawns, spawnedChildren, type FakeChild } from "./fake-spawn";
 import { lines, readSse } from "./sse";
 import { readFolderManifest } from "@starkeep/admin-installer/app-discovery";
+import { manifestDigest } from "@starkeep/admin-installer/manifest-approval";
 
 vi.mock("node:child_process", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:child_process")>()),
@@ -47,6 +48,17 @@ makeAppDir(
   "odd",
   testAppManifest({ id: "odd", name: "Odd", installDependencies: { command: "make" } }),
 );
+
+/** The validated manifest in `dir`, or undefined when it holds none. */
+function validManifest(dir: string) {
+  const folder = readFolderManifest(dir);
+  return folder.kind === "valid" ? folder.manifest : undefined;
+}
+
+/** The digest arguments the route passes for the manifest in `dir`. */
+function digestArgs(dir: string): string[] {
+  return ["--manifest-digest", manifestDigest(validManifest(dir)!)];
+}
 
 /** Everything the two later passes require of the earlier one. */
 const FULL_CONFIG = {
@@ -101,6 +113,10 @@ beforeAll(async () => {
   const app = await import("../src/routes/apps-cloud-install");
   appInstall = (body = {}) => {
     const appId = (body.appId as string) ?? "photos";
+    // The dialog or tile approves the manifest the app's folder holds, unless
+    // the test names another one or leaves it out.
+    const approvedManifest =
+      "approvedManifest" in body ? body.approvedManifest : validManifest(join(appsDir, appId));
     return (
       app.POST as unknown as (
         r: Request,
@@ -111,6 +127,7 @@ beforeAll(async () => {
         ...CREDS,
         region: "us-east-2",
         ...body,
+        approvedManifest,
       }),
       { params: Promise.resolve({ appId }) },
     );
@@ -254,6 +271,7 @@ describe("an app install", () => {
       "--non-interactive",
       "--app-dir",
       diceDir,
+      ...digestArgs(diceDir),
     ]);
     await finish(res, child);
   });
@@ -270,6 +288,36 @@ describe("an app install", () => {
     const child = lastChild();
     expect(child.args.slice(5, 7)).toEqual(["--app-dir", photosDir]);
     await finish(res, child);
+  });
+
+  // The route deploys only the manifest the person approved, and hands the
+  // CLI its digest so a folder that changes after this check deploys nothing.
+  it("passes the digest of the folder's manifest it checked", async () => {
+    const res = await appInstall({ appId: "photos" });
+    const child = lastChild();
+    expect(child.args.slice(-2)).toEqual(digestArgs(photosDir));
+    await finish(res, child);
+  });
+
+  it("refuses a folder that changed after the approval, and spawns nothing", async () => {
+    const res = await appInstall({
+      appId: "photos",
+      approvedManifest: testAppManifest({ id: "photos", name: "Photos", version: "9.9.9" }),
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      `App photos's folder ${photosDir} changed after you approved its manifest. Review the new manifest and deploy again.`,
+    );
+    expect(spawnedChildren()).toHaveLength(0);
+  });
+
+  it("refuses a request that names no approved manifest, and spawns nothing", async () => {
+    const res = await appInstall({ appId: "photos", approvedManifest: undefined, approved: true });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain(
+      "the manifest the user approved",
+    );
+    expect(spawnedChildren()).toHaveLength(0);
   });
 
   it("refuses an app the scan does not find, and spawns nothing", async () => {
@@ -290,7 +338,7 @@ describe("an app install", () => {
   ])("passes surfaces %j to the installer as %j", async (surfaces, flags) => {
     const res = await appInstall({ appId: "photos", surfaces });
     const child = lastChild();
-    expect(child.args.slice(7)).toEqual(flags);
+    expect(child.args.slice(7, -2)).toEqual(flags);
     await finish(res, child);
   });
 
@@ -300,7 +348,11 @@ describe("an app install", () => {
     expect(
       child.args.filter(
         (a) =>
-          a.startsWith("--") && a !== "--filter" && a !== "--non-interactive" && a !== "--app-dir",
+          a.startsWith("--") &&
+          a !== "--filter" &&
+          a !== "--non-interactive" &&
+          a !== "--app-dir" &&
+          a !== "--manifest-digest",
       ),
     ).toEqual([]);
     await finish(res, child);
@@ -309,7 +361,7 @@ describe("an app install", () => {
   it("ignores a surface it does not know rather than passing it on", async () => {
     const res = await appInstall({ appId: "photos", surfaces: ["desktop", "mobile"] });
     const child = lastChild();
-    expect(child.args.slice(7)).toEqual(["--mobile"]);
+    expect(child.args.slice(7, -2)).toEqual(["--mobile"]);
     await finish(res, child);
   });
 
@@ -392,9 +444,13 @@ describe("an app installed on this machine", () => {
       "dice",
       testAppManifest({ id: "dice", name: "Dice", version: "2.0.0" }),
     );
-    const res = await appInstall({ appId: "dice", approved: true });
+    const res = await appInstall({
+      appId: "dice",
+      approvedManifest: testAppManifest({ id: "dice", name: "Dice", version: "2.0.0" }),
+    });
     const child = lastChild();
     expect(child.args.slice(5, 7)).toEqual(["--app-dir", pinned]);
+    expect(child.args.slice(-2)).toEqual(digestArgs(pinned));
     await finish(res, child);
   });
 
@@ -501,6 +557,29 @@ describe("the one run slot every cloud app install shares", () => {
     expect((await stream.rest()).at(-1)!.event).toBe("done");
   });
 
+  // A reconnecting browser follows the deploy it started, and the folder may
+  // have changed since. The reattach starts nothing, so it checks nothing.
+  it("lets a reattach follow the run without naming an approved manifest", async () => {
+    const first = await appInstall({ appId: "photos", surfaces: ["web"] });
+    const child = lastChild();
+    readSse(first);
+    const again = await appInstall({
+      appId: "photos",
+      surfaces: ["web"],
+      reattach: true,
+      approvedManifest: undefined,
+    });
+    expect(again.status).toBe(200);
+    expect(spawnedChildren()).toHaveLength(1);
+    const stream = readSse(again);
+    expect(await stream.next()).toEqual({
+      event: "message",
+      data: '"[Reconnected to in-progress deploy]"',
+    });
+    child.exit(0);
+    await stream.rest();
+  });
+
   it("starts a run for another surface once the slot's run has ended", async () => {
     const first = await appInstall({ appId: "photos", surfaces: ["web"] });
     await finish(first, lastChild());
@@ -508,7 +587,7 @@ describe("the one run slot every cloud app install shares", () => {
     const second = await appInstall({ appId: "photos", surfaces: ["mobile"] });
     expect(second.status).toBe(200);
     expect(spawnedChildren()).toHaveLength(2);
-    expect(lastChild().args.slice(7)).toEqual(["--mobile"]);
+    expect(lastChild().args.slice(7, -2)).toEqual(["--mobile"]);
     await finish(second, lastChild());
   });
 });

@@ -17,6 +17,10 @@ import {
   writeAdminConfig,
 } from "../helpers";
 
+/** The manifest the person approves in the consent dialog. */
+const INST = testAppManifest({ id: "inst-app", name: "Installable" });
+const MOVING = testAppManifest({ id: "moving-app", name: "Moving" });
+
 let POST: (req: Request) => Promise<Response>;
 let lds: LocalDataServer;
 let dataDir: string;
@@ -30,7 +34,7 @@ beforeAll(async () => {
   const parent = join(dataDir, "apps");
   mkdirSync(parent, { recursive: true });
   writeAdminConfig(dataDir, { appParentDirs: [parent] });
-  makeAppDir(parent, "inst", testAppManifest({ id: "inst-app", name: "Installable" }));
+  makeAppDir(parent, "inst", INST);
   // Valid JSON that fails the manifest validator (no name/version/tier).
   makeAppDir(parent, "invalid", { id: "invalid-app" });
 
@@ -48,29 +52,42 @@ const install = (body: unknown) => POST(jsonRequest("/api/apps/install", body));
 
 describe("approval gate", () => {
   it("rejects a missing appId with 400", async () => {
-    const res = await install({ approved: true });
+    const res = await install({ approvedManifest: INST });
     expect(res.status).toBe(400);
   });
 
-  it("rejects approved=false and missing approved with 400, and writes no secret", async () => {
-    for (const body of [{ appId: "inst-app" }, { appId: "inst-app", approved: false }]) {
+  it("rejects a request that names no approved manifest with 400, and writes no secret", async () => {
+    // A bare flag says someone clicked, not what they saw.
+    for (const body of [{ appId: "inst-app" }, { appId: "inst-app", approved: true }]) {
       const res = await install(body);
       expect(res.status).toBe(400);
       const { error } = (await res.json()) as { error: string };
-      expect(error).toMatch(/approval/i);
+      expect(error).toContain("the manifest the user approved");
     }
     expect(existsSync(join(credsDir, "inst-app.json"))).toBe(false);
   });
 
+  it("refuses with 409 when the folder changed after the approval, and writes no secret", async () => {
+    const res = await install({
+      appId: "inst-app",
+      approvedManifest: { ...INST, version: "9.9.9" },
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      `App inst-app's folder ${join(dataDir, "apps", "inst")} changed after you approved its manifest. Review the new manifest and install again.`,
+    );
+    expect(existsSync(join(credsDir, "inst-app.json"))).toBe(false);
+  });
+
   it("returns 404 for an appId not present in any parent dir", async () => {
-    const res = await install({ appId: "ghost-app", approved: true });
+    const res = await install({ appId: "ghost-app", approvedManifest: INST });
     expect(res.status).toBe(404);
   });
 });
 
 describe("successful install", () => {
   it("registers on the LDS and writes the secret file with mode 0600", async () => {
-    const res = await install({ appId: "inst-app", approved: true });
+    const res = await install({ appId: "inst-app", approvedManifest: INST });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { appId: string; secretPath: string; ok: boolean };
     expect(body.ok).toBe(true);
@@ -101,7 +118,7 @@ describe("successful install", () => {
     makeAppDir(other, "inst-copy", testAppManifest({ id: "inst-app", name: "Copy" }));
     writeAdminConfig(dataDir, { appParentDirs: [other, join(dataDir, "apps")] });
     try {
-      const res = await install({ appId: "inst-app", approved: true });
+      const res = await install({ appId: "inst-app", approvedManifest: INST });
       expect(res.status).toBe(200);
       const { apps } = (await (await fetch(`${lds.url}/admin/apps`)).json()) as {
         apps: Array<{ appId: string; name: string; sourceDir: string | null }>;
@@ -120,7 +137,7 @@ describe("successful install", () => {
     const before = JSON.parse(readFileSync(secretPath, "utf-8")) as { hmacSecret: string };
     chmodSync(secretPath, 0o644);
 
-    const res = await install({ appId: "inst-app", approved: true });
+    const res = await install({ appId: "inst-app", approvedManifest: INST });
     expect(res.status).toBe(200);
     expect(statSync(secretPath).mode & 0o777).toBe(0o600);
     const after = JSON.parse(readFileSync(secretPath, "utf-8")) as { hmacSecret: string };
@@ -135,7 +152,7 @@ describe("successful install", () => {
     const pidPath = join(pidsDir, "inst-app.pid");
     writeFileSync(pidPath, String(child.pid));
 
-    const res = await install({ appId: "inst-app", approved: true });
+    const res = await install({ appId: "inst-app", approvedManifest: INST });
     expect(res.status).toBe(200);
     await eventually(() => {
       expect(isAlive(child.pid!)).toBe(false);
@@ -147,13 +164,13 @@ describe("successful install", () => {
 describe("a pinned folder that now holds another app", () => {
   it("refuses the reinstall, installs nothing, and leaves the app's secret alone", async () => {
     const parent = join(dataDir, "apps");
-    makeAppDir(parent, "moving", testAppManifest({ id: "moving-app", name: "Moving" }));
-    expect((await install({ appId: "moving-app", approved: true })).status).toBe(200);
+    makeAppDir(parent, "moving", MOVING);
+    expect((await install({ appId: "moving-app", approvedManifest: MOVING })).status).toBe(200);
     const secretPath = join(credsDir, "moving-app.json");
     const before = readFileSync(secretPath, "utf-8");
 
     makeAppDir(parent, "moving", testAppManifest({ id: "moved-app", name: "Moved" }));
-    const res = await install({ appId: "moving-app", approved: true });
+    const res = await install({ appId: "moving-app", approvedManifest: MOVING });
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({
       error: `App moving-app's folder ${join(parent, "moving")} now holds another app's manifest.`,
@@ -173,13 +190,13 @@ describe("local-data-server error paths", () => {
   it("refuses an app whose manifest fails validation, because the scan never offers it", async () => {
     // The scan runs the validator Install runs, so Discover apps reports the
     // manifest and the Dashboard shows no card to install.
-    const res = await install({ appId: "invalid-app", approved: true });
+    const res = await install({ appId: "invalid-app", approvedManifest: { id: "invalid-app" } });
     expect(res.status).toBe(404);
   });
 
   it("returns 502 when the local-data-server is unreachable", async () => {
     await lds.stop();
-    const res = await install({ appId: "inst-app", approved: true });
+    const res = await install({ appId: "inst-app", approvedManifest: INST });
     expect(res.status).toBe(502);
     const { error } = (await res.json()) as { error: string };
     expect(error).toMatch(/local-data-server/);

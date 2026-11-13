@@ -1,9 +1,11 @@
 import { join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
-import { appSource, pinnedSourceState } from "../lib/app-scan";
+import { appSource, idMismatch, pinnedSourceState } from "../lib/app-scan";
 import { REPO_ROOT } from "../lib/exec-commands";
 import { installStream } from "../lib/install-stream";
 import { installerEnv } from "@starkeep/admin-installer/aws-env";
+import { readFolderManifest } from "@starkeep/admin-installer/app-discovery";
+import { approvesManifest, manifestDigest } from "@starkeep/admin-installer/manifest-approval";
 
 const STARKEEP_DIR = starkeepDir();
 
@@ -29,11 +31,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
      */
     surfaces?: string[];
     /**
-     * Set by the update dialog after the person approves the manifest the
-     * app's folder holds now. It lets the route deploy a locally installed
-     * app's changed manifest before the local install updates.
+     * The manifest the person approved: the one the update dialog or the
+     * install consent showed, or, for a tile that asked nothing, the
+     * manifest its card holds. The route deploys only when the app's folder
+     * holds this manifest. A reattach, which starts no deploy, may omit it.
      */
-    approved?: boolean;
+    approvedManifest?: unknown;
   };
 
   if (!body.accessKeyId || !body.secretAccessKey || !body.sessionToken || !body.region) {
@@ -59,23 +62,53 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
       { status: 409 },
     );
   }
-  // The CLI deploys the manifest in the folder. Without the update dialog's
-  // approval, the tile asked for consent against the manifest the user
-  // approved locally, so the route deploys only when the two are the same.
-  // The cloud then never runs a manifest nobody approved.
-  if (source.kind === "pinned") {
-    const state = pinnedSourceState(source.appDir, source.manifest);
-    const refusal =
-      state?.sourceState === "changed"
-        ? body.approved === true
-          ? null
-          : `App ${appId}'s folder ${source.appDir} holds a changed manifest. Choose Start or Redeploy to update it.`
-        : state?.sourceState === "invalid"
-          ? `App ${appId}'s folder ${source.appDir} holds an invalid manifest (${state.sourceError}). Fix the manifest first.`
-          : state?.sourceState === "missing"
-            ? `App ${appId}'s source folder ${source.appDir} no longer holds a manifest`
-            : null;
-    if (refusal) return Response.json({ error: refusal }, { status: 409 });
+  // The CLI deploys the manifest in the folder, so the folder must hold the
+  // manifest the person approved. The route hands the CLI that manifest's
+  // digest, and the CLI refuses a folder that changed after this check. A
+  // reattach only follows a deploy already running, so it checks nothing.
+  let digestArgs: string[] = [];
+  if (body.reattach !== true) {
+    const folder = readFolderManifest(source.appDir);
+    if (folder.kind !== "valid") {
+      const detail = folder.kind === "invalid" ? ` (${folder.error})` : "";
+      return Response.json(
+        {
+          error: `App ${appId}'s folder ${source.appDir} holds no valid manifest${detail}. Fix the manifest first.`,
+        },
+        { status: 409 },
+      );
+    }
+    // A folder that now holds another app would deploy that app under this id.
+    if (folder.manifest.id !== appId) {
+      return Response.json(
+        {
+          error: `App ${appId}'s folder ${source.appDir} holds an invalid manifest (${idMismatch(folder.manifest.id, appId)}). Fix the manifest first.`,
+        },
+        { status: 409 },
+      );
+    }
+    if (body.approvedManifest === null || typeof body.approvedManifest !== "object") {
+      return Response.json(
+        { error: "A deploy requires the manifest the user approved (approvedManifest)" },
+        { status: 400 },
+      );
+    }
+    if (!approvesManifest(body.approvedManifest, folder.manifest)) {
+      // A locally installed app's changed folder goes through the update
+      // dialog, which shows the folder's manifest and approves it.
+      const pinnedChanged =
+        source.kind === "pinned" &&
+        pinnedSourceState(source.appDir, source.manifest)?.sourceState === "changed";
+      return Response.json(
+        {
+          error: pinnedChanged
+            ? `App ${appId}'s folder ${source.appDir} holds a changed manifest. Choose Start or Redeploy to update it.`
+            : `App ${appId}'s folder ${source.appDir} changed after you approved its manifest. Review the new manifest and deploy again.`,
+        },
+        { status: 409 },
+      );
+    }
+    digestArgs = ["--manifest-digest", manifestDigest(folder.manifest)];
   }
 
   // iam-permission-tests POC capture — gated by PULUMI_VERBOSE_TRACE above:
@@ -131,6 +164,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
       "--app-dir",
       source.appDir,
       ...surfaceFlags.map((surface) => `--${surface}`),
+      ...digestArgs,
     ],
     cwd: REPO_ROOT,
     env: spawnEnv,

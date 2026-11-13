@@ -1,26 +1,28 @@
 import { stopById } from "../lib/daemon-control";
 import { readFolderManifest } from "@starkeep/admin-installer/app-discovery";
 import { installLocalApp } from "@starkeep/admin-installer/local-app-install";
+import { approvesManifest } from "@starkeep/admin-installer/manifest-approval";
 import { appSource, idMismatch } from "../lib/app-scan";
 import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
 
 /**
- * Install an app locally. Body: `{ appId, approved: true }`.
+ * Install an app locally. Body: `{ appId, approvedManifest }`.
  *
- * The `approved` flag is the explicit user-consent gate: admin-web's UI must
- * show the manifest's requested `sharedTypeAccess` grants and only set
- * `approved: true` after the user clicks Approve. The server re-checks the
- * flag so a forgetful UI can't write grants behind the user's back.
+ * `approvedManifest` is the user-consent gate: the manifest the install or
+ * update dialog showed when the person clicked Approve. The route installs
+ * only when the app's folder still holds that manifest, so a folder that
+ * changed after the dialog never installs grants nobody saw (see
+ * admin-installer's manifest-approval.ts).
  */
 export async function POST(req: Request) {
-  const body = (await req.json()) as { appId?: string; approved?: boolean };
-  const { appId, approved } = body;
+  const body = (await req.json()) as { appId?: string; approvedManifest?: unknown };
+  const { appId, approvedManifest } = body;
   if (!appId) {
     return Response.json({ error: "appId is required" }, { status: 400 });
   }
-  if (approved !== true) {
+  if (approvedManifest === null || typeof approvedManifest !== "object") {
     return Response.json(
-      { error: "Install requires explicit user approval (approved=true)" },
+      { error: "Install requires the manifest the user approved (approvedManifest)" },
       { status: 400 },
     );
   }
@@ -56,6 +58,14 @@ export async function POST(req: Request) {
       {
         error: `App ${appId}'s folder ${sourceDir} now holds another app's manifest.`,
         details: [idMismatch(folder.manifest.id, appId)],
+      },
+      { status: 409 },
+    );
+  }
+  if (!approvesManifest(approvedManifest, folder.manifest)) {
+    return Response.json(
+      {
+        error: `App ${appId}'s folder ${sourceDir} changed after you approved its manifest. Review the new manifest and install again.`,
       },
       { status: 409 },
     );

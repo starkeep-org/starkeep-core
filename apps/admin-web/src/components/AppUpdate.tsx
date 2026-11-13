@@ -159,8 +159,12 @@ export interface CloudInstallRequest {
   surfaces: AppSurface[];
   /** The panel's title. */
   title: string;
-  /** The update dialog's approval of the folder's changed manifest. */
-  approved?: boolean;
+  /**
+   * The manifest the person approved: the one the dialog showed, or the
+   * card's manifest for a tile that asked nothing. The route deploys only
+   * when the app's folder still holds it.
+   */
+  approvedManifest: ManifestSummary;
   /** Close the panel on success, for a run that has more steps after it. */
   closeOnSuccess?: boolean;
 }
@@ -324,10 +328,21 @@ export function AppUpdateProvider({
     (entry: LocalAppEntry, origin: UpdateOrigin): boolean => {
       let behind = behindOf(entry, registry);
       if (!behind.local && behind.cloud.kind !== "behind") return false;
-      // Redeploy on a current cloud install while the local install is
-      // behind: the dialog still offers the redeploy the person chose.
-      if (origin !== "start" && behind.cloud.kind === "none") {
-        behind = { ...behind, cloud: { kind: "redeploy", surfaces: [origin.redeploy] } };
+      // Redeploy and Re-register always reach the surface the person chose.
+      // A current cloud install becomes a redeploy of that surface. A behind
+      // one gains the surface when a code-only change left it out, as a
+      // mobile registration deploys no code.
+      if (origin !== "start") {
+        const chosen = origin.redeploy;
+        if (behind.cloud.kind === "none") {
+          behind = { ...behind, cloud: { kind: "redeploy", surfaces: [chosen] } };
+        } else if (behind.cloud.kind === "behind" && !behind.cloud.surfaces.includes(chosen)) {
+          const current = behind.cloud.surfaces;
+          const surfaces = (["web", "mobile"] as const).filter(
+            (s) => s === chosen || current.includes(s),
+          );
+          behind = { ...behind, cloud: { ...behind.cloud, surfaces } };
+        }
       }
       setPending({ entry, origin, behind });
       return true;
@@ -353,9 +368,9 @@ export function AppUpdateProvider({
           surfaces: behind.cloud.surfaces,
           title:
             behind.cloud.kind === "behind" ? `Update ${name} in the cloud` : `Redeploy ${name}`,
-          // The dialog approved the folder's manifest, which the cloud route
-          // otherwise refuses while the local install is behind.
-          approved: true,
+          // The dialog showed the folder's manifest, so the cloud route may
+          // deploy it while the local install is behind.
+          approvedManifest: behind.folder,
           closeOnSuccess: true,
         });
         if (!result.ok) {
@@ -568,7 +583,7 @@ function CloudAppInstallModal({
 
   useEffect(() => {
     if (!request) return;
-    const { appId, credentials, surfaces, approved } = request;
+    const { appId, credentials, surfaces, approvedManifest } = request;
 
     setLines([]);
     setStatus("running");
@@ -585,7 +600,7 @@ function CloudAppInstallModal({
           sessionToken: credentials.sessionToken,
           region: credentials.region,
           surfaces,
-          ...(approved ? { approved: true } : {}),
+          approvedManifest,
         },
         { onLine: (line) => setLines((l) => [...l, line]), isAborted: () => aborted },
       );
