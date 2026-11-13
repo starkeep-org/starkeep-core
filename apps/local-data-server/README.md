@@ -22,7 +22,7 @@ Registered record types and their record counts are available at `GET /data/type
 
 ### File Watching
 
-The data-server can watch local directories and automatically index new files as records. When a file is added to a watched directory, the data-server creates a record for it. The record keeps the file's own creation and modification dates in `original_created_at` and `original_updated_at`. The watcher extracts no metadata from the file's bytes. An app such as Photos derives metadata later.
+The data-server can watch local directories and automatically index new files as records. When a file is added to a watched directory, the data-server creates a record for it. The record keeps the file's own creation and modification dates in `original_created_at` and `original_updated_at`. The watcher does not extract metadata from the file's contents, though apps like Photos may do so later.
 
 Watches are managed via the API:
 

@@ -23,14 +23,17 @@ The breadth and ambition of Starkeep is what makes this different from tradition
 
 # Get Started
 
-This guide installs Starkeep on your computer, adds the Starkeep Photos flagship app, and then optionally deploys Starkeep to your own AWS account so your data syncs across devices.
+## Installing Starkeep
 
-- Part A runs entirely on your computer, no cloud account needed.
-- Part B adds the cloud, running on your own AWS account.
-- Part C adds the Starkeep Photos mobile app for Android (iOS coming soon) that syncs with the cloud and your local computer.
-- [Sync another computer with your cloud](#sync-another-computer-with-your-cloud) connects a second computer to the cloud you already deployed.
-- [Upgrade Starkeep](#upgrade-starkeep) brings an existing installation up to date.
-- [From the terminal](#from-the-terminal) installs apps and the cloud without Admin's web page.
+- [Install Starkeep on your computer](#run-starkeep-on-your-computer)
+- [Deploy Starkeep Cloud](#deploy-starkeep-to-your-aws-account)
+
+## After Installing
+
+- (Optional) [Install Starkeep Photos](#6-recommended-install-and-open-photos), the flagship Starkeep app
+- [Create your own Starkeep App](docs/authoring-an-app.md)
+- [Upgrade Starkeep](#upgrade-starkeep)
+- [Terminal command reference](#from-the-terminal)
 
 ## Before you begin
 
@@ -41,9 +44,9 @@ You need the following on your computer:
 - A checkout of this repository, `starkeep-core`.
 - A checkout of [`starkeep-apps`](https://github.com/starkeep-org/starkeep-apps) is optional but highly recommended so you can try out the Starkeep Photos app and examine its implementation. A typical location is `~/starkeep-apps`.
 
-The cloud setup (Part B) also needs an AWS account. The setup wizard explains how to create one.
+The cloud setup also needs an AWS account. The setup wizard explains how to create one.
 
-## Part A: run Starkeep on your computer
+## Run Starkeep on your computer
 
 ### 1. Install dependencies
 
@@ -73,7 +76,7 @@ Admin listens on `127.0.0.1` and refuses any request addressed to a name other t
 
 ### 3. Start the local data server
 
-The local data server stores and indexes the files in folders you choose to watch and the data that Starkeep apps save. Every Starkeep app on this computer reads and writes through the data server, and the data server runs sync once you set up the cloud.
+The local data server stores and indexes the files in folders you choose to watch and the data that Starkeep apps save. Every Starkeep app on this computer reads and writes through the data server. The data server runs sync once you set up the cloud.
 
 In the **Local** section, find the **Data Server** card and click **Start Data Server**. The data server listens on port 9820.
 
@@ -114,7 +117,7 @@ To show Photos, click **Discover apps** in the header and add the path of your `
 
 Photos shows the images from your watched folder, or use the mobile app to add photos from your phone.
 
-## Part B: deploy Starkeep to your AWS account
+## Deploy Starkeep to your AWS account
 
 The cloud stores a copy of your data in your own AWS account and syncs it across your computers and phones. It also enables you to run web apps in the cloud that you can access from anywhere.
 
@@ -180,7 +183,7 @@ Installing the Photos web app in the cloud allows you to access your photos remo
 
 Photos then shows the photos that synced from this computer.
 
-## Part C: install the Photos mobile app
+## Install the Photos mobile app
 
 Starkeep Photos is available as an Android app you can build yourself. (Starkeep Photos for iOS is in the works.)
 
@@ -215,7 +218,7 @@ You need the following:
 - JDK 17. Run `java -version` to check.
 - The Android SDK, with platform tools. Android Studio installs both. Set `ANDROID_HOME` to the SDK folder, such as `~/Library/Android/sdk` on macOS.
 - An Android phone with USB debugging turned on, connected over USB.
-- A Starkeep account with the **Data** role. The main cloud account you created in Part B has that role by default.
+- A Starkeep account with the **Data** role. The main cloud account you created when you deployed the cloud has that role by default.
 
 #### 2. Generate the Android project
 
@@ -253,9 +256,9 @@ The build uses Expo's public debug key, and the Photos manifest declares that ke
 
 ## Sync another computer with your cloud
 
-A second computer joins the cloud you deployed in Part B. The second computer syncs your data but does not administer the cloud. Manage users, cloud apps and costs from the computer that deployed the cloud.
+A second computer joins the cloud you already deployed. The second computer syncs your data but does not administer the cloud. Manage users, cloud apps and costs from the computer that deployed the cloud.
 
-1. On the second computer, follow Part A, steps 1 to 3, to install Starkeep and start Admin and the local data server.
+1. On the second computer, follow steps 1 to 3 of [Run Starkeep on your computer](#run-starkeep-on-your-computer) to install Starkeep and start Admin and the local data server.
 2. On the computer that deployed the cloud, copy the address from the **Cloud address** line under the dashboard's **Cloud** heading.
 3. On the second computer, click **Join Existing Cloud** under the dashboard's **Cloud** heading. Do not click **Deploy Starkeep Cloud**.
 4. Paste the address into the form that opens and click **Join**. The local data server restarts.
@@ -278,61 +281,25 @@ The new user will be emailed a temporary password, and they choose a permanent p
 
 ## Upgrade Starkeep
 
-Upgrade the parts of your installation in the order below. Skip the cloud steps if you run Starkeep on your computer only.
+Upgrading Starkeep will not affect your data.
 
-### 1. Upgrade Admin and the local data server
+### 1. Upgrade the local data server
 
-1. In Admin, stop each running app and the data server. Then stop Admin by pressing Ctrl+C in its terminal.
-2. At the root of `starkeep-core`, pull the latest code and install it:
+1. Pull the latest from `starkeep-core` and install it with `pnpm install`.
+2. In Admin, choose **Stop** from the **Data Server** card's triple-dot menu.
+3. Click **Start Data Server** on the **Data Server** card.
 
-   ```sh
-   git pull
-   pnpm install
-   ```
+### 2. Upgrade the cloud data server and cloud Drive
 
-   The install also rebuilds the workspace packages.
+1. Rarely, an upgrade requires a bootstrap update, which should be run on the terminal with `scripts/update-bootstrap.sh --apply`. This command requires the AWS CLI and sufficient permissions in the environment. This command runs outside Starkeep for security reasons. Most upgrades skip this step.
+2. On the **Data Server** card in the **Cloud** section, choose **Manage deployment…** from the menu.
+3. On the **Deploy Starkeep cloud** step, click **Redeploy**. The redeploy updates the cloud data server first and then cloud Drive.
 
-3. Start Admin again with `pnpm --filter admin-web dev`, and click **Start Data Server** on the **Data Server** card.
+### 3. Upgrade the apps
 
-The data server adds any new database columns when it starts.
-
-### 2. Upgrade the local apps
-
-1. At the root of `starkeep-apps`, pull the latest code and install it:
-
-   ```sh
-   git pull
-   pnpm install
-   ```
-
-2. In Admin, an app card whose manifest changed says so. Choose **Update from folder** from the card's menu, and approve any new file access or public links.
-3. Start each app again.
-
-The Example App lives in `starkeep-core`, so step 1 already pulled its code.
-
-#### Checkouts from before 2026-08-25
-
-A `starkeep-apps` checkout from before 2026-08-25 can hold a `pnpm-workspace.yaml` inside an app folder, such as `photos/pnpm-workspace.yaml`. Git ignores the file, so `git pull` leaves it in place. The file hides the app from the workspace at the root of `starkeep-apps`, and the app's install fails with `ERR_PNPM_WORKSPACE_PKG_NOT_FOUND`. Admin skips the dependency install for such an app and names the file. Delete the file once, then run `pnpm install` at the root of `starkeep-apps`. Keep the `pnpm-workspace.yaml` at the root.
-
-### 3. Update the bootstrap stack
-
-Update the bootstrap stack only when the pull changed `packages/aws-bootstrap`. To check, run `git diff --stat ORIG_HEAD HEAD -- packages/aws-bootstrap` at the root of `starkeep-core` right after the pull.
-
-1. On the **Data Server** card in the **Cloud** section, choose **Manage deployment…** from the menu.
-2. Go to step 1 and click **Download bootstrap template**.
-3. In the CloudFormation console, select your bootstrap stack and choose **Update stack**. Choose **Replace existing template**, upload the downloaded template, and keep the existing parameter values.
-
-### 4. Upgrade the cloud data server and cloud Drive
-
-1. On the **Data Server** card in the **Cloud** section, choose **Manage deployment…** from the menu.
-2. On the **Deploy Starkeep cloud** step, click **Redeploy**. The redeploy updates the cloud data server first and then cloud Drive.
-
-### 5. Upgrade the cloud apps
-
-1. On each cloud app card, choose **Redeploy <app name>** from the menu.
-2. For an app with a mobile card, choose **Re-register <app name>** from that card's menu when the app's manifest changed.
-
-A cloud app whose local folder holds a changed manifest cannot redeploy until you choose **Update from folder** on its local card, which step 2 covers.
+1. Pull the latest code.
+2. Restart each local app from Admin. If the app's manifest changed, you'll be shown a consent dialog before updating.
+3. To upgrade cloud apps, click **Redeploy <app name>** from the triple-dot menu to deploy the new code.
 
 ## From the terminal
 
@@ -346,20 +313,14 @@ The local data server must be running. Start it from Admin, or run `pnpm --filte
 pnpm --filter @starkeep/admin-installer cli:install-app-local ../starkeep-apps/photos
 ```
 
-The command shows the same consent as Admin's install dialog: the files the app can read and write, whether the app can create public links, and the dependency install it runs. The command acts only after you approve. Then it installs the app's dependencies and registers the app with the local data server. Pass `--yes` to approve without the question, after you have read the consent. Start the app from Admin afterwards.
-
-The command leaves the library's archive quality unchanged. To change the archive quality, open Admin → Data Server card menu → Storage.
-
 ### Deploy the cloud
 
-Deploy the bootstrap stack first, through steps 1 to 3 of Part B. Those steps write the cloud settings that the commands below read from `~/.starkeep/config.json`. Each command asks for the email address and password of your Starkeep admin account.
+Deploy the bootstrap stack first, through steps 1 to 3 of [Deploy Starkeep to your AWS account](#deploy-starkeep-to-your-aws-account). Those steps write the cloud settings that the commands below read from `~/.starkeep/config.json`. Each command asks for the email address and password of your Starkeep admin account.
 
 ```sh
 pnpm --filter @starkeep/admin-installer cli:install-cloud-data-server
 pnpm --filter @starkeep/admin-installer cli:install-drive
 ```
-
-Run the commands in this order, because cloud Drive needs the cloud data server. The same two commands upgrade an existing cloud.
 
 ### Install an app in the cloud
 
