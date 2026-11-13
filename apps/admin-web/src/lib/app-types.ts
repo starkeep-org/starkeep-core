@@ -3,7 +3,9 @@
 // sections is derived from each app's manifest `targets` (default ["local"]).
 
 export {
+  accessLead,
   categoriesOf,
+  dependencyConsent,
   grantPermissions,
   publicSharingConsent,
 } from "@starkeep/admin-installer/consent-text";

@@ -189,6 +189,8 @@ const SORT_FIELD_OF: Record<string, string> = {
   fidelity: "fidelity",
   node_id: "node_id",
   captured_at: "capturedAt",
+  original_created_at: "originalCreatedAt",
+  original_updated_at: "originalUpdatedAt",
 };
 
 /**

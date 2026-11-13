@@ -11,7 +11,7 @@
  * The connection is `openInstallerPool` in `src/lib/installer-dsql.ts`.
  */
 
-import { folderCommit, type FolderCommit } from "@starkeep/admin-installer/app-discovery";
+import { sourceFingerprint } from "@starkeep/admin-installer/app-discovery";
 import { appFolders, sameManifest } from "../lib/app-scan";
 import type { ManifestSummary } from "../lib/app-types";
 import { compiler, openInstallerPool } from "../lib/installer-dsql";
@@ -26,7 +26,7 @@ export interface RegistryDbRow {
   web_app: boolean | null;
   mobile_app: boolean | null;
   manifest: string | null;
-  web_source_commit: string | null;
+  web_source_hash: string | null;
 }
 
 /**
@@ -51,10 +51,11 @@ export function registryApp(r: RegistryDbRow) {
   };
 }
 
-/** An app's folder now: its valid manifest and its git commit. */
+/** An app's folder now: its valid manifest and its code's fingerprint. */
 export interface FolderNow {
   manifest: Record<string, unknown>;
-  commit: FolderCommit | null;
+  /** The folder's `sourceFingerprint`; null when Admin cannot tell. */
+  source: string | null;
 }
 
 /**
@@ -63,16 +64,16 @@ export interface FolderNow {
  *
  * - `behind`: the deployed manifest differs from the folder's. A row without
  *   a recorded manifest counts as behind, because a redeploy records one.
- * - `codeBehind`: the web app deployed from another commit than the folder's
- *   last one, or the folder holds uncommitted changes. A web app without a
- *   recorded commit counts as behind, because a redeploy records one. False
- *   without a web app, whose code the cloud never runs.
+ * - `codeBehind`: the web app deployed code other than what the folder holds
+ *   now, committed or not. A web app without a recorded fingerprint counts as
+ *   behind, because a redeploy records one. False without a web app, whose
+ *   code the cloud never runs.
  *
  * Each is null when Admin cannot tell: no folder holds a valid manifest for
- * the app, or, for the code, the folder is outside git.
+ * the app, or, for the code, the folder has no fingerprint.
  */
 export function behindFolder(
-  r: Pick<RegistryDbRow, "manifest" | "web_app" | "web_source_commit">,
+  r: Pick<RegistryDbRow, "manifest" | "web_app" | "web_source_hash">,
   folder: FolderNow | undefined,
 ): { behind: boolean | null; codeBehind: boolean | null } {
   if (!folder) return { behind: null, codeBehind: null };
@@ -81,9 +82,9 @@ export function behindFolder(
   const codeBehind =
     r.web_app !== true
       ? false
-      : folder.commit === null
+      : folder.source === null
         ? null
-        : folder.commit.dirty || r.web_source_commit !== folder.commit.commit;
+        : r.web_source_hash !== folder.source;
   return { behind, codeBehind };
 }
 
@@ -114,7 +115,7 @@ export async function POST(req: Request) {
         "web_app",
         "mobile_app",
         "manifest",
-        "web_source_commit",
+        "web_source_hash",
       ])
       .orderBy("installed_at", "asc")
       .compile();
@@ -126,7 +127,7 @@ export async function POST(req: Request) {
         const now = folder && {
           manifest: folder.manifest,
           // Only a web app runs the folder's code in the cloud.
-          commit: r.web_app === true ? folderCommit(folder.dir) : null,
+          source: r.web_app === true ? sourceFingerprint(folder.dir) : null,
         };
         return { ...registryApp(r), ...behindFolder(r, now) };
       }),

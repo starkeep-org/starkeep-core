@@ -8,7 +8,9 @@
  * credentials in the body. The dashboard's cloud column branches on each.
  */
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { jsonRequest, makeDataDir } from "./helpers";
 
@@ -112,7 +114,7 @@ describe("each row the dashboard reads", () => {
     web_app: true,
     mobile_app: null,
     manifest: JSON.stringify({ id: "photos", infraRequirements: { publicSharing: true } }),
-    web_source_commit: null,
+    web_source_hash: null,
   };
 
   it("carries the manifest the last install deployed, parsed", async () => {
@@ -140,34 +142,30 @@ describe("each row the dashboard reads", () => {
 });
 
 // The update dialog offers the cloud install when it runs another manifest
-// or, for a web app, another commit than the app's folder holds now.
+// or, for a web app, other code than the app's folder holds now.
 describe("whether a row is behind its app's folder", () => {
   const deployed = { id: "photos", version: "1.0.0", infraRequirements: { publicSharing: true } };
   const row: {
     manifest: string | null;
     web_app: boolean | null;
-    web_source_commit: string | null;
-  } = { manifest: JSON.stringify(deployed), web_app: true, web_source_commit: "abc" };
-  const clean = { commit: "abc", dirty: false };
+    web_source_hash: string | null;
+  } = { manifest: JSON.stringify(deployed), web_app: true, web_source_hash: "abc" };
 
   async function behind(
     r: Partial<typeof row>,
-    folder?: {
-      manifest: Record<string, unknown>;
-      commit: { commit: string; dirty: boolean } | null;
-    },
+    folder?: { manifest: Record<string, unknown>; source: string | null },
   ) {
     const { behindFolder } = await import("../src/routes/apps-cloud-list");
     return behindFolder({ ...row, ...r }, folder);
   }
 
-  it("is current when the folder holds the deployed manifest and commit, whatever the key order", async () => {
+  it("is current when the folder holds the deployed manifest and code, whatever the key order", async () => {
     const reordered = {
       infraRequirements: { publicSharing: true },
       version: "1.0.0",
       id: "photos",
     };
-    expect(await behind({}, { manifest: reordered, commit: clean })).toEqual({
+    expect(await behind({}, { manifest: reordered, source: "abc" })).toEqual({
       behind: false,
       codeBehind: false,
     });
@@ -175,38 +173,35 @@ describe("whether a row is behind its app's folder", () => {
 
   it("is behind when the folder holds another manifest", async () => {
     expect(
-      await behind({}, { manifest: { ...deployed, version: "1.1.0" }, commit: clean }),
+      await behind({}, { manifest: { ...deployed, version: "1.1.0" }, source: "abc" }),
     ).toMatchObject({ behind: true });
   });
 
   it("is behind when the row predates the recorded manifest, since a redeploy records one", async () => {
-    expect(await behind({ manifest: null }, { manifest: deployed, commit: clean })).toMatchObject({
+    expect(await behind({ manifest: null }, { manifest: deployed, source: "abc" })).toMatchObject({
       behind: true,
     });
   });
 
   it.each([
-    ["the folder has a newer commit", { commit: "def", dirty: false }, "abc"],
-    ["the folder holds uncommitted changes", { commit: "abc", dirty: true }, "abc"],
-    ["the row predates the recorded commit", clean, null],
-  ])("has code behind when %s", async (_case, commit, recorded) => {
-    expect(await behind({ web_source_commit: recorded }, { manifest: deployed, commit })).toEqual({
+    ["the folder holds other code", "def", "abc"],
+    ["the row predates the recorded fingerprint", "abc", null],
+  ])("has code behind when %s", async (_case, source, recorded) => {
+    expect(await behind({ web_source_hash: recorded }, { manifest: deployed, source })).toEqual({
       behind: false,
       codeBehind: true,
     });
   });
 
   it("never has code behind without a web app, whose code the cloud does not run", async () => {
-    expect(
-      await behind(
-        { web_app: false },
-        { manifest: deployed, commit: { commit: "def", dirty: true } },
-      ),
-    ).toEqual({ behind: false, codeBehind: false });
+    expect(await behind({ web_app: false }, { manifest: deployed, source: "def" })).toEqual({
+      behind: false,
+      codeBehind: false,
+    });
   });
 
-  it("cannot tell the code for a folder outside git", async () => {
-    expect(await behind({}, { manifest: deployed, commit: null })).toEqual({
+  it("cannot tell the code for a folder without a fingerprint", async () => {
+    expect(await behind({}, { manifest: deployed, source: null })).toEqual({
       behind: false,
       codeBehind: null,
     });
@@ -214,5 +209,37 @@ describe("whether a row is behind its app's folder", () => {
 
   it("cannot tell anything when no folder holds a valid manifest for the app", async () => {
     expect(await behind({}, undefined)).toEqual({ behind: null, codeBehind: null });
+  });
+
+  // A deploy records the folder's fingerprint, and the list compares it with
+  // the folder's fingerprint now. A folder with uncommitted and untracked
+  // files must read as current right after its deploy, and stay current
+  // when the person commits the same files.
+  it("reads a dirty folder as current after its deploy, and after the commit that follows", async () => {
+    const { sourceFingerprint } = await import("@starkeep/admin-installer/app-discovery");
+    const root = mkdtempSync(join(tmpdir(), "cloud-list-dirty-"));
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-C", root, ...args], { encoding: "utf-8" }).trim();
+    git("init", "-q");
+    git("config", "user.email", "test@example.com");
+    git("config", "user.name", "Test");
+    git("config", "commit.gpgsign", "false");
+    writeFileSync(join(root, "index.ts"), "1");
+    git("add", ".");
+    git("commit", "-qm", "first");
+    writeFileSync(join(root, "index.ts"), "2");
+    writeFileSync(join(root, ".env"), "LOCAL=1");
+
+    const recorded = sourceFingerprint(root);
+    expect(recorded).not.toBeNull();
+    const now = () => ({ manifest: deployed, source: sourceFingerprint(root) });
+    expect(await behind({ web_source_hash: recorded }, now())).toMatchObject({ codeBehind: false });
+
+    git("add", ".");
+    git("commit", "-qm", "second");
+    expect(await behind({ web_source_hash: recorded }, now())).toMatchObject({ codeBehind: false });
+
+    writeFileSync(join(root, "index.ts"), "3");
+    expect(await behind({ web_source_hash: recorded }, now())).toMatchObject({ codeBehind: true });
   });
 });

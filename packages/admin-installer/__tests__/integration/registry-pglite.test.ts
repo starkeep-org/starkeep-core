@@ -193,11 +193,11 @@ describe("the registry's surfaces", () => {
   it("records the web install's source commit, and keeps it through a mobile registration", async () => {
     const commit = async () =>
       (
-        await state.pg.query<{ web_source_commit: string | null }>(
-          "SELECT web_source_commit FROM shared.app_registry WHERE app_id = $1",
+        await state.pg.query<{ web_source_hash: string | null }>(
+          "SELECT web_source_hash FROM shared.app_registry WHERE app_id = $1",
           ["photos"],
         )
-      ).rows[0]?.web_source_commit;
+      ).rows[0]?.web_source_hash;
 
     await registry.registerApp(photos, "photos", ["web"], "abc");
     expect(await commit()).toBe("abc");

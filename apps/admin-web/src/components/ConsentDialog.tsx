@@ -21,6 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
+  accessLead,
   categoriesOf,
   grantPermissions,
   publicSharingConsent,
@@ -92,6 +93,8 @@ export function ConsentDialog({
           {title ?? `Install ${entry.manifest.name ?? entry.appId}?`}
         </h3>
         {children}
+        {/* The terminal install prints the same words from consent-text.ts;
+            consent-cli-parity.test.tsx holds the markup to them. */}
         {!showAccess ? null : allAccess ? (
           <div className="text-sm">
             This app is the <span className="font-medium">User-Data-Owner</span>: read + write
@@ -100,10 +103,7 @@ export function ConsentDialog({
           </div>
         ) : (
           <p className="text-sm text-muted-foreground">
-            {entry.manifest.name ?? entry.appId}{" "}
-            {grants.length === 0
-              ? "doesn't access any of your files."
-              : "asks for access to these files."}
+            {accessLead({ ...entry.manifest, id: entry.appId })}
           </p>
         )}
 

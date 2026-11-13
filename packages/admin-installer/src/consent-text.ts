@@ -37,6 +37,38 @@ export function grantPermissions(g: ConsentGrant): { files: string; metadata: st
 }
 
 /**
+ * The sentence that leads the file access: the User-Data-Owner's access to
+ * every file, no access, or the opening of the grant list.
+ */
+export function accessLead(manifest: ConsentManifest): string {
+  const ir = manifest.infraRequirements;
+  if (ir?.fileAccessAll) {
+    return "This app is the User-Data-Owner: read + write access to all files, including unclassified ones.";
+  }
+  const name = manifest.name ?? manifest.id ?? "This app";
+  return (ir?.fileAccess ?? []).length === 0
+    ? `${name} doesn't access any of your files.`
+    : `${name} asks for access to these files.`;
+}
+
+/** The dependency install an install runs, as `resolveInstallCommand` answers it. */
+export type DependencyConsent =
+  | { kind: "run"; display: string; cwd: string }
+  | { kind: "refused"; display: string; cwd: string; reason: string }
+  | { kind: "skip" };
+
+/** What an install says about the dependency install, or null when it runs none. */
+export function dependencyConsent(d: DependencyConsent): string | null {
+  if (d.kind === "run") {
+    return `Install runs ${d.display} in ${d.cwd}, which runs the app\u2019s own install scripts.`;
+  }
+  if (d.kind === "refused") {
+    return `Install will not run ${d.display}: ${d.reason} Run it yourself in ${d.cwd}.`;
+  }
+  return null;
+}
+
+/**
  * What the install dialogs say about the public-sharing capability. One
  * sentence for both the local and the cloud install, so the person approves
  * the same words either way.

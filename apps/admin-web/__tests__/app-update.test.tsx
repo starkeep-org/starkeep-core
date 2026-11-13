@@ -82,6 +82,8 @@ let running = false;
 let cloudBehind = true;
 let cloudCodeBehind = false;
 let cloudMobileOnly = false;
+/** How `/api/apps/cloud/list` answers: the row, a failure, or never. */
+let cloudList: "ok" | "fail" | "hang" = "ok";
 
 beforeEach(() => {
   state.calls = [];
@@ -92,10 +94,13 @@ beforeEach(() => {
   cloudBehind = true;
   cloudCodeBehind = false;
   cloudMobileOnly = false;
+  cloudList = "ok";
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init?: RequestInit) => {
       if (url === "/api/apps/cloud/list") {
+        if (cloudList === "hang") return new Promise<Response>(() => {});
+        if (cloudList === "fail") return Response.json({ error: "DSQL down" }, { status: 502 });
         return Response.json({
           apps: [
             {
@@ -329,6 +334,52 @@ describe("Redeploy on the cloud card", () => {
     expect(state.calls).toEqual([CLOUD_DEPLOY, "install"]);
   });
 
+  describe("when only the local install is behind", () => {
+    beforeEach(() => {
+      cloudBehind = false;
+      cloudCodeBehind = false;
+    });
+
+    function redeployBox(dialog: HTMLElement) {
+      return within(dialog).getByRole("checkbox", {
+        name: "Redeploy Dice in the cloud",
+      }) as HTMLInputElement;
+    }
+
+    it("still offers the cloud redeploy, checked, and runs it before the local update", async () => {
+      await show();
+      const { user, dialog } = await redeploy();
+      expect(checkbox(dialog, "on this computer").checked).toBe(true);
+      expect(redeployBox(dialog).checked).toBe(true);
+      expect(redeployBox(dialog).disabled).toBe(false);
+      await user.click(within(dialog).getByRole("button", { name: "Update" }));
+      await vi.waitFor(() => expect(state.calls).toEqual([CLOUD_DEPLOY, "install"]), {
+        timeout: 3000,
+      });
+      // The route refuses a deploy while the local install is behind, unless
+      // the dialog approved the folder's manifest.
+      expect(state.cloudBodies[0]).toMatchObject({ surfaces: ["web"], approved: true });
+    });
+
+    it("redeploys the cloud alone when the operator unchecks the local install", async () => {
+      await show();
+      const { user, dialog } = await redeploy();
+      await user.click(checkbox(dialog, "on this computer"));
+      expect(within(dialog).getByText(SKEW_WARNING)).toBeTruthy();
+      await user.click(within(dialog).getByRole("button", { name: "Update" }));
+      await vi.waitFor(() => expect(state.calls).toEqual([CLOUD_DEPLOY]), { timeout: 3000 });
+    });
+
+    it("does not warn when the operator leaves the current cloud alone", async () => {
+      await show();
+      const { user, dialog } = await redeploy();
+      await user.click(redeployBox(dialog));
+      expect(within(dialog).queryByText(SKEW_WARNING)).toBeNull();
+      await user.click(within(dialog).getByRole("button", { name: "Update" }));
+      await vi.waitFor(() => expect(state.calls).toEqual(["install"]), { timeout: 3000 });
+    });
+  });
+
   it("disables Update when the operator unchecks every install", async () => {
     await show();
     const { user, dialog } = await redeploy();
@@ -336,5 +387,44 @@ describe("Redeploy on the cloud card", () => {
     await user.click(checkbox(dialog, "in the cloud"));
     const update = within(dialog).getByRole("button", { name: "Update" }) as HTMLButtonElement;
     expect(update.disabled).toBe(true);
+  });
+});
+
+// The cloud can never run an app whose folder manifest leaves out the cloud
+// target, so the dialog offers no cloud choice, whatever the registry's state.
+describe("Start on a local-only app while the cloud registry is unread", () => {
+  const LOCAL_ONLY: LocalAppEntry = {
+    ...CHANGED,
+    manifest: { id: "dice", name: "Dice", version: "1.0.0", targets: ["local"] },
+    folderManifest: { id: "dice", name: "Dice", version: "1.1.0", targets: ["local"] },
+  };
+
+  it.each([
+    ["signed out", () => (state.signedIn = false)],
+    ["still loading", () => (cloudList = "hang")],
+    ["failing", () => (cloudList = "fail")],
+  ])("offers the local install alone when the registry is %s", async (_case, arrange) => {
+    arrange();
+    render(
+      <AppUpdateProvider cloudAdministered signedIn={state.signedIn}>
+        <div data-testid="local">
+          <LocalAppsSection
+            apps={[LOCAL_ONLY]}
+            refresh={async () => undefined}
+            localOnline={true}
+          />
+        </div>
+      </AppUpdateProvider>,
+    );
+    if (state.signedIn) {
+      await vi.waitFor(() =>
+        expect(fetch).toHaveBeenCalledWith("/api/apps/cloud/list", expect.anything()),
+      );
+    }
+    await new Promise((r) => setTimeout(r, 50));
+    const { dialog } = await start();
+    expect(checkbox(dialog, "on this computer").checked).toBe(true);
+    expect(within(dialog).queryByRole("checkbox", { name: /in the cloud/ })).toBeNull();
+    expect(within(dialog).queryByText(SKEW_WARNING)).toBeNull();
   });
 });

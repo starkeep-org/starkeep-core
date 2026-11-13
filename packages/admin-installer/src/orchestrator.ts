@@ -21,6 +21,7 @@
 import { createHash } from "node:crypto";
 import { handlerUsesAppAssetsBucket, type AppManifest } from "@starkeep/admin-manifest";
 import { roleChain, type AwsCredentials } from "./session";
+import { sourceFingerprint } from "./app-discovery";
 import {
   createAppRole,
   createAppExecRole,
@@ -155,10 +156,11 @@ export interface InstallInput {
    */
   surfaces?: readonly AppSurface[];
   /**
-   * The git commit of the app folder the install deploys from, recorded with
-   * a web install. See `folderCommit` in app-discovery.
+   * The app folder a web install deploys from. The install records the
+   * folder's `sourceFingerprint` (see app-discovery), so Admin can tell when
+   * the folder's code moves past the deployed copy.
    */
-  webSourceCommit?: string | null;
+  webSourceDir?: string;
 }
 
 export interface RegistryCredentials {
@@ -271,6 +273,9 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
   // identity and the callback.
   const surfaces = resolveSurfaces(appId, manifest, input.surfaces);
   const web = surfaces.includes("web");
+  // Taken after the CLI's dependency install and bundle build, so the
+  // fingerprint covers a lockfile the install rewrote.
+  const webSourceHash = web && input.webSourceDir ? sourceFingerprint(input.webSourceDir) : null;
   // Resolved before any step, so a mobile app on a deployment with no
   // mobile-apps client fails before it changes anything.
   const mobileCallback = surfaces.includes("mobile")
@@ -622,7 +627,7 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
     "install",
     "register_app",
     done,
-    () => registry.registerApp(manifest, appId, surfaces, input.webSourceCommit ?? null),
+    () => registry.registerApp(manifest, appId, surfaces, webSourceHash),
     { alwaysRun: true },
   );
 
