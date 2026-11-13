@@ -389,3 +389,54 @@ test("Public links: unavailable without a cloud", async () => {
   // No suite yet creates, opens or revokes one of the example's links.
   await expect(page.getByText("Public links are unavailable here")).toBeVisible();
 });
+
+test("MCP: a local client creates, lists, reads, tags and notes files over loopback", async () => {
+  // An outside client such as Claude Code calls the app's MCP route. On the
+  // local surface loopback trust admits it with no token, as the app's own
+  // pages are admitted; in the cloud it would send a delegation token. Last,
+  // because the file and tag it adds would change the counts the tests above
+  // assert.
+  const mcp = `${new URL(page.url()).origin}/mcp`;
+  let nextId = 0;
+  async function rpc(method: string, params: Record<string, unknown> = {}) {
+    const res = await fetch(mcp, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: ++nextId, method, params }),
+    });
+    expect(res.status).toBe(200);
+    return ((await res.json()) as { result: Record<string, unknown> }).result;
+  }
+  async function tool(name: string, args: Record<string, unknown> = {}) {
+    const result = (await rpc("tools/call", { name, arguments: args })) as {
+      content: { text: string }[];
+      isError: boolean;
+    };
+    expect(result.isError, result.content[0]!.text).toBe(false);
+    return result.content[0]!.text;
+  }
+
+  expect(await rpc("initialize", { protocolVersion: "2025-06-18" })).toMatchObject({
+    capabilities: { tools: {} },
+  });
+  const tools = (await rpc("tools/list")) as { tools: { name: string }[] };
+  expect(tools.tools.map((t) => t.name)).toContain("read_file");
+
+  const created = JSON.parse(
+    await tool("create_file", { name: "from-mcp", text: "Written by an MCP client." }),
+  ) as { id: string; name: string };
+  expect(created.name).toBe("from-mcp.skexample");
+  expect(await tool("read_file", { recordId: created.id })).toBe("Written by an MCP client.");
+
+  await tool("tag_file", { recordId: created.id, tag: "mcp" });
+  const tagged = JSON.parse(await tool("list_files", { tag: "mcp" })) as { id: string }[];
+  expect(tagged.map((f) => f.id)).toEqual([created.id]);
+
+  await tool("write_note", { recordId: created.id, text: "an MCP note" });
+  expect(await tool("list_notes")).toContain("an MCP note");
+  await tool("delete_note", { recordId: created.id });
+  expect(await tool("list_notes")).not.toContain("an MCP note");
+});
