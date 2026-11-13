@@ -169,7 +169,7 @@ export function CloudAppsSection({
                     // An install behind the folder updates through the
                     // update dialog, which redeploys every installed surface.
                     onSelect: () => {
-                      if (!requestUpdate(entry, "redeploy")) install();
+                      if (!requestUpdate(entry, { redeploy: surface })) install();
                     },
                     disabled: blocked !== undefined,
                     title: blocked,

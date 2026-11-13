@@ -30,12 +30,25 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  utimesSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateManifest, type AppManifest } from "@starkeep/admin-manifest";
 import { PROTOCOL_VERSION } from "@starkeep/protocol-primitives";
+import { enclosingWorkspace } from "./approved-commands";
 import { protocolRefusal, rawAppId } from "./protocol-check";
 
 export const MANIFEST_FILE = "starkeep.manifest.json";
@@ -53,7 +66,6 @@ export const DEFAULT_APPS_DIR = resolve(
   "example-app",
 );
 
-/** Expand a leading `~` to the user's home folder. */
 /**
  * The folder a person typed, resolved where they typed it. `pnpm --filter`
  * runs a script inside its package's folder and names the folder pnpm started
@@ -63,6 +75,7 @@ export function typedPath(p: string): string {
   return resolve(process.env.INIT_CWD ?? process.cwd(), expandHome(p));
 }
 
+/** Expand a leading `~` to the user's home folder. */
 export function expandHome(p: string): string {
   if (p === "~") return homedir();
   if (p.startsWith("~/")) return join(homedir(), p.slice(2));
@@ -288,30 +301,126 @@ export function scanApps(configuredDirs: string[], options: ScanOptions = {}): S
   return { apps, problems: dirs.flatMap((d) => d.problems), dirs };
 }
 
-/** The code an app folder holds, as git records it. */
-export interface FolderCommit {
-  /** The last commit that touched the folder. */
-  commit: string;
-  /** The folder holds changes git has not committed. */
-  dirty: boolean;
+/** The dependency fields whose `workspace:` entries the app builds from. */
+const DEPENDENCY_FIELDS = [
+  "dependencies",
+  "devDependencies",
+  "optionalDependencies",
+  "peerDependencies",
+] as const;
+
+/**
+ * The folders and files an app's web bundle builds from: the app's folder,
+ * each package it reaches through `workspace:` dependencies, and the
+ * workspace lockfile. pnpm links a workspace dependency into the app's
+ * `node_modules`, so the link names the package's folder. An unlinked
+ * workspace dependency, for example before the first install, widens the set
+ * to the whole workspace, which over-reports a change but never misses one.
+ */
+export function sourcePaths(appDir: string): string[] {
+  const workspace = enclosingWorkspace(appDir);
+  const root = workspace?.covers ? workspace.root : null;
+  const paths = new Set<string>();
+  const visit = (dir: string): boolean => {
+    const real = realpathOrNull(dir);
+    if (real === null) return false;
+    if (paths.has(real)) return true;
+    paths.add(real);
+    let pkg: Record<string, unknown>;
+    try {
+      pkg = JSON.parse(readFileSync(join(real, "package.json"), "utf-8")) as Record<
+        string,
+        unknown
+      >;
+    } catch {
+      return true;
+    }
+    for (const field of DEPENDENCY_FIELDS) {
+      const deps = pkg[field];
+      if (deps === null || typeof deps !== "object") continue;
+      for (const [name, spec] of Object.entries(deps)) {
+        if (typeof spec !== "string" || !spec.startsWith("workspace:")) continue;
+        if (!visit(join(real, "node_modules", name))) return false;
+      }
+    }
+    return true;
+  };
+  if (!visit(appDir)) {
+    if (root === null) return [];
+    paths.clear();
+    paths.add(realpathSync(root));
+  }
+  if (root !== null && existsSync(join(root, "pnpm-lock.yaml"))) {
+    paths.add(realpathSync(join(root, "pnpm-lock.yaml")));
+  }
+  return [...paths].sort();
 }
 
 /**
- * The last git commit that touched `dir`, and whether `dir` holds uncommitted
- * changes. A cloud web install records the commit, so Admin can tell when the
- * folder's code moved past the deployed copy. Null for a folder outside git.
+ * A fingerprint of the code an app's web bundle builds from, as the working
+ * tree holds it: the content of every file in {@link sourcePaths} that git
+ * tracks or would track, committed or not. A cloud web install records the
+ * fingerprint, so Admin can tell when the folder's code moved past the
+ * deployed copy. Committing a change leaves the fingerprint as it was, and
+ * an edit outside the source paths never changes it.
+ *
+ * git hashes the working tree into a throwaway index and object store, so
+ * the repository's own index and objects stay untouched. Null when Admin
+ * cannot tell: the folder is outside git, a source path lies outside the
+ * folder's repository, or a workspace dependency cannot be found.
  */
-export function folderCommit(dir: string): FolderCommit | null {
-  const git = (args: string[]) =>
-    execFileSync("git", ["-C", dir, ...args], {
+export function sourceFingerprint(appDir: string): string | null {
+  const run = (cwd: string, args: string[], env?: NodeJS.ProcessEnv) =>
+    execFileSync("git", ["-C", cwd, ...args], {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
+      ...(env ? { env } : {}),
     }).trim();
+  let scratch: string | null = null;
   try {
-    const commit = git(["log", "-1", "--format=%H", "--", "."]);
-    if (!commit) return null;
-    return { commit, dirty: git(["status", "--porcelain", "--", "."]) !== "" };
+    const top = realpathSync(run(appDir, ["rev-parse", "--show-toplevel"]));
+    const paths = sourcePaths(appDir);
+    if (paths.length === 0) return null;
+    const rels = paths.map((p) => relative(top, p).split(sep).join("/"));
+    if (rels.some((r) => r.startsWith("..") || isAbsolute(r))) return null;
+
+    const gitPath = (name: string) => resolve(top, run(top, ["rev-parse", "--git-path", name]));
+    scratch = mkdtempSync(join(tmpdir(), "starkeep-source-"));
+    const index = join(scratch, "index");
+    // A copy of the real index, so git rehashes only files that changed. git
+    // rehashes a file whose mtime is not older than the index's own, since a
+    // same-second edit can leave its size and mtime as recorded. The copy
+    // keeps the index's mtime, rounded down, so that check still holds.
+    const realIndex = gitPath("index");
+    if (existsSync(realIndex)) {
+      copyFileSync(realIndex, index);
+      const { atime, mtime } = statSync(realIndex);
+      utimesSync(index, atime, mtime);
+    }
+    // git refuses an object directory that does not exist yet.
+    const objects = join(scratch, "objects");
+    mkdirSync(objects);
+    const env = {
+      ...process.env,
+      GIT_INDEX_FILE: index,
+      GIT_OBJECT_DIRECTORY: objects,
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: gitPath("objects"),
+    };
+    run(top, ["add", "--all", "--", ...rels.map((r) => (r === "" ? "." : r))], env);
+    const tree = run(top, ["write-tree"], env);
+    const lines = rels.map((r) => {
+      let id: string;
+      try {
+        id = run(top, ["rev-parse", `${tree}:${r}`], env);
+      } catch {
+        id = "-";
+      }
+      return `${id} ${r}`;
+    });
+    return createHash("sha256").update(lines.join("\n")).digest("hex");
   } catch {
     return null;
+  } finally {
+    if (scratch !== null) rmSync(scratch, { recursive: true, force: true });
   }
 }

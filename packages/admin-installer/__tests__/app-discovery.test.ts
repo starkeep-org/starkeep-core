@@ -4,11 +4,19 @@
  */
 
 import { afterAll, describe, expect, it } from "vitest";
-import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PROTOCOL_VERSION, parseProtocolVersion } from "@starkeep/protocol-primitives";
-import { folderCommit, scanApps } from "../src/app-discovery.js";
+import { scanApps, sourceFingerprint, sourcePaths } from "../src/app-discovery.js";
 import { execFileSync } from "node:child_process";
 import { appDirFor, resolveAppDir, takeAppDirFlag } from "../src/app-cli-config.js";
 
@@ -298,42 +306,111 @@ describe("takeAppDirFlag", () => {
   });
 });
 
-// A cloud web install records the folder's commit; Admin compares it with the
-// folder's to tell whether the cloud runs the folder's code.
-describe("folderCommit", () => {
-  function repo(): { root: string; git: (...args: string[]) => string } {
-    const root = mkdtempSync(join(tmpdir(), "folder-commit-"));
+// A cloud web install records the fingerprint of the code it deploys; Admin
+// compares it with the folder's fingerprint now to tell whether the cloud
+// runs the folder's code.
+describe("sourceFingerprint", () => {
+  /**
+   * A pnpm workspace with Photos-like layout: `photos` depends on
+   * `packages/info` through `workspace:*`, pnpm's link in
+   * `photos/node_modules` names the package's folder, and `drive` is an
+   * unrelated app.
+   */
+  function workspace(): { root: string; git: (...args: string[]) => string; app: string } {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "source-fingerprint-")));
     const git = (...args: string[]) =>
       execFileSync("git", ["-C", root, ...args], { encoding: "utf-8" }).trim();
     git("init", "-q");
     git("config", "user.email", "test@example.com");
     git("config", "user.name", "Test");
     git("config", "commit.gpgsign", "false");
-    for (const app of ["dice", "memo"]) {
-      mkdirSync(join(root, app));
-      writeFileSync(join(root, app, "index.ts"), "1");
+    writeFileSync(join(root, ".gitignore"), "node_modules\n");
+    writeFileSync(
+      join(root, "pnpm-workspace.yaml"),
+      'packages:\n  - "photos"\n  - "drive"\n  - "packages/*"\n',
+    );
+    writeFileSync(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    for (const dir of ["photos", "drive", "packages/info"]) {
+      mkdirSync(join(root, dir), { recursive: true });
+      writeFileSync(join(root, dir, "index.ts"), "1");
     }
+    writeFileSync(
+      join(root, "photos", "package.json"),
+      JSON.stringify({ name: "photos", dependencies: { "@x/info": "workspace:*" } }),
+    );
+    writeFileSync(join(root, "packages/info", "package.json"), JSON.stringify({ name: "@x/info" }));
+    mkdirSync(join(root, "photos", "node_modules", "@x"), { recursive: true });
+    symlinkSync(join(root, "packages/info"), join(root, "photos", "node_modules", "@x", "info"));
     git("add", ".");
     git("commit", "-qm", "first");
-    return { root, git };
+    return { root, git, app: join(root, "photos") };
   }
 
-  it("names the last commit that touched the folder, not another folder's later one", () => {
-    const { root, git } = repo();
-    const first = git("rev-parse", "HEAD");
-    writeFileSync(join(root, "memo", "index.ts"), "2");
-    git("commit", "-qam", "memo only");
-    expect(folderCommit(join(root, "dice"))).toEqual({ commit: first, dirty: false });
+  it("covers the app's folder, its workspace packages and the lockfile", () => {
+    const { root, app } = workspace();
+    expect(sourcePaths(app)).toEqual(
+      [join(root, "packages/info"), join(root, "photos"), join(root, "pnpm-lock.yaml")].sort(),
+    );
   });
 
-  it("reports uncommitted changes in the folder", () => {
-    const { root } = repo();
-    writeFileSync(join(root, "dice", "index.ts"), "2");
-    expect(folderCommit(join(root, "dice"))?.dirty).toBe(true);
-    expect(folderCommit(join(root, "memo"))?.dirty).toBe(false);
+  it.each([
+    ["the app's folder", "photos/index.ts"],
+    ["a workspace package the app depends on", "packages/info/index.ts"],
+    ["the workspace lockfile", "pnpm-lock.yaml"],
+  ])("changes when %s changes", (_case, file) => {
+    const { root, app } = workspace();
+    const before = sourceFingerprint(app);
+    writeFileSync(join(root, file), "changed");
+    expect(sourceFingerprint(app)).not.toBe(before);
+  });
+
+  it("stays the same when an unrelated app changes, committed or not", () => {
+    const { root, git, app } = workspace();
+    const before = sourceFingerprint(app);
+    writeFileSync(join(root, "drive", "index.ts"), "2");
+    expect(sourceFingerprint(app)).toBe(before);
+    git("commit", "-qam", "drive only");
+    expect(sourceFingerprint(app)).toBe(before);
+  });
+
+  it("matches the working tree, so committing uncommitted and untracked files leaves it alone", () => {
+    const { root, git, app } = workspace();
+    writeFileSync(join(root, "photos", "index.ts"), "2");
+    writeFileSync(join(root, "photos", "new.ts"), "new");
+    const dirty = sourceFingerprint(app);
+    expect(dirty).not.toBeNull();
+    expect(sourceFingerprint(app)).toBe(dirty);
+    git("add", ".");
+    git("commit", "-qm", "second");
+    expect(sourceFingerprint(app)).toBe(dirty);
+  });
+
+  it("ignores files git ignores, such as node_modules", () => {
+    const { root, app } = workspace();
+    const before = sourceFingerprint(app);
+    writeFileSync(join(root, "photos", "node_modules", "junk.js"), "junk");
+    expect(sourceFingerprint(app)).toBe(before);
+  });
+
+  it("leaves the repository's index and objects untouched", () => {
+    const { root, git, app } = workspace();
+    writeFileSync(join(root, "photos", "new.ts"), "never staged");
+    const objects = git("count-objects");
+    sourceFingerprint(app);
+    expect(git("status", "--porcelain")).toBe("?? photos/new.ts");
+    expect(git("count-objects")).toBe(objects);
+  });
+
+  it("widens to the whole workspace when a workspace package is not linked yet", () => {
+    const { root, app } = workspace();
+    rmSync(join(root, "photos", "node_modules"), { recursive: true });
+    expect(sourcePaths(app)).toEqual([root, join(root, "pnpm-lock.yaml")]);
+    const before = sourceFingerprint(app);
+    writeFileSync(join(root, "drive", "index.ts"), "2");
+    expect(sourceFingerprint(app)).not.toBe(before);
   });
 
   it("answers null for a folder outside git", () => {
-    expect(folderCommit(mkdtempSync(join(tmpdir(), "no-git-")))).toBeNull();
+    expect(sourceFingerprint(mkdtempSync(join(tmpdir(), "no-git-")))).toBeNull();
   });
 });

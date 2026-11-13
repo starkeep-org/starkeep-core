@@ -6,7 +6,8 @@
  * re-drive.
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -106,6 +107,7 @@ vi.mock("../src/compute-stack", () => ({
 }));
 
 import { installApp, uninstallApp, type InstallerConfig } from "../src/orchestrator";
+import { sourceFingerprint } from "../src/app-discovery";
 import {
   createAppRole,
   createAppExecRole,
@@ -698,7 +700,14 @@ describe("an app that ships a mobile build", () => {
     "detach_temp_install_infra_policy",
   ];
 
-  it("records the commit of the folder the install deploys from", async () => {
+  // The CLI passes the app folder; the cloud list compares the recorded
+  // fingerprint with the folder's own, so both must come from one function.
+  it("records the fingerprint of the folder the install deploys from", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "orchestrator-source-"));
+    execFileSync("git", ["-C", dir, "init", "-q"]);
+    writeFileSync(join(dir, "index.ts"), "uncommitted");
+    const fingerprint = sourceFingerprint(dir);
+    expect(fingerprint).toMatch(/^[0-9a-f]{64}$/);
     await installApp({
       appId: "photos",
       manifest: photosManifest,
@@ -706,9 +715,14 @@ describe("an app that ships a mobile build", () => {
       version: "0.1.0",
       config,
       registryCredentials,
-      webSourceCommit: "abc",
+      webSourceDir: dir,
     });
-    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(photosManifest, "photos", ["web"], "abc");
+    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(
+      photosManifest,
+      "photos",
+      ["web"],
+      fingerprint,
+    );
   });
 
   it("installs every surface the manifest offers when none is named", async () => {

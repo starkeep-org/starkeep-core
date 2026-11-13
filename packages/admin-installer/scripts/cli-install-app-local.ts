@@ -30,7 +30,13 @@ import {
   unattendedArgs,
   type CommandSource,
 } from "../src/approved-commands";
-import { categoriesOf, grantPermissions, publicSharingConsent } from "../src/consent-text";
+import {
+  accessLead,
+  categoriesOf,
+  dependencyConsent,
+  grantPermissions,
+  publicSharingConsent,
+} from "../src/consent-text";
 import { installLocalApp } from "../src/local-app-install";
 import { prompt } from "../src/cli-prompt";
 
@@ -70,17 +76,10 @@ if (!health?.ok) {
 }
 
 // The consent words, in the order Admin's dialog shows them.
-const ir = manifest.infraRequirements;
-const grants = ir?.fileAccess ?? [];
+const grants = manifest.infraRequirements?.fileAccess ?? [];
 console.log(`\nInstall ${name}?\n`);
-if (ir?.fileAccessAll) {
-  console.log(
-    "This app is the User-Data-Owner: read + write access to all files, including unclassified ones.",
-  );
-} else if (grants.length === 0) {
-  console.log(`${name} doesn't access any of your files.`);
-} else {
-  console.log(`${name} asks for access to these files.`);
+console.log(accessLead(manifest));
+if (!manifest.infraRequirements?.fileAccessAll) {
   for (const g of grants) {
     const { files, metadata } = grantPermissions(g);
     console.log(`  - ${categoriesOf(g.types)}: files ${files}, metadata ${metadata}`);
@@ -91,15 +90,8 @@ const publicLinks = publicSharingConsent(manifest);
 if (publicLinks) console.log(`\nPublic links: ${publicLinks}`);
 
 const install = resolveInstallCommand(appDir, folder.raw as CommandSource);
-if (install.kind === "run") {
-  console.log(
-    `\nInstall runs \`${install.display}\` in ${install.cwd}, which runs the app's own install scripts.`,
-  );
-} else if (install.kind === "refused") {
-  console.log(
-    `\nInstall will not run \`${install.display}\`: ${install.reason} Run it yourself in ${install.cwd}.`,
-  );
-}
+const dependencies = dependencyConsent(install);
+if (dependencies) console.log(`\n${dependencies}`);
 
 if (!yes) {
   if (!process.stdin.isTTY) {

@@ -6,12 +6,13 @@
  * folder holds now. The local install runs the folder's code directly, so it
  * is behind only when its card reports a changed folder manifest. The cloud
  * install is behind when its recorded manifest differs from the folder's, or
- * when its web app deployed from another git commit than the folder's, as
+ * when its web app deployed other code than the folder holds, as
  * `/api/apps/cloud/list` reports per row.
  *
  * Start on a local card and Redeploy on a cloud card open one update dialog
  * when either install is behind. The dialog offers a checkbox per behind
- * install. After approval, the cloud deploys first, the local install updates
+ * install. Redeploy also offers its own cloud install while only the local
+ * install is behind, so a Redeploy always reaches the cloud. After approval, the cloud deploys first, the local install updates
  * second, and the app starts last. The cloud goes first so the local app
  * never writes to a table the cloud lacks: the cloud refuses such a row and
  * stops the computer's uploads until it catches up.
@@ -44,6 +45,7 @@ import { refreshTokens, getIdentityPoolCredentials, type STSCredentials } from "
 import {
   consentDiffers,
   surfacesOf,
+  targetsOf,
   type AppSurface,
   type LocalAppEntry,
   type ManifestSummary,
@@ -68,8 +70,8 @@ export interface CloudRegistryRow {
    */
   behind?: boolean | null;
   /**
-   * Whether the cloud web app runs code other than the folder's: another git
-   * commit, or uncommitted changes. Null when Admin cannot tell.
+   * Whether the cloud web app runs code other than the folder holds now,
+   * committed or not. Null when Admin cannot tell.
    */
   codeBehind?: boolean | null;
 }
@@ -88,6 +90,11 @@ export type CloudUpdate =
   /** No cloud here, no cloud install of the app, or a current one. */
   | { kind: "none" }
   | { kind: "behind"; surfaces: AppSurface[]; deployed: ManifestSummary | null }
+  /**
+   * A current cloud install that the person chose Redeploy on. The dialog
+   * offers it while the local install is behind.
+   */
+  | { kind: "redeploy"; surfaces: AppSurface[] }
   /** Admin cannot tell, for the reason given. */
   | { kind: "unknown"; reason: string };
 
@@ -110,9 +117,14 @@ function cloudUpdateOf(
   folder: ManifestSummary,
   registry: CloudRegistry,
 ): CloudUpdate {
+  if (registry.kind === "none") return { kind: "none" };
+  // An app the folder keeps off the cloud has no cloud install to update. A
+  // registry row from a time the manifest targeted the cloud still counts,
+  // so only an unread registry takes this answer.
+  if (registry.kind !== "ready" && !targetsOf({ ...entry, manifest: folder }).includes("cloud")) {
+    return { kind: "none" };
+  }
   switch (registry.kind) {
-    case "none":
-      return { kind: "none" };
     case "loading":
       return { kind: "unknown", reason: "Admin is still reading the cloud's app registry." };
     case "signed-out":
@@ -183,7 +195,8 @@ interface AppUpdateValue {
   requestUpdate: (entry: LocalAppEntry, origin: UpdateOrigin) => boolean;
 }
 
-export type UpdateOrigin = "start" | "redeploy";
+/** Start on a local card, or Redeploy on the cloud tile of one surface. */
+export type UpdateOrigin = "start" | { redeploy: AppSurface };
 
 const AppUpdateContext = createContext<AppUpdateValue | null>(null);
 
@@ -309,8 +322,13 @@ export function AppUpdateProvider({
 
   const requestUpdate = useCallback(
     (entry: LocalAppEntry, origin: UpdateOrigin): boolean => {
-      const behind = behindOf(entry, registry);
+      let behind = behindOf(entry, registry);
       if (!behind.local && behind.cloud.kind !== "behind") return false;
+      // Redeploy on a current cloud install while the local install is
+      // behind: the dialog still offers the redeploy the person chose.
+      if (origin !== "start" && behind.cloud.kind === "none") {
+        behind = { ...behind, cloud: { kind: "redeploy", surfaces: [origin.redeploy] } };
+      }
       setPending({ entry, origin, behind });
       return true;
     },
@@ -328,12 +346,15 @@ export function AppUpdateProvider({
     const name = entry.manifest.name ?? entry.appId;
     setUpdatingAppId(entry.appId);
     try {
-      if (choice.cloud && behind.cloud.kind === "behind") {
+      if (choice.cloud && (behind.cloud.kind === "behind" || behind.cloud.kind === "redeploy")) {
         const result = await installCloud({
           appId: entry.appId,
           appName: name,
           surfaces: behind.cloud.surfaces,
-          title: `Update ${name} in the cloud`,
+          title:
+            behind.cloud.kind === "behind" ? `Update ${name} in the cloud` : `Redeploy ${name}`,
+          // The dialog approved the folder's manifest, which the cloud route
+          // otherwise refuses while the local install is behind.
           approved: true,
           closeOnSuccess: true,
         });
@@ -437,17 +458,25 @@ function UpdateDialog({
 }) {
   const name = entry.manifest.name ?? entry.appId;
   const cloudKind = behind.cloud.kind;
+  // The cloud install the dialog can run: one behind the folder, or the
+  // current one the person chose Redeploy on.
+  const cloudOffered = cloudKind === "behind" || cloudKind === "redeploy";
   const [local, setLocal] = useState(behind.local);
-  const [cloud, setCloud] = useState(cloudKind === "behind");
+  const [cloud, setCloud] = useState(cloudOffered);
 
-  const cloudChecked = cloudKind === "behind" && cloud;
-  const warn = (behind.local && !local) || (cloudKind !== "none" && !cloudChecked);
+  const cloudChecked = cloudOffered && cloud;
+  // A current cloud install left alone stays current, so only a behind or
+  // unknown one warns.
+  const warn =
+    (behind.local && !local) ||
+    ((cloudKind === "behind" || cloudKind === "unknown") && !cloudChecked);
   const accessChanged =
     (behind.local && local && consentDiffers(entry.manifest, behind.folder)) ||
     (behind.cloud.kind === "behind" &&
       cloudChecked &&
       (behind.cloud.deployed === null || consentDiffers(behind.cloud.deployed, behind.folder)));
-  const cloudSurfaces = behind.cloud.kind === "behind" ? behind.cloud.surfaces : [];
+  const cloudSurfaces =
+    behind.cloud.kind === "behind" || behind.cloud.kind === "redeploy" ? behind.cloud.surfaces : [];
   const surface: "local" | AppSurface =
     local && behind.local ? "local" : cloudSurfaces.includes("web") ? "web" : "mobile";
   const nothingChecked = !(behind.local && local) && !cloudChecked;
@@ -461,7 +490,7 @@ function UpdateDialog({
       approveLabel={
         origin === "start" ? (nothingChecked ? `Start ${name}` : "Update & Start") : "Update"
       }
-      approveDisabled={origin === "redeploy" && nothingChecked}
+      approveDisabled={origin !== "start" && nothingChecked}
       onApprove={() => onApprove({ local: behind.local && local, cloud: cloudChecked })}
       onCancel={onCancel}
     >
@@ -483,16 +512,20 @@ function UpdateDialog({
         {cloudKind !== "none" && (
           <div className="flex flex-col gap-0.5">
             <label
-              className={`flex items-center gap-2 text-sm ${cloudKind === "behind" ? "" : "text-muted-foreground"}`}
+              className={`flex items-center gap-2 text-sm ${cloudOffered ? "" : "text-muted-foreground"}`}
             >
               <input
                 type="checkbox"
                 className="size-4"
                 checked={cloudChecked}
-                disabled={cloudKind !== "behind"}
+                disabled={!cloudOffered}
                 onChange={(e) => setCloud(e.target.checked)}
               />
-              Update {name} in the cloud
+              {cloudKind === "redeploy"
+                ? cloudSurfaces.includes("web")
+                  ? `Redeploy ${name} in the cloud`
+                  : `Re-register ${name} Mobile`
+                : `Update ${name} in the cloud`}
             </label>
             {behind.cloud.kind === "unknown" && (
               <p className="pl-6 text-xs text-muted-foreground">{behind.cloud.reason}</p>

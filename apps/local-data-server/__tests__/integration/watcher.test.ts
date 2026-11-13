@@ -214,6 +214,21 @@ describe("live filesystem events", () => {
     );
     const old = await listRecords(drive, `?where=${where}`);
     expect(old.map((r) => r.original_filename)).toEqual(["dated.txt"]);
+
+    // They are ordering keys too, nulls last in either direction.
+    for (const column of ["original_updated_at", "original_created_at"]) {
+      for (const direction of ["asc", "desc"] as const) {
+        const rows = await listRecords(drive, `?order=${column}.${direction}`);
+        expect(rows.map((r) => r.original_filename)).toContain("dated.txt");
+        const dates = rows.map((r) => r[column] as string | null);
+        const present = dates.filter((d): d is string => d !== null);
+        expect(dates.slice(0, present.length)).toEqual(present);
+        const sorted = [...present].sort();
+        expect(present).toEqual(direction === "asc" ? sorted : sorted.reverse());
+      }
+    }
+    const oldestFirst = await listRecords(drive, "?order=original_updated_at.asc");
+    expect(oldestFirst[0]!.original_filename).toBe("dated.txt");
   });
 
   it("a modified file is re-ingested under a new record", async () => {

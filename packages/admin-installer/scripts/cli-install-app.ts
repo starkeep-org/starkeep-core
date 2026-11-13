@@ -68,7 +68,6 @@ import { prompt } from "../src/cli-prompt";
 import { unattendedArgs, type CommandResolution } from "../src/approved-commands";
 import { useOnlyAwsCredentials, withoutAwsVariables } from "../src/aws-env";
 import { protocolRefusal } from "../src/protocol-check";
-import { folderCommit } from "../src/app-discovery";
 import {
   loadStarkeepCliConfig,
   appDirFor,
@@ -425,9 +424,9 @@ await installApp({
   appId,
   manifest,
   surfaces,
-  // Admin compares the recorded commit with the folder's to tell whether the
-  // cloud web app runs the folder's code.
-  webSourceCommit: folderCommit(appDir)?.commit ?? null,
+  // Admin compares the recorded fingerprint with the folder's to tell
+  // whether the cloud web app runs the folder's code.
+  webSourceDir: appDir,
   ...(zipBuffer ? { zipBuffer } : {}),
   version: manifest.version,
   registryCredentials,
