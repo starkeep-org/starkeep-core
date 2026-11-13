@@ -10,3 +10,4 @@ export * from "./settings/index.js";
 export * from "./device-session/index.js";
 export * from "./markup/index.js";
 export * from "./protocol-version/index.js";
+export * from "./delegation/index.js";
