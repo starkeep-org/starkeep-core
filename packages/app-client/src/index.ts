@@ -19,6 +19,14 @@ export {
 } from "./sign";
 export { type ProxyRequest, type ProxyResponse, proxyToDataServer } from "./proxy";
 export {
+  DELEGATION_HEADER,
+  type DelegatedPrincipal,
+  type DelegationMode,
+  delegationRefusal,
+  verifyDelegation,
+  verifyDelegationToken,
+} from "./delegation";
+export {
   createDataProxyHandler,
   sessionAuth,
   type DataProxyOptions,

@@ -101,6 +101,13 @@ export interface SignedFetchInit {
   method?: string;
   headers?: Record<string, string>;
   body?: SignableBody;
+  /**
+   * An outside client's delegation token (`DelegatedPrincipal.token` from
+   * `verifyDelegation`). Sent beside the signature, so the data server
+   * applies the delegation's mode and revocation to this call. Null or
+   * omitted on the local surface and for the app's own calls.
+   */
+  delegation?: string | null;
 }
 
 export async function signedFetch(
@@ -112,6 +119,7 @@ export async function signedFetch(
   const body = NO_BODY_METHODS.has(method.toUpperCase()) ? undefined : init?.body;
   const headers: Record<string, string> = {
     ...(init?.headers ?? {}),
+    ...(init?.delegation ? { "X-Starkeep-Delegation": init.delegation } : {}),
     ...signRequest({
       appId: creds.appId,
       hmacSecret: creds.hmacSecret,
