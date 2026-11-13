@@ -29,6 +29,7 @@
  * when that work happens.
  */
 
+import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -285,4 +286,32 @@ export function scanApps(configuredDirs: string[], options: ScanOptions = {}): S
   }
 
   return { apps, problems: dirs.flatMap((d) => d.problems), dirs };
+}
+
+/** The code an app folder holds, as git records it. */
+export interface FolderCommit {
+  /** The last commit that touched the folder. */
+  commit: string;
+  /** The folder holds changes git has not committed. */
+  dirty: boolean;
+}
+
+/**
+ * The last git commit that touched `dir`, and whether `dir` holds uncommitted
+ * changes. A cloud web install records the commit, so Admin can tell when the
+ * folder's code moved past the deployed copy. Null for a folder outside git.
+ */
+export function folderCommit(dir: string): FolderCommit | null {
+  const git = (args: string[]) =>
+    execFileSync("git", ["-C", dir, ...args], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  try {
+    const commit = git(["log", "-1", "--format=%H", "--", "."]);
+    if (!commit) return null;
+    return { commit, dirty: git(["status", "--porcelain", "--", "."]) !== "" };
+  } catch {
+    return null;
+  }
 }

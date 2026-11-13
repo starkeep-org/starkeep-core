@@ -223,7 +223,7 @@ describe("install", () => {
       const entries = ledger.filter((e) => e.step === step).map((e) => e.status);
       expect(entries, step).toEqual(["pending", "done"]);
     }
-    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(photosManifest, "photos", ["web"]);
+    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(photosManifest, "photos", ["web"], null);
     expect(fakeRegistry.close).toHaveBeenCalled();
   });
 
@@ -698,6 +698,19 @@ describe("an app that ships a mobile build", () => {
     "detach_temp_install_infra_policy",
   ];
 
+  it("records the commit of the folder the install deploys from", async () => {
+    await installApp({
+      appId: "photos",
+      manifest: photosManifest,
+      zipBuffer: Buffer.from("zip"),
+      version: "0.1.0",
+      config,
+      registryCredentials,
+      webSourceCommit: "abc",
+    });
+    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(photosManifest, "photos", ["web"], "abc");
+  });
+
   it("installs every surface the manifest offers when none is named", async () => {
     await installApp({
       appId: "photos",
@@ -707,10 +720,12 @@ describe("an app that ships a mobile build", () => {
       config: { ...config, mobileSignIn },
       registryCredentials,
     });
-    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(mobileManifest, "photos", [
-      "web",
-      "mobile",
-    ]);
+    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(
+      mobileManifest,
+      "photos",
+      ["web", "mobile"],
+      null,
+    );
     expect(setMobileAppCallback).toHaveBeenCalledWith(
       { region: "us-east-1", ...mobileSignIn },
       "starkeep-photos",
@@ -751,7 +766,12 @@ describe("an app that ships a mobile build", () => {
     );
     expect(createAppExecRole).not.toHaveBeenCalled();
     expect(installComputeStack).not.toHaveBeenCalled();
-    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(mobileManifest, "photos", ["mobile"]);
+    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(
+      mobileManifest,
+      "photos",
+      ["mobile"],
+      null,
+    );
   });
 
   it("creates the HMAC secret on a mobile-only install", async () => {
@@ -785,7 +805,12 @@ describe("an app that ships a mobile build", () => {
     for (const step of COMPUTE_STEPS) expect(doneSteps("install"), step).toContain(step);
     expect(createAppExecRole).toHaveBeenCalledTimes(1);
     // register_app runs again, so the row records the web app too.
-    expect(fakeRegistry.registerApp).toHaveBeenLastCalledWith(mobileManifest, "photos", ["web"]);
+    expect(fakeRegistry.registerApp).toHaveBeenLastCalledWith(
+      mobileManifest,
+      "photos",
+      ["web"],
+      null,
+    );
   });
 
   it("refuses a surface the manifest does not offer, before any step", async () => {
@@ -842,7 +867,7 @@ describe("an app that ships a mobile build", () => {
       surfaces: ["web"],
     });
     expect(setMobileAppCallback).not.toHaveBeenCalled();
-    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(mobileManifest, "photos", ["web"]);
+    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(mobileManifest, "photos", ["web"], null);
   });
 
   it("removes the web app alone and keeps the data side", async () => {

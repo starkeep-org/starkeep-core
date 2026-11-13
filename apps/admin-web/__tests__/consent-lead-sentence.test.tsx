@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { LocalAppsSection } from "../src/components/LocalAppsSection";
+import { AppUpdateProvider } from "../src/components/AppUpdate";
 import type { LocalAppEntry } from "../src/lib/app-types";
 
 vi.mock("@/lib/operator-session", () => ({ operatorSessionIfSignedIn: async () => null }));
@@ -46,7 +47,11 @@ function entry(
 async function openConsent(app: LocalAppEntry) {
   stubFetch();
   const user = userEvent.setup();
-  render(<LocalAppsSection apps={[app]} refresh={async () => undefined} localOnline={true} />);
+  render(
+    <AppUpdateProvider cloudAdministered={false} signedIn={false}>
+      <LocalAppsSection apps={[app]} refresh={async () => undefined} localOnline={true} />
+    </AppUpdateProvider>,
+  );
   await user.click(screen.getByRole("button", { name: `Install ${app.manifest.name}` }));
   await screen.findByRole("button", { name: "Approve & Install" });
 }

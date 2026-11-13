@@ -358,7 +358,7 @@ describe("an app installed on this machine", () => {
     await finish(res, child);
   });
 
-  it("refuses while its folder holds a manifest the user has not approved, and spawns nothing", async () => {
+  it("refuses while its folder holds a changed manifest, and spawns nothing", async () => {
     const pinned = makeAppDir(
       join(dataDir, "elsewhere"),
       "dice",
@@ -372,8 +372,30 @@ describe("an app installed on this machine", () => {
     );
     const res = await appInstall({ appId: "dice" });
     expect(res.status).toBe(409);
-    expect(((await res.json()) as { error: string }).error).toContain("Update from folder");
+    expect(((await res.json()) as { error: string }).error).toBe(
+      `App dice's folder ${pinned} holds a changed manifest. Choose Start or Redeploy to update it.`,
+    );
     expect(spawnedChildren()).toHaveLength(0);
+  });
+
+  // The update dialog approves the folder's changed manifest, and deploys it
+  // to the cloud before the local install updates.
+  it("deploys its folder's changed manifest once the update dialog approves it", async () => {
+    const pinned = makeAppDir(
+      join(dataDir, "elsewhere"),
+      "dice",
+      testAppManifest({ id: "dice", name: "Dice" }),
+    );
+    registryAnswers([pinnedRow("dice", pinned)]);
+    makeAppDir(
+      join(dataDir, "elsewhere"),
+      "dice",
+      testAppManifest({ id: "dice", name: "Dice", version: "2.0.0" }),
+    );
+    const res = await appInstall({ appId: "dice", approved: true });
+    const child = lastChild();
+    expect(child.args.slice(5, 7)).toEqual(["--app-dir", pinned]);
+    await finish(res, child);
   });
 
   it("refuses while its folder holds an invalid manifest, says to fix it, and spawns nothing", async () => {

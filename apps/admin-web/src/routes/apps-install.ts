@@ -26,8 +26,8 @@ export async function POST(req: Request) {
   }
 
   // A first install reads the manifest the scan found, which is the one the
-  // user saw on the card. A reinstall ("Update from folder") reads the
-  // installed app's pinned folder again, so the app never switches source.
+  // user saw on the card. A reinstall (the update dialog) reads the installed
+  // app's pinned folder again, so the app never switches source.
   const source = await appSource(appId);
   if (source.kind === "not-found") {
     return Response.json(
@@ -72,9 +72,9 @@ export async function POST(req: Request) {
     return Response.json(details ? { error, details } : { error }, { status: result.status });
   }
 
-  // If the app daemon is already running, stop it so the user restarts it and
-  // picks up the (possibly rotated) HMAC secret — @starkeep/app-client caches
-  // credentials per process and has no file-watch invalidation.
+  // A reinstall keeps the app's secret, but a running app keeps the old
+  // manifest's behavior until it restarts. Stop it, so the next Start runs
+  // the new manifest.
   await stopById(appId);
 
   return Response.json({ appId: result.appId, secretPath: result.secretPath, ok: true });

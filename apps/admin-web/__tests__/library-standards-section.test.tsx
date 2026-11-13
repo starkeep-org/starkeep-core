@@ -9,6 +9,7 @@ import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { LibraryStandardsSection } from "../src/components/LibraryStandardsSection";
 import { LocalAppsSection } from "../src/components/LocalAppsSection";
+import { AppUpdateProvider } from "../src/components/AppUpdate";
 import type { LocalAppEntry } from "../src/lib/app-types";
 
 // No one is signed in; the route decides where the change goes.
@@ -241,7 +242,11 @@ describe("the install flow's quality step", () => {
 
   async function openConsent(entry: LocalAppEntry) {
     const user = userEvent.setup();
-    render(<LocalAppsSection apps={[entry]} refresh={async () => undefined} localOnline={true} />);
+    render(
+      <AppUpdateProvider cloudAdministered={false} signedIn={false}>
+        <LocalAppsSection apps={[entry]} refresh={async () => undefined} localOnline={true} />
+      </AppUpdateProvider>,
+    );
     await user.click(screen.getByRole("button", { name: `Install ${entry.manifest.name}` }));
     return user;
   }

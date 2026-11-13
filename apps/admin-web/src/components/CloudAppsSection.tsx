@@ -1,38 +1,13 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { CommandOutput } from "@/components/CommandOutput";
 import { ConsentDialog } from "@/components/ConsentDialog";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import {
-  readCloudConfig,
-  readCognitoSession,
-  writeCloudCredentials,
-  writeCognitoSession,
-} from "@/lib/cloud-config";
-import { refreshTokens, getIdentityPoolCredentials, type STSCredentials } from "@/lib/cognito-auth";
+import { useAppUpdate, type CloudInstallRequest } from "@/components/AppUpdate";
+import { readCloudConfig } from "@/lib/cloud-config";
 import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
 import { ACTION_OCCASIONAL, ACTION_OPEN } from "@/lib/action-colors";
-import {
-  consentDiffers,
-  surfacesOf,
-  type AppSurface,
-  type LocalAppEntry,
-  type ManifestSummary,
-} from "@/lib/app-types";
-import { runInstallStream } from "@/lib/install-stream-client";
-
-/** One row of `shared.app_registry`, as POST /api/apps/cloud/list returns it. */
-interface CloudRegistryRow {
-  appId: string;
-  name: string | null;
-  version: string;
-  webApp: boolean;
-  mobileApp: boolean;
-  /** The manifest the last install deployed, or null when the row predates it. */
-  manifest: ManifestSummary | null;
-}
+import { consentDiffers, surfacesOf, type AppSurface, type LocalAppEntry } from "@/lib/app-types";
 
 /** Why a tile from the registry alone cannot redeploy or re-register. */
 function noFolder(surface: AppSurface): string {
@@ -64,31 +39,19 @@ export function CloudAppsSection({
   // the "Set up cloud" CTA, so this section only disables installs.
   const [cloudReady, setCloudReady] = useState<boolean | null>(null);
   const [credError, setCredError] = useState<string | null>(null);
-  // The tile whose install modal is currently open (null when closed). Each
-  // tile installs its own surface on top of the app's data side, and no other.
-  const [installing, setInstalling] = useState<{
-    appId: string;
-    appName: string;
-    endpoint: string;
-    surface: AppSurface;
-  } | null>(null);
-  // Whether the open modal's run is in progress. Every cloud app install
-  // shares one run slot on the server, so every tile waits for it.
-  const [running, setRunning] = useState(false);
-  const [credentials, setCredentials] = useState<(STSCredentials & { region?: string }) | null>(
-    null,
-  );
-  // Apps whose cloud web app, and apps whose mobile app, the registry reports
-  // as installed. Loaded from `shared.app_registry` via POST
-  // /api/apps/cloud/list; refreshed after every successful install. null = not
-  // yet loaded / cloud not configured. The two surfaces install independently,
-  // each on top of the app's shared data side.
-  const [webIds, setWebIds] = useState<Set<string> | null>(null);
-  const [mobileIds, setMobileIds] = useState<Set<string> | null>(null);
-  // The registry's rows, for the installed apps whose folder no scanned folder
-  // holds. Their tiles come from the registry, so an installed app's tile
-  // stays when its folder leaves Discover apps.
-  const [registryRows, setRegistryRows] = useState<CloudRegistryRow[] | null>(null);
+  // The cloud registry, the install panel and its one run slot live in the
+  // update flow, which the local cards share. See AppUpdate.tsx.
+  const {
+    registry,
+    cloudRunning: running,
+    installCloud,
+    requestUpdate,
+    updatingAppId,
+  } = useAppUpdate();
+  const registryRows = registry.kind === "ready" ? registry.rows : null;
+  const webIds = registryRows && new Set(registryRows.filter((a) => a.webApp).map((a) => a.appId));
+  const mobileIds =
+    registryRows && new Set(registryRows.filter((a) => a.mobileApp).map((a) => a.appId));
   // The install waiting on the consent dialog, or null when none is open.
   const [pendingConsent, setPendingConsent] = useState<{
     entry: LocalAppEntry;
@@ -113,78 +76,10 @@ export function CloudAppsSection({
     })();
   }, []);
 
-  // Refresh the cloud install registry. Requires signed-in Cognito creds —
-  // skips silently if the user hasn't signed in (registry stays null and the
-  // section falls back to showing no "Installed" badge until they auth).
-  const refreshRegistry = useCallback(async () => {
-    try {
-      const cfg = await readCloudConfig();
-      if (!cfg) return; // cloud not configured
-      const session = await readCognitoSession();
-      if (!session?.refreshToken) return; // not signed in
-      const tokens = await refreshTokens(cfg.cognitoConfig, session.refreshToken);
-      const creds = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
-      await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
-      const res = await fetch("/api/apps/cloud/list", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          accessKeyId: creds.accessKeyId,
-          secretAccessKey: creds.secretAccessKey,
-          sessionToken: creds.sessionToken,
-        }),
-      });
-      if (!res.ok) {
-        const body = (await res.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(body?.error ?? `cloud registry list failed: ${res.status}`);
-      }
-      const body = (await res.json()) as { apps: CloudRegistryRow[] };
-      setRegistryRows(body.apps);
-      setWebIds(new Set(body.apps.filter((a) => a.webApp).map((a) => a.appId)));
-      setMobileIds(new Set(body.apps.filter((a) => a.mobileApp).map((a) => a.appId)));
-    } catch (err) {
-      // The registry read is best-effort: a failure just means no "Installed"
-      // badges. Don't surface it as a section-level error.
-      console.warn("cloud registry list failed:", err);
-    }
-  }, []);
-
-  useEffect(() => {
-    refreshRegistry();
-  }, [refreshRegistry]);
-
-  const handleInstall = async (
-    appId: string,
-    appName: string,
-    endpoint: string,
-    surface: AppSurface,
-  ) => {
+  const handleInstall = async (request: CloudInstallRequest) => {
     setCredError(null);
-    const cfg = await readCloudConfig();
-    if (!cfg) {
-      setCredError("Cloud is not configured. Complete the cloud setup first.");
-      return;
-    }
-
-    const session = await readCognitoSession();
-    if (!session?.refreshToken) {
-      setCredError("Not signed in. Sign in from the dashboard first.");
-      return;
-    }
-
-    let creds: STSCredentials;
-    try {
-      const tokens = await refreshTokens(cfg.cognitoConfig, session.refreshToken);
-      creds = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
-      await writeCloudCredentials(creds);
-      await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
-    } catch (err) {
-      setCredError(err instanceof Error ? err.message : "Failed to get AWS credentials");
-      return;
-    }
-
-    setCredentials({ ...creds, region: cfg.region });
-    setInstalling({ appId, appName, endpoint, surface });
+    const result = await installCloud(request);
+    if (!result.ok && result.error) setCredError(result.error);
   };
 
   const listedIds = new Set((apps ?? []).map((a) => a.appId));
@@ -208,20 +103,22 @@ export function CloudAppsSection({
         {leading}
         {apps?.flatMap((entry) => {
           const name = entry.manifest.name ?? entry.appId;
-          // Cloud install is generic: any app discovered with a "cloud" target is
-          // installable via the per-appId route, which drives the app's own
-          // `bundle` script. No hardcoded installer registry.
-          const endpoint = `/api/apps/${entry.appId}/cloud-install`;
           const url = browserBaseUrl ? `${browserBaseUrl}/apps/${entry.appId}/` : null;
           // One run at a time across every tile, and none before cloud is set up.
           // A locally installed app deploys only the manifest the user
-          // approved, so its folder must still hold that manifest.
+          // approved, so a first cloud install waits until the local install
+          // takes the folder's changed manifest. An installed tile's update
+          // goes through the update dialog, which approves it.
+          const changed =
+            entry.sourceState === "changed"
+              ? "Its folder holds a changed manifest. Choose Start or Redeploy to update it."
+              : undefined;
           const blocked = !cloudReady
             ? "Set up cloud before installing apps"
             : running
               ? "Another cloud install is running"
-              : entry.sourceState === "changed"
-                ? "Its folder holds a changed manifest. Choose Update from folder on its local card first"
+              : updatingAppId === entry.appId
+                ? `${name} is updating`
                 : entry.sourceState === "invalid"
                   ? "Its folder holds an invalid manifest. Fix the manifest first"
                   : entry.sourceState === "missing"
@@ -247,7 +144,13 @@ export function CloudAppsSection({
             const approved =
               entry.status === "active" ||
               (deployed !== null && !consentDiffers(deployed, entry.manifest));
-            const run = () => void handleInstall(entry.appId, name, endpoint, surface);
+            const run = () =>
+              void handleInstall({
+                appId: entry.appId,
+                appName: name,
+                surfaces: [surface],
+                title: surface === "mobile" ? `Register ${tileName}` : `Install ${name} in cloud`,
+              });
             const install = approved
               ? run
               : () =>
@@ -263,7 +166,11 @@ export function CloudAppsSection({
               ? [
                   {
                     label: surface === "web" ? `Redeploy ${name}` : `Re-register ${tileName}`,
-                    onSelect: install,
+                    // An install behind the folder updates through the
+                    // update dialog, which redeploys every installed surface.
+                    onSelect: () => {
+                      if (!requestUpdate(entry, "redeploy")) install();
+                    },
                     disabled: blocked !== undefined,
                     title: blocked,
                   },
@@ -277,12 +184,12 @@ export function CloudAppsSection({
               primary = (
                 // The title sits on the wrapper because a disabled button
                 // swallows the hover that would raise the tooltip.
-                <span className="block" title={blocked}>
+                <span className="block" title={blocked ?? changed}>
                   <Button
                     size="sm"
                     className={ACTION_OCCASIONAL}
                     onClick={install}
-                    disabled={blocked !== undefined}
+                    disabled={blocked !== undefined || changed !== undefined}
                   >
                     {surface === "web" ? `Install ${name} in cloud` : `Register ${tileName}`}
                   </Button>
@@ -376,126 +283,6 @@ export function CloudAppsSection({
           onCancel={() => setPendingConsent(null)}
         />
       )}
-
-      <CloudAppInstallModal
-        opened={installing !== null}
-        appId={installing?.appId ?? null}
-        appName={installing?.appName ?? null}
-        endpoint={installing?.endpoint ?? null}
-        surface={installing?.surface ?? null}
-        credentials={credentials}
-        onRunningChange={setRunning}
-        onClose={() => {
-          setInstalling(null);
-          setCredentials(null);
-        }}
-        onSuccess={() => {
-          refreshRegistry();
-        }}
-      />
     </div>
-  );
-}
-
-function CloudAppInstallModal({
-  opened,
-  appName,
-  endpoint,
-  surface,
-  credentials,
-  onClose,
-  onSuccess,
-  onRunningChange,
-}: {
-  opened: boolean;
-  appId: string | null;
-  appName: string | null;
-  endpoint: string | null;
-  surface: AppSurface | null;
-  credentials: STSCredentials | null;
-  onClose: () => void;
-  onSuccess?: () => void;
-  onRunningChange?: (running: boolean) => void;
-}) {
-  const [lines, setLines] = useState<string[]>([]);
-  const [status, setStatus] = useState<"idle" | "running" | "success" | "failure">("idle");
-  // Bumped by the Retry button to re-drive the install effect. Most install
-  // failures are transient (IAM/S3 eventual consistency) and clear on retry.
-  const [retryNonce, setRetryNonce] = useState(0);
-
-  useEffect(() => {
-    onRunningChange?.(status === "running");
-  }, [status]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!opened || !credentials || !endpoint || !surface) return;
-
-    setLines([]);
-    setStatus("running");
-    let aborted = false;
-
-    async function run() {
-      // The deploy runs detached on the server, so a dropped stream reconnects
-      // to it rather than leaving the dialog spinning.
-      const outcome = await runInstallStream(
-        endpoint!,
-        {
-          accessKeyId: credentials!.accessKeyId,
-          secretAccessKey: credentials!.secretAccessKey,
-          sessionToken: credentials!.sessionToken,
-          region: (credentials as STSCredentials & { region?: string }).region ?? "",
-          surfaces: [surface!],
-        },
-        { onLine: (line) => setLines((l) => [...l, line]), isAborted: () => aborted },
-      );
-      if (aborted) return;
-      if (outcome.kind === "done") {
-        setStatus("success");
-        onSuccess?.();
-      } else {
-        setLines((l) => [...l, `Error: ${outcome.message}`]);
-        setStatus("failure");
-      }
-    }
-
-    run();
-    return () => {
-      aborted = true;
-    };
-  }, [opened, credentials, endpoint, surface, retryNonce]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  return (
-    <Dialog
-      open={opened}
-      onOpenChange={(open) => {
-        if (!open && status !== "running") onClose();
-      }}
-    >
-      <DialogContent className="sm:max-w-4xl">
-        <DialogHeader>
-          <DialogTitle>
-            {surface === "mobile"
-              ? `Register ${appName ?? "app"} Mobile`
-              : `Install ${appName ?? "app"} in cloud`}
-          </DialogTitle>
-        </DialogHeader>
-        <CommandOutput lines={lines} status={status} />
-        {status !== "running" && (
-          <div className="flex items-center justify-end gap-3">
-            {status === "failure" && (
-              <>
-                <p className="mr-auto text-sm text-muted-foreground">
-                  Most failures are transitory and fixed with a retry.
-                </p>
-                <Button onClick={() => setRetryNonce((n) => n + 1)}>Retry</Button>
-              </>
-            )}
-            <Button variant="outline" onClick={onClose}>
-              Close
-            </Button>
-          </div>
-        )}
-      </DialogContent>
-    </Dialog>
   );
 }

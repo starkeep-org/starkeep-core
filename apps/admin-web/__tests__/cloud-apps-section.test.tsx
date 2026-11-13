@@ -47,6 +47,16 @@ vi.mock("@/lib/install-stream-client", () => ({
 }));
 
 const { CloudAppsSection } = await import("../src/components/CloudAppsSection");
+const { AppUpdateProvider } = await import("../src/components/AppUpdate");
+
+/** The section inside the update flow the Dashboard provides. */
+function section(apps: LocalAppEntry[]) {
+  return (
+    <AppUpdateProvider cloudAdministered signedIn>
+      <CloudAppsSection apps={apps} />
+    </AppUpdateProvider>
+  );
+}
 
 /** What the registry answers for each app id. */
 let registry: Array<{
@@ -129,7 +139,7 @@ function tileNames(): string[] {
 
 async function renderWith(rows: typeof registry, apps: LocalAppEntry[] = [PHOTOS, MEMO]) {
   registry = rows;
-  render(<CloudAppsSection apps={apps} />);
+  render(section(apps));
   // The registry read is what turns "Not installed" into its answer.
   await vi.waitFor(() =>
     expect(fetch).toHaveBeenCalledWith("/api/apps/cloud/list", expect.anything()),
@@ -285,12 +295,12 @@ describe("an installed app whose folder no scanned folder holds", () => {
   });
 });
 
-describe("a locally installed app whose folder holds a manifest the user has not approved", () => {
+describe("a locally installed app whose folder holds a changed manifest", () => {
   const DICE = app("dice", "Dice", { web: true, mobile: false });
   const CHANGED_TITLE =
-    "Its folder holds a changed manifest. Choose Update from folder on its local card first";
+    "Its folder holds a changed manifest. Choose Start or Redeploy to update it.";
 
-  it("disables the cloud install, and says to update from the folder first", async () => {
+  it("disables a first cloud install, and says to update through Start or Redeploy", async () => {
     await renderWith([], [{ ...DICE, status: "active", sourceState: "changed" }]);
     const button = within(await tile("Dice")).getByRole("button", {
       name: "Install Dice in cloud",
@@ -299,19 +309,18 @@ describe("a locally installed app whose folder holds a manifest the user has not
     expect(button.parentElement!.getAttribute("title")).toBe(CHANGED_TITLE);
   });
 
-  it("disables the redeploy of an installed app", async () => {
+  it("opens the update dialog from Redeploy, and deploys nothing until approved", async () => {
     await renderWith(
       [{ appId: "dice", webApp: true, mobileApp: false }],
       [{ ...DICE, status: "active", sourceState: "changed" }],
     );
-    const user = userEvent.setup();
-    await user.click(
-      within(await tile("Dice")).getByRole("button", { name: "More actions for Dice" }),
+    await vi.waitFor(async () =>
+      expect(within(await tile("Dice")).getByText("Installed")).toBeTruthy(),
     );
-    const item = await screen.findByRole("menuitem", { name: "Redeploy Dice" });
-    expect(item.getAttribute("aria-disabled")).toBe("true");
-    expect(item.getAttribute("title")).toBe(CHANGED_TITLE);
-    await user.click(item);
+    await chooseFromMenu("Dice", "Redeploy Dice");
+    expect(await screen.findByRole("heading", { name: "Update Dice?" })).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: "Update Dice on this computer" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Update" })).toBeTruthy();
     expect(installs).toHaveLength(0);
   });
 });
@@ -486,7 +495,7 @@ describe("consent before a cloud install", () => {
       vi.fn(() => new Promise<Response>(() => {})),
     );
     const user = userEvent.setup();
-    render(<CloudAppsSection apps={[SHARING]} />);
+    render(section([SHARING]));
     await vi.waitFor(() =>
       expect(fetch).toHaveBeenCalledWith("/api/apps/cloud/list", expect.anything()),
     );

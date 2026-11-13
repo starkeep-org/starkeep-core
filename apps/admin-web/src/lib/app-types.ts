@@ -90,8 +90,8 @@ export interface LocalAppEntry {
   /** Why the pinned folder's manifest fails validation, for an "invalid" app. */
   sourceError?: string;
   /**
-   * The manifest the pinned folder holds now, for a "changed" app. Update
-   * from folder installs it.
+   * The manifest the pinned folder holds now, for a "changed" app. The update
+   * dialog that Start opens installs it.
    */
   folderManifest?: ManifestSummary;
   /**

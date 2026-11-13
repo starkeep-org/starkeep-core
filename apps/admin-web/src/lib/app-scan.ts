@@ -104,6 +104,53 @@ export function pinnedSourceState(
   return { sourceState: "changed", folderManifest: folder.raw };
 }
 
+/** An app's folder and the valid manifest it holds now. */
+export interface AppFolder {
+  dir: string;
+  manifest: Record<string, unknown>;
+}
+
+/**
+ * Each app's folder, by app id. An installed app reads its pinned folder, and
+ * any other app reads the folder the scan found. An app whose folder is gone,
+ * holds an invalid manifest, or holds another app's manifest has no entry.
+ */
+export async function appFolders(): Promise<Map<string, AppFolder>> {
+  const registry = await readRegistry();
+  const pins = pinsOf(registry);
+  const out = new Map<string, AppFolder>();
+  for (const [appId, dir] of pins) {
+    const folder = readFolderManifest(dir);
+    if (folder.kind === "valid" && folder.manifest.id === appId) {
+      out.set(appId, { dir, manifest: folder.manifest as unknown as Record<string, unknown> });
+    }
+  }
+  for (const app of scanApps({ pinned: pins }).apps) {
+    if (pins.has(app.appId)) continue;
+    const folder = readFolderManifest(app.appDir);
+    if (folder.kind === "valid") {
+      out.set(app.appId, {
+        dir: app.appDir,
+        manifest: folder.manifest as unknown as Record<string, unknown>,
+      });
+    }
+  }
+  return out;
+}
+
+/** Whether two manifests hold the same values, whatever their key order. */
+export function sameManifest(a: unknown, b: unknown): boolean {
+  return canonical(a) === canonical(b);
+}
+
+function canonical(value: unknown): string {
+  return JSON.stringify(value, (_key, v: unknown) =>
+    v !== null && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v).sort(([x], [y]) => x.localeCompare(y)))
+      : v,
+  );
+}
+
 /** Why a folder's manifest is not the installed app's: it names another id. */
 export function idMismatch(folderId: string, appId: unknown): string {
   return `id: "${folderId}" is not this app's id "${String(appId)}"`;

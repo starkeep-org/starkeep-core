@@ -145,7 +145,7 @@ describe("successful install", () => {
 });
 
 describe("a pinned folder that now holds another app", () => {
-  it("refuses Update from folder, installs nothing, and leaves the app's secret alone", async () => {
+  it("refuses the reinstall, installs nothing, and leaves the app's secret alone", async () => {
     const parent = join(dataDir, "apps");
     makeAppDir(parent, "moving", testAppManifest({ id: "moving-app", name: "Moving" }));
     expect((await install({ appId: "moving-app", approved: true })).status).toBe(200);

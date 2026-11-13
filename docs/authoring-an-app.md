@@ -1422,9 +1422,8 @@ The install path is identical for first-party and third-party apps.
    `local-data-server` to register the app and provision its per-app HMAC
    credential. Install pins
    the app's folder and the manifest you approved: **Start** runs that folder
-   with that manifest whatever the scan finds later. When the folder's manifest
-   changes, the card offers **Update from folder**, which asks for approval
-   again only when the app's file access changed.
+   with that manifest whatever the scan finds later. When the local or cloud
+   install is behind the folder, **Start** opens an update dialog first.
 4. For a cloud target, see "Install in your cloud" below.
 
 Install runs only these command shapes, matched by the program's bare name on
@@ -1490,9 +1489,8 @@ the same Dashboard. The cloud install does not need a local install first.
    machines. A machine's rows reach the cloud once that machine is signed in to
    sync, which the root README describes in "Part B", step 5.
 7. **Update.** **Redeploy <name>** in the web card's menu rebuilds and
-   redeploys from the folder. When the folder's manifest has changed for an app
-   installed locally, choose **Update from folder** on the local card first;
-   the cloud card refuses until you do.
+   redeploys from the folder. When either install is behind the folder,
+   Redeploy opens the same update dialog. The dialog updates the cloud first.
 
 See [`starkeep-apps/README.md`](../../starkeep-apps/README.md) for the install steps
 from the app-author's side, and the root [`README.md`](../README.md) for the
