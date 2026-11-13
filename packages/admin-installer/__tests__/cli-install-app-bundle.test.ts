@@ -18,7 +18,9 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PROTOCOL_VERSION } from "@starkeep/protocol-primitives";
+import { validateManifest } from "@starkeep/admin-manifest";
 import { DEFAULT_APPS_DIR } from "../src/app-discovery.js";
+import { manifestDigest } from "../src/manifest-approval.js";
 
 const PACKAGE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -48,6 +50,7 @@ afterAll(() => new Promise<void>((done) => health.close(() => done())));
 
 function runCli(
   appDir: string,
+  extraArgs: string[] = [],
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
   const starkeepDir = mkdtempSync(join(tmpdir(), "cli-bundle-sk-"));
   writeFileSync(
@@ -76,6 +79,7 @@ function runCli(
       "--web",
       "--app-dir",
       appDir,
+      ...extraArgs,
     ],
     {
       cwd: PACKAGE_DIR,
@@ -107,5 +111,32 @@ describe("cli:install-app and the bundle command", () => {
     // Nothing past the check ran: no install banner, no dependency install.
     expect(result.stdout).not.toContain("cloud install");
     expect(result.stdout).not.toContain("Installing dependencies");
+  });
+});
+
+// Admin's cloud-install route checks the folder against the manifest the
+// person approved and passes its digest. The CLI reads the manifest again
+// later, so it refuses a folder that changed between the two reads.
+describe("cli:install-app and the approved manifest's digest", () => {
+  const bundle = { command: "node", args: ["scripts/bundle.mjs"] };
+
+  it("refuses a folder whose manifest no longer matches the approved digest", async () => {
+    const result = await runCli(appWithBundle(bundle), ["--manifest-digest", "0".repeat(64)]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("changed after the manifest was approved");
+    expect(result.stdout).not.toContain("cloud install");
+  });
+
+  it("goes on past the check when the folder still holds the approved manifest", async () => {
+    const appDir = appWithBundle(bundle);
+    const manifest = validateManifest(
+      JSON.parse(readFileSync(join(appDir, "starkeep.manifest.json"), "utf-8")),
+    ).manifest!;
+    const result = await runCli(appDir, ["--manifest-digest", manifestDigest(manifest)]);
+    expect(result.stderr).not.toContain("changed after the manifest was approved");
+    // The next check, on the bundle command, is the one that stops it.
+    expect(result.stderr).toContain(
+      "The manifest's bundle command `node scripts/bundle.mjs` is not approved",
+    );
   });
 });

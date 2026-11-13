@@ -7,6 +7,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./app-discovery": "./src/app-discovery.ts",
+    "./manifest-approval": "./src/manifest-approval.ts",
     "./approved-commands": "./src/approved-commands.ts",
     "./consent-text": "./src/consent-text.ts",
     "./local-app-install": "./src/local-app-install.ts",

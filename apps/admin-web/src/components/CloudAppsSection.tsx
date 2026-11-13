@@ -150,6 +150,9 @@ export function CloudAppsSection({
                 appName: name,
                 surfaces: [surface],
                 title: surface === "mobile" ? `Register ${tileName}` : `Install ${name} in cloud`,
+                // The manifest the consent showed, or the one the tile's
+                // earlier approval covers.
+                approvedManifest: entry.manifest,
               });
             const install = approved
               ? run
@@ -167,7 +170,8 @@ export function CloudAppsSection({
                   {
                     label: surface === "web" ? `Redeploy ${name}` : `Re-register ${tileName}`,
                     // An install behind the folder updates through the
-                    // update dialog, which redeploys every installed surface.
+                    // update dialog, which offers every behind surface and
+                    // always the one clicked.
                     onSelect: () => {
                       if (!requestUpdate(entry, { redeploy: surface })) install();
                     },

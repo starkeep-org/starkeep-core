@@ -189,7 +189,12 @@ export function LocalAppsSection({
       const res = await fetch("/api/apps/install", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ appId: entry.appId, approved: true }),
+        // The manifest the consent or update dialog showed. The route
+        // installs only when the folder still holds it.
+        body: JSON.stringify({
+          appId: entry.appId,
+          approvedManifest: entry.folderManifest ?? entry.manifest,
+        }),
       });
       if (!res.ok) {
         const data = (await res.json().catch(() => null)) as {

@@ -82,6 +82,8 @@ let running = false;
 let cloudBehind = true;
 let cloudCodeBehind = false;
 let cloudMobileOnly = false;
+/** The cloud holds both the web app and the mobile app. */
+let cloudBoth = false;
 /** How `/api/apps/cloud/list` answers: the row, a failure, or never. */
 let cloudList: "ok" | "fail" | "hang" = "ok";
 
@@ -94,6 +96,7 @@ beforeEach(() => {
   cloudBehind = true;
   cloudCodeBehind = false;
   cloudMobileOnly = false;
+  cloudBoth = false;
   cloudList = "ok";
   vi.stubGlobal(
     "fetch",
@@ -107,8 +110,8 @@ beforeEach(() => {
               appId: "dice",
               name: "Dice",
               version: "1.0.0",
-              webApp: !cloudMobileOnly,
-              mobileApp: cloudMobileOnly,
+              webApp: cloudBoth || !cloudMobileOnly,
+              mobileApp: cloudBoth || cloudMobileOnly,
               manifest: approved,
               behind: cloudBehind,
               codeBehind: cloudCodeBehind,
@@ -192,7 +195,8 @@ describe("Start when both installs are behind", () => {
     await vi.waitFor(() => expect(state.calls).toEqual([CLOUD_DEPLOY, "install", "start"]), {
       timeout: 3000,
     });
-    expect(state.cloudBodies[0]).toMatchObject({ surfaces: ["web"], approved: true });
+    // The dialog showed the folder's manifest, and the route deploys only that one.
+    expect(state.cloudBodies[0]).toMatchObject({ surfaces: ["web"], approvedManifest: folder });
   });
 
   it("warns, and skips the cloud, when the operator unchecks it", async () => {
@@ -358,7 +362,7 @@ describe("Redeploy on the cloud card", () => {
       });
       // The route refuses a deploy while the local install is behind, unless
       // the dialog approved the folder's manifest.
-      expect(state.cloudBodies[0]).toMatchObject({ surfaces: ["web"], approved: true });
+      expect(state.cloudBodies[0]).toMatchObject({ surfaces: ["web"], approvedManifest: folder });
     });
 
     it("redeploys the cloud alone when the operator unchecks the local install", async () => {
@@ -377,6 +381,50 @@ describe("Redeploy on the cloud card", () => {
       expect(within(dialog).queryByText(SKEW_WARNING)).toBeNull();
       await user.click(within(dialog).getByRole("button", { name: "Update" }));
       await vi.waitFor(() => expect(state.calls).toEqual(["install"]), { timeout: 3000 });
+    });
+  });
+
+  // A code-only change leaves the mobile registration current, so the
+  // dialog's cloud update covers the web app alone unless the person chose
+  // the mobile tile.
+  describe("when only the cloud web app's code is behind", () => {
+    const android = { package: "app.dice", callbackScheme: "dice" };
+    const BOTH: LocalAppEntry = {
+      ...CHANGED,
+      manifest: { ...approved, mobile: { android } },
+      sourceState: undefined,
+      folderManifest: undefined,
+    };
+
+    beforeEach(() => {
+      cloudBehind = false;
+      cloudCodeBehind = true;
+      cloudBoth = true;
+    });
+
+    async function chooseOn(tile: string, action: string) {
+      const user = userEvent.setup();
+      const cloud = screen.getByTestId("cloud");
+      await user.click(within(cloud).getByRole("button", { name: `More actions for ${tile}` }));
+      await user.click(await screen.findByRole("menuitem", { name: action }));
+      return { user, dialog: await updateDialog() };
+    }
+
+    it("re-registers the mobile app the person chose, with the web app's update", async () => {
+      await show(BOTH);
+      const { user, dialog } = await chooseOn("Dice Mobile", "Re-register Dice Mobile");
+      expect(checkbox(dialog, "in the cloud").checked).toBe(true);
+      await user.click(within(dialog).getByRole("button", { name: "Update" }));
+      await vi.waitFor(() => expect(state.calls).toEqual([CLOUD_DEPLOY]), { timeout: 3000 });
+      expect(state.cloudBodies[0]).toMatchObject({ surfaces: ["web", "mobile"] });
+    });
+
+    it("updates the web app alone from the web tile", async () => {
+      await show(BOTH);
+      const { user, dialog } = await chooseOn("Dice", "Redeploy Dice");
+      await user.click(within(dialog).getByRole("button", { name: "Update" }));
+      await vi.waitFor(() => expect(state.calls).toEqual([CLOUD_DEPLOY]), { timeout: 3000 });
+      expect(state.cloudBodies[0]).toMatchObject({ surfaces: ["web"] });
     });
   });
 

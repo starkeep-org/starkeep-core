@@ -15,6 +15,10 @@
  *              STARKEEP_BUNDLE_OUT    = <abs path to write dist.zip>
  *     out:     app writes dist.zip to STARKEEP_BUNDLE_OUT
  *
+ * `--manifest-digest <hex>` names the digest of the manifest the person
+ * approved (see src/manifest-approval.ts). admin-web passes it, and the
+ * script refuses a folder whose manifest no longer matches.
+ *
  * `--app-dir <folder>` names the app's source folder; admin-web passes the
  * folder it resolved. Without it, the app is located by scanning the
  * configured app folders (`scanApps` in src/app-discovery.ts, the scan
@@ -30,6 +34,7 @@
  *   pnpm --filter @starkeep/admin-installer cli:install-app <appId> --mobile
  *   pnpm --filter @starkeep/admin-installer cli:install-app <appId> --web
  *   pnpm --filter @starkeep/admin-installer cli:install-app <appId> --app-dir <folder>
+ *   pnpm --filter @starkeep/admin-installer cli:install-app <appId> --manifest-digest <hex>
  *
  * Every install creates the app's data side: its role, schema, tables, grants
  * and namespace. `--web` adds the cloud web app (its compute), and `--mobile`
@@ -72,10 +77,12 @@ import {
   loadStarkeepCliConfig,
   appDirFor,
   cloudBuildCommands,
-  deriveInstallerArns,
+  cloudInstallInput,
   takeAppDirFlag,
+  takeFlagValue,
   starkeepConfigPath,
 } from "../src/app-cli-config";
+import { manifestDigest } from "../src/manifest-approval";
 
 function installAppDependencies(install: CommandResolution): void {
   if (install.kind === "skip") return;
@@ -233,8 +240,11 @@ function prepareWebApp(build: {
 
 let flags: string[];
 let appDirFlag: string | undefined;
+let approvedDigest: string | undefined;
 try {
-  ({ appDir: appDirFlag, rest: flags } = takeAppDirFlag(process.argv.slice(2)));
+  const { appDir, rest } = takeAppDirFlag(process.argv.slice(2));
+  appDirFlag = appDir;
+  ({ value: approvedDigest, rest: flags } = takeFlagValue(rest, "--manifest-digest", "a digest"));
 } catch (err) {
   console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);
@@ -248,7 +258,7 @@ const appId = flags.find((f) => !f.startsWith("--"));
 
 if (!appId) {
   console.error(
-    "Usage: cli:install-app <appId> [--non-interactive] [--web] [--mobile] [--app-dir <folder>]",
+    "Usage: cli:install-app <appId> [--non-interactive] [--web] [--mobile] [--app-dir <folder>] [--manifest-digest <hex>]",
   );
   process.exit(1);
 }
@@ -321,18 +331,6 @@ if (config.accountId) {
   accountId = identity.Account;
 }
 
-const {
-  managerRoleArn,
-  installDdlRoleArn,
-  installInfraRoleArn,
-  apiGatewayExecutionArn,
-  permissionsBoundaryArn,
-  foundationalPermissionsBoundaryArn,
-  userDataOwnerPermissionsBoundaryArn,
-  pulumiStateBucket,
-  artifactsBucket,
-} = deriveInstallerArns(config, accountId, region);
-
 // Locate the app and load its manifest.
 let appDir: string;
 try {
@@ -367,6 +365,14 @@ if (!validation.manifest) {
   process.exit(1);
 }
 const manifest = validation.manifest;
+// Admin's route checked the folder against the manifest the person approved
+// and passed its digest. A folder that changed since then deploys nothing.
+if (approvedDigest !== undefined && manifestDigest(manifest) !== approvedDigest) {
+  console.error(
+    `Error: ${manifestPath} changed after the manifest was approved. Review the new manifest and deploy again.`,
+  );
+  process.exit(1);
+}
 
 const offered = manifestSurfaces(manifest);
 const surfaces = requestedSurfaces.length > 0 ? requestedSurfaces : offered;
@@ -420,45 +426,19 @@ const registryCredentials = {
   sessionToken: process.env.AWS_SESSION_TOKEN!,
 };
 
-await installApp({
-  appId,
-  manifest,
-  surfaces,
-  // Admin compares the recorded fingerprint with the folder's to tell
-  // whether the cloud web app runs the folder's code.
-  webSourceDir: appDir,
-  ...(zipBuffer ? { zipBuffer } : {}),
-  version: manifest.version,
-  registryCredentials,
-  config: {
-    stackPrefix,
+await installApp(
+  cloudInstallInput({
+    appId,
+    appDir,
+    manifest,
+    surfaces,
+    ...(zipBuffer ? { zipBuffer } : {}),
+    config,
     region,
     accountId,
-    dsqlHostname: config.auroraEndpoint,
-    filesBucket: config.s3Bucket,
-    artifactsBucket,
-    pulumiStateBucket,
-    apiGatewayId: config.apiGatewayId,
-    apiGatewayExecutionArn,
-    apiGatewayUrl: config.apiGatewayUrl ?? "",
-    authorizerId: config.authorizerId,
-    sessionAuthorizerId: config.sessionAuthorizerId,
-    permissionsBoundaryArn,
-    foundationalPermissionsBoundaryArn,
-    userDataOwnerPermissionsBoundaryArn,
-    managerRoleArn,
-    installDdlRoleArn,
-    installInfraRoleArn,
-    ...(config.mobileAppsUserPoolClientId
-      ? {
-          mobileSignIn: {
-            userPoolId: config.userPoolId,
-            mobileAppsClientId: config.mobileAppsUserPoolClientId,
-          },
-        }
-      : {}),
-  },
-}).catch(exitOnInstallFailure);
+    registryCredentials,
+  }),
+).catch(exitOnInstallFailure);
 
 if (!installsWeb) {
   console.log(

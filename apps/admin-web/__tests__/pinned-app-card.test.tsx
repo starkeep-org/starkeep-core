@@ -191,7 +191,8 @@ describe("Start with a changed folder manifest", () => {
 
     await user.click(screen.getByRole("button", { name: "Update & Start" }));
     await vi.waitFor(() => expect(calls).toEqual(["install", "start"]), { timeout: 3000 });
-    expect(installs).toEqual([{ appId: "dice", approved: true }]);
+    // The update dialog showed the folder's manifest, so the install approves that one.
+    expect(installs).toEqual([{ appId: "dice", approvedManifest: CHANGED.folderManifest }]);
   });
 
   it("shows the file access when the folder's manifest changes it", async () => {
@@ -338,7 +339,9 @@ describe("the dependency install at Install", () => {
     serve();
     const user = await approve();
     await user.click(await screen.findByRole("button", { name: "Approve & Install" }));
-    await vi.waitFor(() => expect(installs).toEqual([{ appId: "dice", approved: true }]));
+    await vi.waitFor(() =>
+      expect(installs).toEqual([{ appId: "dice", approvedManifest: approved }]),
+    );
     expect(depsPosts).toBe(1);
     expect(screen.queryByText(/Installing Dice.s dependencies/)).toBeNull();
   });
@@ -366,7 +369,9 @@ describe("the dependency install at Install", () => {
     const user = await approve();
     expect(await screen.findByText(/Install will not run/)).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Approve & Install" }));
-    await vi.waitFor(() => expect(installs).toEqual([{ appId: "dice", approved: true }]));
+    await vi.waitFor(() =>
+      expect(installs).toEqual([{ appId: "dice", approvedManifest: approved }]),
+    );
     expect(depsPosts).toBe(0);
     expect(screen.getByText(/Run it yourself in \/apps\/dice before you start Dice/)).toBeTruthy();
   });

@@ -336,8 +336,23 @@ async function adminPost(adminUrl: string, path: string, body: unknown): Promise
   return res;
 }
 
+/**
+ * Install `appId` locally the way the Dashboard's Install does: approve the
+ * manifest Admin's app list shows for it. The route refuses a manifest the
+ * folder no longer holds.
+ */
 export async function installAppViaAdmin(adminUrl: string, appId: string): Promise<void> {
-  await adminPost(adminUrl, "/api/apps/install", { appId, approved: true });
+  const res = await fetch(`${adminUrl}/api/apps/list`);
+  if (!res.ok) throw new Error(`GET /api/apps/list → ${res.status} ${await res.text()}`);
+  const { apps } = (await res.json()) as {
+    apps: Array<{ appId: string; manifest: unknown; folderManifest?: unknown }>;
+  };
+  const entry = apps.find((a) => a.appId === appId);
+  if (!entry) throw new Error(`Admin's app list has no ${appId}`);
+  await adminPost(adminUrl, "/api/apps/install", {
+    appId,
+    approvedManifest: entry.folderManifest ?? entry.manifest,
+  });
 }
 
 export async function uninstallAppViaAdmin(adminUrl: string, appId: string): Promise<void> {
