@@ -102,6 +102,14 @@ export interface JourneyApp {
   /** Present when the app serves a browser UI the journey should drive. */
   readonly browser?: JourneyBrowserSurface;
   /**
+   * Present when the app serves outside clients: an MCP route declared
+   * `auth: "delegated"` with Probe's tool set (`list_records`, `add_label`,
+   * `list_notes`, `add_note`, `delete_note`, `erase_file`). The journey then
+   * creates delegation tokens on the consent page and drives the mode table
+   * through the route (see delegation-steps.ts).
+   */
+  readonly outsideClient?: { readonly mcpPath: string };
+  /**
    * Refuse to start when the machine is in a state that would take the run down
    * later — a dev server already holding the app's directory, say. Runs before
    * the first AWS call, which is the only cheap moment to fail.

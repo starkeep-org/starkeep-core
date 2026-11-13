@@ -35,4 +35,5 @@ export const probeApp: JourneyApp = {
     body: (recordId) => ({ targetId: recordId }),
   },
   browser: { signedInControl: "Upload" },
+  outsideClient: { mcpPath: "/mcp" },
 };

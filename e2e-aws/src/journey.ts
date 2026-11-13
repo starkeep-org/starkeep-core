@@ -78,6 +78,7 @@ import {
 } from "./run-state.js";
 import type { JourneyApp, JourneyContext, JourneySharedFile } from "./journey-app.js";
 import { defineMemberSteps } from "./member-steps.js";
+import { defineDelegationSteps } from "./delegation-steps.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -1495,13 +1496,20 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         },
       );
 
-      it(`${app.appId} cloud static handler serves`, async () => {
+      it(`${app.appId} cloud static handler serves through CloudFront, and only there`, async () => {
         // The app root, spelled the way the platform can actually register it.
         // `/` is declared public and becomes `ANY /apps/<appId>`; the manifest's
         // reach is real here rather than aspirational.
-        const res = await fetch(`${config.apiGatewayUrl}/apps/${app.appId}`);
+        const res = await fetchWhenReady(`${config.publicBaseUrl}/apps/${app.appId}`);
         expect(res.status).toBe(200);
         expect(await res.text()).toContain("<");
+
+        // The same route on the gateway's own hostname is refused: that origin
+        // belongs to the consent pages, and an app's page and script must never
+        // load beside them. The origin authorizer's identity source is the
+        // header CloudFront adds, so the gateway refuses before invoking it.
+        const direct = await fetch(`${config.apiGatewayUrl}/apps/${app.appId}`);
+        expect(direct.status).toBe(401);
       });
 
       it("the app root's trailing-slash spelling is gated, and that is a platform limit", async () => {
@@ -1539,7 +1547,9 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // any kind, which was the exposure — the negative test immediately after
         // this one is what holds that closed.
         const cookie = await signInToApp(app.appId);
-        const proxyBase = `${config.apiGatewayUrl}/apps/${app.appId}/api/local-data`;
+        // Through CloudFront: an app's session routes refuse the execute-api
+        // hostname, which belongs to the consent pages.
+        const proxyBase = `${config.publicBaseUrl}/apps/${app.appId}/api/local-data`;
 
         const listRes = await fetch(`${proxyBase}/data/records?limit=500`, {
           headers: { cookie },
@@ -1748,7 +1758,9 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // the two applies is a property of how the caller cleared its state, not
         // of whether the platform let it in.
         const REFUSED = [401, 403];
-        const url = `${config.apiGatewayUrl}/apps/${app.appId}/api/local-data/data/records?limit=1`;
+        // Through CloudFront, where the app's pages live; see the static-handler
+        // step for why the execute-api hostname refuses them.
+        const url = `${config.publicBaseUrl}/apps/${app.appId}/api/local-data/data/records?limit=1`;
 
         const anonymous = await fetch(url);
         expect(REFUSED).toContain(anonymous.status);
@@ -1762,7 +1774,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // rather than something a page can trigger — so what is asserted here is
         // what sign-out actually promises: the browser is told to drop them, and
         // a request carrying what is left is refused.
-        const out = await fetch(`${config.apiGatewayUrl}/apps/${app.appId}/api/session/sign-out`, {
+        const out = await fetch(`${config.publicBaseUrl}/apps/${app.appId}/api/session/sign-out`, {
           method: "POST",
           headers: { cookie },
         });
@@ -1801,9 +1813,8 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
           // same-origin; loading the HTML from the gateway instead would split the
           // origin (gateway HTML, CloudFront API) and the app's same-origin fetches
           // would be CORS-blocked — a configuration that never occurs in the real
-          // deployment. The raw-fetch steps above stay on apiGatewayUrl on purpose
-          // (they assert the gateway is directly reachable, and Node fetch is not
-          // CORS-bound); only the real browser needs the single CloudFront origin.
+          // deployment. The app's own routes answer only through CloudFront in
+          // any case: the execute-api hostname belongs to the consent pages.
           const appUrl = `${config.publicBaseUrl}/apps/${app.appId}/`;
 
           // Fresh tiny PNG → new content hash (the kept-up cloud dedupes by hash).
@@ -1968,10 +1979,10 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
 
       it("Part A: SPA + immutable assets served through the CloudFront distribution (edge hit)", async () => {
         // The whole point of Part A: browser-facing traffic goes to the CloudFront
-        // domain (publicBaseUrl), not the raw gateway. Every other step in this
-        // journey deliberately hits apiGatewayUrl directly (the gateway stays
-        // reachable — CloudFront is an optimization layer, not a security
-        // boundary), so this is the ONLY coverage of the distribution itself.
+        // domain (publicBaseUrl), not the raw gateway. The broker's data plane
+        // stays reachable on the gateway directly, and the app's own routes
+        // answer only through CloudFront; this step covers the distribution's
+        // caching itself.
         // Placed late so the distribution — created minutes ago during the
         // cloud-data-server install — has had time to reach "Deployed".
         const base = config.publicBaseUrl;
@@ -2324,6 +2335,18 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
       // that, at the tier where it actually cost a run to discover. Do not
       // reorder these to keep them apart — the meeting is the point.
       app.extraSteps?.(ctx);
+
+      // An outside client holding a delegation token the user created on the
+      // consent page, for an app that serves one.
+      if (app.outsideClient) {
+        defineDelegationSteps({
+          config: () => config,
+          appId: app.appId,
+          mcpPath: app.outsideClient.mcpPath,
+          admin: () => admin,
+          recordId: () => syncedRecordId,
+        });
+      }
 
       // A second account, end to end: a member created by the admin, a second
       // machine that signs in as the member, and two libraries kept apart.
