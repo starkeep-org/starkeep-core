@@ -635,6 +635,12 @@ export async function runAppUninstallDdl(
       // link the person may have forgotten.
       await db.deleteFrom("public_sharing.public_shares").where("app_id", "=", appId).execute();
       await db.deleteFrom("public_sharing.app_capabilities").where("app_id", "=", appId).execute();
+      // An app's delegations end with it, as its public shares do. A
+      // reinstall must not bring back an outside client's access. The rows'
+      // stored Cognito refresh tokens stay valid at Cognito until they expire,
+      // but no data branch accepts a connectors-client token, so they reach
+      // nothing.
+      await db.deleteFrom("delegation.grants").where("app_id", "=", appId).execute();
       await sql`DROP SCHEMA IF EXISTS ${sql.raw(schemaName)} CASCADE`.execute(db);
 
       // Revoke the DSQL-side IAM mapping before DROP ROLE — DROP ROLE fails if
