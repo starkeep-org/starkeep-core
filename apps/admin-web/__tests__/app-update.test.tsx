@@ -149,7 +149,7 @@ afterEach(() => {
 
 async function show(entry: LocalAppEntry = CHANGED) {
   render(
-    <AppUpdateProvider cloudAdministered signedIn={state.signedIn}>
+    <AppUpdateProvider cloudAdministered signedIn={state.signedIn} refreshApps={() => {}}>
       <div data-testid="local">
         <LocalAppsSection apps={[entry]} refresh={async () => undefined} localOnline={true} />
       </div>
@@ -277,7 +277,7 @@ describe("Start when only the cloud's code is behind", () => {
     cloudCodeBehind = true;
     cloudMobileOnly = true;
     render(
-      <AppUpdateProvider cloudAdministered signedIn>
+      <AppUpdateProvider cloudAdministered signedIn refreshApps={() => {}}>
         <div data-testid="local">
           <LocalAppsSection apps={[CURRENT]} refresh={async () => undefined} localOnline={true} />
         </div>
@@ -454,7 +454,7 @@ describe("Start on a local-only app while the cloud registry is unread", () => {
   ])("offers the local install alone when the registry is %s", async (_case, arrange) => {
     arrange();
     render(
-      <AppUpdateProvider cloudAdministered signedIn={state.signedIn}>
+      <AppUpdateProvider cloudAdministered signedIn={state.signedIn} refreshApps={() => {}}>
         <div data-testid="local">
           <LocalAppsSection
             apps={[LOCAL_ONLY]}

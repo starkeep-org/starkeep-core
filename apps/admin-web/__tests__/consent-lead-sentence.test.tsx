@@ -48,7 +48,7 @@ async function openConsent(app: LocalAppEntry) {
   stubFetch();
   const user = userEvent.setup();
   render(
-    <AppUpdateProvider cloudAdministered={false} signedIn={false}>
+    <AppUpdateProvider cloudAdministered={false} signedIn={false} refreshApps={() => {}}>
       <LocalAppsSection apps={[app]} refresh={async () => undefined} localOnline={true} />
     </AppUpdateProvider>,
   );

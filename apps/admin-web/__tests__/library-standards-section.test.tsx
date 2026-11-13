@@ -243,7 +243,7 @@ describe("the install flow's quality step", () => {
   async function openConsent(entry: LocalAppEntry) {
     const user = userEvent.setup();
     render(
-      <AppUpdateProvider cloudAdministered={false} signedIn={false}>
+      <AppUpdateProvider cloudAdministered={false} signedIn={false} refreshApps={() => {}}>
         <LocalAppsSection apps={[entry]} refresh={async () => undefined} localOnline={true} />
       </AppUpdateProvider>,
     );
