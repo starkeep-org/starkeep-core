@@ -20,6 +20,7 @@
  *     unreachable through the edge no matter what gets signed.
  */
 import { describe, it, expect, beforeAll } from "vitest";
+import { unwrapSecrets } from "./pulumi-secrets";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -41,10 +42,16 @@ pulumi.runtime.setMocks(
       id: string;
       state: Record<string, unknown>;
     } {
-      created.push({ type: args.type, name: args.name, inputs: args.inputs });
+      created.push({ type: args.type, name: args.name, inputs: unwrapSecrets(args.inputs) });
       const extra: Record<string, unknown> = {};
       if (args.type.endsWith("apigatewayv2/api:Api")) {
         extra.apiEndpoint = "https://mockapi.execute-api.us-east-2.amazonaws.com";
+      }
+      // The TLS provider makes key material at apply time; the program derives
+      // the CloudFront origin secret from it.
+      if (args.type === "tls:index/privateKey:PrivateKey") {
+        extra.privateKeyPem = `mock-private-key-${args.name}`;
+        extra.publicKeyPem = `mock-public-key-${args.name}`;
       }
       if (args.type.endsWith("cloudfront/distribution:Distribution")) {
         extra.domainName = `${args.name}.cloudfront.net`;
@@ -326,5 +333,75 @@ describe("stack outputs", () => {
 
   it("still exports apiGatewayUrl — server-to-server traffic stays off the edge", () => {
     expect(programOutputs.apiGatewayUrl).toMatch(/^https:\/\/mockapi\.execute-api\./);
+  });
+});
+
+describe("the origin split between CloudFront and the execute-api hostname", () => {
+  const byType = (suffix: string) => created.filter((r) => r.type.endsWith(suffix));
+
+  it("marks every request CloudFront forwards to the gateway with the origin header", () => {
+    const origins = distribution.inputs.origins as Array<{
+      originId: string;
+      customHeaders?: Array<{ name: string; value: string }>;
+    }>;
+    const gateway = origins.find((o) => o.originId === "api-gateway")!;
+    const header = gateway.customHeaders?.find((h) => h.name === "x-starkeep-origin");
+    expect(header?.value).toMatch(/^[A-Za-z0-9_-]{40,}$/);
+    // Only the gateway origin: the S3 origins never see app traffic.
+    for (const o of origins.filter((o) => o.originId !== "api-gateway")) {
+      expect(o.customHeaders ?? []).toEqual([]);
+    }
+  });
+
+  it("gives the session, origin and delegated authorizers the same origin secret", () => {
+    const origins = distribution.inputs.origins as Array<{
+      originId: string;
+      customHeaders?: Array<{ name: string; value: string }>;
+    }>;
+    const secret = origins.find((o) => o.originId === "api-gateway")!.customHeaders![0]!.value;
+    const fns = byType("lambda/function:Function").filter((r) => /authorizer$/.test(r.name));
+    expect(fns.map((f) => f.name).sort()).toEqual([
+      "delegated-authorizer",
+      "origin-authorizer",
+      "session-authorizer",
+    ]);
+    for (const fn of fns) {
+      const env = (fn.inputs.environment as { variables: Record<string, string> }).variables;
+      expect(env.STARKEEP_ORIGIN_SECRET, fn.name).toBe(secret);
+    }
+  });
+
+  it("keys the origin authorizer on the header alone, and the delegated one per route", () => {
+    const authorizers = byType("apigatewayv2/authorizer:Authorizer");
+    const origin = authorizers.find((a) => a.name === "origin-header")!;
+    expect(origin.inputs.identitySources).toEqual(["$request.header.x-starkeep-origin"]);
+    const delegated = authorizers.find((a) => a.name === "delegation-token")!;
+    expect(delegated.inputs.identitySources).toEqual([
+      "$request.header.Authorization",
+      "$request.header.x-starkeep-origin",
+      "$context.routeKey",
+    ]);
+  });
+
+  it("serves the consent and connections pages with no gateway authorizer", () => {
+    const routes = byType("apigatewayv2/route:Route").map((r) => r.inputs);
+    for (const key of [
+      "GET /connect",
+      "POST /connect/approve",
+      "GET /connect/callback",
+      "GET /connect/jwks.json",
+      "GET /connections",
+      "POST /connections/{id}/revoke",
+    ]) {
+      const route = routes.find((r) => r.routeKey === key);
+      expect(route, key).toBeDefined();
+      expect(route!.authorizerId, key).toBeUndefined();
+    }
+  });
+
+  it("exports both authorizers and the signing key for the installer", () => {
+    expect(programOutputs.originAuthorizerId).toBe("origin-header-id");
+    expect(programOutputs.delegatedAuthorizerId).toBe("delegation-token-id");
+    expect(programOutputs.delegationSigningPrivateKey).toMatch(/^mock-private-key-/);
   });
 });

@@ -157,7 +157,11 @@ describe("configureAppSignInClients", () => {
     await configureAppSignInClients({
       ...POOL,
       publicBaseUrls: ["https://d1.cloudfront.net/"],
-      clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1", connectorsClientId: "conn1" },
+      clients: {
+        cloudAppsClientId: "cloud1",
+        mobileAppsClientId: "mobile1",
+        connectorsClientId: "conn1",
+      },
       gatewayBaseUrl: "https://abc123.execute-api.us-east-2.amazonaws.com",
       deploymentName: "Koller Family",
     });
@@ -185,7 +189,11 @@ describe("configureAppSignInClients", () => {
     await configureAppSignInClients({
       ...POOL,
       publicBaseUrls: ["https://photos.example.com", "https://d1.cloudfront.net"],
-      clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1", connectorsClientId: "conn1" },
+      clients: {
+        cloudAppsClientId: "cloud1",
+        mobileAppsClientId: "mobile1",
+        connectorsClientId: "conn1",
+      },
       gatewayBaseUrl: "https://abc123.execute-api.us-east-2.amazonaws.com/",
       deploymentName: "Koller Family",
     });
@@ -208,7 +216,11 @@ describe("configureAppSignInClients", () => {
       ...POOL,
       // The custom domain, and the CloudFront name that keeps answering.
       publicBaseUrls: ["https://photos.example.com", "https://d1.cloudfront.net/"],
-      clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1", connectorsClientId: "conn1" },
+      clients: {
+        cloudAppsClientId: "cloud1",
+        mobileAppsClientId: "mobile1",
+        connectorsClientId: "conn1",
+      },
       gatewayBaseUrl: "https://abc123.execute-api.us-east-2.amazonaws.com",
       deploymentName: "Koller Family",
     });
@@ -231,7 +243,11 @@ describe("configureAppSignInClients", () => {
     await configureAppSignInClients({
       ...POOL,
       publicBaseUrls: ["https://d1.cloudfront.net", "https://d1.cloudfront.net/"],
-      clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1", connectorsClientId: "conn1" },
+      clients: {
+        cloudAppsClientId: "cloud1",
+        mobileAppsClientId: "mobile1",
+        connectorsClientId: "conn1",
+      },
       gatewayBaseUrl: "https://abc123.execute-api.us-east-2.amazonaws.com",
       deploymentName: "Koller Family",
     });
@@ -250,7 +266,11 @@ describe("configureAppSignInClients", () => {
     await configureAppSignInClients({
       ...POOL,
       publicBaseUrls: ["https://d1.cloudfront.net"],
-      clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1", connectorsClientId: "conn1" },
+      clients: {
+        cloudAppsClientId: "cloud1",
+        mobileAppsClientId: "mobile1",
+        connectorsClientId: "conn1",
+      },
       gatewayBaseUrl: "https://abc123.execute-api.us-east-2.amazonaws.com",
       deploymentName: "Koller Family",
     });
@@ -279,7 +299,11 @@ describe("configureAppSignInClients", () => {
     await configureAppSignInClients({
       ...POOL,
       publicBaseUrls: ["https://d1.cloudfront.net"],
-      clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1", connectorsClientId: "conn1" },
+      clients: {
+        cloudAppsClientId: "cloud1",
+        mobileAppsClientId: "mobile1",
+        connectorsClientId: "conn1",
+      },
       gatewayBaseUrl: "https://abc123.execute-api.us-east-2.amazonaws.com",
       deploymentName: "Koller Family",
     });

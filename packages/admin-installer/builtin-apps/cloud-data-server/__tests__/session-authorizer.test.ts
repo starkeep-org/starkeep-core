@@ -76,8 +76,16 @@ function claims(over: Record<string, unknown> = {}) {
   };
 }
 
-function event(cookie?: string, headerName = "cookie") {
-  return { headers: cookie === undefined ? {} : { [headerName]: cookie } };
+const ORIGIN_SECRET = "o".repeat(43);
+
+/** A request as CloudFront forwards it: the origin header is always present. */
+function event(cookie?: string, headerName = "cookie", origin: string | null = ORIGIN_SECRET) {
+  return {
+    headers: {
+      ...(cookie === undefined ? {} : { [headerName]: cookie }),
+      ...(origin === null ? {} : { "x-starkeep-origin": origin }),
+    },
+  };
 }
 
 let fetchMock: ReturnType<typeof vi.fn>;
@@ -89,6 +97,7 @@ beforeEach(async () => {
   process.env.AWS_REGION = REGION;
   process.env.STARKEEP_USER_POOL_ID = POOL;
   process.env.STARKEEP_USER_POOL_CLIENT_ID = CLIENT;
+  process.env.STARKEEP_ORIGIN_SECRET = ORIGIN_SECRET;
   fetchMock = vi.fn(async () => new Response(JSON.stringify({ keys: [key.jwk] }), { status: 200 }));
   vi.stubGlobal("fetch", fetchMock);
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -121,6 +130,22 @@ describe("allows", () => {
 });
 
 describe("refuses", () => {
+  it("a valid session that did not come through CloudFront", async () => {
+    // On the gateway's execute-api hostname an app's page would share an
+    // origin with the consent pages, so it must not load there.
+    const token = await signJwt(key, claims());
+    expect((await handler(event(`sk_token=${token}`, "cookie", null))).isAuthorized).toBe(false);
+    expect((await handler(event(`sk_token=${token}`, "cookie", "x".repeat(43)))).isAuthorized).toBe(
+      false,
+    );
+  });
+
+  it("every request when the deployment has no origin secret", async () => {
+    delete process.env.STARKEEP_ORIGIN_SECRET;
+    const token = await signJwt(key, claims());
+    expect((await handler(event(`sk_token=${token}`))).isAuthorized).toBe(false);
+  });
+
   it("a missing Cookie header", async () => {
     expect(await handler(event())).toEqual({ isAuthorized: false });
     expect(await handler({})).toEqual({ isAuthorized: false });
