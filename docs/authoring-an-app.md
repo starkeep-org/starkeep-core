@@ -731,37 +731,30 @@ keys the platform fills in (these feed `getRuntimeConfig()` from §3).
   session authorizer. This is the answer for a browser app, because a
   navigation carries the cookie but cannot send an `Authorization` header. The
   authorizer gates every route on the handler, and each `publicPaths` entry
-  becomes its own more specific route with no authorizer. The validator
+  becomes its own more specific route with no user check. The validator
   refuses a `session` handler with no `publicPaths`, because nobody could
   reach the sign-in page (§8). The example's `static` handler uses this mode.
 - `"jwt"`, the default — a bearer token in `Authorization`, checked by the
   gateway's Cognito JWT authorizer. Use it for a route your page's own code
   calls, such as the example's `POST /api/echo`, and never for a page a
   browser navigates to.
-- `"public"` — no gate at all.
 
-**`auth: "public"` is wider than it looks, and the manifest makes you say so.**
-It removes the authorizer from the route, and a handler that owns a catch-all
-_is_ the whole app — every server route your bundle mounts, including the
-signing proxy from §4, becomes reachable by anyone on the internet. A browser
-app does not need it: `session` serves the shell and the sign-in page through
-`publicPaths` and gates the rest. If you use `public` anyway, three things
-narrow it:
+No route of yours answers a caller the platform has not checked. A
+`publicPaths` entry must be one of the platform's pages (`/`, `/sign-in`,
+`/api/session/*`, `/starkeep-runtime-config`, `/_immutable/*`, `/_static/*`)
+or one of the handler's `staticAssetPaths`, so an anonymous request reaches a
+file or a platform page and never your server code. The validator refuses
+anything else, and it refuses `auth: "public"`, which earlier versions
+accepted.
 
-- **`publicPaths`** — required whenever an anonymous route is a catch-all.
-  List the sub-paths the opt-out was actually _for_. The installer checks the
-  list against your real route table and refuses the install if it names a path
-  you do not serve, or one the gateway would route somewhere authenticated.
-  The declaration does not enforce anything; it is what makes the decision
-  reviewable, and the installer prints it at install time.
-- **A per-route `auth` override** — the object form of a route entry. API
-  Gateway prefers a more specific route over `{proxy+}`, so a `"jwt"` route for
-  your data subtree, pointed at the same Lambda, puts the authorizer back in
-  front of it while the document at `/` stays open. Use this when your client
-  can send a bearer token on its XHR; a session cookie is not a bearer token,
-  so this composes with, rather than replaces, the check in §4.
-- **The `endUserAuth` decision on your proxy (§4)** — the origin check, and the
-  one that actually holds. See §10.
+Your app's pages answer only through the deployment's CloudFront address. On
+the API Gateway's own `execute-api` hostname the gateway refuses them, because
+that hostname serves the platform's consent pages (§7b).
+
+A route entry may also take the object form, `{ "route": "POST /mcp", "auth":
+"delegated" }`, to override the handler's `auth` on one path. API Gateway
+prefers a more specific route over `{proxy+}`, so the override governs that
+path alone. `"delegated"` exists only as an override: see §7b.
 
 Then provide a `bundle` script — the app-owned half of the install contract.
 The installer runs `<manager> run bundle` in the app's folder, with the package
@@ -998,6 +991,56 @@ What is still yours: which bundler and server library (the platform's answers
 are Vite and Hono, and neither is enforced), the build command that produces
 your output, native dependencies, any handler beyond the shell, and which of
 your public paths are files on disk rather than routes your server answers.
+
+### 7b. Serving outside clients (MCP, scripts)
+
+An outside client is a program outside Starkeep that acts for one user: Claude
+Code, Claude Desktop, a script. It has no browser session. Serve it from a
+route declared `"auth": "delegated"`:
+
+```jsonc
+"routes": ["GET /", "ANY /{proxy+}", { "route": "POST /mcp", "auth": "delegated" }]
+```
+
+The user creates a token for your app on the platform's consent page, at
+`<gateway URL>/connect?app=<appId>`, and picks `read` or `readwrite` and an
+expiry. Link to that page from your app. The user lists and revokes tokens at
+`<gateway URL>/connections`. The outside client sends the token as
+`Authorization: Bearer skd_…` to your route's CloudFront URL.
+
+In the handler, ask the platform who is calling and forward the token on every
+data call:
+
+```ts
+import { delegationRefusal, signedFetch, verifyDelegation } from "@starkeep/app-client";
+
+app.post("/mcp", async (c) => {
+  const who = await verifyDelegation(c.req.raw);
+  if (!who) return delegationRefusal();
+  const res = await signedFetch(creds, "/app-data/db/notes", { delegation: who.token });
+  // …
+});
+```
+
+Mount the route before any gate that expects a session cookie, such as
+`honoOriginGate`, because an outside client never holds one. Probe's
+`test-apps/probe/src/mcp.ts` is a complete example.
+
+What the platform enforces on every data call the route makes:
+
+- **The mode.** A `read` token reads and writes labels. A `readwrite` token
+  also writes records, files, metadata and rows, and deletes by tombstone
+  only: a record moves to the Trash, and a row becomes a tombstone. No token
+  erases a file's bytes, restores from the archive, syncs or publishes a
+  public link. Your app's grants still apply: the mode narrows them and never
+  widens them.
+- **Revocation and sign-out.** A revoked or expired token is refused at once.
+  "Sign out all devices", "Disable" and removal from `starkeep-users` end the
+  token within one fifteen-minute ID-token lifetime.
+
+On the local surface, `verifyDelegation` admits any loopback caller with full
+app power and no token, as your app's own pages are admitted. A local endpoint
+therefore grants full app power to any process on the machine.
 
 ### 8. Sign-in (cloud target only)
 
@@ -1364,15 +1407,17 @@ user can be checked is your app's own server code**.
 
 Concretely, in a cloud install:
 
-- The **API Gateway authorizer** is on your routes unless you opted out (§7).
-  A `jwt` route needs a bearer token, so it suits XHR-only routes your client
-  can attach one to (Photos' `POST /api/resize` uses it correctly). A
-  `session` handler checks the platform's cookie, so it gates documents too,
-  except the `publicPaths` you list.
-- **CloudFront is not a boundary.** The gateway origin stays directly
-  reachable, and `data-roles-and-permissions.md` says so explicitly. An edge
-  check is an optimization that keeps anonymous traffic off your Lambda; it is
-  never enforcement.
+- The **API Gateway authorizer** is on every route of yours (§7). A `jwt`
+  route needs a bearer token, so it suits XHR-only routes your client can
+  attach one to (Photos' `POST /api/resize` uses it correctly). A `session`
+  handler checks the platform's cookie, so it gates documents too, except the
+  `publicPaths` you list, which reach only platform pages and static files. A
+  `delegated` route checks an outside client's token (§7b).
+- **CloudFront's viewer function is not a boundary.** It redirects a
+  signed-out navigation to sign-in to keep anonymous traffic off your Lambda,
+  and it enforces nothing. The gateway's authorizers do the enforcing, and
+  they refuse your routes on the execute-api hostname, which belongs to the
+  platform's consent pages.
 - **A client-side gate such as `AuthGate` is not a boundary** (§8). It runs
   in the browser.
 - **Your signing proxy is the boundary** (§4). It is the one place every cloud
@@ -1382,8 +1427,8 @@ Concretely, in a cloud install:
 The checklist before a cloud install:
 
 1. Every handler's `auth` and `publicPaths` reflect what you actually intend to
-   be anonymous, and the installer's anonymous-route report at install time
-   matches what you expected.
+   be anonymous, and the installer's route report at install time matches what
+   you expected.
 2. Your proxy's `endUserAuth` is `sessionAuth()` or another
    `{ auth: "session", … }` form, or you can defend
    the `justification` string you wrote instead.
