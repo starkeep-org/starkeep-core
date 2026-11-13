@@ -1449,7 +1449,7 @@ An app whose manifest lists `cloud` in `targets` installs in the cloud from
 the same Dashboard. The cloud install does not need a local install first.
 
 1. **Prepare the cloud.** Deploy Starkeep Cloud and sign in to admin-web as
-   its admin, as the root [`README.md`](../README.md) describes in "Part B".
+   its admin, as the root [`README.md`](../README.md) describes in "Deploy Starkeep to your AWS account".
    The **Cloud** section lists one card per surface the manifest offers: a web
    card for an app with compute, and a mobile card for an app with a `mobile`
    block. Both cards come from the same Discover apps folder as the local card.
@@ -1487,7 +1487,7 @@ the same Dashboard. The cloud install does not need a local install first.
    account.
 6. **Sync.** Your cloud app shares one set of tables with each of your
    machines. A machine's rows reach the cloud once that machine is signed in to
-   sync, which the root README describes in "Part B", step 5.
+   sync, which the root README describes in "Deploy Starkeep to your AWS account", step 5.
 7. **Update.** **Redeploy <name>** in the web card's menu rebuilds and
    redeploys from the folder. When either install is behind the folder,
    Redeploy opens the same update dialog. The dialog updates the cloud first.

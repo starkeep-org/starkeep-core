@@ -16,9 +16,9 @@ export function StoragePage() {
         </Badge>
       </div>
       <p className="text-sm text-muted-foreground mb-6">
-        This machine keeps every file in your Starkeep library, except photo and video originals,
-        which it downloads when you open one. It also keeps photo and video previews up to its
-        ceiling. Turn on &quot;Keep originals here&quot; to keep every original too. Nothing is
+        This machine keeps every file in your Starkeep library, except large photo and video
+        originals, which can be downloaded on demand. It also keeps photo and video previews up to
+        its ceiling. Turn on &quot;Keep originals here&quot; to keep every original too. Nothing is
         removed unless you free up space.
       </p>
       <div className="rounded-lg border p-6">

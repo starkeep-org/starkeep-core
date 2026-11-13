@@ -26,7 +26,7 @@ Each heading is one group of operations, with a table of the current state and a
 
 ### How labels read
 
-The page shows each label as `<app>/<key>=<value>`, such as `example-app/tag=spoon`. The `example-app/` prefix names the app that made the assertion. Another app can put a label with the same key name on the same file, and the prefix keeps the two apart. Every label has a key, and the app declares its keys in `starkeep.manifest.json`. The example app declares three:
+The page shows each label as `<app>/<key>=<value>`, such as `example-app/tag=spoon`. The `example-app/` prefix names the app that made the assertion. Every label has a key, and the app declares its keys in `starkeep.manifest.json`. The example app declares three:
 
 - `tag` holds a tag you add, such as `example-app/tag=spoon`.
 - `derived` marks a copy and names how the copy was made, such as `example-app/derived=uppercase`.
@@ -34,7 +34,7 @@ The page shows each label as `<app>/<key>=<value>`, such as `example-app/tag=spo
 
 ### How dates read
 
-The Open file panel shows two kinds of date. "Record created" and "Record updated" say when Starkeep made and changed the record. "Original created" and "Original modified" are the source file's own dates. Only a file from a watched folder carries these dates. A file made from text or uploaded through the page shows a dash.
+The Open file panel shows two kinds of date. "Record created" and "Record updated" say when Starkeep made and changed the record. "Original created" and "Original modified" are the source file's own dates. Only a file from a watched folder carries file dates.
 
 ## Layout
 
