@@ -39,7 +39,11 @@ import {
 import { pulumiUpInline, pulumiDestroyInline, type StateResource } from "./compute-stack";
 import { initializeSharedSchema } from "./dsql-schema-init";
 import { buildCloudDataServerProgram } from "./builtin-programs/cloud-data-server-program";
-import { putCloudFrontSigningParameter, putDeploymentSettingsParameter } from "./app-creds";
+import {
+  putCloudFrontSigningParameter,
+  putDelegationSigningParameter,
+  putDeploymentSettingsParameter,
+} from "./app-creds";
 import { configureAppSignInClients, findOrCreateAppSignInClients } from "./app-sign-in-clients";
 import {
   assertNoForeignRecords,
@@ -214,6 +218,10 @@ export interface CloudDataServerInstallOutputs {
   authorizerId: string;
   /** The REQUEST authorizer that reads the session cookie. */
   sessionAuthorizerId: string;
+  /** The REQUEST authorizer that admits only requests that came through CloudFront. */
+  originAuthorizerId: string;
+  /** The REQUEST authorizer that verifies a delegation token. */
+  delegatedAuthorizerId: string;
   functionArn: string;
   region: string;
   /** The client cloud app sessions sign in with, on the managed login page. */
@@ -605,6 +613,8 @@ export async function installCloudDataServer(
     const cloudfrontDomain = String(outputs.cloudfrontDomain);
     const authorizerId = String(outputs.authorizerId);
     const sessionAuthorizerId = String(outputs.sessionAuthorizerId);
+    const originAuthorizerId = String(outputs.originAuthorizerId);
+    const delegatedAuthorizerId = String(outputs.delegatedAuthorizerId);
     const functionArn = String(outputs.functionArn);
     const region = String(outputs.region);
 
@@ -648,6 +658,17 @@ export async function installCloudDataServer(
       awsCreds: managerCreds,
     });
     console.log("CloudFront signing config persisted.");
+
+    // Step 4.5b: Persist the delegation signing key the same way. The broker
+    // signs outside clients' tokens with it and seals each delegation's
+    // stored Cognito refresh token under a key derived from it.
+    console.log("Persisting the delegation signing key to SSM…");
+    await putDelegationSigningParameter({
+      stackPrefix: config.stackPrefix,
+      privateKeyPem: String(outputs.delegationSigningPrivateKey),
+      region: config.region,
+      awsCreds: managerCreds,
+    });
 
     // Step 4.6: Seed the deployment's settings from this machine's local
     // values, once. A document that does not check out is not seeded; the
@@ -738,6 +759,8 @@ export async function installCloudDataServer(
       apiGatewayExecutionArn,
       authorizerId,
       sessionAuthorizerId,
+      originAuthorizerId,
+      delegatedAuthorizerId,
       functionArn,
       region,
       cloudAppsUserPoolClientId: signInClients.cloudAppsClientId,

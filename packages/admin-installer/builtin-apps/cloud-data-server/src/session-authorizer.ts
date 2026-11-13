@@ -15,6 +15,7 @@
  * 500 is indistinguishable from an outage — every failure returns
  * `{ isAuthorized: false }` instead.
  */
+import { cameThroughCloudFront } from "./origin-header.js";
 import { userPoolConfig, verifyUserToken } from "./verify-user-token.js";
 
 export { resetKeySetCache } from "./verify-user-token.js";
@@ -60,6 +61,10 @@ export async function handler(event: AuthorizerEvent): Promise<SimpleResponse> {
     // API Gateway lower-cases header names in the v2 payload, but a caller can
     // still send `Cookie`, so check both rather than trusting one.
     const headers = event.headers ?? {};
+    // An app's pages load through CloudFront only. On the gateway's own
+    // hostname they would share an origin with the consent pages, which
+    // issue credentials that leave the deployment. See origin-header.ts.
+    if (!cameThroughCloudFront(headers)) return DENY;
     const token = readCookie(headers["cookie"] ?? headers["Cookie"], TOKEN_COOKIE);
     if (!token) return DENY;
 

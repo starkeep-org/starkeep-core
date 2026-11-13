@@ -274,6 +274,58 @@ export async function putCloudFrontSigningParameter(opts: {
   return name;
 }
 
+/** Where the delegation signing key lives. MUST match DELEGATION_SIGNING_PARAM in the CDS program. */
+export function delegationSigningParameterName(stackPrefix: string): string {
+  return `/${stackPrefix}/app-creds/_delegation-signing`;
+}
+
+/**
+ * Write the delegation signing key as a SecureString, under Manager creds,
+ * as {@link putCloudFrontSigningParameter} does for the CloudFront key. The
+ * CDS stack makes the key and exports it; the broker reads it to sign
+ * delegation tokens and to seal the Cognito refresh token each delegation
+ * keeps. Idempotent.
+ */
+export async function putDelegationSigningParameter(opts: {
+  stackPrefix: string;
+  privateKeyPem: string;
+  region: string;
+  awsCreds: AwsCredentials;
+}): Promise<string> {
+  const ssm = makeSsmClient(opts.region, opts.awsCreds);
+  const name = delegationSigningParameterName(opts.stackPrefix);
+  // Shape MUST match loadDelegationSigningKey in the cloud-data-server handler.
+  const value = JSON.stringify({ privateKeyPem: opts.privateKeyPem });
+  const description =
+    "Delegation token signing key for outside clients. Created by admin-installer.";
+  try {
+    await ssm.send(
+      new PutParameterCommand({
+        Name: name,
+        Type: "SecureString",
+        Value: value,
+        Description: description,
+        Tags: [
+          { Key: "starkeep:appId", Value: "cloud-data-server" },
+          { Key: "starkeep:managed", Value: "true" },
+        ],
+      }),
+    );
+  } catch (err) {
+    if (!(err instanceof ParameterAlreadyExists)) throw err;
+    await ssm.send(
+      new PutParameterCommand({
+        Name: name,
+        Type: "SecureString",
+        Value: value,
+        Overwrite: true,
+        Description: description,
+      }),
+    );
+  }
+  return name;
+}
+
 /** Fetch and parse the JSON-encoded SecureString. Returns null if absent. */
 export async function getAppCredsParameter(opts: {
   stackPrefix: string;

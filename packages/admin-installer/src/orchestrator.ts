@@ -106,6 +106,10 @@ export interface InstallerConfig {
   authorizerId: string;
   /** See ComputeContext.sessionAuthorizerId — absent on a pre-authorizer stack. */
   sessionAuthorizerId?: string;
+  /** See ComputeContext.originAuthorizerId — absent on a stack that predates it. */
+  originAuthorizerId?: string;
+  /** See ComputeContext.delegatedAuthorizerId — absent on a stack that predates it. */
+  delegatedAuthorizerId?: string;
   /**
    * Base URL of the shared HTTP API Gateway (the cloud-data-server's stage
    * URL). Injected into per-app Lambdas as STARKEEP_CLOUD_DATA_BASE so that
@@ -552,6 +556,10 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
           ...(config.sessionAuthorizerId
             ? { sessionAuthorizerId: config.sessionAuthorizerId }
             : {}),
+          ...(config.originAuthorizerId ? { originAuthorizerId: config.originAuthorizerId } : {}),
+          ...(config.delegatedAuthorizerId
+            ? { delegatedAuthorizerId: config.delegatedAuthorizerId }
+            : {}),
           region: config.region,
           accountId: config.accountId,
           pulumiStateBucket: config.pulumiStateBucket,
@@ -808,6 +816,10 @@ async function removeComputeSteps(
       apiGatewayUrl: config.apiGatewayUrl,
       authorizerId: config.authorizerId,
       ...(config.sessionAuthorizerId ? { sessionAuthorizerId: config.sessionAuthorizerId } : {}),
+      ...(config.originAuthorizerId ? { originAuthorizerId: config.originAuthorizerId } : {}),
+      ...(config.delegatedAuthorizerId
+        ? { delegatedAuthorizerId: config.delegatedAuthorizerId }
+        : {}),
       region: config.region,
       accountId: config.accountId,
       pulumiStateBucket: config.pulumiStateBucket,

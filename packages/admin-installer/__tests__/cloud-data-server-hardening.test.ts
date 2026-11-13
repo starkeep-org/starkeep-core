@@ -7,6 +7,7 @@
  *     bucket self-emptying so repeated teardown isn't wedged.
  */
 import { DEFAULT_STAND_IN_STANDARDS, STAND_IN_CATEGORIES } from "@starkeep/protocol-primitives";
+import { unwrapSecrets } from "./pulumi-secrets";
 import { describe, it, expect, beforeEach } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -41,7 +42,7 @@ pulumi.runtime.setMocks(
       id: string;
       state: Record<string, unknown>;
     } {
-      created.push({ type: args.type, name: args.name, inputs: args.inputs });
+      created.push({ type: args.type, name: args.name, inputs: unwrapSecrets(args.inputs) });
       const extra: Record<string, unknown> = {};
       // The API Gateway's apiEndpoint is a computed output the mock must supply,
       // or the CloudFront origin-domain derivation (apiEndpoint.replace(...))
@@ -50,6 +51,12 @@ pulumi.runtime.setMocks(
         extra.apiEndpoint = "https://mockapi.execute-api.us-east-2.amazonaws.com";
       }
       // CloudFront distribution's domainName feeds publicBaseUrl.
+      // The TLS provider makes key material at apply time; the program derives
+      // the CloudFront origin secret from it.
+      if (args.type === "tls:index/privateKey:PrivateKey") {
+        extra.privateKeyPem = `mock-private-key-${args.name}`;
+        extra.publicKeyPem = `mock-public-key-${args.name}`;
+      }
       if (args.type.endsWith("cloudfront/distribution:Distribution")) {
         extra.domainName = `${args.name}.cloudfront.net`;
       }

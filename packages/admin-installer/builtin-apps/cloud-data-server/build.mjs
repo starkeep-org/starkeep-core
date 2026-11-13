@@ -17,10 +17,11 @@
  * so its layout is "files at the zip root" — `api-handler.handler` resolves to
  * api-handler.js's `handler` export.
  *
- * The zip carries two entry points. The session authorizer is a second,
- * much smaller Lambda that shares this artifact rather than getting its own:
- * it is deployed alongside the broker, versioned with it, and giving it a
- * separate build would be a second thing to remember to rebuild.
+ * The zip carries four entry points. The session, origin and delegated
+ * authorizers are much smaller Lambdas that share this artifact rather than
+ * getting their own: each is deployed alongside the broker, versioned with
+ * it, and giving each a separate build would be a second thing to remember
+ * to rebuild.
  */
 
 import { execSync } from "node:child_process";
@@ -59,7 +60,12 @@ mkdirSync(stagingDir, { recursive: true });
 
 // CommonJS, because Lambda's default loader expects it unless the zip carries
 // a package.json with type=module or the file is named .mjs.
-for (const entry of ["api-handler", "session-authorizer"]) {
+for (const entry of [
+  "api-handler",
+  "session-authorizer",
+  "origin-authorizer",
+  "delegated-authorizer",
+]) {
   console.log(`Bundling ${entry} with esbuild…`);
   await build({
     entryPoints: [join(pkgDir, "src", `${entry}.ts`)],
@@ -74,10 +80,13 @@ for (const entry of ["api-handler", "session-authorizer"]) {
 
 console.log("Creating dist.zip…");
 if (existsSync(outputZip)) rmSync(outputZip);
-execSync(`zip -j "${outputZip}" api-handler.js session-authorizer.js`, {
-  cwd: stagingDir,
-  stdio: "inherit",
-});
+execSync(
+  `zip -j "${outputZip}" api-handler.js session-authorizer.js origin-authorizer.js delegated-authorizer.js`,
+  {
+    cwd: stagingDir,
+    stdio: "inherit",
+  },
+);
 
 rmSync(stagingDir, { recursive: true });
 

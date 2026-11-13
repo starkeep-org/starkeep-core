@@ -16,6 +16,7 @@
  * by hand.
  */
 import { describe, it, expect, beforeAll } from "vitest";
+import { unwrapSecrets } from "./pulumi-secrets";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,10 +45,16 @@ pulumi.runtime.setMocks(
       id: string;
       state: Record<string, unknown>;
     } {
-      created.push({ type: args.type, name: args.name, inputs: args.inputs });
+      created.push({ type: args.type, name: args.name, inputs: unwrapSecrets(args.inputs) });
       const extra: Record<string, unknown> = {};
       if (args.type.endsWith("apigatewayv2/api:Api")) {
         extra.apiEndpoint = "https://mockapi.execute-api.us-east-2.amazonaws.com";
+      }
+      // The TLS provider makes key material at apply time; the program derives
+      // the CloudFront origin secret from it.
+      if (args.type === "tls:index/privateKey:PrivateKey") {
+        extra.privateKeyPem = `mock-private-key-${args.name}`;
+        extra.publicKeyPem = `mock-public-key-${args.name}`;
       }
       if (args.type.endsWith("cloudfront/distribution:Distribution")) {
         extra.domainName = `${args.name}.cloudfront.net`;

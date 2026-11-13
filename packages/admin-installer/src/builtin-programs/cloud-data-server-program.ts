@@ -12,13 +12,15 @@
  * Stack outputs match the previous SST shape so per-app Pulumi installs can
  * read apiGatewayId and authorizerId to attach their own routes:
  *   auroraHostname, bucketName, apiGatewayUrl, publicBaseUrl, apiGatewayId,
- *   authorizerId, sessionAuthorizerId, region
+ *   authorizerId, sessionAuthorizerId, originAuthorizerId,
+ *   delegatedAuthorizerId, region
  *
  * The Lambda's IAM role is NOT a Pulumi resource — Manager mints it as part
  * of the install pipeline (createAppRole + broker-power policy). Pulumi only
  * references its ARN.
  */
 
+import { createHmac } from "node:crypto";
 import * as aws from "@pulumi/aws";
 import { appAssetsBucketName } from "../static-assets";
 import * as pulumi from "@pulumi/pulumi";
@@ -32,6 +34,12 @@ import {
   AUTH_SIGN_OUT_ROUTE,
   AUTH_SIGNED_OUT_ROUTE,
   MOBILE_KEYS_ROUTE,
+  CONNECT_ROUTE,
+  CONNECT_APPROVE_ROUTE,
+  CONNECT_CALLBACK_ROUTE,
+  CONNECT_JWKS_ROUTE,
+  CONNECTIONS_ROUTE,
+  ORIGIN_HEADER,
   INTENT_TAG_KEY,
   LADDER_TAG_KEY,
   LADDER_TAG_COMPLETE,
@@ -210,6 +218,32 @@ export function buildCloudDataServerProgram(
     // See putCloudFrontSigningParameter in app-creds.ts. The name is shared via
     // this exported constant so both sides agree; keep them in lockstep.
     const cloudfrontSigningParamName = `/${ctx.stackPrefix}/app-creds/_cloudfront-signing`;
+    // The delegation signing key, written the same way: this program makes
+    // the key and exports it, and the installer writes the SecureString under
+    // Manager creds. See putDelegationSigningParameter in app-creds.ts.
+    const delegationSigningParamName = `/${ctx.stackPrefix}/app-creds/_delegation-signing`;
+
+    // -----------------------------------------------------------------------
+    // Delegation signing key and the CloudFront origin secret
+    // -----------------------------------------------------------------------
+    //
+    // ECDSA P-256 for ES256 delegation tokens. Generated through the TLS
+    // provider so the key stays stable in Pulumi state across updates: a new
+    // key on every `pulumi up` would invalidate every token users handed to
+    // outside clients.
+    const delegationKey = new tls.PrivateKey(`${ctx.stackPrefix}-delegation-signing-key`, {
+      algorithm: "ECDSA",
+      ecdsaCurve: "P256",
+    });
+    // The value CloudFront adds to every request it forwards to the gateway,
+    // derived from the key so the deployment holds one secret rather than two.
+    // It separates the shared origin from the execute-api hostname; see
+    // origin-header.ts in the cloud-data-server.
+    const originSecret = pulumi.secret(
+      delegationKey.privateKeyPem.apply((pem) =>
+        createHmac("sha256", pem).update("starkeep-cloudfront-origin-header").digest("base64url"),
+      ),
+    );
 
     // -----------------------------------------------------------------------
     // DSQL cluster
@@ -525,6 +559,9 @@ export function buildCloudDataServerProgram(
             // for signing shared-file CloudFront URLs. Name only — the Lambda
             // reads and caches the value once per warm container.
             CLOUDFRONT_SIGNING_PARAM: cloudfrontSigningParamName,
+            // SSM SecureString holding the delegation signing key's PEM. Name
+            // only, as above.
+            DELEGATION_SIGNING_PARAM: delegationSigningParamName,
             // Forwarded only when the installer process sets it (the Tier-3
             // e2e suite does, to shorten the broker's HMAC secret cache).
             // Absent in real installs → broker keeps its 5-min default.
@@ -736,6 +773,8 @@ export function buildCloudDataServerProgram(
           variables: {
             STARKEEP_USER_POOL_ID: ctx.userPoolId,
             STARKEEP_USER_POOL_CLIENT_ID: ctx.cloudAppsUserPoolClientId,
+            // An app's pages load through CloudFront only.
+            STARKEEP_ORIGIN_SECRET: originSecret,
           },
         },
         tags: { "starkeep:managed": "true", "starkeep:appId": "cloud-data-server" },
@@ -762,6 +801,114 @@ export function buildCloudDataServerProgram(
       authorizerResultTtlInSeconds: 300,
       authorizerUri: sessionAuthFn.invokeArn,
       name: "sessionCookie",
+    });
+
+    // -----------------------------------------------------------------------
+    // Origin and delegated authorizers
+    // -----------------------------------------------------------------------
+    //
+    // The origin authorizer sits on every route an app answers before sign-in
+    // (`publicPaths`). Those routes check no user, and without this check an
+    // app's page and script would load on the execute-api hostname, where the
+    // consent pages live. Its identity source is the origin header alone, so
+    // a request without the header is refused before any invocation, and the
+    // gateway caches one decision for all CloudFront traffic.
+    //
+    // The delegated authorizer sits on app routes declared `auth: "delegated"`
+    // and verifies a delegation token with the public key alone. The route key
+    // is an identity source, so a cached approval never crosses apps.
+    //
+    // Same artifact and naming rules as the session authorizer above.
+    const originAuthLambdaName = `${ctx.stackPrefix}-app-cloud-data-server-origin-authorizer`;
+    const delegatedAuthLambdaName = `${ctx.stackPrefix}-app-cloud-data-server-delegated-authorizer`;
+
+    const originAuthLogGroup = new aws.cloudwatch.LogGroup("origin-auth-log-group", {
+      name: `/aws/lambda/${originAuthLambdaName}`,
+      retentionInDays: 14,
+      tags: { "starkeep:managed": "true", "starkeep:appId": "cloud-data-server" },
+    });
+    const delegatedAuthLogGroup = new aws.cloudwatch.LogGroup("delegated-auth-log-group", {
+      name: `/aws/lambda/${delegatedAuthLambdaName}`,
+      retentionInDays: 14,
+      tags: { "starkeep:managed": "true", "starkeep:appId": "cloud-data-server" },
+    });
+
+    const originAuthFn = new aws.lambda.Function(
+      "origin-authorizer",
+      {
+        name: originAuthLambdaName,
+        role: ctx.appRoleArn,
+        runtime: aws.lambda.Runtime.NodeJS22dX,
+        handler: "origin-authorizer.handler",
+        code: new pulumi.asset.FileArchive(ctx.distZipPath),
+        sourceCodeHash: ctx.bundleHash,
+        memorySize: 128,
+        timeout: 5,
+        environment: { variables: { STARKEEP_ORIGIN_SECRET: originSecret } },
+        tags: { "starkeep:managed": "true", "starkeep:appId": "cloud-data-server" },
+      },
+      { dependsOn: [originAuthLogGroup] },
+    );
+    const delegatedAuthFn = new aws.lambda.Function(
+      "delegated-authorizer",
+      {
+        name: delegatedAuthLambdaName,
+        role: ctx.appRoleArn,
+        runtime: aws.lambda.Runtime.NodeJS22dX,
+        handler: "delegated-authorizer.handler",
+        code: new pulumi.asset.FileArchive(ctx.distZipPath),
+        sourceCodeHash: ctx.bundleHash,
+        memorySize: 128,
+        timeout: 5,
+        environment: {
+          variables: {
+            STARKEEP_ORIGIN_SECRET: originSecret,
+            STARKEEP_DELEGATION_PUBLIC_KEY: delegationKey.publicKeyPem,
+          },
+        },
+        tags: { "starkeep:managed": "true", "starkeep:appId": "cloud-data-server" },
+      },
+      { dependsOn: [delegatedAuthLogGroup] },
+    );
+
+    for (const [name, fnRef] of [
+      ["origin-authorizer-invoke", originAuthFn],
+      ["delegated-authorizer-invoke", delegatedAuthFn],
+    ] as const) {
+      new aws.lambda.Permission(name, {
+        action: "lambda:InvokeFunction",
+        function: fnRef.name,
+        principal: "apigateway.amazonaws.com",
+        sourceArn: pulumi.interpolate`${api.executionArn}/authorizers/*`,
+      });
+    }
+
+    const originAuthorizer = new aws.apigatewayv2.Authorizer("origin-header", {
+      apiId: api.id,
+      authorizerType: "REQUEST",
+      authorizerPayloadFormatVersion: "2.0",
+      enableSimpleResponses: true,
+      identitySources: [`$request.header.${ORIGIN_HEADER}`],
+      authorizerResultTtlInSeconds: 300,
+      authorizerUri: originAuthFn.invokeArn,
+      name: "originHeader",
+    });
+
+    const delegatedAuthorizer = new aws.apigatewayv2.Authorizer("delegation-token", {
+      apiId: api.id,
+      authorizerType: "REQUEST",
+      authorizerPayloadFormatVersion: "2.0",
+      enableSimpleResponses: true,
+      identitySources: [
+        "$request.header.Authorization",
+        `$request.header.${ORIGIN_HEADER}`,
+        "$context.routeKey",
+      ],
+      // Short: a revoked token keeps reaching app code until the cached
+      // decision ends, though never data.
+      authorizerResultTtlInSeconds: 60,
+      authorizerUri: delegatedAuthFn.invokeArn,
+      name: "delegationToken",
     });
 
     // Lambda integration
@@ -828,6 +975,27 @@ export function buildCloudDataServerProgram(
       new aws.apigatewayv2.Route(name, {
         apiId: api.id,
         routeKey: `GET ${path}`,
+        target: pulumi.interpolate`integrations/${integration.id}`,
+      });
+    }
+
+    // The consent and connections pages, where a user grants an outside
+    // client access and ends it. No authorizer: the pages sign the user in
+    // through the managed login page themselves. The broker answers them only
+    // on the execute-api hostname, refusing any request that carries the
+    // CloudFront origin header, so they never load beside app script. Outside
+    // /apps/*, so no app route can shadow them.
+    for (const [name, routeKey] of [
+      ["route-connect", `GET ${CONNECT_ROUTE}`],
+      ["route-connect-approve", `POST ${CONNECT_APPROVE_ROUTE}`],
+      ["route-connect-callback", `GET ${CONNECT_CALLBACK_ROUTE}`],
+      ["route-connect-jwks", `GET ${CONNECT_JWKS_ROUTE}`],
+      ["route-connections", `GET ${CONNECTIONS_ROUTE}`],
+      ["route-connections-revoke", `POST ${CONNECTIONS_ROUTE}/{id}/revoke`],
+    ] as const) {
+      new aws.apigatewayv2.Route(name, {
+        apiId: api.id,
+        routeKey,
         target: pulumi.interpolate`integrations/${integration.id}`,
       });
     }
@@ -1245,6 +1413,11 @@ export function buildCloudDataServerProgram(
         {
           originId: gatewayOriginId,
           domainName: gatewayOriginDomain,
+          // Marks every request that came through CloudFront, so the gateway
+          // can keep app pages off its execute-api hostname and the consent
+          // pages off this distribution. CloudFront replaces a viewer's
+          // header of the same name.
+          customHeaders: [{ name: ORIGIN_HEADER, value: originSecret }],
           customOriginConfig: {
             httpPort: 80,
             httpsPort: 443,
@@ -1652,6 +1825,13 @@ export function buildCloudDataServerProgram(
       // Per-app installs read this to attach `auth: "session"` routes. See
       // ComputeContext.sessionAuthorizerId.
       sessionAuthorizerId: sessionAuthorizer.id,
+      // Per-app installs put this on the routes an app answers before sign-in.
+      originAuthorizerId: originAuthorizer.id,
+      // Per-app installs put this on `auth: "delegated"` routes.
+      delegatedAuthorizerId: delegatedAuthorizer.id,
+      // The installer writes this into the `delegationSigningParamName`
+      // SecureString post-Pulumi, as with the CloudFront key. A secret output.
+      delegationSigningPrivateKey: delegationKey.privateKeyPem,
       functionArn: fn.arn,
       region: ctx.region,
     };
