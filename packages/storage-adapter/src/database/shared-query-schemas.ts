@@ -82,6 +82,10 @@ const SHARED_RECORD_COLUMNS: readonly AppColumnInfo[] = [
   // the string node-postgres returns for int8.
   { name: "size_bytes", type: "bigint", notNull: true, primaryKey: false },
   text("original_filename", false),
+  // The source file's own dates, in ISO 8601, so a predicate and an ordering
+  // over them work alike on both engines.
+  text("original_created_at", false),
+  text("original_updated_at", false),
   text("origin_app_id", true),
   text("parent_id", false),
   // A stand-in's role, and the reported fidelity — the stand-in's own on a

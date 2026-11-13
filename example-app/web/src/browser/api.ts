@@ -217,6 +217,9 @@ export interface ExampleRecord {
   parent_id: string | null;
   created_at: string;
   updated_at: string;
+  /** The source file's own dates; only a watched folder's files carry them. */
+  original_created_at?: string | null;
+  original_updated_at?: string | null;
   deleted_at?: string | null;
   metadata?: Record<string, unknown> | null;
   labels?: { app_id: string; key: string; value: string; label: string }[];

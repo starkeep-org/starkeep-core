@@ -305,13 +305,15 @@ export function missingDependencies(
   // falls back to the same workspace lookup.
   const ws = enclosingWorkspace(pkgDir);
   const where =
-    install && install.kind !== "skip"
-      ? `Run \`${install.display}\` in ${install.cwd}.`
-      : !ws
-        ? `Run \`pnpm install\` in ${pkgDir}.`
-        : ws.covers
-          ? `Run \`pnpm install\` in ${ws.root}.`
-          : `${pkgDir} sits inside the pnpm workspace at ${ws.root}, which does not list it. Run \`pnpm install --ignore-workspace\` in ${pkgDir}.`;
+    install && install.kind === "refused"
+      ? `${install.reason} Run \`${install.display}\` in ${install.cwd}.`
+      : install && install.kind !== "skip"
+        ? `Run \`${install.display}\` in ${install.cwd}.`
+        : !ws
+          ? `Run \`pnpm install\` in ${pkgDir}.`
+          : ws.covers
+            ? `Run \`pnpm install\` in ${ws.root}.`
+            : `${pkgDir} sits inside the pnpm workspace at ${ws.root}, which does not list it. Run \`pnpm install --ignore-workspace\` in ${pkgDir}.`;
   return {
     missing,
     message: `'${id}' cannot start: ${count} not installed (${shown}). ${where} Then try again.`,

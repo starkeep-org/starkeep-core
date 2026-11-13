@@ -19,6 +19,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
+  categoriesOf,
+  grantPermissions,
   publicSharingConsent,
   type AppSurface,
   type DependencyPlan,
@@ -35,33 +37,6 @@ import {
   type LibraryStandardsDraft,
   type LibraryStandardsResponse,
 } from "@/components/LibraryStandardsSection";
-
-/**
- * A grant's file categories, named in the plural for the install prompt.
- *
- * One entry per category an app may be granted, plus `other`. A category
- * missing here shows as its raw id, so `consent-category-names.test.ts` checks
- * the map against the registry's `APP_GRANTABLE_CATEGORIES`.
- */
-const CATEGORY_NAMES: Record<string, string> = {
-  image: "Images",
-  video: "Videos",
-  audio: "Audio",
-  document: "Documents",
-  text: "Text files",
-  code: "Code files",
-  font: "Fonts",
-  archive: "Archives",
-  data: "Data files",
-  model3d: "3D models",
-  example: "Example files",
-  other: "Other files",
-};
-
-export function categoriesOf(types: readonly string[]): string {
-  const prefixes = [...new Set(types.map((t) => t.split("/")[0] ?? t))];
-  return prefixes.map((p) => CATEGORY_NAMES[p] ?? p).join(", ");
-}
 
 export function ConsentDialog({
   entry,
@@ -121,11 +96,7 @@ export function ConsentDialog({
         {grants.length > 0 && (
           <ul className="flex flex-col gap-2">
             {grants.map((g, i) => {
-              // Per design: any access (read or readwrite) implicitly grants
-              // SELECT on the per-category metadata table. metadataWrite adds
-              // INSERT/UPDATE on top of that read.
-              const dataPermissions = g.access === "readwrite" ? "read + write" : "read";
-              const metadataPermissions = g.metadataWrite ? "read + write" : "read";
+              const { files: dataPermissions, metadata: metadataPermissions } = grantPermissions(g);
               return (
                 <Collapsible key={i} asChild>
                   <li className="border rounded-md p-3 flex flex-col gap-2">
@@ -180,8 +151,10 @@ export function ConsentDialog({
           <div className="border-t pt-4 flex flex-col gap-3">
             <h4 className="text-sm font-medium">Quality kept when originals archive</h4>
             <p className="text-xs text-muted-foreground">
-              Larger originals archive to deep storage, and a copy at this size stays available. You
-              can change this later on the Storage page.
+              Larger originals archive to deep storage, and a copy at this size stays available. The
+              setting covers your whole Starkeep library for every app, because deep archiving is a
+              core data concern that no single app owns. You can change the setting later in Admin →
+              Data Server card menu → Storage.
             </p>
             <LibraryStandardsFields
               state={quality.state}

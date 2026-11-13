@@ -257,6 +257,18 @@ describe("reading labels", () => {
     expect(without.find((r) => r.id === record.id)!.labels).toBeUndefined();
   });
 
+  it("renders each label the same way on the single-record route as on the list", async () => {
+    const { record } = await createRecordWithBytes(owner, { fileName: "single.jpg" });
+    await setLabels(annotator, [{ recordId: record.id, key: "face-count", value: "3" }]);
+
+    const res = await owner.fetch(`/data/records/${record.id}?include=labels`);
+    expect(res.status).toBe(200);
+    const { record: single } = (await res.json()) as { record: { labels: unknown[] } };
+    expect(single.labels).toEqual([
+      { app_id: "annotator", key: "face-count", value: "3", label: "annotator/face-count" },
+    ]);
+  });
+
   it("returns an empty array, not null, for a record with no labels", async () => {
     const { record } = await createRecordWithBytes(owner, { fileName: "unlabelled.jpg" });
     const rows = await listWith(owner, "?include=labels&limit=1000");

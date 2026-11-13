@@ -1276,7 +1276,11 @@ Five things about this route specifically:
 4. **`created_at` and `updated_at` are serialized HLCs.** You can order by them
    and read them back; you cannot filter on them, because a sync-internal clock
    is not a promise the platform makes. `updated_after=<iso>` is the supported
-   question, and the server converts the instant into the bound.
+   question, and the server converts the instant into the bound. These columns
+   say when Starkeep made and changed the record. The source file's own dates
+   sit in `original_created_at` and `original_updated_at`, as ISO 8601 text
+   that you can filter and order on. Only the folder watcher fills them, and
+   either one is null when the source reported no date.
 5. **The access paths are not grammar and stay named parameters.** `label` and
    `labelValue` select through the reverse index, which is a join; `notLabel`
    is an anti-join; `variant`, `labelApps` and `include`

@@ -120,7 +120,12 @@ function display(command: string, args: string[]): string {
  * app inside one that does not cover it needs `--ignore-workspace` (#141).
  */
 export function enclosingWorkspace(dir: string): { root: string; covers: boolean } | null {
-  for (let d = resolve(dir); ; d = dirname(d)) {
+  return workspaceFrom(resolve(dir), dir);
+}
+
+/** The nearest pnpm workspace at or above `start`, and whether it covers `dir`. */
+function workspaceFrom(start: string, dir: string): { root: string; covers: boolean } | null {
+  for (let d = start; ; d = dirname(d)) {
     const file = join(d, "pnpm-workspace.yaml");
     if (existsSync(file)) {
       const rel = relative(d, resolve(dir)).split(sep).join("/");
@@ -131,6 +136,46 @@ export function enclosingWorkspace(dir: string): { root: string; covers: boolean
     }
     if (dirname(d) === d) return null;
   }
+}
+
+/**
+ * A `pnpm-workspace.yaml` that hides the app from the workspace that lists it.
+ *
+ * pnpm uses the nearest workspace file. A file inside the app's folder, below
+ * an outer workspace that lists the app, makes the app a workspace of its own,
+ * and the outer workspace's packages vanish from pnpm's view. An app that
+ * depends on a sibling with `workspace:*` then fails with
+ * ERR_PNPM_WORKSPACE_PKG_NOT_FOUND. Admin cannot just install at the outer
+ * root, because pnpm in the app's folder would still read the nested file.
+ *
+ * pnpm 10 keeps build approvals in `pnpm-workspace.yaml`, so approving builds
+ * inside the app's folder can leave such a file behind. A checkout from before 2026-08-25 ignored the file in
+ * git, so `git pull` never removes it.
+ */
+export function nestedWorkspace(appDir: string): { file: string; outerRoot: string } | null {
+  const inner = enclosingWorkspace(appDir);
+  if (!inner) return null;
+  const parent = dirname(inner.root);
+  if (parent === inner.root) return null;
+  const outer = workspaceFrom(parent, appDir);
+  if (!outer?.covers) return null;
+  return { file: join(inner.root, "pnpm-workspace.yaml"), outerRoot: outer.root };
+}
+
+/**
+ * The arguments to spawn an approved command with, when no one sits at a
+ * terminal to answer pnpm.
+ *
+ * pnpm asks before it deletes a `node_modules` that an install under other
+ * settings built, and with no terminal it aborts with
+ * ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY. The folder holds only
+ * dependencies the same install puts back, so Admin lets pnpm delete it. The
+ * flag stays out of `display`, which shows what a person would type.
+ */
+export function unattendedArgs(command: string, args: string[]): string[] {
+  return command === "pnpm" && args[0] === "install"
+    ? [...args, "--config.confirm-modules-purge=false"]
+    : args;
 }
 
 /** The `packages` globs of a pnpm-workspace.yaml, matched against a relative path. */
@@ -180,7 +225,9 @@ function declaredCwd(appDir: string, cwd: string | undefined): string | null {
  * The approved dependency install for the app in `appDir`, or why there is
  * none. A pnpm install inside a workspace that does not cover the app gains
  * `--ignore-workspace`. An app core's own workspace lists installs nothing,
- * declared or not. Without a declared command:
+ * declared or not. An app hidden from its workspace by a nested
+ * `pnpm-workspace.yaml` runs nothing, and the refusal names the file (see
+ * {@link nestedWorkspace}). Without a declared command:
  *
  * - a folder with no package.json installs nothing;
  * - a lockfile beside package.json picks its manager's frozen install;
@@ -193,6 +240,20 @@ function declaredCwd(appDir: string, cwd: string | undefined): string | null {
 export function resolveInstallCommand(appDir: string, manifest: CommandSource): CommandResolution {
   if (inCoreWorkspace(appDir)) {
     return { kind: "skip", reason: "Core's own install installs the apps in core's workspace." };
+  }
+  const nested = nestedWorkspace(appDir);
+  if (nested) {
+    const frozen = existsSync(join(nested.outerRoot, "pnpm-lock.yaml"))
+      ? ["--frozen-lockfile"]
+      : [];
+    return {
+      kind: "refused",
+      display: display("pnpm", ["install", ...frozen]),
+      cwd: nested.outerRoot,
+      reason:
+        `${nested.file} makes pnpm treat the app's folder as a workspace of its own, ` +
+        `apart from the workspace at ${nested.outerRoot} that lists the app. Delete ${nested.file}.`,
+    };
   }
   const declared = manifest.installDependencies;
   if (declared) {

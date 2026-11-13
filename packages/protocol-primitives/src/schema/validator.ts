@@ -23,6 +23,8 @@ export const dataRecordSchema = v.object({
   mimeType: v.pipe(v.string(), v.minLength(1)),
   sizeBytes: v.pipe(v.number(), v.integer(), v.minValue(0)),
   originalFilename: v.nullable(v.string()),
+  originalCreatedAt: v.nullable(v.pipe(v.string(), v.isoTimestamp())),
+  originalUpdatedAt: v.nullable(v.pipe(v.string(), v.isoTimestamp())),
   originAppId: v.pipe(v.string(), v.minLength(1)),
   parentId: v.nullable(v.string()),
 });

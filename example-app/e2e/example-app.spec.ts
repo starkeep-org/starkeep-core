@@ -209,6 +209,11 @@ test("Example files: create one from text, with its counts inline", async () => 
   await expect(await cell("Example files", "hello.skexample", "Words")).toHaveText("7");
   await expect(await cell("Example files", "hello.skexample", "Bytes")).toHaveText("41");
   await expect(page.getByLabel("File content")).toContainText("Hello, Starkeep.");
+  // The Open panel shows the size and both kinds of date. A file made from
+  // text has no source file, so the source reported no dates.
+  await expect(await cell("Open file", "Size", "Value")).toHaveText("41 bytes");
+  await expect(await cell("Open file", "Record created", "Value")).toHaveText(/^\d{4}-\d\d-\d\dT/);
+  await expect(await cell("Open file", "File modified", "Value")).toHaveText("not reported");
   await expect(table("Types")).toContainText("example/plaintext");
   await expectLogged("POST", /^\/data\/files\?type=example%2Fplaintext$/, 200);
   await expectLogged("POST", /^\/data\/records$/, 200);
@@ -259,6 +264,13 @@ test("Labels: add, set exactly, count and retract tags", async () => {
   await expect(await cell("Example files", "hello.skexample", "Labels")).toContainText(
     "example-app/reviewed",
   );
+  // The Open panel reads the single-record route, which must name each
+  // label's key just as the list does.
+  const openLabels = await cell("Open file", "Labels", "Value");
+  await expect(openLabels).toContainText("example-app/tag=draft");
+  await expect(openLabels).toContainText("example-app/tag=idea");
+  await expect(openLabels).toContainText("example-app/reviewed");
+  await expect(openLabels).not.toContainText("undefined");
   await expectLogged("POST", /^\/data\/labels$/, 200);
 
   await page.getByLabel("Tags", { exact: true }).fill("idea");

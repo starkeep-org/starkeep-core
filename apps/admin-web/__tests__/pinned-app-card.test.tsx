@@ -169,7 +169,7 @@ describe("Update from folder", () => {
       },
     });
     await chooseFromMenu("Update from folder");
-    expect(await screen.findByText(/can publish files to public links/)).toBeTruthy();
+    expect(await screen.findByText(/can create web links to your images/)).toBeTruthy();
     expect(installs).toEqual([]);
   });
 });

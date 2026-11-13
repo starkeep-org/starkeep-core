@@ -2,6 +2,12 @@
 // The app list comes from /api/apps/list; membership in the local vs. cloud
 // sections is derived from each app's manifest `targets` (default ["local"]).
 
+export {
+  categoriesOf,
+  grantPermissions,
+  publicSharingConsent,
+} from "@starkeep/admin-installer/consent-text";
+
 export type AppTarget = "local" | "cloud";
 
 /**
@@ -157,15 +163,4 @@ export function surfacesOf(a: LocalAppEntry): AppSurface[] {
   if (a.manifest.infraRequirements?.compute?.enabled) out.push("web");
   if (a.manifest.mobile?.android) out.push("mobile");
   return out;
-}
-
-/**
- * What the install dialogs say about the public-sharing capability. One
- * sentence for both the local and the cloud install, so the person approves
- * the same words either way.
- */
-export function publicSharingConsent(manifest: ManifestSummary): string | null {
-  if (manifest.infraRequirements?.publicSharing !== true) return null;
-  const name = manifest.name ?? manifest.id ?? "This app";
-  return `${name} can publish files to public links. Anyone with a link can see what it shows, without signing in.`;
 }

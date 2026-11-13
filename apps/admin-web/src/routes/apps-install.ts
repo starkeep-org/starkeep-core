@@ -1,13 +1,8 @@
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
-import { starkeepDir } from "@starkeep/app-client";
-import { join } from "node:path";
 import { stopById } from "../lib/daemon-control";
 import { readFolderManifest } from "@starkeep/admin-installer/app-discovery";
+import { installLocalApp } from "@starkeep/admin-installer/local-app-install";
 import { appSource, idMismatch } from "../lib/app-scan";
 import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
-
-const STARKEEP_DIR = starkeepDir();
-const APP_CREDS_DIR = join(STARKEEP_DIR, "app-creds");
 
 /**
  * Install an app locally. Body: `{ appId, approved: true }`.
@@ -67,88 +62,20 @@ export async function POST(req: Request) {
   }
   const manifest = folder.raw;
 
-  let installResp: Response;
-  try {
-    installResp = await fetch(`${localDataServerUrlFromEnv()}/admin/apps/install`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ manifest, sourceDir }),
-    });
-  } catch (err) {
-    return Response.json(
-      {
-        error: "Could not reach local-data-server",
-        detail: err instanceof Error ? err.message : String(err),
-      },
-      { status: 502 },
-    );
+  const result = await installLocalApp({
+    manifest,
+    sourceDir,
+    dataServerUrl: localDataServerUrlFromEnv(),
+  });
+  if (!result.ok) {
+    const { error, details } = result;
+    return Response.json(details ? { error, details } : { error }, { status: result.status });
   }
-
-  if (!installResp.ok) {
-    return Response.json(await installFailure(installResp), { status: installResp.status });
-  }
-
-  const result = (await installResp.json()) as { appId: string; hmacSecret: string };
-
-  // Persist the per-app secret under the host's Starkeep data dir so apps can
-  // load it without depending on their cwd and so source repos stay clean of
-  // host-machine state.
-  mkdirSync(APP_CREDS_DIR, { recursive: true, mode: 0o700 });
-  const secretPath = join(APP_CREDS_DIR, `${appId}.json`);
-  writeFileSync(
-    secretPath,
-    JSON.stringify(
-      {
-        appId: result.appId,
-        hmacSecret: result.hmacSecret,
-        dataServerUrl: localDataServerUrlFromEnv(),
-      },
-      null,
-      2,
-    ) + "\n",
-    { mode: 0o600 },
-  );
-  // writeFileSync's mode is only honored on file creation — a reinstall over
-  // an existing 0644 file would leave the loose perms. chmod unconditionally.
-  chmodSync(secretPath, 0o600);
 
   // If the app daemon is already running, stop it so the user restarts it and
   // picks up the (possibly rotated) HMAC secret — @starkeep/app-client caches
   // credentials per process and has no file-watch invalidation.
   await stopById(appId);
 
-  return Response.json({ appId: result.appId, secretPath, ok: true });
-}
-
-/**
- * Turn local-data-server's install refusal into `{ error, details? }`, where
- * `error` is a sentence the UI shows as is and `details` lists each manifest
- * validation error. local-data-server answers 400
- * `{ error: "ManifestValidationError", details }` or 500 `{ error, message }`.
- */
-async function installFailure(resp: Response): Promise<{ error: string; details?: string[] }> {
-  const text = await resp.text();
-  const parsed = parseJsonObject(text);
-  if (parsed?.error === "ManifestValidationError" && Array.isArray(parsed.details)) {
-    return {
-      error: "The app's manifest failed validation.",
-      details: parsed.details.map(String),
-    };
-  }
-  if (typeof parsed?.message === "string") {
-    return { error: `Install failed: ${parsed.message}` };
-  }
-  const quoted = text.trim() ? `: ${text.trim().slice(0, 500)}` : "";
-  return { error: `Install failed: local-data-server answered ${resp.status}${quoted}` };
-}
-
-function parseJsonObject(
-  text: string,
-): { error?: unknown; message?: unknown; details?: unknown } | null {
-  try {
-    const value: unknown = JSON.parse(text);
-    return typeof value === "object" && value !== null ? value : null;
-  } catch {
-    return null;
-  }
+  return Response.json({ appId: result.appId, secretPath: result.secretPath, ok: true });
 }

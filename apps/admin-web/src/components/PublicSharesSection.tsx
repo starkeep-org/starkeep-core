@@ -119,7 +119,7 @@ export function PublicSharesSection() {
 
       <CollapsibleContent className="space-y-4">
         <p className="text-sm text-muted-foreground">
-          Anyone holding one of these links can see what it shows without signing in.
+          Anyone who has a valid link can view the shared content without signing in.
         </p>
         {message && (
           <p className="text-sm" role="status">

@@ -11,6 +11,7 @@ export default defineConfig({
     "src/web.ts",
     "src/hono.ts",
     "src/local.ts",
+    "src/content-disposition.ts",
   ],
   format: ["esm", "cjs"],
   dts: true,

@@ -30,6 +30,8 @@ export async function createSharedSchema(pg: PGlite): Promise<void> {
       mime_type text,
       size_bytes bigint NOT NULL,
       original_filename text,
+      original_created_at text,
+      original_updated_at text,
       origin_app_id text NOT NULL,
       parent_id text,
       stand_in_role text CHECK (stand_in_role IN ('canonical', 'smaller')),

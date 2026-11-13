@@ -2124,6 +2124,8 @@ async function main() {
             mime_type: r.mimeType,
             size_bytes: r.sizeBytes,
             original_filename: r.originalFilename,
+            original_created_at: r.originalCreatedAt,
+            original_updated_at: r.originalUpdatedAt,
             parent_id: r.parentId,
             stand_in_role: r.standInRole,
             fidelity: r.fidelity,
@@ -2144,13 +2146,7 @@ async function main() {
             // metadata case above (no metadata row = genuinely not extracted).
             ...(includeLabels
               ? {
-                  labels: (labelsById.get(r.id) ?? []).map((l) => ({
-                    app_id: l.appId,
-                    key: l.key,
-                    value: l.value,
-                    // Wire/UI rendering only — storage has no such string.
-                    label: `${l.appId}/${l.key}`,
-                  })),
+                  labels: (labelsById.get(r.id) ?? []).map(labelOnWire),
                 }
               : {}),
             ...(standInSummaries.has(r.id)
@@ -2371,6 +2367,8 @@ async function main() {
           sizeBytes: number;
           objectStorageKey: string | null;
           originalFilename: string | null;
+          originalCreatedAt: string | null;
+          originalUpdatedAt: string | null;
           parentId: string | null;
           standInRole: string | null;
           fidelity: number | null;
@@ -2385,6 +2383,8 @@ async function main() {
           size_bytes: r.sizeBytes,
           object_storage_key: r.objectStorageKey,
           original_filename: r.originalFilename,
+          original_created_at: r.originalCreatedAt,
+          original_updated_at: r.originalUpdatedAt,
           parent_id: r.parentId,
           stand_in_role: r.standInRole,
           fidelity: r.fidelity,
@@ -4168,6 +4168,8 @@ async function main() {
             mime_type: record.mimeType,
             size_bytes: record.sizeBytes,
             original_filename: record.originalFilename,
+            original_created_at: record.originalCreatedAt,
+            original_updated_at: record.originalUpdatedAt,
             parent_id: record.parentId,
             stand_in_role: record.standInRole,
             fidelity: record.fidelity,
@@ -4191,7 +4193,7 @@ async function main() {
                     (await databaseAdapter.getLabelsByRecordIds([record.id])).get(record.id) ?? []
                   )
                     .filter((l) => !l.deletedAt)
-                    .map((l) => ({ app_id: l.appId, key: l.key, value: l.value })),
+                    .map(labelOnWire),
                 }
               : {}),
             ...(await (async () => {
@@ -4734,6 +4736,20 @@ function isPeerGoneError(err: unknown): boolean {
     code === "EPIPE" ||
     code === "ERR_STREAM_DESTROYED"
   );
+}
+
+/**
+ * One label as the record routes send it. The list route and the single-record
+ * route share this shape, so a client renders `label=value` from either.
+ */
+function labelOnWire(l: RecordLabel) {
+  return {
+    app_id: l.appId,
+    key: l.key,
+    value: l.value,
+    // Wire/UI rendering only — storage has no such string.
+    label: `${l.appId}/${l.key}`,
+  };
 }
 
 function json(res: import("node:http").ServerResponse, body: unknown) {

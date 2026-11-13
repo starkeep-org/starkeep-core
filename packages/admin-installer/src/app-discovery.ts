@@ -53,6 +53,15 @@ export const DEFAULT_APPS_DIR = resolve(
 );
 
 /** Expand a leading `~` to the user's home folder. */
+/**
+ * The folder a person typed, resolved where they typed it. `pnpm --filter`
+ * runs a script inside its package's folder and names the folder pnpm started
+ * in as `INIT_CWD`, so a relative path resolves against that.
+ */
+export function typedPath(p: string): string {
+  return resolve(process.env.INIT_CWD ?? process.cwd(), expandHome(p));
+}
+
 export function expandHome(p: string): string {
   if (p === "~") return homedir();
   if (p.startsWith("~/")) return join(homedir(), p.slice(2));

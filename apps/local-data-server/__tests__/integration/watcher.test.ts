@@ -13,6 +13,8 @@ import {
   unlink,
   utimes,
   truncate,
+  rename,
+  stat,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -175,6 +177,43 @@ describe("live filesystem events", () => {
       const records = await listRecords(drive);
       expect(records.map((r) => r.original_filename)).toContain("c.png");
     });
+  });
+
+  it("records the file's own dates, on the list and on the single record", async () => {
+    // Dated before the watcher sees it: a rename keeps the mtime, so the
+    // record's capture time is the file's 2020 date, not today.
+    const staging = await mkdtemp(join(tmpdir(), "starkeep-dated-"));
+    const staged = join(staging, "dated.txt");
+    await writeFile(staged, "dated-bytes");
+    const mtime = new Date("2020-01-02T03:04:05.000Z");
+    await utimes(staged, mtime, mtime);
+    const birth = (await stat(staged)).birthtimeMs;
+    await rename(staged, join(watchDir, "dated.txt"));
+    await rm(staging, { recursive: true, force: true });
+
+    const record = await eventually(async () => {
+      const found = (await listRecords(drive)).find((r) => r.original_filename === "dated.txt");
+      expect(found).toBeDefined();
+      return found!;
+    });
+    expect(record["original_updated_at"]).toBe(mtime.toISOString());
+    // Birth time is the filesystem's to report; 0 means it reports none.
+    expect(record["original_created_at"]).toBe(birth > 0 ? new Date(birth).toISOString() : null);
+    // Starkeep's own record times are a separate fact.
+    expect(record["created_at"]).not.toBe(mtime.toISOString());
+
+    const single = (await (await drive.fetch(`/data/records/${record.id}`)).json()) as {
+      record: Record<string, unknown>;
+    };
+    expect(single.record["original_updated_at"]).toBe(mtime.toISOString());
+    expect(single.record["original_created_at"]).toBe(record["original_created_at"]);
+
+    // The dates are filterable columns of the records grammar.
+    const where = encodeURIComponent(
+      JSON.stringify({ original_updated_at: { lt: "2021-01-01T00:00:00.000Z" } }),
+    );
+    const old = await listRecords(drive, `?where=${where}`);
+    expect(old.map((r) => r.original_filename)).toEqual(["dated.txt"]);
   });
 
   it("a modified file is re-ingested under a new record", async () => {

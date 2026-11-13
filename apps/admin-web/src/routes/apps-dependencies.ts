@@ -17,6 +17,7 @@
 import { readFolderManifest, type FolderManifest } from "@starkeep/admin-installer/app-discovery";
 import {
   resolveInstallCommand,
+  unattendedArgs,
   type CommandResolution,
   type CommandSource,
 } from "@starkeep/admin-installer/approved-commands";
@@ -79,7 +80,8 @@ export async function POST(req: Request, { params }: Params) {
     key: `deps:${encodeURIComponent(appId)}`,
     noun: "dependency install",
     command: resolution.command,
-    args: resolution.args,
+    // No terminal answers pnpm here; see `unattendedArgs`.
+    args: unattendedArgs(resolution.command, resolution.args),
     cwd: resolution.cwd,
     env: process.env,
     reattach: body.reattach === true,

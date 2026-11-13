@@ -226,6 +226,9 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
       .addColumn("mime_type", "text")
       .addColumn("size_bytes", "bigint", (c) => c.notNull())
       .addColumn("original_filename", "text")
+      // The source file's own dates, in ISO 8601; see DataRecord.originalCreatedAt.
+      .addColumn("original_created_at", "text")
+      .addColumn("original_updated_at", "text")
       .addColumn("origin_app_id", "text", (c) => c.notNull())
       .addColumn("parent_id", "text")
       .addColumn("stand_in_role", "text", (c) =>
@@ -250,6 +253,11 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
       ["canonical_threshold", "integer"],
       ["self_canonical", "boolean"],
       ["stand_in_slot", "text"],
+      // TEMPORARY: the source file's dates, for a cluster created before
+      // 2026-11-13. Replaced by the schema versioning plan at
+      // ~/projects/starkeep/plan-schema-and-bootstrap-versioning-2026-11-08.md.
+      ["original_created_at", "text"],
+      ["original_updated_at", "text"],
     ] as const) {
       await sql
         .raw(`ALTER TABLE shared.records ADD COLUMN IF NOT EXISTS ${column} ${type}`)

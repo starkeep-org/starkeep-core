@@ -82,6 +82,8 @@ const FIELD_MAP: Record<string, string> = {
   originAppId: "origin_app_id",
   parentId: "parent_id",
   originalFilename: "original_filename",
+  originalCreatedAt: "original_created_at",
+  originalUpdatedAt: "original_updated_at",
   standInRole: "stand_in_role",
   fidelity: "fidelity",
   canonicalThreshold: "canonical_threshold",

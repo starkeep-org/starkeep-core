@@ -46,6 +46,7 @@
  */
 
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import { contentDisposition } from "@starkeep/app-client/content-disposition";
 import {
   canRead,
   isStandInOriginal,
@@ -617,8 +618,8 @@ export interface PublicFileResponse {
  * The file takes the share's title for its name, with the served file's
  * extension when the title lacks it: the original's for an original, and the
  * stand-in's format for a stand-in. A stand-in's name drops the original's
- * extension first. `filename` holds an ASCII fallback, and `filename*`
- * holds the UTF-8 form.
+ * extension first. `contentDisposition` from `@starkeep/app-client` builds
+ * the header, the same construction Drive's file route uses.
  */
 export function publicFileResponse(
   title: string,
@@ -627,7 +628,7 @@ export function publicFileResponse(
 ): PublicFileResponse {
   const originalExt = originalFilename?.match(/\.([A-Za-z0-9]{1,10})$/)?.[1] ?? null;
   const servedExt = served.isOriginal ? originalExt : (served.type.split("/")[1] ?? null);
-  let base = title.replace(/[\u0000-\u001f\u007f"\\/]/g, "_").trim() || "download";
+  let base = title.trim() || "download";
   if (
     !served.isOriginal &&
     originalExt &&
@@ -639,23 +640,11 @@ export function publicFileResponse(
     servedExt && !base.toLowerCase().endsWith(`.${servedExt.toLowerCase()}`)
       ? `${base}.${servedExt}`
       : base;
-  const ascii = name.replace(/[^\x20-\x7e]/g, "_");
   const inline = inlineContentType(served.type);
   return {
     contentType: inline ?? "application/octet-stream",
-    disposition: `${inline ? "inline" : "attachment"}; filename="${ascii}"; filename*=UTF-8''${encodeRfc8187(name)}`,
+    disposition: contentDisposition(name, { inline: inline !== null }),
   };
-}
-
-/**
- * Percent-encode a value for an RFC 8187 `ext-value`, which admits fewer
- * characters than `encodeURIComponent` leaves alone.
- */
-function encodeRfc8187(value: string): string {
-  return encodeURIComponent(value).replace(
-    /['()*]/g,
-    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
-  );
 }
 
 // ---------------------------------------------------------------------------

@@ -51,6 +51,11 @@
       "types": "./dist/local.d.ts",
       "import": "./dist/local.js",
       "require": "./dist/local.cjs"
+    },
+    "./content-disposition": {
+      "types": "./dist/content-disposition.d.ts",
+      "import": "./dist/content-disposition.js",
+      "require": "./dist/content-disposition.cjs"
     }
   },
   "files": [

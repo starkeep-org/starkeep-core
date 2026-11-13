@@ -5,7 +5,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { configPath } from "@starkeep/app-client";
 import { appManifestSchema, type AppManifest } from "@starkeep/admin-manifest";
 import type { Registry } from "./registry";
@@ -15,7 +15,7 @@ import {
   type CommandResolution,
   type CommandSource,
 } from "./approved-commands";
-import { expandHome, MANIFEST_FILE, scanApps } from "./app-discovery";
+import { MANIFEST_FILE, scanApps, typedPath } from "./app-discovery";
 
 export interface StarkeepCliConfig {
   stackPrefix: string;
@@ -137,7 +137,7 @@ export function appDirFor(
   appDir: string | undefined,
 ): string {
   if (appDir === undefined) return resolveAppDir(config, appId);
-  const dir = resolve(expandHome(appDir));
+  const dir = typedPath(appDir);
   const manifestPath = join(dir, MANIFEST_FILE);
   let id: unknown;
   try {
