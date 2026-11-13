@@ -411,11 +411,11 @@ export async function installCloudDataServer(
 
   const managerCreds = await roleChain([config.managerRoleArn]);
 
-  // Step 0: Find or create the two sign-in clients, as admin-app. The broker's
-  // environment and the gateway's authorizers name both, so their ids must
+  // Step 0: Find or create the sign-in clients, as admin-app. The broker's
+  // environment and the gateway's authorizers name them, so their ids must
   // exist before Pulumi runs; their callbacks follow in step 4.4, once the
   // CloudFront domain exists.
-  console.log("Finding or creating the cloud-apps and mobile-apps sign-in clients…");
+  console.log("Finding or creating the cloud-apps, mobile-apps and connectors sign-in clients…");
   const signInClients = await findOrCreateAppSignInClients({
     stackPrefix: config.stackPrefix,
     region: config.region,
@@ -564,6 +564,7 @@ export async function installCloudDataServer(
       userPoolId: config.userPoolId,
       cloudAppsUserPoolClientId: signInClients.cloudAppsClientId,
       mobileAppsUserPoolClientId: signInClients.mobileAppsClientId,
+      connectorsUserPoolClientId: signInClients.connectorsClientId,
       deviceUserPoolClientId: config.deviceUserPoolClientId,
       cognitoDomain: config.cognitoDomain,
       ephemeral: config.ephemeral ?? false,
@@ -607,9 +608,10 @@ export async function installCloudDataServer(
     const functionArn = String(outputs.functionArn);
     const region = String(outputs.region);
 
-    // Step 4.4: Give both sign-in clients their full settings now that the
+    // Step 4.4: Give the sign-in clients their full settings now that the
     // CloudFront domain is known: the cloud-apps client's callback and logout
-    // address on the shared origin, and each client's branding style. As
+    // address on the shared origin, the connectors client's on the gateway's
+    // own hostname, and each client's branding style. As
     // admin-app, the only role with Cognito client grants.
     const signingDomain = String(outputs.cloudfrontSigningDomain);
     const hosts = signingHosts(
@@ -623,6 +625,7 @@ export async function installCloudDataServer(
       region: config.region,
       userPoolId: config.userPoolId,
       publicBaseUrls: hosts.map((h) => `https://${h}`),
+      gatewayBaseUrl: apiGatewayUrl,
       clients: signInClients,
       deploymentName: config.deploymentName,
     });

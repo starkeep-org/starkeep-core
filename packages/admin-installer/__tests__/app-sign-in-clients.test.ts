@@ -69,24 +69,30 @@ describe("findOrCreateAppSignInClients", () => {
         { ClientId: "admin1", ClientName: "sk-admin" },
         { ClientId: "cloud1", ClientName: "sk-cloud-apps" },
         { ClientId: "mobile1", ClientName: "sk-mobile-apps" },
+        { ClientId: "conn1", ClientName: "sk-connectors" },
       ],
     });
     expect(await findOrCreateAppSignInClients(POOL)).toEqual({
       cloudAppsClientId: "cloud1",
       mobileAppsClientId: "mobile1",
+      connectorsClientId: "conn1",
     });
     expect(cognito.commandCalls(CreateUserPoolClientCommand)).toHaveLength(0);
   });
 
   it("creates a missing client as a public client with no password flow", async () => {
-    cognito
-      .on(ListUserPoolClientsCommand)
-      .resolves({ UserPoolClients: [{ ClientId: "cloud1", ClientName: "sk-cloud-apps" }] });
+    cognito.on(ListUserPoolClientsCommand).resolves({
+      UserPoolClients: [
+        { ClientId: "cloud1", ClientName: "sk-cloud-apps" },
+        { ClientId: "conn1", ClientName: "sk-connectors" },
+      ],
+    });
     cognito.on(CreateUserPoolClientCommand).resolves({ UserPoolClient: { ClientId: "mobile2" } });
 
     expect(await findOrCreateAppSignInClients(POOL)).toEqual({
       cloudAppsClientId: "cloud1",
       mobileAppsClientId: "mobile2",
+      connectorsClientId: "conn1",
     });
     const input = cognito.commandCalls(CreateUserPoolClientCommand)[0]!.args[0].input;
     expect(input).toMatchObject({
@@ -102,6 +108,25 @@ describe("findOrCreateAppSignInClients", () => {
     ]);
   });
 
+  it("creates the connectors client with ten-year refresh tokens and fifteen-minute ID tokens", async () => {
+    cognito.on(ListUserPoolClientsCommand).resolves({
+      UserPoolClients: [
+        { ClientId: "cloud1", ClientName: "sk-cloud-apps" },
+        { ClientId: "mobile1", ClientName: "sk-mobile-apps" },
+      ],
+    });
+    cognito.on(CreateUserPoolClientCommand).resolves({ UserPoolClient: { ClientId: "conn2" } });
+
+    expect((await findOrCreateAppSignInClients(POOL)).connectorsClientId).toBe("conn2");
+    expect(cognito.commandCalls(CreateUserPoolClientCommand)[0]!.args[0].input).toMatchObject({
+      ClientName: "sk-connectors",
+      GenerateSecret: false,
+      IdTokenValidity: 15,
+      RefreshTokenValidity: 3650,
+      EnableTokenRevocation: true,
+    });
+  });
+
   it("follows the client list across pages", async () => {
     cognito
       .on(ListUserPoolClientsCommand)
@@ -110,6 +135,7 @@ describe("findOrCreateAppSignInClients", () => {
         UserPoolClients: [
           { ClientId: "cloud1", ClientName: "sk-cloud-apps" },
           { ClientId: "mobile1", ClientName: "sk-mobile-apps" },
+          { ClientId: "conn1", ClientName: "sk-connectors" },
         ],
       });
     expect((await findOrCreateAppSignInClients(POOL)).cloudAppsClientId).toBe("cloud1");
@@ -124,11 +150,15 @@ describe("configureAppSignInClients", () => {
     cognito.on(DescribeUserPoolClientCommand, { ClientId: "mobile1" }).resolves({
       UserPoolClient: MOBILE,
     });
+    cognito
+      .on(DescribeUserPoolClientCommand, { ClientId: "conn1" })
+      .resolves({ UserPoolClient: { ...MOBILE, ClientId: "conn1", ClientName: "sk-connectors" } });
 
     await configureAppSignInClients({
       ...POOL,
       publicBaseUrls: ["https://d1.cloudfront.net/"],
-      clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1" },
+      clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1", connectorsClientId: "conn1" },
+      gatewayBaseUrl: "https://abc123.execute-api.us-east-2.amazonaws.com",
       deploymentName: "Koller Family",
     });
 
@@ -149,6 +179,28 @@ describe("configureAppSignInClients", () => {
     expect(mobile!.CallbackURLs).toEqual(["memo-mobile://auth/callback"]);
   });
 
+  it("gives the connectors client its callback on the gateway's own hostname alone", async () => {
+    cognito.on(DescribeUserPoolClientCommand).resolves({ UserPoolClient: MOBILE });
+
+    await configureAppSignInClients({
+      ...POOL,
+      publicBaseUrls: ["https://photos.example.com", "https://d1.cloudfront.net"],
+      clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1", connectorsClientId: "conn1" },
+      gatewayBaseUrl: "https://abc123.execute-api.us-east-2.amazonaws.com/",
+      deploymentName: "Koller Family",
+    });
+
+    // The consent pages never answer on the shared origin, where app script
+    // runs, so no CloudFront name appears here.
+    expect(cognito.commandCalls(UpdateUserPoolClientCommand)[2]!.args[0].input).toMatchObject({
+      CallbackURLs: ["https://abc123.execute-api.us-east-2.amazonaws.com/connect/callback"],
+      LogoutURLs: ["https://abc123.execute-api.us-east-2.amazonaws.com/connections"],
+      AllowedOAuthFlows: ["code"],
+      RefreshTokenValidity: 3650,
+      IdTokenValidity: 15,
+    });
+  });
+
   it("lists a callback and a logout address on every name the cloud answers on", async () => {
     cognito.on(DescribeUserPoolClientCommand).resolves({ UserPoolClient: MOBILE });
 
@@ -156,7 +208,8 @@ describe("configureAppSignInClients", () => {
       ...POOL,
       // The custom domain, and the CloudFront name that keeps answering.
       publicBaseUrls: ["https://photos.example.com", "https://d1.cloudfront.net/"],
-      clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1" },
+      clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1", connectorsClientId: "conn1" },
+      gatewayBaseUrl: "https://abc123.execute-api.us-east-2.amazonaws.com",
       deploymentName: "Koller Family",
     });
 
@@ -178,7 +231,8 @@ describe("configureAppSignInClients", () => {
     await configureAppSignInClients({
       ...POOL,
       publicBaseUrls: ["https://d1.cloudfront.net", "https://d1.cloudfront.net/"],
-      clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1" },
+      clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1", connectorsClientId: "conn1" },
+      gatewayBaseUrl: "https://abc123.execute-api.us-east-2.amazonaws.com",
       deploymentName: "Koller Family",
     });
 
@@ -196,7 +250,8 @@ describe("configureAppSignInClients", () => {
     await configureAppSignInClients({
       ...POOL,
       publicBaseUrls: ["https://d1.cloudfront.net"],
-      clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1" },
+      clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1", connectorsClientId: "conn1" },
+      gatewayBaseUrl: "https://abc123.execute-api.us-east-2.amazonaws.com",
       deploymentName: "Koller Family",
     });
 
@@ -206,6 +261,7 @@ describe("configureAppSignInClients", () => {
     expect(created).toEqual([
       { UserPoolId: POOL.userPoolId, ClientId: "cloud1", ...brandingStyle("Koller Family") },
       { UserPoolId: POOL.userPoolId, ClientId: "mobile1", ...brandingStyle("Koller Family") },
+      { UserPoolId: POOL.userPoolId, ClientId: "conn1", ...brandingStyle("Koller Family") },
     ]);
     expect(cognito.commandCalls(UpdateManagedLoginBrandingCommand)).toHaveLength(0);
   });
@@ -216,12 +272,15 @@ describe("configureAppSignInClients", () => {
       .on(DescribeManagedLoginBrandingByClientCommand, { ClientId: "cloud1" })
       .resolves({ ManagedLoginBranding: { ManagedLoginBrandingId: "brand-cloud" } })
       .on(DescribeManagedLoginBrandingByClientCommand, { ClientId: "mobile1" })
-      .resolves({ ManagedLoginBranding: { ManagedLoginBrandingId: "brand-mobile" } });
+      .resolves({ ManagedLoginBranding: { ManagedLoginBrandingId: "brand-mobile" } })
+      .on(DescribeManagedLoginBrandingByClientCommand, { ClientId: "conn1" })
+      .resolves({ ManagedLoginBranding: { ManagedLoginBrandingId: "brand-conn" } });
 
     await configureAppSignInClients({
       ...POOL,
       publicBaseUrls: ["https://d1.cloudfront.net"],
-      clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1" },
+      clients: { cloudAppsClientId: "cloud1", mobileAppsClientId: "mobile1", connectorsClientId: "conn1" },
+      gatewayBaseUrl: "https://abc123.execute-api.us-east-2.amazonaws.com",
       deploymentName: "Koller Family",
     });
 
@@ -232,6 +291,7 @@ describe("configureAppSignInClients", () => {
     expect(updated).toEqual([
       { UserPoolId: POOL.userPoolId, ManagedLoginBrandingId: "brand-cloud", ...style },
       { UserPoolId: POOL.userPoolId, ManagedLoginBrandingId: "brand-mobile", ...style },
+      { UserPoolId: POOL.userPoolId, ManagedLoginBrandingId: "brand-conn", ...style },
     ]);
     expect(cognito.commandCalls(CreateManagedLoginBrandingCommand)).toHaveLength(0);
   });

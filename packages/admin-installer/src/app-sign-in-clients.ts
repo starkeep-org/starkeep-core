@@ -1,17 +1,19 @@
 /**
- * The two Cognito app clients that sign people in on the managed login page:
- * one for cloud apps and one for mobile apps.
+ * The three Cognito app clients that sign people in on the managed login
+ * page: one for cloud apps, one for mobile apps, and one for the consent and
+ * connections pages that grant outside clients access ("connectors").
  *
- * Neither client lives in the bootstrap stack. The cloud-apps client's callback
+ * No client lives in the bootstrap stack. The cloud-apps client's callback
  * names the CloudFront domain, which exists only after the cloud data server
- * install, and the mobile-apps client's callbacks change with each app install.
- * The admin-app role creates and updates both through the SDK.
+ * install, the connectors client's names the gateway's own hostname, and the
+ * mobile-apps client's callbacks change with each app install. The admin-app
+ * role creates and updates all three through the SDK.
  *
  * `UpdateUserPoolClient` resets every setting the call leaves out, so every
  * update here reads the client first and writes its whole configuration back.
  *
- * The identity pool trusts neither client, so a token from either reaches no
- * AWS role.
+ * The identity pool trusts none of the three, so a token from any of them
+ * reaches no AWS role.
  */
 import {
   CognitoIdentityProviderClient,
@@ -27,7 +29,11 @@ import {
   type UpdateUserPoolClientCommandInput,
   type UserPoolClientType,
 } from "@aws-sdk/client-cognito-identity-provider";
-import { escapeMarkup } from "@starkeep/protocol-primitives";
+import {
+  CONNECT_CALLBACK_ROUTE,
+  CONNECTIONS_ROUTE,
+  escapeMarkup,
+} from "@starkeep/protocol-primitives";
 import { ADMIN_STAR, starBody, starSvg } from "./starkeep-star";
 
 export interface AppSignInClientIds {
@@ -35,6 +41,12 @@ export interface AppSignInClientIds {
   cloudAppsClientId: string;
   /** Mobile apps: the broker's mobile branch, with an attested key. */
   mobileAppsClientId: string;
+  /**
+   * The consent and connections pages. The broker keeps one refresh token
+   * from this client per delegation, to check that the user may still use
+   * data. No data branch and no gateway authorizer accepts its tokens.
+   */
+  connectorsClientId: string;
 }
 
 interface PoolRef {
@@ -49,6 +61,10 @@ export function cloudAppsClientName(stackPrefix: string): string {
 
 export function mobileAppsClientName(stackPrefix: string): string {
   return `${stackPrefix}-mobile-apps`;
+}
+
+export function connectorsClientName(stackPrefix: string): string {
+  return `${stackPrefix}-connectors`;
 }
 
 /** The address a mobile app's sign-in returns to, from its manifest's scheme. */
@@ -92,6 +108,20 @@ const CLOUD_APPS_LIFETIMES = {
  * user keeps syncing, as on the device client.
  */
 const MOBILE_APPS_LIFETIMES = {
+  TokenValidityUnits: { IdToken: "minutes", AccessToken: "minutes", RefreshToken: "days" },
+  IdTokenValidity: 15,
+  AccessTokenValidity: 15,
+  RefreshTokenValidity: 3650,
+} as const;
+
+/**
+ * Ten-year refresh tokens, because a delegation lives as long as the user
+ * chose and its stored refresh token must outlive it. Fifteen-minute ID
+ * tokens bound how long a disabled or ungrouped user's outside clients keep
+ * reaching data: the broker mints one from the stored refresh token and
+ * checks its groups.
+ */
+const CONNECTORS_LIFETIMES = {
   TokenValidityUnits: { IdToken: "minutes", AccessToken: "minutes", RefreshToken: "days" },
   IdTokenValidity: 15,
   AccessTokenValidity: 15,
@@ -305,6 +335,7 @@ export async function findOrCreateAppSignInClients(pool: PoolRef): Promise<AppSi
   return {
     cloudAppsClientId: await ensure(cloudAppsClientName(pool.stackPrefix), CLOUD_APPS_LIFETIMES),
     mobileAppsClientId: await ensure(mobileAppsClientName(pool.stackPrefix), MOBILE_APPS_LIFETIMES),
+    connectorsClientId: await ensure(connectorsClientName(pool.stackPrefix), CONNECTORS_LIFETIMES),
   };
 }
 
@@ -328,6 +359,28 @@ export function cloudAppsClientSettings(
     AllowedOAuthScopes: [...OAUTH_ON.AllowedOAuthScopes],
     CallbackURLs: bases.map((b) => `${b}/auth/callback`),
     LogoutURLs: bases.map((b) => `${b}/auth/signed-out`),
+  };
+}
+
+/**
+ * The connectors client's full settings. The consent and connections pages
+ * answer only on the gateway's own hostname, never on the shared origin where
+ * app script runs, so the callback names that hostname alone.
+ */
+export function connectorsClientSettings(
+  gatewayBaseUrl: string,
+): Partial<UpdateUserPoolClientCommandInput> {
+  const base = gatewayBaseUrl.replace(/\/+$/, "");
+  return {
+    ...SHARED_SETTINGS,
+    ...OAUTH_ON,
+    ...CONNECTORS_LIFETIMES,
+    ExplicitAuthFlows: [...SHARED_SETTINGS.ExplicitAuthFlows],
+    SupportedIdentityProviders: [...SHARED_SETTINGS.SupportedIdentityProviders],
+    AllowedOAuthFlows: [...OAUTH_ON.AllowedOAuthFlows],
+    AllowedOAuthScopes: [...OAUTH_ON.AllowedOAuthScopes],
+    CallbackURLs: [`${base}${CONNECT_CALLBACK_ROUTE}`],
+    LogoutURLs: [`${base}${CONNECTIONS_ROUTE}`],
   };
 }
 
@@ -363,13 +416,15 @@ export function mobileAppsClientSettings(
 }
 
 /**
- * Bring both clients to their full settings once the CloudFront domain is
+ * Bring every client to its full settings once the CloudFront domain is
  * known, and give each its branding style. The mobile-apps client keeps the
  * callbacks that app installs registered.
  */
 export async function configureAppSignInClients(
   pool: PoolRef & {
     publicBaseUrls: readonly string[];
+    /** The gateway's own execute-api URL, where the consent pages answer. */
+    gatewayBaseUrl: string;
     clients: AppSignInClientIds;
     deploymentName: string;
   },
@@ -398,6 +453,19 @@ export async function configureAppSignInClients(
     client,
     pool.userPoolId,
     pool.clients.mobileAppsClientId,
+    pool.deploymentName,
+  );
+
+  const connectors = await describe(client, pool.userPoolId, pool.clients.connectorsClientId);
+  await client.send(
+    new UpdateUserPoolClientCommand(
+      updateInputFrom(connectors, connectorsClientSettings(pool.gatewayBaseUrl)),
+    ),
+  );
+  await ensureBranding(
+    client,
+    pool.userPoolId,
+    pool.clients.connectorsClientId,
     pool.deploymentName,
   );
 }
