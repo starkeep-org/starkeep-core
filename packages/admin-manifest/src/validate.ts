@@ -1,5 +1,10 @@
 import type { AppManifest } from "./schema.js";
-import { appManifestSchema, publicPathCovers, SIGN_IN_PATH } from "./schema.js";
+import {
+  appManifestSchema,
+  PLATFORM_PUBLIC_PATHS,
+  publicPathCovers,
+  SIGN_IN_PATH,
+} from "./schema.js";
 import { z } from "zod";
 import { isKnownType, typeCategory, isGrantableCategory } from "@starkeep/protocol-primitives";
 import {
@@ -96,7 +101,59 @@ function editDistance(a: string, b: string): number {
   return prev[b.length]!;
 }
 
+/**
+ * Whether a `publicPaths` entry reaches no further than one of `allowed`. A
+ * literal entry must be covered by an allowed entry; a wildcard entry must sit
+ * inside an allowed wildcard, so `/_immutable/fonts/*` passes under
+ * `/_immutable/*` and `/sign-in/*` does not pass under the literal `/sign-in`.
+ */
+function withinAllowed(entry: string, allowed: readonly string[]): boolean {
+  if (!entry.endsWith("/*")) return allowed.some((a) => publicPathCovers(a, entry));
+  const bare = entry.slice(0, -2);
+  return allowed.some((a) => a.endsWith("/*") && publicPathCovers(a, bare));
+}
+
+const RETIRED_PUBLIC_MESSAGE =
+  `auth "public" is retired. An app's own code may not answer a caller the platform has not ` +
+  `checked. For a browser page, use auth "session" and list the page in publicPaths. For a ` +
+  `program outside Starkeep, such as an MCP client, give the route auth "delegated": the user ` +
+  `creates a token for it on the platform's consent page. An incoming webhook from a ` +
+  `third-party service is not supported yet.`;
+
+/**
+ * Every place a manifest still says `auth: "public"`, named with the reason
+ * and the replacement. Read from the raw manifest because the schema's own
+ * refusal of a route-level value arrives as an opaque union mismatch.
+ */
+function retiredPublicAuth(raw: unknown): string[] {
+  const handlers = (raw as { infraRequirements?: { compute?: { handlers?: unknown } } } | null)
+    ?.infraRequirements?.compute?.handlers;
+  if (!Array.isArray(handlers)) return [];
+  const errors: string[] = [];
+  handlers.forEach((handler: unknown, h) => {
+    if (typeof handler !== "object" || handler === null) return;
+    const { auth, routes } = handler as { auth?: unknown; routes?: unknown };
+    const at = `infraRequirements.compute.handlers.${h}`;
+    if (auth === "public") errors.push(`${at}.auth: ${RETIRED_PUBLIC_MESSAGE}`);
+    if (!Array.isArray(routes)) return;
+    routes.forEach((route: unknown, r) => {
+      if (
+        typeof route === "object" &&
+        route !== null &&
+        (route as { auth?: unknown }).auth === "public"
+      ) {
+        errors.push(`${at}.routes.${r}.auth: ${RETIRED_PUBLIC_MESSAGE}`);
+      }
+    });
+  });
+  return errors;
+}
+
 export function validateManifest(raw: unknown): ValidationResult {
+  const retired = retiredPublicAuth(raw);
+  if (retired.length > 0) {
+    return { valid: false, manifest: null, errors: retired, warnings: [], impliedCategories: [] };
+  }
   const result = appManifestSchema.safeParse(raw);
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -219,37 +276,44 @@ export function validateManifest(raw: unknown): ValidationResult {
 
   // --- Anonymous routes ------------------------------------------------
   //
-  // `auth: "public"` removes the Cognito authorizer from a gateway route. On a
-  // catch-all that is the entire app, including whatever server routes the
-  // bundle happens to mount — which is how the signing proxy at
-  // /api/local-data ended up answering the internet (postmortem 2026-08-23,
-  // root causes 3.1 and 3.4). The opt-out is still available, because a
-  // browser navigating to a URL cannot send a bearer token and the HTML shell
-  // has to be reachable. What it now costs is a `publicPaths` declaration
-  // naming the subpaths the opt-out was *for*, checked against the handler's
-  // real route table so it cannot name something the handler does not serve.
-  //
-  // `auth: "session"` is the better answer and the one a browser app should
-  // take: the catch-all carries the session authorizer, and each publicPaths
-  // entry is emitted as its own more-specific unauthenticated route. The
-  // "declare what the opt-out was for" rule therefore does not apply — there
-  // is no opt-out on the catch-all to account for — but the entries still have
-  // to name routes the handler serves, or the declaration describes a
-  // deployment that does not exist.
+  // No author can make a route anonymous. The schema refuses `auth: "public"`
+  // (retired 2026-11-13, item K), and the only anonymous routes left are the
+  // ones a `session` handler's `publicPaths` derive. Each entry becomes its
+  // own unauthenticated route, more specific than the gated catch-all, so the
+  // declaration is the reach. The rules below bound that reach to platform
+  // pages and static files, so no app code ever runs for an anonymous caller:
+  // an endpoint an app guarded itself, such as an MCP endpoint, would reopen
+  // the 2026-08-23 exposure one route at a time. An outside client calls a
+  // `delegated` route instead.
   for (const handler of manifest.infraRequirements.compute.handlers) {
-    const routes = resolveHandlerRoutes(handler);
-    // What the manifest actually wrote down, before publicPaths derivation —
-    // needed to tell an author's own `jwt` override from a route this file's
-    // rules just synthesized.
+    const where = `infraRequirements.compute.handlers["${handler.name}"]`;
+    // What the manifest wrote down, before publicPaths derivation — needed to
+    // tell an author's own override from a route the resolver synthesized.
     const declaredRoutes = declaredHandlerRoutes(handler);
-    const anonymous = routes.filter((r) => r.auth === "public");
-    // A derived route came from publicPaths itself, so it is not evidence that
-    // the declaration was needed — counting it would make the check circular.
-    const anonymousCatchAll = anonymous.filter((r) => r.catchAll && !r.derived);
+
+    for (const route of declaredRoutes.filter((r) => r.auth === "delegated")) {
+      // A delegated route hands an outside client's token to the app's code.
+      // A catch-all would hand it every path the bundle mounts, including the
+      // app's browser pages, so each delegated route names one path.
+      if (route.catchAll) {
+        errors.push(
+          `${where}: route "${route.declared}" has auth "delegated" on a catch-all. Name the ` +
+            `one path an outside client calls, such as "POST /mcp".`,
+        );
+      }
+    }
+
+    if (handler.publicPaths.length > 0 && handler.auth !== "session") {
+      errors.push(
+        `${where}: publicPaths needs auth "session". Under "${handler.auth}" no route is ` +
+          `anonymous, so the declaration would mislead a reviewer.`,
+      );
+      continue;
+    }
 
     if (handler.auth === "session" && handler.publicPaths.length === 0) {
       errors.push(
-        `infraRequirements.compute.handlers["${handler.name}"]: auth "session" gates every ` +
+        `${where}: auth "session" gates every ` +
           `route on this handler, including the one that serves the sign-in page. Declare ` +
           `"publicPaths" with at least the shell and the session routes (e.g. ` +
           `["/", "/_immutable/*", "/sign-in", "/api/session/*"]), or nobody can sign in.`,
@@ -257,54 +321,20 @@ export function validateManifest(raw: unknown): ValidationResult {
       continue;
     }
 
-    if (anonymous.length === 0 && handler.publicPaths.length > 0) {
-      errors.push(
-        `infraRequirements.compute.handlers["${handler.name}"]: publicPaths is declared but ` +
-          `no route on this handler is anonymous — every route carries the JWT authorizer, ` +
-          `so nothing here is public and the declaration would mislead a reviewer`,
-      );
-      continue;
-    }
-
-    if (anonymousCatchAll.length > 0 && handler.publicPaths.length === 0) {
-      errors.push(
-        `infraRequirements.compute.handlers["${handler.name}"]: route ` +
-          `"${anonymousCatchAll[0]!.declared}" is a catch-all with auth "public", which makes ` +
-          `EVERY path under /apps/${manifest.id}/ reachable without authentication — including ` +
-          `any data proxy, upload route, or admin route the bundle mounts. Declare ` +
-          `"publicPaths" listing the subpaths that are meant to be anonymous (e.g. ` +
-          `["/", "/_immutable/*"]), and give the rest an authenticated route ` +
-          `(a more specific route with auth "jwt" wins over {proxy+} at the gateway) or ` +
-          `enforce the end user in the handler itself.`,
-      );
-    }
-
     const seenPublicPaths = new Set<string>();
     for (const publicPath of handler.publicPaths) {
       if (seenPublicPaths.has(publicPath)) {
-        errors.push(
-          `infraRequirements.compute.handlers["${handler.name}"].publicPaths: duplicate entry ` +
-            `"${publicPath}"`,
-        );
+        errors.push(`${where}.publicPaths: duplicate entry "${publicPath}"`);
       }
       seenPublicPaths.add(publicPath);
 
-      // A wildcard entry is not a declaration; it is the absence of one.
-      //
-      // `publicPaths` is the single input that removes the gateway authorizer
-      // from a route, and every entry becomes its own more-specific
-      // unauthenticated route. An entry whose derived path is the catch-all
-      // therefore removes the authorizer from the catch-all itself, which
-      // un-gates every path the bundle mounts — the app's data proxy included.
-      // The anonymous-catch-all check above cannot see this: it filters derived
-      // routes out first, deliberately, because counting them would make it
-      // circular.
+      // A wildcard entry is not a declaration; it is the absence of one. Its
+      // derived route is the catch-all itself, which un-gates every path the
+      // bundle mounts.
       if (publicPathRoutePath(publicPath) === "/{proxy+}") {
-        const gated = declaredRoutes
-          .filter((r) => r.auth !== "public")
-          .map((r) => `"${r.declared}"`);
+        const gated = declaredRoutes.map((r) => `"${r.declared}"`);
         errors.push(
-          `infraRequirements.compute.handlers["${handler.name}"].publicPaths: "${publicPath}" ` +
+          `${where}.publicPaths: "${publicPath}" ` +
             `is a wildcard over the whole handler. It derives the route "ANY /{proxy+}" with no ` +
             `authorizer, so EVERY path under /apps/${manifest.id}/ becomes anonymous — ` +
             (gated.length > 0 ? `including ${gated.join(", ")}, which this handler gates — ` : ``) +
@@ -315,54 +345,43 @@ export function validateManifest(raw: unknown): ValidationResult {
         continue;
       }
 
-      if (handler.auth === "session") {
-        // The two checks below do not apply here, and running them would be
-        // circular: under `session` this very entry becomes a route, so it
-        // would always be found and always be public.
-        //
-        // What can still go wrong is the reverse — an entry that silently
-        // overrides a route the manifest deliberately gated. The derived
-        // public route replaces a declared route on the same path, so a
-        // `{ auth: "jwt" }` override sitting under a declared public path
-        // would be quietly discarded, and the manifest would say two opposite
-        // things about one path.
-        const shadowed = declaredRoutes.find(
-          (r) =>
-            r.path === publicPathRoutePath(publicPath) &&
-            r.auth !== "public" &&
-            // Only an override the author wrote. Replacing a route that merely
-            // inherited the handler's `session` default is the ordinary case —
-            // it is how `GET /` becomes public when `/` is declared.
-            r.authExplicit === true,
+      // Only platform pages and the handler's own static files. Anything else
+      // is app code answering an anonymous caller.
+      if (
+        !withinAllowed(publicPath, PLATFORM_PUBLIC_PATHS) &&
+        !withinAllowed(publicPath, handler.staticAssetPaths)
+      ) {
+        errors.push(
+          `${where}.publicPaths: "${publicPath}" is neither a platform page ` +
+            `(${PLATFORM_PUBLIC_PATHS.join(", ")}) nor one of this handler's staticAssetPaths. ` +
+            `An anonymous route may serve only those, so no app code runs for a caller the ` +
+            `platform has not checked. For a program outside Starkeep, such as an MCP client, ` +
+            `declare the route with auth "delegated": the user creates a token for it on the ` +
+            `platform's consent page. An incoming webhook from a third-party service is not ` +
+            `supported yet.`,
         );
-        if (shadowed) {
-          errors.push(
-            `infraRequirements.compute.handlers["${handler.name}"].publicPaths: "${publicPath}" ` +
-              `covers route "${shadowed.declared}", which the manifest declares as ` +
-              `auth "${shadowed.auth}". Declaring a path public and gating it are contradictory; ` +
-              `remove one.`,
-          );
-        }
-        continue;
       }
 
-      // The declaration is only worth anything if it describes the routes that
-      // actually exist. A path served by no route, or by a route that carries
-      // the authorizer, is an author mistake — most likely a stale entry left
-      // behind after the route table changed.
-      const selected = matchRoute(routes, "GET", probePathFor(publicPath));
-      if (!selected) {
+      // An entry must not silently override a route the manifest gated on
+      // purpose. The derived public route replaces a declared route on the
+      // same path, so an override sitting under a public path would be
+      // quietly discarded, and the manifest would say two opposite things
+      // about one path.
+      const shadowed = declaredRoutes.find(
+        (r) =>
+          r.path === publicPathRoutePath(publicPath) &&
+          r.auth !== "public" &&
+          // Only an override the author wrote. Replacing a route that merely
+          // inherited the handler's `session` default is the ordinary case —
+          // it is how `GET /` becomes public when `/` is declared.
+          r.authExplicit === true,
+      );
+      if (shadowed) {
         errors.push(
-          `infraRequirements.compute.handlers["${handler.name}"].publicPaths: "${publicPath}" is ` +
-            `not served by any route on this handler`,
-        );
-        continue;
-      }
-      if (selected.auth !== "public") {
-        errors.push(
-          `infraRequirements.compute.handlers["${handler.name}"].publicPaths: "${publicPath}" is ` +
-            `declared public but the gateway routes it to "${selected.declared}", which requires ` +
-            `authentication`,
+          `${where}.publicPaths: "${publicPath}" ` +
+            `covers route "${shadowed.declared}", which the manifest declares as ` +
+            `auth "${shadowed.auth}". Declaring a path public and gating it are contradictory; ` +
+            `remove one.`,
         );
       }
     }

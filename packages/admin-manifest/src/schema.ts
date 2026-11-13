@@ -61,24 +61,26 @@ export const sharedResourceRequirementSchema = z.discriminatedUnion("kind", [
  * One route on a compute handler, in either of two forms.
  *
  * The bare string (`"ANY /{proxy+}"`) takes the handler's own `auth`. The
- * object form adds a per-route `auth` override, which exists so a handler can
- * be **partly** anonymous: API Gateway v2 prefers a more specific route over
- * `{proxy+}`, so a `jwt` route for `ANY /api/data/{proxy+}` on the same Lambda
- * puts the authorizer back in front of that subtree while the document at `/`
- * stays reachable without a bearer token.
+ * object form adds a per-route `auth` override. API Gateway v2 prefers a more
+ * specific route over `{proxy+}`, so an override on one path changes the gate
+ * on that path alone.
  *
- * That granularity is the point. Before it existed the only control was
- * `auth: "public"` on a whole handler, and a handler that owns a catch-all is
- * the whole app — so every app that needed an anonymously-reachable HTML shell
- * (which is every browser app, since a navigation cannot send an
- * `Authorization` header) also published its data plane to the internet. See
- * the 2026-08-23 postmortem, root cause 3.1.
+ * `delegated` exists only as an override: it names one route an outside
+ * client, such as an MCP client, calls with a delegation token the user
+ * created on the platform's consent page. The gateway verifies the token and
+ * the platform enforces the delegation's mode on every data call the route
+ * makes. It is the replacement for the retired `auth: "public"`, which let an
+ * app's own code answer the internet and guard itself.
+ *
+ * No author can declare a route anonymous. The only anonymous routes are the
+ * ones a `session` handler's `publicPaths` derive, and those are bounded to
+ * platform pages and the handler's static files.
  */
 export const appComputeRouteSchema = z.union([
   z.string().min(1),
   z.strictObject({
     route: z.string().min(1),
-    auth: z.enum(["public", "jwt", "session"]),
+    auth: z.enum(["jwt", "session", "delegated"]),
   }),
 ]);
 
@@ -86,13 +88,11 @@ export const appComputeRouteSchema = z.union([
  * A path under the handler that is *intended* to be reachable without
  * authentication, e.g. `/`, `/_immutable/*`, `/sign-in`.
  *
- * Required whenever a handler leaves a catch-all route anonymous. A catch-all
- * publishes far more than the author is usually thinking about, so the
- * manifest has to say out loud which subpaths that was for; the installer
- * checks the list against the handler's real route table and prints it at
- * install time. The declaration does not change what the gateway enforces —
- * it is the artifact that makes the decision reviewable, and the thing a
- * reviewer can diff.
+ * Only a `session` handler declares these. Each entry becomes its own
+ * unauthenticated route, more specific than the gated catch-all, so the
+ * declaration is the anonymous reach exactly. The validator bounds every entry
+ * to a platform page ({@link PLATFORM_PUBLIC_PATHS}) or one of the handler's
+ * `staticAssetPaths`, so no app code runs for an anonymous caller.
  */
 const publicPathSchema = z
   .string()
@@ -163,7 +163,9 @@ const appComputeHandlerObjectSchema = z.strictObject({
    *   - `session` — the platform's session cookie, checked by a REQUEST
    *                 authorizer that can read `Cookie` where a JWT authorizer
    *                 cannot. This is the answer for a browser app.
-   *   - `public`  — no gate at all.
+   *
+   * There is no anonymous handler. A route an outside client calls takes a
+   * per-route `delegated` override (see {@link appComputeRouteSchema}).
    *
    * Under `session` the catch-all is gated and each `publicPaths` entry is
    * emitted as its own *more-specific* unauthenticated route, so API Gateway's
@@ -172,7 +174,7 @@ const appComputeHandlerObjectSchema = z.strictObject({
    * the declaration sitting beside it and every route an app added was
    * anonymous until someone noticed.
    */
-  auth: z.enum(["public", "jwt", "session"]).default("jwt"),
+  auth: z.enum(["jwt", "session"]).default("jwt"),
   publicPaths: z.array(publicPathSchema).default([]),
   /**
    * The subset of `publicPaths` this handler's bundle answers from files on
@@ -217,6 +219,21 @@ const appComputeHandlerObjectSchema = z.strictObject({
  * probe checks that it answers.
  */
 export const SIGN_IN_PATH = "/sign-in";
+
+/**
+ * The pages every browser app answers before sign-in: the shell, the sign-in
+ * page, the session refresh routes, the runtime config the sign-in page
+ * reads, and the two build-output prefixes. A `publicPaths` entry must be one
+ * of these or one of the handler's `staticAssetPaths`.
+ */
+export const PLATFORM_PUBLIC_PATHS: readonly string[] = [
+  "/",
+  SIGN_IN_PATH,
+  "/api/session/*",
+  "/starkeep-runtime-config",
+  "/_immutable/*",
+  "/_static/*",
+];
 
 /**
  * The prefixes CloudFront serves from the app assets bucket rather than from

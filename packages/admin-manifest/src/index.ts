@@ -9,6 +9,7 @@ export {
   publicPathCovers,
   SERVED_ASSET_PREFIXES,
   SIGN_IN_PATH,
+  PLATFORM_PUBLIC_PATHS,
   handlerUsesAppAssetsBucket,
   appSpecificSyncableSchema,
   syncableTableSchema,

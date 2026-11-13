@@ -56,7 +56,11 @@ export interface ResolvedRoute {
 }
 
 /** @see AppComputeHandler.auth */
-export type RouteAuth = "public" | "jwt" | "session";
+/**
+ * `public` never comes from a manifest: the schema refuses it. The resolver
+ * gives it to the routes a `session` handler's `publicPaths` derive.
+ */
+export type RouteAuth = "public" | "jwt" | "session" | "delegated";
 
 /** Normalize one manifest route entry to its string form and auth override. */
 function routeParts(route: AppComputeRoute): { key: string; auth?: RouteAuth } {
