@@ -34,7 +34,7 @@ The page shows each label as `<app>/<key>=<value>`, such as `example-app/tag=spo
 
 ### How dates read
 
-The Open file panel shows two kinds of date. "Record created" and "Record updated" say when Starkeep made and changed the record. "File created" and "File modified" are the source file's own dates. Only a file from a watched folder carries file dates. A file made from text or uploaded through the page shows "not reported."
+The Open file panel shows two kinds of date. "Record created" and "Record updated" say when Starkeep made and changed the record. "Original created" and "Original modified" are the source file's own dates. Only a file from a watched folder carries these dates. A file made from text or uploaded through the page shows a dash.
 
 ## Layout
 

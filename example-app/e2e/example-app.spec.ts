@@ -213,7 +213,7 @@ test("Example files: create one from text, with its counts inline", async () => 
   // text has no source file, so the source reported no dates.
   await expect(await cell("Open file", "Size", "Value")).toHaveText("41 bytes");
   await expect(await cell("Open file", "Record created", "Value")).toHaveText(/^\d{4}-\d\d-\d\dT/);
-  await expect(await cell("Open file", "File modified", "Value")).toHaveText("not reported");
+  await expect(await cell("Open file", "Original modified", "Value")).toHaveText("—");
   await expect(table("Types")).toContainText("example/plaintext");
   await expectLogged("POST", /^\/data\/files\?type=example%2Fplaintext$/, 200);
   await expectLogged("POST", /^\/data\/records$/, 200);
