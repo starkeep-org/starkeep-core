@@ -139,9 +139,10 @@ function workspaceFrom(start: string, dir: string): { root: string; covers: bool
 }
 
 /**
- * A `pnpm-workspace.yaml` that hides the app from the workspace that lists it.
+ * A stray `pnpm-workspace.yaml` that hides the app from the workspace that
+ * lists it.
  *
- * pnpm uses the nearest workspace file. A file inside the app's folder, below
+ * pnpm uses the nearest workspace file. A file that lists no packages, below
  * an outer workspace that lists the app, makes the app a workspace of its own,
  * and the outer workspace's packages vanish from pnpm's view. An app that
  * depends on a sibling with `workspace:*` then fails with
@@ -149,17 +150,24 @@ function workspaceFrom(start: string, dir: string): { root: string; covers: bool
  * root, because pnpm in the app's folder would still read the nested file.
  *
  * pnpm 10 keeps build approvals in `pnpm-workspace.yaml`, so approving builds
- * inside the app's folder can leave such a file behind. A checkout from before 2026-08-25 ignored the file in
- * git, so `git pull` never removes it.
+ * inside the app's folder can leave such a file behind, with no `packages`
+ * list. A checkout from before 2026-08-25 ignored the file in git, so
+ * `git pull` never removes it.
+ *
+ * An inner file that lists packages is a deliberate workspace, such as a copy
+ * of core's example app, which carries its own. pnpm installs it correctly,
+ * and deleting it would break the app, so it is not refused.
  */
 export function nestedWorkspace(appDir: string): { file: string; outerRoot: string } | null {
   const inner = enclosingWorkspace(appDir);
   if (!inner) return null;
+  const file = join(inner.root, "pnpm-workspace.yaml");
+  if (workspaceGlobs(readFileSync(file, "utf-8")).length > 0) return null;
   const parent = dirname(inner.root);
   if (parent === inner.root) return null;
   const outer = workspaceFrom(parent, appDir);
   if (!outer?.covers) return null;
-  return { file: join(inner.root, "pnpm-workspace.yaml"), outerRoot: outer.root };
+  return { file, outerRoot: outer.root };
 }
 
 /**
@@ -178,13 +186,28 @@ export function unattendedArgs(command: string, args: string[]): string[] {
     : args;
 }
 
-/** The `packages` globs of a pnpm-workspace.yaml, matched against a relative path. */
-function workspaceGlobsMatch(yaml: string, rel: string): boolean {
+/**
+ * The `packages` globs of a pnpm-workspace.yaml, from a block list or a flow
+ * list such as `packages: [web, "common"]`.
+ */
+function workspaceGlobs(yaml: string): string[] {
   const globs: string[] = [];
   let inPackages = false;
   for (const line of yaml.split("\n")) {
-    if (/^packages\s*:/.test(line)) {
-      inPackages = true;
+    const key = line.match(/^packages\s*:\s*(.*)$/);
+    if (key) {
+      const flow = key[1]!
+        .replace(/#.*$/, "")
+        .trim()
+        .match(/^\[(.*)\]$/);
+      if (flow) {
+        for (const item of flow[1]!.split(",")) {
+          const glob = item.trim().replace(/^["']|["']$/g, "");
+          if (glob) globs.push(glob);
+        }
+      } else {
+        inPackages = true;
+      }
       continue;
     }
     if (inPackages) {
@@ -193,6 +216,12 @@ function workspaceGlobsMatch(yaml: string, rel: string): boolean {
       else if (/^\S/.test(line)) inPackages = false;
     }
   }
+  return globs;
+}
+
+/** Whether a pnpm-workspace.yaml's `packages` globs match a relative path. */
+function workspaceGlobsMatch(yaml: string, rel: string): boolean {
+  const globs = workspaceGlobs(yaml);
   const toRegex = (glob: string) =>
     new RegExp(
       "^" +
@@ -251,7 +280,7 @@ export function resolveInstallCommand(appDir: string, manifest: CommandSource): 
       display: display("pnpm", ["install", ...frozen]),
       cwd: nested.outerRoot,
       reason:
-        `${nested.file} makes pnpm treat the app's folder as a workspace of its own, ` +
+        `${nested.file} lists no packages, and makes pnpm treat the app's folder as a workspace of its own, ` +
         `apart from the workspace at ${nested.outerRoot} that lists the app. Delete ${nested.file}.`,
     };
   }

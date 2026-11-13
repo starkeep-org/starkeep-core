@@ -101,10 +101,57 @@ describe("resolveInstallCommand, inferred", () => {
         display: "pnpm install --frozen-lockfile",
         cwd: ws,
         reason:
-          `${file} makes pnpm treat the app's folder as a workspace of its own, ` +
+          `${file} lists no packages, and makes pnpm treat the app's folder as a workspace of its own, ` +
           `apart from the workspace at ${ws} that lists the app. Delete ${file}.`,
       });
     }
+  });
+
+  it("refuses a stray file whose packages list is an empty flow list", () => {
+    const ws = folder({ "pnpm-workspace.yaml": "packages:\n  - photos\n" });
+    const app = folder({ ...PKG, "pnpm-workspace.yaml": "packages: []\n" }, ws, "photos");
+    expect(nestedWorkspace(app)).toEqual({ file: join(app, "pnpm-workspace.yaml"), outerRoot: ws });
+  });
+
+  // A copy of core's example app keeps its own workspace file, which lists
+  // its packages. The outer workspace does not list those, so deleting the
+  // file, as a refusal would advise, breaks the app's `workspace:*` links.
+  it.each([
+    ["a block list", "packages:\n  - common\n  - web\n"],
+    ["a flow list", 'packages: [common, "web"] # the app\'s packages\n'],
+  ])("installs a deliberate workspace inside a workspace that lists it, from %s", (_, yaml) => {
+    const ws = folder({ "pnpm-workspace.yaml": "packages:\n  - apps/*\n" });
+    mkdirSync(join(ws, "apps"));
+    const app = folder(
+      { ...PKG, "pnpm-lock.yaml": "", "pnpm-workspace.yaml": yaml },
+      join(ws, "apps"),
+      "my-app",
+    );
+    expect(nestedWorkspace(app)).toBeNull();
+    expect(resolveInstallCommand(app, {})).toMatchObject({
+      kind: "run",
+      display: "pnpm install --frozen-lockfile",
+      cwd: app,
+    });
+  });
+
+  // pnpm uses the nearest workspace, which lists the app, so an outer `**`
+  // glob that also matches it hides nothing.
+  it("installs at a middle workspace that lists the app below an outer ** glob", () => {
+    const outer = folder({ "pnpm-workspace.yaml": 'packages:\n  - "**"\n' });
+    const middle = folder(
+      { "pnpm-workspace.yaml": "packages:\n  - apps/*\n", "pnpm-lock.yaml": "" },
+      outer,
+      "mono",
+    );
+    mkdirSync(join(middle, "apps"));
+    const app = folder(PKG, join(middle, "apps"), "photos");
+    expect(nestedWorkspace(app)).toBeNull();
+    expect(resolveInstallCommand(app, {})).toMatchObject({
+      kind: "run",
+      display: "pnpm install --frozen-lockfile",
+      cwd: middle,
+    });
   });
 
   it("installs nothing for an app core's own workspace lists, even a declared command", () => {
