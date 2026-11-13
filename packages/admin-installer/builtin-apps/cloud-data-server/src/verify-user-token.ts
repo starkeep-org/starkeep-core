@@ -77,6 +77,19 @@ export function mobilePoolConfig(): PoolConfig | null {
   return { region, userPoolId, userPoolClientId };
 }
 
+/**
+ * The pool's connectors client, behind the consent and connections pages.
+ * The broker keeps one of its refresh tokens per delegation. No data branch
+ * accepts its tokens. Null turns delegated access off.
+ */
+export function connectorsPoolConfig(): PoolConfig | null {
+  const region = process.env.AWS_REGION;
+  const userPoolId = process.env.STARKEEP_USER_POOL_ID;
+  const userPoolClientId = process.env.STARKEEP_CONNECTORS_USER_POOL_CLIENT_ID;
+  if (!region || !userPoolId || !userPoolClientId) return null;
+  return { region, userPoolId, userPoolClientId };
+}
+
 export function issuerFor(cfg: PoolConfig): string {
   return `https://cognito-idp.${cfg.region}.amazonaws.com/${cfg.userPoolId}`;
 }

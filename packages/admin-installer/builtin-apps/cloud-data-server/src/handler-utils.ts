@@ -4,6 +4,8 @@ export interface APIGatewayEvent {
   rawPath: string;
   requestContext: {
     http: { method: string };
+    /** The host name the request arrived on: the execute-api hostname, behind CloudFront too. */
+    domainName?: string;
     authorizer?: {
       jwt?: { claims?: Record<string, string> };
     };

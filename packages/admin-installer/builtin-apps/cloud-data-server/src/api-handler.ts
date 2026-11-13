@@ -78,6 +78,7 @@ import {
   DEPLOYMENT_SETTINGS_ROUTE,
   AUTH_CONFIG_ROUTE,
   MOBILE_KEYS_ROUTE,
+  isConnectPath,
   DATA_GROUP,
   stampFor,
   hasMetadataTable,
@@ -180,6 +181,24 @@ import {
 } from "@starkeep/storage-adapter";
 import type { StoredAvailability } from "@starkeep/storage-adapter";
 import { ok, clientErr, type APIGatewayEvent, type LambdaContext } from "./handler-utils.js";
+import { handleConnectRoute, isConnectRoute } from "./connect-routes.js";
+import { delegatedMayCall, isDelegatedWrite } from "./delegation-policy.js";
+import {
+  findDelegation,
+  isLive,
+  loadConnectableApps,
+  revokeDelegation,
+  touchDelegation,
+  type DelegationRow,
+} from "./delegation-store.js";
+import {
+  delegationSigningKeyFromPem,
+  openRefreshToken,
+  verifyDelegationToken,
+  type DelegationSigningKey,
+} from "./delegation-tokens.js";
+import { checkDelegationUser } from "./delegation-user-check.js";
+import { carriesOriginHeader } from "./origin-header.js";
 import {
   appMayPublish,
   deleteOwnedShare,
@@ -223,6 +242,7 @@ import {
 } from "./mobile-keys.js";
 import type { MobileIdentity } from "./mobile-attestation.js";
 import {
+  connectorsPoolConfig,
   devicePoolConfig,
   mobilePoolConfig,
   userPoolConfig,
@@ -1574,6 +1594,67 @@ export function viewerBaseUrl(
 
 let cloudFrontConfigCache: { config: CloudFrontSigningConfig; fetchedAt: number } | null = null;
 
+let delegationKeyCache: { key: DelegationSigningKey; fetchedAt: number } | null = null;
+
+/**
+ * The delegation signing key, from the SecureString the installer writes.
+ * Null when the deployment has none yet, which turns delegated access off.
+ */
+async function loadDelegationSigningKey(): Promise<DelegationSigningKey | null> {
+  if (delegationKeyCache && Date.now() - delegationKeyCache.fetchedAt < HMAC_CACHE_TTL_MS) {
+    return delegationKeyCache.key;
+  }
+  const name = process.env.DELEGATION_SIGNING_PARAM;
+  if (!name) return null;
+  try {
+    const result = await getSsmClient().send(
+      new GetParameterCommand({ Name: name, WithDecryption: true }),
+    );
+    const parsed = JSON.parse(result.Parameter?.Value ?? "{}") as { privateKeyPem?: unknown };
+    if (typeof parsed.privateKeyPem !== "string") return null;
+    delegationKeyCache = {
+      key: delegationSigningKeyFromPem(parsed.privateKeyPem),
+      fetchedAt: Date.now(),
+    };
+    return delegationKeyCache.key;
+  } catch (err) {
+    if (err instanceof ParameterNotFound) return null;
+    throw err;
+  }
+}
+
+/** Test seam. */
+export function __setDelegationSigningKeyForTests(key: DelegationSigningKey | null): void {
+  delegationKeyCache = key ? { key, fetchedAt: Number.MAX_SAFE_INTEGER / 2 } : null;
+  delegationRowCache.clear();
+}
+
+/**
+ * Delegation rows by id, for up to a minute. A revoke on this container
+ * drops its entry at once; another container notices within the minute.
+ */
+const DELEGATION_ROW_TTL_MS = 60_000;
+const delegationRowCache = new Map<string, { row: DelegationRow | null; until: number }>();
+
+/**
+ * A database client as Starkeep Drive with no user tag: the platform's
+ * standing identity, for tables outside the user cut (public shares,
+ * delegations, the app registry). Closed with the request.
+ */
+async function platformClient(
+  accountId: string,
+  toClose: Array<() => Promise<void>>,
+): Promise<DatabaseClient> {
+  const creds = await getAppCreds(DRIVE_APP_ID, accountId, null);
+  const conn = makeConnection(DRIVE_APP_ID, creds);
+  const client = await conn.clientFactory.createClient({
+    hostname: conn.auroraEndpoint,
+    region: conn.region,
+  });
+  toClose.push(() => client.end());
+  return client;
+}
+
 async function loadCloudFrontSigningConfig(): Promise<CloudFrontSigningConfig> {
   if (cloudFrontConfigCache && Date.now() - cloudFrontConfigCache.fetchedAt < HMAC_CACHE_TTL_MS) {
     return cloudFrontConfigCache.config;
@@ -2846,6 +2927,134 @@ function eventKindOf(eventName: string): AvailabilityEventKind | null {
   return null;
 }
 
+/**
+ * The delegated branch's admission checks (plan-headless-delegated-access-
+ * 2026-11-13.md, "The delegated branch in the data server"):
+ *
+ * 1. The token verifies, and its `aud` names the path's app.
+ * 2. The row exists, is live, and names the same user, app and mode.
+ * 3. The app's signature verifies for the same app: phase 1 issues only
+ *    `app`-channel delegations, served by the app's own endpoint.
+ * 4. The stored refresh token mints an ID token whose groups may use data.
+ * 5. The route sits on the mode's allowlist.
+ *
+ * Past this, the request runs as the app for the delegation's user, and the
+ * app's grants apply as on any app call.
+ */
+async function admitDelegation(req: {
+  token: string;
+  appId: string;
+  method: string;
+  subPath: string;
+  headers: Record<string, string | undefined>;
+  body: Buffer;
+  accountId: string;
+  toClose: Array<() => Promise<void>>;
+}): Promise<{ userId: string } | { status: number; message: string }> {
+  const key = await loadDelegationSigningKey();
+  const pool = connectorsPoolConfig();
+  const cognitoDomain = process.env.STARKEEP_COGNITO_DOMAIN;
+  if (!key || !pool || !cognitoDomain) {
+    return { status: 401, message: "Delegated access is not set up on this cloud" };
+  }
+  const claims = verifyDelegationToken(req.token, key);
+  if (!claims) return { status: 401, message: "Invalid or expired delegation token" };
+  if (claims.aud !== req.appId) {
+    return { status: 403, message: "This delegation is for another app" };
+  }
+  if (claims.sk_channel !== "app") {
+    return { status: 403, message: "This cloud serves delegations through an app's endpoint only" };
+  }
+  // A delegated call acts for the delegation's user alone. A user token
+  // beside it would leave two answers to "whose data", so it is refused.
+  if (req.headers["x-starkeep-user-token"] !== undefined) {
+    return { status: 400, message: "A delegated call carries no user token" };
+  }
+  const hmacSecret = await loadAppHmacSecret(req.appId);
+  if (!hmacSecret) return { status: 401, message: `Unknown app: ${req.appId}` };
+  const hmacCheck = validateAppHmac(
+    req.appId,
+    req.method,
+    req.subPath,
+    req.headers,
+    req.body,
+    hmacSecret,
+  );
+  if (!hmacCheck.ok) return { status: hmacCheck.status, message: hmacCheck.message };
+  if (!delegatedMayCall(claims.sk_mode, req.method, req.subPath)) {
+    return {
+      status: 403,
+      message: `A ${claims.sk_mode} delegation may not call ${req.method} ${req.subPath}`,
+    };
+  }
+
+  const now = Date.now();
+  let client: DatabaseClient | null = null;
+  const db = async () => (client ??= await platformClient(req.accountId, req.toClose));
+  let cached = delegationRowCache.get(claims.sk_dlg);
+  if (!cached || cached.until <= now) {
+    cached = {
+      row: await findDelegation(await db(), claims.sk_dlg),
+      until: now + DELEGATION_ROW_TTL_MS,
+    };
+    delegationRowCache.set(claims.sk_dlg, cached);
+  }
+  const row = cached.row;
+  if (
+    !row ||
+    row.user_id !== claims.sub ||
+    row.app_id !== req.appId ||
+    row.mode !== claims.sk_mode ||
+    row.channel !== claims.sk_channel ||
+    !isLive(row, now)
+  ) {
+    return { status: 401, message: "This delegation was revoked or has expired" };
+  }
+  if (!USER_SEGMENT_PATTERN.test(row.user_id)) {
+    return { status: 401, message: "This request names no user" };
+  }
+
+  const refresh = openRefreshToken(key.refreshKey, row.id, row.cognito_refresh_ciphertext);
+  if (!refresh) return { status: 401, message: "This delegation was revoked or has expired" };
+  const check = await checkDelegationUser(row.id, row.user_id, refresh, {
+    pool,
+    cognitoDomain,
+    groupsMayUseData,
+  });
+  if (!check.ok) {
+    if (check.reason === "refused") {
+      // Signed out everywhere, disabled or deleted: the delegation ends.
+      delegationRowCache.delete(row.id);
+      await revokeDelegation(await db(), row.user_id, row.id, now).catch((err: unknown) =>
+        console.warn("[delegation] marking a refused delegation revoked failed:", err),
+      );
+      return { status: 401, message: "This delegation was revoked or has expired" };
+    }
+    if (check.reason === "no-library") {
+      return { status: 403, message: "This account has no data library on this cloud" };
+    }
+    return { status: 503, message: "Sign-in is unavailable right now. Try again." };
+  }
+
+  // Bounded to one write an hour per column, and never fatal: a missed
+  // "last used" stamp must not refuse a call that passed every check.
+  const wrote = isDelegatedWrite(req.method, req.subPath);
+  const stale = (at: number | null) => at === null || now - at >= 60 * 60 * 1000;
+  if (stale(row.last_used_at_ms) || (wrote && stale(row.last_write_at_ms))) {
+    try {
+      await touchDelegation(await db(), row, wrote, now);
+      cached.row = {
+        ...row,
+        last_used_at_ms: now,
+        ...(wrote ? { last_write_at_ms: now } : {}),
+      };
+    } catch (err) {
+      console.warn("[delegation] recording use failed:", err);
+    }
+  }
+  return { userId: row.user_id };
+}
+
 export async function handler(event: APIGatewayEvent, context: LambdaContext) {
   // S3 notifications arrive at the same function as HTTP requests, so the shape
   // has to be discriminated before anything reads `requestContext` — which an
@@ -2924,6 +3133,44 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         ...(cognitoDomain ? { cognitoDomain } : {}),
         ...(mobile ? { mobileClientId: mobile.userPoolClientId } : {}),
       });
+    }
+
+    // The consent and connections pages, where a user grants an outside
+    // client access and ends it. They issue credentials that leave the
+    // deployment, so they answer only on the gateway's execute-api hostname,
+    // never on the shared CloudFront origin where app script runs. A request
+    // carrying the CloudFront origin header came through CloudFront and is
+    // refused, whatever the header's value. See origin-header.ts.
+    if (isConnectPath(rawPath)) {
+      if (carriesOriginHeader(event.headers ?? {})) return clientErr("Not found", 404);
+      if (!isConnectRoute(method, rawPath)) return clientErr("Not found", 404);
+      const accountId = getAccountId(context.invokedFunctionArn);
+      return await handleConnectRoute(
+        {
+          method,
+          rawPath,
+          query: event.queryStringParameters ?? {},
+          headers: Object.fromEntries(
+            Object.entries(event.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]),
+          ),
+          cookieHeader: signInCookieHeader(event),
+          body: event.body
+            ? event.isBase64Encoded
+              ? Buffer.from(event.body, "base64").toString("utf8")
+              : event.body
+            : "",
+        },
+        {
+          pool: connectorsPoolConfig(),
+          cognitoDomain: process.env.STARKEEP_COGNITO_DOMAIN,
+          host: event.requestContext.domainName ?? "",
+          signingKey: loadDelegationSigningKey,
+          db: () => platformClient(accountId, toClose),
+          connectableApps: async () =>
+            loadConnectableApps(await platformClient(accountId, toClose)),
+          groupsMayUseData,
+        },
+      );
     }
 
     // GET /auth/{start,callback,sign-out,signed-out} — the platform's sign-in
@@ -3042,6 +3289,11 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // back: a mobile app whose key is refused must not get a second chance on
     // another branch.
     const mobileKeyId = normalizedHeaders["x-starkeep-key-id"];
+    // An outside client's delegation, carried by the app's own server beside
+    // the app's signature. Taken before every other branch and never falls
+    // back: a refused delegation must not get a second chance as a device or
+    // as the app's own session.
+    const delegationToken = normalizedHeaders["x-starkeep-delegation"];
     const signedInDevice =
       !mobileKeyId && !!userTokenHeader && !normalizedHeaders["x-starkeep-app-sig"];
     /** The attested key a mobile request signed with; its app's grants apply. */
@@ -3051,7 +3303,20 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
      * app-scoped health check, which needs no token.
      */
     let subjectUserId: string | null = null;
-    if (mobileKeyId) {
+    if (delegationToken !== undefined) {
+      const refusal = await admitDelegation({
+        token: delegationToken,
+        appId,
+        method,
+        subPath,
+        headers: normalizedHeaders,
+        body: bodyBytes,
+        accountId: getAccountId(context.invokedFunctionArn),
+        toClose,
+      });
+      if ("status" in refusal) return clientErr(refusal.message, refusal.status);
+      subjectUserId = refusal.userId;
+    } else if (mobileKeyId) {
       // A mobile app. The token says who; the attested key says which app,
       // and the app's manifest grants then bound what the request may do.
       //
