@@ -28,6 +28,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
      * surface its manifest offers. See admin-installer's `AppSurface`.
      */
     surfaces?: string[];
+    /**
+     * Set by the update dialog after the person approves the manifest the
+     * app's folder holds now. It lets the route deploy a locally installed
+     * app's changed manifest before the local install updates.
+     */
+    approved?: boolean;
   };
 
   if (!body.accessKeyId || !body.secretAccessKey || !body.sessionToken || !body.region) {
@@ -53,15 +59,17 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
       { status: 409 },
     );
   }
-  // The CLI deploys the manifest in the folder, and the tile asked for
-  // consent against the manifest the user approved locally. Deploy only
-  // when the two are the same, so the cloud never runs a manifest nobody
-  // approved.
+  // The CLI deploys the manifest in the folder. Without the update dialog's
+  // approval, the tile asked for consent against the manifest the user
+  // approved locally, so the route deploys only when the two are the same.
+  // The cloud then never runs a manifest nobody approved.
   if (source.kind === "pinned") {
     const state = pinnedSourceState(source.appDir, source.manifest);
     const refusal =
       state?.sourceState === "changed"
-        ? `App ${appId}'s folder ${source.appDir} holds a manifest you have not approved. Choose Update from folder on its local card first.`
+        ? body.approved === true
+          ? null
+          : `App ${appId}'s folder ${source.appDir} holds a changed manifest. Choose Start or Redeploy to update it.`
         : state?.sourceState === "invalid"
           ? `App ${appId}'s folder ${source.appDir} holds an invalid manifest (${state.sourceError}). Fix the manifest first.`
           : state?.sourceState === "missing"

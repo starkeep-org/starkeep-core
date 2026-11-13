@@ -32,6 +32,7 @@ import { APPS_CHANGED_EVENT } from "../components/AppDiscovery";
 import { LocalDriveSection } from "../components/LocalDriveSection";
 import { LocalAppsSection } from "../components/LocalAppsSection";
 import { CloudAppsSection } from "../components/CloudAppsSection";
+import { AppUpdateProvider } from "../components/AppUpdate";
 import { ThisMachineSection } from "../components/ThisMachineSection";
 import { UsersSection } from "../components/UsersSection";
 import { PublicSharesSection } from "../components/PublicSharesSection";
@@ -510,7 +511,7 @@ export function DashboardPage() {
     bumpAll();
   }
 
-  return (
+  const page = (
     <div className="min-h-full bg-surface p-6">
       {appsError && (
         <Alert variant="destructive" className="mb-6 max-w-7xl">
@@ -921,5 +922,13 @@ export function DashboardPage() {
         success={watchSuccess}
       />
     </div>
+  );
+
+  // Start on a local card and Redeploy on a cloud card share one update flow,
+  // so the provider wraps both sections.
+  return (
+    <AppUpdateProvider cloudAdministered={cloudAdministered} signedIn={cognitoSession !== null}>
+      {page}
+    </AppUpdateProvider>
   );
 }

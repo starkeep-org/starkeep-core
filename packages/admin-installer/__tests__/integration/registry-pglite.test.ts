@@ -188,6 +188,27 @@ describe("the registry's surfaces", () => {
     expect((await registry.listInstalledApps()).map((a) => a.appId)).toEqual(["photos"]);
   });
 
+  // Admin compares the commit with the app folder's to tell whether the cloud
+  // web app runs the folder's code. Only a web install deploys that code.
+  it("records the web install's source commit, and keeps it through a mobile registration", async () => {
+    const commit = async () =>
+      (
+        await state.pg.query<{ web_source_commit: string | null }>(
+          "SELECT web_source_commit FROM shared.app_registry WHERE app_id = $1",
+          ["photos"],
+        )
+      ).rows[0]?.web_source_commit;
+
+    await registry.registerApp(photos, "photos", ["web"], "abc");
+    expect(await commit()).toBe("abc");
+    await registry.registerApp(photos, "photos", ["mobile"], "def");
+    expect(await commit()).toBe("abc");
+    await registry.registerApp(photos, "photos", ["web"], "def");
+    expect(await commit()).toBe("def");
+    await registry.registerApp(photos, "photos", ["web"]);
+    expect(await commit()).toBeNull();
+  });
+
   it("removing the mobile app leaves the web app installed", async () => {
     await registry.registerApp(photos, "photos", ["web", "mobile"]);
     await registry.removeSurfaces("photos", ["mobile"]);

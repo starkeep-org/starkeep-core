@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { LocalAppsSection } from "../src/components/LocalAppsSection";
+import { AppUpdateProvider } from "../src/components/AppUpdate";
 import { APPS_CHANGED_EVENT } from "../src/components/AppDiscovery";
 import type { LocalAppEntry } from "../src/lib/app-types";
 
@@ -51,7 +52,11 @@ afterEach(() => {
 
 async function menuItems(entry: LocalAppEntry): Promise<string[]> {
   const user = userEvent.setup();
-  render(<LocalAppsSection apps={[entry]} refresh={async () => undefined} localOnline={true} />);
+  render(
+    <AppUpdateProvider cloudAdministered={false} signedIn={false}>
+      <LocalAppsSection apps={[entry]} refresh={async () => undefined} localOnline={true} />
+    </AppUpdateProvider>,
+  );
   const more = screen.queryByRole("button", { name: `More actions for ${entry.manifest.name}` });
   if (!more) return [];
   await user.click(more);

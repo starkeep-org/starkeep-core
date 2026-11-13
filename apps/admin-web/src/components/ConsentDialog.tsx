@@ -5,7 +5,9 @@
  * Both install paths open it. A local install always does. A cloud install
  * does unless the person already approved the same manifest locally, since
  * the cloud deploys the manifest a local install pinned; a cloud-only install
- * would otherwise act on grants nobody was shown.
+ * would otherwise act on grants nobody was shown. The update dialog
+ * (`AppUpdate.tsx`) builds on it too: it adds its choices as children, and
+ * shows the file access only when the update changes it.
  *
  * The quality step belongs to the local install only: it sets the local
  * library's stand-in standards, which a cloud action has no business setting.
@@ -13,7 +15,7 @@
  * of which run the app's install command in its folder. A mobile registration
  * runs no command, so its dialog names none.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { ChevronDownIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -42,6 +44,10 @@ export function ConsentDialog({
   entry,
   surface = "local",
   title,
+  showAccess = true,
+  approveLabel,
+  approveDisabled = false,
+  children,
   onApprove,
   onCancel,
 }: {
@@ -50,6 +56,13 @@ export function ConsentDialog({
   surface?: "local" | AppSurface;
   /** The question the dialog asks. Defaults to "Install <name>?". */
   title?: string;
+  /** False hides the file access and public links. Defaults to true. */
+  showAccess?: boolean;
+  /** The approve button's label. Defaults to "Approve & Install" or "Approve & Register". */
+  approveLabel?: string;
+  approveDisabled?: boolean;
+  /** Shown below the title, ahead of the file access. */
+  children?: ReactNode;
   onApprove: () => void;
   onCancel: () => void;
 }) {
@@ -78,7 +91,8 @@ export function ConsentDialog({
         <h3 className="text-lg font-semibold">
           {title ?? `Install ${entry.manifest.name ?? entry.appId}?`}
         </h3>
-        {allAccess ? (
+        {children}
+        {!showAccess ? null : allAccess ? (
           <div className="text-sm">
             This app is the <span className="font-medium">User-Data-Owner</span>: read + write
             access to
@@ -93,7 +107,7 @@ export function ConsentDialog({
           </p>
         )}
 
-        {grants.length > 0 && (
+        {showAccess && grants.length > 0 && (
           <ul className="flex flex-col gap-2">
             {grants.map((g, i) => {
               const { files: dataPermissions, metadata: metadataPermissions } = grantPermissions(g);
@@ -125,7 +139,7 @@ export function ConsentDialog({
           </ul>
         )}
 
-        {publicSharingConsent(entry.manifest) && (
+        {showAccess && publicSharingConsent(entry.manifest) && (
           <div className="border rounded-md p-3 text-sm flex flex-col gap-1">
             <span className="font-medium">Public links</span>
             <span className="text-muted-foreground">{publicSharingConsent(entry.manifest)}</span>
@@ -180,10 +194,14 @@ export function ConsentDialog({
             onClick={() => void approve()}
             disabled={
               saving ||
+              approveDisabled ||
               (quality !== null && draftProblems(quality.draft, quality.state.ranges).length > 0)
             }
           >
-            {saving ? "Saving…" : surface === "mobile" ? "Approve & Register" : "Approve & Install"}
+            {saving
+              ? "Saving…"
+              : (approveLabel ??
+                (surface === "mobile" ? "Approve & Register" : "Approve & Install"))}
           </Button>
         </div>
       </div>

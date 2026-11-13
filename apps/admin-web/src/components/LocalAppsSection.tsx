@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -7,10 +7,10 @@ import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
 import { APPS_CHANGED_EVENT } from "@/components/AppDiscovery";
 import { CommandOutput } from "@/components/CommandOutput";
 import { ConsentDialog } from "@/components/ConsentDialog";
+import { useAppUpdate } from "@/components/AppUpdate";
 import { runInstallStream } from "@/lib/install-stream-client";
 import { ACTION_OCCASIONAL, ACTION_OPEN, ACTION_START } from "@/lib/action-colors";
 import {
-  consentDiffers,
   type DaemonStatus,
   type DependencyPlan,
   type InstallStep,
@@ -173,7 +173,8 @@ export function LocalAppsSection({
     }
   };
 
-  const handleApprove = async (entry: LocalAppEntry) => {
+  // Resolves true once the app is installed from its folder.
+  const handleApprove = async (entry: LocalAppEntry): Promise<boolean> => {
     setPendingConsent(null);
     setBusyAppId(entry.appId);
     setError(null);
@@ -184,10 +185,7 @@ export function LocalAppsSection({
       setStepsOpenFor(entry.appId);
     };
     try {
-      if (!(await installDependencies(entry))) {
-        setBusyAppId(null);
-        return;
-      }
+      if (!(await installDependencies(entry))) return false;
       const res = await fetch("/api/apps/install", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -199,11 +197,14 @@ export function LocalAppsSection({
           details?: string[];
         } | null;
         fail({ error: data?.error ?? `Install failed: ${res.status}`, details: data?.details });
-        return;
+        return false;
       }
-      await refresh();
+      // A reinstall stops a running app, so its status changes too.
+      await Promise.all([refresh(), refreshStatus([entry.appId])]);
+      return true;
     } catch (err) {
       fail({ error: err instanceof Error ? err.message : String(err) });
+      return false;
     } finally {
       setBusyAppId(null);
     }
@@ -281,17 +282,22 @@ export function LocalAppsSection({
     return false;
   };
 
-  // Apply the manifest an installed app's pinned folder holds now. New file
-  // access or public links go through the consent dialog; anything else reinstalls at once,
-  // which reapplies every idempotent install step.
-  const handleUpdateFromFolder = (entry: LocalAppEntry) => {
-    const next = entry.folderManifest;
-    if (next && consentDiffers(entry.manifest, next)) {
-      setPendingConsent({ ...entry, manifest: next });
-      return;
-    }
-    void handleApprove(entry);
-  };
+  // The update flow that Start shares with the cloud card's Redeploy. It
+  // reinstalls and starts through these handlers, so their progress and
+  // failure dialogs stay here. The ref keeps the handlers on this render's
+  // state.
+  const update = useAppUpdate();
+  const handlers = useRef({ handleApprove, handleStart, runStatus });
+  handlers.current = { handleApprove, handleStart, runStatus };
+  const { registerLocal } = update;
+  useEffect(() => {
+    registerLocal({
+      reinstall: (entry) => handlers.current.handleApprove(entry),
+      start: (appId) => handlers.current.handleStart(appId),
+      isRunning: (appId) => handlers.current.runStatus[appId]?.running === true,
+    });
+    return () => registerLocal(null);
+  }, [registerLocal]);
 
   // Hide core's example app by removing its folder from Discover apps.
   const handleHide = async (entry: LocalAppEntry) => {
@@ -362,6 +368,7 @@ export function LocalAppsSection({
           const port = status?.port;
           const busy = !!want;
           const installBusy = busyAppId === entry.appId;
+          const updating = update.updatingAppId === entry.appId;
           const sourceMissing = installed && entry.sourceState === "missing";
           const sourceChanged = installed && entry.sourceState === "changed";
           // The approved manifest still drives the app, so this is a note,
@@ -378,13 +385,6 @@ export function LocalAppsSection({
               label: want === "stop" ? "Stopping…" : "Stop",
               onSelect: () => handleStop(entry.appId),
               disabled: busy,
-            });
-          }
-          if (sourceChanged) {
-            actions.push({
-              label: installBusy ? "Updating…" : "Update from folder",
-              onSelect: () => handleUpdateFromFolder(entry),
-              disabled: installBusy || !localOnline,
             });
           }
           if (installed) {
@@ -430,8 +430,8 @@ export function LocalAppsSection({
                   </p>
                 ) : sourceChanged ? (
                   <p className="text-xs text-muted-foreground">
-                    Its folder holds a changed manifest. Choose <b>Update from folder</b> to apply
-                    it.
+                    Its folder holds a changed manifest.{" "}
+                    {running ? "Stop and start the app to apply it." : "Start the app to apply it."}
                   </p>
                 ) : undefined
               }
@@ -536,13 +536,21 @@ export function LocalAppsSection({
                   <Button
                     size="sm"
                     className={ACTION_START}
-                    onClick={() => handleStart(entry.appId)}
-                    disabled={busy || sourceMissing}
+                    // A changed folder manifest, here or in the cloud, opens
+                    // the update dialog, which starts the app after it.
+                    onClick={() => {
+                      if (!update.requestUpdate(entry, "start")) void handleStart(entry.appId);
+                    }}
+                    disabled={busy || sourceMissing || updating || installBusy}
                   >
-                    {want === "start" && (
+                    {(want === "start" || updating) && (
                       <span className="mr-1 size-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
                     )}
-                    {want === "start" ? `Starting ${name}…` : `Start ${name}`}
+                    {updating
+                      ? `Updating ${name}…`
+                      : want === "start"
+                        ? `Starting ${name}…`
+                        : `Start ${name}`}
                   </Button>
                 )
               }
@@ -554,7 +562,7 @@ export function LocalAppsSection({
       {pendingConsent && (
         <ConsentDialog
           entry={pendingConsent}
-          onApprove={() => handleApprove(pendingConsent)}
+          onApprove={() => void handleApprove(pendingConsent)}
           onCancel={() => setPendingConsent(null)}
         />
       )}

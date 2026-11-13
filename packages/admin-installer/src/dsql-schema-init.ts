@@ -531,6 +531,9 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
       // The validated manifest the app was installed with, so uninstall needs
       // no source checkout.
       .addColumn("manifest", "text")
+      // The git commit of the folder the web app last deployed from, so
+      // Admin can tell when the folder's code moved past it.
+      .addColumn("web_source_commit", "text")
       .execute();
     await sql
       .raw(`GRANT INSERT, UPDATE, DELETE, SELECT ON shared.app_registry TO "${installer}"`)
@@ -548,6 +551,10 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
     // Replaced by ~/projects/starkeep/plan-schema-and-bootstrap-versioning-2026-11-08.md.
     await sql
       .raw(`ALTER TABLE shared.app_registry ADD COLUMN IF NOT EXISTS manifest text`)
+      .execute(db);
+    // TEMPORARY, as above: adds the web_source_commit column.
+    await sql
+      .raw(`ALTER TABLE shared.app_registry ADD COLUMN IF NOT EXISTS web_source_commit text`)
       .execute(db);
     const registry = db as unknown as Kysely<Record<string, Record<string, unknown>>>;
     await registry

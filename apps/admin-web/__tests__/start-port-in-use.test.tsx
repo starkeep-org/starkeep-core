@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { LocalAppsSection } from "../src/components/LocalAppsSection";
+import { AppUpdateProvider } from "../src/components/AppUpdate";
 import type { LocalAppEntry } from "../src/lib/app-types";
 
 vi.mock("@/lib/operator-session", () => ({ operatorSessionIfSignedIn: async () => null }));
@@ -60,7 +61,11 @@ afterEach(() => {
 });
 
 function show() {
-  render(<LocalAppsSection apps={[dice]} refresh={async () => undefined} localOnline={true} />);
+  render(
+    <AppUpdateProvider cloudAdministered={false} signedIn={false}>
+      <LocalAppsSection apps={[dice]} refresh={async () => undefined} localOnline={true} />
+    </AppUpdateProvider>,
+  );
 }
 
 describe("Start when the app's port is in use", () => {

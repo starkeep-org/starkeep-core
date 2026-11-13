@@ -10,7 +10,7 @@
  * cloud installs stream theirs (see `lib/install-stream.ts`).
  *
  * The folder is the one Install reads the manifest from: an installed app's
- * pinned folder, which Update from folder reinstalls, or the scan's find for
+ * pinned folder, which the update dialog reinstalls, or the scan's find for
  * a first install. The command comes from that folder's manifest as it is now.
  */
 

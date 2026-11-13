@@ -77,8 +77,17 @@ export interface Registry {
    * had. Installing the mobile app writes its Android identity in the same
    * transaction as `mobile_app`, so the two always agree: the broker reads the
    * identity, and admin-web and the CLI read the column.
+   *
+   * `webSourceCommit` is the git commit of the folder a web install deployed
+   * from (see `folderCommit`). A web install records it, null outside git; an
+   * install without the web app leaves the recorded commit alone.
    */
-  registerApp(manifest: AppManifest, appId: string, surfaces: readonly AppSurface[]): Promise<void>;
+  registerApp(
+    manifest: AppManifest,
+    appId: string,
+    surfaces: readonly AppSurface[],
+    webSourceCommit?: string | null,
+  ): Promise<void>;
   /**
    * Clear `surfaces` from the app's row and remove their registry parts: the
    * mobile app's Android identity. The row and the data side stay.
@@ -206,7 +215,7 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
       });
     },
 
-    async registerApp(manifest, appId, surfaces) {
+    async registerApp(manifest, appId, surfaces, webSourceCommit = null) {
       const web = surfaces.includes("web");
       const android = manifest.mobile?.android;
       const mobile = surfaces.includes("mobile");
@@ -222,6 +231,7 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
               web_app: web,
               mobile_app: mobile,
               manifest: JSON.stringify(manifest),
+              web_source_commit: web ? webSourceCommit : null,
             })
             .onConflict((oc) =>
               oc.column("app_id").doUpdateSet((eb) => ({
@@ -229,8 +239,11 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
                 name: eb.ref("excluded.name"),
                 manifest: eb.ref("excluded.manifest"),
                 updated_at: sql`now()`,
-                // Installing a surface never removes another one.
-                ...(web ? { web_app: true } : {}),
+                // Installing a surface never removes another one. Only a
+                // web install deploys the folder's code.
+                ...(web
+                  ? { web_app: true, web_source_commit: eb.ref("excluded.web_source_commit") }
+                  : {}),
                 // A manifest that no longer ships a mobile build leaves no
                 // mobile app installed.
                 ...(mobile ? { mobile_app: true } : android ? {} : { mobile_app: false }),

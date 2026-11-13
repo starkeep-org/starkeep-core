@@ -8,7 +8,8 @@ import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PROTOCOL_VERSION, parseProtocolVersion } from "@starkeep/protocol-primitives";
-import { scanApps } from "../src/app-discovery.js";
+import { folderCommit, scanApps } from "../src/app-discovery.js";
+import { execFileSync } from "node:child_process";
 import { appDirFor, resolveAppDir, takeAppDirFlag } from "../src/app-cli-config.js";
 
 function manifest(id: string, name: string): Record<string, unknown> {
@@ -294,5 +295,45 @@ describe("takeAppDirFlag", () => {
     });
     expect(takeAppDirFlag(["dice"])).toEqual({ rest: ["dice"] });
     expect(() => takeAppDirFlag(["dice", "--app-dir"])).toThrow(/needs a folder/);
+  });
+});
+
+// A cloud web install records the folder's commit; Admin compares it with the
+// folder's to tell whether the cloud runs the folder's code.
+describe("folderCommit", () => {
+  function repo(): { root: string; git: (...args: string[]) => string } {
+    const root = mkdtempSync(join(tmpdir(), "folder-commit-"));
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-C", root, ...args], { encoding: "utf-8" }).trim();
+    git("init", "-q");
+    git("config", "user.email", "test@example.com");
+    git("config", "user.name", "Test");
+    git("config", "commit.gpgsign", "false");
+    for (const app of ["dice", "memo"]) {
+      mkdirSync(join(root, app));
+      writeFileSync(join(root, app, "index.ts"), "1");
+    }
+    git("add", ".");
+    git("commit", "-qm", "first");
+    return { root, git };
+  }
+
+  it("names the last commit that touched the folder, not another folder's later one", () => {
+    const { root, git } = repo();
+    const first = git("rev-parse", "HEAD");
+    writeFileSync(join(root, "memo", "index.ts"), "2");
+    git("commit", "-qam", "memo only");
+    expect(folderCommit(join(root, "dice"))).toEqual({ commit: first, dirty: false });
+  });
+
+  it("reports uncommitted changes in the folder", () => {
+    const { root } = repo();
+    writeFileSync(join(root, "dice", "index.ts"), "2");
+    expect(folderCommit(join(root, "dice"))?.dirty).toBe(true);
+    expect(folderCommit(join(root, "memo"))?.dirty).toBe(false);
+  });
+
+  it("answers null for a folder outside git", () => {
+    expect(folderCommit(mkdtempSync(join(tmpdir(), "no-git-")))).toBeNull();
   });
 });

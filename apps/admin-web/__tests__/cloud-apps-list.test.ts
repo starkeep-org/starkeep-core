@@ -112,6 +112,7 @@ describe("each row the dashboard reads", () => {
     web_app: true,
     mobile_app: null,
     manifest: JSON.stringify({ id: "photos", infraRequirements: { publicSharing: true } }),
+    web_source_commit: null,
   };
 
   it("carries the manifest the last install deployed, parsed", async () => {
@@ -135,5 +136,83 @@ describe("each row the dashboard reads", () => {
   ])("carries no manifest for %s, so the dashboard asks", async (_case, manifest) => {
     const { registryApp } = await import("../src/routes/apps-cloud-list");
     expect(registryApp({ ...row, manifest }).manifest).toBeNull();
+  });
+});
+
+// The update dialog offers the cloud install when it runs another manifest
+// or, for a web app, another commit than the app's folder holds now.
+describe("whether a row is behind its app's folder", () => {
+  const deployed = { id: "photos", version: "1.0.0", infraRequirements: { publicSharing: true } };
+  const row: {
+    manifest: string | null;
+    web_app: boolean | null;
+    web_source_commit: string | null;
+  } = { manifest: JSON.stringify(deployed), web_app: true, web_source_commit: "abc" };
+  const clean = { commit: "abc", dirty: false };
+
+  async function behind(
+    r: Partial<typeof row>,
+    folder?: {
+      manifest: Record<string, unknown>;
+      commit: { commit: string; dirty: boolean } | null;
+    },
+  ) {
+    const { behindFolder } = await import("../src/routes/apps-cloud-list");
+    return behindFolder({ ...row, ...r }, folder);
+  }
+
+  it("is current when the folder holds the deployed manifest and commit, whatever the key order", async () => {
+    const reordered = {
+      infraRequirements: { publicSharing: true },
+      version: "1.0.0",
+      id: "photos",
+    };
+    expect(await behind({}, { manifest: reordered, commit: clean })).toEqual({
+      behind: false,
+      codeBehind: false,
+    });
+  });
+
+  it("is behind when the folder holds another manifest", async () => {
+    expect(
+      await behind({}, { manifest: { ...deployed, version: "1.1.0" }, commit: clean }),
+    ).toMatchObject({ behind: true });
+  });
+
+  it("is behind when the row predates the recorded manifest, since a redeploy records one", async () => {
+    expect(await behind({ manifest: null }, { manifest: deployed, commit: clean })).toMatchObject({
+      behind: true,
+    });
+  });
+
+  it.each([
+    ["the folder has a newer commit", { commit: "def", dirty: false }, "abc"],
+    ["the folder holds uncommitted changes", { commit: "abc", dirty: true }, "abc"],
+    ["the row predates the recorded commit", clean, null],
+  ])("has code behind when %s", async (_case, commit, recorded) => {
+    expect(await behind({ web_source_commit: recorded }, { manifest: deployed, commit })).toEqual({
+      behind: false,
+      codeBehind: true,
+    });
+  });
+
+  it("never has code behind without a web app, whose code the cloud does not run", async () => {
+    expect(
+      await behind(
+        { web_app: false },
+        { manifest: deployed, commit: { commit: "def", dirty: true } },
+      ),
+    ).toEqual({ behind: false, codeBehind: false });
+  });
+
+  it("cannot tell the code for a folder outside git", async () => {
+    expect(await behind({}, { manifest: deployed, commit: null })).toEqual({
+      behind: false,
+      codeBehind: null,
+    });
+  });
+
+  it("cannot tell anything when no folder holds a valid manifest for the app", async () => {
+    expect(await behind({}, undefined)).toEqual({ behind: null, codeBehind: null });
   });
 });

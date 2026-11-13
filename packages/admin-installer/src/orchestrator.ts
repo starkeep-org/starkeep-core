@@ -154,6 +154,11 @@ export interface InstallInput {
    * alone. A surface the manifest does not offer is refused.
    */
   surfaces?: readonly AppSurface[];
+  /**
+   * The git commit of the app folder the install deploys from, recorded with
+   * a web install. See `folderCommit` in app-discovery.
+   */
+  webSourceCommit?: string | null;
 }
 
 export interface RegistryCredentials {
@@ -617,7 +622,7 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
     "install",
     "register_app",
     done,
-    () => registry.registerApp(manifest, appId, surfaces),
+    () => registry.registerApp(manifest, appId, surfaces, input.webSourceCommit ?? null),
     { alwaysRun: true },
   );
 

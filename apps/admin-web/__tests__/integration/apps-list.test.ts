@@ -271,7 +271,7 @@ describe("with the local-data-server up", () => {
     expect(invalid).not.toHaveProperty("folderManifest");
   });
 
-  it("marks an installed app whose folder now names another app id as invalid, with no Update from folder", async () => {
+  it("marks an installed app whose folder now names another app id as invalid, which nothing updates", async () => {
     const renamed = (await list()).find((a) => a.appId === "renamed-id-app");
     expect(renamed).toMatchObject({
       sourceDir: renamedIdDir,
