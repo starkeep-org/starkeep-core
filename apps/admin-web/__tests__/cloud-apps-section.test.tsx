@@ -17,6 +17,8 @@ import userEvent from "@testing-library/user-event";
 import type { LocalAppEntry } from "../src/lib/app-types";
 
 const installs = vi.hoisted(() => [] as Array<{ url: string; body: Record<string, unknown> }>);
+/** How the mocked install stream ends, or null for a run that never settles. */
+const stream = vi.hoisted(() => ({ outcome: null as unknown }));
 
 vi.mock("@/lib/cloud-config", () => ({
   readCloudConfig: async () => ({
@@ -41,8 +43,8 @@ vi.mock("@/lib/cognito-auth", () => ({
 vi.mock("@/lib/install-stream-client", () => ({
   runInstallStream: async (url: string, body: Record<string, unknown>) => {
     installs.push({ url, body });
-    // Never settles: the dialog stays open on a running install.
-    return new Promise(() => {});
+    // By default it never settles: the dialog stays open on a running install.
+    return stream.outcome ?? new Promise(() => {});
   },
 }));
 
@@ -50,9 +52,9 @@ const { CloudAppsSection } = await import("../src/components/CloudAppsSection");
 const { AppUpdateProvider } = await import("../src/components/AppUpdate");
 
 /** The section inside the update flow the Dashboard provides. */
-function section(apps: LocalAppEntry[]) {
+function section(apps: LocalAppEntry[], refreshApps?: () => void) {
   return (
-    <AppUpdateProvider cloudAdministered signedIn>
+    <AppUpdateProvider cloudAdministered signedIn refreshApps={refreshApps}>
       <CloudAppsSection apps={apps} />
     </AppUpdateProvider>
   );
@@ -73,6 +75,7 @@ const PHOTOS_DEPS = { kind: "run", display: "pnpm install --frozen-lockfile", cw
 
 beforeEach(() => {
   installs.length = 0;
+  stream.outcome = null;
   registry = [];
   vi.stubGlobal(
     "fetch",
@@ -137,9 +140,13 @@ function tileNames(): string[] {
   );
 }
 
-async function renderWith(rows: typeof registry, apps: LocalAppEntry[] = [PHOTOS, MEMO]) {
+async function renderWith(
+  rows: typeof registry,
+  apps: LocalAppEntry[] = [PHOTOS, MEMO],
+  refreshApps?: () => void,
+) {
   registry = rows;
-  render(section(apps));
+  render(section(apps, refreshApps));
   // The registry read is what turns "Not installed" into its answer.
   await vi.waitFor(() =>
     expect(fetch).toHaveBeenCalledWith("/api/apps/cloud/list", expect.anything()),
@@ -419,6 +426,9 @@ describe("consent before a cloud install", () => {
     await approve();
     await vi.waitFor(() => expect(installs).toHaveLength(1));
     expect(installs[0]!.body["surfaces"]).toEqual(["web"]);
+    // The route deploys only when the folder still holds the manifest the
+    // dialog showed.
+    expect(installs[0]!.body["approvedManifest"]).toEqual(SHARING.manifest);
   });
 
   it("installs nothing when the person cancels", async () => {
@@ -519,6 +529,8 @@ describe("consent before a cloud install", () => {
     await chooseFromMenu("Photos", "Redeploy Photos");
     await vi.waitFor(() => expect(installs).toHaveLength(1));
     expect(screen.queryByRole("heading", { name: "Install Photos in the cloud?" })).toBeNull();
+    // The deployed manifest's approval covers the folder's, which the card shows.
+    expect(installs[0]!.body["approvedManifest"]).toEqual(SHARING.manifest);
   });
 
   it("registers a second surface without asking when the first one's manifest covers it", async () => {
@@ -575,5 +587,51 @@ describe("consent before a cloud install", () => {
     );
     await vi.waitFor(() => expect(installs).toHaveLength(1));
     expect(screen.queryByRole("heading", { name: "Install Photos in the cloud?" })).toBeNull();
+    // The local install's approved manifest.
+    expect(installs[0]!.body["approvedManifest"]).toEqual(SHARING.manifest);
+  });
+});
+
+// The route refuses with a 409 before any deploy starts. A folder that no
+// longer holds the approved manifest refuses every retry of the same request,
+// so the card must re-read the folder. Another install running is worth a
+// retry once it ends.
+describe("a cloud install the route refuses", () => {
+  async function installRefused(outcome: Record<string, unknown>) {
+    stream.outcome = Promise.resolve({ kind: "error", tokenExpired: false, ...outcome });
+    const refreshApps = vi.fn();
+    const user = userEvent.setup();
+    await renderWith([], [{ ...PHOTOS, status: "active" }], refreshApps);
+    await user.click(
+      await within(await tile("Photos")).findByRole("button", { name: "Install Photos in cloud" }),
+    );
+    await screen.findByText(`Error: ${outcome.message as string}`);
+    return refreshApps;
+  }
+
+  it("re-reads the app list, and offers no Retry, when the folder changed after the approval", async () => {
+    const refreshApps = await installRefused({
+      message: "App photos's folder /apps/photos changed after you approved its manifest.",
+      status: 409,
+      code: "MANIFEST_NOT_APPROVED",
+    });
+    expect(refreshApps).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.queryByText(/fixed with a retry/)).toBeNull();
+  });
+
+  it("re-reads the app list, and keeps Retry, when another install is running", async () => {
+    const refreshApps = await installRefused({
+      message: "Another cloud install is running (memo (web)). Try again once it ends.",
+      status: 409,
+    });
+    expect(refreshApps).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+  });
+
+  it("leaves the app list alone for a deploy that failed after it started", async () => {
+    const refreshApps = await installRefused({ message: "pulumi up failed" });
+    expect(refreshApps).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   });
 });

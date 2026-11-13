@@ -84,10 +84,10 @@ afterEach(() => {
   installAnswer = () => Response.json({ ok: true });
 });
 
-function show(entry: LocalAppEntry) {
+function show(entry: LocalAppEntry, refresh: () => Promise<void> = async () => undefined) {
   render(
     <AppUpdateProvider cloudAdministered={false} signedIn={false}>
-      <LocalAppsSection apps={[entry]} refresh={async () => undefined} localOnline={true} />
+      <LocalAppsSection apps={[entry]} refresh={refresh} localOnline={true} />
     </AppUpdateProvider>,
   );
 }
@@ -254,6 +254,33 @@ describe("Start with a changed folder manifest", () => {
     expect(await screen.findByRole("heading", { name: "Install of dice failed" })).toBeTruthy();
     expect(screen.getByText("The schema step failed.")).toBeTruthy();
     expect(calls).toEqual(["install"]);
+  });
+
+  // The route refuses a manifest the folder no longer holds. The card then
+  // re-reads the app list, so the next click shows the folder's manifest
+  // rather than sending the stale one again.
+  it("re-reads the app list when the folder changed after the approval", async () => {
+    serve();
+    const error = "App dice's folder /apps/dice changed after you approved its manifest.";
+    installAnswer = () => Response.json({ error, code: "MANIFEST_NOT_APPROVED" }, { status: 409 });
+    const refresh = vi.fn(async () => undefined);
+    show(CHANGED, refresh);
+    const user = await clickStart();
+    await user.click(await screen.findByRole("button", { name: "Update & Start" }));
+    expect(await screen.findByText(error)).toBeTruthy();
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual(["install"]);
+  });
+
+  it("keeps the app list when the reinstall fails for another reason", async () => {
+    serve();
+    installAnswer = () => Response.json({ error: "The schema step failed." }, { status: 500 });
+    const refresh = vi.fn(async () => undefined);
+    show(CHANGED, refresh);
+    const user = await clickStart();
+    await user.click(await screen.findByRole("button", { name: "Update & Start" }));
+    expect(await screen.findByText("The schema step failed.")).toBeTruthy();
+    expect(refresh).not.toHaveBeenCalled();
   });
 
   it("starts at once when nothing is behind", async () => {

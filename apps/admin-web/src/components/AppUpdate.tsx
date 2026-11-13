@@ -44,6 +44,7 @@ import {
 import { refreshTokens, getIdentityPoolCredentials, type STSCredentials } from "@/lib/cognito-auth";
 import {
   consentDiffers,
+  MANIFEST_NOT_APPROVED,
   surfacesOf,
   targetsOf,
   type AppSurface,
@@ -213,12 +214,19 @@ export function useAppUpdate(): AppUpdateValue {
 export function AppUpdateProvider({
   cloudAdministered,
   signedIn,
+  refreshApps,
   children,
 }: {
   /** This machine deployed the cloud and holds what administers it. */
   cloudAdministered: boolean;
   /** An admin is signed in to the cloud. A change re-reads the registry. */
   signedIn: boolean;
+  /**
+   * Re-read the app list. A cloud install that the route refuses, such as
+   * for a folder that changed after the person approved its manifest, calls
+   * it, so the cards show what the folder holds now.
+   */
+  refreshApps?: () => void;
   children: ReactNode;
 }) {
   const [registry, setRegistry] = useState<CloudRegistry>(
@@ -438,6 +446,7 @@ export function AppUpdateProvider({
       <CloudAppInstallModal
         request={installing}
         onRunningChange={setCloudRunning}
+        onRefused={() => refreshApps?.()}
         onSuccess={() => {
           void refreshRegistry();
           if (installing?.closeOnSuccess) {
@@ -564,15 +573,21 @@ function CloudAppInstallModal({
   onClose,
   onSuccess,
   onRunningChange,
+  onRefused,
 }: {
   request: (CloudInstallRequest & { credentials: STSCredentials & { region: string } }) | null;
   /** `succeeded` is true when the run that the panel shows succeeded. */
   onClose: (succeeded: boolean) => void;
   onSuccess: () => void;
   onRunningChange: (running: boolean) => void;
+  /** The route refused the request with a 409, before any deploy started. */
+  onRefused: () => void;
 }) {
   const [lines, setLines] = useState<string[]>([]);
   const [status, setStatus] = useState<"idle" | "running" | "success" | "failure">("idle");
+  // A folder that no longer holds the approved manifest refuses every retry
+  // of the same request, so the panel offers no Retry for it.
+  const [stale, setStale] = useState(false);
   // Bumped by the Retry button to re-drive the install effect. Most install
   // failures are transient (IAM/S3 eventual consistency) and clear on retry.
   const [retryNonce, setRetryNonce] = useState(0);
@@ -587,6 +602,7 @@ function CloudAppInstallModal({
 
     setLines([]);
     setStatus("running");
+    setStale(false);
     let aborted = false;
 
     async function run() {
@@ -611,6 +627,11 @@ function CloudAppInstallModal({
       } else {
         setLines((l) => [...l, `Error: ${outcome.message}`]);
         setStatus("failure");
+        // A 409 can say the cards' manifests are out of date, so the app
+        // list is re-read. Another install running also answers 409, and a
+        // retry once it ends is the way through.
+        if (outcome.status === 409) onRefused();
+        if (outcome.code === MANIFEST_NOT_APPROVED) setStale(true);
       }
     }
 
@@ -634,7 +655,7 @@ function CloudAppInstallModal({
         <CommandOutput lines={lines} status={status} />
         {status !== "running" && (
           <div className="flex items-center justify-end gap-3">
-            {status === "failure" && (
+            {status === "failure" && !stale && (
               <>
                 <p className="mr-auto text-sm text-muted-foreground">
                   Most failures are transitory and fixed with a retry.

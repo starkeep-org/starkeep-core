@@ -927,7 +927,11 @@ export function DashboardPage() {
   // Start on a local card and Redeploy on a cloud card share one update flow,
   // so the provider wraps both sections.
   return (
-    <AppUpdateProvider cloudAdministered={cloudAdministered} signedIn={cognitoSession !== null}>
+    <AppUpdateProvider
+      cloudAdministered={cloudAdministered}
+      signedIn={cognitoSession !== null}
+      refreshApps={refreshApps}
+    >
       {page}
     </AppUpdateProvider>
   );

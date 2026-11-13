@@ -3,6 +3,7 @@ import { readFolderManifest } from "@starkeep/admin-installer/app-discovery";
 import { installLocalApp } from "@starkeep/admin-installer/local-app-install";
 import { approvesManifest } from "@starkeep/admin-installer/manifest-approval";
 import { appSource, idMismatch } from "../lib/app-scan";
+import { MANIFEST_NOT_APPROVED } from "../lib/app-types";
 import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
 
 /**
@@ -66,6 +67,7 @@ export async function POST(req: Request) {
     return Response.json(
       {
         error: `App ${appId}'s folder ${sourceDir} changed after you approved its manifest. Review the new manifest and install again.`,
+        code: MANIFEST_NOT_APPROVED,
       },
       { status: 409 },
     );

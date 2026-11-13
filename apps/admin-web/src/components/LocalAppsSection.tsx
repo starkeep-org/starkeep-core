@@ -202,6 +202,9 @@ export function LocalAppsSection({
           details?: string[];
         } | null;
         fail({ error: data?.error ?? `Install failed: ${res.status}`, details: data?.details });
+        // A 409 says the folder no longer holds the manifest this card shows,
+        // so the card re-reads it before the person tries again.
+        if (res.status === 409) void refresh();
         return false;
       }
       // A reinstall stops a running app, so its status changes too.
