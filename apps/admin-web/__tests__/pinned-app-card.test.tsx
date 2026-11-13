@@ -86,7 +86,7 @@ afterEach(() => {
 
 function show(entry: LocalAppEntry, refresh: () => Promise<void> = async () => undefined) {
   render(
-    <AppUpdateProvider cloudAdministered={false} signedIn={false}>
+    <AppUpdateProvider cloudAdministered={false} signedIn={false} refreshApps={() => {}}>
       <LocalAppsSection apps={[entry]} refresh={refresh} localOnline={true} />
     </AppUpdateProvider>,
   );

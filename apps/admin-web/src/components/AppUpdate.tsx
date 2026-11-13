@@ -224,9 +224,10 @@ export function AppUpdateProvider({
   /**
    * Re-read the app list. A cloud install that the route refuses, such as
    * for a folder that changed after the person approved its manifest, calls
-   * it, so the cards show what the folder holds now.
+   * it, so the cards show what the folder holds now. It is required so that
+   * a caller cannot drop it and bring back a refusal that repeats on retry.
    */
-  refreshApps?: () => void;
+  refreshApps: () => void;
   children: ReactNode;
 }) {
   const [registry, setRegistry] = useState<CloudRegistry>(
@@ -446,7 +447,7 @@ export function AppUpdateProvider({
       <CloudAppInstallModal
         request={installing}
         onRunningChange={setCloudRunning}
-        onRefused={() => refreshApps?.()}
+        onRefused={refreshApps}
         onSuccess={() => {
           void refreshRegistry();
           if (installing?.closeOnSuccess) {

@@ -53,7 +53,7 @@ afterEach(() => {
 async function menuItems(entry: LocalAppEntry): Promise<string[]> {
   const user = userEvent.setup();
   render(
-    <AppUpdateProvider cloudAdministered={false} signedIn={false}>
+    <AppUpdateProvider cloudAdministered={false} signedIn={false} refreshApps={() => {}}>
       <LocalAppsSection apps={[entry]} refresh={async () => undefined} localOnline={true} />
     </AppUpdateProvider>,
   );

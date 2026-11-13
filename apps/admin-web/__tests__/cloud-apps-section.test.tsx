@@ -52,7 +52,7 @@ const { CloudAppsSection } = await import("../src/components/CloudAppsSection");
 const { AppUpdateProvider } = await import("../src/components/AppUpdate");
 
 /** The section inside the update flow the Dashboard provides. */
-function section(apps: LocalAppEntry[], refreshApps?: () => void) {
+function section(apps: LocalAppEntry[], refreshApps: () => void = () => {}) {
   return (
     <AppUpdateProvider cloudAdministered signedIn refreshApps={refreshApps}>
       <CloudAppsSection apps={apps} />
@@ -143,7 +143,7 @@ function tileNames(): string[] {
 async function renderWith(
   rows: typeof registry,
   apps: LocalAppEntry[] = [PHOTOS, MEMO],
-  refreshApps?: () => void,
+  refreshApps: () => void = () => {},
 ) {
   registry = rows;
   render(section(apps, refreshApps));
