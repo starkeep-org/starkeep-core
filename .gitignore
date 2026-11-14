@@ -4,6 +4,7 @@ dist/
 *.tsbuildinfo
 .env
 .env.*
+*.env
 !.env.example
 .DS_Store
 
@@ -29,3 +30,7 @@ packages/admin-installer/builtin-apps/cloud-data-server/dist.zip
 # Playwright output
 test-results/
 playwright-report/
+
+# Local lead-session harness (keep in the checkout, do not commit)
+.claude/skills/lead/
+docs/agents/
