@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import type { AppCredentials } from "./credentials";
+import { DELEGATION_HEADER } from "./delegation";
 
 export type SignableBody = string | Buffer | Uint8Array | undefined;
 
@@ -119,7 +120,7 @@ export async function signedFetch(
   const body = NO_BODY_METHODS.has(method.toUpperCase()) ? undefined : init?.body;
   const headers: Record<string, string> = {
     ...(init?.headers ?? {}),
-    ...(init?.delegation ? { "X-Starkeep-Delegation": init.delegation } : {}),
+    ...(init?.delegation ? { [DELEGATION_HEADER]: init.delegation } : {}),
     ...signRequest({
       appId: creds.appId,
       hmacSecret: creds.hmacSecret,
