@@ -92,7 +92,10 @@ export const appComputeRouteSchema = z.union([
  * unauthenticated route, more specific than the gated catch-all, so the
  * declaration is the anonymous reach exactly. The validator bounds every entry
  * to a platform page ({@link PLATFORM_PUBLIC_PATHS}) or one of the handler's
- * `staticAssetPaths`, so no app code runs for an anonymous caller.
+ * `staticAssetPaths`. The bound is on paths, not on code: the app's server
+ * still answers the shell, `/sign-in`, `/api/session/*` and
+ * `/starkeep-runtime-config` through the platform's helpers, and must mount
+ * nothing else under them.
  */
 const publicPathSchema = z
   .string()

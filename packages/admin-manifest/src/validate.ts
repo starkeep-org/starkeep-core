@@ -108,8 +108,8 @@ function withinAllowed(entry: string, allowed: readonly string[]): boolean {
 }
 
 const RETIRED_PUBLIC_MESSAGE =
-  `auth "public" is retired. An app's own code may not answer a caller the platform has not ` +
-  `checked. For a browser page, use auth "session" and list the page in publicPaths. For a ` +
+  `auth "public" is retired. An app may not declare an anonymous route of its own. ` +
+  `For a browser page, use auth "session" and list the page in publicPaths. For a ` +
   `program outside Starkeep, such as an MCP client, give the route auth "delegated": the user ` +
   `creates a token for it on the platform's consent page. An incoming webhook from a ` +
   `third-party service is not supported yet.`;
@@ -275,10 +275,11 @@ export function validateManifest(raw: unknown): ValidationResult {
   // ones a `session` handler's `publicPaths` derive. Each entry becomes its
   // own unauthenticated route, more specific than the gated catch-all, so the
   // declaration is the reach. The rules below bound that reach to platform
-  // pages and static files, so no app code ever runs for an anonymous caller:
-  // an endpoint an app guarded itself, such as an MCP endpoint, would reopen
-  // the 2026-08-23 exposure one route at a time. An outside client calls a
-  // `delegated` route instead.
+  // pages and static files. The bound is on paths, not on code: the app's
+  // server still answers the platform pages through the platform's helpers,
+  // and must mount nothing else under them. An endpoint an app guarded itself,
+  // such as an MCP endpoint, would reopen the 2026-08-23 exposure one route at
+  // a time. An outside client calls a `delegated` route instead.
   for (const handler of manifest.infraRequirements.compute.handlers) {
     const where = `infraRequirements.compute.handlers["${handler.name}"]`;
     // What the manifest wrote down, before publicPaths derivation — needed to
@@ -339,8 +340,9 @@ export function validateManifest(raw: unknown): ValidationResult {
         continue;
       }
 
-      // Only platform pages and the handler's own static files. Anything else
-      // is app code answering an anonymous caller.
+      // Only platform pages and the handler's own static files. Any other
+      // path would be app code of the author's choosing answering an
+      // anonymous caller.
       if (
         !withinAllowed(publicPath, PLATFORM_PUBLIC_PATHS) &&
         !withinAllowed(publicPath, handler.staticAssetPaths)
@@ -348,8 +350,7 @@ export function validateManifest(raw: unknown): ValidationResult {
         errors.push(
           `${where}.publicPaths: "${publicPath}" is neither a platform page ` +
             `(${PLATFORM_PUBLIC_PATHS.join(", ")}) nor one of this handler's staticAssetPaths. ` +
-            `An anonymous route may serve only those, so no app code runs for a caller the ` +
-            `platform has not checked. For a program outside Starkeep, such as an MCP client, ` +
+            `An anonymous route may serve only those. For a program outside Starkeep, such as an MCP client, ` +
             `declare the route with auth "delegated": the user creates a token for it on the ` +
             `platform's consent page. An incoming webhook from a third-party service is not ` +
             `supported yet.`,
