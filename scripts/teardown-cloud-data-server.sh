@@ -439,6 +439,7 @@ fi
 echo "  CloudFront   : distribution $(list_or_none "$DIST_IDS"), with its OAC, cache policies, public key, key group and function"
 echo "  Certificates : $(list_or_none "$CERT_ARNS") (us-east-1), and a Route53-zone domain's records"
 echo "  Signing key  : SSM /${STACK_PREFIX}/app-creds/_cloudfront-signing"
+echo "  Delegation   : SSM /${STACK_PREFIX}/app-creds/_delegation-signing"
 echo "  S3 buckets   : $FILES_BUCKET, $BILLING_BUCKET"
 echo "  CUR report   : $CUR_REPORT"
 echo "  IAM role     : $CDS_ROLE"
@@ -909,6 +910,13 @@ step "Deleting CloudFront signing SecureString: /${STACK_PREFIX}/app-creds/_clou
 try_delete "/${STACK_PREFIX}/app-creds/_cloudfront-signing" \
   ssm delete-parameter --name "/${STACK_PREFIX}/app-creds/_cloudfront-signing"
 
+# The key that signs outside clients' delegation tokens. Every delegation it
+# signed lived in the DSQL cluster this script deletes, so nothing it signs
+# would still mean anything.
+step "Deleting delegation signing SecureString: /${STACK_PREFIX}/app-creds/_delegation-signing"
+try_delete "/${STACK_PREFIX}/app-creds/_delegation-signing" \
+  ssm delete-parameter --name "/${STACK_PREFIX}/app-creds/_delegation-signing"
+
 # ── Step 5: S3 files bucket ───────────────────────────────────────────────────
 
 step "Emptying S3 files bucket: $FILES_BUCKET"
@@ -979,6 +987,9 @@ STALE = [
     "apiGatewayId",
     "apiGatewayExecutionArn",
     "authorizerId",
+    "sessionAuthorizerId",
+    "originAuthorizerId",
+    "delegatedAuthorizerId",
     "s3Bucket",
     "auroraEndpoint",
 ]
