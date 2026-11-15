@@ -31,6 +31,13 @@
 # $HOME/.starkeep, whose resources are all still live) and is left untouched.
 # Clearing removes only cloud state; the local 'appParentDirs' setting is always
 # preserved.
+#
+# Cognito pools: the script finds the pools to delete from the target stack's
+# own resources, and by the names and tags the bootstrap template gives them
+# (<prefix>-auth tagged StackPrefix=<prefix>, and <prefix>_admin). It never
+# takes a pool ID from the config, because the config may describe another
+# deployment. It also refuses to touch a pool that the config names unless the
+# config matches the target.
 
 set -euo pipefail
 
@@ -63,14 +70,17 @@ done
 
 # ── Load config ───────────────────────────────────────────────────────────────
 
+# The config's pool IDs serve two purposes only: the user pool ID stands in for
+# the config's region, and both IDs mark pools that a teardown of another
+# deployment must never touch. Neither ID selects a pool to delete.
 CONFIG_STACK_PREFIX=""
-USER_POOL_ID=""
-IDENTITY_POOL_ID=""
+CONFIG_USER_POOL_ID=""
+CONFIG_IDENTITY_POOL_ID=""
 
 if [[ -f "$CONFIG_FILE" ]]; then
   CONFIG_STACK_PREFIX=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('stackPrefix',''))" 2>/dev/null || true)
-  USER_POOL_ID=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('userPoolId',''))" 2>/dev/null || true)
-  IDENTITY_POOL_ID=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('identityPoolId',''))" 2>/dev/null || true)
+  CONFIG_USER_POOL_ID=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('userPoolId',''))" 2>/dev/null || true)
+  CONFIG_IDENTITY_POOL_ID=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('identityPoolId',''))" 2>/dev/null || true)
 fi
 
 # The stack prefix is the only thing that scopes a teardown to a single
@@ -100,7 +110,7 @@ STACK_NAME="${STACK_PREFIX}-bootstrap"
 # (e.g. the test suite deploys to us-east-2 while the AWS CLI default is
 # us-east-1), which would skip the real resources and falsely report success.
 # It must be passed via --region, or entered at an interactive prompt.
-CONFIG_REGION="${USER_POOL_ID%%_*}"
+CONFIG_REGION="${CONFIG_USER_POOL_ID%%_*}"
 REGION="$FLAG_REGION"
 if [[ -z "$REGION" ]]; then
   if [[ "$YES" != "true" && -t 0 ]]; then
@@ -143,6 +153,70 @@ ARTIFACTS_BUCKET="${STACK_PREFIX}-artifacts-${ACCOUNT_ID}-${REGION}"
 APP_ASSETS_BUCKET="${STACK_PREFIX}-app-assets-${ACCOUNT_ID}-${REGION}"
 SSM_PARAM="/${STACK_PREFIX}/pulumi/passphrase"
 
+# ── Find this deployment's Cognito pools ─────────────────────────────────────
+# Read before the stack deletion below, because the stack's resource list goes
+# away with the stack. The name lookups find pools that a failed or partial
+# stack deletion left behind. Each list is space-separated (bash 3.2 has no
+# associative arrays) and holds each ID once.
+
+USER_POOL_IDS=""
+IDENTITY_POOL_IDS=""
+
+add_id() {  # add_id <list> <id>: print <list> with <id> appended once
+  local list="$1" id="$2"
+  if [[ -z "$id" || "$id" == "None" ]]; then printf '%s' "$list"; return; fi
+  case " $list " in
+    *" $id "*) printf '%s' "$list" ;;
+    *) printf '%s' "${list:+$list }$id" ;;
+  esac
+}
+
+stack_resource_id() {  # stack_resource_id <logical-id>
+  aws cloudformation describe-stack-resource --stack-name "$STACK_NAME" \
+    --logical-resource-id "$1" \
+    --query 'StackResourceDetail.PhysicalResourceId' --output text 2>/dev/null || true
+}
+
+# A user pool counts as this deployment's only when the bootstrap template's
+# StackPrefix tag names this prefix, whatever source named the pool.
+user_pool_is_ours() {  # user_pool_is_ours <user-pool-id>
+  local tag
+  tag=$(aws cognito-idp describe-user-pool --user-pool-id "$1" \
+    --query 'UserPool.UserPoolTags.StackPrefix' --output text 2>/dev/null || true)
+  [[ "$tag" == "$STACK_PREFIX" ]]
+}
+
+CANDIDATE_USER_POOLS=$(stack_resource_id UserPool)
+for id in $(aws cognito-idp list-user-pools --max-results 60 \
+    --query "UserPools[?Name=='${STACK_PREFIX}-auth'].Id" --output text 2>/dev/null || true); do
+  CANDIDATE_USER_POOLS=$(add_id "$CANDIDATE_USER_POOLS" "$id")
+done
+for id in $CANDIDATE_USER_POOLS; do
+  if user_pool_is_ours "$id"; then
+    USER_POOL_IDS=$(add_id "$USER_POOL_IDS" "$id")
+  fi
+done
+
+IDENTITY_POOL_IDS=$(add_id "" "$(stack_resource_id IdentityPool)")
+for id in $(aws cognito-identity list-identity-pools --max-results 60 \
+    --query "IdentityPools[?IdentityPoolName=='${STACK_PREFIX}_admin'].IdentityPoolId" --output text 2>/dev/null || true); do
+  IDENTITY_POOL_IDS=$(add_id "$IDENTITY_POOL_IDS" "$id")
+done
+
+# A config for another deployment names pools that must survive this teardown.
+# Reaching one here means the stack or a name lookup points at the other
+# deployment's pool, so the script stops before it deletes anything.
+if [[ "$CONFIG_MATCHES_TEARDOWN" != "true" ]]; then
+  for id in $USER_POOL_IDS $IDENTITY_POOL_IDS; do
+    if [[ "$id" == "$CONFIG_USER_POOL_ID" || "$id" == "$CONFIG_IDENTITY_POOL_ID" ]]; then
+      echo "Error: Cognito pool $id belongs to the deployment that $CONFIG_FILE" >&2
+      echo "describes (prefix '${CONFIG_STACK_PREFIX:-<none>}'), not to ${STACK_PREFIX}/${REGION}." >&2
+      echo "Nothing was deleted." >&2
+      exit 1
+    fi
+  done
+fi
+
 # ── Confirmation ────────────────────────────────────────────────────────────
 echo ""
 echo "This will permanently destroy ALL Starkeep resources in AWS:"
@@ -163,8 +237,8 @@ echo "    IAM policy           : ${STACK_PREFIX}-app-permissions-boundary"
 echo "    IAM policy           : ${STACK_PREFIX}-foundational-permissions-boundary"
 echo "    IAM policy           : ${STACK_PREFIX}-install-ddl-permissions-boundary"
 echo "    IAM policy           : ${STACK_PREFIX}-install-infra-permissions-boundary"
-[[ -n "$USER_POOL_ID" ]]      && echo "    Cognito User Pool    : $USER_POOL_ID"
-[[ -n "$IDENTITY_POOL_ID" ]]  && echo "    Cognito Identity Pool: $IDENTITY_POOL_ID"
+for id in $USER_POOL_IDS; do echo "    Cognito User Pool    : $id"; done
+for id in $IDENTITY_POOL_IDS; do echo "    Cognito Identity Pool: $id"; done
 echo ""
 if [[ "$CONFIG_MATCHES_TEARDOWN" == "true" ]]; then
   echo "After all resources are deleted, the cloud config in $CONFIG_FILE will be"
@@ -515,29 +589,36 @@ else
   skip
 fi
 
-# Delete Cognito resources using IDs from config (CF may not have removed them)
-if [[ -n "$IDENTITY_POOL_ID" ]]; then
-  step "Deleting Cognito Identity Pool: $IDENTITY_POOL_ID"
+# Delete the Cognito pools found above. The stack deletion normally removes
+# them; this sweep catches pools a failed or partial deletion left behind.
+for id in $IDENTITY_POOL_IDS; do
+  step "Deleting Cognito Identity Pool: $id"
   if aws cognito-identity delete-identity-pool \
-      --identity-pool-id "$IDENTITY_POOL_ID" --region "$REGION" 2>/dev/null; then
+      --identity-pool-id "$id" --region "$REGION" 2>/dev/null; then
     echo "  Deleted."
   else
     echo "  Not found or already deleted."
   fi
-fi
+done
 
-if [[ -n "$USER_POOL_ID" ]]; then
-  step "Deleting Cognito User Pool: $USER_POOL_ID"
-  # Must disable deletion protection before deleting
-  aws cognito-idp update-user-pool --user-pool-id "$USER_POOL_ID" \
-    --deletion-protection INACTIVE --region "$REGION" 2>/dev/null || true
+for id in $USER_POOL_IDS; do
+  step "Deleting Cognito User Pool: $id"
+  # UpdateUserPool resets every setting the call omits to its default, so the
+  # script turns deletion protection off only when it is on. The template
+  # never turns it on.
+  protection=$(aws cognito-idp describe-user-pool --user-pool-id "$id" --region "$REGION" \
+    --query 'UserPool.DeletionProtection' --output text 2>/dev/null || true)
+  if [[ "$protection" == "ACTIVE" ]]; then
+    aws cognito-idp update-user-pool --user-pool-id "$id" \
+      --deletion-protection INACTIVE --region "$REGION" 2>/dev/null || true
+  fi
   if aws cognito-idp delete-user-pool \
-      --user-pool-id "$USER_POOL_ID" --region "$REGION" 2>/dev/null; then
+      --user-pool-id "$id" --region "$REGION" 2>/dev/null; then
     echo "  Deleted."
   else
     echo "  Not found or already deleted."
   fi
-fi
+done
 
 # ── Step 6: Clear cloud config ────────────────────────────────────────────────
 # Only a config whose prefix+region match the teardown target describes the
