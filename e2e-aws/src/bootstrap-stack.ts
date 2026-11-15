@@ -95,7 +95,8 @@ export async function ensureBootstrapStack(options: {
     if (existing.StackStatus !== "CREATE_COMPLETE" && existing.StackStatus !== "UPDATE_COMPLETE") {
       throw new Error(
         `bootstrap stack ${stackName} exists but is in state ${existing.StackStatus}; ` +
-          `tear it down (scripts/teardown-bootstrap.sh --prefix ${stackPrefix}) and re-run`,
+          `preview its teardown (scripts/teardown-bootstrap.sh --dry-run --prefix ${stackPrefix} --region ${region}), ` +
+          "run the teardown without --dry-run, and re-run",
       );
     }
     // Reusing the stack as-is would mean testing yesterday's permissions

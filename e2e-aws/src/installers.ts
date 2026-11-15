@@ -122,22 +122,34 @@ export async function runInstallCli(
 
 /**
  * Run one of the repository's teardown scripts against the test stack, as the
- * operator would, with this run's state dir as STARKEEP_DIR.
+ * operator would, with this run's state dir as STARKEEP_DIR. A --dry-run pass
+ * goes first, so the log records the resolved resource list before anything
+ * is deleted, and a failed lookup stops the teardown before it starts.
  */
 export function runTeardownScript(
   script: "teardown-cloud-data-server.sh" | "teardown-bootstrap.sh",
   paths: RunPaths,
 ): void {
-  const result = spawnSync(
-    "bash",
-    [join(REPO_ROOT, "scripts", script), "--yes", "--prefix", STACK_PREFIX, "--region", REGION],
-    {
-      stdio: "inherit",
-      env: { ...process.env, STARKEEP_DIR: paths.dataDir, AWS_REGION: REGION },
-    },
-  );
-  if (result.status !== 0) {
-    throw new Error(`${script} exited with code ${result.status}`);
+  for (const mode of [["--dry-run"], []]) {
+    const result = spawnSync(
+      "bash",
+      [
+        join(REPO_ROOT, "scripts", script),
+        "--yes",
+        ...mode,
+        "--prefix",
+        STACK_PREFIX,
+        "--region",
+        REGION,
+      ],
+      {
+        stdio: "inherit",
+        env: { ...process.env, STARKEEP_DIR: paths.dataDir, AWS_REGION: REGION },
+      },
+    );
+    if (result.status !== 0) {
+      throw new Error(`${[script, ...mode].join(" ")} exited with code ${result.status}`);
+    }
   }
 }
 
