@@ -326,6 +326,30 @@ export async function putDelegationSigningParameter(opts: {
   return name;
 }
 
+/**
+ * Delete the two signing SecureStrings the cloud-data-server install writes
+ * outside Pulumi: the CloudFront URL-signing key and the delegation signing
+ * key. Idempotent. The uninstall calls it, as the teardown script does,
+ * because nothing either key signs outlives the deployment.
+ */
+export async function deleteSigningParameters(opts: {
+  stackPrefix: string;
+  region: string;
+  awsCreds: AwsCredentials;
+}): Promise<void> {
+  const ssm = makeSsmClient(opts.region, opts.awsCreds);
+  for (const name of [
+    cloudFrontSigningParameterName(opts.stackPrefix),
+    delegationSigningParameterName(opts.stackPrefix),
+  ]) {
+    try {
+      await ssm.send(new DeleteParameterCommand({ Name: name }));
+    } catch (err) {
+      if (!(err instanceof ParameterNotFound)) throw err;
+    }
+  }
+}
+
 /** Fetch and parse the JSON-encoded SecureString. Returns null if absent. */
 export async function getAppCredsParameter(opts: {
   stackPrefix: string;

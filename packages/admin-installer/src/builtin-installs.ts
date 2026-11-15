@@ -40,6 +40,7 @@ import { pulumiUpInline, pulumiDestroyInline, type StateResource } from "./compu
 import { initializeSharedSchema } from "./dsql-schema-init";
 import { buildCloudDataServerProgram } from "./builtin-programs/cloud-data-server-program";
 import {
+  deleteSigningParameters,
   putCloudFrontSigningParameter,
   putDelegationSigningParameter,
   putDeploymentSettingsParameter,
@@ -786,7 +787,8 @@ export async function installCloudDataServer(
  *   3. Role-chain to the app session.
  *   4. Run `pulumi destroy` to remove all Pulumi-managed resources (DSQL
  *      cluster, files bucket, Lambda, API Gateway, CUR report).
- *   5. Delete all inline policies on the app role, then delete the role.
+ *   5. Delete the two signing SecureStrings the install wrote outside Pulumi.
+ *   6. Delete all inline policies on the app role, then delete the role.
  *
  * Idempotent — safe to re-run if a previous attempt was interrupted.
  */
@@ -849,6 +851,16 @@ export async function uninstallCloudDataServer(
       creds: appCreds,
     }),
     creds: appCreds,
+  });
+
+  // The install writes both signing keys under Manager creds, outside Pulumi
+  // state, so `pulumi destroy` leaves them. The teardown script deletes the
+  // same two.
+  console.log("Deleting the CloudFront and delegation signing keys from SSM…");
+  await deleteSigningParameters({
+    stackPrefix: config.stackPrefix,
+    region: config.region,
+    awsCreds: managerCreds,
   });
 
   console.log("Deleting app role…");

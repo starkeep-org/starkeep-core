@@ -1195,6 +1195,23 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           resource: appCredsArn,
           why: "Uninstall deletes the app's signing credential.",
         },
+        // The cloud-data-server's two signing keys sit under the same prefix,
+        // written at install and deleted at uninstall, outside Pulumi state.
+        ...["_cloudfront-signing", "_delegation-signing"].flatMap((name): ExpectedCall[] => {
+          const arn = `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/app-creds/${name}`;
+          return [
+            {
+              action: "ssm:PutParameter",
+              resource: arn,
+              why: "The cloud-data-server install writes its signing key as a SecureString.",
+            },
+            {
+              action: "ssm:DeleteParameter",
+              resource: arn,
+              why: "The cloud-data-server uninstall deletes its signing key.",
+            },
+          ];
+        }),
         {
           action: "ssm:PutParameter",
           resource: settingsArn,
