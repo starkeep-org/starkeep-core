@@ -148,7 +148,13 @@ export function runTeardownScript(
       },
     );
     if (result.status !== 0) {
-      throw new Error(`${[script, ...mode].join(" ")} exited with code ${result.status}`);
+      // The stack is left partly torn down. Name the command that finishes it
+      // safely, with this run's STARKEEP_DIR, so nobody has to rebuild it.
+      throw new Error(
+        `${[script, ...mode].join(" ")} exited with code ${result.status}. ` +
+          "To finish by hand, preview the teardown, then run it without --dry-run: " +
+          `STARKEEP_DIR=${paths.dataDir} scripts/${script} --dry-run --prefix ${STACK_PREFIX} --region ${REGION}`,
+      );
     }
   }
 }
