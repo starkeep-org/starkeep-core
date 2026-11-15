@@ -365,7 +365,7 @@ describe("read-only", () => {
     expect(load).not.toHaveBeenCalled();
   });
 
-  it("refuses a WITH that leads into a write, and drops the snapshot it touched", async () => {
+  it("refuses a WITH that leads into a write, and leaves the copy whole", async () => {
     const { load } = fakeServer();
     const cache = createSnapshotCache({ tables: TABLES });
     await cache.query(q({ load }));
@@ -393,9 +393,33 @@ describe("read-only", () => {
         cache.query(q({ load, sql: "WITH doomed AS (SELECT id FROM sets) DELETE FROM sets" })),
       ).rejects.toBeInstanceOf(SnapshotReadOnlyError);
 
-      // The touched copy is gone, so the next query reloads a whole one.
+      // The rollback undid the write, so the same copy answers whole.
       expect((await cache.query(q({ load }))).rows).toEqual([{ n: 3 }]);
-      expect(load).toHaveBeenCalledTimes(2);
+      expect(load).toHaveBeenCalledTimes(1);
+    } finally {
+      proto.setAuthorizer = original;
+    }
+  });
+
+  it("keeps a write from reaching another query that shares the same load", async () => {
+    const proto = DatabaseSync.prototype as { setAuthorizer?: unknown };
+    const original = proto.setAuthorizer;
+    proto.setAuthorizer = undefined;
+    try {
+      let release!: () => void;
+      const load = vi.fn(
+        () => new Promise<SnapshotRow[]>((resolve) => (release = () => resolve(SETS))),
+      );
+      const cache = createSnapshotCache({ tables: TABLES });
+      const writer = cache.query(
+        q({ load, sql: "WITH doomed AS (SELECT id FROM sets) DELETE FROM sets" }),
+      );
+      const reader = cache.query(q({ load }));
+      await Promise.resolve();
+      release();
+      await expect(writer).rejects.toBeInstanceOf(SnapshotReadOnlyError);
+      expect((await reader).rows).toEqual([{ n: 3 }]);
+      expect(load).toHaveBeenCalledTimes(1);
     } finally {
       proto.setAuthorizer = original;
     }
