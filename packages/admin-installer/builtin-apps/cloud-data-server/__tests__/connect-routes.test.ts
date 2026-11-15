@@ -251,6 +251,23 @@ describe("the consent flow", () => {
     expect(db.calls(/insert/)).toHaveLength(0);
   });
 
+  it("refuses a callback for an app uninstalled since the form, and creates nothing", async () => {
+    const { approve, cookies } = await consent({
+      client: "x",
+      app: "probe",
+      mode: "read",
+      days: "90",
+    });
+    const state = new URL(approve.headers.Location!).searchParams.get("state")!;
+    const res = await handleConnectRoute(
+      req({ rawPath: "/connect/callback", query: { state, code: "c1" }, cookieHeader: cookies }),
+      { ...deps(), connectableApps: async () => [] },
+    );
+    expect(res.statusCode).toBe(404);
+    expect(db.calls(/insert/)).toHaveLength(0);
+    expect(cognitoCalls.some((c) => c.url.endsWith("/oauth2/revoke"))).toBe(true);
+  });
+
   it("refuses an account with no data library and ends its refresh token", async () => {
     groups = [];
     const { approve, cookies } = await consent({
