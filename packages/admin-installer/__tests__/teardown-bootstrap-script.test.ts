@@ -199,6 +199,63 @@ describe("teardown-bootstrap.sh", () => {
     expect(output).toContain("Cloud config cleared");
   });
 
+  describe("with STARKEEP_DIR set to the target's own config, as the e2e harness sets it", () => {
+    // The harness and its printed cleanup command point STARKEEP_DIR at the
+    // run's state dir, whose config describes the target. The operator's own
+    // config still sits at $HOME/.starkeep and describes the live deployment.
+    const runConfig = {
+      stackPrefix: "sktest",
+      userPoolId: TEST_USER_POOL,
+      identityPoolId: TEST_IDENTITY_POOL,
+    };
+    const homeConfig = {
+      stackPrefix: "live",
+      userPoolId: LIVE_USER_POOL,
+      identityPoolId: LIVE_IDENTITY_POOL,
+    };
+    let runSandbox: Sandbox;
+    beforeEach(() => {
+      runSandbox = createSandbox(runConfig, homeConfig);
+    });
+    afterEach(() => runSandbox.cleanup());
+    const runAsHarness = (account: Account) =>
+      runSandbox.run(
+        "teardown-bootstrap.sh",
+        ["--yes", "--force", "--prefix", "sktest", "--region", REGION],
+        account,
+      );
+
+    it("stops before deleting anything when a found pool is one the home config names", () => {
+      const account = mergeAccounts(live, target);
+      account.stacks["sktest-bootstrap"].IdentityPool = LIVE_IDENTITY_POOL;
+      const { status, output, calls } = runAsHarness(account);
+      expect(status).toBe(1);
+      expect(output).toContain(`Cognito pool ${LIVE_IDENTITY_POOL} belongs to the deployment`);
+      expect(destructive(calls)).toEqual([]);
+    });
+
+    it("fails when a home-config pool that existed at the start is gone at the end", () => {
+      runSandbox.stub(
+        "teardown-cloud-data-server.sh",
+        `#!/usr/bin/env bash\naws cognito-identity delete-identity-pool --identity-pool-id ${LIVE_IDENTITY_POOL} >/dev/null\n`,
+      );
+      const { status, output } = runAsHarness(mergeAccounts(live, target));
+      expect(status, output).toBe(1);
+      expect(output).toContain(
+        `the identity pool ${LIVE_IDENTITY_POOL} that ${runSandbox.dir}/.starkeep/config.json names (prefix 'live') existed when this teardown started and is gone now.`,
+      );
+    });
+
+    it("deletes the target, clears the run's config and leaves the home config's pools", () => {
+      const { status, output, account } = runAsHarness(mergeAccounts(live, target));
+      expect(status, output).toBe(0);
+      expect(identifiersOf(account).sort()).toEqual(identifiersOf(live).sort());
+      expect(output).toContain("Cloud config cleared");
+      expect(output).toContain(`${LIVE_USER_POOL} still exists.`);
+      expect(output).toContain(`${LIVE_IDENTITY_POOL} still exists.`);
+    });
+  });
+
   it("succeeds against an account that holds nothing of the target", () => {
     const { status, output } = runTeardown("sktest", mergeAccounts(live, emptyAccount()), [
       "--force",

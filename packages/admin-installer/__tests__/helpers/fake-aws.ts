@@ -430,11 +430,20 @@ export interface Sandbox {
 
 /**
  * Copies every script in `scripts/` into a temp directory, puts the fake `aws`
- * first on PATH, and points STARKEEP_DIR at a temp config.
+ * first on PATH, and points STARKEEP_DIR at a temp config. `homeConfig`, when
+ * given, becomes `$HOME/.starkeep/config.json`, the config a run without
+ * STARKEEP_DIR would read.
  */
-export function createSandbox(config: Record<string, unknown>): Sandbox {
+export function createSandbox(
+  config: Record<string, unknown>,
+  homeConfig?: Record<string, unknown>,
+): Sandbox {
   const dir = mkdtempSync(join(tmpdir(), "teardown-"));
   for (const sub of ["scripts", "bin", "starkeep", "env"]) mkdirSync(join(dir, sub));
+  if (homeConfig) {
+    mkdirSync(join(dir, ".starkeep"));
+    writeFileSync(join(dir, ".starkeep", "config.json"), JSON.stringify(homeConfig));
+  }
   for (const f of readdirSync(REPO_SCRIPTS)) {
     if (!f.endsWith(".sh")) continue;
     copyFileSync(join(REPO_SCRIPTS, f), join(dir, "scripts", f));
