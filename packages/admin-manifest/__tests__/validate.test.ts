@@ -40,7 +40,7 @@ describe("photos fixture (full real manifest)", () => {
     expect(m.localRun?.cwd).toBe(".");
     // Handler defaults: runtime + auth on the api handler (auth unspecified → jwt)
     const api = m.infraRequirements.compute.handlers.find((h) => h.name === "api");
-    expect(api?.runtime).toBe("nodejs22.x");
+    expect(api?.runtime).toBe("nodejs24.x");
     expect(api?.auth).toBe("jwt");
     // The shell handler is what a browser navigates to, so it takes the
     // session authorizer rather than the JWT one (which reads a header a

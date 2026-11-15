@@ -136,7 +136,7 @@ const bundleAssetsDirSchema = z
 const appComputeHandlerObjectSchema = z.strictObject({
   name: z.string(),
   handler: z.string(),
-  runtime: z.enum(["nodejs22.x"]).default("nodejs22.x"),
+  runtime: z.enum(["nodejs24.x"]).default("nodejs24.x"),
   memoryMb: z.number().int().min(128).max(10240).default(256),
   timeoutSeconds: z.number().int().min(1).max(900).default(30),
   /**

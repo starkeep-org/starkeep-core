@@ -795,7 +795,7 @@ export function createFileWatchManager(opts: FileWatchManagerOptions): FileWatch
       });
       for (const entry of entries) {
         if (entry.isFile()) {
-          const filePath = join(entry.parentPath ?? entry.path, entry.name);
+          const filePath = join(entry.parentPath, entry.name);
           if (!isExcluded(entry.name, active.config.excludePatterns)) {
             if (matchesPatterns(entry.name, active.config.includePatterns)) {
               files.push(filePath);

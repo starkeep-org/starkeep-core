@@ -1,6 +1,6 @@
 # @starkeep/storage-sqlite
 
-SQLite implementation of `DatabaseAdapter` using the built-in `node:sqlite` module (Node.js 22+). No native compilation dependencies required.
+SQLite implementation of `DatabaseAdapter` using the built-in `node:sqlite` module. No native compilation dependencies required.
 
 ## Installation
 
@@ -8,7 +8,7 @@ SQLite implementation of `DatabaseAdapter` using the built-in `node:sqlite` modu
 pnpm add @starkeep/storage-sqlite
 ```
 
-Requires Node.js 22 or later for `node:sqlite` support.
+Requires Node.js 24 or later, the version the rest of Starkeep requires.
 
 ## Usage
 

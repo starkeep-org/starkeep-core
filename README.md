@@ -39,7 +39,7 @@ The breadth and ambition of Starkeep is what makes this different from tradition
 
 You need the following on your computer:
 
-- Node.js 22 or later.
+- Node.js 24 or later.
 - pnpm 10.20 or later, as a `pnpm` command on your `PATH`.
 - A checkout of this repository, `starkeep-core`.
 - A checkout of [`starkeep-apps`](https://github.com/starkeep-org/starkeep-apps) is optional but highly recommended so you can try out the Starkeep Photos app and examine its implementation. A typical location is `~/starkeep-apps`.

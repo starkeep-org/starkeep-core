@@ -95,7 +95,7 @@
   },
   "devDependencies": {
     "@hono/node-server": "^1.19.17",
-    "@types/node": "^25.4.0",
+    "@types/node": "^24.19.2",
     "aws-sdk-client-mock": "^4.1.0",
     "hono": "^4.12.30",
     "tsup": "^8.0.0",

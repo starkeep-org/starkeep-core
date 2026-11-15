@@ -5,9 +5,9 @@
  * 1. Build all required workspace packages (tsup → dist/) so esbuild can
  *    resolve their compiled JS. `pnpm --filter` runs each in dependency order.
  * 2. Bundle src/api-handler.ts via esbuild — externalize nothing; everything
- *    (workspace deps, AWS SDK, pg) ends up in a single output file. AWS Lambda
- *    runtimes don't pre-include @aws-sdk/* on Node 22.x, so bundling them is
- *    correct.
+ *    (workspace deps, AWS SDK, pg) ends up in a single output file. The
+ *    Lambda runtime ships its own @aws-sdk/* copy, but bundling pins the
+ *    version the handler was built and tested against.
  * 3. Zip the bundle output into dist.zip alongside this script.
  *
  * Output: packages/admin-installer/builtin-apps/cloud-data-server/dist.zip
@@ -65,7 +65,7 @@ for (const entry of ["api-handler", "session-authorizer"]) {
     entryPoints: [join(pkgDir, "src", `${entry}.ts`)],
     bundle: true,
     platform: "node",
-    target: "node22",
+    target: "node24",
     format: "cjs",
     outfile: join(stagingDir, `${entry}.js`),
     external: [],
