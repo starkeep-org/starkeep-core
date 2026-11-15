@@ -137,6 +137,9 @@ beforeAll(async () => {
       refreshCalls += 1;
       return refreshAnswer();
     }
+    if (String(input) === `https://${COGNITO_DOMAIN}/oauth2/revoke`) {
+      return new Response("", { status: 200 });
+    }
     if (jwksDown && String(input).includes("/.well-known/jwks.json")) {
       throw new TypeError("fetch failed");
     }
@@ -278,6 +281,52 @@ describe("refuses", () => {
       delegation: token(),
     });
     expect(res.statusCode).toBe(401);
+  });
+
+  it("a delegation revoked on the connections page, at once on the same container", async () => {
+    let current = row();
+    db = new FakeDsql()
+      .on(/update "delegation"\."grants" set "revoked_at_ms"/, () => {
+        current = row({ revoked_at_ms: Date.now() });
+        return [current as unknown as Record<string, unknown>];
+      })
+      .on(/from "delegation"\."grants"/, () => [current as unknown as Record<string, unknown>])
+      .on(/update "delegation"\."grants"/, []);
+    setDbFactory(db);
+    const before = await call({
+      method: "GET",
+      subPath: "/app-data/db/probe_notes",
+      delegation: token(),
+    });
+    expect(passedGate(before)).toBe(true);
+
+    const csrf = "c".repeat(32);
+    const session = await mintTestUserToken({
+      aud: CONNECTORS,
+      "cognito:groups": ["starkeep-users"],
+    });
+    const revoked = (await handler(
+      {
+        rawPath: "/connections/dlg-1/revoke",
+        requestContext: { http: { method: "POST" }, domainName: "abc.execute-api.test" },
+        headers: {
+          "sec-fetch-site": "same-origin",
+          "content-type": "application/x-www-form-urlencoded",
+          cookie: `sk_connections=${session}; sk_connect_csrf=${csrf}`,
+        },
+        body: `csrf=${csrf}`,
+      },
+      context,
+    )) as { statusCode: number };
+    expect(revoked.statusCode).toBe(302);
+    expect(db.calls(/update "delegation"\."grants" set "revoked_at_ms"/)).toHaveLength(1);
+
+    const after = await call({
+      method: "GET",
+      subPath: "/app-data/db/probe_notes",
+      delegation: token(),
+    });
+    expect(after.statusCode).toBe(401);
   });
 
   it("a token whose mode differs from its row", async () => {

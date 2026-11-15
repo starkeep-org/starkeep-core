@@ -3168,6 +3168,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           connectableApps: async () =>
             loadConnectableApps(await platformClient(accountId, toClose)),
           groupsMayUseData,
+          forgetDelegation: (id) => delegationRowCache.delete(id),
         },
       );
     }

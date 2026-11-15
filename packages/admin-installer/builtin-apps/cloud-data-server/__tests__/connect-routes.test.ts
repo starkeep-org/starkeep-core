@@ -46,6 +46,7 @@ function deps(): ConnectDeps {
     db: async () => db.createClient({ hostname: "x", region: "x" }),
     connectableApps: async () => [{ appId: "probe", name: "Probe" }],
     groupsMayUseData: (g) => g.includes("starkeep-users"),
+    forgetDelegation: () => {},
     fetch: async (input, init) => {
       const url = String(input);
       const body = new URLSearchParams(String(init?.body ?? ""));
