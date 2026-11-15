@@ -21,14 +21,23 @@
 # consent: pass --force, or answer the interactive y/N prompt. Without either,
 # a protected cluster is left intact and the run says so.
 #
+# The script resolves the gateway, Lambdas, log groups, DSQL clusters,
+# distribution and certificates before the confirmation, and the confirmation
+# lists their IDs. --dry-run prints that list, and the list from
+# teardown-cloud-apps.sh, then exits without deleting anything.
+#
+# A failed AWS call does not stop the teardown. The script lists each failure
+# at the end and exits 1. A resource that is already gone is not a failure.
+#
 # Usage:
-#   ./teardown-cloud-data-server.sh [--yes|-y] [--force] --prefix <stack-prefix> --region <region>
+#   ./teardown-cloud-data-server.sh [--yes|-y] [--force] [--dry-run] --prefix <stack-prefix> --region <region>
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Honor repo-root .env / .env.local (STARKEEP_DIR etc.) before defaulting below.
 source "$SCRIPT_DIR/load-env.sh"
+source "$SCRIPT_DIR/teardown-common.sh"
 STARKEEP_DIR="${STARKEEP_DIR:-$HOME/.starkeep}"
 CONFIG_FILE="$STARKEEP_DIR/config.json"
 
@@ -43,6 +52,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --yes|-y) YES=true; shift ;;
     --force) FORCE=true; shift ;;
+    --dry-run) DRY_RUN=true; shift ;;
     --prefix) FLAG_PREFIX="$2"; shift 2 ;;
     --region) FLAG_REGION="$2"; shift 2 ;;
     *) echo "Unknown flag: $1"; exit 1 ;;
@@ -241,44 +251,177 @@ PYEOF
 delete_role() {
   local role_name="$1"
   step "Deleting IAM role: $role_name"
-  if ! aws iam get-role --role-name "$role_name" >/dev/null 2>&1; then
-    skip; return
-  fi
+  exists iam get-role --role-name "$role_name" || return 0
 
-  aws iam delete-role-permissions-boundary --role-name "$role_name" 2>/dev/null || true
+  try_quiet iam delete-role-permissions-boundary --role-name "$role_name"
 
   local arns
-  arns=$(aws iam list-attached-role-policies --role-name "$role_name" \
-    --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null || true)
+  arns=$(aws_call iam list-attached-role-policies --role-name "$role_name" \
+    --query 'AttachedPolicies[].PolicyArn' --output text) || true
   for arn in $arns; do
     echo "  Detaching: $arn"
-    aws iam detach-role-policy --role-name "$role_name" --policy-arn "$arn" || true
+    try_quiet iam detach-role-policy --role-name "$role_name" --policy-arn "$arn"
   done
 
   local inline
-  inline=$(aws iam list-role-policies --role-name "$role_name" \
-    --query 'PolicyNames[]' --output text 2>/dev/null || true)
+  inline=$(aws_call iam list-role-policies --role-name "$role_name" \
+    --query 'PolicyNames[]' --output text) || true
   for p in $inline; do
     echo "  Deleting inline policy: $p"
-    aws iam delete-role-policy --role-name "$role_name" --policy-name "$p" || true
+    try_quiet iam delete-role-policy --role-name "$role_name" --policy-name "$p"
   done
 
-  aws iam delete-role --role-name "$role_name"
-  echo "  Deleted."
+  try_delete "role $role_name" iam delete-role --role-name "$role_name"
 }
+
+# list_or_none <list>: prints the list space-separated, or "<none>" when empty.
+list_or_none() {
+  local v
+  v=$(echo $1)
+  echo "${v:-<none>}"
+}
+
+# ── Resolve this deployment's resources ──────────────────────────────────────
+# Every selection happens here, before the confirmation, so the confirmation
+# and --dry-run list the actual IDs that the steps below delete.
+
+API_IDS=$(aws_call apigatewayv2 get-apis \
+  --query "Items[?Name=='${GATEWAY_NAME}'].ApiId" --output text) || true
+
+CDS_LAMBDAS=$(aws_call lambda list-functions \
+  --query "Functions[?starts_with(FunctionName, '${CDS_LAMBDA_PREFIX}')].FunctionName" \
+  --output text) || true
+
+CDS_LOG_GROUPS=$(aws_call logs describe-log-groups \
+  --log-group-name-prefix "/aws/lambda/${CDS_LAMBDA_PREFIX}" \
+  --query "logGroups[].logGroupName" --output text) || true
+
+# A DSQL cluster's identifier is assigned by AWS, so unlike every other resource
+# here it cannot be selected by a prefixed name — the `starkeep:stackPrefix` tag
+# is the only thing that says which deployment a cluster belongs to. Clusters
+# created before that tag existed carry only `starkeep:appId=cloud-data-server`,
+# which every deployment's cluster carries, so an untagged cluster cannot be
+# attributed to this prefix and is never deleted on that basis alone. The one
+# exception is a cluster with deletion protection off: the program sets
+# protection from `!ephemeral`, so an unprotected cluster is a disposable e2e
+# one by construction and no real deployment has one.
+#
+# Each CLUSTERS line is "<mine|other|untagged> <cluster-id> <owner or -> <protection or ->".
+CLUSTER_TAGS=$(python3 - "$REGION" << 'PYEOF'
+import os, subprocess, json, sys
+
+region = sys.argv[1]
+
+def record_failure(msg):
+    msg = " ".join(msg.split())
+    print(f"  ERROR {msg}", file=sys.stderr)
+    with open(os.environ["TEARDOWN_FAILURES"], "a") as f:
+        f.write(msg + "\n")
+
+r = subprocess.run(
+    ["aws", "dsql", "list-clusters", "--region", region, "--output", "json"],
+    capture_output=True, text=True,
+)
+if r.returncode != 0:
+    record_failure(f"aws dsql list-clusters: {r.stderr}")
+    sys.exit(0)
+
+for cluster in json.loads(r.stdout).get("clusters", []):
+    arn = cluster.get("arn", "")
+    cid = cluster.get("identifier") or arn.split("/")[-1]
+    if not arn:
+        continue
+    tr = subprocess.run(
+        ["aws", "dsql", "list-tags-for-resource", "--resource-arn", arn,
+         "--region", region, "--output", "json"],
+        capture_output=True, text=True,
+    )
+    if tr.returncode != 0:
+        record_failure(f"aws dsql list-tags-for-resource {cid}: {tr.stderr}")
+        continue
+    tags = json.loads(tr.stdout).get("tags", {})
+    if tags.get("starkeep:appId") != "cloud-data-server":
+        continue
+    print(cid, tags.get("starkeep:stackPrefix") or "-")
+PYEOF
+)
+CLUSTERS=""
+while read -r CID OWNER; do
+  [[ -z "${CID:-}" ]] && continue
+  if [[ "$OWNER" != "-" && "$OWNER" != "$STACK_PREFIX" ]]; then
+    CLUSTERS+="other $CID $OWNER -"$'\n'
+    continue
+  fi
+  # Read once: it decides both whether an untagged cluster is attributable and
+  # whether a deletable one needs its protection lifted first.
+  PROTECTED=$(aws_call dsql get-cluster --identifier "$CID" --region "$REGION" \
+    --query 'deletionProtectionEnabled' --output text) || PROTECTED=unknown
+  if [[ "$OWNER" == "-" ]]; then
+    CLUSTERS+="untagged $CID - $PROTECTED"$'\n'
+  else
+    CLUSTERS+="mine $CID - $PROTECTED"$'\n'
+  fi
+done <<< "$CLUSTER_TAGS"
+
+describe_cluster() {  # describe_cluster <state> <cluster-id> <owner> <protection>
+  case "$1:$4" in
+    other:*) echo "$2 (skipped: belongs to deployment '$3')" ;;
+    untagged:False|untagged:false) echo "$2 (untagged and unprotected: deleted as a disposable e2e cluster)" ;;
+    untagged:*) echo "$2 (skipped: untagged and protected)" ;;
+    mine:True|mine:true)
+      if [[ "$FORCE" == "true" ]]; then
+        echo "$2 (protected: --force lifts the protection)"
+      else
+        echo "$2 (protected: kept unless --force or a 'y' at the prompt)"
+      fi ;;
+    *) echo "$2" ;;
+  esac
+}
+
+DIST_IDS=$(aws_call cloudfront list-distributions \
+  --query "DistributionList.Items[?Comment=='${STACK_PREFIX} platform CDN'].Id" \
+  --output text) || true
+[[ "$DIST_IDS" == "None" ]] && DIST_IDS=""
+
+# Every certificate tagged with the prefix and the cloud-data-server: the
+# stack's (Route53 mode) and the installer's (external mode). CloudFront takes
+# certificates only from us-east-1, so they live there whatever $REGION is.
+CERT_CANDIDATES=$(aws_call acm list-certificates --region us-east-1 \
+  --certificate-statuses PENDING_VALIDATION ISSUED INACTIVE EXPIRED VALIDATION_TIMED_OUT REVOKED FAILED \
+  --query 'CertificateSummaryList[].CertificateArn' --output text) || true
+CERT_ARNS=""
+for arn in $CERT_CANDIDATES; do
+  [[ "$arn" == "None" ]] && continue
+  owner_app=$(aws_call acm list-tags-for-certificate --region us-east-1 --certificate-arn "$arn" \
+    --query "[Tags[?Key=='starkeep:stackPrefix'].Value | [0], Tags[?Key=='starkeep:appId'].Value | [0]]" \
+    --output text) || continue
+  read -r owner app <<< "$owner_app"
+  if [[ "$owner" == "$STACK_PREFIX" && "$app" == "cloud-data-server" ]]; then
+    CERT_ARNS="${CERT_ARNS:+$CERT_ARNS }$arn"
+  fi
+done
 
 # ── Confirmation ──────────────────────────────────────────────────────────────
 
 echo ""
+[[ "$DRY_RUN" == "true" ]] && echo "DRY RUN: nothing will be deleted. A real run would do the following."
 echo "This will permanently destroy all Starkeep cloud-data-server resources"
 echo "(and all installed apps via teardown-cloud-apps.sh):"
 echo ""
 echo "  Stack prefix : $STACK_PREFIX  (region: $REGION, account: $ACCOUNT_ID)"
-echo "  API Gateway  : $GATEWAY_NAME"
-echo "  Lambdas      : ${CDS_LAMBDA_PREFIX}*"
-echo "  DSQL cluster : (tagged starkeep:stackPrefix=${STACK_PREFIX})$([[ "$FORCE" == "true" ]] && echo "  [--force: will disable deletion protection]")"
-echo "  CloudFront   : distribution + OAC + cache policies + public key + key group (Part B)"
-echo "  Custom domain: every certificate tagged with the prefix, and a Route53-zone domain's records"
+echo "  API Gateway  : $GATEWAY_NAME ($(list_or_none "$API_IDS"))"
+echo "  Lambdas      : $(list_or_none "$CDS_LAMBDAS")"
+echo "  Log groups   : $(list_or_none "$CDS_LOG_GROUPS")"
+if [[ -z "$CLUSTERS" ]]; then
+  echo "  DSQL cluster : <none>"
+else
+  while read -r STATE CID OWNER PROTECTED; do
+    [[ -z "${CID:-}" ]] && continue
+    echo "  DSQL cluster : $(describe_cluster "$STATE" "$CID" "$OWNER" "$PROTECTED")"
+  done <<< "$CLUSTERS"
+fi
+echo "  CloudFront   : distribution $(list_or_none "$DIST_IDS"), with its OAC, cache policies, public key, key group and function"
+echo "  Certificates : $(list_or_none "$CERT_ARNS") (us-east-1), and a Route53-zone domain's records"
 echo "  Signing key  : SSM /${STACK_PREFIX}/app-creds/_cloudfront-signing"
 echo "  S3 buckets   : $FILES_BUCKET, $BILLING_BUCKET"
 echo "  CUR report   : $CUR_REPORT"
@@ -291,6 +434,12 @@ else
   echo "                 prefix '${CONFIG_STACK_PREFIX:-<none>}' / region '${CONFIG_REGION:-<none>}', not this teardown"
 fi
 echo ""
+
+if [[ "$DRY_RUN" == "true" ]]; then
+  echo ">>> Running teardown-cloud-apps.sh --dry-run..."
+  "$SCRIPT_DIR/teardown-cloud-apps.sh" --yes --dry-run --prefix "$STACK_PREFIX" --region "$REGION"
+  finish_teardown "Cloud-data-server teardown"
+fi
 
 if [[ "$YES" != "true" ]]; then
   read -r -p "Continue? [y/N] " confirm
@@ -314,31 +463,26 @@ echo ">>> Running teardown-cloud-apps.sh..."
 # (cloud-data-server) and any per-app stacks are unblocked.
 
 step "Clearing stale Pulumi locks in s3://${PULUMI_STATE_BUCKET}/.pulumi/locks/"
-if aws s3api head-bucket --bucket "$PULUMI_STATE_BUCKET" 2>/dev/null; then
-  LOCK_KEYS=$(aws s3api list-objects-v2 --bucket "$PULUMI_STATE_BUCKET" \
+if exists s3api head-bucket --bucket "$PULUMI_STATE_BUCKET"; then
+  LOCK_KEYS=$(aws_call s3api list-objects-v2 --bucket "$PULUMI_STATE_BUCKET" \
     --prefix ".pulumi/locks/" \
-    --query 'Contents[].Key' --output text 2>/dev/null || true)
+    --query 'Contents[].Key' --output text) || true
   if [[ -z "$LOCK_KEYS" || "$LOCK_KEYS" == "None" ]]; then
     echo "  No locks found."
   else
     for key in $LOCK_KEYS; do
-      echo "  Removing: $key"
-      aws s3api delete-object --bucket "$PULUMI_STATE_BUCKET" --key "$key" >/dev/null
+      try_delete "lock $key" s3api delete-object --bucket "$PULUMI_STATE_BUCKET" --key "$key"
     done
   fi
-else
-  skip
 fi
 
 # ── Step 2: API Gateway v2 ────────────────────────────────────────────────────
 
 step "Deleting API Gateway: $GATEWAY_NAME"
-API_ID=$(aws apigatewayv2 get-apis \
-  --query "Items[?Name=='${GATEWAY_NAME}'].ApiId | [0]" \
-  --output text 2>/dev/null || true)
-if [[ -n "$API_ID" && "$API_ID" != "None" ]]; then
-  aws apigatewayv2 delete-api --api-id "$API_ID"
-  echo "  Deleted API Gateway $API_ID ($GATEWAY_NAME)."
+if [[ -n "$API_IDS" ]]; then
+  for api_id in $API_IDS; do
+    try_delete "API Gateway $api_id ($GATEWAY_NAME)" apigatewayv2 delete-api --api-id "$api_id"
+  done
 else
   skip
 fi
@@ -346,95 +490,37 @@ fi
 # ── Step 3: cloud-data-server Lambda + log group ──────────────────────────────
 
 step "Deleting Lambdas under: ${CDS_LAMBDA_PREFIX}"
-CDS_LAMBDAS=$(aws lambda list-functions \
-  --query "Functions[?starts_with(FunctionName, '${CDS_LAMBDA_PREFIX}')].FunctionName" \
-  --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true)
 if [[ -n "$CDS_LAMBDAS" ]]; then
-  while IFS= read -r fn; do
-    aws lambda delete-function --function-name "$fn"
-    echo "  Deleted $fn."
-  done <<< "$CDS_LAMBDAS"
+  for fn in $CDS_LAMBDAS; do
+    try_delete "$fn" lambda delete-function --function-name "$fn"
+  done
 else
   skip
 fi
 
 step "Deleting log groups under: /aws/lambda/${CDS_LAMBDA_PREFIX}"
-CDS_LOG_GROUPS=$(aws logs describe-log-groups \
-  --log-group-name-prefix "/aws/lambda/${CDS_LAMBDA_PREFIX}" \
-  --query "logGroups[].logGroupName" \
-  --output text 2>/dev/null | tr '\t' '\n' | grep -v '^$' || true)
 if [[ -n "$CDS_LOG_GROUPS" ]]; then
-  while IFS= read -r lg; do
-    aws logs delete-log-group --log-group-name "$lg"
-    echo "  Deleted $lg."
-  done <<< "$CDS_LOG_GROUPS"
+  for lg in $CDS_LOG_GROUPS; do
+    try_delete "$lg" logs delete-log-group --log-group-name "$lg"
+  done
 else
   skip
 fi
 
 # ── Step 4: DSQL cluster ──────────────────────────────────────────────────────
 
-# A DSQL cluster's identifier is assigned by AWS, so unlike every other resource
-# here it cannot be selected by a prefixed name — the `starkeep:stackPrefix` tag
-# is the only thing that says which deployment a cluster belongs to. Clusters
-# created before that tag existed carry only `starkeep:appId=cloud-data-server`,
-# which every deployment's cluster carries, so an untagged cluster cannot be
-# attributed to this prefix and is never deleted on that basis alone. The one
-# exception is a cluster with deletion protection off: the program sets
-# protection from `!ephemeral`, so an unprotected cluster is a disposable e2e
-# one by construction and no real deployment has one.
+# The clusters were selected and classified before the confirmation.
 step "Deleting DSQL cluster (tagged starkeep:stackPrefix=${STACK_PREFIX})"
-CLUSTERS=$(python3 - "$REGION" "$STACK_PREFIX" << 'PYEOF'
-import subprocess, json, sys
-
-region, prefix = sys.argv[1], sys.argv[2]
-r = subprocess.run(
-    ["aws", "dsql", "list-clusters", "--region", region, "--output", "json"],
-    capture_output=True, text=True,
-)
-if r.returncode != 0:
-    sys.exit(0)
-
-for cluster in json.loads(r.stdout).get("clusters", []):
-    arn = cluster.get("arn", "")
-    cid = cluster.get("identifier") or arn.split("/")[-1]
-    if not arn:
-        continue
-    tr = subprocess.run(
-        ["aws", "dsql", "list-tags-for-resource", "--resource-arn", arn,
-         "--region", region, "--output", "json"],
-        capture_output=True, text=True,
-    )
-    if tr.returncode != 0:
-        continue
-    tags = json.loads(tr.stdout).get("tags", {})
-    if tags.get("starkeep:appId") != "cloud-data-server":
-        continue
-    owner = tags.get("starkeep:stackPrefix")
-    if owner == prefix:
-        print(f"mine {cid} -")
-    elif owner:
-        print(f"other {cid} {owner}")
-    else:
-        print(f"untagged {cid} -")
-PYEOF
-)
-
 if [[ -z "$CLUSTERS" ]]; then
   skip
 else
-  while read -r STATE CID OWNER; do
-    [[ -z "$CID" ]] && continue
+  while read -r STATE CID OWNER PROTECTED; do
+    [[ -z "${CID:-}" ]] && continue
 
     if [[ "$STATE" == "other" ]]; then
       echo "  Skipping $CID — it belongs to deployment '$OWNER', not '$STACK_PREFIX'."
       continue
     fi
-
-    # Read once: it decides both whether an untagged cluster is attributable
-    # and whether a deletable one needs its protection lifted first.
-    PROTECTED=$(aws dsql get-cluster --identifier "$CID" --region "$REGION" \
-      --query 'deletionProtectionEnabled' --output text 2>/dev/null || echo "unknown")
 
     if [[ "$STATE" == "untagged" ]]; then
       # No stackPrefix tag: predates the tag, so which deployment it belongs to
@@ -470,7 +556,10 @@ else
         continue
       fi
       echo "  Disabling deletion protection on ${CID}..."
-      aws dsql update-cluster --identifier "$CID" --no-deletion-protection-enabled --region "$REGION" >/dev/null
+      if ! aws_call dsql update-cluster --identifier "$CID" --no-deletion-protection-enabled \
+          --region "$REGION" >/dev/null; then
+        continue
+      fi
       # update-cluster is asynchronous; wait for the cluster to settle back to
       # ACTIVE (protection cleared) before delete-cluster, or the delete races
       # the in-flight update and fails.
@@ -478,17 +567,25 @@ else
     fi
 
     echo "  Deleting cluster: $CID"
-    # Best-effort: a single cluster that refuses to delete (e.g. it is already
-    # mid-delete) must NOT abort the whole teardown and leave the bootstrap
-    # layer half-removed. Warn and move on.
-    if aws dsql delete-cluster --identifier "$CID" --region "$REGION" 2>/tmp/dsql-del-err; then
+    # A cluster that is already being deleted refuses another delete, which
+    # is not a failure.
+    rc=0
+    aws_probe dsql delete-cluster --identifier "$CID" --region "$REGION" >/dev/null || rc=$?
+    if [[ $rc -eq 0 ]]; then
       echo "  Delete initiated (DSQL deletion is asynchronous)."
+    elif [[ $rc -eq 1 ]]; then
+      echo "  Not found or already deleted."
     else
-      echo "  WARN: could not delete $CID — leaving it. Reason:"
-      sed 's/^/    /' /tmp/dsql-del-err
+      delete_error="$AWS_ERROR"
+      status=$(aws_probe dsql get-cluster --identifier "$CID" --region "$REGION" \
+        --query 'status' --output text) || status=""
+      if [[ "$status" == "DELETING" || "$status" == "DELETED" ]]; then
+        echo "  Already being deleted."
+      else
+        record_failure "could not delete DSQL cluster $CID: $delete_error"
+      fi
     fi
   done <<< "$CLUSTERS"
-  rm -f /tmp/dsql-del-err
 fi
 
 # ── Step 4b: CloudFront (Part B: shared-file signed URLs) ─────────────────────
@@ -505,16 +602,22 @@ fi
 # install that failed before creating them).
 
 step "Deleting CloudFront distribution + signing key material"
-# The certificate deletes below name each failure here, and the script fails at
-# the end when any is listed.
-CERT_FAILURES=$(mktemp)
-python3 - "$STACK_PREFIX" "$CERT_FAILURES" << 'PYEOF'
-import json, subprocess, sys, time
+# The distribution and certificates were selected before the confirmation. Each
+# failure below is recorded, and the script fails at the end.
+python3 - "$STACK_PREFIX" "$DIST_IDS" "$CERT_ARNS" << 'PYEOF'
+import json, os, subprocess, sys, time
 
 prefix = sys.argv[1]
-cert_failures = sys.argv[2]
+dist_ids = sys.argv[2].split()
+cert_arns = sys.argv[3].split()
 
-DIST_COMMENT = f"{prefix} platform CDN"
+
+def record_failure(msg):
+    msg = " ".join(msg.split())
+    print(f"  ERROR {msg}", flush=True)
+    with open(os.environ["TEARDOWN_FAILURES"], "a") as f:
+        f.write(msg + "\n")
+
 PUBKEY_COMMENT = f"{prefix} shared-file signing key"
 KEYGROUP_COMMENT = f"{prefix} shared-file signers"
 OAC_NAME = f"{prefix}-files-oac"
@@ -552,7 +655,7 @@ def delete_with_etag(kind, list_cmd, list_key, match, id_of, get_cmd, delete_cmd
             return
         rid = id_of(found)
     except Exception as e:  # noqa: BLE001 — best-effort teardown
-        print(f"  WARN {kind} lookup: {e}")
+        record_failure(f"{kind} lookup: {e}")
         return
     for attempt in range(6):
         try:
@@ -562,22 +665,19 @@ def delete_with_etag(kind, list_cmd, list_key, match, id_of, get_cmd, delete_cmd
             return
         except Exception as e:  # noqa: BLE001 — best-effort teardown
             if attempt == 5:
-                print(f"  WARN {kind} cleanup after 6 tries: {e}")
+                record_failure(f"{kind} cleanup after 6 tries: {e}")
                 return
             time.sleep(20)
 
 
-# ---- Distribution: find by comment → disable → wait Deployed → delete --------
+# ---- Distribution: disable → wait Deployed → delete ---------------------------
 dist_domain = None  # Its cloudfront.net name, which a custom domain's alias records target.
-try:
-    data = cf("list-distributions")
-    items = (data.get("DistributionList") or {}).get("Items", []) or []
-    dist = next((d for d in items if d.get("Comment") == DIST_COMMENT), None)
-    if not dist:
-        print("  Distribution: not found, skipping.")
-    else:
-        dist_id = dist["Id"]
-        dist_domain = dist.get("DomainName")
+
+
+def delete_distribution(dist_id):
+    global dist_domain
+    try:
+        dist_domain = cf("get-distribution", "--id", dist_id)["Distribution"].get("DomainName")
         print(f"  Distribution: {dist_id} (disable → wait → delete)")
         gc = cf("get-distribution-config", "--id", dist_id)
         etag, cfg = gc["ETag"], gc["DistributionConfig"]
@@ -616,7 +716,7 @@ try:
             print(f"  …status={status} enabled={enabled}; waiting 30s")
             time.sleep(30)
         if not ready:
-            print("  Distribution did not settle as disabled in 25m; leave for manual cleanup.")
+            record_failure(f"distribution {dist_id} did not settle as disabled in 25m; delete it by hand")
         else:
             # And retry anyway. The observed failure (2026-08-24) had status
             # Deployed and the disable applied, and AWS still refused once; a
@@ -636,8 +736,14 @@ try:
                         raise
                     print(f"  delete refused ({str(e).strip()[:80]}…); retrying in 30s")
                     time.sleep(30)
-except Exception as e:  # noqa: BLE001
-    print(f"  WARN distribution cleanup: {e}")
+    except Exception as e:  # noqa: BLE001
+        record_failure(f"distribution {dist_id} cleanup: {e}")
+
+
+if not dist_ids:
+    print("  Distribution: not found, skipping.")
+for dist_id in dist_ids:
+    delete_distribution(dist_id)
 
 # ---- Dependents (only deletable once the distribution no longer references
 # them; each best-effort, so a still-referenced resource just warns) ----------
@@ -688,7 +794,7 @@ for attempt in range(6):
         # gone. Names are account-global and CreateFunction refuses a
         # duplicate, so an orphan here breaks the next install of this prefix.
         if attempt == 5:
-            print(f"  WARN function cleanup ({REDIRECT_FN_NAME}) after 6 tries: {e}")
+            record_failure(f"function cleanup ({REDIRECT_FN_NAME}) after 6 tries: {e}")
             break
         time.sleep(20)
 
@@ -740,17 +846,9 @@ def delete_record(zone_id, name, rtype, keep):
 
 
 try:
-    statuses = ["PENDING_VALIDATION", "ISSUED", "INACTIVE", "EXPIRED", "VALIDATION_TIMED_OUT",
-                "REVOKED", "FAILED"]
-    summaries = acm("list-certificates", "--certificate-statuses", *statuses).get(
-        "CertificateSummaryList", [])
-    for summary in summaries:
-        arn = summary["CertificateArn"]
+    for arn in cert_arns:
         tags = {t["Key"]: t.get("Value") for t in
                 acm("list-tags-for-certificate", "--certificate-arn", arn).get("Tags", [])}
-        if (tags.get("starkeep:stackPrefix") != prefix
-                or tags.get("starkeep:appId") != "cloud-data-server"):
-            continue
         cert = acm("describe-certificate", "--certificate-arn", arn)["Certificate"]
         domain = cert["DomainName"].lower()
         zone = None if "starkeep:customDomainMode" in tags else zone_for(domain)
@@ -771,53 +869,41 @@ try:
         except Exception as e:  # noqa: BLE001
             in_use = acm("describe-certificate", "--certificate-arn", arn)["Certificate"].get(
                 "InUseBy", [])
-            failure = (f"{arn} ({domain})"
-                       + (f", which ACM reports in use by {', '.join(in_use)}" if in_use else "")
-                       + f": {e}")
-            print(f"  ERROR certificate {failure}")
-            with open(cert_failures, "a") as f:
-                f.write(failure + "\n")
+            record_failure(f"certificate {arn} ({domain})"
+                           + (f", which ACM reports in use by {', '.join(in_use)}" if in_use else "")
+                           + f": {e}")
 except Exception as e:  # noqa: BLE001
-    print(f"  ERROR custom domain cleanup: {e}")
-    with open(cert_failures, "a") as f:
-        f.write(f"custom domain cleanup: {e}\n")
+    record_failure(f"custom domain cleanup: {e}")
 PYEOF
 
 step "Deleting CloudFront signing SecureString: /${STACK_PREFIX}/app-creds/_cloudfront-signing"
-aws ssm delete-parameter --name "/${STACK_PREFIX}/app-creds/_cloudfront-signing" 2>/dev/null \
-  && echo "  Deleted." || echo "  Not found, skipping."
+try_delete "/${STACK_PREFIX}/app-creds/_cloudfront-signing" \
+  ssm delete-parameter --name "/${STACK_PREFIX}/app-creds/_cloudfront-signing"
 
 # ── Step 5: S3 files bucket ───────────────────────────────────────────────────
 
 step "Emptying S3 files bucket: $FILES_BUCKET"
-if aws s3api head-bucket --bucket "$FILES_BUCKET" 2>/dev/null; then
-  aws s3api delete-bucket-policy --bucket "$FILES_BUCKET" 2>/dev/null || true
-  empty_bucket "$FILES_BUCKET"
-  aws s3api delete-bucket --bucket "$FILES_BUCKET" --region "$REGION"
-  echo "  Deleted $FILES_BUCKET."
-else
-  skip
+if exists s3api head-bucket --bucket "$FILES_BUCKET"; then
+  try_quiet s3api delete-bucket-policy --bucket "$FILES_BUCKET"
+  empty_bucket "$FILES_BUCKET" || record_failure "could not empty $FILES_BUCKET"
+  try_delete "$FILES_BUCKET" s3api delete-bucket --bucket "$FILES_BUCKET" --region "$REGION"
 fi
 
 # ── Step 6: S3 billing bucket ─────────────────────────────────────────────────
 
 step "Emptying S3 billing bucket: $BILLING_BUCKET"
-if aws s3api head-bucket --bucket "$BILLING_BUCKET" 2>/dev/null; then
-  empty_bucket "$BILLING_BUCKET"
-  aws s3api delete-bucket --bucket "$BILLING_BUCKET" --region "$REGION"
-  echo "  Deleted $BILLING_BUCKET."
-else
-  skip
+if exists s3api head-bucket --bucket "$BILLING_BUCKET"; then
+  empty_bucket "$BILLING_BUCKET" || record_failure "could not empty $BILLING_BUCKET"
+  try_delete "$BILLING_BUCKET" s3api delete-bucket --bucket "$BILLING_BUCKET" --region "$REGION"
 fi
 
 # ── Step 7: CUR report ────────────────────────────────────────────────────────
 
 step "Deleting CUR report: $CUR_REPORT"
-if aws cur describe-report-definitions --region us-east-1 \
-    --query "ReportDefinitions[?ReportName=='${CUR_REPORT}'] | length(@)" \
-    --output text 2>/dev/null | grep -q "^1$"; then
-  aws cur delete-report-definition --report-name "$CUR_REPORT" --region us-east-1
-  echo "  Deleted."
+CUR_COUNT=$(aws_call cur describe-report-definitions --region us-east-1 \
+  --query "ReportDefinitions[?ReportName=='${CUR_REPORT}'] | length(@)" --output text) || true
+if [[ "$CUR_COUNT" == "1" ]]; then
+  try_delete "$CUR_REPORT" cur delete-report-definition --report-name "$CUR_REPORT" --region us-east-1
 else
   skip
 fi
@@ -888,14 +974,4 @@ else
   skip
 fi
 
-if [[ -s "$CERT_FAILURES" ]]; then
-  echo ""
-  echo "Cloud-data-server teardown finished, but these certificates could not be deleted:"
-  sed 's/^/  /' "$CERT_FAILURES"
-  rm -f "$CERT_FAILURES"
-  exit 1
-fi
-rm -f "$CERT_FAILURES"
-
-echo ""
-echo "Cloud-data-server teardown complete."
+finish_teardown "Cloud-data-server teardown"

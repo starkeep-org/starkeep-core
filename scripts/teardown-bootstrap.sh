@@ -14,7 +14,16 @@
 # cluster can actually be removed (threaded through to
 # teardown-cloud-data-server.sh, which runs unattended here).
 #
-# Usage: ./teardown-bootstrap.sh [--yes|-y] [--force] --prefix <stack-prefix> --region <region>
+# Usage: ./teardown-bootstrap.sh [--yes|-y] [--force] [--dry-run] --prefix <stack-prefix> --region <region>
+#
+# --dry-run prints the resources the teardown would delete, including the lists
+# from teardown-cloud-data-server.sh and teardown-cloud-apps.sh, then exits
+# without deleting anything.
+#
+# A failed AWS call does not stop the bootstrap layer's teardown. The script
+# lists each failure at the end and exits 1. A resource that is already gone is
+# not a failure. A failure in teardown-cloud-data-server.sh stops this script
+# before it deletes the bootstrap layer.
 #
 # --prefix and --region are both required: together they scope the teardown to
 # one deployment in one place, and neither is ever inferred from config. A
@@ -37,7 +46,9 @@
 # (<prefix>-auth tagged StackPrefix=<prefix>, and <prefix>_admin). It never
 # takes a pool ID from the config, because the config may describe another
 # deployment. It also refuses to touch a pool that the config names unless the
-# config matches the target.
+# config matches the target. When the config describes another deployment, the
+# script checks at the end that the config's pools still exist, and fails if a
+# pool that existed at the start is gone.
 
 set -euo pipefail
 
@@ -47,6 +58,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # a STARKEEP_DIR provided via .env.local correctly counts as "explicit" (and thus
 # this deployment's config gets cleared).
 source "$SCRIPT_DIR/load-env.sh"
+source "$SCRIPT_DIR/teardown-common.sh"
 
 STARKEEP_DIR="${STARKEEP_DIR:-$HOME/.starkeep}"
 CONFIG_FILE="$STARKEEP_DIR/config.json"
@@ -62,6 +74,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --yes|-y) YES=true; shift ;;
     --force) FORCE=true; shift ;;
+    --dry-run) DRY_RUN=true; shift ;;
     --prefix) FLAG_PREFIX="$2"; shift 2 ;;
     --region) FLAG_REGION="$2"; shift 2 ;;
     *) echo "Unknown flag: $1"; exit 1 ;;
@@ -172,23 +185,23 @@ add_id() {  # add_id <list> <id>: print <list> with <id> appended once
 }
 
 stack_resource_id() {  # stack_resource_id <logical-id>
-  aws cloudformation describe-stack-resource --stack-name "$STACK_NAME" \
+  aws_call cloudformation describe-stack-resource --stack-name "$STACK_NAME" \
     --logical-resource-id "$1" \
-    --query 'StackResourceDetail.PhysicalResourceId' --output text 2>/dev/null || true
+    --query 'StackResourceDetail.PhysicalResourceId' --output text || true
 }
 
 # A user pool counts as this deployment's only when the bootstrap template's
 # StackPrefix tag names this prefix, whatever source named the pool.
 user_pool_is_ours() {  # user_pool_is_ours <user-pool-id>
   local tag
-  tag=$(aws cognito-idp describe-user-pool --user-pool-id "$1" \
-    --query 'UserPool.UserPoolTags.StackPrefix' --output text 2>/dev/null || true)
+  tag=$(aws_call cognito-idp describe-user-pool --user-pool-id "$1" \
+    --query 'UserPool.UserPoolTags.StackPrefix' --output text) || true
   [[ "$tag" == "$STACK_PREFIX" ]]
 }
 
 CANDIDATE_USER_POOLS=$(stack_resource_id UserPool)
-for id in $(aws cognito-idp list-user-pools --max-results 60 \
-    --query "UserPools[?Name=='${STACK_PREFIX}-auth'].Id" --output text 2>/dev/null || true); do
+for id in $(aws_call cognito-idp list-user-pools --max-results 60 \
+    --query "UserPools[?Name=='${STACK_PREFIX}-auth'].Id" --output text || true); do
   CANDIDATE_USER_POOLS=$(add_id "$CANDIDATE_USER_POOLS" "$id")
 done
 for id in $CANDIDATE_USER_POOLS; do
@@ -198,8 +211,8 @@ for id in $CANDIDATE_USER_POOLS; do
 done
 
 IDENTITY_POOL_IDS=$(add_id "" "$(stack_resource_id IdentityPool)")
-for id in $(aws cognito-identity list-identity-pools --max-results 60 \
-    --query "IdentityPools[?IdentityPoolName=='${STACK_PREFIX}_admin'].IdentityPoolId" --output text 2>/dev/null || true); do
+for id in $(aws_call cognito-identity list-identity-pools --max-results 60 \
+    --query "IdentityPools[?IdentityPoolName=='${STACK_PREFIX}_admin'].IdentityPoolId" --output text || true); do
   IDENTITY_POOL_IDS=$(add_id "$IDENTITY_POOL_IDS" "$id")
 done
 
@@ -217,8 +230,28 @@ if [[ "$CONFIG_MATCHES_TEARDOWN" != "true" ]]; then
   done
 fi
 
+# The config's pools must survive a teardown of another deployment. Record
+# which of them exist now, so the check at the end can tell a pool this run
+# removed from one that was already gone. A pool ID carries its region.
+config_pool_present() {  # config_pool_present <user|identity> <pool-id>: 0 present, 1 gone, 2 unknown
+  local region="${2%%[_:]*}"
+  if [[ "$1" == "user" ]]; then
+    aws_probe cognito-idp describe-user-pool --user-pool-id "$2" --region "$region" >/dev/null
+  else
+    aws_probe cognito-identity describe-identity-pool --identity-pool-id "$2" --region "$region" >/dev/null
+  fi
+}
+CONFIG_POOLS_PRESENT=""
+if [[ "$CONFIG_MATCHES_TEARDOWN" != "true" ]]; then
+  [[ -n "$CONFIG_USER_POOL_ID" ]] && config_pool_present user "$CONFIG_USER_POOL_ID" \
+    && CONFIG_POOLS_PRESENT+="user:$CONFIG_USER_POOL_ID "
+  [[ -n "$CONFIG_IDENTITY_POOL_ID" ]] && config_pool_present identity "$CONFIG_IDENTITY_POOL_ID" \
+    && CONFIG_POOLS_PRESENT+="identity:$CONFIG_IDENTITY_POOL_ID "
+fi
+
 # ── Confirmation ────────────────────────────────────────────────────────────
 echo ""
+[[ "$DRY_RUN" == "true" ]] && echo "DRY RUN: nothing will be deleted. A real run would do the following."
 echo "This will permanently destroy ALL Starkeep resources in AWS:"
 echo ""
 echo "  Phase 1 — apps         : all installed apps (photos, etc.)"
@@ -249,6 +282,16 @@ else
 fi
 echo ""
 
+CDS_FORCE_FLAG=""
+[[ "$FORCE" == "true" ]] && CDS_FORCE_FLAG="--force"
+
+if [[ "$DRY_RUN" == "true" ]]; then
+  echo ">>> Running teardown-cloud-data-server.sh --dry-run..."
+  "$SCRIPT_DIR/teardown-cloud-data-server.sh" --yes --dry-run $CDS_FORCE_FLAG \
+    --prefix "$STACK_PREFIX" --region "$REGION"
+  finish_teardown "Bootstrap teardown"
+fi
+
 if [[ "$YES" != "true" ]]; then
   read -r -p "Continue? [y/N] " confirm
   if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
@@ -263,10 +306,9 @@ echo ">>> Running teardown-cloud-data-server.sh (phases 1–2: apps, then cloud-
 # Thread --force through: bootstrap teardown runs CDS teardown unattended
 # (--yes), so a deletion-protected DSQL cluster would be skipped unless the
 # operator opted in with --force here too.
-# Plain string (not an array): macOS ships bash 3.2, where expanding an empty
-# array under `set -u` errors. --force has no spaces, so unquoted is safe.
-CDS_FORCE_FLAG=""
-[[ "$FORCE" == "true" ]] && CDS_FORCE_FLAG="--force"
+# CDS_FORCE_FLAG is a plain string (not an array): macOS ships bash 3.2, where
+# expanding an empty array under `set -u` errors. --force has no spaces, so
+# unquoted is safe.
 "$SCRIPT_DIR/teardown-cloud-data-server.sh" --yes $CDS_FORCE_FLAG --prefix "$STACK_PREFIX" --region "$REGION"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -329,53 +371,48 @@ PYEOF
 delete_role() {
   local role_name="$1"
   step "Cleaning up IAM role: $role_name"
-  if ! aws iam get-role --role-name "$role_name" >/dev/null 2>&1; then
-    skip; return
-  fi
+  exists iam get-role --role-name "$role_name" || return 0
 
   # Remove permissions boundary
-  aws iam delete-role-permissions-boundary --role-name "$role_name" 2>/dev/null || true
+  try_quiet iam delete-role-permissions-boundary --role-name "$role_name"
 
   # Detach managed policies
   local arns
-  arns=$(aws iam list-attached-role-policies --role-name "$role_name" \
-    --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null || true)
+  arns=$(aws_call iam list-attached-role-policies --role-name "$role_name" \
+    --query 'AttachedPolicies[].PolicyArn' --output text) || true
   for arn in $arns; do
     echo "  Detaching: $arn"
-    aws iam detach-role-policy --role-name "$role_name" --policy-arn "$arn" || true
+    try_quiet iam detach-role-policy --role-name "$role_name" --policy-arn "$arn"
   done
 
   # Delete inline policies
   local inline
-  inline=$(aws iam list-role-policies --role-name "$role_name" \
-    --query 'PolicyNames[]' --output text 2>/dev/null || true)
+  inline=$(aws_call iam list-role-policies --role-name "$role_name" \
+    --query 'PolicyNames[]' --output text) || true
   for p in $inline; do
     echo "  Deleting inline policy: $p"
-    aws iam delete-role-policy --role-name "$role_name" --policy-name "$p" || true
+    try_quiet iam delete-role-policy --role-name "$role_name" --policy-name "$p"
   done
 
-  aws iam delete-role --role-name "$role_name"
-  echo "  Deleted."
+  try_delete "role $role_name" iam delete-role --role-name "$role_name"
 }
 
 delete_managed_policy() {
   local policy_name="$1"
   local policy_arn="arn:aws:iam::${ACCOUNT_ID}:policy/${policy_name}"
   step "Cleaning up IAM managed policy: $policy_name"
-  if ! aws iam get-policy --policy-arn "$policy_arn" >/dev/null 2>&1; then
-    skip; return
-  fi
+  exists iam get-policy --policy-arn "$policy_arn" || return 0
 
   # Detach from all roles using it as an attached policy.
   # Also remove it as a permissions boundary on those same roles — a role can
   # hold the same policy in both positions simultaneously (e.g. cloud-data-server-role).
   local attached_roles
-  attached_roles=$(aws iam list-entities-for-policy --policy-arn "$policy_arn" \
-    --entity-filter Role --query 'PolicyRoles[].RoleName' --output text 2>/dev/null || true)
+  attached_roles=$(aws_call iam list-entities-for-policy --policy-arn "$policy_arn" \
+    --entity-filter Role --query 'PolicyRoles[].RoleName' --output text) || true
   for role in $attached_roles; do
     echo "  Detaching from role: $role"
-    aws iam detach-role-policy --role-name "$role" --policy-arn "$policy_arn" 2>/dev/null || true
-    aws iam delete-role-permissions-boundary --role-name "$role" 2>/dev/null || true
+    try_quiet iam detach-role-policy --role-name "$role" --policy-arn "$policy_arn"
+    try_quiet iam delete-role-permissions-boundary --role-name "$role"
   done
 
   # Also scan for roles that use this policy *only* as a permissions boundary
@@ -383,7 +420,7 @@ delete_managed_policy() {
   # --query filters per-page and silently misses roles on later pages.
   local boundary_only_roles
   boundary_only_roles=$(python3 - "$policy_arn" << 'PYEOF'
-import subprocess, json, sys
+import os, subprocess, json, sys
 policy_arn = sys.argv[1]
 marker = None
 while True:
@@ -392,6 +429,10 @@ while True:
         cmd += ["--starting-token", marker]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
+        msg = " ".join(f"aws iam list-roles: {r.stderr}".split())
+        print(f"  ERROR {msg}", file=sys.stderr)
+        with open(os.environ["TEARDOWN_FAILURES"], "a") as f:
+            f.write(msg + "\n")
         break
     data = json.loads(r.stdout)
     for role in data.get("Roles", []):
@@ -404,52 +445,42 @@ PYEOF
   )
   for role in $boundary_only_roles; do
     echo "  Removing boundary from role: $role"
-    aws iam delete-role-permissions-boundary --role-name "$role" 2>/dev/null || true
+    try_quiet iam delete-role-permissions-boundary --role-name "$role"
   done
 
   # Delete non-default versions before deleting the policy
   local versions
-  versions=$(aws iam list-policy-versions --policy-arn "$policy_arn" \
-    --query 'Versions[?!IsDefaultVersion].VersionId' --output text 2>/dev/null || true)
+  versions=$(aws_call iam list-policy-versions --policy-arn "$policy_arn" \
+    --query 'Versions[?!IsDefaultVersion].VersionId' --output text) || true
   for ver in $versions; do
-    aws iam delete-policy-version --policy-arn "$policy_arn" --version-id "$ver" || true
+    try_quiet iam delete-policy-version --policy-arn "$policy_arn" --version-id "$ver"
   done
 
-  aws iam delete-policy --policy-arn "$policy_arn"
-  echo "  Deleted."
+  try_delete "policy $policy_name" iam delete-policy --policy-arn "$policy_arn"
 }
 
 # ── Step 1: Empty S3 buckets ──────────────────────────────────────────────────
 step "Emptying S3 bucket: $BUCKET"
-if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
-  empty_versioned_bucket "$BUCKET"
-else
-  skip
+if exists s3api head-bucket --bucket "$BUCKET"; then
+  empty_versioned_bucket "$BUCKET" || record_failure "could not empty $BUCKET"
 fi
 
 step "Emptying S3 bucket: $ARTIFACTS_BUCKET"
-if aws s3api head-bucket --bucket "$ARTIFACTS_BUCKET" 2>/dev/null; then
-  empty_versioned_bucket "$ARTIFACTS_BUCKET"
-else
-  skip
+if exists s3api head-bucket --bucket "$ARTIFACTS_BUCKET"; then
+  empty_versioned_bucket "$ARTIFACTS_BUCKET" || record_failure "could not empty $ARTIFACTS_BUCKET"
 fi
 
 # Unversioned, which the helper handles: S3 lists each object once, with the
 # version id "null".
 step "Emptying S3 bucket: $APP_ASSETS_BUCKET"
-if aws s3api head-bucket --bucket "$APP_ASSETS_BUCKET" 2>/dev/null; then
-  empty_versioned_bucket "$APP_ASSETS_BUCKET"
-else
-  skip
+if exists s3api head-bucket --bucket "$APP_ASSETS_BUCKET"; then
+  empty_versioned_bucket "$APP_ASSETS_BUCKET" || record_failure "could not empty $APP_ASSETS_BUCKET"
 fi
 
 # ── Step 2: Delete SSM parameter ─────────────────────────────────────────────
 step "Deleting SSM parameter: $SSM_PARAM"
-if aws ssm get-parameter --name "$SSM_PARAM" --region "$REGION" >/dev/null 2>&1; then
-  aws ssm delete-parameter --name "$SSM_PARAM" --region "$REGION"
-  echo "  Deleted."
-else
-  skip
+if exists ssm get-parameter --name "$SSM_PARAM" --region "$REGION"; then
+  try_delete "$SSM_PARAM" ssm delete-parameter --name "$SSM_PARAM" --region "$REGION"
 fi
 
 # ── Step 2a: Delete per-app HMAC credential parameters ───────────────────────
@@ -459,17 +490,15 @@ fi
 # behind by an interrupted run so a re-bootstrap starts clean.
 APP_CREDS_PREFIX="/${STACK_PREFIX}/app-creds/"
 step "Deleting per-app SSM credential parameters under $APP_CREDS_PREFIX"
-APP_CREDS_NAMES=$(aws ssm get-parameters-by-path \
+APP_CREDS_NAMES=$(aws_call ssm get-parameters-by-path \
   --path "$APP_CREDS_PREFIX" \
   --recursive \
   --region "$REGION" \
   --query 'Parameters[].Name' \
-  --output text 2>/dev/null || true)
+  --output text) || true
 if [ -n "$APP_CREDS_NAMES" ] && [ "$APP_CREDS_NAMES" != "None" ]; then
   for name in $APP_CREDS_NAMES; do
-    aws ssm delete-parameter --name "$name" --region "$REGION" 2>/dev/null \
-      && echo "  Deleted $name" \
-      || echo "  Could not delete $name (continuing)"
+    try_delete "$name" ssm delete-parameter --name "$name" --region "$REGION"
   done
 else
   skip
@@ -482,17 +511,15 @@ fi
 # only thing that removes them.
 PLATFORM_PREFIX="/${STACK_PREFIX}/platform/"
 step "Deleting platform SSM parameters under $PLATFORM_PREFIX"
-PLATFORM_NAMES=$(aws ssm get-parameters-by-path \
+PLATFORM_NAMES=$(aws_call ssm get-parameters-by-path \
   --path "$PLATFORM_PREFIX" \
   --recursive \
   --region "$REGION" \
   --query 'Parameters[].Name' \
-  --output text 2>/dev/null || true)
+  --output text) || true
 if [ -n "$PLATFORM_NAMES" ] && [ "$PLATFORM_NAMES" != "None" ]; then
   for name in $PLATFORM_NAMES; do
-    aws ssm delete-parameter --name "$name" --region "$REGION" 2>/dev/null \
-      && echo "  Deleted $name" \
-      || echo "  Could not delete $name (continuing)"
+    try_delete "$name" ssm delete-parameter --name "$name" --region "$REGION"
   done
 else
   skip
@@ -506,29 +533,31 @@ fi
 # is. Each delete runs once: a certificate still in use means a distribution
 # still holds it, and the script names the distribution and fails at the end.
 step "Deleting custom-domain certificates tagged starkeep:stackPrefix=${STACK_PREFIX} (us-east-1)"
-CERT_ARNS=$(aws acm list-certificates --region us-east-1 \
+CERT_ARNS=$(aws_call acm list-certificates --region us-east-1 \
   --certificate-statuses PENDING_VALIDATION ISSUED INACTIVE EXPIRED VALIDATION_TIMED_OUT REVOKED FAILED \
-  --query 'CertificateSummaryList[].CertificateArn' --output text 2>/dev/null || true)
+  --query 'CertificateSummaryList[].CertificateArn' --output text) || true
 CERTS_DELETED=false
-CERT_FAILURES=()
 if [ -n "$CERT_ARNS" ] && [ "$CERT_ARNS" != "None" ]; then
   for arn in $CERT_ARNS; do
-    owner=$(aws acm list-tags-for-certificate --region us-east-1 --certificate-arn "$arn" \
-      --query "Tags[?Key=='starkeep:stackPrefix'].Value | [0]" --output text 2>/dev/null || true)
+    owner=$(aws_call acm list-tags-for-certificate --region us-east-1 --certificate-arn "$arn" \
+      --query "Tags[?Key=='starkeep:stackPrefix'].Value | [0]" --output text) || continue
     [ "$owner" = "$STACK_PREFIX" ] || continue
     CERTS_DELETED=true
-    if err=$(aws acm delete-certificate --region us-east-1 --certificate-arn "$arn" 2>&1); then
+    rc=0
+    aws_probe acm delete-certificate --region us-east-1 --certificate-arn "$arn" >/dev/null || rc=$?
+    if [[ $rc -eq 0 ]]; then
       echo "  Deleted $arn"
       continue
     fi
-    holders=$(aws acm describe-certificate --region us-east-1 --certificate-arn "$arn" \
-      --query 'Certificate.InUseBy[]' --output text 2>/dev/null || true)
+    [[ $rc -eq 1 ]] && { echo "  $arn: not found or already deleted."; continue; }
+    err="$AWS_ERROR"
+    holders=$(aws_probe acm describe-certificate --region us-east-1 --certificate-arn "$arn" \
+      --query 'Certificate.InUseBy[]' --output text) || true
     if [ -n "$holders" ] && [ "$holders" != "None" ]; then
-      echo "  ERROR $arn is in use by $holders; run teardown-cloud-data-server.sh, then this script again"
+      record_failure "certificate $arn is in use by $holders; run teardown-cloud-data-server.sh, then this script again"
     else
-      echo "  ERROR could not delete $arn: $err"
+      record_failure "could not delete certificate $arn: $err"
     fi
-    CERT_FAILURES+=("$arn")
   done
 fi
 [ "$CERTS_DELETED" = true ] || skip
@@ -550,69 +579,43 @@ delete_managed_policy "${STACK_PREFIX}-install-infra-permissions-boundary"
 # All resources that CF would trip over are already gone; this is fast and
 # should succeed cleanly.
 step "Deleting CloudFormation stack: $STACK_NAME"
-if aws cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION" >/dev/null 2>&1; then
-  aws cloudformation delete-stack --stack-name "$STACK_NAME" --region "$REGION"
-  echo "  Waiting for stack deletion (this may take a few minutes)..."
-  if aws cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "$REGION" 2>/dev/null; then
-    echo "  Stack deleted."
-  else
-    echo "  WARNING: stack-delete-complete timed out or failed — Cognito and S3 cleanup will still proceed."
+if exists cloudformation describe-stacks --stack-name "$STACK_NAME" --region "$REGION"; then
+  if aws_call cloudformation delete-stack --stack-name "$STACK_NAME" --region "$REGION" >/dev/null; then
+    echo "  Waiting for stack deletion (this may take a few minutes)..."
+    if aws_probe cloudformation wait stack-delete-complete --stack-name "$STACK_NAME" --region "$REGION" >/dev/null; then
+      echo "  Stack deleted."
+    else
+      record_failure "stack $STACK_NAME did not finish deleting: ${AWS_ERROR:-timed out}. Cognito and S3 cleanup still ran."
+    fi
   fi
-else
-  skip
 fi
 
 # Delete the buckets themselves (should be empty by now). CF stack deletion
 # normally removes them, but if the stack was in CREATE_FAILED / ROLLBACK state
 # the bucket may have been orphaned from the stack — handle that here.
 step "Deleting S3 bucket: $BUCKET"
-if aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
-  aws s3api delete-bucket --bucket "$BUCKET" --region "$REGION"
-  echo "  Deleted."
-else
-  skip
+if exists s3api head-bucket --bucket "$BUCKET"; then
+  try_delete "$BUCKET" s3api delete-bucket --bucket "$BUCKET" --region "$REGION"
 fi
 
 step "Deleting S3 bucket: $ARTIFACTS_BUCKET"
-if aws s3api head-bucket --bucket "$ARTIFACTS_BUCKET" 2>/dev/null; then
-  aws s3api delete-bucket --bucket "$ARTIFACTS_BUCKET" --region "$REGION"
-  echo "  Deleted."
-else
-  skip
+if exists s3api head-bucket --bucket "$ARTIFACTS_BUCKET"; then
+  try_delete "$ARTIFACTS_BUCKET" s3api delete-bucket --bucket "$ARTIFACTS_BUCKET" --region "$REGION"
 fi
 
 step "Deleting S3 bucket: $APP_ASSETS_BUCKET"
-if aws s3api head-bucket --bucket "$APP_ASSETS_BUCKET" 2>/dev/null; then
-  aws s3api delete-bucket --bucket "$APP_ASSETS_BUCKET" --region "$REGION"
-  echo "  Deleted."
-else
-  skip
+if exists s3api head-bucket --bucket "$APP_ASSETS_BUCKET"; then
+  try_delete "$APP_ASSETS_BUCKET" s3api delete-bucket --bucket "$APP_ASSETS_BUCKET" --region "$REGION"
 fi
 
 # Delete the Cognito pools found above. The stack deletion normally removes
 # them; this sweep catches pools a failed or partial deletion left behind. A
 # missing pool counts as deleted. Any other failure, such as a user pool that
-# still has a domain, names the pool and fails the script at the end, like the
-# certificate step.
-COGNITO_FAILURES=()
-
-report_pool_delete_failure() {  # report_pool_delete_failure <pool-id> <error>
-  if [[ "$2" == *ResourceNotFoundException* ]]; then
-    echo "  Not found or already deleted."
-  else
-    echo "  ERROR could not delete $1: $2"
-    COGNITO_FAILURES+=("$1")
-  fi
-}
-
+# still has a domain, is recorded and fails the script at the end.
 for id in $IDENTITY_POOL_IDS; do
   step "Deleting Cognito Identity Pool: $id"
-  if err=$(aws cognito-identity delete-identity-pool \
-      --identity-pool-id "$id" --region "$REGION" 2>&1); then
-    echo "  Deleted."
-  else
-    report_pool_delete_failure "$id" "$err"
-  fi
+  try_delete "identity pool $id" cognito-identity delete-identity-pool \
+    --identity-pool-id "$id" --region "$REGION"
 done
 
 for id in $USER_POOL_IDS; do
@@ -620,18 +623,13 @@ for id in $USER_POOL_IDS; do
   # UpdateUserPool resets every setting the call omits to its default, so the
   # script turns deletion protection off only when it is on. The template
   # never turns it on.
-  protection=$(aws cognito-idp describe-user-pool --user-pool-id "$id" --region "$REGION" \
-    --query 'UserPool.DeletionProtection' --output text 2>/dev/null || true)
+  protection=$(aws_call cognito-idp describe-user-pool --user-pool-id "$id" --region "$REGION" \
+    --query 'UserPool.DeletionProtection' --output text) || true
   if [[ "$protection" == "ACTIVE" ]]; then
-    aws cognito-idp update-user-pool --user-pool-id "$id" \
-      --deletion-protection INACTIVE --region "$REGION" 2>/dev/null || true
+    try_quiet cognito-idp update-user-pool --user-pool-id "$id" \
+      --deletion-protection INACTIVE --region "$REGION"
   fi
-  if err=$(aws cognito-idp delete-user-pool \
-      --user-pool-id "$id" --region "$REGION" 2>&1); then
-    echo "  Deleted."
-  else
-    report_pool_delete_failure "$id" "$err"
-  fi
+  try_delete "user pool $id" cognito-idp delete-user-pool --user-pool-id "$id" --region "$REGION"
 done
 
 # ── Step 6: Clear cloud config ────────────────────────────────────────────────
@@ -668,16 +666,22 @@ else
   echo "  expected it to be."
 fi
 
-echo ""
-if [ "${#CERT_FAILURES[@]}" -gt 0 ]; then
-  echo "Bootstrap teardown finished, but these certificates could not be deleted:"
-  printf '  %s\n' "${CERT_FAILURES[@]}"
+# ── Step 7: Confirm the other deployment's pools survived ────────────────────
+# A teardown of this prefix must never remove the pools of the deployment that
+# the config describes. Recheck every pool that existed at the start.
+if [[ -n "$CONFIG_POOLS_PRESENT" ]]; then
+  step "Checking that the Cognito pools $CONFIG_FILE names still exist"
+  for entry in $CONFIG_POOLS_PRESENT; do
+    kind="${entry%%:*}"
+    id="${entry#*:}"
+    rc=0
+    config_pool_present "$kind" "$id" || rc=$?
+    case $rc in
+      0) echo "  $id still exists." ;;
+      1) record_failure "the $kind pool $id that $CONFIG_FILE names (prefix '${CONFIG_STACK_PREFIX:-<none>}') existed when this teardown started and is gone now. Investigate before running another teardown." ;;
+      *) record_failure "could not confirm that the $kind pool $id still exists: $AWS_ERROR" ;;
+    esac
+  done
 fi
-if [ "${#COGNITO_FAILURES[@]}" -gt 0 ]; then
-  echo "Bootstrap teardown finished, but these Cognito pools could not be deleted:"
-  printf '  %s\n' "${COGNITO_FAILURES[@]}"
-fi
-if [ "${#CERT_FAILURES[@]}" -gt 0 ] || [ "${#COGNITO_FAILURES[@]}" -gt 0 ]; then
-  exit 1
-fi
-echo "Bootstrap teardown complete."
+
+finish_teardown "Bootstrap teardown"

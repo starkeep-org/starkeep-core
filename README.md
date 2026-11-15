@@ -344,6 +344,8 @@ The cloud scripts need `python3` and the AWS CLI, signed in with administrator c
 - The database has deletion protection. `teardown-cloud-data-server.sh` removes the database only after you confirm at the prompt or pass `--force`.
 - `teardown-bootstrap.sh` never prompts about the database. Pass `--force` to remove the database. Without `--force`, the database stays in your account.
 
+Pass `--dry-run` to any cloud script to see what it would remove. The script lists each resource it found, including the lists of the layers above it, and removes nothing. A cloud script that cannot remove a resource keeps going, lists each failure at the end, and exits with an error.
+
 ## Removing Starkeep locally
 
 `scripts/reset-local-data.sh` deletes the files, the database and the list of watched folders that this machine holds in Starkeep. The script keeps the cloud address and this computer's sign-in.
