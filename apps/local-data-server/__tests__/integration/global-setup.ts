@@ -97,7 +97,7 @@ export default async function setup(project: TestProject): Promise<() => Promise
     bundle: true,
     format: "esm",
     platform: "node",
-    target: "node22",
+    target: "node24",
     // Node's resolution, not a bundler's: no "module" condition, `main` only.
     conditions: [],
     mainFields: ["main"],
