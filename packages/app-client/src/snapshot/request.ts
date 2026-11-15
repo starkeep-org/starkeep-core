@@ -91,11 +91,12 @@ function isCloudMode(): boolean {
  *   tables: manifest.infraRequirements.appSpecificSyncable.tables,
  * });
  * app.get("/api/weekly-volume", async (c) => {
+ *   const floor = Number(c.req.query("freshAfter") ?? "");
  *   const result = await snapshots.query(c.req.raw, {
  *     tables: ["sets"],
  *     sql: WEEKLY_VOLUME_SQL,
  *     maxAge: 5 * 60_000,
- *     freshAfter: Number(c.req.query("freshAfter") ?? 0),
+ *     freshAfter: Number.isFinite(floor) ? floor : undefined,
  *   });
  *   const res = Response.json({ rows: result.rows, loadedAt: result.loadedAt });
  *   if (result.setCookie) res.headers.append("Set-Cookie", result.setCookie);
