@@ -79,18 +79,30 @@ export async function checkDelegationUser(
     console.error("[delegation] the token endpoint did not answer:", err);
     return { ok: false, reason: "unavailable" };
   }
-  if (res.status === 400 || res.status === 401) {
-    // invalid_grant: the refresh token was revoked or the user disabled.
-    cache.delete(delegationId);
-    return { ok: false, reason: "refused" };
+  const body = (await res.json().catch(() => ({}))) as { id_token?: unknown; error?: unknown };
+  if (!res.ok) {
+    // Only invalid_grant speaks about the user: the refresh token was revoked
+    // or the user disabled. Any other refusal (invalid_client after a client
+    // was recreated, a throttle, a malformed request) is the deployment's
+    // problem, and revoking every delegation over it would be permanent.
+    if (res.status === 400 && body.error === "invalid_grant") {
+      cache.delete(delegationId);
+      return { ok: false, reason: "refused" };
+    }
+    console.error(`[delegation] the token endpoint answered ${res.status} ${String(body.error)}`);
+    return { ok: false, reason: "unavailable" };
   }
-  if (!res.ok) return { ok: false, reason: "unavailable" };
-  const body = (await res.json().catch(() => ({}))) as { id_token?: unknown };
   const idToken = typeof body.id_token === "string" ? body.id_token : null;
+  // A fresh ID token that does not verify says nothing about the user either:
+  // Cognito's keys could not be fetched, or the pool's configuration drifted.
   const claims = idToken ? await verifyUserToken(idToken, deps.pool) : null;
+  if (!claims) {
+    console.error("[delegation] the minted ID token did not verify");
+    return { ok: false, reason: "unavailable" };
+  }
   // A token for another user would mean a row's ciphertext was moved, which
   // the sealing's associated data already prevents. Refuse it all the same.
-  if (!claims || claims.sub !== userId) return { ok: false, reason: "refused" };
+  if (claims.sub !== userId) return { ok: false, reason: "refused" };
 
   const result: UserCheck = deps.groupsMayUseData(claims.groups)
     ? { ok: true }
