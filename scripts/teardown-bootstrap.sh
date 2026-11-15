@@ -45,10 +45,12 @@
 # own resources, and by the names and tags the bootstrap template gives them
 # (<prefix>-auth tagged StackPrefix=<prefix>, and <prefix>_admin). It never
 # takes a pool ID from the config, because the config may describe another
-# deployment. It also refuses to touch a pool that the config names unless the
-# config matches the target. When the config describes another deployment, the
-# script checks at the end that the config's pools still exist, and fails if a
-# pool that existed at the start is gone.
+# deployment. It also refuses to touch a pool that a config for another
+# deployment names, and it checks at the end that each such pool still exists.
+# A pool that existed at the start and is gone fails the run. Two configs
+# count: $STARKEEP_DIR/config.json and the default $HOME/.starkeep/config.json.
+# The second matters when STARKEEP_DIR names the target's own config, as in the
+# e2e harness, while the default config describes the live deployment.
 
 set -euo pipefail
 
@@ -83,17 +85,16 @@ done
 
 # ── Load config ───────────────────────────────────────────────────────────────
 
-# The config's pool IDs serve two purposes only: the user pool ID stands in for
-# the config's region, and both IDs mark pools that a teardown of another
-# deployment must never touch. Neither ID selects a pool to delete.
+# Config pool IDs serve two purposes only: the user pool ID stands in for the
+# config's region, and both IDs mark pools that a teardown of another
+# deployment must never touch (see protect_config_pools below). Neither ID
+# selects a pool to delete.
 CONFIG_STACK_PREFIX=""
 CONFIG_USER_POOL_ID=""
-CONFIG_IDENTITY_POOL_ID=""
 
 if [[ -f "$CONFIG_FILE" ]]; then
   CONFIG_STACK_PREFIX=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('stackPrefix',''))" 2>/dev/null || true)
   CONFIG_USER_POOL_ID=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('userPoolId',''))" 2>/dev/null || true)
-  CONFIG_IDENTITY_POOL_ID=$(python3 -c "import json; c=json.load(open('$CONFIG_FILE')); print(c.get('identityPoolId',''))" 2>/dev/null || true)
 fi
 
 # The stack prefix is the only thing that scopes a teardown to a single
@@ -216,23 +217,49 @@ for id in $(aws_call cognito-identity list-identity-pools --max-results 60 \
   IDENTITY_POOL_IDS=$(add_id "$IDENTITY_POOL_IDS" "$id")
 done
 
-# A config for another deployment names pools that must survive this teardown.
-# Reaching one here means the stack or a name lookup points at the other
-# deployment's pool, so the script stops before it deletes anything.
-if [[ "$CONFIG_MATCHES_TEARDOWN" != "true" ]]; then
+# Pools that must survive this teardown: those that a config for another
+# deployment names. Two configs count. The first is $CONFIG_FILE. The second is
+# the default $HOME/.starkeep/config.json, because the e2e harness and its
+# printed cleanup command point STARKEEP_DIR at the run's own config, while the
+# operator's live deployment stays described at the default path. Each line is
+# "<user|identity>\t<pool-id>\t<config-file>\t<config-prefix>".
+PROTECTED_POOLS=""
+protect_config_pools() {  # protect_config_pools <config-file>
+  local file="$1" prefix user identity
+  [[ -f "$file" ]] || return 0
+  prefix=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('stackPrefix',''))" "$file" 2>/dev/null || true)
+  user=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('userPoolId',''))" "$file" 2>/dev/null || true)
+  identity=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('identityPoolId',''))" "$file" 2>/dev/null || true)
+  # A config that describes the target names the pools this teardown deletes.
+  if [[ -n "$prefix" && "$prefix" == "$STACK_PREFIX" && "${user%%_*}" == "$REGION" ]]; then
+    return 0
+  fi
+  if [[ -n "$user" ]]; then PROTECTED_POOLS+="user"$'\t'"$user"$'\t'"$file"$'\t'"$prefix"$'\n'; fi
+  if [[ -n "$identity" ]]; then PROTECTED_POOLS+="identity"$'\t'"$identity"$'\t'"$file"$'\t'"$prefix"$'\n'; fi
+}
+DEFAULT_CONFIG_FILE="$HOME/.starkeep/config.json"
+protect_config_pools "$CONFIG_FILE"
+if [[ "$DEFAULT_CONFIG_FILE" != "$CONFIG_FILE" ]]; then
+  protect_config_pools "$DEFAULT_CONFIG_FILE"
+fi
+
+# Reaching a protected pool here means the stack or a name lookup points at the
+# other deployment's pool, so the script stops before it deletes anything.
+while IFS=$'\t' read -r kind pid file cprefix; do
+  [[ -z "${pid:-}" ]] && continue
   for id in $USER_POOL_IDS $IDENTITY_POOL_IDS; do
-    if [[ "$id" == "$CONFIG_USER_POOL_ID" || "$id" == "$CONFIG_IDENTITY_POOL_ID" ]]; then
-      echo "Error: Cognito pool $id belongs to the deployment that $CONFIG_FILE" >&2
-      echo "describes (prefix '${CONFIG_STACK_PREFIX:-<none>}'), not to ${STACK_PREFIX}/${REGION}." >&2
+    if [[ "$id" == "$pid" ]]; then
+      echo "Error: Cognito pool $id belongs to the deployment that $file" >&2
+      echo "describes (prefix '${cprefix:-<none>}'), not to ${STACK_PREFIX}/${REGION}." >&2
       echo "Nothing was deleted." >&2
       exit 1
     fi
   done
-fi
+done <<< "$PROTECTED_POOLS"
 
-# The config's pools must survive a teardown of another deployment. Record
-# which of them exist now, so the check at the end can tell a pool this run
-# removed from one that was already gone. A pool ID carries its region.
+# Record which protected pools exist now, so the check at the end can tell a
+# pool this run removed from one that was already gone. A pool ID carries its
+# region.
 config_pool_present() {  # config_pool_present <user|identity> <pool-id>: 0 present, 1 gone, 2 unknown
   local region="${2%%[_:]*}"
   if [[ "$1" == "user" ]]; then
@@ -242,12 +269,17 @@ config_pool_present() {  # config_pool_present <user|identity> <pool-id>: 0 pres
   fi
 }
 CONFIG_POOLS_PRESENT=""
-if [[ "$CONFIG_MATCHES_TEARDOWN" != "true" ]]; then
-  [[ -n "$CONFIG_USER_POOL_ID" ]] && config_pool_present user "$CONFIG_USER_POOL_ID" \
-    && CONFIG_POOLS_PRESENT+="user:$CONFIG_USER_POOL_ID "
-  [[ -n "$CONFIG_IDENTITY_POOL_ID" ]] && config_pool_present identity "$CONFIG_IDENTITY_POOL_ID" \
-    && CONFIG_POOLS_PRESENT+="identity:$CONFIG_IDENTITY_POOL_ID "
-fi
+while IFS=$'\t' read -r kind pid file cprefix; do
+  [[ -z "${pid:-}" ]] && continue
+  rc=0
+  config_pool_present "$kind" "$pid" || rc=$?
+  case $rc in
+    0) CONFIG_POOLS_PRESENT+="$kind"$'\t'"$pid"$'\t'"$file"$'\t'"$cprefix"$'\n' ;;
+    1) ;;
+    *) echo "  WARN could not read the $kind pool $pid that $file names, so this teardown" >&2
+       echo "       cannot confirm afterwards that the pool survived: ${AWS_ERROR//$'\n'/ }" >&2 ;;
+  esac
+done <<< "$PROTECTED_POOLS"
 
 # ── Confirmation ────────────────────────────────────────────────────────────
 echo ""
@@ -273,6 +305,11 @@ echo "    IAM policy           : ${STACK_PREFIX}-install-infra-permissions-bound
 for id in $USER_POOL_IDS; do echo "    Cognito User Pool    : $id"; done
 for id in $IDENTITY_POOL_IDS; do echo "    Cognito Identity Pool: $id"; done
 echo ""
+while IFS=$'\t' read -r kind pid file cprefix; do
+  [[ -z "${pid:-}" ]] && continue
+  echo "  Kept, and checked at the end: $kind pool $pid ($file, prefix '${cprefix:-<none>}')"
+done <<< "$CONFIG_POOLS_PRESENT"
+[[ -n "$CONFIG_POOLS_PRESENT" ]] && echo ""
 if [[ "$CONFIG_MATCHES_TEARDOWN" == "true" ]]; then
   echo "After all resources are deleted, the cloud config in $CONFIG_FILE will be"
   echo "cleared (the local 'appParentDirs' setting is preserved)."
@@ -667,21 +704,21 @@ else
 fi
 
 # ── Step 7: Confirm the other deployment's pools survived ────────────────────
-# A teardown of this prefix must never remove the pools of the deployment that
-# the config describes. Recheck every pool that existed at the start.
+# A teardown of this prefix must never remove the pools of another deployment
+# that a config describes. Recheck every protected pool that existed at the
+# start.
 if [[ -n "$CONFIG_POOLS_PRESENT" ]]; then
-  step "Checking that the Cognito pools $CONFIG_FILE names still exist"
-  for entry in $CONFIG_POOLS_PRESENT; do
-    kind="${entry%%:*}"
-    id="${entry#*:}"
+  step "Checking that the other deployments' Cognito pools still exist"
+  while IFS=$'\t' read -r kind id file cprefix; do
+    [[ -z "${id:-}" ]] && continue
     rc=0
     config_pool_present "$kind" "$id" || rc=$?
     case $rc in
       0) echo "  $id still exists." ;;
-      1) record_failure "the $kind pool $id that $CONFIG_FILE names (prefix '${CONFIG_STACK_PREFIX:-<none>}') existed when this teardown started and is gone now. Investigate before running another teardown." ;;
+      1) record_failure "the $kind pool $id that $file names (prefix '${cprefix:-<none>}') existed when this teardown started and is gone now. Investigate before running another teardown." ;;
       *) record_failure "could not confirm that the $kind pool $id still exists: $AWS_ERROR" ;;
     esac
-  done
+  done <<< "$CONFIG_POOLS_PRESENT"
 fi
 
 finish_teardown "Bootstrap teardown"
