@@ -117,7 +117,7 @@ export function buildPulumiProgram(
           // check the broker performs. No control in @starkeep/app-client or at
           // the broker could reach that; only this line could.
           role: ctx.appExecRoleArn,
-          runtime: aws.lambda.Runtime.NodeJS22dX,
+          runtime: aws.lambda.Runtime.NodeJS24dX,
           handler: handler.handler,
           s3Bucket: ctx.artifactsBucket,
           s3Key: `apps/${ctx.appId}/latest/dist.zip`,

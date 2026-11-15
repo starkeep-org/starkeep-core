@@ -7,7 +7,7 @@
  * into a `dist.zip` at `STARKEEP_BUNDLE_OUT`, which is the contract
  * `cli-install-app` invokes an app's `pnpm bundle` under.
  *
- * Everything is bundled in: the Lambda runtime pre-includes nothing on Node 22,
+ * Everything is bundled in: the Lambda runtime provides none of the app's packages,
  * and a local install of a fixture app must not need its own `pnpm install`.
  */
 
@@ -31,7 +31,7 @@ if (!cloud) {
     entryPoints: [join(pkgDir, "src", "serve.ts")],
     bundle: true,
     platform: "node",
-    target: "node22",
+    target: "node24",
     format: "esm",
     outfile: join(pkgDir, "serve.mjs"),
     // esbuild emits `import` for these under ESM; Node resolves them natively.
@@ -52,7 +52,7 @@ if (!cloud) {
     entryPoints: [join(pkgDir, "src", "write-assets.ts")],
     bundle: true,
     platform: "node",
-    target: "node22",
+    target: "node24",
     format: "esm",
     outfile: writeLocalAssets,
     external: ["node:*"],
@@ -75,7 +75,7 @@ if (!cloud) {
   const esbuildCommon = {
     bundle: true,
     platform: "node",
-    target: "node22",
+    target: "node24",
     format: "esm",
     // esbuild emits `import` for these under ESM; Node resolves them natively.
     external: ["node:*"],

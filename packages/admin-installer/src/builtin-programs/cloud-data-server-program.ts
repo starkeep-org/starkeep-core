@@ -474,7 +474,7 @@ export function buildCloudDataServerProgram(
       {
         name: lambdaName,
         role: ctx.appRoleArn,
-        runtime: aws.lambda.Runtime.NodeJS22dX,
+        runtime: aws.lambda.Runtime.NodeJS24dX,
         handler: "api-handler.handler",
         code: new pulumi.asset.FileArchive(ctx.distZipPath),
         sourceCodeHash: ctx.bundleHash,
@@ -715,7 +715,7 @@ export function buildCloudDataServerProgram(
       {
         name: sessionAuthLambdaName,
         role: ctx.appRoleArn,
-        runtime: aws.lambda.Runtime.NodeJS22dX,
+        runtime: aws.lambda.Runtime.NodeJS24dX,
         handler: "session-authorizer.handler",
         code: new pulumi.asset.FileArchive(ctx.distZipPath),
         sourceCodeHash: ctx.bundleHash,

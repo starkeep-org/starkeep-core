@@ -58,7 +58,7 @@ try {
       outfile: join(staging, outfile),
       bundle: true,
       platform: "node",
-      target: "node22",
+      target: "node24",
       // ESM, because `cloud.ts` uses top-level await to load the app during INIT.
       format: "esm",
       external: ["node:*"],
