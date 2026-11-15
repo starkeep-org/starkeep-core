@@ -281,6 +281,34 @@ while IFS=$'\t' read -r kind pid file cprefix; do
   esac
 done <<< "$PROTECTED_POOLS"
 
+# ── Find this deployment's parameters and leftover certificates ──────────────
+# Selected before the confirmation, like the pools, so the confirmation and
+# --dry-run list what Steps 2a, 2b and 2c delete.
+
+prefixed_parameters() {  # prefixed_parameters <path>: SSM parameter names under <path>
+  local names
+  names=$(aws_call ssm get-parameters-by-path --path "$1" --recursive --region "$REGION" \
+    --query 'Parameters[].Name' --output text) || true
+  [[ "$names" == "None" ]] || printf '%s' "$names"
+}
+APP_CREDS_PREFIX="/${STACK_PREFIX}/app-creds/"
+PLATFORM_PREFIX="/${STACK_PREFIX}/platform/"
+APP_CREDS_NAMES=$(prefixed_parameters "$APP_CREDS_PREFIX")
+PLATFORM_NAMES=$(prefixed_parameters "$PLATFORM_PREFIX")
+
+# Every certificate tagged with the prefix. CloudFront takes certificates only
+# from us-east-1, so they live there whatever $REGION is.
+CERT_ARNS=""
+CERT_CANDIDATES=$(aws_call acm list-certificates --region us-east-1 \
+  --certificate-statuses PENDING_VALIDATION ISSUED INACTIVE EXPIRED VALIDATION_TIMED_OUT REVOKED FAILED \
+  --query 'CertificateSummaryList[].CertificateArn' --output text) || true
+for arn in $CERT_CANDIDATES; do
+  [[ "$arn" == "None" ]] && continue
+  owner=$(aws_call acm list-tags-for-certificate --region us-east-1 --certificate-arn "$arn" \
+    --query "Tags[?Key=='starkeep:stackPrefix'].Value | [0]" --output text) || continue
+  if [[ "$owner" == "$STACK_PREFIX" ]]; then CERT_ARNS="${CERT_ARNS:+$CERT_ARNS }$arn"; fi
+done
+
 # ── Confirmation ────────────────────────────────────────────────────────────
 echo ""
 [[ "$DRY_RUN" == "true" ]] && echo "DRY RUN: nothing will be deleted. A real run would do the following."
@@ -294,6 +322,8 @@ echo "    S3 bucket            : $BUCKET"
 echo "    S3 bucket            : $ARTIFACTS_BUCKET"
 echo "    S3 bucket            : $APP_ASSETS_BUCKET"
 echo "    SSM parameter        : $SSM_PARAM"
+for name in $APP_CREDS_NAMES $PLATFORM_NAMES; do echo "    SSM parameter        : $name"; done
+for arn in $CERT_ARNS; do echo "    Certificate          : $arn (us-east-1)"; done
 echo "    IAM role             : ${STACK_PREFIX}-app-admin-role"
 echo "    IAM role             : ${STACK_PREFIX}-manager-role"
 echo "    IAM role             : ${STACK_PREFIX}-install-ddl-role"
@@ -524,16 +554,10 @@ fi
 # Each cloud-installed app has a /${STACK_PREFIX}/app-creds/${appId}
 # SecureString written by the installer (see admin-installer/src/app-creds.ts).
 # Normal uninstall removes these per-app; the sweep here catches any left
-# behind by an interrupted run so a re-bootstrap starts clean.
-APP_CREDS_PREFIX="/${STACK_PREFIX}/app-creds/"
+# behind by an interrupted run so a re-bootstrap starts clean. The names were
+# selected before the confirmation.
 step "Deleting per-app SSM credential parameters under $APP_CREDS_PREFIX"
-APP_CREDS_NAMES=$(aws_call ssm get-parameters-by-path \
-  --path "$APP_CREDS_PREFIX" \
-  --recursive \
-  --region "$REGION" \
-  --query 'Parameters[].Name' \
-  --output text) || true
-if [ -n "$APP_CREDS_NAMES" ] && [ "$APP_CREDS_NAMES" != "None" ]; then
+if [[ -n "$APP_CREDS_NAMES" ]]; then
   for name in $APP_CREDS_NAMES; do
     try_delete "$name" ssm delete-parameter --name "$name" --region "$REGION"
   done
@@ -546,15 +570,8 @@ fi
 # written by admin-web through Manager, and any device records a deployment kept
 # from before pairing was retired. Nothing uninstalls these, so the sweep is the
 # only thing that removes them.
-PLATFORM_PREFIX="/${STACK_PREFIX}/platform/"
 step "Deleting platform SSM parameters under $PLATFORM_PREFIX"
-PLATFORM_NAMES=$(aws_call ssm get-parameters-by-path \
-  --path "$PLATFORM_PREFIX" \
-  --recursive \
-  --region "$REGION" \
-  --query 'Parameters[].Name' \
-  --output text) || true
-if [ -n "$PLATFORM_NAMES" ] && [ "$PLATFORM_NAMES" != "None" ]; then
+if [[ -n "$PLATFORM_NAMES" ]]; then
   for name in $PLATFORM_NAMES; do
     try_delete "$name" ssm delete-parameter --name "$name" --region "$REGION"
   done
@@ -565,39 +582,29 @@ fi
 # ── Step 2c: Delete custom-domain certificates ───────────────────────────────
 # teardown-cloud-data-server.sh above deletes every certificate tagged with the
 # prefix after it deletes the distribution, which releases each one at once.
-# This step deletes any certificate an earlier, failed run left. CloudFront
-# takes certificates only from us-east-1, so they live there whatever $REGION
-# is. Each delete runs once: a certificate still in use means a distribution
-# still holds it, and the script names the distribution and fails at the end.
+# This step deletes any certificate an earlier, failed run left; one that the
+# cloud-data-server teardown already deleted reads as already gone. Each
+# delete runs once: a certificate still in use means a distribution still
+# holds it, and the script names the distribution and fails at the end.
 step "Deleting custom-domain certificates tagged starkeep:stackPrefix=${STACK_PREFIX} (us-east-1)"
-CERT_ARNS=$(aws_call acm list-certificates --region us-east-1 \
-  --certificate-statuses PENDING_VALIDATION ISSUED INACTIVE EXPIRED VALIDATION_TIMED_OUT REVOKED FAILED \
-  --query 'CertificateSummaryList[].CertificateArn' --output text) || true
-CERTS_DELETED=false
-if [ -n "$CERT_ARNS" ] && [ "$CERT_ARNS" != "None" ]; then
-  for arn in $CERT_ARNS; do
-    owner=$(aws_call acm list-tags-for-certificate --region us-east-1 --certificate-arn "$arn" \
-      --query "Tags[?Key=='starkeep:stackPrefix'].Value | [0]" --output text) || continue
-    [ "$owner" = "$STACK_PREFIX" ] || continue
-    CERTS_DELETED=true
-    rc=0
-    aws_probe acm delete-certificate --region us-east-1 --certificate-arn "$arn" >/dev/null || rc=$?
-    if [[ $rc -eq 0 ]]; then
-      echo "  Deleted $arn"
-      continue
-    fi
-    [[ $rc -eq 1 ]] && { echo "  $arn: not found or already deleted."; continue; }
-    err="$AWS_ERROR"
-    holders=$(aws_probe acm describe-certificate --region us-east-1 --certificate-arn "$arn" \
-      --query 'Certificate.InUseBy[]' --output text) || true
-    if [ -n "$holders" ] && [ "$holders" != "None" ]; then
-      record_failure "certificate $arn is in use by $holders; run teardown-cloud-data-server.sh, then this script again"
-    else
-      record_failure "could not delete certificate $arn: $err"
-    fi
-  done
-fi
-[ "$CERTS_DELETED" = true ] || skip
+for arn in $CERT_ARNS; do
+  rc=0
+  aws_probe acm delete-certificate --region us-east-1 --certificate-arn "$arn" >/dev/null || rc=$?
+  if [[ $rc -eq 0 ]]; then
+    echo "  Deleted $arn"
+    continue
+  fi
+  [[ $rc -eq 1 ]] && { echo "  $arn: not found or already deleted."; continue; }
+  err="$AWS_ERROR"
+  holders=$(aws_probe acm describe-certificate --region us-east-1 --certificate-arn "$arn" \
+    --query 'Certificate.InUseBy[]' --output text) || true
+  if [ -n "$holders" ] && [ "$holders" != "None" ]; then
+    record_failure "certificate $arn is in use by $holders; run teardown-cloud-data-server.sh, then this script again"
+  else
+    record_failure "could not delete certificate $arn: $err"
+  fi
+done
+[[ -n "$CERT_ARNS" ]] || skip
 
 # ── Step 3: Delete IAM roles and policies manually ───────────────────────────
 # Done before CF deletion so CF never races against us or gets stuck on
