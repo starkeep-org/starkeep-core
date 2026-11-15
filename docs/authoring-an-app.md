@@ -741,13 +741,17 @@ keys the platform fills in (these feed `getRuntimeConfig()` from §3).
   calls, such as the example's `POST /api/echo`, and never for a page a
   browser navigates to.
 
-No route of yours answers a caller the platform has not checked. A
-`publicPaths` entry must be one of the platform's pages (`/`, `/sign-in`,
-`/api/session/*`, `/starkeep-runtime-config`, `/_immutable/*`, `/_static/*`)
-or one of the handler's `staticAssetPaths`, so an anonymous request reaches a
-file or a platform page and never your server code. The validator refuses
-anything else, and it refuses `auth: "public"`, which earlier versions
-accepted.
+You cannot declare an anonymous route of your own. A `publicPaths` entry must
+be one of the platform's pages (`/`, `/sign-in`, `/api/session/*`,
+`/starkeep-runtime-config`, `/_immutable/*`, `/_static/*`) or one of the
+handler's `staticAssetPaths`. The validator refuses anything else, and it
+refuses `auth: "public"`, which earlier versions accepted.
+
+The validator bounds paths, not code. Your server still answers the shell,
+`/sign-in`, `/api/session/*` and `/starkeep-runtime-config` for a caller who
+has not signed in, through the platform's helpers. Mount nothing else under
+those paths. A route you add under `/api/session/*` answers the internet with
+no user check.
 
 Your app's pages answer only through the deployment's CloudFront address. On
 the API Gateway's own `execute-api` hostname the gateway refuses them, because
