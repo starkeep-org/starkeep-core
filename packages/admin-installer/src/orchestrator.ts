@@ -726,6 +726,12 @@ async function uninstallAppInner(input: UninstallInput, registry: Registry): Pro
       awsCreds: managerCreds,
     }),
   );
+
+  // delete_app_registry already forgot the ledger, but every step after it
+  // recorded itself again. Left in place, those records would make the next
+  // uninstall of a reinstalled app skip them, and leave the registry entry,
+  // both roles and the HMAC secret behind.
+  await registry.clearSteps(appId);
 }
 
 /**
