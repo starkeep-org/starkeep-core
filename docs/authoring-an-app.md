@@ -708,8 +708,9 @@ SQLite, caches the copy per user, and runs the app's read-only SQL against it.
 Each result carries `loadedAt`, the copy's load time, for an "as of" label. A
 Refresh action sends a `freshAfter` floor that reloads an older copy. The
 package README's section "Analysis reads in SQL: `@starkeep/app-client/snapshot`"
-describes the options and limits, and Probe's `GET /api/notes-summary` is a
-working route.
+describes the options and limits. The example app's `GET /api/notes-by-day`
+(`example-app/web/src/server/analysis.ts`) is the route to copy, and its page
+shows the load time beside a Refresh button.
 
 ### 7. Cloud compute + the bundle (cloud target only)
 
