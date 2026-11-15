@@ -67,6 +67,14 @@ describe("teardown-bootstrap.sh", () => {
 
   it("lists every layer's resources on --dry-run and deletes nothing", () => {
     const before = mergeAccounts(live, target);
+    // A certificate an earlier, failed run left: only the bootstrap's own
+    // sweep deletes it.
+    const leftoverCert = "arn:aws:acm:us-east-1:123456789012:certificate/sktest-leftover";
+    before.certificates.push({
+      CertificateArn: leftoverCert,
+      DomainName: "old.sktest.example.com",
+      Tags: { "starkeep:stackPrefix": "sktest" },
+    });
     const { status, output, calls, account } = runTeardown("sktest", before, ["--dry-run"]);
     expect(status, output).toBe(0);
     for (const id of [
@@ -74,6 +82,10 @@ describe("teardown-bootstrap.sh", () => {
       TEST_IDENTITY_POOL,
       "sktestcluster",
       "sktest-app-photos-web",
+      // The bootstrap layer's own sweeps.
+      "/sktest/app-creds/photos",
+      "/sktest/platform/deployment-settings",
+      leftoverCert,
     ]) {
       expect(output).toContain(id);
     }
