@@ -516,6 +516,17 @@ async function callback(req: ConnectRequest, deps: ConnectDeps): Promise<Connect
     ]);
   }
 
+  // Checked again here, not only on the form: the app may have been
+  // uninstalled during the sign-in, and uninstall's delete of its
+  // delegations must not be undone by a row created after it.
+  const apps = await deps.connectableApps();
+  if (!apps.some((a) => a.appId === pending.app)) {
+    await revokeAtCognito(deps, tokens.refreshToken);
+    return message(deps, 404, `No app called ${pending.app} serves outside clients here.`, [
+      clearPending(),
+    ]);
+  }
+
   const key = await deps.signingKey();
   if (!key) return message(deps, 503, "Outside access is not set up on this cloud yet.");
   const now = (deps.now ?? Date.now)();
