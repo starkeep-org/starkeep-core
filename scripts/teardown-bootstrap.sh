@@ -590,14 +590,28 @@ else
 fi
 
 # Delete the Cognito pools found above. The stack deletion normally removes
-# them; this sweep catches pools a failed or partial deletion left behind.
+# them; this sweep catches pools a failed or partial deletion left behind. A
+# missing pool counts as deleted. Any other failure, such as a user pool that
+# still has a domain, names the pool and fails the script at the end, like the
+# certificate step.
+COGNITO_FAILURES=()
+
+report_pool_delete_failure() {  # report_pool_delete_failure <pool-id> <error>
+  if [[ "$2" == *ResourceNotFoundException* ]]; then
+    echo "  Not found or already deleted."
+  else
+    echo "  ERROR could not delete $1: $2"
+    COGNITO_FAILURES+=("$1")
+  fi
+}
+
 for id in $IDENTITY_POOL_IDS; do
   step "Deleting Cognito Identity Pool: $id"
-  if aws cognito-identity delete-identity-pool \
-      --identity-pool-id "$id" --region "$REGION" 2>/dev/null; then
+  if err=$(aws cognito-identity delete-identity-pool \
+      --identity-pool-id "$id" --region "$REGION" 2>&1); then
     echo "  Deleted."
   else
-    echo "  Not found or already deleted."
+    report_pool_delete_failure "$id" "$err"
   fi
 done
 
@@ -612,11 +626,11 @@ for id in $USER_POOL_IDS; do
     aws cognito-idp update-user-pool --user-pool-id "$id" \
       --deletion-protection INACTIVE --region "$REGION" 2>/dev/null || true
   fi
-  if aws cognito-idp delete-user-pool \
-      --user-pool-id "$id" --region "$REGION" 2>/dev/null; then
+  if err=$(aws cognito-idp delete-user-pool \
+      --user-pool-id "$id" --region "$REGION" 2>&1); then
     echo "  Deleted."
   else
-    echo "  Not found or already deleted."
+    report_pool_delete_failure "$id" "$err"
   fi
 done
 
@@ -658,6 +672,12 @@ echo ""
 if [ "${#CERT_FAILURES[@]}" -gt 0 ]; then
   echo "Bootstrap teardown finished, but these certificates could not be deleted:"
   printf '  %s\n' "${CERT_FAILURES[@]}"
+fi
+if [ "${#COGNITO_FAILURES[@]}" -gt 0 ]; then
+  echo "Bootstrap teardown finished, but these Cognito pools could not be deleted:"
+  printf '  %s\n' "${COGNITO_FAILURES[@]}"
+fi
+if [ "${#CERT_FAILURES[@]}" -gt 0 ] || [ "${#COGNITO_FAILURES[@]}" -gt 0 ]; then
   exit 1
 fi
 echo "Bootstrap teardown complete."

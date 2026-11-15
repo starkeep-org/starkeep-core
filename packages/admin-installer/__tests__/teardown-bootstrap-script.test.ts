@@ -35,6 +35,8 @@ interface Fixture {
   stackResources: Record<string, string> | null;
   userPools: { Id: string; Name: string; StackPrefix: string; DeletionProtection: string }[];
   identityPools: { IdentityPoolId: string; IdentityPoolName: string }[];
+  /** The stderr a pool's delete call fails with, by pool ID; other deletes succeed. */
+  deleteErrors?: Record<string, string>;
 }
 
 const FAKE_AWS = `#!/usr/bin/env node
@@ -65,9 +67,13 @@ switch (cmd) {
     if (q === "UserPool.DeletionProtection") out(pool.DeletionProtection);
     fail();
   }
-  case "cognito-idp update-user-pool":
   case "cognito-idp delete-user-pool":
-  case "cognito-identity delete-identity-pool":
+  case "cognito-identity delete-identity-pool": {
+    const err = (fx.deleteErrors || {})[opt("--user-pool-id") || opt("--identity-pool-id")];
+    if (err) { process.stderr.write(err + "\\n"); process.exit(254); }
+    process.exit(0);
+  }
+  case "cognito-idp update-user-pool":
     process.exit(0);
   default:
     fail();
@@ -251,6 +257,38 @@ describe("teardown-bootstrap.sh Cognito sweep", () => {
     expect(status).toBe(1);
     expect(output).toContain(`Cognito pool ${LIVE_IDENTITY_POOL} belongs to the deployment`);
     expect(calls.filter((c) => /delete|update/.test(c))).toEqual([]);
+  });
+
+  it("reports a pool it cannot delete and exits 1, but treats a missing pool as deleted", () => {
+    const domainError =
+      "An error occurred (InvalidParameterException) when calling the DeleteUserPool " +
+      "operation: User pool cannot be deleted. It has a domain configured that should be deleted first.";
+    const { status, output } = runTeardown("sktest", {
+      stackResources: { UserPool: TEST_USER_POOL, IdentityPool: TEST_IDENTITY_POOL },
+      userPools: [
+        {
+          Id: TEST_USER_POOL,
+          Name: "sktest-auth",
+          StackPrefix: "sktest",
+          DeletionProtection: "INACTIVE",
+        },
+      ],
+      identityPools: [],
+      deleteErrors: {
+        [TEST_USER_POOL]: domainError,
+        [TEST_IDENTITY_POOL]:
+          "An error occurred (ResourceNotFoundException) when calling the DeleteIdentityPool " +
+          `operation: IdentityPool '${TEST_IDENTITY_POOL}' not found.`,
+      },
+    });
+    expect(status, output).toBe(1);
+    expect(output).toContain(`ERROR could not delete ${TEST_USER_POOL}: ${domainError}`);
+    // The script still runs its remaining steps before it fails.
+    expect(output).toContain("Leaving");
+    const failureList = output.slice(output.indexOf("could not be deleted:"));
+    expect(failureList).toContain(TEST_USER_POOL);
+    expect(failureList).not.toContain(TEST_IDENTITY_POOL);
+    expect(output).not.toContain("Bootstrap teardown complete.");
   });
 
   it("deletes the config's pools when the config describes the target", () => {
