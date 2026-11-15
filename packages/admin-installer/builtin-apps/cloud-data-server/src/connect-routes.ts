@@ -92,6 +92,8 @@ export interface ConnectDeps {
   /** The installed apps that serve outside clients. */
   connectableApps(): Promise<ConnectableApp[]>;
   groupsMayUseData(groups: readonly string[]): boolean;
+  /** Drop a revoked delegation from this container's row cache. */
+  forgetDelegation(id: string): void;
   fetch?: typeof globalThis.fetch;
   now?: () => number;
 }
@@ -635,6 +637,7 @@ async function revoke(
   if (!userId) return redirect(CONNECTIONS_ROUTE);
   const row = await revokeDelegation(await deps.db(), userId, id, (deps.now ?? Date.now)());
   if (row) {
+    deps.forgetDelegation(row.id);
     const key = await deps.signingKey();
     const refresh = key
       ? openRefreshToken(key.refreshKey, row.id, row.cognito_refresh_ciphertext)

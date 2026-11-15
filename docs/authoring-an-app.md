@@ -1044,8 +1044,8 @@ What the platform enforces on every data call the route makes:
   erases a file's bytes, restores from the archive, syncs or publishes a
   public link. Your app's grants still apply: the mode narrows them and never
   widens them.
-- **Revocation and sign-out.** A revoked or expired token is refused at once.
-  "Sign out all devices", "Disable" and removal from `starkeep-users` end the
+- **Revocation and sign-out.** An expired token is refused at once, and a
+  revoked one within a minute. "Sign out all devices", "Disable" and removal from `starkeep-users` end the
   token within one fifteen-minute ID-token lifetime.
 
 On the local surface, `verifyDelegation` admits any loopback caller with full
