@@ -3,8 +3,16 @@
  * deployment's cloud-data-server and apps, report every failed call, and
  * delete nothing on --dry-run. The ambient config describes another
  * deployment, as ~/.starkeep does during a teardown of a test prefix.
+ *
+ * The script also removes what the install leaves outside Pulumi state: the
+ * SecureStrings the installer writes under Manager creds, and the keys it
+ * writes into ~/.starkeep/config.json. Neither list is derived from the
+ * installer, so those checks read both sides.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { cloudFrontSigningParameterName, delegationSigningParameterName } from "../src/app-creds";
 import {
   REGION,
   createSandbox,
@@ -27,6 +35,19 @@ beforeEach(() => {
   });
 });
 afterEach(() => sandbox.cleanup());
+
+const REPO_ROOT = join(__dirname, "..", "..", "..");
+const script = readFileSync(join(REPO_ROOT, "scripts", "teardown-cloud-data-server.sh"), "utf8");
+const installCli = readFileSync(
+  join(REPO_ROOT, "packages", "admin-installer", "scripts", "cli-install-cloud-data-server.ts"),
+  "utf8",
+);
+
+/** The keys in the script's STALE list. */
+function staleKeys(): string[] {
+  const block = /STALE = \[([\s\S]*?)\]/.exec(script)?.[1] ?? "";
+  return [...block.matchAll(/"([A-Za-z]+)"/g)].map((m) => m[1]!);
+}
 
 const run = (extra: string[], account = mergeAccounts(live, target)) =>
   sandbox.run(
@@ -55,6 +76,41 @@ describe("teardown-cloud-data-server.sh", () => {
     for (const call of calls.filter((c) => !isReadCall(c))) {
       for (const id of identifiersOf(live)) expect(call).not.toContain(id);
     }
+  });
+
+  it("deletes every signing SecureString the install writes", () => {
+    const { status, output, account } = run(["--force"]);
+    expect(status, output).toBe(0);
+    for (const name of [
+      cloudFrontSigningParameterName("sktest"),
+      delegationSigningParameterName("sktest"),
+    ]) {
+      expect(target.ssmParameters, name).toContain(name);
+      expect(account.ssmParameters, name).not.toContain(name);
+    }
+  });
+
+  it("reports a failed delete of the delegation signing key", () => {
+    const name = delegationSigningParameterName("sktest");
+    const account = mergeAccounts(live, target);
+    account.errors.push({
+      match: `ssm delete-parameter --name ${name}`,
+      error:
+        "An error occurred (AccessDeniedException) when calling the DeleteParameter operation: denied",
+    });
+    const { status, output } = run(["--force"], account);
+    expect(status, output).toBe(1);
+    expect(output).toContain(`could not delete ${name}: An error occurred (AccessDeniedException)`);
+  });
+
+  it("strips every authorizer id the install writes into config.json", () => {
+    // The authorizers die with the gateway, so a kept id points at nothing.
+    const written = [...installCli.matchAll(/^\s*([A-Za-z]*[aA]uthorizerId): outputs\./gm)].map(
+      (m) => m[1]!,
+    );
+    expect(written.length).toBeGreaterThan(0);
+    const stale = staleKeys();
+    for (const key of written) expect(stale, key).toContain(key);
   });
 
   it("retries a throttled cluster lookup and finishes", () => {

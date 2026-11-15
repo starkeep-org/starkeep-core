@@ -162,6 +162,7 @@ export function deployment(prefix: string): Account {
       `/${prefix}/pulumi/passphrase`,
       `/${prefix}/app-creds/photos`,
       `/${prefix}/app-creds/_cloudfront-signing`,
+      `/${prefix}/app-creds/_delegation-signing`,
       `/${prefix}/platform/deployment-settings`,
     ],
     curReports: [`${prefix}-billing`],
