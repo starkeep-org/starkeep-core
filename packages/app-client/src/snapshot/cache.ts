@@ -68,7 +68,10 @@ export interface SnapshotCacheOptions {
 }
 
 export interface SnapshotLoadContext {
-  /** Rows the snapshot may still take. A loader may stop early and throw past it. */
+  /**
+   * Rows the snapshot may still take. A loader may stop once it holds more and
+   * return what it has; the cache then refuses the load.
+   */
   remainingRows: number;
 }
 
