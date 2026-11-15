@@ -402,7 +402,7 @@ describe("lambda wiring", () => {
   it("runs every handler on Node 24", async () => {
     await run(
       manifestWithHandlers([
-        { name: "static", routes: ["GET /"], auth: "public" },
+        { name: "web", routes: ["GET /"] },
         { name: "api", routes: ["POST /api/resize"] },
       ]),
     );
