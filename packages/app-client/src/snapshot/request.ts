@@ -29,7 +29,7 @@ import {
   type SnapshotRow,
   type SnapshotTable,
 } from "./cache.js";
-import { SnapshotAccessError, SnapshotLoadError, SnapshotTooLargeError } from "./errors.js";
+import { SnapshotAccessError, SnapshotLoadError } from "./errors.js";
 
 /** The row API's largest page. */
 const PAGE_SIZE = 500;
@@ -193,7 +193,9 @@ async function loadTable(
       );
     }
     rows.push(...page.rows);
-    if (rows.length > ctx.remainingRows) throw new SnapshotTooLargeError(ctx.remainingRows);
+    // Past the cap, the rest of the table cannot change the outcome. The cache
+    // refuses the load and names its own cap.
+    if (rows.length > ctx.remainingRows) return rows;
     pageToken = page.page_token;
   } while (pageToken);
   return rows;

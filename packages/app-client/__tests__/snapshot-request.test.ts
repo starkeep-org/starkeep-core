@@ -11,6 +11,7 @@ import {
   createSnapshotSql,
   SnapshotAccessError,
   SnapshotLoadError,
+  SnapshotTooLargeError,
   type SnapshotTable,
 } from "../src/snapshot.js";
 import type { MinimalRequest } from "../src/index.js";
@@ -122,6 +123,27 @@ describe("loading rows through the row API", () => {
     expect(err).toBeInstanceOf(SnapshotLoadError);
     expect((err as SnapshotLoadError).status).toBe(400);
     expect((err as Error).message).toContain("limit must be at most 500");
+  });
+
+  it("stops a table's load past the row cap, and reports the cap itself", async () => {
+    const tables: SnapshotTable[] = [
+      ...TABLES,
+      { name: "tags", columns: [{ name: "record_id", type: "text" }] },
+    ];
+    proxyMock.proxyToDataServer.mockImplementation(async (_creds: unknown, req: { path: string }) =>
+      respond(200, {
+        rows: [{ record_id: "a" }, { record_id: "b" }],
+        page_token: req.path.includes("page_token") ? null : "1",
+      }),
+    );
+    const err = await createSnapshotSql({ appId: "testapp", tables, maxRows: 5 })
+      .query(request(), { ...query, tables: ["notes", "tags"] })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SnapshotTooLargeError);
+    expect((err as SnapshotTooLargeError).maxRows).toBe(5);
+    expect((err as Error).message).toContain("more than 5 rows");
+    // notes: two pages, four rows. tags: one page passes the one row left.
+    expect(proxyMock.proxyToDataServer).toHaveBeenCalledTimes(3);
   });
 
   it("answers 503 when the app has no credential", async () => {
