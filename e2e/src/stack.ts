@@ -255,7 +255,8 @@ export async function startPlatformStack(options: PlatformStackOptions): Promise
     // process serving a built client, so the harness starts what an operator
     // starts rather than a dev server. `tsx` runs the TypeScript entry directly,
     // the way `apps/local-data-server` is run. The client is built first (or,
-    // under Turbo, checked to have been built by `test:e2e`'s `dependsOn`) so
+    // with `STARKEEP_E2E_CLIENTS_PREBUILT=1`, checked to have been built by
+    // `test:e2e`'s `dependsOn`) so
     // the run serves this checkout's source rather than a stale `dist/`.
     const adminDir = join(REPO_ROOT, "apps/admin-web");
     await buildClient(adminDir);
@@ -277,8 +278,9 @@ export async function startPlatformStack(options: PlatformStackOptions): Promise
     if (options.drive !== false) {
       const driveDir = join(REPO_ROOT, "apps/drive");
       // Drive's server builds only a *missing* `dist/`, so a stale one needs
-      // the same treatment; under Turbo the `dist/index.html` check also keeps
-      // that silent self-build from ever standing in for Turbo's build.
+      // the same treatment; with `STARKEEP_E2E_CLIENTS_PREBUILT=1` the
+      // `dist/index.html` check also keeps that silent self-build from ever
+      // standing in for Turbo's build.
       await buildClient(driveDir);
       drive = await startWebServer({
         appDir: driveDir,
