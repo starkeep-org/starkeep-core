@@ -21,12 +21,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # `changeset status --since=origin/main` diffs against main.
           fetch-depth: 0
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: pnpm
@@ -37,7 +37,7 @@ jobs:
       # matching another job's entries: `tier-1-` is a prefix of `tier-1-unit-`,
       # but `tier-1--` is not. The last step of the job prunes the cache before
       # the post step saves it; see there.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: .turbo/cache
           key: turbo-${{ runner.os }}-${{ github.job }}--${{ hashFiles('pnpm-lock.yaml', 'turbo.json') }}-${{ github.sha }}
@@ -79,14 +79,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: pnpm
       # Turbo's cache, per job; see tier-1.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: .turbo/cache
           key: turbo-${{ runner.os }}-${{ github.job }}--${{ hashFiles('pnpm-lock.yaml', 'turbo.json') }}-${{ github.sha }}
@@ -115,14 +115,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: pnpm
       # Turbo's cache, per job; see tier-1.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: .turbo/cache
           key: turbo-${{ runner.os }}-${{ github.job }}--${{ hashFiles('pnpm-lock.yaml', 'turbo.json') }}-${{ github.sha }}
@@ -143,14 +143,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: pnpm
       # Turbo's cache, per job; see tier-1.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: .turbo/cache
           key: turbo-${{ runner.os }}-${{ github.job }}--${{ hashFiles('pnpm-lock.yaml', 'turbo.json') }}-${{ github.sha }}
@@ -170,14 +170,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: pnpm
       # Turbo's cache, per job; see tier-1.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: .turbo/cache
           key: turbo-${{ runner.os }}-${{ github.job }}--${{ hashFiles('pnpm-lock.yaml', 'turbo.json') }}-${{ github.sha }}
@@ -191,7 +191,7 @@ jobs:
         run: echo "version=$(node -p "require('./node_modules/@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
         working-directory: e2e
       - id: playwright-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
@@ -204,7 +204,7 @@ jobs:
       - name: Prune Turbo cache entries older than 7 days
         run: test ! -d .turbo/cache || find .turbo/cache -type f -mtime +7 -delete
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: tier-2-test-results
           path: e2e/test-results/
@@ -220,9 +220,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: pnpm
@@ -230,7 +230,7 @@ jobs:
             pnpm-lock.yaml
             example-app/pnpm-lock.yaml
       # Turbo's cache, per job; see tier-1.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: .turbo/cache
           key: turbo-${{ runner.os }}-${{ github.job }}--${{ hashFiles('pnpm-lock.yaml', 'turbo.json') }}-${{ github.sha }}
@@ -259,7 +259,7 @@ jobs:
         run: echo "version=$(node -p "require('./node_modules/@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
         working-directory: example-app/e2e
       - id: playwright-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.playwright-version.outputs.version }}
@@ -277,7 +277,7 @@ jobs:
       - name: Prune Turbo cache entries older than 7 days
         run: test ! -d .turbo/cache || find .turbo/cache -type f -mtime +7 -delete
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: example-tier-2-test-results
           path: example-app/e2e/test-results/
@@ -291,9 +291,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: pnpm
