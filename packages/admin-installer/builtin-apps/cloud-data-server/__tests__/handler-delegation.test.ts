@@ -22,6 +22,7 @@ import {
   signDelegationToken,
 } from "../src/delegation-tokens.js";
 import { resetUserCheckCache } from "../src/delegation-user-check.js";
+import { resetKeySetCache } from "../src/verify-user-token.js";
 import type { DelegationRow } from "../src/delegation-store.js";
 import { FakeDsql } from "./fake-dsql.js";
 import { makeDelegationKeyPem } from "./delegation-key.js";
@@ -48,6 +49,8 @@ let db: FakeDsql;
 /** What Cognito's token endpoint answers for a refresh. */
 let refreshAnswer: () => Promise<Response>;
 let refreshCalls = 0;
+/** Whether Cognito's JWKS endpoint is unreachable. */
+let jwksDown = false;
 
 function row(over: Partial<DelegationRow> = {}): DelegationRow {
   const id = over.id ?? "dlg-1";
@@ -133,6 +136,9 @@ beforeAll(async () => {
     if (String(input) === `https://${COGNITO_DOMAIN}/oauth2/token`) {
       refreshCalls += 1;
       return refreshAnswer();
+    }
+    if (jwksDown && String(input).includes("/.well-known/jwks.json")) {
+      throw new TypeError("fetch failed");
     }
     return fixtureFetch(input, init);
   });
@@ -309,6 +315,41 @@ describe("refuses", () => {
       delegation: token(),
     });
     expect(res.statusCode).toBe(403);
+  });
+
+  it("a delegation while Cognito's keys cannot be fetched, without revoking the row", async () => {
+    jwksDown = true;
+    resetKeySetCache();
+    try {
+      const res = await call({
+        method: "GET",
+        subPath: "/app-data/db/probe_notes",
+        delegation: token(),
+      });
+      expect(res.statusCode).toBe(503);
+      expect(db.calls(/update "delegation"\."grants" set "revoked_at_ms"/)).toHaveLength(0);
+    } finally {
+      jwksDown = false;
+      resetKeySetCache();
+    }
+  });
+
+  it("a token endpoint refusal that says nothing about the user, without revoking", async () => {
+    for (const [status, error] of [
+      [400, "invalid_client"],
+      [401, "invalid_client"],
+      [400, "invalid_request"],
+    ] as const) {
+      resetUserCheckCache();
+      refreshAnswer = async () => new Response(JSON.stringify({ error }), { status });
+      const res = await call({
+        method: "GET",
+        subPath: "/app-data/db/probe_notes",
+        delegation: token(),
+      });
+      expect(res.statusCode).toBe(503);
+    }
+    expect(db.calls(/update "delegation"\."grants" set "revoked_at_ms"/)).toHaveLength(0);
   });
 
   it("a user token beside the delegation, rather than choosing one", async () => {
