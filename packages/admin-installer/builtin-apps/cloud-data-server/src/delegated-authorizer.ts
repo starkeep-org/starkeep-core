@@ -8,7 +8,8 @@
  * expired, and the token's `aud` names the app whose route this is. The
  * broker checks the delegation row, the user's groups and the mode on every
  * data call the app then makes, so a token revoked after the authorizer
- * cached its decision reaches app code but no data.
+ * cached its decision reaches app code, and reaches data only until the
+ * broker's own row cache (a minute at most) notices.
  *
  * The identity sources include the route key beside the bearer, so a cached
  * approval for one app's route never answers for another app's.

@@ -6,8 +6,8 @@
  * an SSM SecureString, and the gateway's delegated authorizer holds only the
  * public key. The token carries the user, the app, the delegation id, the
  * mode and the channel, so the authorizer can decide without a database. The
- * broker still looks the row up on every data call, which is what makes
- * revocation immediate at the data plane.
+ * broker still checks the row on every data call, through a cache of at
+ * most a minute, so a revocation reaches the data plane within that minute.
  *
  * The same private key also seeds the key that encrypts each delegation's
  * stored Cognito refresh token, through HKDF, so the deployment holds one
