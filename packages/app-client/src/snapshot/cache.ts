@@ -237,21 +237,27 @@ export function createSnapshotCache(options: SnapshotCacheOptions): SnapshotCach
       return { rows: run(snapshot, q), loadedAt: snapshot.loadedAt };
 
       function run(s: Snapshot, query: SnapshotCacheQuery): Record<string, SQLOutputValue>[] {
+        // Every statement runs in a transaction that always rolls back, so a
+        // write that slips past the keyword check never reaches the copy that
+        // the other callers of this snapshot query next.
         const before = totalChanges(s.db);
-        const stmt = s.db.prepare(query.sql);
-        const rows =
-          query.params === undefined
-            ? stmt.all()
-            : Array.isArray(query.params)
-              ? stmt.all(...(query.params as SQLInputValue[]))
-              : stmt.all(query.params as Record<string, SQLInputValue>);
+        s.db.exec("BEGIN");
+        let rows: Record<string, SQLOutputValue>[];
+        try {
+          const stmt = s.db.prepare(query.sql);
+          rows =
+            query.params === undefined
+              ? stmt.all()
+              : Array.isArray(query.params)
+                ? stmt.all(...(query.params as SQLInputValue[]))
+                : stmt.all(query.params as Record<string, SQLInputValue>);
+        } finally {
+          s.db.exec("ROLLBACK");
+        }
         if (totalChanges(s.db) !== before) {
-          // The copy no longer matches the data server. Drop it so no later
-          // query answers from it.
-          const entry = entries.get(key);
-          if (entry?.current === s) entry.current = undefined;
-          retire(s.db);
-          throw new SnapshotReadOnlyError("the statement changed the snapshot; only reads may run");
+          throw new SnapshotReadOnlyError(
+            "the statement tried to change the snapshot; only reads may run",
+          );
         }
         return rows.map((r) => ({ ...r }));
       }
@@ -303,8 +309,8 @@ const LEADING_TRIVIA = /^(?:\s+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)*/;
  *
  * `prepare` compiles only the first statement of a string, so a check on the
  * first keyword also refuses `ATTACH`, `PRAGMA` and DDL hidden behind it. A
- * `WITH` can still lead into a `DELETE`, which the change count after the
- * statement catches.
+ * `WITH` can still lead into a `DELETE`. The rollback around every statement
+ * undoes it, and the change count after the statement reports it.
  */
 function assertReadStatement(sql: string): void {
   const body = sql.replace(LEADING_TRIVIA, "");
@@ -321,8 +327,8 @@ function totalChanges(db: DatabaseSync): number {
 
 /**
  * Where the runtime offers it (Node 24.10 and later), let SQLite itself refuse
- * every action but a read. Node 22 has no authorizer; there the keyword check
- * and the change count carry the guarantee alone.
+ * every action but a read. Node 22 has no authorizer; there the keyword check,
+ * the rollback and the change count carry the guarantee alone.
  */
 function guardReads(db: DatabaseSync): void {
   const withAuthorizer = db as DatabaseSync & {
@@ -336,9 +342,15 @@ function guardReads(db: DatabaseSync): void {
     number | undefined
   >;
   const allowed = new Set(
-    [c.SQLITE_SELECT, c.SQLITE_READ, c.SQLITE_FUNCTION, c.SQLITE_RECURSIVE].filter(
-      (v): v is number => typeof v === "number",
-    ),
+    [
+      c.SQLITE_SELECT,
+      c.SQLITE_READ,
+      c.SQLITE_FUNCTION,
+      c.SQLITE_RECURSIVE,
+      // The BEGIN and ROLLBACK around each statement. App SQL cannot reach
+      // them: the keyword check admits only SELECT, WITH and VALUES.
+      c.SQLITE_TRANSACTION,
+    ].filter((v): v is number => typeof v === "number"),
   );
   const ok = c.SQLITE_OK;
   const deny = c.SQLITE_DENY;

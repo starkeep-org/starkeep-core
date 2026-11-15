@@ -236,10 +236,10 @@ Limits and guarantees:
   recently used. A snapshot over 200,000 rows (`maxRows`) raises
   `SnapshotTooLargeError`. Aggregate on the data server with the row grammar
   for tables that large.
-- A statement must begin with `SELECT`, `WITH` or `VALUES`. A statement that
-  changes the copy raises `SnapshotReadOnlyError`, and the helper drops the
-  copy. On Node 24.10 and later, a SQLite authorizer also refuses every action
-  but a read.
+- A statement must begin with `SELECT`, `WITH` or `VALUES`. Each statement runs
+  in a transaction that the helper rolls back, so a statement that tries to
+  change the copy leaves it whole and raises `SnapshotReadOnlyError`. On Node
+  24.10 and later, a SQLite authorizer also refuses every action but a read.
 - Write the SQL in the app's server code. Never run SQL text that arrived from
   the browser: the copy holds only the caller's rows, but an arbitrary
   statement has no cost bound.
