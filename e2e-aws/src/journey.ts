@@ -841,8 +841,9 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         await lds?.stop();
         if (anyFailed) {
           console.log(
-            "[e2e-aws] journey failed — leaving cloud resources up for debugging " +
-              `(tear down manually: scripts/teardown-bootstrap.sh --prefix ${STACK_PREFIX} --region ${REGION})`,
+            "[e2e-aws] journey failed — leaving cloud resources up for debugging. " +
+              "To tear down by hand, preview the teardown, then run it without --dry-run: " +
+              `STARKEEP_DIR=${paths.dataDir} scripts/teardown-bootstrap.sh --dry-run --prefix ${STACK_PREFIX} --region ${REGION}`,
           );
           return;
         }
