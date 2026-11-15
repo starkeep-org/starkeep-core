@@ -399,6 +399,18 @@ describe("lambda wiring", () => {
     expect(fn!.inputs.timeout).toBe(30);
   });
 
+  it("runs every handler on Node 24", async () => {
+    await run(
+      manifestWithHandlers([
+        { name: "static", routes: ["GET /"], auth: "public" },
+        { name: "api", routes: ["POST /api/resize"] },
+      ]),
+    );
+    const fns = created.filter((r) => r.type === "aws:lambda/function:Function");
+    expect(fns).toHaveLength(2);
+    for (const fn of fns) expect(fn.inputs.runtime, fn.name).toBe("nodejs24.x");
+  });
+
   it("always injects the cloud-client env trio plus platform context", async () => {
     await run(
       manifestWithHandlers([

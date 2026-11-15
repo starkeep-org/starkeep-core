@@ -145,6 +145,16 @@ beforeEach(() => {
   optionsByName.clear();
 });
 
+describe("the Lambda runtime", () => {
+  it("runs every cloud data server function on Node 24", async () => {
+    await buildProgram(false);
+    const fns = byTypeSuffix("lambda/function:Function");
+    // The broker and the session authorizer.
+    expect(fns.length).toBeGreaterThanOrEqual(2);
+    for (const fn of fns) expect(fn.inputs.runtime, fn.name).toBe("nodejs24.x");
+  });
+});
+
 describe("isEphemeralInstall is fail-safe — a real install can't be marked ephemeral by accident", () => {
   it("is false for an empty argv (the real-user admin-web spawn passes no --ephemeral)", () => {
     expect(isEphemeralInstall([])).toBe(false);
