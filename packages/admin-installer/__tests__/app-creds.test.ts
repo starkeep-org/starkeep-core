@@ -5,8 +5,18 @@
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { mockClient } from "aws-sdk-client-mock";
-import { SSMClient, ParameterAlreadyExists, PutParameterCommand } from "@aws-sdk/client-ssm";
-import { ensureAppCredsParameter, putCloudFrontSigningParameter } from "../src/app-creds.js";
+import {
+  SSMClient,
+  DeleteParameterCommand,
+  ParameterAlreadyExists,
+  ParameterNotFound,
+  PutParameterCommand,
+} from "@aws-sdk/client-ssm";
+import {
+  deleteSigningParameters,
+  ensureAppCredsParameter,
+  putCloudFrontSigningParameter,
+} from "../src/app-creds.js";
 
 const ssm = mockClient(SSMClient);
 const awsCreds = {
@@ -101,5 +111,27 @@ describe("putCloudFrontSigningParameter", () => {
     const overwrite = putInputs()[1]!;
     expect(overwrite.Overwrite).toBe(true);
     expect(JSON.parse(overwrite.Value!).hosts).toEqual(["photos.example.com", "d1.cloudfront.net"]);
+  });
+});
+
+describe("deleteSigningParameters", () => {
+  const opts = { stackPrefix: "sk", region: "us-east-2", awsCreds };
+
+  it("deletes the CloudFront and the delegation signing keys", async () => {
+    ssm.on(DeleteParameterCommand).resolves({});
+    await deleteSigningParameters(opts);
+    expect(ssm.commandCalls(DeleteParameterCommand).map((c) => c.args[0].input.Name)).toEqual([
+      "/sk/app-creds/_cloudfront-signing",
+      "/sk/app-creds/_delegation-signing",
+    ]);
+  });
+
+  it("treats a key that is already gone as deleted, and still deletes the other", async () => {
+    ssm
+      .on(DeleteParameterCommand)
+      .rejectsOnce(new ParameterNotFound({ message: "gone", $metadata: {} }))
+      .resolves({});
+    await deleteSigningParameters(opts);
+    expect(ssm.commandCalls(DeleteParameterCommand)).toHaveLength(2);
   });
 });
