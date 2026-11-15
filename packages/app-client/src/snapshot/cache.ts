@@ -224,6 +224,11 @@ export function createSnapshotCache(options: SnapshotCacheOptions): SnapshotCach
   return {
     async query(q) {
       if (!(q.maxAge >= 0)) throw new RangeError("maxAge must be a non-negative number");
+      // A NaN floor would fail every freshness check, so the cache would reload
+      // on every query and no query would join another's load.
+      if (q.freshAfter !== undefined && !Number.isFinite(q.freshAfter)) {
+        throw new RangeError("freshAfter must be a finite number of epoch milliseconds");
+      }
       const tables = [...new Set(q.tables)].sort();
       if (tables.length === 0) throw new Error("a snapshot query names at least one table");
       for (const t of tables) {

@@ -211,6 +211,13 @@ describe("freshness", () => {
     expect(load).toHaveBeenCalledTimes(2);
   });
 
+  it.each([NaN, Infinity])("refuses a freshAfter of %s before loading", async (freshAfter) => {
+    const { load } = fakeServer();
+    const cache = createSnapshotCache({ tables: TABLES });
+    await expect(cache.query(q({ load, freshAfter }))).rejects.toBeInstanceOf(RangeError);
+    expect(load).not.toHaveBeenCalled();
+  });
+
   it("reports the time the load started, not the time it finished", async () => {
     const t = clock(5_000);
     const load = vi.fn(async () => {
