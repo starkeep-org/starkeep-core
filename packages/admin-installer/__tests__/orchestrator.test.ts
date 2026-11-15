@@ -20,10 +20,18 @@ interface LedgerEntry {
 }
 
 const ledger: LedgerEntry[] = [];
+// Every record ever written, in order. Unlike `ledger`, clearing a ledger
+// leaves this untouched, so tests can still read the order a run took.
+const history: LedgerEntry[] = [];
+
+function forgetSteps(appId: string) {
+  for (let i = ledger.length - 1; i >= 0; i--) if (ledger[i]!.appId === appId) ledger.splice(i, 1);
+}
 
 const fakeRegistry = {
   async recordStep(appId: string, operation: string, step: string, status: string, error?: string) {
     ledger.push({ appId, operation, step, status, error });
+    history.push({ appId, operation, step, status, error });
   },
   async getCompletedSteps(appId: string, operation: string) {
     return new Set(
@@ -33,12 +41,10 @@ const fakeRegistry = {
     );
   },
   registerApp: vi.fn(async () => {}),
-  deleteAppRegistryEntry: vi.fn(async () => {}),
+  // Like the DSQL registry, deleting the entry forgets the app's steps.
+  deleteAppRegistryEntry: vi.fn(async (appId: string) => forgetSteps(appId)),
   removeSurfaces: vi.fn(async () => {}),
-  clearSteps: vi.fn(async (appId: string) => {
-    for (let i = ledger.length - 1; i >= 0; i--)
-      if (ledger[i]!.appId === appId) ledger.splice(i, 1);
-  }),
+  clearSteps: vi.fn(async (appId: string) => forgetSteps(appId)),
   listInstalledApps: vi.fn(async () => []),
   // The manifest the last install recorded; null means never installed.
   storedManifest: vi.fn(async (): Promise<AppManifest | null> => null),
@@ -166,6 +172,7 @@ let dataDir: string;
 
 beforeEach(() => {
   ledger.length = 0;
+  history.length = 0;
   vi.clearAllMocks();
   // An empty Starkeep directory: no data.db, no creds files. A cloud install
   // must need nothing from a local install and write nothing beside one.
@@ -183,7 +190,7 @@ function doneSteps(operation: string): string[] {
   // "done" on every drive, so a resumed install legitimately logs them twice.
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const e of ledger) {
+  for (const e of history) {
     if (e.operation === operation && e.status === "done" && !seen.has(e.step)) {
       seen.add(e.step);
       out.push(e.step);
@@ -677,6 +684,40 @@ describe("uninstall", () => {
     });
     // Uninstall ran fully even though install's ledger was complete.
     expect(doneSteps("uninstall")).toHaveLength(13);
+  });
+
+  it("forgets both ledgers once it completes", async () => {
+    await installApp({
+      appId: "photos",
+      manifest: photosManifest,
+      version: "0.1.0",
+      config,
+      registryCredentials,
+    });
+    await uninstallApp({ appId: "photos", manifest: photosManifest, config, registryCredentials });
+    expect(ledger).toEqual([]);
+  });
+
+  it("removes everything again after a reinstall", async () => {
+    for (let round = 0; round < 2; round++) {
+      await installApp({
+        appId: "photos",
+        manifest: photosManifest,
+        version: "0.1.0",
+        config,
+        registryCredentials,
+      });
+      await uninstallApp({
+        appId: "photos",
+        manifest: photosManifest,
+        config,
+        registryCredentials,
+      });
+    }
+    expect(fakeRegistry.deleteAppRegistryEntry).toHaveBeenCalledTimes(2);
+    expect(deleteAppRoleWithPolicies).toHaveBeenCalledTimes(2);
+    expect(deleteAppExecRoleWithPolicies).toHaveBeenCalledTimes(2);
+    expect(deleteAppCredsParameter).toHaveBeenCalledTimes(2);
   });
 });
 
