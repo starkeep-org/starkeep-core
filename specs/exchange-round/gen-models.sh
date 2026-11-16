@@ -20,13 +20,14 @@ mk() {
     for i in $inv; do echo "  $i"; done
   } > "models/$name.cfg"
 }
-# --- Findings: the responder as written today (records, then labels).
-mk finding-crash         "$LOSS" MergedApply=FALSE ApplyUnit=\"statement\" GuardedWrite=FALSE MaxCrashes=1
-mk finding-concurrent    "$LOSS" MergedApply=FALSE ApplyUnit=\"statement\" GuardedWrite=FALSE NumNodes=2
+# --- Findings: the responder as written today (records, then labels), with
+#     its writes guarded (fix A).
+mk finding-crash         "$LOSS" MergedApply=FALSE ApplyUnit=\"statement\" GuardedWrite=TRUE MaxCrashes=1
+mk finding-concurrent    "$LOSS" MergedApply=FALSE ApplyUnit=\"statement\" GuardedWrite=TRUE NumNodes=2
 # --- Merged order alone is not enough: one HLC split across two statements.
-mk finding-batch-crash      "$LOSS" ApplyUnit=\"statement\" GuardedWrite=FALSE NumRec=2 NumLab=0 MaxTime=1 MaxWrites=1 BatchMax=2 MaxCrashes=1
-mk finding-batch-concurrent "$LOSS" ApplyUnit=\"statement\" GuardedWrite=FALSE NumNodes=2 NumRec=2 NumLab=0 MaxTime=1 MaxWrites=1 BatchMax=2
-# --- The LWW check and the write are separate transactions: a lost update.
+mk finding-batch-crash      "$LOSS" ApplyUnit=\"statement\" GuardedWrite=TRUE NumRec=2 NumLab=0 MaxTime=1 MaxWrites=1 BatchMax=2 MaxCrashes=1
+mk finding-batch-concurrent "$LOSS" ApplyUnit=\"statement\" GuardedWrite=TRUE NumNodes=2 NumRec=2 NumLab=0 MaxTime=1 MaxWrites=1 BatchMax=2
+# --- Before fix A: the LWW check and the write were separate transactions.
 mk finding-lww-race      "$LOSS" ApplyUnit=\"statement\" GuardedWrite=FALSE NumNodes=2 "Writers={1,2}" NumLab=0
 # --- The same shapes with the fix: merged per-author HLC order, one transaction per HLC.
 mk fixed-crash           "$SAFE" MaxCrashes=1

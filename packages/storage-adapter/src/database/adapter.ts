@@ -34,6 +34,20 @@ export interface DatabaseAdapter {
   healthCheck(): Promise<boolean>;
 
   put(record: DataRecord): Promise<void>;
+  /**
+   * The sync apply path's write: `put`, but an existing row is replaced only by
+   * a strictly later `updatedAt`, decided in the statement itself. Resolves
+   * `true` when the snapshot was written and `false` when a newer row was kept.
+   *
+   * The apply paths compare HLCs in JavaScript before writing, but that read
+   * and the write are separate transactions. A concurrent round (another
+   * device's exchange on the cloud, a local edit on a device) can land a newer
+   * row in between, and an unconditional upsert would then put the older row
+   * back over it after the newer one had already raised its author's coverage.
+   * The newer version would never be re-shipped, and the replicas would
+   * disagree from then on. See `specs/exchange-round` (finding 3).
+   */
+  putSnapshot(record: DataRecord): Promise<boolean>;
   get(id: StarkeepId): Promise<DataRecord | null>;
   /**
    * Soft-delete: stamps `deleted_at` and bumps `updated_at` to `hlc`.
@@ -314,8 +328,12 @@ export interface DatabaseAdapter {
    * Distinct from `upsertLabels`, which mints a fresh HLC and clears
    * `deletedAt`: that is the *local write* path, and using it here would
    * resurrect a retraction that arrived from a peer.
+   *
+   * Last-writer-wins is decided in the statement, as for `putSnapshot`: an
+   * existing row is replaced only by a strictly later `updatedAt`. Resolves
+   * `true` when the snapshot was written and `false` when a newer row was kept.
    */
-  putLabel(label: RecordLabel): Promise<void>;
+  putLabel(label: RecordLabel): Promise<boolean>;
 
   /**
    * Read one label by primary key, tombstones included — the LWW comparison

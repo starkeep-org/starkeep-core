@@ -478,9 +478,16 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
               }
               row = admitted.row;
             }
-            await databaseAdapter.put(row);
-            appliedRecords.push(row);
-            held = row;
+            // Last-writer-wins is decided again inside the write: the `get`
+            // above is its own transaction, and another device's round can
+            // land a newer row before this one writes. When it has, this side
+            // keeps that row, and the cascades below follow what it holds.
+            if (await databaseAdapter.putSnapshot(row)) {
+              appliedRecords.push(row);
+              held = row;
+            } else {
+              held = (await databaseAdapter.get(snapshot.id)) ?? held;
+            }
           }
           // **Outside** the LWW guard: an equal or older record row can still
           // carry columns this side lacks, and the record's clock does not move
@@ -537,9 +544,9 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
             continue;
           }
           clock.receive(incoming.updatedAt);
-          // Snapshot write: an inbound retraction must stay retracted.
-          await databaseAdapter.putLabel(incoming);
-          appliedLabels.push(incoming);
+          // Snapshot write: an inbound retraction must stay retracted. The
+          // write keeps a newer row a concurrent round landed since the read.
+          if (await databaseAdapter.putLabel(incoming)) appliedLabels.push(incoming);
         }
       } else if ((request.labels?.length ?? 0) > 0) {
         console.warn(

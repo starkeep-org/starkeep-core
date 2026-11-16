@@ -59,37 +59,37 @@ These are proposals checked against the model, not changes that have been made. 
 
 `./check-all.sh` compares each model's verdict with `expected.txt`. Every `pass` row is exhaustive: TLC explored every reachable state.
 
-| Model                     | Shape                                             | Expected and got | Distinct states | Depth |
-| ------------------------- | ------------------------------------------------- | ---------------- | --------------- | ----- |
-| finding-crash             | records then labels, 1 crash                      | CloudNoLoss      | 504             | 17    |
-| finding-concurrent        | records then labels, 2 devices                    | DeviceNoGap      | 596             | 14    |
-| finding-batch-crash       | batch of 2 sharing an HLC, 1 crash                | CloudNoLoss      | 113             | 15    |
-| finding-batch-concurrent  | batch of 2 sharing an HLC, 2 devices              | DeviceNoGap      | 259             | 17    |
-| finding-lww-race          | read-then-write LWW, 2 writers, one key           | CloudNoLoss      | 690             | 13    |
-| fixed-crash               | guarded, merged, one transaction per HLC; 1 crash | pass             | 404             | 14    |
-| fixed-concurrent          | as above, 2 devices                               | pass             | 1,435           | 22    |
-| fixed-batches             | 3 records, batches of 2, 1 crash                  | pass             | 174,688         | 20    |
-| fixed-labelbatch          | 2 devices, label batch, Limit 1, 1 crash          | pass             | 36,102          | 25    |
-| fixed-two-writers         | 2 writers, 2 records + 1 label, Limit 1, 1 crash  | pass             | 1,294,812       | 33    |
-| fixed-hlc-skew            | 2 writers, HLCs not in real-time order            | pass             | 381,993         | 33    |
-| fixed-relay               | 2 writers, batches, Limit 2, 1 crash              | pass             | 11,432,190      | 33    |
-| deferred-crash            | guarded, merged, deferred coverage; 1 crash       | pass             | 582             | 17    |
-| deferred-concurrent       | as above, 2 devices                               | pass             | 1,657           | 24    |
-| deferred-batch-crash      | batch of 2, 1 crash                               | pass             | 120             | 14    |
-| deferred-batch-concurrent | batch of 2, 2 devices                             | pass             | 246             | 19    |
-| deferred-batches          | 3 records, batches of 2, 1 crash                  | pass             | 315,125         | 27    |
-| deferred-labelbatch       | 2 devices, label batch, Limit 1, 1 crash          | pass             | 56,814          | 29    |
-| deferred-two-writers      | 2 writers, Limit 1, 1 crash                       | pass             | 2,109,054       | 36    |
-| deferred-relay            | 2 writers, batches, Limit 2                       | pass             | 4,411,065       | 38    |
-| mutant-nocap              | deferred coverage without the scan cap            | DeviceNoGap      | 170             | 11    |
-| mutant-notrim             | `collectSince` without the HLC-boundary trim      | CloudNoLoss      | 188             | 10    |
-| mutant-split              | `cutRound` cutting items, not whole timestamps    | CloudNoLoss      | 170             | 9     |
-| mutant-perstream          | ceiling per stream instead of the minimum         | CloudNoLoss      | 15,912          | 9     |
-| witness-relayed-label     | a device holds another device's label             | reached          | 14,038          | 9     |
-| witness-truncated         | a round ships less than it owes                   | reached          | 399             | 5     |
-| witness-batch             | a batch arrives whole on another device           | reached          | 2,086           | 8     |
-| witness-crash             | a crash happens                                   | reached          | 486             | 5     |
-| witness-converged         | every write done, everyone holds the same rows    | reached          | 20,334          | 10    |
+| Model                     | Shape                                                | Expected and got | Distinct states | Depth |
+| ------------------------- | ---------------------------------------------------- | ---------------- | --------------- | ----- |
+| finding-crash             | records then labels, guarded writes, 1 crash         | CloudNoLoss      | 349             | 13    |
+| finding-concurrent        | records then labels, guarded writes, 2 devices       | DeviceNoGap      | 464             | 10    |
+| finding-batch-crash       | batch of 2 sharing an HLC, guarded writes, 1 crash   | CloudNoLoss      | 96              | 11    |
+| finding-batch-concurrent  | batch of 2 sharing an HLC, guarded writes, 2 devices | DeviceNoGap      | 153             | 12    |
+| finding-lww-race          | read-then-write LWW before fix A, 2 writers, one key | CloudNoLoss      | 721             | 13    |
+| fixed-crash               | guarded, merged, one transaction per HLC; 1 crash    | pass             | 404             | 14    |
+| fixed-concurrent          | as above, 2 devices                                  | pass             | 1,435           | 22    |
+| fixed-batches             | 3 records, batches of 2, 1 crash                     | pass             | 174,688         | 20    |
+| fixed-labelbatch          | 2 devices, label batch, Limit 1, 1 crash             | pass             | 36,102          | 25    |
+| fixed-two-writers         | 2 writers, 2 records + 1 label, Limit 1, 1 crash     | pass             | 1,294,812       | 33    |
+| fixed-hlc-skew            | 2 writers, HLCs not in real-time order               | pass             | 381,993         | 33    |
+| fixed-relay               | 2 writers, batches, Limit 2, 1 crash                 | pass             | 11,432,190      | 33    |
+| deferred-crash            | guarded, merged, deferred coverage; 1 crash          | pass             | 582             | 17    |
+| deferred-concurrent       | as above, 2 devices                                  | pass             | 1,657           | 24    |
+| deferred-batch-crash      | batch of 2, 1 crash                                  | pass             | 120             | 14    |
+| deferred-batch-concurrent | batch of 2, 2 devices                                | pass             | 246             | 19    |
+| deferred-batches          | 3 records, batches of 2, 1 crash                     | pass             | 315,125         | 27    |
+| deferred-labelbatch       | 2 devices, label batch, Limit 1, 1 crash             | pass             | 56,814          | 29    |
+| deferred-two-writers      | 2 writers, Limit 1, 1 crash                          | pass             | 2,109,054       | 36    |
+| deferred-relay            | 2 writers, batches, Limit 2                          | pass             | 4,411,065       | 38    |
+| mutant-nocap              | deferred coverage without the scan cap               | DeviceNoGap      | 170             | 11    |
+| mutant-notrim             | `collectSince` without the HLC-boundary trim         | CloudNoLoss      | 188             | 10    |
+| mutant-split              | `cutRound` cutting items, not whole timestamps       | CloudNoLoss      | 170             | 9     |
+| mutant-perstream          | ceiling per stream instead of the minimum            | CloudNoLoss      | 15,912          | 9     |
+| witness-relayed-label     | a device holds another device's label                | reached          | 14,038          | 9     |
+| witness-truncated         | a round ships less than it owes                      | reached          | 399             | 5     |
+| witness-batch             | a batch arrives whole on another device              | reached          | 2,086           | 8     |
+| witness-crash             | a crash happens                                      | reached          | 486             | 5     |
+| witness-converged         | every write done, everyone holds the same rows       | reached          | 20,334          | 10    |
 
 The mutants show the model catches the rules the code's comments call load-bearing. The witnesses show the interesting states are reachable, so a clean run is not a vacuous one.
 
