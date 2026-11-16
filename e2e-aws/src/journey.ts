@@ -80,6 +80,7 @@ import {
 import type { JourneyApp, JourneyContext, JourneySharedFile } from "./journey-app.js";
 import { defineMemberSteps } from "./member-steps.js";
 import { defineDelegationSteps } from "./delegation-steps.js";
+import { defineOAuthSteps } from "./oauth-steps.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -2394,6 +2395,13 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
           mcpPath: app.outsideClient.mcpPath,
           admin: () => admin,
           recordId: () => syncedRecordId,
+        });
+        // The same route, reached by an MCP client that signs in with OAuth.
+        defineOAuthSteps({
+          config: () => config,
+          appId: app.appId,
+          mcpPath: app.outsideClient.mcpPath,
+          admin: () => admin,
         });
       }
 
