@@ -357,6 +357,50 @@ describe("the connections list", () => {
   });
 });
 
+describe("the connections list's OAuth rows", () => {
+  it("shows the client's hosts beside the name it chose", async () => {
+    const start = await handleConnectRoute(req({ rawPath: "/connections" }), deps());
+    const state = new URL(start.headers.Location!).searchParams.get("state")!;
+    const back = await handleConnectRoute(
+      req({ rawPath: "/connect/callback", query: { state, code: "c1" }, cookieHeader: jar(start) }),
+      deps(),
+    );
+    const row = (over: Record<string, unknown>) => ({
+      user_id: TEST_USER_ID,
+      app_id: "probe",
+      channel: "app",
+      mode: "read",
+      cognito_refresh_ciphertext: "x",
+      created_at_ms: String(Date.now()),
+      expires_at_ms: String(Date.now() + 86_400_000),
+      revoked_at_ms: null,
+      last_used_at_ms: null,
+      last_write_at_ms: null,
+      client_id: null,
+      redirect_host: null,
+      ...over,
+    });
+    db.on(/select .* from "delegation"\."grants" where "user_id"/, [
+      row({
+        id: "dlg-oauth",
+        client_name: "Example <Assistant>",
+        client_id: "https://client.example/oauth/metadata.json",
+        redirect_host: "127.0.0.1:53124",
+      }),
+      row({ id: "dlg-pat", client_name: "My script" }),
+    ]);
+    const list = await handleConnectRoute(
+      req({ rawPath: "/connections", cookieHeader: jar(back, jar(start)) }),
+      deps(),
+    );
+    expect(list.body).toContain(
+      "Example &lt;Assistant&gt;<br><small>Identified by <code>client.example</code>, " +
+        "sent to <code>127.0.0.1:53124</code></small>",
+    );
+    expect(list.body).toContain("<td>My script</td>");
+  });
+});
+
 describe("helpers", () => {
   it("names only the consent, OAuth and connections routes", () => {
     expect(isConnectRoute("GET", "/connect")).toBe(true);

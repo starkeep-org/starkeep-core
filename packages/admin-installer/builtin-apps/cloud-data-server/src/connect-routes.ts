@@ -359,13 +359,34 @@ async function sessionUser(req: ConnectRequest, deps: ConnectDeps): Promise<stri
   return claims.sub;
 }
 
+/**
+ * The program's name. An OAuth client chose its own name, so the row also
+ * shows the host its metadata document lives on and the host its access went
+ * to, which the client cannot choose freely.
+ */
+function describeClient(row: DelegationRow): string {
+  const name = escapeMarkup(row.client_name);
+  if (!row.client_id) return name;
+  let clientHost: string;
+  try {
+    clientHost = new URL(row.client_id).host;
+  } catch {
+    clientHost = row.client_id;
+  }
+  return (
+    `${name}<br><small>Identified by <code>${escapeMarkup(clientHost)}</code>` +
+    (row.redirect_host ? `, sent to <code>${escapeMarkup(row.redirect_host)}</code>` : "") +
+    `</small>`
+  );
+}
+
 function describeRow(row: DelegationRow, now: number): string {
   const status =
     row.revoked_at_ms !== null ? "Revoked" : row.expires_at_ms <= now ? "Expired" : "Active";
   const used =
     row.last_used_at_ms === null ? "Never" : new Date(row.last_used_at_ms).toDateString();
   return (
-    `<td>${escapeMarkup(row.client_name)}</td><td>${escapeMarkup(row.app_id)}</td>` +
+    `<td>${describeClient(row)}</td><td>${escapeMarkup(row.app_id)}</td>` +
     `<td>${row.mode === "read" ? "Read" : "Read and write"}</td>` +
     `<td>${escapeMarkup(new Date(row.expires_at_ms).toDateString())}</td>` +
     `<td>${escapeMarkup(used)}</td><td>${status}</td>`
