@@ -45,6 +45,7 @@ function deps(): ConnectDeps {
     signingKey: async () => key,
     db: async () => db.createClient({ hostname: "x", region: "x" }),
     connectableApps: async () => [{ appId: "probe", name: "Probe", delegatedPaths: ["/mcp"] }],
+    viewerHosts: async () => ["cloud.example.com"],
     groupsMayUseData: (g) => g.includes("starkeep-users"),
     forgetDelegation: () => {},
     fetch: async (input, init) => {

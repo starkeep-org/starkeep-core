@@ -241,3 +241,169 @@ export async function loadConnectableApps(client: DatabaseClient): Promise<Conne
     }))
     .filter((app) => app.delegatedPaths.length > 0);
 }
+
+// ---------------------------------------------------------------------------
+// OAuth authorizations in progress
+// ---------------------------------------------------------------------------
+
+const AUTHORIZATIONS_TABLE = "delegation.authorizations";
+
+/** How long an authorization row lives: the sign-in, the consent and the code exchange. */
+export const AUTHORIZATION_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * One OAuth authorization request, from the sign-in to the code exchange.
+ * The id becomes the grant's id, so the sealed refresh token moves to the
+ * grant unchanged.
+ */
+export interface AuthorizationRow {
+  id: string;
+  user_id: string;
+  user_email: string;
+  app_id: string;
+  /** The `resource` the client named: the app's MCP endpoint URL. */
+  resource: string;
+  client_id: string;
+  client_name: string;
+  redirect_uri: string;
+  /** The client's own `state`, returned with the code. */
+  state: string | null;
+  code_challenge: string;
+  requested_scope: string;
+  /** Set by the approval. */
+  mode: DelegationMode | null;
+  days: number | null;
+  cognito_refresh_ciphertext: string;
+  code_hash: string | null;
+  code_expires_at_ms: number | null;
+  created_at_ms: number;
+  expires_at_ms: number;
+  used_at_ms: number | null;
+}
+
+const AUTHORIZATION_COLUMNS = [
+  "id",
+  "user_id",
+  "user_email",
+  "app_id",
+  "resource",
+  "client_id",
+  "client_name",
+  "redirect_uri",
+  "state",
+  "code_challenge",
+  "requested_scope",
+  "mode",
+  "days",
+  "cognito_refresh_ciphertext",
+  "code_hash",
+  "code_expires_at_ms",
+  "created_at_ms",
+  "expires_at_ms",
+  "used_at_ms",
+] as const;
+
+function authorizationOf(raw: Record<string, unknown>): AuthorizationRow {
+  return {
+    ...(raw as unknown as AuthorizationRow),
+    days: nullableNumber(raw.days),
+    code_expires_at_ms: nullableNumber(raw.code_expires_at_ms),
+    created_at_ms: Number(raw.created_at_ms),
+    expires_at_ms: Number(raw.expires_at_ms),
+    used_at_ms: nullableNumber(raw.used_at_ms),
+  };
+}
+
+export async function insertAuthorization(
+  client: DatabaseClient,
+  row: AuthorizationRow,
+): Promise<void> {
+  await run(
+    client,
+    compiler
+      .insertInto(AUTHORIZATIONS_TABLE)
+      .values({ ...row })
+      .compile(),
+  );
+}
+
+/** One authorization by id, or null. The caller checks its expiry. */
+export async function findAuthorization(
+  client: DatabaseClient,
+  id: string,
+): Promise<AuthorizationRow | null> {
+  const rows = await run(
+    client,
+    compiler
+      .selectFrom(AUTHORIZATIONS_TABLE)
+      .select([...AUTHORIZATION_COLUMNS])
+      .where("id", "=", id)
+      .compile(),
+  );
+  return rows[0] ? authorizationOf(rows[0]) : null;
+}
+
+/**
+ * Record the user's approval: the mode, the expiry and the code's hash. Only
+ * a row that is live and not yet approved changes, so a second approval of
+ * the same consent page does nothing. Returns the approved row, or null.
+ */
+export async function approveAuthorizationRow(
+  client: DatabaseClient,
+  id: string,
+  approval: { mode: DelegationMode; days: number; codeHash: string; codeExpiresAtMs: number },
+  nowMs: number,
+): Promise<AuthorizationRow | null> {
+  const rows = await run(
+    client,
+    compiler
+      .updateTable(AUTHORIZATIONS_TABLE)
+      .set({
+        mode: approval.mode,
+        days: approval.days,
+        code_hash: approval.codeHash,
+        code_expires_at_ms: approval.codeExpiresAtMs,
+        // The row outlives its code, so a second use of the code is still
+        // recognized after the first one.
+        expires_at_ms: nowMs + AUTHORIZATION_TTL_MS,
+      })
+      .where("id", "=", id)
+      .where("code_hash", "is", null)
+      .where("expires_at_ms", ">", nowMs)
+      .returning([...AUTHORIZATION_COLUMNS])
+      .compile(),
+  );
+  return rows[0] ? authorizationOf(rows[0]) : null;
+}
+
+/** Delete one authorization and return it as it stood, or null. */
+export async function deleteAuthorization(
+  client: DatabaseClient,
+  id: string,
+): Promise<AuthorizationRow | null> {
+  const rows = await run(
+    client,
+    compiler
+      .deleteFrom(AUTHORIZATIONS_TABLE)
+      .where("id", "=", id)
+      .returning([...AUTHORIZATION_COLUMNS])
+      .compile(),
+  );
+  return rows[0] ? authorizationOf(rows[0]) : null;
+}
+
+/** Delete every expired authorization and return them, for the caller to revoke. */
+export async function deleteExpiredAuthorizations(
+  client: DatabaseClient,
+  nowMs: number,
+): Promise<AuthorizationRow[]> {
+  const rows = await run(
+    client,
+    compiler
+      .deleteFrom(AUTHORIZATIONS_TABLE)
+      .where("expires_at_ms", "<=", nowMs)
+      .returning([...AUTHORIZATION_COLUMNS])
+      .compile(),
+  );
+  return rows.map(authorizationOf);
+}

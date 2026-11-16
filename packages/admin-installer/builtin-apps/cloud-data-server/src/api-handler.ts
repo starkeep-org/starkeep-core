@@ -3185,6 +3185,10 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
           db: () => platformClient(accountId, toClose),
           connectableApps: async () =>
             loadConnectableApps(await platformClient(accountId, toClose)),
+          viewerHosts: async () => {
+            const cfg = await loadCloudFrontSigningConfig();
+            return [...(cfg.hosts ?? [cfg.domain])];
+          },
           groupsMayUseData,
           forgetDelegation: (id) => delegationRowCache.delete(id),
         },
