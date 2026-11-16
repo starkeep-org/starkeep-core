@@ -122,40 +122,29 @@ export async function runInstallCli(
 
 /**
  * Run one of the repository's teardown scripts against the test stack, as the
- * operator would, with this run's state dir as STARKEEP_DIR. A --dry-run pass
- * goes first, so the log records the resolved resource list before anything
- * is deleted, and a failed lookup stops the teardown before it starts.
+ * operator would, with this run's state dir as STARKEEP_DIR. The script prints
+ * the resolved resource list before it deletes anything, so the log records it.
  */
 export function runTeardownScript(
   script: "teardown-cloud-data-server.sh" | "teardown-bootstrap.sh",
   paths: RunPaths,
 ): void {
-  for (const mode of [["--dry-run"], []]) {
-    const result = spawnSync(
-      "bash",
-      [
-        join(REPO_ROOT, "scripts", script),
-        "--yes",
-        ...mode,
-        "--prefix",
-        STACK_PREFIX,
-        "--region",
-        REGION,
-      ],
-      {
-        stdio: "inherit",
-        env: { ...process.env, STARKEEP_DIR: paths.dataDir, AWS_REGION: REGION },
-      },
+  const result = spawnSync(
+    "bash",
+    [join(REPO_ROOT, "scripts", script), "--yes", "--prefix", STACK_PREFIX, "--region", REGION],
+    {
+      stdio: "inherit",
+      env: { ...process.env, STARKEEP_DIR: paths.dataDir, AWS_REGION: REGION },
+    },
+  );
+  if (result.status !== 0) {
+    // The stack is left partly torn down. Name the command that finishes it
+    // safely, with this run's STARKEEP_DIR, so nobody has to rebuild it.
+    throw new Error(
+      `${script} exited with code ${result.status}. ` +
+        "To finish by hand, preview the teardown, then run it without --dry-run: " +
+        `STARKEEP_DIR=${paths.dataDir} scripts/${script} --dry-run --prefix ${STACK_PREFIX} --region ${REGION}`,
     );
-    if (result.status !== 0) {
-      // The stack is left partly torn down. Name the command that finishes it
-      // safely, with this run's STARKEEP_DIR, so nobody has to rebuild it.
-      throw new Error(
-        `${[script, ...mode].join(" ")} exited with code ${result.status}. ` +
-          "To finish by hand, preview the teardown, then run it without --dry-run: " +
-          `STARKEEP_DIR=${paths.dataDir} scripts/${script} --dry-run --prefix ${STACK_PREFIX} --region ${REGION}`,
-      );
-    }
   }
 }
 
