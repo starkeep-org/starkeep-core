@@ -979,7 +979,12 @@ API Gateway, and these limits apply to each one:
   new AWS account usually starts at 10 concurrent executions, although AWS's
   documented regional default is 1,000. Ask AWS to raise the limit through a
   Service Quotas request in the AWS console. AWS also raises the limit over time
-  as the account's usage grows.
+  as the account's usage grows. A request through the app's signing proxy holds
+  two executions, one for the app and one for the data server, so a page that
+  sends a dozen requests at once can exhaust a limit of 10 by itself. API
+  Gateway answers each request over the limit with a 503. Limit how many
+  requests your page sends at once, and retry a throttled read after a short
+  wait. The example app's `web/src/browser/request-gate.ts` does both.
 
 Keep large bytes off the Lambda path:
 

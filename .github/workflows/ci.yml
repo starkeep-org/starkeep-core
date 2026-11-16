@@ -241,6 +241,12 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm install --frozen-lockfile
         working-directory: example-app
+      # The example's own packages (`common` and `web`): their typecheck and
+      # unit tests. Neither needs core's harness.
+      - run: pnpm typecheck
+        working-directory: example-app
+      - run: pnpm test
+        working-directory: example-app
       # Playwright strips the suite's types without checking them, and the
       # root `typecheck` skips the suite, because it needs core's harness.
       - run: pnpm typecheck:e2e
