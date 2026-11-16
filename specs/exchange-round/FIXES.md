@@ -1,6 +1,6 @@
 # Proposed fixes
 
-This note proposes fixes for the four findings in `README.md`. Each fix has been checked against the model; none has been implemented. They are offered for discussion, because two of them change the DSQL write path.
+This note proposes fixes for the four findings in `README.md`. Each fix has been checked against the model. Fix A is implemented; the others are not yet. They are offered for discussion, because two of them change the DSQL write path.
 
 ## The findings, briefly
 
@@ -12,6 +12,8 @@ This note proposes fixes for the four findings in `README.md`. Each fix has been
 In findings 1 and 2, `sync()` returns `complete: true` and logs nothing. Each finding has a TLA+ counterexample and a reproduction against the real engine and responder in `packages/sync-engine/__tests__/exchange-round-findings.test.ts`.
 
 ## Fix A: compare and write in one statement (finding 3)
+
+**Status: implemented** on `pedromdrp/guarded-snapshot-writes`. `DatabaseAdapter.putSnapshot` and a guarded `putLabel` are used by both apply loops, on DSQL, SQLite and the mock; the model's finding configs now describe the code with this fix in place.
 
 The sync apply path should write a snapshot only if it is newer than what the row holds, as part of the upsert itself:
 

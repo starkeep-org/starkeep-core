@@ -31,8 +31,8 @@ import { buildSide } from "./sync-test-harness/side.js";
  * deferred coverage on DSQL) make them pass, and vitest then flags them for
  * the `.fails` to be removed.
  *
- * The lost-update test (finding 3) is also `it.fails`. It needs fix A, the
- * guarded snapshot write, rather than a change of apply order.
+ * Finding 3, the lost update, is fixed by `putSnapshot` and a guarded
+ * `putLabel` (fix A), so its test is an ordinary one.
  */
 describe("exchange round: findings from the TLA+ model", () => {
   type Side = Awaited<ReturnType<typeof buildSide>>;
@@ -262,7 +262,7 @@ describe("exchange round: findings from the TLA+ model", () => {
   // The responder's LWW check is a `get` followed by a `put`, and `put` is an
   // unconditional upsert in its own transaction. A round that read the row
   // before another round wrote a newer version then overwrites that version.
-  it.fails("a concurrent older write does not overwrite a newer one on the cloud", async () => {
+  it("a concurrent older write does not overwrite a newer one on the cloud", async () => {
     const { A, B, C } = await sides("A", "B", "C");
     const id = await seedRecord(A);
     await engineFor(A, C).sync();
@@ -277,20 +277,20 @@ describe("exchange round: findings from the TLA+ model", () => {
     await edit(B);
     const newest = (await B.db.get(id))!.updatedAt;
 
-    // Hold A's round between the responder's get and its put.
-    const put = C.db.put.bind(C.db);
+    // Hold A's round between the responder's get and its write.
+    const putSnapshot = C.db.putSnapshot.bind(C.db);
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
     let reachedPut!: () => void;
     const atPut = new Promise<void>((resolve) => (reachedPut = resolve));
     let held = false;
-    C.db.put = async (record) => {
+    C.db.putSnapshot = async (record) => {
       if (!held && record.id === id && record.updatedAt.nodeId === "A") {
         held = true;
         reachedPut();
         await gate;
       }
-      return put(record);
+      return putSnapshot(record);
     };
 
     const aRound = engineFor(A, C).exchange();

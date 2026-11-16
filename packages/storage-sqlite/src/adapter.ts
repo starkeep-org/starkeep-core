@@ -252,22 +252,39 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
   }
 
   async put(record: DataRecord): Promise<void> {
+    this.upsertRecord(record, false);
+  }
+
+  async putSnapshot(record: DataRecord): Promise<boolean> {
+    return this.upsertRecord(record, true);
+  }
+
+  /**
+   * One upsert statement. With `onlyIfNewer` an existing row is replaced only
+   * by a strictly later `updated_at` (see `DatabaseAdapter.putSnapshot`), and
+   * the result says whether a row was written.
+   */
+  private upsertRecord(record: DataRecord, onlyIfNewer: boolean): boolean {
     const row = recordToRow(record);
     const updateColumns = Object.keys(row).filter((column) => column !== "id");
     const query = qb
       .insertInto("shared_records")
       .values({ ...row })
-      .onConflict((oc) =>
-        oc
+      .onConflict((oc) => {
+        const update = oc
           .column("id")
           .doUpdateSet((eb) =>
             Object.fromEntries(
               updateColumns.map((column) => [column, eb.ref(`excluded.${column}`)]),
             ),
-          ),
-      )
+          );
+        return onlyIfNewer
+          ? update.where(kSql.ref("excluded.updated_at"), ">", kSql.ref("shared_records.updated_at"))
+          : update;
+      })
+      .returning("id")
       .compile();
-    this.runStmt(query.sql, ...query.parameters);
+    return this.allRows(query.sql, ...query.parameters).length > 0;
   }
 
   async get(id: StarkeepId): Promise<DataRecord | null> {
@@ -615,9 +632,9 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
 
   // ---- Label sync ---------------------------------------------------------
 
-  async putLabel(label: RecordLabel): Promise<void> {
+  async putLabel(label: RecordLabel): Promise<boolean> {
     const query = buildLabelSnapshotUpsert(qb, LABELS, label);
-    this.runStmt(query.sql, ...query.parameters);
+    return this.allRows(query.sql, ...query.parameters).length > 0;
   }
 
   async getLabel(

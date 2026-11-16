@@ -106,6 +106,16 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
     this.store.set(record.id, structuredClone(record));
   }
 
+  async putSnapshot(record: DataRecord): Promise<boolean> {
+    // Last-writer-wins inside the write, as the real engines decide it in the
+    // upsert's WHERE clause. Nothing awaits between the read and the write, so
+    // no other round can land in between.
+    const existing = this.store.get(record.id);
+    if (existing && compareHLC(record.updatedAt, existing.updatedAt) <= 0) return false;
+    await this.put(record);
+    return true;
+  }
+
   async get(id: StarkeepId): Promise<DataRecord | null> {
     const record = this.store.get(id);
     return record ? structuredClone(record) : null;
@@ -648,14 +658,16 @@ export class MockDatabaseAdapter implements DatabaseAdapter {
 
   // ---- Label sync ---------------------------------------------------------
 
-  async putLabel(label: RecordLabel): Promise<void> {
+  async putLabel(label: RecordLabel): Promise<boolean> {
     // Snapshot write, tombstone included — the apply path's equivalent of
     // put(record). Not upsertLabels, which would clear deletedAt and so
-    // resurrect a retraction that arrived from a peer.
-    this.labels.set(
-      this.labelKey(label.recordId, label.appId, label.key, label.value),
-      structuredClone(label),
-    );
+    // resurrect a retraction that arrived from a peer. Last-writer-wins is
+    // decided here, as the real engines decide it in the statement.
+    const key = this.labelKey(label.recordId, label.appId, label.key, label.value);
+    const existing = this.labels.get(key);
+    if (existing && compareHLC(label.updatedAt, existing.updatedAt) <= 0) return false;
+    this.labels.set(key, structuredClone(label));
+    return true;
   }
 
   async getLabel(

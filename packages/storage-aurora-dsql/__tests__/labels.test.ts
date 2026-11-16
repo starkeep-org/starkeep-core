@@ -274,6 +274,70 @@ describe("the sync-facing surface", () => {
     );
   });
 
+  // The apply path's LWW is decided in the statement, so a concurrent older
+  // write cannot land over a newer one (specs/exchange-round, finding 3).
+  function snapshotLabel() {
+    return {
+      recordId: rid("rec1"),
+      appId: "alpha",
+      key: "quality",
+      value: "high",
+      recordType: "image/jpeg",
+      createdAt: HLC,
+      updatedAt: HLC,
+      nodeId: HLC.nodeId,
+      deletedAt: null,
+    };
+  }
+
+  it("putLabel replaces a row only with a strictly later updated_at, and says whether it wrote", async () => {
+    client.responses.push({ match: /^insert into "shared"\."record_labels"/, rows: [{ updated_at: "x" }] });
+    expect(await adapter.putLabel(snapshotLabel())).toBe(true);
+    const upsert = client.calls[1]!;
+    expect(upsert.text).toMatch(
+      /do update set .* where "excluded"\."updated_at" > "shared"\."record_labels"\."updated_at" returning "updated_at"$/,
+    );
+  });
+
+  it("putLabel reports a write the guard kept out, and still issues the raise", async () => {
+    // No row back from RETURNING: the snapshot was older than the stored row.
+    // The raise still runs, because `guardNodeWatermarks` refuses a commit that
+    // wrote a synced table without one. It takes its value from rows carrying
+    // the stamp, so here it records nothing.
+    expect(await adapter.putLabel(snapshotLabel())).toBe(false);
+    const [begin, , raise, commit] = client.calls;
+    expect([begin!.text, commit!.text]).toEqual(["BEGIN", "COMMIT"]);
+    expect(raise!.text).toMatch(/^insert into "shared"\."node_watermarks_labels" /);
+  });
+
+  it("putSnapshot guards the record upsert the same way, and reports whether it wrote", async () => {
+    const record = {
+      id: rid("rec1"),
+      type: "image/jpeg",
+      originAppId: "photos",
+      contentHash: "sha256:x",
+      objectStorageKey: "",
+      mimeType: "application/octet-stream",
+      sizeBytes: 0,
+      createdAt: HLC,
+      updatedAt: HLC,
+      deletedAt: null,
+      version: 1,
+    } as unknown as Parameters<AuroraDsqlDatabaseAdapter["putSnapshot"]>[0];
+
+    expect(await adapter.putSnapshot(record)).toBe(false);
+    expect(client.calls[1]!.text).toMatch(
+      /where "excluded"\."updated_at" > "shared"\."records"\."updated_at" returning "id"$/,
+    );
+    // Raised either way; see the putLabel case above.
+    expect(client.texts()).toContainEqual(expect.stringMatching(/node_watermarks_records/));
+
+    client.calls = [];
+    client.responses.push({ match: /^insert into "shared"\."records"/, rows: [{ id: "rec1" }] });
+    expect(await adapter.putSnapshot(record)).toBe(true);
+    expect(client.texts()).toContainEqual(expect.stringMatching(/node_watermarks_records/));
+  });
+
   it("getLabelNodeWatermarks deserializes the per-node fold", async () => {
     client.responses.push({
       match: /select "node_id", max\("updated_at"\)/,

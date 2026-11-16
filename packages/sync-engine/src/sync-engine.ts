@@ -1031,7 +1031,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           // incoming snapshot, because the two disagree whenever the snapshot
           // lost: a losing tombstone leaves the record live, and a losing live
           // row leaves it deleted. See the responder's copy.
-          const held = rowAlreadyApplied ? current! : snapshot;
+          let held = rowAlreadyApplied ? current! : snapshot;
 
           // Everything that writes this record is inside one guard, and a
           // failure inside it takes the record out of the round rather than
@@ -1062,7 +1062,12 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
                 const loser = await yieldSlotToIncoming(localDatabaseAdapter, snapshot, clock);
                 if (loser) appliedIds.push(loser.id);
               }
-              await localDatabaseAdapter.put(snapshot);
+              // Last-writer-wins again inside the write: a local edit can land
+              // a newer row between the read above and this write. This node
+              // then keeps it, and the cascades below follow what it holds.
+              if (!(await localDatabaseAdapter.putSnapshot(snapshot))) {
+                held = (await localDatabaseAdapter.get(snapshot.id)) ?? held;
+              }
             }
 
             // **Outside** the LWW guard, deliberately. An equal or older record
@@ -1148,11 +1153,13 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
             // putLabel, not upsertLabels: this writes the snapshot verbatim
             // including its tombstone, so an inbound retraction stays
             // retracted instead of being revived.
-            await localDatabaseAdapter.putLabel(incoming);
             // Surface the labelled record as changed. Nothing on the record
             // row moved — a label write must never touch records.updated_at
-            // — but subscribers key on record ids.
-            appliedIds.push(incoming.recordId);
+            // — but subscribers key on record ids. A write the guard kept out
+            // (a newer local label landed since the read) changed nothing.
+            if (await localDatabaseAdapter.putLabel(incoming)) {
+              appliedIds.push(incoming.recordId);
+            }
           }
           // No blob to pull, so a label can never fail the way a record
           // with a missing blob can.

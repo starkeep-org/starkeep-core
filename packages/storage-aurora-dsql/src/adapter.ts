@@ -261,27 +261,52 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
     );
   }
 
+  async putSnapshot(record: DataRecord): Promise<boolean> {
+    let wrote = false;
+    await withOccRetry("putSnapshot", () =>
+      this.writeTransaction(async (written) => {
+        wrote = await this.putRaw(record, { onlyIfNewer: true });
+        // Raised whether or not the guard let the row in. The raise takes its
+        // value from rows carrying this stamp, so after a skipped write it
+        // records nothing, the same rule as a write that loses last-writer-wins,
+        // and `guardNodeWatermarks` sees every write to a synced table raised.
+        written.records.push(writtenStamp(record.updatedAt));
+      }),
+    );
+    return wrote;
+  }
+
   // Raw single-statement upsert. Value-independent (the row is built from the
   // caller-supplied record, not from a prior read), so replaying it verbatim is
-  // idempotent — safe inside any transaction's retry.
-  private async putRaw(record: DataRecord): Promise<void> {
+  // idempotent — safe inside any transaction's retry. With `onlyIfNewer` an
+  // existing row is replaced only by a strictly later `updated_at`, and the
+  // result says whether a row was written.
+  private async putRaw(
+    record: DataRecord,
+    options: { onlyIfNewer?: boolean } = {},
+  ): Promise<boolean> {
     const row = recordToRow(record);
     const updateColumns = Object.keys(row).filter((column) => column !== "id");
-    await this.run(
+    const result = await this.run(
       this.qb
         .insertInto("shared.records")
         .values({ ...row })
-        .onConflict((oc) =>
-          oc
+        .onConflict((oc) => {
+          const update = oc
             .column("id")
             .doUpdateSet((eb) =>
               Object.fromEntries(
                 updateColumns.map((column) => [column, eb.ref(`excluded.${column}`)]),
               ),
-            ),
-        )
+            );
+          return options.onlyIfNewer
+            ? update.where(sql.ref("excluded.updated_at"), ">", sql.ref("shared.records.updated_at"))
+            : update;
+        })
+        .returning("id")
         .compile(),
     );
+    return result.rows.length > 0;
   }
 
   async get(id: StarkeepId): Promise<DataRecord | null> {
@@ -512,7 +537,9 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
       await this.getClient().query("SAVEPOINT starkeep_transaction");
       try {
         const transaction: Transaction = {
-          put: async (record) => this.putRaw(record),
+          put: async (record) => {
+            await this.putRaw(record);
+          },
           get: async (id) => this.getRaw(id),
           delete: async (id, hlc) => this.deleteRaw(id, hlc),
           query: async (query) => this.queryRaw(query),
@@ -722,13 +749,17 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
 
   // ---- Label sync ---------------------------------------------------------
 
-  async putLabel(label: RecordLabel): Promise<void> {
+  async putLabel(label: RecordLabel): Promise<boolean> {
+    let wrote = false;
     await withOccRetry("putLabel", () =>
       this.writeTransaction(async (written) => {
-        await this.run(buildLabelSnapshotUpsert(this.qb, LABELS, label));
+        const result = await this.run(buildLabelSnapshotUpsert(this.qb, LABELS, label));
+        wrote = result.rows.length > 0;
+        // Raised either way, as in `putSnapshot`.
         written.labels.push(writtenStamp(label.updatedAt));
       }),
     );
+    return wrote;
   }
 
   async getLabel(

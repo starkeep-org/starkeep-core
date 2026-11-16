@@ -26,7 +26,7 @@
  * and the sync-side scan, none of which the grammar expresses.
  */
 
-import type { CompiledQuery, Kysely } from "kysely";
+import { sql, type CompiledQuery, type Kysely } from "kysely";
 import type { HLCTimestamp, RecordLabel, StarkeepId } from "@starkeep/protocol-primitives";
 import { serializeHLC } from "@starkeep/protocol-primitives";
 import type { LabelRetraction, LabelUpsert, LabelValueReplacement } from "./types.js";
@@ -152,6 +152,16 @@ export function buildLabelValueReplacementTombstone(
  * `put(record)`. Every column comes from the incoming row, tombstone included,
  * which is what keeps an inbound retraction retracted;
  * {@link buildLabelUpsert} would clear `deleted_at` and resurrect it.
+ *
+ * Last-writer-wins is decided **in the statement**: an existing row is
+ * replaced only by a strictly later `updated_at`. The apply paths also compare
+ * in JavaScript first, but that read and this write are separate transactions,
+ * and a concurrent round can write a newer row in between; an unconditional
+ * upsert would then put the older row back over it. Serialized HLCs compare
+ * as strings in HLC order, which the delta scans rely on too.
+ *
+ * `RETURNING` yields one row when the snapshot was written and none when the
+ * guard kept a newer row, so callers can tell the two apart.
  */
 export function buildLabelSnapshotUpsert(
   k: Kysely<LabelDb>,
@@ -170,8 +180,10 @@ export function buildLabelSnapshotUpsert(
         .columns([...PK_COLUMNS])
         .doUpdateSet((eb) =>
           Object.fromEntries(updateColumns.map((c) => [c, eb.ref(`excluded.${c}`)])),
-        ),
+        )
+        .where(sql.ref("excluded.updated_at"), ">", sql.ref(`${dialect.table}.updated_at`)),
     )
+    .returning("updated_at")
     .compile();
 }
 

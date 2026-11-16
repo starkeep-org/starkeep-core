@@ -54,8 +54,9 @@ function authoredRecord(side: Side, nodeId: string, wallTime: number): AnyRecord
 }
 
 /**
- * Refuse `put` for one record id, leaving every other method — and the
- * adapter's own internal calls — untouched.
+ * Refuse the write of one record id (`put`, or `putSnapshot`, which is what
+ * the apply path calls), leaving every other method — and the adapter's own
+ * internal calls — untouched.
  *
  * Narrower than `failingMethod`: the question here is not "what does this
  * adapter do when writes fail", it is what the *responder* does when one row of
@@ -68,7 +69,7 @@ function refusingPutFor(db: DatabaseAdapter, id: StarkeepId): DatabaseAdapter {
     get(target, prop) {
       const value = Reflect.get(target, prop, target);
       if (typeof value !== "function") return value;
-      if (prop === "put") {
+      if (prop === "put" || prop === "putSnapshot") {
         return async (record: AnyRecord) => {
           if (record.id === id) throw new Error("[test] injected put failure");
           return (value as (r: AnyRecord) => unknown).call(target, record);
