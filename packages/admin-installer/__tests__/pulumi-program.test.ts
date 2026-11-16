@@ -84,8 +84,11 @@ function manifestWithHandlers(handlers: Partial<AppComputeHandler>[]): AppManife
   });
 }
 
-async function run(manifest: AppManifest): Promise<Record<string, unknown>> {
-  const outputs = await buildPulumiProgram(manifest, ctx)();
+async function run(
+  manifest: AppManifest,
+  context: ComputeContext = ctx,
+): Promise<Record<string, unknown>> {
+  const outputs = await buildPulumiProgram(manifest, context)();
   // Force resolution of every output so all resource registrations settle.
   for (const value of Object.values(outputs)) {
     if (pulumi.Output.isInstance(value)) {
@@ -465,6 +468,28 @@ describe("lambda wiring", () => {
     const fn = created.find((r) => r.type === "aws:lambda/function:Function");
     const env = (fn!.inputs.environment as { variables: Record<string, string> }).variables;
     expect(env.STARKEEP_APP_BASE_PATH).toBe("/apps/photos");
+  });
+
+  it("states the public base URL when the stack has one, and omits it otherwise", async () => {
+    // An app's 401 to an outside client names its resource metadata URL on
+    // this base. Without it the 401 omits the URL and the client falls back
+    // to the well-known location.
+    await run(manifestWithHandlers([{ name: "static" }]), {
+      ...ctx,
+      publicBaseUrl: "https://cloud.example.com",
+    });
+    const withBase = created.find((r) => r.type === "aws:lambda/function:Function");
+    expect(
+      (withBase!.inputs.environment as { variables: Record<string, string> }).variables
+        .STARKEEP_PUBLIC_BASE_URL,
+    ).toBe("https://cloud.example.com");
+
+    created.length = 0;
+    await run(manifestWithHandlers([{ name: "static" }]));
+    const without = created.find((r) => r.type === "aws:lambda/function:Function");
+    expect(
+      (without!.inputs.environment as { variables: Record<string, string> }).variables,
+    ).not.toHaveProperty("STARKEEP_PUBLIC_BASE_URL");
   });
 
   it("grants API Gateway invoke permission scoped to the gateway execution ARN", async () => {

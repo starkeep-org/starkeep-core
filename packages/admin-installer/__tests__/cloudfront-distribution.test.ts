@@ -405,6 +405,34 @@ describe("the origin split between CloudFront and the execute-api hostname", () 
     }
   });
 
+  it("serves OAuth discovery, authorization and tokens with no gateway authorizer", () => {
+    const routes = byType("apigatewayv2/route:Route").map((r) => r.inputs);
+    for (const key of [
+      "GET /.well-known/oauth-protected-resource/apps/{appId}/{path+}",
+      "GET /.well-known/oauth-authorization-server",
+      "GET /connect/authorize",
+      "POST /connect/authorize/approve",
+      "POST /connect/token",
+    ]) {
+      const route = routes.find((r) => r.routeKey === key);
+      expect(route, key).toBeDefined();
+      expect(route!.authorizerId, key).toBeUndefined();
+    }
+  });
+
+  it("throttles the anonymous OAuth routes below the stage-wide limit", () => {
+    const [stage] = byType("apigatewayv2/stage:Stage");
+    expect(stage!.inputs.defaultRouteSettings).toMatchObject({
+      throttlingRateLimit: 50,
+      throttlingBurstLimit: 100,
+    });
+    expect(stage!.inputs.routeSettings).toEqual(
+      ["GET /connect/authorize", "POST /connect/authorize/approve", "POST /connect/token"].map(
+        (routeKey) => ({ routeKey, throttlingRateLimit: 5, throttlingBurstLimit: 10 }),
+      ),
+    );
+  });
+
   it("exports both authorizers and the signing key for the installer", () => {
     expect(programOutputs.originAuthorizerId).toBe("origin-header-id");
     expect(programOutputs.delegatedAuthorizerId).toBe("delegation-token-id");

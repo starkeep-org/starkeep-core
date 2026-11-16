@@ -18,7 +18,16 @@
  * itself before trusting it (`verifyDelegation` in `@starkeep/app-client`),
  * because the app forwards the token to the broker anyway.
  *
- * It never throws: a thrown authorizer is a 500, which reads as an outage.
+ * A bad token gets a 401, so an MCP client refreshes or signs in again. API
+ * Gateway answers 401 only when the authorizer fails with the exact message
+ * `Unauthorized`; `isAuthorized: false` is a 403, and any other thrown error
+ * is a 500. So the handler throws `Unauthorized` for every token failure: a
+ * missing or malformed bearer, a bad signature, a wrong `aud` and an expired
+ * token. A request without the CloudFront origin header still gets
+ * `isAuthorized: false`, a 403, because that refusal concerns the origin and
+ * not the token. Every other failure maps to one of those two answers.
+ * ~/projects/starkeep/implementation-status-delegated-access-phase2-2026-11-16.md,
+ * section "Work unit 0: the 401 spike", records how the gateway behaves.
  */
 import { delegationPublicKeyFromPem, verifyDelegationToken } from "./delegation-tokens.js";
 import { cameThroughCloudFront } from "./origin-header.js";
@@ -55,27 +64,41 @@ export function appIdOfPath(rawPath: string | undefined): string | null {
   return /^\/apps\/([^/]+)(\/|$)/.exec(rawPath ?? "")?.[1] ?? null;
 }
 
+/** The one failure API Gateway turns into a 401. */
+export const UNAUTHORIZED = "Unauthorized";
+
+class TokenRefused extends Error {
+  constructor() {
+    super(UNAUTHORIZED);
+  }
+}
+
+function decide(event: AuthorizerEvent): SimpleResponse {
+  const headers = event.headers ?? {};
+  if (!cameThroughCloudFront(headers)) return DENY;
+  const key = loadPublicKey();
+  if (!key) {
+    console.error("[delegated-authorizer] no delegation public key configured");
+    return DENY;
+  }
+  const auth = headers["authorization"] ?? headers["Authorization"] ?? "";
+  const match = /^Bearer\s+(\S+)$/i.exec(auth);
+  if (!match) throw new TokenRefused();
+  const claims = verifyDelegationToken(match[1]!, key);
+  if (!claims) throw new TokenRefused();
+  const appId = appIdOfPath(event.rawPath);
+  if (!appId || claims.aud !== appId) throw new TokenRefused();
+  return {
+    isAuthorized: true,
+    context: { userId: claims.sub, delegationId: claims.sk_dlg, mode: claims.sk_mode },
+  };
+}
+
 export async function handler(event: AuthorizerEvent): Promise<SimpleResponse> {
   try {
-    const headers = event.headers ?? {};
-    if (!cameThroughCloudFront(headers)) return DENY;
-    const key = loadPublicKey();
-    if (!key) {
-      console.error("[delegated-authorizer] no delegation public key configured");
-      return DENY;
-    }
-    const auth = headers["authorization"] ?? headers["Authorization"] ?? "";
-    const match = /^Bearer\s+(\S+)$/i.exec(auth);
-    if (!match) return DENY;
-    const claims = verifyDelegationToken(match[1]!, key);
-    if (!claims) return DENY;
-    const appId = appIdOfPath(event.rawPath);
-    if (!appId || claims.aud !== appId) return DENY;
-    return {
-      isAuthorized: true,
-      context: { userId: claims.sub, delegationId: claims.sk_dlg, mode: claims.sk_mode },
-    };
+    return decide(event);
   } catch (err) {
+    if (err instanceof TokenRefused) throw new Error(UNAUTHORIZED);
     console.error("[delegated-authorizer] unexpected failure:", err);
     return DENY;
   }

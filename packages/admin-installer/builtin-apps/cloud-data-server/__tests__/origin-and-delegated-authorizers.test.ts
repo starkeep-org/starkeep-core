@@ -1,6 +1,8 @@
 /**
  * The origin authorizer and the delegated authorizer. Both admit only
- * requests that came through CloudFront, and neither ever throws.
+ * requests that came through CloudFront. The delegated authorizer fails with
+ * `Unauthorized` for a bad token, which the gateway answers with a 401, and
+ * otherwise never throws.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -73,16 +75,15 @@ describe("delegated authorizer", () => {
     });
   });
 
-  it("refuses a token for another app", async () => {
-    expect((await delegated(req({ auth: `Bearer ${token("photos")}` }))).isAuthorized).toBe(false);
+  // API Gateway turns a failure with the exact message `Unauthorized` into a
+  // 401, which an MCP client answers by refreshing or signing in again.
+  it("fails with Unauthorized for a token for another app", async () => {
+    await expect(delegated(req({ auth: `Bearer ${token("photos")}` }))).rejects.toThrow(
+      /^Unauthorized$/,
+    );
   });
 
-  it("refuses a valid token that did not come through CloudFront", async () => {
-    const res = await delegated(req({ auth: `Bearer ${token()}`, origin: null }));
-    expect(res.isAuthorized).toBe(false);
-  });
-
-  it("refuses an expired token, a missing bearer and garbage", async () => {
+  it("fails with Unauthorized for an expired token, a missing bearer and garbage", async () => {
     for (const auth of [
       `Bearer ${token("probe", Date.now() - 1)}`,
       undefined,
@@ -90,8 +91,26 @@ describe("delegated authorizer", () => {
       "Basic abc",
       "Bearer skd_not.a.token",
     ]) {
-      expect((await delegated(req({ auth }))).isAuthorized, String(auth)).toBe(false);
+      await expect(delegated(req({ auth })), String(auth)).rejects.toThrow(/^Unauthorized$/);
     }
+  });
+
+  it("fails with Unauthorized for a token signed by another key", async () => {
+    const other = delegationSigningKeyFromPem(makeDelegationKeyPem().privateKeyPem);
+    const forged = signDelegationToken(other, {
+      userId: "user-1",
+      appId: "probe",
+      delegationId: "dlg-1",
+      mode: "read",
+      channel: "app",
+      expiresAtMs: Date.now() + 60_000,
+    });
+    await expect(delegated(req({ auth: `Bearer ${forged}` }))).rejects.toThrow(/^Unauthorized$/);
+  });
+
+  it("refuses with a 403, not a 401, a valid token that did not come through CloudFront", async () => {
+    const res = await delegated(req({ auth: `Bearer ${token()}`, origin: null }));
+    expect(res.isAuthorized).toBe(false);
   });
 
   it("refuses everything when the deployment has no public key", async () => {
