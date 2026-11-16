@@ -1,8 +1,8 @@
 # @starkeep/sdk
 
 Host-side facade that wires the Starkeep data plane together: record + file
-operations, per-category metadata, search, the shared-space API surface, and the
-HLC clock / change notifier that the local-data-server shares with its sync
+operations, per-category metadata, the shared-space API surface, and the HLC
+clock / change notifier that the local-data-server shares with its sync
 supervisor. It runs the **local** side against a SQLite database adapter and a
 filesystem/S3 object-storage adapter; the cloud-data-server is a separate
 artifact and does not use this package.
@@ -46,10 +46,6 @@ await sdk.data.delete(record.id);
 await sdk.data.putMetadata("image/jpeg", { recordId: record.id, width: 800, height: 600 });
 const meta = await sdk.data.getMetadata("image", record.id);
 
-// Search across records.
-const result = await sdk.index.search({ types: ["image/jpeg"], limit: 20 });
-console.log(result.items);
-
 // Shared-space API surface (used by the local-data-server's HTTP routes).
 const response = await sdk.api.handleRequest({
   path: "/data/records",
@@ -83,7 +79,6 @@ await sdk.close();
 | Member           | Description                                                                                                                                                                          |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `data`           | `DataOperations` — `putWithFile`, `putWithLocalFile`, `putWithExistingBlob`, `get`, `update`, `delete`, `query`, and per-category `putMetadata` / `getMetadata` / `getMetadataByIds` |
-| `index`          | `IndexOperations` — `search(query)` over records, returning `{ items }`                                                                                                              |
 | `api`            | `ApiOperations` — `router`, `handleRequest`, `handleWebSocketConnect` for the shared-space API                                                                                       |
 | `changeNotifier` | `ChangeNotifier` — emits `local-change-recorded` on every write; the sync supervisor forwards its events onto the same channel                                                       |
 | `clock`          | `HLCClock` — the clock backing this SDK, exposed so the supervisor can share it                                                                                                      |

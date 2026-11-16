@@ -20,7 +20,6 @@
     "@aws-sdk/client-cognito-identity-provider": "^3.700.0",
     "@aws-sdk/dsql-signer": "^3.700.0",
     "@starkeep/protocol-primitives": "workspace:*",
-    "@starkeep/query-orchestrator": "workspace:*",
     "@starkeep/sdk": "workspace:*",
     "@starkeep/shared-space-api": "workspace:*",
     "@starkeep/storage-adapter": "workspace:*",
