@@ -1,13 +1,13 @@
 /**
  * The request gate: no more than `maxInFlight` requests at once, and throttled
- * reads sent again while writes are not.
+ * requests sent again while other failures are not.
  *
  * Without the gate, a refresh of every panel sent about fifteen requests at
  * once. In the cloud each one holds two Lambda executions, so the account's
  * concurrency limit throttled most of them and the page failed to load.
  */
 import { describe, expect, it } from "vitest";
-import { createRequestGate, isRetryableThrottle } from "../src/browser/request-gate.js";
+import { createRequestGate, isThrottle } from "../src/browser/request-gate.js";
 
 /** A promise and the function that settles it, for holding an attempt open. */
 function deferred<T>() {
@@ -29,7 +29,7 @@ describe("the in-flight limit", () => {
     const holds = Array.from({ length: 15 }, () => deferred<void>());
 
     const sends = holds.map((hold) =>
-      gate.send("GET", async () => {
+      gate.send(async () => {
         running++;
         peak = Math.max(peak, running);
         await hold.promise;
@@ -54,7 +54,7 @@ describe("the in-flight limit", () => {
     const order: number[] = [];
     await Promise.all(
       [1, 2, 3, 4].map((n) =>
-        gate.send("GET", async () => {
+        gate.send(async () => {
           order.push(n);
           await flush();
           return { status: 200 };
@@ -68,20 +68,18 @@ describe("the in-flight limit", () => {
     const gate = createRequestGate({ maxInFlight: 1, retryDelaysMs: [10], ...noWait });
     let calls = 0;
     await expect(
-      gate.send("GET", async () => {
+      gate.send(async () => {
         calls++;
         throw new TypeError("Failed to fetch");
       }),
     ).rejects.toThrow("Failed to fetch");
     expect(calls).toBe(1);
-    await expect(gate.send("GET", async () => ({ status: 200 }))).resolves.toEqual({
-      status: 200,
-    });
+    await expect(gate.send(async () => ({ status: 200 }))).resolves.toEqual({ status: 200 });
   });
 });
 
-describe("retrying throttled reads", () => {
-  it("sends a throttled GET again until it succeeds, waiting a jittered delay each time", async () => {
+describe("retrying throttled requests", () => {
+  it("sends a throttled request again until it succeeds, waiting a jittered delay each time", async () => {
     const waits: number[] = [];
     const gate = createRequestGate({
       maxInFlight: 1,
@@ -90,7 +88,7 @@ describe("retrying throttled reads", () => {
       random: () => 0, // the low end of the jitter: half of each delay
     });
     const statuses = [503, 429, 200];
-    const result = await gate.send("GET", async () => ({ status: statuses.shift()! }));
+    const result = await gate.send(async () => ({ status: statuses.shift()! }));
     expect(result.status).toBe(200);
     expect(waits).toEqual([150, 500]);
   });
@@ -98,7 +96,7 @@ describe("retrying throttled reads", () => {
   it("answers the last throttle once the retries run out", async () => {
     const gate = createRequestGate({ maxInFlight: 1, retryDelaysMs: [1, 1], ...noWait });
     let calls = 0;
-    const result = await gate.send("GET", async () => {
+    const result = await gate.send(async () => {
       calls++;
       return { status: 503 };
     });
@@ -106,24 +104,26 @@ describe("retrying throttled reads", () => {
     expect(calls).toBe(3);
   });
 
-  it("never sends a write twice, because a 503 may follow a write that happened", async () => {
-    const gate = createRequestGate({ maxInFlight: 1, retryDelaysMs: [1, 1, 1], ...noWait });
-    for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+  it("never retries a failure that can follow work already done", async () => {
+    // A 500 or 502 can follow a crash partway through a write, and a 504 a
+    // timeout after it. Sending the request again could write twice.
+    const gate = createRequestGate({ maxInFlight: 1, retryDelaysMs: [1, 1], ...noWait });
+    for (const status of [500, 502, 504]) {
       let calls = 0;
-      const result = await gate.send(method, async () => {
+      const result = await gate.send(async () => {
         calls++;
-        return { status: 503 };
+        return { status };
       });
-      expect(result.status, method).toBe(503);
-      expect(calls, method).toBe(1);
+      expect(result.status, String(status)).toBe(status);
+      expect(calls, String(status)).toBe(1);
     }
   });
 
-  it("does not retry other failures", async () => {
+  it("does not retry client errors", async () => {
     const gate = createRequestGate({ maxInFlight: 1, retryDelaysMs: [1, 1], ...noWait });
-    for (const status of [400, 403, 404, 500, 502, 504]) {
+    for (const status of [400, 401, 403, 404, 409]) {
       let calls = 0;
-      await gate.send("GET", async () => {
+      await gate.send(async () => {
         calls++;
         return { status };
       });
@@ -140,9 +140,9 @@ describe("retrying throttled reads", () => {
       random: () => 0.5,
     });
     const statuses = [503, 200];
-    const first = gate.send("GET", async () => ({ status: statuses.shift()! }));
+    const first = gate.send(async () => ({ status: statuses.shift()! }));
     let secondRan = false;
-    const second = gate.send("GET", async () => {
+    const second = gate.send(async () => {
       secondRan = true;
       return { status: 200 };
     });
@@ -154,11 +154,10 @@ describe("retrying throttled reads", () => {
   });
 });
 
-describe("isRetryableThrottle", () => {
-  it("covers 503 and 429 on GET and HEAD only", () => {
-    expect(isRetryableThrottle("GET", 503)).toBe(true);
-    expect(isRetryableThrottle("HEAD", 429)).toBe(true);
-    expect(isRetryableThrottle("POST", 503)).toBe(false);
-    expect(isRetryableThrottle("GET", 500)).toBe(false);
+describe("isThrottle", () => {
+  it("covers 503 and 429 only", () => {
+    expect(isThrottle(503)).toBe(true);
+    expect(isThrottle(429)).toBe(true);
+    for (const status of [200, 400, 500, 502, 504]) expect(isThrottle(status)).toBe(false);
   });
 });

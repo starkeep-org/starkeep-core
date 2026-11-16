@@ -22,7 +22,7 @@ Each heading is one group of operations, with a table of the current state and a
 | Public links  | Web links to your example files, made with a file's Share button. Anyone who has a valid link can view the shared content without signing in. Public links need a cloud. |
 | Activity      | Every request the page made, with method, path, status and duration.                                                                                                     |
 
-`web/src/browser/api.ts` holds one function per operation and names the route each one calls. Every request to the app's own server passes through `web/src/browser/request-gate.ts`, which keeps at most three requests in flight and retries a read that the cloud throttled. A throttled read appears in the Activity table as a 503, followed by the retry.
+`web/src/browser/api.ts` holds one function per operation and names the route each one calls. Every request to the app's own server passes through `web/src/browser/request-gate.ts`, which keeps at most three requests in flight and retries a request that the cloud throttled. A throttled request appears in the Activity table as a 503, followed by the retry.
 
 ### How labels read
 

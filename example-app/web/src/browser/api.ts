@@ -66,8 +66,9 @@ async function call<T>(
     body = JSON.stringify(init.json);
   }
   const logged = init.log ?? url.replace(BASE, "/");
-  // One fetch, logged on its own, so a throttled read shows in the Activity
-  // table as its 503 followed by the retry's answer.
+  // One fetch, logged on its own, so a throttled request shows in the Activity
+  // table as its 503 followed by the retry's answer. Every body the page sends
+  // through the gate is a string, so a retry can send it again.
   const attempt = async () => {
     const started = performance.now();
     try {
@@ -94,7 +95,7 @@ async function call<T>(
   };
   // Only the app's own server runs on Lambda. Signed S3 and CloudFront URLs
   // are absolute and skip the gate.
-  const res = url.startsWith(BASE) ? await gate.send(method, attempt) : await attempt();
+  const res = url.startsWith(BASE) ? await gate.send(attempt) : await attempt();
   let parsed: unknown = res.text;
   try {
     parsed = res.text ? JSON.parse(res.text) : null;

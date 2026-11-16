@@ -983,8 +983,11 @@ API Gateway, and these limits apply to each one:
   two executions, one for the app and one for the data server, so a page that
   sends a dozen requests at once can exhaust a limit of 10 by itself. API
   Gateway answers each request over the limit with a 503. Limit how many
-  requests your page sends at once, and retry a throttled read after a short
-  wait. The example app's `web/src/browser/request-gate.ts` does both.
+  requests your page sends at once, and retry a throttled request after a short
+  wait. A 503 or 429 means the work never started, so a retry is safe even for
+  a write. A 500, 502 or 504 can follow a write that already happened, so do
+  not retry those blindly. The example app's `web/src/browser/request-gate.ts`
+  does both.
 
 Keep large bytes off the Lambda path:
 
