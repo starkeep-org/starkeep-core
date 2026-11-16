@@ -340,6 +340,18 @@ while IFS=$'\t' read -r kind pid file cprefix; do
   echo "  Kept, and checked at the end: $kind pool $pid ($file, prefix '${cprefix:-<none>}')"
 done <<< "$CONFIG_POOLS_PRESENT"
 [[ -n "$CONFIG_POOLS_PRESENT" ]] && echo ""
+# Another deployment in the target's region shares every regional service with
+# it, so a command that names the wrong --prefix reaches that deployment's
+# resources. The warning names that deployment and does not stop the run. A
+# user pool ID carries its region.
+while IFS=$'\t' read -r kind pid file cprefix; do
+  [[ "$kind" == "user" && "${pid%%_*}" == "$REGION" ]] || continue
+  echo "  WARNING: $REGION also holds the deployment that $file describes"
+  echo "           (prefix '${cprefix:-<none>}'). Check that --prefix names the deployment to remove."
+  echo "           Test deployments belong in a region that no live deployment uses:"
+  echo "           see STARKEEP_AWS_REGION in e2e-aws/README.md."
+  echo ""
+done <<< "$PROTECTED_POOLS"
 if [[ "$CONFIG_MATCHES_TEARDOWN" == "true" ]]; then
   echo "After all resources are deleted, the cloud config in $CONFIG_FILE will be"
   echo "cleared (the local 'appParentDirs' setting is preserved)."
