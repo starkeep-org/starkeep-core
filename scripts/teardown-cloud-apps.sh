@@ -166,6 +166,18 @@ prefix = sys.argv[1]
 marker = None
 found = []
 
+# The throttling retry of aws_probe in teardown-common.sh, for calls made here.
+# The wait runs the external sleep, as aws_probe does, so tests can skip it.
+THROTTLED = ("Throttl", "TooManyRequests", "RequestLimitExceeded", "Rate exceeded", "SlowDown")
+
+def run_aws(args):
+    for delay in (5, 10, 20, None):
+        r = subprocess.run(["aws", *args], capture_output=True, text=True)
+        if r.returncode == 0 or delay is None or not any(t in r.stderr for t in THROTTLED):
+            return r
+        print(f"  aws {args[0]} {args[1]} was throttled; retrying in {delay}s.", file=sys.stderr)
+        subprocess.run(["sleep", str(delay)])
+
 def record_failure(msg):
     msg = " ".join(msg.split())
     print(f"  ERROR {msg}", file=sys.stderr)
@@ -173,10 +185,10 @@ def record_failure(msg):
         f.write(msg + "\n")
 
 while True:
-    cmd = ["aws", "iam", "list-roles", "--output", "json"]
+    cmd = ["iam", "list-roles", "--output", "json"]
     if marker:
         cmd += ["--starting-token", marker]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = run_aws(cmd)
     if r.returncode != 0:
         record_failure(f"aws iam list-roles: {r.stderr}")
         break
@@ -200,10 +212,7 @@ while True:
         #     it here leaves cloud-data-server in a broken, half-installed state.
         if app_id in ("cloud-data-server", "admin", "local-data-sync"):
             continue
-        tags_r = subprocess.run(
-            ["aws", "iam", "list-role-tags", "--role-name", name, "--output", "json"],
-            capture_output=True, text=True,
-        )
+        tags_r = run_aws(["iam", "list-role-tags", "--role-name", name, "--output", "json"])
         if tags_r.returncode != 0:
             record_failure(f"aws iam list-role-tags {name}: {tags_r.stderr}")
             continue

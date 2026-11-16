@@ -78,6 +78,21 @@ describe("teardown-cloud-apps.sh", () => {
     expect(result.account.roles.map((r) => r.RoleName)).not.toContain("sktest-app-photos-role");
   });
 
+  it("retries a throttled lookup in the role scan and finishes", () => {
+    const account = mergeAccounts(live, target);
+    account.errors.push({
+      match: "iam list-role-tags --role-name sktest-app-photos-role",
+      error:
+        "An error occurred (Throttling) when calling the ListRoleTags operation: Rate exceeded",
+      times: 2,
+    });
+    const { status, output, account: after } = run([], account);
+    expect(status, output).toBe(0);
+    expect(output).toContain("aws iam list-role-tags was throttled; retrying in 5s.");
+    expect(output).not.toContain("ERROR");
+    expect(after.roles.map((r) => r.RoleName)).not.toContain("sktest-app-photos-role");
+  });
+
   it("fails when a lookup fails, rather than reporting nothing to delete", () => {
     const account = mergeAccounts(live, target);
     account.errors.push({

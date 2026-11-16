@@ -221,6 +221,35 @@ describe("teardown-bootstrap.sh", () => {
     expect(identifiersOf(after).sort()).toEqual(identifiersOf(live).sort());
   });
 
+  it("retries a throttled role listing and finishes", () => {
+    const account = mergeAccounts(live, target);
+    account.errors.push({
+      match: "iam list-roles",
+      error: "An error occurred (Throttling) when calling the ListRoles operation: Rate exceeded",
+      times: 2,
+    });
+    const { status, output, account: after } = runTeardown("sktest", account, ["--force"]);
+    expect(status, output).toBe(0);
+    expect(output).toContain("aws iam list-roles was throttled; retrying in 5s.");
+    expect(output).not.toContain("ERROR");
+    expect(identifiersOf(after).sort()).toEqual(identifiersOf(live).sort());
+  });
+
+  it("retries an S3 SlowDown while emptying a bucket and finishes", () => {
+    const account = mergeAccounts(live, target);
+    account.errors.push({
+      match: "s3api list-object-versions --bucket sktest-pulumi-state-",
+      error:
+        "An error occurred (SlowDown) when calling the ListObjectVersions operation: Please reduce your request rate.",
+      times: 2,
+    });
+    const { status, output, account: after } = runTeardown("sktest", account, ["--force"]);
+    expect(status, output).toBe(0);
+    expect(output).toContain("aws s3api list-object-versions was throttled; retrying in 5s.");
+    expect(output).not.toContain("ERROR");
+    expect(identifiersOf(after).sort()).toEqual(identifiersOf(live).sort());
+  });
+
   it("deletes the config's own deployment when the config describes the target", () => {
     const { status, output, account } = runTeardown("live", mergeAccounts(live, target), [
       "--force",

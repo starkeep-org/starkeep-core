@@ -57,6 +57,45 @@ describe("teardown-cloud-data-server.sh", () => {
     }
   });
 
+  it("retries a throttled cluster lookup and finishes", () => {
+    const account = mergeAccounts(live, target);
+    account.errors.push({
+      match: "dsql list-clusters",
+      error:
+        "An error occurred (ThrottlingException) when calling the ListClusters operation: Rate exceeded",
+      times: 2,
+    });
+    const { status, output, account: after } = run(["--force"], account);
+    expect(status, output).toBe(0);
+    expect(output).toContain("aws dsql list-clusters was throttled; retrying in 5s.");
+    expect(output).not.toContain("ERROR");
+    expect(after.dsqlClusters.map((c) => c.identifier)).not.toContain("sktestcluster");
+  });
+
+  it("retries throttled CloudFront and S3 calls and finishes", () => {
+    const account = mergeAccounts(live, target);
+    account.errors.push(
+      {
+        match: "cloudfront list-key-groups",
+        error:
+          "An error occurred (Throttling) when calling the ListKeyGroups operation: Rate exceeded",
+        times: 2,
+      },
+      {
+        match: `s3api list-objects-v2 --bucket sktest-files-`,
+        error:
+          "An error occurred (SlowDown) when calling the ListObjectsV2 operation: Please reduce your request rate.",
+        times: 2,
+      },
+    );
+    const { status, output, account: after } = run(["--force"], account);
+    expect(status, output).toBe(0);
+    expect(output).toContain("aws cloudfront list-key-groups was throttled; retrying in 5s.");
+    expect(output).toContain("aws s3api list-objects-v2 was throttled; retrying in 5s.");
+    expect(output).not.toContain("ERROR");
+    expect(after.buckets).not.toContain(`sktest-files-123456789012-${REGION}`);
+  });
+
   it("keeps a protected cluster without --force, and that is not a failure", () => {
     const { status, output, account } = run([]);
     expect(status, output).toBe(0);
