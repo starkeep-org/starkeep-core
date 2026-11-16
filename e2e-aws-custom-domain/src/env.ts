@@ -10,7 +10,7 @@
  *                                        AWS call: custom domains are optional,
  *                                        and the variable is the opt-in.
  *
- * STARKEEP_AWS_STACK_PREFIX, STARKEEP_AWS_REGION and STARKEEP_AWS_TEARDOWN work
+ * STARKEEP_AWS_STACK_PREFIX, STARKEEP_AWS_E2E_REGION and STARKEEP_AWS_TEARDOWN work
  * as in the journey, and the suite shares the journey's run-state directory, so
  * it reuses a stack a journey run kept warm.
  *

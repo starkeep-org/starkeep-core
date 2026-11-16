@@ -12,25 +12,25 @@ const live: LiveDeployment = {
 
 describe("testRegion", () => {
   it("refuses an unset region and names the live region and a command that sets another", () => {
-    expect(() => testRegion(undefined, [live])).toThrow(/STARKEEP_AWS_REGION is not set/);
-    expect(() => testRegion("  ", [live])).toThrow(/STARKEEP_AWS_REGION is not set/);
+    expect(() => testRegion(undefined, [live])).toThrow(/STARKEEP_AWS_E2E_REGION is not set/);
+    expect(() => testRegion("  ", [live])).toThrow(/STARKEEP_AWS_E2E_REGION is not set/);
     expect(() => testRegion(undefined, [live])).toThrow(
       /'starkeep' \(\/home\/op\/\.starkeep\/config\.json\) runs in us-east-2/,
     );
     expect(() => testRegion(undefined, [live])).toThrow(
-      "echo 'STARKEEP_AWS_REGION=us-west-2' >> .env.local",
+      "echo 'STARKEEP_AWS_E2E_REGION=us-west-2' >> .env.local",
     );
   });
 
   it("suggests a region that no live deployment uses", () => {
     const west = { ...live, stackPrefix: "other", region: "us-west-2" };
     expect(() => testRegion(undefined, [live, west])).toThrow(
-      "echo 'STARKEEP_AWS_REGION=eu-west-1' >> .env.local",
+      "echo 'STARKEEP_AWS_E2E_REGION=eu-west-1' >> .env.local",
     );
   });
 
   it("refuses an unset region when no live deployment is configured", () => {
-    expect(() => testRegion(undefined, [])).toThrow(/STARKEEP_AWS_REGION is not set/);
+    expect(() => testRegion(undefined, [])).toThrow(/STARKEEP_AWS_E2E_REGION is not set/);
   });
 
   it("returns a region that no live deployment uses, with no warning", () => {
@@ -40,9 +40,9 @@ describe("testRegion", () => {
   it("returns the live region with a warning that names the deployment and the fix", () => {
     const { region, warning } = testRegion("us-east-2", [live]);
     expect(region).toBe("us-east-2");
-    expect(warning).toContain("STARKEEP_AWS_REGION is us-east-2");
+    expect(warning).toContain("STARKEEP_AWS_E2E_REGION is us-east-2");
     expect(warning).toContain("'starkeep' (/home/op/.starkeep/config.json)");
-    expect(warning).toContain("STARKEEP_AWS_REGION=us-west-2");
+    expect(warning).toContain("STARKEEP_AWS_E2E_REGION=us-west-2");
   });
 });
 

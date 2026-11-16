@@ -256,7 +256,7 @@ describe("teardown-bootstrap.sh", () => {
     expect(output).toContain(
       `WARNING: ${REGION} also holds the deployment that ${sandbox.configFile} describes`,
     );
-    expect(output).toContain("STARKEEP_AWS_REGION");
+    expect(output).toContain("STARKEEP_AWS_E2E_REGION");
   });
 
   it("does not warn when no other deployment's pool is in the target's region", () => {
