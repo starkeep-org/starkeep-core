@@ -263,7 +263,7 @@ export function defineDelegationSteps(d: DelegationStepsContext): void {
 }
 
 /** Sign in on the managed login page, when it asks. A live Cognito session skips it. */
-async function signInIfAsked(page: Page, email: string, password: string): Promise<void> {
+export async function signInIfAsked(page: Page, email: string, password: string): Promise<void> {
   const onCognito = await page
     .waitForURL(/\.amazoncognito\.com\//, { timeout: 15_000 })
     .then(() => true)
