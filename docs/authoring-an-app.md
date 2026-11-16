@@ -406,11 +406,13 @@ different granularities are in play, and it's easy to confuse them:
   reach; the per-type grant says what it may actually read.
 
 - **Per-category metadata now authorizes per type**, not per category.
-  `GET /data/records/:id/metadata/:typeId` resolves the record and checks your
-  grant against the record's own type; the `typeId` in the path decides nothing
-  and is kept only because callers send it. Declaring `image/jpeg` and
-  `image/png` no longer reaches an `image/svg` record's metadata. If a type
-  matters to your app, declare it.
+  `GET /data/records/:id/metadata/:category` resolves the record and checks your
+  grant against the record's own type; the category in the path decides nothing
+  and is kept only because callers send it. Send the bare category, such as
+  `image`, never a full type id: API Gateway decodes `%2F` into a real slash, so
+  an encoded `image/jpeg` reaches the data server as two segments and matches no
+  route. Declaring `image/jpeg` and `image/png` no longer reaches an `image/svg`
+  record's metadata. If a type matters to your app, declare it.
 
 **A note on advisory labels.** If your app writes shared records that may not be
 of interest to _other_ apps that read that same type, include a `label` on
