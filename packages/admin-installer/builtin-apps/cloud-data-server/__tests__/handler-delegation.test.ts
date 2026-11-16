@@ -67,6 +67,8 @@ function row(over: Partial<DelegationRow> = {}): DelegationRow {
     revoked_at_ms: null,
     last_used_at_ms: Date.now(),
     last_write_at_ms: Date.now(),
+    client_id: null,
+    redirect_host: null,
     ...over,
   };
 }
@@ -291,7 +293,8 @@ describe("refuses", () => {
         return [current as unknown as Record<string, unknown>];
       })
       .on(/from "delegation"\."grants"/, () => [current as unknown as Record<string, unknown>])
-      .on(/update "delegation"\."grants"/, []);
+      .on(/update "delegation"\."grants"/, [])
+      .on(/update "delegation"\."refresh_tokens"/, []);
     setDbFactory(db);
     const before = await call({
       method: "GET",

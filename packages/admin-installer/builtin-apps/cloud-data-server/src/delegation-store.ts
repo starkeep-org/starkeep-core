@@ -35,6 +35,10 @@ export interface DelegationRow {
   revoked_at_ms: number | null;
   last_used_at_ms: number | null;
   last_write_at_ms: number | null;
+  /** An OAuth client's `client_id` URL. Null for a pasted token. */
+  client_id: string | null;
+  /** The host an OAuth client's redirect URI names. Null for a pasted token. */
+  redirect_host: string | null;
 }
 
 const COLUMNS = [
@@ -50,6 +54,8 @@ const COLUMNS = [
   "revoked_at_ms",
   "last_used_at_ms",
   "last_write_at_ms",
+  "client_id",
+  "redirect_host",
 ] as const;
 
 type Db = Record<string, Record<string, unknown>>;
@@ -76,6 +82,8 @@ function rowOf(raw: Record<string, unknown>): DelegationRow {
     revoked_at_ms: nullableNumber(raw.revoked_at_ms),
     last_used_at_ms: nullableNumber(raw.last_used_at_ms),
     last_write_at_ms: nullableNumber(raw.last_write_at_ms),
+    client_id: typeof raw.client_id === "string" ? raw.client_id : null,
+    redirect_host: typeof raw.redirect_host === "string" ? raw.redirect_host : null,
   };
 }
 
@@ -406,4 +414,143 @@ export async function deleteExpiredAuthorizations(
       .compile(),
   );
   return rows.map(authorizationOf);
+}
+
+/** The authorization a code's hash names, or null. */
+export async function findAuthorizationByCode(
+  client: DatabaseClient,
+  codeHash: string,
+): Promise<AuthorizationRow | null> {
+  const rows = await run(
+    client,
+    compiler
+      .selectFrom(AUTHORIZATIONS_TABLE)
+      .select([...AUTHORIZATION_COLUMNS])
+      .where("code_hash", "=", codeHash)
+      .compile(),
+  );
+  return rows[0] ? authorizationOf(rows[0]) : null;
+}
+
+/**
+ * Mark an authorization's code used. True for the one caller that marks it;
+ * a concurrent second exchange of the same code gets false.
+ */
+export async function claimAuthorization(
+  client: DatabaseClient,
+  id: string,
+  nowMs: number,
+): Promise<boolean> {
+  const rows = await run(
+    client,
+    compiler
+      .updateTable(AUTHORIZATIONS_TABLE)
+      .set({ used_at_ms: nowMs })
+      .where("id", "=", id)
+      .where("used_at_ms", "is", null)
+      .returning(["id"])
+      .compile(),
+  );
+  return rows.length === 1;
+}
+
+// ---------------------------------------------------------------------------
+// OAuth refresh tokens
+// ---------------------------------------------------------------------------
+
+const REFRESH_TOKENS_TABLE = "delegation.refresh_tokens";
+
+export interface RefreshTokenRow {
+  token_hash: string;
+  grant_id: string;
+  app_id: string;
+  created_at_ms: number;
+  /** The grant's own expiry: a refresh token never outlives its grant. */
+  expires_at_ms: number;
+  rotated_at_ms: number | null;
+}
+
+const REFRESH_TOKEN_COLUMNS = [
+  "token_hash",
+  "grant_id",
+  "app_id",
+  "created_at_ms",
+  "expires_at_ms",
+  "rotated_at_ms",
+] as const;
+
+function refreshTokenOf(raw: Record<string, unknown>): RefreshTokenRow {
+  return {
+    ...(raw as unknown as RefreshTokenRow),
+    created_at_ms: Number(raw.created_at_ms),
+    expires_at_ms: Number(raw.expires_at_ms),
+    rotated_at_ms: nullableNumber(raw.rotated_at_ms),
+  };
+}
+
+export async function insertRefreshToken(
+  client: DatabaseClient,
+  row: RefreshTokenRow,
+): Promise<void> {
+  await run(
+    client,
+    compiler
+      .insertInto(REFRESH_TOKENS_TABLE)
+      .values({ ...row })
+      .compile(),
+  );
+}
+
+export async function findRefreshToken(
+  client: DatabaseClient,
+  tokenHash: string,
+): Promise<RefreshTokenRow | null> {
+  const rows = await run(
+    client,
+    compiler
+      .selectFrom(REFRESH_TOKENS_TABLE)
+      .select([...REFRESH_TOKEN_COLUMNS])
+      .where("token_hash", "=", tokenHash)
+      .compile(),
+  );
+  return rows[0] ? refreshTokenOf(rows[0]) : null;
+}
+
+/**
+ * Mark one refresh token rotated. True for the one caller that marks it; a
+ * concurrent refresh with the same token gets false.
+ */
+export async function rotateRefreshToken(
+  client: DatabaseClient,
+  tokenHash: string,
+  nowMs: number,
+): Promise<boolean> {
+  const rows = await run(
+    client,
+    compiler
+      .updateTable(REFRESH_TOKENS_TABLE)
+      .set({ rotated_at_ms: nowMs })
+      .where("token_hash", "=", tokenHash)
+      .where("rotated_at_ms", "is", null)
+      .returning(["token_hash"])
+      .compile(),
+  );
+  return rows.length === 1;
+}
+
+/** End every live refresh token under one grant, as a revocation does. */
+export async function endRefreshTokens(
+  client: DatabaseClient,
+  grantId: string,
+  nowMs: number,
+): Promise<void> {
+  await run(
+    client,
+    compiler
+      .updateTable(REFRESH_TOKENS_TABLE)
+      .set({ rotated_at_ms: nowMs })
+      .where("grant_id", "=", grantId)
+      .where("rotated_at_ms", "is", null)
+      .compile(),
+  );
 }

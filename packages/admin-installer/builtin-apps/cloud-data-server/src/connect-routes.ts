@@ -37,6 +37,7 @@ import {
   CONNECT_CALLBACK_ROUTE,
   CONNECT_JWKS_ROUTE,
   CONNECT_ROUTE,
+  CONNECT_TOKEN_ROUTE,
   CONNECTIONS_ROUTE,
   DELEGATION_MODES,
   connectionRevokePath,
@@ -78,6 +79,7 @@ import {
   isLive,
   listDelegations,
   newDelegationId,
+  endRefreshTokens,
   revokeDelegation,
   type DelegationRow,
 } from "./delegation-store.js";
@@ -88,6 +90,7 @@ import {
   readPendingOAuth,
   type PendingOAuth,
 } from "./oauth-authorize.js";
+import { handleTokenRequest } from "./oauth-token.js";
 import { verifyUserToken } from "./verify-user-token.js";
 
 const SESSION_COOKIE = "sk_connections";
@@ -117,6 +120,7 @@ export function isConnectRoute(method: string, rawPath: string): boolean {
     return (
       rawPath === CONNECT_APPROVE_ROUTE ||
       rawPath === CONNECT_AUTHORIZE_APPROVE_ROUTE ||
+      rawPath === CONNECT_TOKEN_ROUTE ||
       parseConnectionRevokePath(rawPath) !== null
     );
   }
@@ -318,6 +322,8 @@ async function callback(req: ConnectRequest, deps: ConnectDeps): Promise<Connect
     revoked_at_ms: null,
     last_used_at_ms: null,
     last_write_at_ms: null,
+    client_id: null,
+    redirect_host: null,
   };
   await insertDelegation(await deps.db(), row);
   const token = signDelegationToken(key, {
@@ -407,8 +413,12 @@ async function revoke(
   }
   const userId = await sessionUser(req, deps);
   if (!userId) return redirect(CONNECTIONS_ROUTE);
-  const row = await revokeDelegation(await deps.db(), userId, id, (deps.now ?? Date.now)());
+  const now = (deps.now ?? Date.now)();
+  const db = await deps.db();
+  const row = await revokeDelegation(db, userId, id, now);
   if (row) {
+    // An OAuth client's refresh tokens end with the delegation.
+    await endRefreshTokens(db, row.id, now);
     deps.forgetDelegation(row.id);
     const key = await deps.signingKey();
     const refresh = key
@@ -438,6 +448,10 @@ export async function handleConnectRoute(
         headers: { "Content-Type": "application/json", "Cache-Control": "max-age=300" },
         body: JSON.stringify(delegationJwks(key)),
       };
+    }
+    // A client, not a browser: JSON answers, never a page.
+    if (req.method === "POST" && req.rawPath === CONNECT_TOKEN_ROUTE) {
+      return await handleTokenRequest(req, deps);
     }
     if (!deps.pool || !deps.cognitoDomain) {
       return message(deps, 503, "Outside access is not set up on this cloud yet.");

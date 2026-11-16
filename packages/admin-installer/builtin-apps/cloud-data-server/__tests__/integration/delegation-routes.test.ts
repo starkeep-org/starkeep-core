@@ -185,6 +185,8 @@ async function delegate(
     revoked_at_ms: null,
     last_used_at_ms: null,
     last_write_at_ms: null,
+    client_id: null,
+    redirect_host: null,
     ...over,
   };
   await insertDelegation(client, row);
