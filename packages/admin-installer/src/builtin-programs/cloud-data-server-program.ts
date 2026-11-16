@@ -36,6 +36,11 @@ import {
   MOBILE_KEYS_ROUTE,
   CONNECT_ROUTE,
   CONNECT_APPROVE_ROUTE,
+  CONNECT_AUTHORIZE_APPROVE_ROUTE,
+  CONNECT_AUTHORIZE_ROUTE,
+  CONNECT_TOKEN_ROUTE,
+  OAUTH_AS_METADATA_ROUTE,
+  OAUTH_PRM_PREFIX,
   CONNECT_CALLBACK_ROUTE,
   CONNECT_JWKS_ROUTE,
   CONNECTIONS_ROUTE,
@@ -68,6 +73,14 @@ import {
 // ---------------------------------------------------------------------------
 const GATEWAY_THROTTLE_RATE_LIMIT = 50; // steady-state req/s across the whole shared stage
 const GATEWAY_THROTTLE_BURST_LIMIT = 100; // token-bucket burst allowance
+// The anonymous OAuth endpoints get a tighter limit of their own.
+const OAUTH_THROTTLE_RATE_LIMIT = 5;
+const OAUTH_THROTTLE_BURST_LIMIT = 10;
+const OAUTH_THROTTLED_ROUTE_KEYS = [
+  `GET ${CONNECT_AUTHORIZE_ROUTE}`,
+  `POST ${CONNECT_AUTHORIZE_APPROVE_ROUTE}`,
+  `POST ${CONNECT_TOKEN_ROUTE}`,
+];
 // TEMPORARILY DISABLED (see usage site below): unusable on a default AWS account
 // whose total Lambda concurrency limit is 10 — any reservation drops unreserved
 // below its floor of 10 and 400s the install. Re-enable with the account quota fix.
@@ -697,24 +710,6 @@ export function buildCloudDataServerProgram(
       },
     });
 
-    const stage = new aws.apigatewayv2.Stage(`${ctx.stackPrefix}-gateway-stage`, {
-      apiId: api.id,
-      name: "$default",
-      autoDeploy: true,
-      // Stage-wide request throttle. Applies to every route (the public
-      // /health and OPTIONS preflight as well as the HMAC-gated data plane),
-      // so it bounds Lambda invocations regardless of which surface is hit.
-      // See guardrail note at the top of the file.
-      defaultRouteSettings: {
-        throttlingRateLimit: GATEWAY_THROTTLE_RATE_LIMIT,
-        throttlingBurstLimit: GATEWAY_THROTTLE_BURST_LIMIT,
-      },
-      tags: {
-        "starkeep:managed": "true",
-        "starkeep:appId": "cloud-data-server",
-      },
-    });
-
     const authorizer = new aws.apigatewayv2.Authorizer("cognito-jwt", {
       apiId: api.id,
       authorizerType: "JWT",
@@ -1003,6 +998,61 @@ export function buildCloudDataServerProgram(
         target: pulumi.interpolate`integrations/${integration.id}`,
       });
     }
+
+    // OAuth for MCP clients: discovery, the authorization endpoint, the
+    // consent page's approval and the token endpoint. No authorizer: the
+    // discovery documents are public, the browser routes sign the user in
+    // themselves, and the token endpoint checks the code or refresh token it
+    // receives. The broker answers the protected resource metadata through
+    // CloudFront only and the rest on the execute-api hostname only.
+    const oauthRoutes = (
+      [
+        ["route-oauth-protected-resource", `GET ${OAUTH_PRM_PREFIX}/apps/{appId}/{path+}`],
+        ["route-oauth-authorization-server", `GET ${OAUTH_AS_METADATA_ROUTE}`],
+        ["route-connect-authorize", `GET ${CONNECT_AUTHORIZE_ROUTE}`],
+        ["route-connect-authorize-approve", `POST ${CONNECT_AUTHORIZE_APPROVE_ROUTE}`],
+        ["route-connect-token", `POST ${CONNECT_TOKEN_ROUTE}`],
+      ] as const
+    ).map(
+      ([name, routeKey]) =>
+        new aws.apigatewayv2.Route(name, {
+          apiId: api.id,
+          routeKey,
+          target: pulumi.interpolate`integrations/${integration.id}`,
+        }),
+    );
+
+    const stage = new aws.apigatewayv2.Stage(
+      `${ctx.stackPrefix}-gateway-stage`,
+      {
+        apiId: api.id,
+        name: "$default",
+        autoDeploy: true,
+        // Stage-wide request throttle. Applies to every route (the public
+        // /health and OPTIONS preflight as well as the HMAC-gated data plane),
+        // so it bounds Lambda invocations regardless of which surface is hit.
+        // See guardrail note at the top of the file.
+        defaultRouteSettings: {
+          throttlingRateLimit: GATEWAY_THROTTLE_RATE_LIMIT,
+          throttlingBurstLimit: GATEWAY_THROTTLE_BURST_LIMIT,
+        },
+        // The OAuth endpoints answer anonymous callers, and each call can
+        // reach DSQL, Cognito or a client's metadata URL. A tighter limit
+        // keeps a flood there from taking the account's few concurrent
+        // Lambda slots from every app.
+        routeSettings: OAUTH_THROTTLED_ROUTE_KEYS.map((routeKey) => ({
+          routeKey,
+          throttlingRateLimit: OAUTH_THROTTLE_RATE_LIMIT,
+          throttlingBurstLimit: OAUTH_THROTTLE_BURST_LIMIT,
+        })),
+        tags: {
+          "starkeep:managed": "true",
+          "starkeep:appId": "cloud-data-server",
+        },
+      },
+      // A route setting names a route that must already exist.
+      { dependsOn: oauthRoutes },
+    );
 
     // A mobile app registers its attested key here. Drive's path, because the
     // key then signs Drive-channel requests; the handler answers it before

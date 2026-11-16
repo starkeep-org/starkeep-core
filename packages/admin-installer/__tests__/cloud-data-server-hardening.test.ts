@@ -121,6 +121,12 @@ async function buildProgram(ephemeral: boolean): Promise<void> {
       await new Promise((resolve) => (value as pulumi.Output<unknown>).apply(resolve));
     }
   }
+  // A resource behind a long `dependsOn` chain can register after every
+  // output has resolved. Wait until registrations stop arriving.
+  for (let seen = -1; seen !== created.length; ) {
+    seen = created.length;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
 }
 
 const byTypeSuffix = (suffix: string): CreatedResource[] =>

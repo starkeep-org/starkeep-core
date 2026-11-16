@@ -323,6 +323,7 @@ export function cloudInstallInput(opts: {
       sessionAuthorizerId: config.sessionAuthorizerId,
       originAuthorizerId: config.originAuthorizerId,
       delegatedAuthorizerId: config.delegatedAuthorizerId,
+      publicBaseUrl: config.publicBaseUrl,
       ...deriveInstallerArns(config, accountId, region),
       ...(config.mobileAppsUserPoolClientId
         ? {
