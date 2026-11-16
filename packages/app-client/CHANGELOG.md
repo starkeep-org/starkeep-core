@@ -1,5 +1,17 @@
 # @starkeep/app-client
 
+## 0.12.0
+
+### Minor Changes
+
+- 1460d5c: `contentDisposition(name, { inline })` builds a `Content-Disposition` header that names a file, with an ASCII `filename` fallback and an RFC 8187 `filename*`. Import it from `@starkeep/app-client` or from the dependency-free `@starkeep/app-client/content-disposition` subpath.
+- 380bb3f: Outside clients, such as MCP clients and scripts, can reach one app's data with a delegation token the user creates on the platform's consent page. A manifest route declares `"auth": "delegated"` for such a client, and `verifyDelegation(req)` in `@starkeep/app-client` tells the route whose request it is. Pass the returned token to `signedFetch` (`delegation`) or `proxyToDataServer` (`delegationToken`) so the platform applies the token's mode and revocation to each data call. On the local surface a loopback caller passes with no token.
+
+  The manifest validator refuses `auth: "public"` on a handler or a route, and accepts a `publicPaths` entry only when it is a platform page or one of the handler's `staticAssetPaths`. A manifest that used either must move the route to `"delegated"` or drop it.
+
+- b1dc276: Add `@starkeep/app-client/local`. `serveLocal({ app, static })` runs an app's local server: it reads the port admin-web passes on `--port`, binds 127.0.0.1, serves static files ahead of the app, and refuses a request with a non-loopback `Host` or from a page on another site before any route runs. An app that builds its own server mounts `localSurfaceGuard()` from `@starkeep/app-client/hono` first instead. Both replace the checks each app's local server used to write by hand.
+- 82c483f: Add `@starkeep/app-client/snapshot`. `createSnapshotSql({ appId, tables })` loads an app's own rows through the row API into an in-memory SQLite in the app's server, caches the copy per user, and runs any read-only SQL the app writes against it. Each query takes `maxAge`, the copy's time-to-live, and `freshAfter`, a floor a Refresh action sets to reload an older copy on whichever instance answers. Each result returns `loadedAt` for an "as of" label. The built output now keeps the `node:` prefix on builtin imports, because `node:sqlite` resolves only with the prefix.
+
 ## 0.11.0
 
 ### Minor Changes

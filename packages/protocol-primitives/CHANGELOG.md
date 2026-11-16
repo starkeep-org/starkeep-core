@@ -1,5 +1,15 @@
 # @starkeep/protocol-primitives
 
+## 0.11.0
+
+### Minor Changes
+
+- 380bb3f: Outside clients, such as MCP clients and scripts, can reach one app's data with a delegation token the user creates on the platform's consent page. A manifest route declares `"auth": "delegated"` for such a client, and `verifyDelegation(req)` in `@starkeep/app-client` tells the route whose request it is. Pass the returned token to `signedFetch` (`delegation`) or `proxyToDataServer` (`delegationToken`) so the platform applies the token's mode and revocation to each data call. On the local surface a loopback caller passes with no token.
+
+  The manifest validator refuses `auth: "public"` on a handler or a route, and accepts a `publicPaths` entry only when it is a platform page or one of the handler's `staticAssetPaths`. A manifest that used either must move the route to `"delegated"` or drop it.
+
+- 1460d5c: A record keeps its source file's own dates. `DataRecord` gains `originalCreatedAt` and `originalUpdatedAt`, ISO 8601 strings or null, and `createDataRecord` takes both as optional input. Both stores add the `original_created_at` and `original_updated_at` columns, and an existing SQLite database or DSQL cluster gains them when the data server starts. The records grammar can filter and order on both columns. Only the local folder watcher fills them, from the file's birth time and modification time.
+
 ## 0.10.0
 
 ### Minor Changes
