@@ -22,6 +22,7 @@ export {
   DELEGATION_HEADER,
   type DelegatedPrincipal,
   type DelegationMode,
+  type RefusedRequest,
   delegationRefusal,
   verifyDelegation,
   verifyDelegationToken,

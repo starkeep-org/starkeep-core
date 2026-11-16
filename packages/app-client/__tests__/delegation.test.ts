@@ -156,9 +156,53 @@ describe("forwarding the token", () => {
 });
 
 describe("delegationRefusal", () => {
+  function refused(url: string, authorization?: string) {
+    return new Request(url, { headers: authorization ? { authorization } : {} });
+  }
+
+  beforeEach(() => {
+    process.env.STARKEEP_APP_CLIENT_MODE = "cloud";
+    process.env.STARKEEP_APP_BASE_PATH = "/apps/probe";
+    process.env.STARKEEP_PUBLIC_BASE_URL = "https://cloud.example.com/";
+  });
+
   it("tells a client a bearer token is expected", () => {
     const res = delegationRefusal();
     expect(res.status).toBe(401);
-    expect(res.headers.get("WWW-Authenticate")).toContain("Bearer");
+    expect(res.headers.get("WWW-Authenticate")).toBe('Bearer realm="starkeep"');
+  });
+
+  it("names the route's resource metadata on the public base URL", () => {
+    // The app sees its own path with the mount stripped.
+    const res = delegationRefusal(refused("https://x.execute-api.test/mcp"));
+    expect(res.headers.get("WWW-Authenticate")).toBe(
+      'Bearer realm="starkeep", resource_metadata="https://cloud.example.com/.well-known/oauth-protected-resource/apps/probe/mcp"',
+    );
+  });
+
+  it("does not repeat a mount the request still carries", () => {
+    const res = delegationRefusal(refused("https://x.execute-api.test/apps/probe/mcp"));
+    expect(res.headers.get("WWW-Authenticate")).toContain(
+      "/.well-known/oauth-protected-resource/apps/probe/mcp",
+    );
+  });
+
+  it("says invalid_token when the request carried a bearer", () => {
+    const res = delegationRefusal(refused("https://x/mcp", "Bearer skd_expired"));
+    expect(res.headers.get("WWW-Authenticate")).toMatch(
+      /^Bearer realm="starkeep", error="invalid_token", resource_metadata="[^"]+"$/,
+    );
+  });
+
+  it("omits resource_metadata without the public base URL, and on the local surface", () => {
+    delete process.env.STARKEEP_PUBLIC_BASE_URL;
+    expect(delegationRefusal(refused("https://x/mcp")).headers.get("WWW-Authenticate")).toBe(
+      'Bearer realm="starkeep"',
+    );
+    process.env.STARKEEP_PUBLIC_BASE_URL = "https://cloud.example.com";
+    process.env.STARKEEP_APP_CLIENT_MODE = "local";
+    expect(
+      delegationRefusal(refused("http://127.0.0.1:4000/mcp")).headers.get("WWW-Authenticate"),
+    ).toBe('Bearer realm="starkeep"');
   });
 });
