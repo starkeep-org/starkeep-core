@@ -6,11 +6,32 @@ same admin-installer CLIs an operator runs. It is the only suite that touches a
 live account, so it is **inert unless explicitly enabled**.
 
 ```bash
+echo 'STARKEEP_AWS_REGION=us-west-2' >> .env.local   # once, from the repo root
 STARKEEP_AWS_TESTS=1 pnpm test:aws          # from repo root (turbo) or this dir
 ```
 
 Without `STARKEEP_AWS_TESTS=1` the suite reports skipped and makes no AWS calls.
 `pnpm test` (the default unit suite) never runs it.
+
+## The test region
+
+`STARKEEP_AWS_REGION` has no default, and an enabled run without it fails at
+once. Pick a region that none of your live deployments use, and that offers
+Aurora DSQL. The test stack and a live deployment in one region share every
+regional service, including Cognito. A teardown command that names the wrong
+prefix in that region reaches the live deployment's resources. A separate
+region confines that mistake to the global services (IAM, CloudFront, Route53
+and the `us-east-1` certificates), where the prefix still separates them.
+
+The suite reads the repository's `.env.local`, so set the region there once. An
+exported variable wins over the file. When the region matches the region of a
+live deployment, the run prints a warning and goes on. The suite finds live
+deployments in `~/.starkeep/config.json` and in the config that `STARKEEP_DIR`
+names. `scripts/teardown-bootstrap.sh` prints the same kind of warning when
+`--region` holds another deployment.
+
+To move an existing test stack, tear it down in its old region first. The run
+state in `.run/<prefix>/` describes one region at a time.
 
 Custom domains have a live suite of their own, `e2e-aws-custom-domain`, which
 needs a DNS zone you control and never runs under `pnpm test:aws`. Its
@@ -136,7 +157,7 @@ registry database, which must not land in a checkout you do not own.
 | `STARKEEP_AWS_TESTS`        | _(unset)_           | Must be `1` to run; otherwise the suite skips.                                                                                                                                                                                                     |
 | `STARKEEP_AWS_APP_DIR`      | _(unset)_           | The app to run against. Unset selects `test-apps/probe`. A path with no manifest fails the run.                                                                                                                                                    |
 | `STARKEEP_AWS_STACK_PREFIX` | `sktest`            | Dedicated test stack prefix. **Never** point this at a live deployment's prefix.                                                                                                                                                                   |
-| `STARKEEP_AWS_REGION`       | `us-east-2`         | Region for a from-scratch bootstrap (an existing stack's own region always wins via its pool ID).                                                                                                                                                  |
+| `STARKEEP_AWS_REGION`       | _(required)_        | The region of the test stack. Choose one that no live deployment uses (see "The test region").                                                                                                                                                     |
 | `STARKEEP_AWS_TEARDOWN`     | `all`               | What to tear down **after a fully passing run**: `all` → `teardown-bootstrap.sh`; `apps` → `teardown-cloud-data-server.sh`; `none` → keep everything up. A run with **any failed step never tears down**, so a broken stack is left for debugging. |
 | `HMAC_CACHE_TTL_MS`         | `0` (in this suite) | Baked into the broker Lambda at install. The suite sets `0` so a just-rotated/revoked app secret isn't served from the broker's cache. Real installs leave it unset → broker keeps its 5-min default.                                              |
 
@@ -145,8 +166,9 @@ development). The runner authenticates the admin user itself and hands the
 Cognito-derived temporary credentials to the CLIs via `--non-interactive`.
 
 Turbo sanitizes the environment, so `turbo.json`'s `test:aws` task declares all
-of the above (plus the AWS credential vars) under `passThroughEnv` — without
-that, the gate var never reaches vitest and the suite silently skips.
+of the above (plus the AWS credential vars, and `STARKEEP_DIR` for the region
+check) under `passThroughEnv` — without that, the gate var never reaches vitest
+and the suite silently skips.
 
 ## Run state (`src/run-state.ts`)
 
