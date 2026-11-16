@@ -56,10 +56,15 @@ STARKEEP_AWS_TESTS=1 pnpm test:aws:custom-domain     # from the repository root
 
 Without `STARKEEP_AWS_TESTS=1`, or without `STARKEEP_AWS_CUSTOM_DOMAIN_ZONE`, the
 suite reports skipped and makes no AWS call. The suite reads the repository's
-`.env`, so the zone can live there.
+`.env` and `.env.local`, so the zone can live there.
 
-`STARKEEP_AWS_STACK_PREFIX`, `STARKEEP_AWS_E2E_REGION` and `STARKEEP_AWS_TEARDOWN`
-work as in `e2e-aws`, so an enabled run without `STARKEEP_AWS_E2E_REGION` fails. The suite shares the journey's run-state directory, so it
+`STARKEEP_AWS_STACK_PREFIX`, `STARKEEP_AWS_E2E_REGION` and
+`STARKEEP_AWS_TEARDOWN` work as in `e2e-aws`. The suite checks the region
+whenever `STARKEEP_AWS_TESTS=1` is set, so a run without
+`STARKEEP_AWS_E2E_REGION` fails even when the zone is unset. A region that a
+live deployment uses prints a warning, and the run goes on.
+
+The suite shares the journey's run-state directory, so it
 reuses a stack that a journey run kept warm with `STARKEEP_AWS_TEARDOWN=none`,
 and it creates the bootstrap stack, the cloud data server and the Probe app when
 they are missing. A failed run tears nothing down.
