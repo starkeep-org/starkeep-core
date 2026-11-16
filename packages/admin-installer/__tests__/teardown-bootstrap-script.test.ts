@@ -250,6 +250,25 @@ describe("teardown-bootstrap.sh", () => {
     expect(identifiersOf(after).sort()).toEqual(identifiersOf(live).sort());
   });
 
+  it("warns when another deployment's config names a pool in the target's region", () => {
+    const { status, output } = runTeardown("sktest", mergeAccounts(live, target), ["--dry-run"]);
+    expect(status, output).toBe(0);
+    expect(output).toContain(
+      `WARNING: ${REGION} also holds the deployment that ${sandbox.configFile} describes`,
+    );
+    expect(output).toContain("STARKEEP_AWS_REGION");
+  });
+
+  it("does not warn when no other deployment's pool is in the target's region", () => {
+    const { status, output } = sandbox.run(
+      "teardown-bootstrap.sh",
+      ["--yes", "--dry-run", "--prefix", "sktest", "--region", "us-west-2"],
+      live,
+    );
+    expect(status, output).toBe(0);
+    expect(output).not.toContain("also holds the deployment");
+  });
+
   it("deletes the config's own deployment when the config describes the target", () => {
     const { status, output, account } = runTeardown("live", mergeAccounts(live, target), [
       "--force",
