@@ -10,7 +10,10 @@
  * - `GET /connect/callback` exchanges the code. For a consent, it creates the
  *   delegation, seals the fresh refresh token into the row, and shows the
  *   token once. For the connections list, it sets a short session cookie and
- *   returns to the list.
+ *   returns to the list. For an OAuth request, it shows the OAuth consent
+ *   page (`oauth-authorize.ts`).
+ * - `GET /connect/authorize` and `POST /connect/authorize/approve` serve an
+ *   OAuth client's authorization request; see `oauth-authorize.ts`.
  * - `GET /connections` lists the user's delegations, and
  *   `POST /connections/<id>/revoke` ends one.
  * - `GET /connect/jwks.json` publishes the public key.
@@ -27,9 +30,10 @@
  *
  * Every failure answers a page that says what went wrong, never a 500.
  */
-import { createHash, randomBytes } from "node:crypto";
 import {
   CONNECT_APPROVE_ROUTE,
+  CONNECT_AUTHORIZE_APPROVE_ROUTE,
+  CONNECT_AUTHORIZE_ROUTE,
   CONNECT_CALLBACK_ROUTE,
   CONNECT_JWKS_ROUTE,
   CONNECT_ROUTE,
@@ -40,14 +44,34 @@ import {
   parseConnectionRevokePath,
   type DelegationMode,
 } from "@starkeep/protocol-primitives";
-import type { DatabaseClient } from "@starkeep/storage-aurora-dsql";
+import {
+  clearPending,
+  cookie,
+  csrfFor,
+  csrfOk,
+  DEFAULT_EXPIRY_DAYS,
+  exchangeCode,
+  EXPIRY_DAYS,
+  html,
+  message,
+  newPendingIds,
+  readCookies,
+  readPendingJson,
+  redirect,
+  revokeAtCognito,
+  sameOriginPost,
+  startSignIn,
+  type ConnectDeps,
+  type ConnectRequest,
+  type ConnectResponse,
+  type PendingBase,
+  type Tokens,
+} from "./connect-pages.js";
 import {
   delegationJwks,
   openRefreshToken,
   sealRefreshToken,
-  secretsEqual,
   signDelegationToken,
-  type DelegationSigningKey,
 } from "./delegation-tokens.js";
 import {
   insertDelegation,
@@ -55,329 +79,77 @@ import {
   listDelegations,
   newDelegationId,
   revokeDelegation,
-  type ConnectableApp,
   type DelegationRow,
 } from "./delegation-store.js";
-import { verifyUserToken, type PoolConfig } from "./verify-user-token.js";
+import {
+  authorize,
+  approveAuthorization,
+  oauthCallback,
+  readPendingOAuth,
+  type PendingOAuth,
+} from "./oauth-authorize.js";
+import { verifyUserToken } from "./verify-user-token.js";
 
-const PENDING_COOKIE = "sk_connect";
-const PENDING_PATH = CONNECT_ROUTE;
-const PENDING_MAX_AGE_S = 600;
-const CSRF_COOKIE = "sk_connect_csrf";
 const SESSION_COOKIE = "sk_connections";
 /** The connections list's own session: one ID token's life. */
 const SESSION_MAX_AGE_S = 15 * 60;
 
-export const EXPIRY_DAYS = [7, 30, 90, 365] as const;
-export const DEFAULT_EXPIRY_DAYS = 90;
+export { DEFAULT_EXPIRY_DAYS, EXPIRY_DAYS };
 export const DEFAULT_MODE: DelegationMode = "read";
 
 const APP_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 const MAX_CLIENT_NAME = 64;
 
-export type { ConnectableApp } from "./delegation-store.js";
-
-export interface ConnectDeps {
-  /** The connectors client, or null when the deployment predates it. */
-  pool: PoolConfig | null;
-  /** The managed login page's host name. */
-  cognitoDomain: string | undefined;
-  /** The execute-api hostname the request arrived on. */
-  host: string;
-  signingKey(): Promise<DelegationSigningKey | null>;
-  /** A database client as the platform's standing identity, untagged. */
-  db(): Promise<DatabaseClient>;
-  /** The installed apps that serve outside clients. */
-  connectableApps(): Promise<ConnectableApp[]>;
-  groupsMayUseData(groups: readonly string[]): boolean;
-  /** Drop a revoked delegation from this container's row cache. */
-  forgetDelegation(id: string): void;
-  fetch?: typeof globalThis.fetch;
-  now?: () => number;
-}
-
-export interface ConnectRequest {
-  method: string;
-  rawPath: string;
-  query: Record<string, string | undefined>;
-  /** Lower-cased header names. */
-  headers: Record<string, string | undefined>;
-  cookieHeader: string | undefined;
-  body: string;
-}
-
-export interface ConnectResponse {
-  statusCode: number;
-  headers: Record<string, string>;
-  cookies?: string[];
-  body: string;
-}
+export type { ConnectDeps, ConnectRequest, ConnectResponse } from "./connect-pages.js";
+export { sameOriginPost } from "./connect-pages.js";
 
 export function isConnectRoute(method: string, rawPath: string): boolean {
   if (method === "GET") {
-    return [CONNECT_ROUTE, CONNECT_CALLBACK_ROUTE, CONNECT_JWKS_ROUTE, CONNECTIONS_ROUTE].includes(
-      rawPath,
-    );
+    return [
+      CONNECT_ROUTE,
+      CONNECT_AUTHORIZE_ROUTE,
+      CONNECT_CALLBACK_ROUTE,
+      CONNECT_JWKS_ROUTE,
+      CONNECTIONS_ROUTE,
+    ].includes(rawPath);
   }
   if (method === "POST") {
-    return rawPath === CONNECT_APPROVE_ROUTE || parseConnectionRevokePath(rawPath) !== null;
+    return (
+      rawPath === CONNECT_APPROVE_ROUTE ||
+      rawPath === CONNECT_AUTHORIZE_APPROVE_ROUTE ||
+      parseConnectionRevokePath(rawPath) !== null
+    );
   }
   return false;
 }
 
 // ---------------------------------------------------------------------------
-// Cookies, headers and pages
+// The pending sign-in
 // ---------------------------------------------------------------------------
 
-function cookie(name: string, value: string, path: string, maxAge: number): string {
-  return (
-    `${name}=${value}; Path=${path}; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax` +
-    (maxAge === 0 ? "; Expires=Thu, 01 Jan 1970 00:00:00 GMT" : "")
-  );
-}
-
-function readCookies(header: string | undefined): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const part of (header ?? "").split(";")) {
-    const trimmed = part.trim();
-    const eq = trimmed.indexOf("=");
-    if (eq <= 0) continue;
-    const name = trimmed.slice(0, eq);
-    if (out[name] !== undefined) continue;
-    try {
-      out[name] = decodeURIComponent(trimmed.slice(eq + 1));
-    } catch {
-      // A malformed value is ignored rather than trusted.
-    }
-  }
-  return out;
-}
-
-function securityHeaders(cognitoDomain: string | undefined): Record<string, string> {
-  const formTargets = cognitoDomain ? `'self' https://${cognitoDomain}` : "'self'";
-  return {
-    "Content-Type": "text/html; charset=utf-8",
-    "Cache-Control": "no-store",
-    "Content-Security-Policy":
-      `default-src 'none'; style-src 'unsafe-inline'; form-action ${formTargets}; ` +
-      `frame-ancestors 'none'; base-uri 'none'`,
-    "X-Frame-Options": "DENY",
-    "Referrer-Policy": "no-referrer",
-    "Cross-Origin-Opener-Policy": "same-origin",
-  };
-}
-
-const STYLE =
-  "body{font-family:system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem;" +
-  "line-height:1.5}label{display:block;margin:.75rem 0 .25rem}input,select{font:inherit}" +
-  "code,textarea{font-family:ui-monospace,monospace}textarea{width:100%;height:8rem}" +
-  "table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:.25rem .5rem;" +
-  "border-bottom:1px solid #ccc}.warn{color:#8a4b00}";
-
-function html(
-  deps: Pick<ConnectDeps, "cognitoDomain">,
-  status: number,
-  title: string,
-  body: string,
-  cookies: string[] = [],
-): ConnectResponse {
-  return {
-    statusCode: status,
-    headers: securityHeaders(deps.cognitoDomain),
-    cookies,
-    body:
-      `<!doctype html><html><head><meta charset="utf-8"><title>${escapeMarkup(title)}</title>` +
-      `<meta name="viewport" content="width=device-width,initial-scale=1">` +
-      `<style>${STYLE}</style></head><body><h1>${escapeMarkup(title)}</h1>${body}</body></html>`,
-  };
-}
-
-function message(
-  deps: Pick<ConnectDeps, "cognitoDomain">,
-  status: number,
-  text: string,
-  cookies: string[] = [],
-): ConnectResponse {
-  return html(
-    deps,
-    status,
-    "Starkeep",
-    `<p>${escapeMarkup(text)}</p><p><a href="${CONNECTIONS_ROUTE}">Your connections</a></p>`,
-    cookies,
-  );
-}
-
-function redirect(location: string, cookies: string[] = []): ConnectResponse {
-  return {
-    statusCode: 302,
-    headers: { Location: location, "Cache-Control": "no-store" },
-    cookies,
-    body: "",
-  };
-}
-
-/**
- * Whether a POST came from this origin. `Sec-Fetch-Site` answers directly in
- * current browsers; an older browser that does not send it must send an
- * `Origin` naming this host.
- */
-export function sameOriginPost(headers: Record<string, string | undefined>, host: string): boolean {
-  const site = headers["sec-fetch-site"];
-  if (site !== undefined) return site === "same-origin";
-  return headers["origin"] === `https://${host}`;
-}
-
-function csrfFor(req: ConnectRequest): { token: string; cookies: string[] } {
-  const existing = readCookies(req.cookieHeader)[CSRF_COOKIE];
-  if (existing && /^[A-Za-z0-9_-]{32,}$/.test(existing)) return { token: existing, cookies: [] };
-  const token = randomBytes(24).toString("base64url");
-  return { token, cookies: [cookie(CSRF_COOKIE, token, "/", 60 * 60 * 24)] };
-}
-
-function csrfOk(req: ConnectRequest, form: URLSearchParams): boolean {
-  const expected = readCookies(req.cookieHeader)[CSRF_COOKIE];
-  const got = form.get("csrf");
-  return !!expected && !!got && secretsEqual(expected, got);
-}
-
-// ---------------------------------------------------------------------------
-// Sign-in round trip
-// ---------------------------------------------------------------------------
-
-interface PendingConsent {
+interface PendingConsent extends PendingBase {
   kind: "consent";
-  state: string;
-  verifier: string;
   app: string;
   mode: DelegationMode;
   days: number;
   client: string;
 }
 
-interface PendingList {
+interface PendingList extends PendingBase {
   kind: "list";
-  state: string;
-  verifier: string;
 }
 
-type Pending = PendingConsent | PendingList;
-
-function pkceChallenge(verifier: string): string {
-  return createHash("sha256").update(verifier).digest("base64url");
-}
-
-function callbackUrl(deps: ConnectDeps): string {
-  return `https://${deps.host}${CONNECT_CALLBACK_ROUTE}`;
-}
-
-function startSignIn(deps: ConnectDeps, pending: Pending, cookies: string[] = []): ConnectResponse {
-  const authorize = new URL(`https://${deps.cognitoDomain}/oauth2/authorize`);
-  authorize.search = new URLSearchParams({
-    response_type: "code",
-    client_id: deps.pool!.userPoolClientId,
-    redirect_uri: callbackUrl(deps),
-    scope: "openid email",
-    state: pending.state,
-    code_challenge: pkceChallenge(pending.verifier),
-    code_challenge_method: "S256",
-  }).toString();
-  return redirect(authorize.toString(), [
-    ...cookies,
-    cookie(
-      PENDING_COOKIE,
-      Buffer.from(JSON.stringify(pending)).toString("base64url"),
-      PENDING_PATH,
-      PENDING_MAX_AGE_S,
-    ),
-  ]);
-}
-
-function newPendingIds(): { state: string; verifier: string } {
-  return {
-    state: randomBytes(16).toString("base64url"),
-    verifier: randomBytes(32).toString("base64url"),
-  };
-}
+type Pending = PendingConsent | PendingList | PendingOAuth;
 
 function readPending(req: ConnectRequest): Pending | null {
-  const raw = readCookies(req.cookieHeader)[PENDING_COOKIE];
-  if (!raw) return null;
-  try {
-    const p = JSON.parse(Buffer.from(raw, "base64url").toString("utf8")) as Record<string, unknown>;
-    if (typeof p.state !== "string" || typeof p.verifier !== "string") return null;
-    if (p.kind === "list") return { kind: "list", state: p.state, verifier: p.verifier };
-    if (p.kind !== "consent") return null;
-    const form = checkConsentForm({
-      app: p.app,
-      mode: p.mode,
-      days: p.days,
-      client: p.client,
-    });
-    return form.ok
-      ? { kind: "consent", state: p.state, verifier: p.verifier, ...form.value }
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-const clearPending = () => cookie(PENDING_COOKIE, "", PENDING_PATH, 0);
-
-interface Tokens {
-  idToken: string;
-  refreshToken: string;
-  userId: string;
-  groups: readonly string[];
-}
-
-async function exchangeCode(
-  deps: ConnectDeps,
-  code: string,
-  verifier: string,
-): Promise<Tokens | null> {
-  const doFetch = deps.fetch ?? globalThis.fetch;
-  const res = await doFetch(`https://${deps.cognitoDomain}/oauth2/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      client_id: deps.pool!.userPoolClientId,
-      code,
-      redirect_uri: callbackUrl(deps),
-      code_verifier: verifier,
-    }).toString(),
-  });
-  const answer = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-  if (!res.ok) {
-    console.warn(`[connect] the token exchange answered ${res.status}`);
-    return null;
-  }
-  const idToken = typeof answer.id_token === "string" ? answer.id_token : null;
-  const refreshToken = typeof answer.refresh_token === "string" ? answer.refresh_token : null;
-  if (!idToken || !refreshToken) return null;
-  const claims = await verifyUserToken(idToken, deps.pool!);
-  if (!claims) return null;
-  return { idToken, refreshToken, userId: claims.sub, groups: claims.groups };
-}
-
-/** End one refresh token at Cognito. A failure is logged, not fatal. */
-async function revokeAtCognito(deps: ConnectDeps, refreshToken: string): Promise<void> {
-  try {
-    const res = await (deps.fetch ?? globalThis.fetch)(
-      `https://${deps.cognitoDomain}/oauth2/revoke`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          token: refreshToken,
-          client_id: deps.pool!.userPoolClientId,
-        }).toString(),
-      },
-    );
-    if (!res.ok) console.warn(`[connect] revoking a refresh token answered ${res.status}`);
-  } catch (err) {
-    console.warn("[connect] revoking a refresh token failed:", err);
-  }
+  const p = readPendingJson(req);
+  if (!p) return null;
+  const ids = { state: p.state as string, verifier: p.verifier as string };
+  if (p.kind === "list") return { kind: "list", ...ids };
+  if (p.kind === "oauth") return readPendingOAuth(p, ids);
+  if (p.kind !== "consent") return null;
+  const form = checkConsentForm({ app: p.app, mode: p.mode, days: p.days, client: p.client });
+  return form.ok ? { kind: "consent", ...ids, ...form.value } : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -515,6 +287,8 @@ async function callback(req: ConnectRequest, deps: ConnectDeps): Promise<Connect
       cookie(SESSION_COOKIE, tokens.idToken, CONNECTIONS_ROUTE, SESSION_MAX_AGE_S),
     ]);
   }
+
+  if (pending.kind === "oauth") return await oauthCallback(req, deps, pending, tokens);
 
   // Checked again here, not only on the form: the app may have been
   // uninstalled during the sign-in, and uninstall's delete of its
@@ -671,6 +445,10 @@ export async function handleConnectRoute(
     if (req.method === "GET" && req.rawPath === CONNECT_ROUTE) return await consentPage(req, deps);
     if (req.method === "POST" && req.rawPath === CONNECT_APPROVE_ROUTE)
       return await approve(req, deps);
+    if (req.method === "GET" && req.rawPath === CONNECT_AUTHORIZE_ROUTE)
+      return await authorize(req, deps);
+    if (req.method === "POST" && req.rawPath === CONNECT_AUTHORIZE_APPROVE_ROUTE)
+      return await approveAuthorization(req, deps);
     if (req.method === "GET" && req.rawPath === CONNECT_CALLBACK_ROUTE)
       return await callback(req, deps);
     if (req.method === "GET" && req.rawPath === CONNECTIONS_ROUTE) {
