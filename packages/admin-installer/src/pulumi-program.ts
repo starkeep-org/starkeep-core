@@ -178,9 +178,6 @@ export function buildPulumiProgram(
               // would be a second copy of the platform's own routing choice.
               STARKEEP_APP_BASE_PATH: `/apps/${ctx.appId}`,
               STARKEEP_CLOUD_DATA_BASE: ctx.apiGatewayUrl,
-              // The browser-facing base, for the resource metadata URL an
-              // app's 401 names to an outside client.
-              ...(ctx.publicBaseUrl ? { STARKEEP_PUBLIC_BASE_URL: ctx.publicBaseUrl } : {}),
               STARKEEP_APP_CREDS_PARAMETER_NAME: `/${ctx.stackPrefix}/app-creds/${ctx.appId}`,
               ...handler.env,
             },

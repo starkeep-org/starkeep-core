@@ -411,6 +411,25 @@ async function fetchEventually(
       }
     });
 
+    // An OAuth client finds the metadata at its well-known location on the
+    // host it called, so each host's document must name that host: RFC 9728
+    // and the MCP SDK refuse a resource that differs from the server URL.
+    for (const which of ["custom domain", "cloudfront.net name"] as const) {
+      it(`serves OAuth discovery on the ${which}, naming that host`, async () => {
+        const host = which === "custom domain" ? FIRST : config.cloudfrontDomain!;
+        const mcp = `https://${host}/apps/${probeApp.appId}/mcp`;
+        const bare = await fetch(mcp, { method: "POST", body: "{}" });
+        expect(bare.status).toBe(401);
+        const res = await fetch(
+          `https://${host}/.well-known/oauth-protected-resource/apps/${probeApp.appId}/mcp`,
+        );
+        expect(res.status).toBe(200);
+        const doc = (await res.json()) as { resource: string; authorization_servers: string[] };
+        expect(doc.resource).toBe(mcp);
+        expect(doc.authorization_servers).toEqual([config.apiGatewayUrl!.replace(/\/+$/, "")]);
+      });
+    }
+
     // ---- 5. Signed bytes on the custom host ---------------------------------
 
     it("mints signed URLs on the custom host, and the edge enforces them", async () => {

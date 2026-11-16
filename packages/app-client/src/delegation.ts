@@ -160,52 +160,29 @@ export async function verifyDelegation(req: GuardedRequest): Promise<DelegatedPr
 
 /** The parts of a refused request {@link delegationRefusal} reads. */
 export interface RefusedRequest {
-  url: string;
   headers: { get(name: string): string | null };
-}
-
-/** Where protected resource metadata lives, relative to the resource's host. */
-const PRM_PREFIX = "/.well-known/oauth-protected-resource";
-
-/**
- * The resource metadata URL for a refused cloud request, or null when the
- * app does not know its public base URL. The path is the route's path under
- * the app's mount, whether or not the request still carries the mount.
- */
-function resourceMetadataUrl(req: RefusedRequest): string | null {
-  const base = process.env.STARKEEP_PUBLIC_BASE_URL?.replace(/\/+$/, "");
-  if (!base) return null;
-  let path: string;
-  try {
-    path = new URL(req.url, "http://localhost").pathname;
-  } catch {
-    return null;
-  }
-  const mount = (process.env.STARKEEP_APP_BASE_PATH ?? "").replace(/\/+$/, "");
-  if (mount && path !== mount && !path.startsWith(`${mount}/`)) path = `${mount}${path}`;
-  return `${base}${PRM_PREFIX}${path}`;
 }
 
 /**
  * The answer for a request {@link verifyDelegation} refused: a 401 with a
  * `WWW-Authenticate` challenge.
  *
- * Pass the request so an MCP client can find where to sign in. In the cloud,
- * the challenge then names the route's protected resource metadata
- * (`resource_metadata`, RFC 9728), from `STARKEEP_PUBLIC_BASE_URL`, and says
- * `error="invalid_token"` when the request carried a bearer token, which
- * tells the client to refresh or sign in again. Without the request, or
- * without the variable, the challenge names neither, and a client falls back
- * to the well-known location under the route's path.
+ * Pass the request, so the challenge says `error="invalid_token"` when the
+ * request carried a bearer token, which tells an MCP client to refresh or
+ * sign in again.
+ *
+ * The challenge names no `resource_metadata`. In the cloud the gateway
+ * answers every request without a valid token before the app runs, with a
+ * 401 that carries no challenge at all, so an OAuth client must already find
+ * the route's protected resource metadata at its well-known location on the
+ * host it called. That location names the right host on every one of the
+ * deployment's names, where a URL built here could name only one.
  */
 export function delegationRefusal(req?: RefusedRequest): Response {
   const params = ['realm="starkeep"'];
   if (req && /^Bearer\s+\S/i.test(req.headers.get("authorization") ?? "")) {
     params.push('error="invalid_token"');
   }
-  const metadata =
-    req && process.env.STARKEEP_APP_CLIENT_MODE === "cloud" ? resourceMetadataUrl(req) : null;
-  if (metadata) params.push(`resource_metadata="${metadata}"`);
   return new Response(JSON.stringify({ error: "A valid delegation token is required" }), {
     status: 401,
     headers: {
