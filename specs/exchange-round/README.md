@@ -18,22 +18,22 @@ The responder applies every record in a shipment, then every label. Each write i
 
 **1a. Crash (`models/finding-crash.cfg`, `CloudNoLoss`, depth 14).** The label never reaches the cloud.
 
-| Step | What happens | State afterwards |
-|---|---|---|
-| 1 | Device L writes `label@1`, then `record@2`. | L holds both. |
-| 2 | L pushes. The cloud applies `record@2`. | Cloud coverage for L is 2. |
-| 3 | The Lambda dies before the label write. | L's response is lost; L's cache of the cloud's coverage is still 0. |
-| 4 | L's next `sync()` owes the cloud something, so it pulls first (`exchange({ push: false })`). | The response reports coverage L = 2. L replaces its cache with it. |
-| 5 | L pushes, scanning above 2. | `label@1` is below the scan, so it is never offered again. The cloud never gets it, and neither does any other device. |
+| Step | What happens                                                                                 | State afterwards                                                                                                       |
+| ---- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| 1    | Device L writes `label@1`, then `record@2`.                                                  | L holds both.                                                                                                          |
+| 2    | L pushes. The cloud applies `record@2`.                                                      | Cloud coverage for L is 2.                                                                                             |
+| 3    | The Lambda dies before the label write.                                                      | L's response is lost; L's cache of the cloud's coverage is still 0.                                                    |
+| 4    | L's next `sync()` owes the cloud something, so it pulls first (`exchange({ push: false })`). | The response reports coverage L = 2. L replaces its cache with it.                                                     |
+| 5    | L pushes, scanning above 2.                                                                  | `label@1` is below the scan, so it is never offered again. The cloud never gets it, and neither does any other device. |
 
 **1b. Concurrent reader (`models/finding-concurrent.cfg`, `DeviceNoGap`, depth 10).** A second device never gets the label.
 
-| Step | What happens | State afterwards |
-|---|---|---|
-| 1 | L writes `label@1`, then `record@2`, and pushes. The cloud applies `record@2`. | The cloud holds `record@2` but not `label@1` yet. |
-| 2 | Device M's round is served in that window. The cloud ships `record@2`. | M's rows watermark for L is 2. |
-| 3 | L's label lands. | The cloud is now complete. |
-| 4 | M keeps syncing. The cloud ships L's rows above 2. | `label@1` is never offered to M. |
+| Step | What happens                                                                   | State afterwards                                  |
+| ---- | ------------------------------------------------------------------------------ | ------------------------------------------------- |
+| 1    | L writes `label@1`, then `record@2`, and pushes. The cloud applies `record@2`. | The cloud holds `record@2` but not `label@1` yet. |
+| 2    | Device M's round is served in that window. The cloud ships `record@2`.         | M's rows watermark for L is 2.                    |
+| 3    | L's label lands.                                                               | The cloud is now complete.                        |
+| 4    | M keeps syncing. The cloud ships L's rows above 2.                             | `label@1` is never offered to M.                  |
 
 ### 2. One HLC can be split across statements
 
@@ -59,37 +59,37 @@ These are proposals checked against the model, not changes that have been made. 
 
 `./check-all.sh` compares each model's verdict with `expected.txt`. Every `pass` row is exhaustive: TLC explored every reachable state.
 
-| Model | Shape | Expected and got | Distinct states | Depth |
-|---|---|---|---|---|
-| finding-crash | records then labels, 1 crash | CloudNoLoss | 504 | 17 |
-| finding-concurrent | records then labels, 2 devices | DeviceNoGap | 596 | 14 |
-| finding-batch-crash | batch of 2 sharing an HLC, 1 crash | CloudNoLoss | 113 | 15 |
-| finding-batch-concurrent | batch of 2 sharing an HLC, 2 devices | DeviceNoGap | 259 | 17 |
-| finding-lww-race | read-then-write LWW, 2 writers, one key | CloudNoLoss | 690 | 13 |
-| fixed-crash | guarded, merged, one transaction per HLC; 1 crash | pass | 404 | 14 |
-| fixed-concurrent | as above, 2 devices | pass | 1,435 | 22 |
-| fixed-batches | 3 records, batches of 2, 1 crash | pass | 174,688 | 20 |
-| fixed-labelbatch | 2 devices, label batch, Limit 1, 1 crash | pass | 36,102 | 25 |
-| fixed-two-writers | 2 writers, 2 records + 1 label, Limit 1, 1 crash | pass | 1,294,812 | 33 |
-| fixed-hlc-skew | 2 writers, HLCs not in real-time order | pass | 381,993 | 33 |
-| fixed-relay | 2 writers, batches, Limit 2, 1 crash | pass | 11,432,190 | 33 |
-| deferred-crash | guarded, merged, deferred coverage; 1 crash | pass | 582 | 17 |
-| deferred-concurrent | as above, 2 devices | pass | 1,657 | 24 |
-| deferred-batch-crash | batch of 2, 1 crash | pass | 120 | 14 |
-| deferred-batch-concurrent | batch of 2, 2 devices | pass | 246 | 19 |
-| deferred-batches | 3 records, batches of 2, 1 crash | pass | 315,125 | 27 |
-| deferred-labelbatch | 2 devices, label batch, Limit 1, 1 crash | pass | 56,814 | 29 |
-| deferred-two-writers | 2 writers, Limit 1, 1 crash | pass | 2,109,054 | 36 |
-| deferred-relay | 2 writers, batches, Limit 2 | pass | 4,411,065 | 38 |
-| mutant-nocap | deferred coverage without the scan cap | DeviceNoGap | 170 | 11 |
-| mutant-notrim | `collectSince` without the HLC-boundary trim | CloudNoLoss | 188 | 10 |
-| mutant-split | `cutRound` cutting items, not whole timestamps | CloudNoLoss | 170 | 9 |
-| mutant-perstream | ceiling per stream instead of the minimum | CloudNoLoss | 15,912 | 9 |
-| witness-relayed-label | a device holds another device's label | reached | 14,038 | 9 |
-| witness-truncated | a round ships less than it owes | reached | 399 | 5 |
-| witness-batch | a batch arrives whole on another device | reached | 2,086 | 8 |
-| witness-crash | a crash happens | reached | 486 | 5 |
-| witness-converged | every write done, everyone holds the same rows | reached | 20,334 | 10 |
+| Model                     | Shape                                             | Expected and got | Distinct states | Depth |
+| ------------------------- | ------------------------------------------------- | ---------------- | --------------- | ----- |
+| finding-crash             | records then labels, 1 crash                      | CloudNoLoss      | 504             | 17    |
+| finding-concurrent        | records then labels, 2 devices                    | DeviceNoGap      | 596             | 14    |
+| finding-batch-crash       | batch of 2 sharing an HLC, 1 crash                | CloudNoLoss      | 113             | 15    |
+| finding-batch-concurrent  | batch of 2 sharing an HLC, 2 devices              | DeviceNoGap      | 259             | 17    |
+| finding-lww-race          | read-then-write LWW, 2 writers, one key           | CloudNoLoss      | 690             | 13    |
+| fixed-crash               | guarded, merged, one transaction per HLC; 1 crash | pass             | 404             | 14    |
+| fixed-concurrent          | as above, 2 devices                               | pass             | 1,435           | 22    |
+| fixed-batches             | 3 records, batches of 2, 1 crash                  | pass             | 174,688         | 20    |
+| fixed-labelbatch          | 2 devices, label batch, Limit 1, 1 crash          | pass             | 36,102          | 25    |
+| fixed-two-writers         | 2 writers, 2 records + 1 label, Limit 1, 1 crash  | pass             | 1,294,812       | 33    |
+| fixed-hlc-skew            | 2 writers, HLCs not in real-time order            | pass             | 381,993         | 33    |
+| fixed-relay               | 2 writers, batches, Limit 2, 1 crash              | pass             | 11,432,190      | 33    |
+| deferred-crash            | guarded, merged, deferred coverage; 1 crash       | pass             | 582             | 17    |
+| deferred-concurrent       | as above, 2 devices                               | pass             | 1,657           | 24    |
+| deferred-batch-crash      | batch of 2, 1 crash                               | pass             | 120             | 14    |
+| deferred-batch-concurrent | batch of 2, 2 devices                             | pass             | 246             | 19    |
+| deferred-batches          | 3 records, batches of 2, 1 crash                  | pass             | 315,125         | 27    |
+| deferred-labelbatch       | 2 devices, label batch, Limit 1, 1 crash          | pass             | 56,814          | 29    |
+| deferred-two-writers      | 2 writers, Limit 1, 1 crash                       | pass             | 2,109,054       | 36    |
+| deferred-relay            | 2 writers, batches, Limit 2                       | pass             | 4,411,065       | 38    |
+| mutant-nocap              | deferred coverage without the scan cap            | DeviceNoGap      | 170             | 11    |
+| mutant-notrim             | `collectSince` without the HLC-boundary trim      | CloudNoLoss      | 188             | 10    |
+| mutant-split              | `cutRound` cutting items, not whole timestamps    | CloudNoLoss      | 170             | 9     |
+| mutant-perstream          | ceiling per stream instead of the minimum         | CloudNoLoss      | 15,912          | 9     |
+| witness-relayed-label     | a device holds another device's label             | reached          | 14,038          | 9     |
+| witness-truncated         | a round ships less than it owes                   | reached          | 399             | 5     |
+| witness-batch             | a batch arrives whole on another device           | reached          | 2,086           | 8     |
+| witness-crash             | a crash happens                                   | reached          | 486             | 5     |
+| witness-converged         | every write done, everyone holds the same rows    | reached          | 20,334          | 10    |
 
 The mutants show the model catches the rules the code's comments call load-bearing. The witnesses show the interesting states are reachable, so a clean run is not a vacuous one.
 
@@ -103,19 +103,19 @@ Liveness is not checked. `witness-converged` shows that convergence is reachable
 
 ## Action-to-code map
 
-| Action | Code |
-|---|---|
-| `Write(n, S, t)` | An app write, e.g. `sdk.setLabels`: one `clock.now()` for the whole batch. The HLC is above everything the device holds, because every applied row went through `clock.receive`. |
-| `Scan`, `Collect` | `collectSince`, `planNodeScans`, `trimToHlcBoundary` in `storage-adapter/src/database/since-queries.ts` |
-| `Ceiling`, `Eligible` | `computeCeilings` in `sync-engine/src/round-cut.ts` |
-| `Cut` | `cutRound` in `round-cut.ts` |
-| `Start(n, push)` | `exchange()` in `sync-engine/src/sync-engine.ts`, outbound half; the pull-first round is `exchange({ push: false })` in `sync()` |
+| Action                          | Code                                                                                                                                                                                                                                                                  |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Write(n, S, t)`                | An app write, e.g. `sdk.setLabels`: one `clock.now()` for the whole batch. The HLC is above everything the device holds, because every applied row went through `clock.receive`.                                                                                      |
+| `Scan`, `Collect`               | `collectSince`, `planNodeScans`, `trimToHlcBoundary` in `storage-adapter/src/database/since-queries.ts`                                                                                                                                                               |
+| `Ceiling`, `Eligible`           | `computeCeilings` in `sync-engine/src/round-cut.ts`                                                                                                                                                                                                                   |
+| `Cut`                           | `cutRound` in `round-cut.ts`                                                                                                                                                                                                                                          |
+| `Start(n, push)`                | `exchange()` in `sync-engine/src/sync-engine.ts`, outbound half; the pull-first round is `exchange({ push: false })` in `sync()`                                                                                                                                      |
 | `CloudRead(n)`, `CloudWrite(n)` | `in-process-transport.ts`, steps 2 (records) and 2b (labels) as written: `get` / `getLabel`, the LWW comparison, then `put` / `putLabel`, each its own DSQL transaction; the coverage raise is `buildWatermarkRaises` in `storage-aurora-dsql/src/node-watermarks.ts` |
-| `CloudApply(n)` | The same apply with the comparison inside the write (fix A), optionally one transaction per HLC (`ApplyUnit = "timestamp"`) |
-| `CloudRaise(n)` | Proposed fix C2: the deferred coverage raise after an HLC's last row |
-| `CloudRespond(n)` | `in-process-transport.ts`, steps 3 to 5 |
-| `Crash(n)` | A Lambda timeout, or a response lost on the way back |
-| `Receive(n)` | `exchange()`, inbound half: LWW apply, `ownSafeAdvance` into `setWatermarks`, and the authoritative replace into `setPeerWatermarks` |
+| `CloudApply(n)`                 | The same apply with the comparison inside the write (fix A), optionally one transaction per HLC (`ApplyUnit = "timestamp"`)                                                                                                                                           |
+| `CloudRaise(n)`                 | Proposed fix C2: the deferred coverage raise after an HLC's last row                                                                                                                                                                                                  |
+| `CloudRespond(n)`               | `in-process-transport.ts`, steps 3 to 5                                                                                                                                                                                                                               |
+| `Crash(n)`                      | A Lambda timeout, or a response lost on the way back                                                                                                                                                                                                                  |
+| `Receive(n)`                    | `exchange()`, inbound half: LWW apply, `ownSafeAdvance` into `setWatermarks`, and the authoritative replace into `setPeerWatermarks`                                                                                                                                  |
 
 ## What is not modelled
 
