@@ -45,17 +45,56 @@ export class FakeDsql implements DatabaseClientFactory {
     return this.log.filter((q) => match.test(q.text));
   }
 
+  private terminateOnEnd = false;
+
+  /**
+   * Answer each statement a macrotask later, and make `end()` reject every
+   * statement the client has not answered yet, the way `pg` does.
+   *
+   * By default `end()` does nothing, so a handler that closes its client while
+   * a query is still running passes here and crashes in Lambda. With this on, a
+   * route that returns an un-awaited query from inside the handler's `try`
+   * fails: the `finally` closes the client first (STA-79).
+   */
+  terminateInFlightOnEnd(): this {
+    this.terminateOnEnd = true;
+    return this;
+  }
+
+  private answer(text: string, values: unknown[] | undefined): { rows: Rows } {
+    const q: LoggedQuery = { text, values: values ?? [] };
+    this.log.push(q);
+    for (const route of [...this.routes, ...this.fallbacks]) {
+      if (route.match.test(text)) return { rows: route.rows(q) };
+    }
+    throw new Error(`FakeDsql: unscripted SQL: ${text}`);
+  }
+
   async createClient(_options: AuroraDsqlDatabaseAdapterOptions): Promise<DatabaseClient> {
+    if (!this.terminateOnEnd) {
+      return {
+        query: async (text, values) => this.answer(text, values),
+        end: async () => {},
+      };
+    }
+    const inFlight = new Set<(err: Error) => void>();
     return {
-      query: async (text, values) => {
-        const q: LoggedQuery = { text, values: values ?? [] };
-        this.log.push(q);
-        for (const route of [...this.routes, ...this.fallbacks]) {
-          if (route.match.test(text)) return { rows: route.rows(q) };
-        }
-        throw new Error(`FakeDsql: unscripted SQL: ${text}`);
+      query: (text, values) =>
+        new Promise((resolve, reject) => {
+          inFlight.add(reject);
+          setImmediate(() => {
+            if (!inFlight.delete(reject)) return;
+            try {
+              resolve(this.answer(text, values));
+            } catch (err) {
+              reject(err);
+            }
+          });
+        }),
+      end: async () => {
+        for (const reject of inFlight) reject(new Error("Connection terminated"));
+        inFlight.clear();
       },
-      end: async () => {},
     };
   }
 }

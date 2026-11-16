@@ -4,7 +4,12 @@ import reactHooks from "eslint-plugin-react-hooks";
 
 export default [
   {
-    files: ["packages/*/src/**/*.ts", "apps/*/src/**/*.ts", "apps/*/*.ts"],
+    files: [
+      "packages/*/src/**/*.ts",
+      "packages/admin-installer/builtin-apps/*/src/**/*.ts",
+      "apps/*/src/**/*.ts",
+      "apps/*/*.ts",
+    ],
     languageOptions: {
       parser: tsparser,
       parserOptions: {
@@ -21,6 +26,11 @@ export default [
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
       ],
       "@typescript-eslint/no-explicit-any": "warn",
+      // `return promise` inside a `try` lets the `finally` run before the
+      // promise settles. A handler whose `finally` closes its database client
+      // then kills the query it is returning, and the rejection reaches Node
+      // with no handler attached, which ends the Lambda worker (STA-79).
+      "@typescript-eslint/return-await": ["error", "error-handling-correctness-only"],
     },
   },
   {
