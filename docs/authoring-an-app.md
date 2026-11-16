@@ -1033,11 +1033,23 @@ route declared `"auth": "delegated"`:
 "routes": ["GET /", "ANY /{proxy+}", { "route": "POST /mcp", "auth": "delegated" }]
 ```
 
-The user creates a token for your app on the platform's consent page, at
-`<gateway URL>/connect?app=<appId>`, and picks `read` or `readwrite` and an
-expiry. Link to that page from your app. The user lists and revokes tokens at
-`<gateway URL>/connections`. The outside client sends the token as
-`Authorization: Bearer skd_…` to your route's CloudFront URL.
+An outside client gets a token in one of two ways:
+
+- **OAuth.** A hosted connector, such as a claude.ai custom connector or a
+  ChatGPT connector, and Claude Code sign in by themselves. The user adds
+  your route's CloudFront URL, such as `https://<your domain>/apps/<appId>/mcp`,
+  as the server URL, with no header. The client finds the platform's sign-in
+  from the 401 your route answers, sends the user through sign-in and a
+  consent page, and keeps a fifteen-minute token that it renews. Your app
+  needs no code for this beyond passing the request to `delegationRefusal`,
+  as below.
+- **A pasted token.** For a script, or a client without OAuth, the user
+  creates a token on the platform's consent page, at
+  `<gateway URL>/connect?app=<appId>`, and picks `read` or `readwrite` and an
+  expiry. Link to that page from your app. The outside client sends the token
+  as `Authorization: Bearer skd_…` to your route's CloudFront URL.
+
+The user lists and revokes both kinds at `<gateway URL>/connections`.
 
 In the handler, ask the platform who is calling and forward the token on every
 data call:
@@ -1047,7 +1059,7 @@ import { delegationRefusal, signedFetch, verifyDelegation } from "@starkeep/app-
 
 app.post("/mcp", async (c) => {
   const who = await verifyDelegation(c.req.raw);
-  if (!who) return delegationRefusal();
+  if (!who) return delegationRefusal(c.req.raw);
   const res = await signedFetch(creds, "/app-data/db/notes", { delegation: who.token });
   // …
 });
@@ -1056,6 +1068,19 @@ app.post("/mcp", async (c) => {
 Mount the route before any gate that expects a session cookie, such as
 `honoOriginGate`, because an outside client never holds one. Probe's
 `test-apps/probe/src/mcp.ts` is a complete example.
+
+Pass the request to `delegationRefusal`. In the cloud, its 401 then names the
+route's resource metadata, which tells an OAuth client where to sign in, and
+says `error="invalid_token"` for an expired token, which tells the client to
+refresh. Without the request, the 401 still works, and a client looks for the
+metadata at its well-known location instead.
+
+Forwarding the token to the platform is safe here, and only here. The MCP
+specification forbids a server to pass a client's token to an upstream API,
+because the upstream would then trust a token meant for someone else. The
+platform's data server belongs to the same deployment that issued the token,
+checks that the token names your app, and requires your app's signature beside
+it. Never forward the token to any other service.
 
 What the platform enforces on every data call the route makes:
 

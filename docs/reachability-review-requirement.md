@@ -54,7 +54,7 @@ looks fine" is not the same artifact and does not compose.
 
 ## Where the answers live in this system
 
-Four facts about the platform decide most rows, and all four are easy to get
+Five facts about the platform decide most rows, and all five are easy to get
 wrong from memory:
 
 - The cloud data plane has **no JWT authorizer**. It authenticates the _app_ via
@@ -75,3 +75,12 @@ wrong from memory:
   derive, and the validator bounds those to platform pages and the handler's
   static files. A `delegated` route admits anyone holding a delegation token
   for that app, which any signed-in user can create for their own data.
+- **The broker answers some routes before anyone signs in.** The OAuth
+  routes take anonymous callers by design. `GET /connect/authorize` makes the
+  broker fetch any public `https` URL a caller names as a `client_id`; the
+  address checks, a 5 KB cap, a 3-second timeout and a route throttle bound
+  that fetch. `POST /connect/token` admits anyone who holds a code with its
+  PKCE verifier, or a refresh token. The protected resource metadata tells
+  anyone which apps serve outside clients and at which paths. A row about a
+  credential these routes issue starts from "anonymous internet" and names
+  what the caller must already hold.
