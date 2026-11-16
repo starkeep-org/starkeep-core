@@ -7,6 +7,9 @@ supervisor. It runs the **local** side against a SQLite database adapter and a
 filesystem/S3 object-storage adapter; the cloud-data-server is a separate
 artifact and does not use this package.
 
+The package is private and is not published to npm. The local-data-server is
+its only consumer. Apps use `@starkeep/app-client` instead.
+
 ## Usage
 
 ```ts

@@ -1,5 +1,6 @@
 {
   "name": "@starkeep/sdk",
+  "private": true,
   "version": "0.4.8",
   "license": "MIT",
   "type": "module",
@@ -17,9 +18,6 @@
     "dist",
     "README.md"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/starkeep-org/starkeep-core.git",
