@@ -43,7 +43,7 @@ import {
 } from "@starkeep/app-client/snapshot";
 import manifest from "../starkeep.manifest.json" with { type: "json" };
 import { ASSET_NAME, STATIC_NAME } from "./assets.js";
-import { handleMcp, oauthClientDocument, OAUTH_CLIENT_PATH } from "./mcp.js";
+import { handleMcp } from "./mcp.js";
 
 /** The app id, fixed to match `starkeep.manifest.json`. */
 export const APP_ID = "probe";
@@ -122,16 +122,6 @@ export const app = new Hono();
 // `verifyDelegation`, and in the cloud the gateway's delegated authorizer has
 // already checked the token. See ./mcp.ts.
 app.post("/mcp", (c) => handleMcp(APP_ID, c.req.raw));
-
-// Probe's OAuth client metadata document, for a suite that drives an MCP
-// client through the OAuth flow with no outside host. A document names its own
-// URL, which holds the deployment's host, so the app answers it rather than a
-// file: the path sits under the public `/_static/*`, and the static branch
-// hands a path with no file on disk to the app.
-app.get(OAUTH_CLIENT_PATH, (c) => {
-  const doc = oauthClientDocument();
-  return doc ? c.json(doc) : c.notFound();
-});
 
 // The origin gate, deny-by-default over the manifest's own `publicPaths`. It is
 // inert on the local surface and redundant with the gateway's session

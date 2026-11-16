@@ -134,3 +134,25 @@ document.getElementById("file").addEventListener("change", (e) => {
 render();
 })();`;
 }
+
+/** Where Probe's OAuth client metadata document is served, relative to the app. */
+export const OAUTH_CLIENT_PATH = "/_static/oauth-client.json";
+
+/**
+ * Probe's OAuth client metadata document: test scaffolding that lets a suite
+ * run the OAuth flow with a loopback redirect, as Claude Code does. It grants
+ * nothing by itself: the user still signs in and approves on the consent
+ * page. A document names its own URL, so the build writes it only when the
+ * installer passes the deployment's public base URL, and it names that host.
+ */
+export function oauthClientDocument(publicBaseUrl: string, appBasePath: string): string {
+  const base = publicBaseUrl.replace(/\/+$/, "");
+  return JSON.stringify({
+    client_id: `${base}${appBasePath.replace(/\/+$/, "")}${OAUTH_CLIENT_PATH}`,
+    client_name: "Probe test client",
+    redirect_uris: ["http://127.0.0.1/callback", "http://localhost/callback"],
+    grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"],
+    token_endpoint_auth_method: "none",
+  });
+}

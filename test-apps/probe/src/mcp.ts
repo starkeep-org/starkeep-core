@@ -15,7 +15,6 @@
  * On the local surface a loopback caller passes with no token.
  */
 
-import { appBasePath } from "@starkeep/app-client/hono";
 import {
   delegationRefusal,
   loadAppCredentials,
@@ -169,27 +168,4 @@ export async function handleMcp(appId: string, req: Request): Promise<Response> 
     });
   }
   return rpcError(id, -32601, `Method not found: ${str(method)}`);
-}
-
-/** Where Probe serves its OAuth client metadata document, relative to the app. */
-export const OAUTH_CLIENT_PATH = "/_static/oauth-client.json";
-
-/**
- * Probe's OAuth client metadata document: test scaffolding that lets a suite
- * run the OAuth flow with a loopback redirect, as Claude Code does. It grants
- * nothing by itself: the user still signs in and approves on the consent
- * page. Null without the deployment's public base URL, which the document
- * needs to name itself.
- */
-export function oauthClientDocument(): Record<string, unknown> | null {
-  const base = process.env.STARKEEP_PUBLIC_BASE_URL?.replace(/\/+$/, "");
-  if (!base) return null;
-  return {
-    client_id: `${base}${appBasePath()}${OAUTH_CLIENT_PATH}`,
-    client_name: "Probe test client",
-    redirect_uris: ["http://127.0.0.1/callback", "http://localhost/callback"],
-    grant_types: ["authorization_code", "refresh_token"],
-    response_types: ["code"],
-    token_endpoint_auth_method: "none",
-  };
 }
