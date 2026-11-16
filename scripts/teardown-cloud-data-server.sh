@@ -809,8 +809,11 @@ for cache_name in CACHE_NAMES:
 for attempt in range(6):
     try:
         got = cf("describe-function", "--name", REDIRECT_FN_NAME)
-    except Exception:  # noqa: BLE001 — absent is success
-        print(f"  Function: {REDIRECT_FN_NAME} not found, skipping.")
+    except Exception as e:  # noqa: BLE001 — absent is success; anything else fails
+        if "NoSuchFunctionExists" in str(e):
+            print(f"  Function: {REDIRECT_FN_NAME} not found, skipping.")
+        else:
+            record_failure(f"function lookup ({REDIRECT_FN_NAME}): {e}")
         break
     try:
         cf("delete-function", "--name", REDIRECT_FN_NAME, "--if-match", got["ETag"])
