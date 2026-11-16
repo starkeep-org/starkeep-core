@@ -59,7 +59,7 @@ suite reports skipped and makes no AWS call. The suite reads the repository's
 `.env`, so the zone can live there.
 
 `STARKEEP_AWS_STACK_PREFIX`, `STARKEEP_AWS_REGION` and `STARKEEP_AWS_TEARDOWN`
-work as in `e2e-aws`. The suite shares the journey's run-state directory, so it
+work as in `e2e-aws`, so an enabled run without `STARKEEP_AWS_REGION` fails. The suite shares the journey's run-state directory, so it
 reuses a stack that a journey run kept warm with `STARKEEP_AWS_TEARDOWN=none`,
 and it creates the bootstrap stack, the cloud data server and the Probe app when
 they are missing. A failed run tears nothing down.

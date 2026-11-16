@@ -5,9 +5,10 @@
  *   STARKEEP_AWS_TESTS=1            enable (required)
  *   STARKEEP_AWS_STACK_PREFIX       dedicated test prefix (default "sktest";
  *                                   must never be the live deployment's prefix)
- *   STARKEEP_AWS_REGION             region for a from-scratch bootstrap
- *                                   (default "us-east-2"; an existing stack's
- *                                   own region always wins via its pool ID)
+ *   STARKEEP_AWS_REGION             the region of the test stack (required,
+ *                                   no default; see region.ts). A region that
+ *                                   a live deployment uses prints a warning
+ *                                   and the run goes on.
  *   STARKEEP_AWS_APP_DIR            the app to run the journey against, as an
  *                                   absolute or repo-relative path to its
  *                                   source directory. Unset selects the Probe
@@ -24,7 +25,12 @@
  *                                   failed step never tears down, regardless of
  *                                   this value, so the stack is left for
  *                                   debugging.
+ *
+ * The repository's .env and .env.local are loaded first, so the region can
+ * live there. An exported variable wins over both.
  */
+import "@starkeep/app-client/load-env";
+import { liveDeployments, testRegion } from "./region.js";
 
 export const AWS_TESTS_ENABLED = process.env.STARKEEP_AWS_TESTS === "1";
 
@@ -37,7 +43,21 @@ export const AWS_TESTS_ENABLED = process.env.STARKEEP_AWS_TESTS === "1";
  */
 export const HMAC_CACHE_TTL_MS = process.env.HMAC_CACHE_TTL_MS ?? "0";
 export const STACK_PREFIX = process.env.STARKEEP_AWS_STACK_PREFIX ?? "sktest";
-export const REGION = process.env.STARKEEP_AWS_REGION ?? "us-east-2";
+
+/**
+ * Checked only when the suites run. A skipped suite needs no region, so it
+ * neither throws nor warns.
+ */
+function resolveRegion(): string {
+  const requested = process.env.STARKEEP_AWS_REGION;
+  if (!AWS_TESTS_ENABLED) return requested?.trim() ?? "";
+  const { region, warning } = testRegion(requested, liveDeployments());
+  // Straight to stderr: vitest hides console output from passing and skipped
+  // tests, and this warning must show on a green run.
+  if (warning) process.stderr.write(`\n${warning}\n\n`);
+  return region;
+}
+export const REGION = resolveRegion();
 export type TeardownMode = "all" | "apps" | "none";
 
 /**

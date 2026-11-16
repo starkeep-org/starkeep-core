@@ -8,6 +8,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
+    "test": "vitest run src/region.unit.test.ts",
     "test:aws": "vitest run",
     "typecheck": "tsc --noEmit"
   },
