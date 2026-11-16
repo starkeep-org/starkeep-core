@@ -96,6 +96,20 @@ describe("teardown-cloud-data-server.sh", () => {
     expect(after.buckets).not.toContain(`sktest-files-123456789012-${REGION}`);
   });
 
+  it("reports a failed lookup of the redirect function rather than skipping it", () => {
+    const account = mergeAccounts(live, target);
+    account.errors.push({
+      match: "cloudfront describe-function",
+      error: "An error occurred (AccessDenied) when calling the DescribeFunction operation: denied",
+    });
+    const { status, output } = run(["--force"], account);
+    expect(status, output).toBe(1);
+    expect(output).not.toContain("sktest-signed-out-redirect not found");
+    expect(output).toContain(
+      "function lookup (sktest-signed-out-redirect): An error occurred (AccessDenied)",
+    );
+  });
+
   it("keeps a protected cluster without --force, and that is not a failure", () => {
     const { status, output, account } = run([]);
     expect(status, output).toBe(0);
