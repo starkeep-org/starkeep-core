@@ -40,21 +40,43 @@ record_failure() {
   printf '%s\n' "$msg" >> "$TEARDOWN_FAILURES"
 }
 
+# is_throttled <aws-error-text>: whether an AWS CLI error means the account
+# hit a rate limit. Services name the case Throttling, ThrottlingException,
+# TooManyRequestsException or RequestLimitExceeded, and some say "Rate exceeded".
+is_throttled() {
+  case "$1" in
+    *Throttl*|*TooManyRequests*|*RequestLimitExceeded*|*"Rate exceeded"*) return 0 ;;
+  esac
+  return 1
+}
+
 # AWS_ERROR holds the stderr of the last failed aws_probe call.
 AWS_ERROR=""
 
 # aws_probe <aws args...>: runs one AWS CLI call and prints its stdout. Returns
 # 0 on success, 1 when the resource does not exist, and 2 on any other failure.
 # Records nothing; aws_call is the recording form.
+#
+# A throttled call is tried again after 5, 10 and 20 seconds. The CLI already
+# retries throttling a few times within a second or two; these waits cover a
+# limit that lasts longer, so one busy moment does not fail a whole teardown.
 aws_probe() {
-  local err_file out
+  local err_file out delay
   err_file=$(mktemp)
-  if out=$(aws "$@" 2>"$err_file"); then
-    rm -f "$err_file"
-    printf '%s' "$out"
-    return 0
-  fi
-  AWS_ERROR=$(cat "$err_file")
+  for delay in 5 10 20 ""; do
+    if out=$(aws "$@" 2>"$err_file"); then
+      rm -f "$err_file"
+      printf '%s' "$out"
+      return 0
+    fi
+    AWS_ERROR=$(cat "$err_file")
+    if [[ -n "$delay" ]] && is_throttled "$AWS_ERROR"; then
+      echo "  aws $1 $2 was throttled; retrying in ${delay}s." >&2
+      sleep "$delay"
+      continue
+    fi
+    break
+  done
   rm -f "$err_file"
   is_not_found "$AWS_ERROR" && return 1
   return 2

@@ -197,9 +197,28 @@ describe("teardown-bootstrap.sh", () => {
     });
     const result = runTeardown("sktest", account, ["--force"]);
     expect(result.status, result.output).toBe(1);
+    // The throttled call is retried, and the failure is recorded only after the
+    // last attempt.
+    expect(result.calls.filter((c) => c.includes("delete-api --api-id sktestapi"))).toHaveLength(4);
     expect(result.output).toContain("could not delete API Gateway sktestapi");
     expect(result.account.stacks["sktest-bootstrap"]).toBeDefined();
     expect(result.account.userPools.map((p) => p.Id)).toContain(TEST_USER_POOL);
+  });
+
+  it("retries a throttled call and finishes when the throttling stops", () => {
+    const account = mergeAccounts(live, target);
+    account.errors.push({
+      match: "apigatewayv2 delete-api --api-id sktestapi",
+      error:
+        "An error occurred (TooManyRequestsException) when calling the DeleteApi operation: slow down",
+      times: 2,
+    });
+    const { status, output, account: after } = runTeardown("sktest", account, ["--force"]);
+    expect(status, output).toBe(0);
+    expect(output).toContain("aws apigatewayv2 delete-api was throttled; retrying in 5s.");
+    expect(output).toContain("aws apigatewayv2 delete-api was throttled; retrying in 10s.");
+    expect(output).not.toContain("ERROR");
+    expect(identifiersOf(after).sort()).toEqual(identifiersOf(live).sort());
   });
 
   it("deletes the config's own deployment when the config describes the target", () => {
