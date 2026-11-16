@@ -829,7 +829,18 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
       .addColumn("revoked_at_ms", "bigint")
       .addColumn("last_used_at_ms", "bigint")
       .addColumn("last_write_at_ms", "bigint")
+      // An OAuth client's `client_id` URL and its redirect URI's host. Null
+      // on a delegation created on the consent page with a pasted token.
+      .addColumn("client_id", "text")
+      .addColumn("redirect_host", "text")
       .execute();
+    // TEMPORARY: adds the OAuth columns to a grants table that predates them.
+    // Replaced by ~/projects/starkeep/plan-schema-and-bootstrap-versioning-2026-11-08.md.
+    for (const column of ["client_id", "redirect_host"]) {
+      await sql
+        .raw(`ALTER TABLE delegation.grants ADD COLUMN IF NOT EXISTS ${column} text`)
+        .execute(db);
+    }
     await sql
       .raw(`GRANT SELECT, INSERT, UPDATE, DELETE ON delegation.grants TO PUBLIC`)
       .execute(db);
@@ -838,6 +849,68 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
       db,
       `CREATE INDEX ASYNC IF NOT EXISTS idx_delegation_grants_user
          ON delegation.grants (user_id, app_id)`,
+    );
+
+    // An OAuth authorization in progress: the client's request, held from the
+    // sign-in to the consent page's approval, then the authorization code's
+    // hash until the client exchanges it. The row's id becomes the grant's
+    // id, so the sealed Cognito refresh token's associated data stays valid
+    // when the token moves to the grant. Rows live ten minutes.
+    await db.schema
+      .createTable("delegation.authorizations")
+      .ifNotExists()
+      .addColumn("id", "text", (c) => c.notNull().primaryKey())
+      .addColumn("user_id", "text", (c) => c.notNull())
+      .addColumn("user_email", "text", (c) => c.notNull())
+      .addColumn("app_id", "text", (c) => c.notNull())
+      .addColumn("resource", "text", (c) => c.notNull())
+      .addColumn("client_id", "text", (c) => c.notNull())
+      .addColumn("client_name", "text", (c) => c.notNull())
+      .addColumn("redirect_uri", "text", (c) => c.notNull())
+      .addColumn("state", "text")
+      .addColumn("code_challenge", "text", (c) => c.notNull())
+      .addColumn("requested_scope", "text", (c) => c.notNull())
+      // Set by the approval.
+      .addColumn("mode", "text", (c) => c.check(sql`mode IN ('read', 'readwrite')`))
+      .addColumn("days", "integer")
+      .addColumn("cognito_refresh_ciphertext", "text", (c) => c.notNull())
+      .addColumn("code_hash", "text")
+      .addColumn("code_expires_at_ms", "bigint")
+      .addColumn("created_at_ms", "bigint", (c) => c.notNull())
+      .addColumn("expires_at_ms", "bigint", (c) => c.notNull())
+      .addColumn("used_at_ms", "bigint")
+      .execute();
+    await sql
+      .raw(`GRANT SELECT, INSERT, UPDATE, DELETE ON delegation.authorizations TO PUBLIC`)
+      .execute(db);
+    // The token endpoint finds a row by its code's hash.
+    await ensureIndex(
+      db,
+      `CREATE INDEX ASYNC IF NOT EXISTS idx_delegation_authorizations_code
+         ON delegation.authorizations (code_hash)`,
+    );
+
+    // An OAuth refresh token, by its SHA-256 hash. A refresh rotates the
+    // token: the old row gains `rotated_at_ms`, and a new row takes its place.
+    // A token never outlives its grant.
+    await db.schema
+      .createTable("delegation.refresh_tokens")
+      .ifNotExists()
+      .addColumn("token_hash", "text", (c) => c.notNull().primaryKey())
+      .addColumn("grant_id", "text", (c) => c.notNull())
+      .addColumn("app_id", "text", (c) => c.notNull())
+      .addColumn("created_at_ms", "bigint", (c) => c.notNull())
+      .addColumn("expires_at_ms", "bigint", (c) => c.notNull())
+      .addColumn("rotated_at_ms", "bigint")
+      .execute();
+    await sql
+      .raw(`GRANT SELECT, INSERT, UPDATE, DELETE ON delegation.refresh_tokens TO PUBLIC`)
+      .execute(db);
+    // Revoking a grant ends every refresh token under it.
+    await ensureIndex(
+      db,
+      `CREATE INDEX ASYNC IF NOT EXISTS idx_delegation_refresh_tokens_grant
+         ON delegation.refresh_tokens (grant_id)`,
     );
 
     // DSQL-side IAM-to-PG mapping for the cloud install registry. The

@@ -641,6 +641,8 @@ export async function runAppUninstallDdl(
       // but no data branch accepts a connectors-client token, so they reach
       // nothing.
       await db.deleteFrom("delegation.grants").where("app_id", "=", appId).execute();
+      await db.deleteFrom("delegation.refresh_tokens").where("app_id", "=", appId).execute();
+      await db.deleteFrom("delegation.authorizations").where("app_id", "=", appId).execute();
       await sql`DROP SCHEMA IF EXISTS ${sql.raw(schemaName)} CASCADE`.execute(db);
 
       // Revoke the DSQL-side IAM mapping before DROP ROLE — DROP ROLE fails if

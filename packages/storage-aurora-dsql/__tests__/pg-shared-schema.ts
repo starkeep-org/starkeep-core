@@ -147,7 +147,39 @@ export async function createSharedSchema(pg: PGlite): Promise<void> {
       expires_at_ms bigint NOT NULL,
       revoked_at_ms bigint,
       last_used_at_ms bigint,
-      last_write_at_ms bigint
+      last_write_at_ms bigint,
+      client_id text,
+      redirect_host text
+    );
+    CREATE TABLE delegation.authorizations (
+      id text PRIMARY KEY,
+      user_id text NOT NULL,
+      user_email text NOT NULL,
+      app_id text NOT NULL,
+      resource text NOT NULL,
+      client_id text NOT NULL,
+      client_name text NOT NULL,
+      redirect_uri text NOT NULL,
+      state text,
+      code_challenge text NOT NULL,
+      requested_scope text NOT NULL,
+      mode text CHECK (mode IN ('read', 'readwrite')),
+      days integer,
+      cognito_refresh_ciphertext text NOT NULL,
+      code_hash text,
+      code_expires_at_ms bigint,
+      created_at_ms bigint NOT NULL,
+      expires_at_ms bigint NOT NULL,
+      used_at_ms bigint
+    );
+    CREATE INDEX idx_delegation_authorizations_code ON delegation.authorizations (code_hash);
+    CREATE TABLE delegation.refresh_tokens (
+      token_hash text PRIMARY KEY,
+      grant_id text NOT NULL,
+      app_id text NOT NULL,
+      created_at_ms bigint NOT NULL,
+      expires_at_ms bigint NOT NULL,
+      rotated_at_ms bigint
     );
   `);
   for (const c of CATEGORIES.filter((c) => hasMetadataTable(c.id))) {
