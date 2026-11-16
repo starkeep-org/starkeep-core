@@ -603,7 +603,7 @@ describe("install DDL: the public-sharing capability", () => {
 });
 
 describe("uninstall DDL", () => {
-  it("deletes the app's public shares, its capability and its delegations", async () => {
+  it("deletes the app's public shares, its capability, its delegations and their OAuth rows", async () => {
     // A public link reads through the creating app's role, so with the app
     // gone nothing could serve it, and a reinstall must not revive it. An
     // outside client's access ends with the app for the same reason.
@@ -613,6 +613,8 @@ describe("uninstall DDL", () => {
       '"public_sharing"."public_shares"',
       '"public_sharing"."app_capabilities"',
       '"delegation"."grants"',
+      '"delegation"."refresh_tokens"',
+      '"delegation"."authorizations"',
     ]) {
       const del = state.queries.find((q) => q.text.includes(`delete from ${table}`));
       expect(del?.text).toContain('where "app_id" =');

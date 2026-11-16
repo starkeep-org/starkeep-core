@@ -255,6 +255,40 @@ describe("every table in `shared` is granted to something", () => {
   });
 });
 
+describe("delegation tables", () => {
+  it("grants every delegation table to PUBLIC, as the broker reads them as Drive", async () => {
+    const statements = await init();
+    const created = statements
+      .map((s) => /create table if not exists "delegation"\."([a-z_]+)"/i.exec(s)?.[1])
+      .filter((t): t is string => Boolean(t));
+    expect(created).toEqual(["grants", "authorizations", "refresh_tokens"]);
+    for (const table of created) {
+      expect(
+        statements.some((s) => /^GRANT /.test(s) && s.includes(`delegation.${table} TO PUBLIC`)),
+        table,
+      ).toBe(true);
+    }
+  });
+
+  it("declares the OAuth columns on grants and adds them to a table that predates them", async () => {
+    const statements = await init();
+    const create = find(statements, 'create table if not exists "delegation"."grants"')!;
+    expect(create).toMatch(/"client_id" text/);
+    expect(create).toMatch(/"redirect_host" text/);
+    for (const column of ["client_id", "redirect_host"]) {
+      expect(statements).toContain(
+        `ALTER TABLE delegation.grants ADD COLUMN IF NOT EXISTS ${column} text`,
+      );
+    }
+  });
+
+  it("indexes the code hash and the refresh tokens' grant", async () => {
+    const statements = await init();
+    expect(find(statements, "idx_delegation_authorizations_code")).toMatch(/\(code_hash\)/);
+    expect(find(statements, "idx_delegation_refresh_tokens_grant")).toMatch(/\(grant_id\)/);
+  });
+});
+
 describe("shared.app_registry surfaces", () => {
   it("declares web_app and mobile_app, false by default, in CREATE TABLE", async () => {
     const create = find(await init(), 'create table if not exists "shared"."app_registry"')!;
