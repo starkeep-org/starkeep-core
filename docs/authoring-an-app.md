@@ -1069,11 +1069,11 @@ Mount the route before any gate that expects a session cookie, such as
 `honoOriginGate`, because an outside client never holds one. Probe's
 `test-apps/probe/src/mcp.ts` is a complete example.
 
-Pass the request to `delegationRefusal`. In the cloud, its 401 then names the
-route's resource metadata, which tells an OAuth client where to sign in, and
-says `error="invalid_token"` for an expired token, which tells the client to
-refresh. Without the request, the 401 still works, and a client looks for the
-metadata at its well-known location instead.
+Pass the request to `delegationRefusal`, so its 401 says
+`error="invalid_token"` for an expired token, which tells an OAuth client to
+refresh. The client finds where to sign in on its own: the platform serves the
+route's metadata at a well-known location on whichever of the deployment's
+host names the client called.
 
 Forwarding the token to the platform is safe here, and only here. The MCP
 specification forbids a server to pass a client's token to an upstream API,

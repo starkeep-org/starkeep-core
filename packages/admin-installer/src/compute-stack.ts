@@ -121,14 +121,6 @@ export interface ComputeContext {
    * refused when missing, as above.
    */
   delegatedAuthorizerId?: string;
-  /**
-   * The deployment's browser-facing base URL (the custom domain once
-   * attached, the CloudFront distribution otherwise). Injected into per-app
-   * Lambdas as STARKEEP_PUBLIC_BASE_URL, so an app's 401 to an outside client
-   * can name the resource metadata URL. Optional: without it the 401 omits
-   * the URL, and a client falls back to the well-known location.
-   */
-  publicBaseUrl?: string;
   region: string;
   accountId: string;
   pulumiStateBucket: string;

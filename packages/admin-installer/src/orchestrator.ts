@@ -110,8 +110,6 @@ export interface InstallerConfig {
   originAuthorizerId?: string;
   /** See ComputeContext.delegatedAuthorizerId — absent on a stack that predates it. */
   delegatedAuthorizerId?: string;
-  /** See ComputeContext.publicBaseUrl. */
-  publicBaseUrl?: string;
   /**
    * Base URL of the shared HTTP API Gateway (the cloud-data-server's stage
    * URL). Injected into per-app Lambdas as STARKEEP_CLOUD_DATA_BASE so that
@@ -562,7 +560,6 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
           ...(config.delegatedAuthorizerId
             ? { delegatedAuthorizerId: config.delegatedAuthorizerId }
             : {}),
-          ...(config.publicBaseUrl ? { publicBaseUrl: config.publicBaseUrl } : {}),
           region: config.region,
           accountId: config.accountId,
           pulumiStateBucket: config.pulumiStateBucket,
@@ -829,7 +826,6 @@ async function removeComputeSteps(
       ...(config.delegatedAuthorizerId
         ? { delegatedAuthorizerId: config.delegatedAuthorizerId }
         : {}),
-      ...(config.publicBaseUrl ? { publicBaseUrl: config.publicBaseUrl } : {}),
       region: config.region,
       accountId: config.accountId,
       pulumiStateBucket: config.pulumiStateBucket,
