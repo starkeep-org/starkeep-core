@@ -66,7 +66,7 @@ export function testRegion(
   const suggestion = SUGGESTED_REGIONS.find((r) => !liveRegions.has(r)) ?? SUGGESTED_REGIONS[0];
   const describe = (d: LiveDeployment) =>
     `'${d.stackPrefix || "<no prefix>"}' (${d.configPath}) runs in ${d.region}`;
-  const setCommand = `echo 'STARKEEP_AWS_REGION=${suggestion}' >> .env.local`;
+  const setCommand = `echo 'STARKEEP_AWS_E2E_REGION=${suggestion}' >> .env.local`;
 
   const region = requested?.trim();
   if (!region) {
@@ -75,11 +75,11 @@ export function testRegion(
       : "No live deployment config was found, so check the account for live deployments yourself.";
     throw new Error(
       [
-        "STARKEEP_AWS_REGION is not set. The cloud suites have no default region for the test stack.",
+        "STARKEEP_AWS_E2E_REGION is not set. The cloud suites have no default region for the test stack.",
         `Choose a region that no live deployment uses. ${where}`,
         "Set the region once, from the repository root:",
         `  ${setCommand}`,
-        "The region must offer Aurora DSQL. An exported STARKEEP_AWS_REGION overrides .env.local.",
+        "The region must offer Aurora DSQL. An exported STARKEEP_AWS_E2E_REGION overrides .env.local.",
       ].join("\n"),
     );
   }
@@ -89,10 +89,10 @@ export function testRegion(
   return {
     region,
     warning: [
-      `WARNING: STARKEEP_AWS_REGION is ${region}, and your live deployment ${sharing.map(describe).join(", and ")}.`,
+      `WARNING: STARKEEP_AWS_E2E_REGION is ${region}, and your live deployment ${sharing.map(describe).join(", and ")}.`,
       "The test stack shares every regional service with that deployment, so a teardown",
       "command that names the wrong prefix reaches the live deployment's regional resources.",
-      `To move the tests, tear down the test stack, then set STARKEEP_AWS_REGION=${suggestion}`,
+      `To move the tests, tear down the test stack, then set STARKEEP_AWS_E2E_REGION=${suggestion}`,
       "in the repository's .env.local. The run continues.",
     ].join("\n"),
   };

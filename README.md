@@ -361,7 +361,7 @@ The repository has four test tiers:
 1. `pnpm test` runs the unit tests. CI requires them.
 2. `pnpm test:integration` runs the suites that start processes, open sockets or boot a database engine. CI runs them as an advisory job, and `pnpm release:publish` runs them before a release.
 3. `pnpm test:e2e` runs the local browser tests with Playwright. Run `pnpm --filter @starkeep/e2e exec playwright install chromium` once beforehand. CI runs these tests as an advisory job. See [`e2e/README.md`](e2e/README.md).
-4. `pnpm test:aws` runs the full journey against a real AWS account, using a separate disposable test deployment with the prefix `sktest`. The suite does nothing unless `STARKEEP_AWS_TESTS=1` is set, and it requires `STARKEEP_AWS_REGION`, a region that none of your live deployments use. A full run takes about 26 minutes and creates real resources in the account, then tears them down by default upon success. See [`e2e-aws/README.md`](e2e-aws/README.md).
+4. `pnpm test:aws` runs the full journey against a real AWS account, using a separate disposable test deployment with the prefix `sktest`. The suite does nothing unless `STARKEEP_AWS_TESTS=1` is set, and it requires `STARKEEP_AWS_E2E_REGION`, a region that none of your live deployments use. A full run takes about 26 minutes and creates real resources in the account, then tears them down by default upon success. See [`e2e-aws/README.md`](e2e-aws/README.md).
 
 # Security
 

@@ -6,7 +6,7 @@ same admin-installer CLIs an operator runs. It is the only suite that touches a
 live account, so it is **inert unless explicitly enabled**.
 
 ```bash
-echo 'STARKEEP_AWS_REGION=us-west-2' >> .env.local   # once, from the repo root
+echo 'STARKEEP_AWS_E2E_REGION=us-west-2' >> .env.local   # once, from the repo root
 STARKEEP_AWS_TESTS=1 pnpm test:aws          # from repo root (turbo) or this dir
 ```
 
@@ -15,7 +15,7 @@ Without `STARKEEP_AWS_TESTS=1` the suite reports skipped and makes no AWS calls.
 
 ## The test region
 
-`STARKEEP_AWS_REGION` has no default, and an enabled run without it fails at
+`STARKEEP_AWS_E2E_REGION` has no default, and an enabled run without it fails at
 once. Pick a region that none of your live deployments use, and that offers
 Aurora DSQL. The test stack and a live deployment in one region share every
 regional service, including Cognito. A teardown command that names the wrong
@@ -157,7 +157,7 @@ registry database, which must not land in a checkout you do not own.
 | `STARKEEP_AWS_TESTS`        | _(unset)_           | Must be `1` to run; otherwise the suite skips.                                                                                                                                                                                                     |
 | `STARKEEP_AWS_APP_DIR`      | _(unset)_           | The app to run against. Unset selects `test-apps/probe`. A path with no manifest fails the run.                                                                                                                                                    |
 | `STARKEEP_AWS_STACK_PREFIX` | `sktest`            | Dedicated test stack prefix. **Never** point this at a live deployment's prefix.                                                                                                                                                                   |
-| `STARKEEP_AWS_REGION`       | _(required)_        | The region of the test stack. Choose one that no live deployment uses (see "The test region").                                                                                                                                                     |
+| `STARKEEP_AWS_E2E_REGION`   | _(required)_        | The region of the test stack. Choose one that no live deployment uses (see "The test region").                                                                                                                                                     |
 | `STARKEEP_AWS_TEARDOWN`     | `all`               | What to tear down **after a fully passing run**: `all` → `teardown-bootstrap.sh`; `apps` → `teardown-cloud-data-server.sh`; `none` → keep everything up. A run with **any failed step never tears down**, so a broken stack is left for debugging. |
 | `HMAC_CACHE_TTL_MS`         | `0` (in this suite) | Baked into the broker Lambda at install. The suite sets `0` so a just-rotated/revoked app secret isn't served from the broker's cache. Real installs leave it unset → broker keeps its 5-min default.                                              |
 

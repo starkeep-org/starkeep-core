@@ -349,7 +349,7 @@ while IFS=$'\t' read -r kind pid file cprefix; do
   echo "  WARNING: $REGION also holds the deployment that $file describes"
   echo "           (prefix '${cprefix:-<none>}'). Check that --prefix names the deployment to remove."
   echo "           Test deployments belong in a region that no live deployment uses:"
-  echo "           see STARKEEP_AWS_REGION in e2e-aws/README.md."
+  echo "           see STARKEEP_AWS_E2E_REGION in e2e-aws/README.md."
   echo ""
 done <<< "$PROTECTED_POOLS"
 if [[ "$CONFIG_MATCHES_TEARDOWN" == "true" ]]; then

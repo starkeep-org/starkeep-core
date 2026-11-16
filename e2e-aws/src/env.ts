@@ -5,7 +5,7 @@
  *   STARKEEP_AWS_TESTS=1            enable (required)
  *   STARKEEP_AWS_STACK_PREFIX       dedicated test prefix (default "sktest";
  *                                   must never be the live deployment's prefix)
- *   STARKEEP_AWS_REGION             the region of the test stack (required,
+ *   STARKEEP_AWS_E2E_REGION             the region of the test stack (required,
  *                                   no default; see region.ts). A region that
  *                                   a live deployment uses prints a warning
  *                                   and the run goes on.
@@ -49,7 +49,7 @@ export const STACK_PREFIX = process.env.STARKEEP_AWS_STACK_PREFIX ?? "sktest";
  * neither throws nor warns.
  */
 function resolveRegion(): string {
-  const requested = process.env.STARKEEP_AWS_REGION;
+  const requested = process.env.STARKEEP_AWS_E2E_REGION;
   if (!AWS_TESTS_ENABLED) return requested?.trim() ?? "";
   const { region, warning } = testRegion(requested, liveDeployments());
   // Straight to stderr: vitest hides console output from passing and skipped
