@@ -300,7 +300,11 @@ export class AuroraDsqlDatabaseAdapter implements DatabaseAdapter {
               ),
             );
           return options.onlyIfNewer
-            ? update.where(sql.ref("excluded.updated_at"), ">", sql.ref("shared.records.updated_at"))
+            ? update.where(
+                sql.ref("excluded.updated_at"),
+                ">",
+                sql.ref("shared.records.updated_at"),
+              )
             : update;
         })
         .returning("id")

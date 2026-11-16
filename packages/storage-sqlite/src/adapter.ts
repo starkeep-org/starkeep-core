@@ -279,7 +279,11 @@ export class SqliteDatabaseAdapter implements DatabaseAdapter {
             ),
           );
         return onlyIfNewer
-          ? update.where(kSql.ref("excluded.updated_at"), ">", kSql.ref("shared_records.updated_at"))
+          ? update.where(
+              kSql.ref("excluded.updated_at"),
+              ">",
+              kSql.ref("shared_records.updated_at"),
+            )
           : update;
       })
       .returning("id")

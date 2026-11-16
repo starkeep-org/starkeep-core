@@ -291,7 +291,10 @@ describe("the sync-facing surface", () => {
   }
 
   it("putLabel replaces a row only with a strictly later updated_at, and says whether it wrote", async () => {
-    client.responses.push({ match: /^insert into "shared"\."record_labels"/, rows: [{ updated_at: "x" }] });
+    client.responses.push({
+      match: /^insert into "shared"\."record_labels"/,
+      rows: [{ updated_at: "x" }],
+    });
     expect(await adapter.putLabel(snapshotLabel())).toBe(true);
     const upsert = client.calls[1]!;
     expect(upsert.text).toMatch(
