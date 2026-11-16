@@ -18,7 +18,8 @@
 # It then shows the publish plan and asks before publishing. `changeset publish`
 # publishes in dependency order through `pnpm publish` (which turns
 # `workspace:*` into the exact version) and tags each release; this script
-# pushes those tags.
+# pushes those tags. It then waits until npm shows every new version, because
+# npm can lag the upload by minutes. The release is complete when it returns.
 #
 # Usage: pnpm release:publish
 
@@ -78,6 +79,12 @@ if [[ -n "$new_tags" ]]; then
   echo "==> Pushing tags"
   # shellcheck disable=SC2086 # one tag per word
   git push origin $new_tags
+
+  # Each tag is the published `name@version`.
+  echo "==> Waiting for npm to show the new versions"
+  # shellcheck disable=SC2086 # one tag per word
+  bash scripts/wait-for-npm.sh $new_tags
+  echo "==> Released."
 else
   echo "==> Nothing new was published, so there are no tags to push."
 fi
