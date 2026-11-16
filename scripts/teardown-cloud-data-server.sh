@@ -160,12 +160,24 @@ skip() { echo "  Not found, skipping."; }
 empty_bucket() {
   local bucket="$1"
   python3 << PYEOF
-import json, os, subprocess, tempfile
+import json, os, subprocess, sys, tempfile
 
 bucket = "$bucket"
 
+# The throttling retry of aws_probe in teardown-common.sh, for calls made here.
+# The wait runs the external sleep, as aws_probe does, so tests can skip it.
+THROTTLED = ("Throttl", "TooManyRequests", "RequestLimitExceeded", "Rate exceeded", "SlowDown")
+
+def run_aws(args):
+    for delay in (5, 10, 20, None):
+        r = subprocess.run(["aws", *args], capture_output=True, text=True)
+        if r.returncode == 0 or delay is None or not any(t in r.stderr for t in THROTTLED):
+            return r
+        print(f"  aws {args[0]} {args[1]} was throttled; retrying in {delay}s.", file=sys.stderr)
+        subprocess.run(["sleep", str(delay)])
+
 def aws_json(*args):
-    r = subprocess.run(["aws"] + list(args), capture_output=True, text=True)
+    r = run_aws(list(args))
     if r.returncode != 0:
         raise RuntimeError(r.stderr.strip())
     return json.loads(r.stdout) if r.stdout.strip() else {}
@@ -180,10 +192,8 @@ def delete_objects(objs):
         json.dump({"Objects": objs, "Quiet": False}, f)
         path = f.name
     try:
-        r = subprocess.run(
-            ["aws", "s3api", "delete-objects", "--bucket", bucket,
-             "--delete", "file://" + path],
-            capture_output=True, text=True)
+        r = run_aws(["s3api", "delete-objects", "--bucket", bucket,
+                     "--delete", "file://" + path])
         if r.returncode != 0:
             raise RuntimeError(r.stderr.strip())
         return r.stdout
@@ -312,16 +322,25 @@ import os, subprocess, json, sys
 
 region = sys.argv[1]
 
+# The throttling retry of aws_probe in teardown-common.sh, for calls made here.
+# The wait runs the external sleep, as aws_probe does, so tests can skip it.
+THROTTLED = ("Throttl", "TooManyRequests", "RequestLimitExceeded", "Rate exceeded", "SlowDown")
+
+def run_aws(args):
+    for delay in (5, 10, 20, None):
+        r = subprocess.run(["aws", *args], capture_output=True, text=True)
+        if r.returncode == 0 or delay is None or not any(t in r.stderr for t in THROTTLED):
+            return r
+        print(f"  aws {args[0]} {args[1]} was throttled; retrying in {delay}s.", file=sys.stderr)
+        subprocess.run(["sleep", str(delay)])
+
 def record_failure(msg):
     msg = " ".join(msg.split())
     print(f"  ERROR {msg}", file=sys.stderr)
     with open(os.environ["TEARDOWN_FAILURES"], "a") as f:
         f.write(msg + "\n")
 
-r = subprocess.run(
-    ["aws", "dsql", "list-clusters", "--region", region, "--output", "json"],
-    capture_output=True, text=True,
-)
+r = run_aws(["dsql", "list-clusters", "--region", region, "--output", "json"])
 if r.returncode != 0:
     record_failure(f"aws dsql list-clusters: {r.stderr}")
     sys.exit(0)
@@ -331,11 +350,8 @@ for cluster in json.loads(r.stdout).get("clusters", []):
     cid = cluster.get("identifier") or arn.split("/")[-1]
     if not arn:
         continue
-    tr = subprocess.run(
-        ["aws", "dsql", "list-tags-for-resource", "--resource-arn", arn,
-         "--region", region, "--output", "json"],
-        capture_output=True, text=True,
-    )
+    tr = run_aws(["dsql", "list-tags-for-resource", "--resource-arn", arn,
+                  "--region", region, "--output", "json"])
     if tr.returncode != 0:
         record_failure(f"aws dsql list-tags-for-resource {cid}: {tr.stderr}")
         continue
@@ -611,6 +627,18 @@ prefix = sys.argv[1]
 dist_ids = sys.argv[2].split()
 cert_arns = sys.argv[3].split()
 
+# The throttling retry of aws_probe in teardown-common.sh, for calls made here.
+# The wait runs the external sleep, as aws_probe does, so tests can skip it.
+THROTTLED = ("Throttl", "TooManyRequests", "RequestLimitExceeded", "Rate exceeded", "SlowDown")
+
+def run_aws(args):
+    for delay in (5, 10, 20, None):
+        r = subprocess.run(["aws", *args], capture_output=True, text=True)
+        if r.returncode == 0 or delay is None or not any(t in r.stderr for t in THROTTLED):
+            return r
+        print(f"  aws {args[0]} {args[1]} was throttled; retrying in {delay}s.", file=sys.stderr)
+        subprocess.run(["sleep", str(delay)])
+
 
 def record_failure(msg):
     msg = " ".join(msg.split())
@@ -629,8 +657,7 @@ REDIRECT_FN_NAME = f"{prefix}-signed-out-redirect"
 
 def cf(*args):
     """Run an `aws cloudfront` subcommand, returning parsed JSON (or {})."""
-    r = subprocess.run(["aws", "cloudfront", *args, "--output", "json"],
-                       capture_output=True, text=True)
+    r = run_aws(["cloudfront", *args, "--output", "json"])
     if r.returncode != 0:
         raise RuntimeError(r.stderr.strip())
     return json.loads(r.stdout) if r.stdout.strip() else {}
@@ -809,7 +836,7 @@ for attempt in range(6):
 
 
 def aws_json(*args):
-    r = subprocess.run(["aws", *args, "--output", "json"], capture_output=True, text=True)
+    r = run_aws([*args, "--output", "json"])
     if r.returncode != 0:
         raise RuntimeError(r.stderr.strip())
     return json.loads(r.stdout) if r.stdout.strip() else {}

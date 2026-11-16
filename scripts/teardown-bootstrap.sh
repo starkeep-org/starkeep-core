@@ -391,8 +391,20 @@ import json, os, subprocess, sys, tempfile
 
 bucket = "$bucket"
 
+# The throttling retry of aws_probe in teardown-common.sh, for calls made here.
+# The wait runs the external sleep, as aws_probe does, so tests can skip it.
+THROTTLED = ("Throttl", "TooManyRequests", "RequestLimitExceeded", "Rate exceeded", "SlowDown")
+
+def run_aws(args):
+    for delay in (5, 10, 20, None):
+        r = subprocess.run(["aws", *args], capture_output=True, text=True)
+        if r.returncode == 0 or delay is None or not any(t in r.stderr for t in THROTTLED):
+            return r
+        print(f"  aws {args[0]} {args[1]} was throttled; retrying in {delay}s.", file=sys.stderr)
+        subprocess.run(["sleep", str(delay)])
+
 def aws_json(*args):
-    r = subprocess.run(["aws"] + list(args), capture_output=True, text=True)
+    r = run_aws(list(args))
     if r.returncode != 0:
         raise RuntimeError(r.stderr.strip())
     return json.loads(r.stdout) if r.stdout.strip() else {}
@@ -409,10 +421,8 @@ def delete_batch(objs):
         json.dump({"Objects": objs, "Quiet": True}, f)
         path = f.name
     try:
-        r = subprocess.run(
-            ["aws", "s3api", "delete-objects", "--bucket", bucket,
-             "--delete", "file://" + path],
-            capture_output=True, text=True)
+        r = run_aws(["s3api", "delete-objects", "--bucket", bucket,
+                     "--delete", "file://" + path])
         if r.returncode != 0:
             raise RuntimeError(r.stderr.strip())
     finally:
@@ -490,11 +500,23 @@ delete_managed_policy() {
 import os, subprocess, json, sys
 policy_arn = sys.argv[1]
 marker = None
+
+# The throttling retry of aws_probe in teardown-common.sh, for calls made here.
+# The wait runs the external sleep, as aws_probe does, so tests can skip it.
+THROTTLED = ("Throttl", "TooManyRequests", "RequestLimitExceeded", "Rate exceeded", "SlowDown")
+
+def run_aws(args):
+    for delay in (5, 10, 20, None):
+        r = subprocess.run(["aws", *args], capture_output=True, text=True)
+        if r.returncode == 0 or delay is None or not any(t in r.stderr for t in THROTTLED):
+            return r
+        print(f"  aws {args[0]} {args[1]} was throttled; retrying in {delay}s.", file=sys.stderr)
+        subprocess.run(["sleep", str(delay)])
 while True:
-    cmd = ["aws", "iam", "list-roles", "--output", "json"]
+    cmd = ["iam", "list-roles", "--output", "json"]
     if marker:
         cmd += ["--starting-token", marker]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = run_aws(cmd)
     if r.returncode != 0:
         msg = " ".join(f"aws iam list-roles: {r.stderr}".split())
         print(f"  ERROR {msg}", file=sys.stderr)

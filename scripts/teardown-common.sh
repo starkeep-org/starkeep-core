@@ -42,10 +42,11 @@ record_failure() {
 
 # is_throttled <aws-error-text>: whether an AWS CLI error means the account
 # hit a rate limit. Services name the case Throttling, ThrottlingException,
-# TooManyRequestsException or RequestLimitExceeded, and some say "Rate exceeded".
+# TooManyRequestsException or RequestLimitExceeded, some say "Rate exceeded",
+# and S3 says SlowDown.
 is_throttled() {
   case "$1" in
-    *Throttl*|*TooManyRequests*|*RequestLimitExceeded*|*"Rate exceeded"*) return 0 ;;
+    *Throttl*|*TooManyRequests*|*RequestLimitExceeded*|*"Rate exceeded"*|*SlowDown*) return 0 ;;
   esac
   return 1
 }
