@@ -15,6 +15,7 @@
 
 import {
   APP_ID,
+  EXAMPLE_CATEGORY,
   EXAMPLE_TYPE,
   LABEL_KEYS,
   EXPORT_PREFIX,
@@ -406,13 +407,15 @@ export async function getRecord(id: string): Promise<ExampleRecord> {
   ).record;
 }
 
-/** `GET /data/records/:id/metadata/:typeId`: the record's metadata row. */
+/** `GET /data/records/:id/metadata/:category`: the record's metadata row. */
 export async function getMetadata(id: string): Promise<Record<string, unknown> | null> {
   return expectOk(
     await data<{ metadata: Record<string, unknown> | null }>(
       "GET",
-      // The type holds a slash, so it travels encoded as one path segment.
-      `/data/records/${encodeURIComponent(id)}/metadata/${encodeURIComponent(EXAMPLE_TYPE)}`,
+      // The category, not the type: a type holds a slash, and API Gateway
+      // decodes `%2F` into a real one, so an encoded type reaches the data
+      // server as two segments and matches no route.
+      `/data/records/${encodeURIComponent(id)}/metadata/${EXAMPLE_CATEGORY}`,
     ),
   ).metadata;
 }
