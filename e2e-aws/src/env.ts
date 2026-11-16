@@ -5,7 +5,7 @@
  *   STARKEEP_AWS_TESTS=1            enable (required)
  *   STARKEEP_AWS_STACK_PREFIX       dedicated test prefix (default "sktest";
  *                                   must never be the live deployment's prefix)
- *   STARKEEP_AWS_E2E_REGION             the region of the test stack (required,
+ *   STARKEEP_AWS_E2E_REGION         the region of the test stack (required,
  *                                   no default; see region.ts). A region that
  *                                   a live deployment uses prints a warning
  *                                   and the run goes on.
@@ -45,8 +45,10 @@ export const HMAC_CACHE_TTL_MS = process.env.HMAC_CACHE_TTL_MS ?? "0";
 export const STACK_PREFIX = process.env.STARKEEP_AWS_STACK_PREFIX ?? "sktest";
 
 /**
- * Checked only when the suites run. A skipped suite needs no region, so it
- * neither throws nor warns.
+ * Checked whenever STARKEEP_AWS_TESTS=1 is set. A run without it needs no
+ * region, so it neither throws nor warns. The check runs at import, so a suite
+ * that skips for its own reason, such as the custom-domain suite without a
+ * zone, still requires the region.
  */
 function resolveRegion(): string {
   const requested = process.env.STARKEEP_AWS_E2E_REGION;
