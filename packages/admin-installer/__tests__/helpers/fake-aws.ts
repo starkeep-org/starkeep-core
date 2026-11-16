@@ -65,8 +65,11 @@ export interface Account {
   buckets: string[];
   ssmParameters: string[];
   curReports: string[];
-  /** Calls that fail: when the call's joined arguments contain `match`, it prints `error`. */
-  errors: { match: string; error: string }[];
+  /**
+   * Calls that fail: when the call's joined arguments contain `match`, it prints
+   * `error`. With `times`, the error fires that many times and then stops.
+   */
+  errors: { match: string; error: string; times?: number }[];
 }
 
 export function emptyAccount(): Account {
@@ -226,7 +229,14 @@ function notFound(what) {
   fail(code, what + " not found");
 }
 for (const e of st.errors) {
-  if (args.join(" ").includes(e.match)) { process.stderr.write(e.error + "\n"); process.exit(254); }
+  if (!args.join(" ").includes(e.match)) continue;
+  if (e.times !== undefined) {
+    if (e.times <= 0) continue;
+    e.times -= 1;
+    fs.writeFileSync(statePath, JSON.stringify(st));
+  }
+  process.stderr.write(e.error + "\n");
+  process.exit(254);
 }
 function out(result) {
   const q = opt("--query");
@@ -451,6 +461,9 @@ export function createSandbox(
   }
   writeFileSync(join(dir, "bin", "aws"), FAKE_AWS);
   chmodSync(join(dir, "bin", "aws"), 0o755);
+  // The scripts wait between retries of a throttled call. The tests skip the wait.
+  writeFileSync(join(dir, "bin", "sleep"), "#!/bin/sh\nexit 0\n");
+  chmodSync(join(dir, "bin", "sleep"), 0o755);
   const configFile = join(dir, "starkeep", "config.json");
   writeFileSync(configFile, JSON.stringify(config));
 
