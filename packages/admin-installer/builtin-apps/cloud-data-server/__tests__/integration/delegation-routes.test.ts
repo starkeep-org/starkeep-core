@@ -344,6 +344,8 @@ describe("the delegation store", () => {
         ('photos', '1', 'Photos', true, '${manifest(["GET /"])}'),
         ('drive-only', '1', null, false, '${manifest([{ route: "POST /mcp", auth: "delegated" }])}');
     `);
-    expect(await loadConnectableApps(client)).toEqual([{ appId: "probe", name: "Probe" }]);
+    expect(await loadConnectableApps(client)).toEqual([
+      { appId: "probe", name: "Probe", delegatedPaths: ["/mcp"] },
+    ]);
   });
 });

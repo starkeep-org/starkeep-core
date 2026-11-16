@@ -182,33 +182,48 @@ export async function touchDelegation(
 }
 
 /**
- * Whether a manifest, as the registry stores it, declares a route an outside
- * client may call: any compute route with `auth: "delegated"`. Read by hand
- * rather than through `@starkeep/admin-manifest`, which this bundle does not
- * carry; an unreadable manifest counts as none.
+ * The paths of a manifest's routes an outside client may call: every compute
+ * route with `auth: "delegated"`, as the manifest declares it, relative to
+ * `/apps/<appId>`. Read by hand rather than through `@starkeep/admin-manifest`,
+ * which this bundle does not carry; an unreadable manifest declares none.
  */
-export function manifestServesOutsideClients(manifestJson: unknown): boolean {
-  if (typeof manifestJson !== "string") return false;
+export function delegatedPathsOf(manifestJson: unknown): string[] {
+  if (typeof manifestJson !== "string") return [];
   try {
     const manifest = JSON.parse(manifestJson) as {
       infraRequirements?: { compute?: { handlers?: { routes?: unknown[] }[] } };
     };
-    const handlers = manifest.infraRequirements?.compute?.handlers ?? [];
-    return handlers.some((h) =>
-      (h.routes ?? []).some(
-        (r) =>
-          typeof r === "object" && r !== null && (r as { auth?: unknown }).auth === "delegated",
-      ),
-    );
+    const paths: string[] = [];
+    for (const h of manifest.infraRequirements?.compute?.handlers ?? []) {
+      for (const r of h.routes ?? []) {
+        if (typeof r !== "object" || r === null) continue;
+        const { auth, route } = r as { auth?: unknown; route?: unknown };
+        if (auth !== "delegated" || typeof route !== "string") continue;
+        const path = /^\S+\s+(\/\S*)$/.exec(route.trim())?.[1];
+        if (path && !paths.includes(path)) paths.push(path);
+      }
+    }
+    return paths;
   } catch {
-    return false;
+    return [];
   }
 }
 
+/** Whether a manifest declares any route an outside client may call. */
+export function manifestServesOutsideClients(manifestJson: unknown): boolean {
+  return delegatedPathsOf(manifestJson).length > 0;
+}
+
+/** An installed app that serves outside clients. */
+export interface ConnectableApp {
+  appId: string;
+  name: string;
+  /** Its delegated routes' paths, relative to `/apps/<appId>`. */
+  delegatedPaths: string[];
+}
+
 /** The installed web apps that serve outside clients, for the consent page. */
-export async function loadConnectableApps(
-  client: DatabaseClient,
-): Promise<{ appId: string; name: string }[]> {
+export async function loadConnectableApps(client: DatabaseClient): Promise<ConnectableApp[]> {
   const rows = await run(
     client,
     compiler
@@ -219,9 +234,10 @@ export async function loadConnectableApps(
       .compile(),
   );
   return rows
-    .filter((r) => manifestServesOutsideClients(r.manifest))
     .map((r) => ({
       appId: String(r.app_id),
       name: typeof r.name === "string" && r.name ? r.name : String(r.app_id),
-    }));
+      delegatedPaths: delegatedPathsOf(r.manifest),
+    }))
+    .filter((app) => app.delegatedPaths.length > 0);
 }

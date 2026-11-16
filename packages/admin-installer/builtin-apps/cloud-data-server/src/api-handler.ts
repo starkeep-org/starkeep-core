@@ -182,6 +182,7 @@ import {
 import type { StoredAvailability } from "@starkeep/storage-adapter";
 import { ok, clientErr, type APIGatewayEvent, type LambdaContext } from "./handler-utils.js";
 import { handleConnectRoute, isConnectRoute } from "./connect-routes.js";
+import { handleOAuthMetadata, isOAuthMetadataPath } from "./oauth-metadata.js";
 import { delegatedMayCall, isDelegatedWrite } from "./delegation-policy.js";
 import {
   findDelegation,
@@ -3134,6 +3135,20 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
         deviceClientId: pool.userPoolClientId,
         ...(cognitoDomain ? { cognitoDomain } : {}),
         ...(mobile ? { mobileClientId: mobile.userPoolClientId } : {}),
+      });
+    }
+
+    // OAuth discovery for MCP clients: the protected resource metadata on the
+    // CloudFront host, and the authorization server metadata on the
+    // execute-api hostname, the issuer. See oauth-metadata.ts.
+    if (method === "GET" && isOAuthMetadataPath(rawPath)) {
+      const accountId = getAccountId(context.invokedFunctionArn);
+      return await handleOAuthMetadata(rawPath, {
+        throughCloudFront: carriesOriginHeader(event.headers ?? {}),
+        issuer: `https://${event.requestContext.domainName ?? ""}`,
+        viewerBase: async () =>
+          viewerBaseUrl(event.headers ?? {}, await loadCloudFrontSigningConfig()),
+        connectableApps: async () => loadConnectableApps(await platformClient(accountId, toClose)),
       });
     }
 

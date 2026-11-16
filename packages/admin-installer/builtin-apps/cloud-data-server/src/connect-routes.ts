@@ -55,6 +55,7 @@ import {
   listDelegations,
   newDelegationId,
   revokeDelegation,
+  type ConnectableApp,
   type DelegationRow,
 } from "./delegation-store.js";
 import { verifyUserToken, type PoolConfig } from "./verify-user-token.js";
@@ -74,10 +75,7 @@ export const DEFAULT_MODE: DelegationMode = "read";
 const APP_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 const MAX_CLIENT_NAME = 64;
 
-export interface ConnectableApp {
-  appId: string;
-  name: string;
-}
+export type { ConnectableApp } from "./delegation-store.js";
 
 export interface ConnectDeps {
   /** The connectors client, or null when the deployment predates it. */
