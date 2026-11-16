@@ -1,10 +1,4 @@
-export type {
-  StarkeepSdk,
-  StarkeepSdkOptions,
-  DataOperations,
-  IndexOperations,
-  ApiOperations,
-} from "./types.js";
+export type { StarkeepSdk, StarkeepSdkOptions, DataOperations, ApiOperations } from "./types.js";
 
 export { createStarkeepSdk } from "./sdk.js";
 

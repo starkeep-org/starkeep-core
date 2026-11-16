@@ -290,9 +290,6 @@ importers:
       '@starkeep/protocol-primitives':
         specifier: workspace:*
         version: link:../../packages/protocol-primitives
-      '@starkeep/query-orchestrator':
-        specifier: workspace:*
-        version: link:../../packages/query-orchestrator
       '@starkeep/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
@@ -796,36 +793,11 @@ importers:
         specifier: ^5.0.5
         version: 5.0.5(@opentelemetry/api@1.9.1)(@types/node@24.19.2)(jsdom@30.0.1(@noble/hashes@1.8.0))(msw@2.14.6(@types/node@24.19.2)(typescript@5.9.3))(vite@8.3.5(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(terser@5.16.9)(tsx@4.23.13)(yaml@2.9.0))
 
-  packages/query-orchestrator:
-    dependencies:
-      '@starkeep/protocol-primitives':
-        specifier: workspace:*
-        version: link:../protocol-primitives
-      '@starkeep/storage-adapter':
-        specifier: workspace:*
-        version: link:../storage-adapter
-    devDependencies:
-      '@types/node':
-        specifier: ^24.19.2
-        version: 24.19.2
-      tsup:
-        specifier: ^8.0.0
-        version: 8.5.1(jiti@2.7.0)(postcss@8.5.18)(tsx@4.23.13)(typescript@5.9.3)(yaml@2.9.0)
-      typescript:
-        specifier: ^5.7.0
-        version: 5.9.3
-      vitest:
-        specifier: ^5.0.5
-        version: 5.0.5(@opentelemetry/api@1.9.1)(@types/node@24.19.2)(jsdom@30.0.1(@noble/hashes@2.2.0))(msw@2.14.6(@types/node@24.19.2)(typescript@5.9.3))(vite@8.3.5(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(terser@5.16.9)(tsx@4.23.13)(yaml@2.9.0))
-
   packages/sdk:
     dependencies:
       '@starkeep/protocol-primitives':
         specifier: workspace:*
         version: link:../protocol-primitives
-      '@starkeep/query-orchestrator':
-        specifier: workspace:*
-        version: link:../query-orchestrator
       '@starkeep/shared-space-api':
         specifier: workspace:*
         version: link:../shared-space-api

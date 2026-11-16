@@ -22,7 +22,6 @@ async function sha256Hex(data: Uint8Array | Buffer): Promise<string> {
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 }
-import { createUnifiedIndex } from "@starkeep/query-orchestrator";
 import { createChangeNotifier } from "@starkeep/sync-engine";
 import {
   createSharedSpaceApi,
@@ -157,8 +156,6 @@ export async function createStarkeepSdk(options: StarkeepSdkOptions): Promise<St
   // server hoists it to share with the app-specific factory, which emits
   // its own local-change events tagged with the writing app's id).
   const changeNotifier = options.changeNotifier ?? createChangeNotifier();
-
-  const unifiedIndex = createUnifiedIndex({ databaseAdapter });
 
   /**
    * Emit a `local-change-recorded` event for a write. The supervisor wakes its
@@ -559,12 +556,6 @@ export async function createStarkeepSdk(options: StarkeepSdkOptions): Promise<St
           records: ids.map((id) => byId.get(id)).filter((r): r is DataRecord => r !== undefined),
           nextCursor: found.nextCursor,
         };
-      },
-    },
-
-    index: {
-      async search(query) {
-        return unifiedIndex.search(query);
       },
     },
 

@@ -7,7 +7,6 @@ import type {
   RecordLabel,
 } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter, ObjectStorageAdapter } from "@starkeep/storage-adapter";
-import type { IndexQuery, IndexResult } from "@starkeep/query-orchestrator";
 import type { ChangeNotifier, SyncStateStore } from "@starkeep/sync-engine";
 import type {
   ApiRequest,
@@ -251,10 +250,6 @@ export interface LabelRetractEntry {
   value?: string;
 }
 
-export interface IndexOperations {
-  search(query: IndexQuery): Promise<IndexResult>;
-}
-
 export interface ApiOperations {
   readonly router: ApiRouter;
   handleRequest(request: ApiRequest): Promise<ApiResponse>;
@@ -266,7 +261,6 @@ export type { WebSocketConnection };
 
 export interface StarkeepSdk {
   readonly data: DataOperations;
-  readonly index: IndexOperations;
   readonly api: ApiOperations;
   /**
    * Broadcast channel for record-level events. The SDK emits

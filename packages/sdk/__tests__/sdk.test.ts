@@ -124,26 +124,6 @@ describe("createStarkeepSdk", () => {
     });
   });
 
-  describe("index operations", () => {
-    it("should search records", async () => {
-      const { sdk } = await createTestSdk();
-
-      await sdk.data.putWithFile(
-        { type: "@test/photo", originAppId: "test" },
-        Buffer.from("a"),
-        "image/jpeg",
-      );
-      await sdk.data.putWithFile(
-        { type: "@test/document", originAppId: "test" },
-        Buffer.from("b"),
-        "text/plain",
-      );
-
-      const result = await sdk.index.search({ types: ["@test/photo"] });
-      expect(result.items.length).toBeGreaterThanOrEqual(1);
-    });
-  });
-
   describe("lifecycle", () => {
     it("should close without errors", async () => {
       const { sdk } = await createTestSdk();
