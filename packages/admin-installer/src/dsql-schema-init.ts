@@ -86,6 +86,7 @@ import {
   backfillNodeWatermarks,
   createNodeWatermarkTable,
 } from "./node-watermark-ddl";
+import { retryOnTransientDbError } from "./retry-on-access-denied";
 
 export interface SchemaInitOptions {
   hostname: string;
@@ -165,8 +166,19 @@ async function ensureIndex(db: Kysely<Record<string, never>>, createSql: string)
 /**
  * Apply the full shared-schema DDL. Each statement runs in its own implicit
  * transaction — see the DSQL note at the top of this file.
+ *
+ * A DSQL optimistic-concurrency conflict (`OC001`, "schema has been updated by
+ * another transaction") or a dropped connection replays the whole body on a
+ * fresh connection, as the per-app DDL in `dsql-ddl.ts` does. An asynchronous
+ * index build changes the catalog under the next statement, so a run that
+ * creates tables and indexes back to back can meet one. Every statement here
+ * is idempotent, so a replay converges.
  */
 export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<void> {
+  await retryOnTransientDbError("shared schema DDL", () => applySharedSchema(opts));
+}
+
+async function applySharedSchema(opts: SchemaInitOptions): Promise<void> {
   const installer = installerPgUser(opts.stackPrefix);
 
   const db = await makeDb(opts);

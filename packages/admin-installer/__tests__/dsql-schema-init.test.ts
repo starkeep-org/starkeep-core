@@ -29,6 +29,8 @@ const state = {
   /** Answers the pg_indexes / pg_roles EXISTS probes. */
   exists: false,
   statements: [] as string[],
+  /** A statement containing this text fails once with a DSQL OCC conflict. */
+  conflictOnce: null as string | null,
 };
 
 vi.mock("@aws-sdk/dsql-signer", () => ({
@@ -57,6 +59,12 @@ vi.mock("pg", () => {
   }
   function handleQuery(text: string) {
     state.statements.push(text.replace(/\s+/g, " ").trim());
+    if (state.conflictOnce && text.includes(state.conflictOnce)) {
+      state.conflictOnce = null;
+      throw Object.assign(new Error("schema has been updated by another transaction (OC001)"), {
+        code: "OC001",
+      });
+    }
     if (text.includes("FROM pg_indexes") || text.includes("FROM pg_roles")) {
       return { rows: [{ exists: state.exists }], rowCount: 1 };
     }
@@ -70,6 +78,7 @@ import { initializeSharedSchema } from "../src/dsql-schema-init";
 beforeEach(() => {
   state.exists = false;
   state.statements = [];
+  state.conflictOnce = null;
 });
 
 async function init() {
@@ -392,6 +401,21 @@ describe("every owned table leads with its owner", () => {
     );
     expect(indexes.length).toBeGreaterThan(0);
     for (const index of indexes) expect(index, index).toMatch(/\((user_id|"user_id"),/);
+  });
+});
+
+describe("an optimistic-concurrency conflict", () => {
+  it("replays the whole DDL and finishes", async () => {
+    // DSQL answers OC001 when an async index build changed the catalog under
+    // the next statement. Every statement is idempotent, so a replay converges.
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    state.conflictOnce = 'create table if not exists "delegation"."authorizations"';
+    const statements = await init();
+    const creates = statements.filter((s) =>
+      s.includes('create table if not exists "delegation"."authorizations"'),
+    );
+    expect(creates).toHaveLength(2);
+    expect(statements.some((s) => s.includes('"delegation"."refresh_tokens"'))).toBe(true);
   });
 });
 
