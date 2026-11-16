@@ -610,12 +610,11 @@ fi
 # cache policies, the RSA public key + key group, the signed-out-redirect
 # viewer-request function, and a custom domain the stack owned. Deleting a
 # distribution requires disable → wait-until-Deployed → delete, which is slow
-# (~5–15 min). This whole
-# step is best-effort: any failure is logged and skipped so a hiccup never
-# aborts the wider teardown (these resources are idle/cheap and can be cleaned
-# up by hand). Done before the files bucket because the distribution's S3 origin
-# references it. Idempotent — silently skips anything already gone (e.g. an
-# install that failed before creating them).
+# (~5–15 min). A failure here does not abort the wider teardown: it is
+# recorded, the later steps still run, and the script fails at the end. Done
+# before the files bucket because the distribution's S3 origin references it.
+# Idempotent: anything already gone counts as deleted (e.g. an install that
+# failed before creating them).
 
 step "Deleting CloudFront distribution + signing key material"
 # The distribution and certificates were selected before the confirmation. Each
