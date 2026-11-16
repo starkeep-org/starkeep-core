@@ -84,3 +84,38 @@ export interface DelegationClaims {
   readonly exp: number;
   readonly iat: number;
 }
+
+// ---------------------------------------------------------------------------
+// OAuth 2.1 for MCP clients
+// ---------------------------------------------------------------------------
+//
+// A hosted connector (claude.ai, ChatGPT) or Claude Code runs the OAuth
+// authorization code flow with PKCE instead of pasting a token. The gateway's
+// execute-api hostname is the authorization server's issuer, beside the
+// consent pages. The app's MCP endpoint, on the CloudFront host, is the
+// protected resource. The access token is the same `skd_` delegation token,
+// with a short life, and a refresh token renews it.
+
+/** The authorization endpoint. A browser starts the flow here. */
+export const CONNECT_AUTHORIZE_ROUTE = "/connect/authorize";
+/** The consent page's form target for an OAuth request. */
+export const CONNECT_AUTHORIZE_APPROVE_ROUTE = "/connect/authorize/approve";
+/** The token endpoint, for both the authorization code and the refresh token grants. */
+export const CONNECT_TOKEN_ROUTE = "/connect/token";
+/** Authorization server metadata (RFC 8414), on the issuer's host. */
+export const OAUTH_AS_METADATA_ROUTE = "/.well-known/oauth-authorization-server";
+/**
+ * Protected resource metadata (RFC 9728) lives at this prefix followed by the
+ * resource's path, on the resource's host:
+ * `/.well-known/oauth-protected-resource/apps/<appId>/<path>`.
+ */
+export const OAUTH_PRM_PREFIX = "/.well-known/oauth-protected-resource";
+
+/** Every refresh token starts with this, so a leak scanner can recognize one. */
+export const REFRESH_TOKEN_PREFIX = "skr_";
+
+/** The OAuth scopes. Each names the delegation mode it grants. */
+export const OAUTH_SCOPES: readonly DelegationMode[] = DELEGATION_MODES;
+
+/** How long an OAuth access token lives. A refresh renews it. */
+export const OAUTH_ACCESS_TOKEN_TTL_S = 15 * 60;
