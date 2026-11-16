@@ -25,9 +25,17 @@ import {
   type Note,
 } from "@example-app/common";
 import { recordActivity } from "./activity.js";
+import { MAX_IN_FLIGHT, RETRY_DELAYS_MS, createRequestGate } from "./request-gate.js";
 
 /** The app's mount: `/` locally, `/apps/example-app/` in the cloud. */
 const BASE = import.meta.env.BASE_URL;
+
+/**
+ * Every request to the app's own server waits here for a slot. A refresh of
+ * every panel would otherwise overrun the cloud's Lambda concurrency limit.
+ * See `request-gate.ts`.
+ */
+const gate = createRequestGate({ maxInFlight: MAX_IN_FLIGHT, retryDelaysMs: RETRY_DELAYS_MS });
 
 /** What every call returns: the HTTP status and the parsed JSON body. */
 export interface Result<T> {
@@ -51,7 +59,6 @@ async function call<T>(
   url: string,
   init: { json?: unknown; body?: BodyInit; headers?: Record<string, string>; log?: string } = {},
 ): Promise<Result<T>> {
-  const started = performance.now();
   const headers: Record<string, string> = { ...init.headers };
   let body = init.body;
   if (init.json !== undefined) {
@@ -59,33 +66,42 @@ async function call<T>(
     body = JSON.stringify(init.json);
   }
   const logged = init.log ?? url.replace(BASE, "/");
-  try {
-    const res = await fetch(url, { method, headers, ...(body !== undefined ? { body } : {}) });
-    const text = await res.text();
-    recordActivity({
-      method,
-      path: logged,
-      status: res.status,
-      ms: Math.round(performance.now() - started),
-      at: new Date(),
-    });
-    let parsed: unknown = text;
+  // One fetch, logged on its own, so a throttled read shows in the Activity
+  // table as its 503 followed by the retry's answer.
+  const attempt = async () => {
+    const started = performance.now();
     try {
-      parsed = text ? JSON.parse(text) : null;
-    } catch {
-      // Not JSON: a file's content, or a proxy error page.
+      const res = await fetch(url, { method, headers, ...(body !== undefined ? { body } : {}) });
+      const text = await res.text();
+      recordActivity({
+        method,
+        path: logged,
+        status: res.status,
+        ms: Math.round(performance.now() - started),
+        at: new Date(),
+      });
+      return { status: res.status, ok: res.ok, text };
+    } catch (err) {
+      recordActivity({
+        method,
+        path: logged,
+        status: "error",
+        ms: Math.round(performance.now() - started),
+        at: new Date(),
+      });
+      throw err;
     }
-    return { status: res.status, ok: res.ok, body: parsed as T };
-  } catch (err) {
-    recordActivity({
-      method,
-      path: logged,
-      status: "error",
-      ms: Math.round(performance.now() - started),
-      at: new Date(),
-    });
-    throw err;
+  };
+  // Only the app's own server runs on Lambda. Signed S3 and CloudFront URLs
+  // are absolute and skip the gate.
+  const res = url.startsWith(BASE) ? await gate.send(method, attempt) : await attempt();
+  let parsed: unknown = res.text;
+  try {
+    parsed = res.text ? JSON.parse(res.text) : null;
+  } catch {
+    // Not JSON: a file's content, or a proxy error page.
   }
+  return { status: res.status, ok: res.ok, body: parsed as T };
 }
 
 /** A data-plane call through the signing proxy. */
