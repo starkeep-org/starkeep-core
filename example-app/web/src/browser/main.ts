@@ -583,7 +583,7 @@ async function renderNotes(): Promise<void> {
 
 const analysis = section(
   "Analysis",
-  "Notes per day, in SQL the app's server runs over a snapshot of the notes table. " +
+  "Notes per day in your time zone, in SQL the app's server runs over a snapshot of the notes table. " +
     "The snapshot lives five minutes, so a note you save appears here after Refresh or once the snapshot expires.",
 );
 const analysisAsOf = named(el("output", {}, "?"), "Analysis as of");
