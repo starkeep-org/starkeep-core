@@ -712,6 +712,9 @@ describes the options and limits. The example app's `GET /api/notes-by-day`
 (`example-app/web/src/server/analysis.ts`) is the route to copy, and its page
 shows the load time beside a Refresh button.
 
+Store timestamps in UTC. To bucket them by the user's day, send the page's UTC
+offset with the read and apply it in the SQL, as the example's `utcOffset` does.
+
 ### 7. Cloud compute + the bundle (cloud target only)
 
 To install to the cloud, declare compute handlers and ship a bundler.

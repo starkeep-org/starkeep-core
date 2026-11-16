@@ -662,15 +662,17 @@ export interface NotesByDay {
 /**
  * `GET /api/notes-by-day`: notes per day, in SQL the app's server runs over a
  * cached snapshot (`web/src/server/analysis.ts`). `freshAfter` is the floor a
- * Refresh sets: a snapshot loaded before it reloads.
+ * Refresh sets: a snapshot loaded before it reloads. `utcOffset` is this
+ * page's offset from UTC in minutes, so each day is the user's own day.
  */
 export async function notesByDay(
   freshAfter: number,
 ): Promise<{ rows: NotesByDay[]; loadedAt: number }> {
+  const utcOffset = -new Date().getTimezoneOffset();
   return expectOk(
     await call<{ rows: NotesByDay[]; loadedAt: number }>(
       "GET",
-      `${BASE}api/notes-by-day${q({ freshAfter })}`,
+      `${BASE}api/notes-by-day${q({ freshAfter, utcOffset })}`,
     ),
   );
 }
