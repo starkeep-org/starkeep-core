@@ -1,5 +1,22 @@
 # @starkeep/admin-manifest
 
+## 0.10.0
+
+### Minor Changes
+
+- 380bb3f: Outside clients, such as MCP clients and scripts, can reach one app's data with a delegation token the user creates on the platform's consent page. A manifest route declares `"auth": "delegated"` for such a client, and `verifyDelegation(req)` in `@starkeep/app-client` tells the route whose request it is. Pass the returned token to `signedFetch` (`delegation`) or `proxyToDataServer` (`delegationToken`) so the platform applies the token's mode and revocation to each data call. On the local surface a loopback caller passes with no token.
+
+  The manifest validator refuses `auth: "public"` on a handler or a route, and accepts a `publicPaths` entry only when it is a platform page or one of the handler's `staticAssetPaths`. A manifest that used either must move the route to `"delegated"` or drop it.
+
+- 170d2f7: A manifest handler's `runtime` now accepts only `"nodejs24.x"` and defaults to it, because Starkeep's cloud Lambdas run on Node 24. A manifest that names `"nodejs22.x"` now fails validation.
+- 5ec8f08: Refuse a manifest with a `session` handler when no handler lists `/sign-in` in `publicPaths`. The platform sends every signed-out visitor to `/sign-in`, so such an app strands them on a page the gateway refuses. `SIGN_IN_PATH` is exported for the installer's post-install probe, which now also warns when the deployed page answers with an error status.
+
+### Patch Changes
+
+- Updated dependencies [380bb3f]
+- Updated dependencies [1460d5c]
+  - @starkeep/protocol-primitives@0.11.0
+
 ## 0.9.0
 
 ### Minor Changes

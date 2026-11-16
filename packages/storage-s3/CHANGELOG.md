@@ -1,5 +1,13 @@
 # @starkeep/storage-s3
 
+## 0.5.7
+
+### Patch Changes
+
+- Updated dependencies [1460d5c]
+- Updated dependencies [5b57fa3]
+  - @starkeep/storage-adapter@0.9.0
+
 ## 0.5.6
 
 ### Patch Changes

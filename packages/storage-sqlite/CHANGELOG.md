@@ -1,5 +1,21 @@
 # @starkeep/storage-sqlite
 
+## 0.8.0
+
+### Minor Changes
+
+- 1460d5c: A record keeps its source file's own dates. `DataRecord` gains `originalCreatedAt` and `originalUpdatedAt`, ISO 8601 strings or null, and `createDataRecord` takes both as optional input. Both stores add the `original_created_at` and `original_updated_at` columns, and an existing SQLite database or DSQL cluster gains them when the data server starts. The records grammar can filter and order on both columns. Only the local folder watcher fills them, from the file's birth time and modification time.
+- 5b57fa3: Row writes report what they did. `AppSyncableApplier.apply` takes optional write conditions and returns the changed-row count, plus a skip reason (`live`, `deleted`, `missing`, `stale` or `superseded`) for an app's own write that changed nothing. `superseded` marks a write that lost last-writer-wins to a newer stamp, and every route answers it with 409. `insertRow` accepts `ifAbsent`, which counts a deleted row as present. `updateRow` and `deleteRow` accept `ifUpdatedAt` for compare-and-set. All three return a `RowWriteResult` in place of a bare number. An update or a key-only delete now matches live rows only, so a patch no longer lands on a tombstone and a repeated delete no longer re-stamps one. `rowWriteResponse` maps a result to the HTTP status both data servers answer with, and its 404 carries `skipped: "missing"` so a client can tell a missing row from a missing route. `refuseMisplacedConditions` refuses a condition the route does not take, such as `ifUpdatedAt` on a `POST`, and both data servers answer it with 400. Both appliers take `probeKeyFor` and `requireInsertKey` from storage-adapter. `appSyncableWriteConformance` holds the cases each SQL applier runs.
+
+### Patch Changes
+
+- Updated dependencies [380bb3f]
+- Updated dependencies [1460d5c]
+- Updated dependencies [5b57fa3]
+  - @starkeep/protocol-primitives@0.11.0
+  - @starkeep/storage-adapter@0.9.0
+  - @starkeep/shared-space-api@0.9.0
+
 ## 0.7.0
 
 ### Minor Changes
