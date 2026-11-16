@@ -327,6 +327,7 @@ describe("the connections list", () => {
     };
     db.on(/select .* from "delegation"\."grants" where "user_id"/, [live]);
     db.on(/update "delegation"\."grants"/, [{ ...live, revoked_at_ms: String(Date.now()) }]);
+    db.on(/update "delegation"\."refresh_tokens"/, []);
 
     const list = await handleConnectRoute(
       req({ rawPath: "/connections", cookieHeader: cookies }),
@@ -349,14 +350,20 @@ describe("the connections list", () => {
     expect(revoked.statusCode).toBe(302);
     const update = db.calls(/update "delegation"\."grants"/)[0]!;
     expect(update.values).toContain(TEST_USER_ID);
+    // An OAuth client's refresh tokens end with the delegation.
+    expect(db.calls(/update "delegation"\."refresh_tokens"/)[0]!.values).toContain("dlg-1");
     const revokes = cognitoCalls.filter((c) => c.url.endsWith("/oauth2/revoke"));
     expect(revokes.at(-1)!.body.get("token")).toBe("refresh-dlg-1");
   });
 });
 
 describe("helpers", () => {
-  it("names only the six routes", () => {
+  it("names only the consent, OAuth and connections routes", () => {
     expect(isConnectRoute("GET", "/connect")).toBe(true);
+    expect(isConnectRoute("GET", "/connect/authorize")).toBe(true);
+    expect(isConnectRoute("POST", "/connect/authorize/approve")).toBe(true);
+    expect(isConnectRoute("POST", "/connect/token")).toBe(true);
+    expect(isConnectRoute("GET", "/connect/token")).toBe(false);
     expect(isConnectRoute("POST", "/connections/abc/revoke")).toBe(true);
     expect(isConnectRoute("GET", "/connections/abc/revoke")).toBe(false);
     expect(isConnectRoute("DELETE", "/connect")).toBe(false);

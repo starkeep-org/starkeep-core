@@ -33,6 +33,7 @@ import {
 import {
   DELEGATION_MODES,
   DELEGATION_TOKEN_PREFIX,
+  REFRESH_TOKEN_PREFIX,
   type DelegationChannel,
   type DelegationClaims,
   type DelegationMode,
@@ -211,4 +212,19 @@ export function secretsEqual(a: string, b: string): boolean {
   const ab = Buffer.from(a);
   const bb = Buffer.from(b);
   return ab.length === bb.length && timingSafeEqual(ab, bb);
+}
+
+/**
+ * A fresh OAuth refresh token and the hash the store keeps. The token is 32
+ * random bytes behind the `skr_` prefix. Only the hash is stored, so a read
+ * of the table yields nothing a client could present.
+ */
+export function mintRefreshToken(): { token: string; hash: string } {
+  const token = `${REFRESH_TOKEN_PREFIX}${randomBytes(32).toString("base64url")}`;
+  return { token, hash: hashRefreshToken(token) };
+}
+
+/** The SHA-256 of a refresh token, as the store keys it. */
+export function hashRefreshToken(token: string): string {
+  return createHash("sha256").update(token).digest("base64url");
 }
