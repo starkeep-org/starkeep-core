@@ -11,8 +11,10 @@
  * each checked against the approved list in src/approved-commands.ts:
  *
  *   <manager> run bundle   (run in the app's source dir)
- *     env in:  STARKEEP_APP_BASE_PATH = /apps/<appId>
- *              STARKEEP_BUNDLE_OUT    = <abs path to write dist.zip>
+ *     env in:  STARKEEP_APP_BASE_PATH   = /apps/<appId>
+ *              STARKEEP_BUNDLE_OUT      = <abs path to write dist.zip>
+ *              STARKEEP_PUBLIC_BASE_URL = the deployment's browser-facing base URL,
+ *                                         when the config holds one
  *     out:     app writes dist.zip to STARKEEP_BUNDLE_OUT
  *
  * `--manifest-digest <hex>` names the digest of the manifest the person
@@ -136,6 +138,7 @@ async function cloudProtocolVersion(apiGatewayUrl: string | undefined): Promise<
 function buildAppBundle(
   bundle: Extract<CommandResolution, { kind: "run" }>,
   appBasePath: string,
+  publicBaseUrl: string | undefined,
 ): Buffer {
   const stagingDir = join(tmpdir(), `starkeep-app-bundle-${Date.now()}`);
   const distZip = join(stagingDir, "dist.zip");
@@ -150,6 +153,10 @@ function buildAppBundle(
         ...withoutAwsVariables(process.env),
         STARKEEP_APP_BASE_PATH: appBasePath,
         STARKEEP_BUNDLE_OUT: distZip,
+        // A file the build writes into its static assets is served from the
+        // assets bucket, never by the app's Lambda, so a file that must name
+        // the deployment's own URL needs it here.
+        ...(publicBaseUrl ? { STARKEEP_PUBLIC_BASE_URL: publicBaseUrl } : {}),
       },
     });
     if (result.status !== 0) {
@@ -229,7 +236,7 @@ function prepareWebApp(build: {
   // script. The base path /apps/<appId> is the platform's routing convention
   // (the shared API Gateway forwards requests under it; see pulumi-program).
   installAppDependencies(build.install);
-  const zip = buildAppBundle(build.bundle, `/apps/${appId}`);
+  const zip = buildAppBundle(build.bundle, `/apps/${appId}`, config.publicBaseUrl);
   console.log(`\nBundle size: ${(zip.length / 1024 / 1024).toFixed(1)} MB`);
   return zip;
 }
