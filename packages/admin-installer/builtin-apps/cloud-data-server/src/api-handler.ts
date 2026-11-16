@@ -57,7 +57,6 @@ import {
   shouldReplace,
   reconcileAvailability,
   vanishedObservation,
-  INTENT_TAG_KEY,
   estimateRestore,
   DEFAULT_AVAILABILITY,
   DEFAULT_RETRIEVAL_INTENT,
@@ -65,13 +64,11 @@ import {
   RETRIEVAL_INTENTS,
   checkMetadataValues,
   typeCategory,
-  getCategory,
   isCategoryId,
   isKnownType,
   planLabelWrites,
   planLabelRetractions,
   labelValueSetKey,
-  parseLabelRef,
   STAND_IN_MIME_TYPES,
   SETTINGS_TYPE_ID,
   OTHER_TYPE_ID,
@@ -2585,6 +2582,7 @@ export async function handleS3Availability(
    * adapter.
    */
   dbFor: (userId: string) => Promise<DatabaseAdapter>,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- for the inventory reconcile; STA-80 connects it
   storage?: ObjectStorageAdapter,
 ): Promise<{ applied: number; skipped: number }> {
   let applied = 0;
@@ -2686,6 +2684,7 @@ const INVENTORY_PREFIX = "_starkeep/inventory/";
  * data files are complete — reacting to a data file directly would read a
  * partial report.
  */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- never called yet; STA-80 connects it
 async function ingestInventoryReport(
   manifestKey: string,
   db: DatabaseAdapter,
@@ -4959,7 +4958,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     if (metadataQueryMatch && method === "GET") {
       const category = decodeURIComponent(metadataQueryMatch[1]!);
       if (!isCategoryId(category)) return clientErr(`"${category}" is not a category`, 400);
-      return runSharedQuery(db, () => planMetadataQuery(category, grants, query));
+      return await runSharedQuery(db, () => planMetadataQuery(category, grants, query));
     }
 
     // GET /apps/{appId}/data/labels — the query grammar over
@@ -4973,7 +4972,7 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
     // nothing here. What restricts the answer is `record_type IN (…)`, which is
     // the same gate every other read of shared data carries.
     if (subPath === "/data/labels" && method === "GET") {
-      return runSharedQuery(db, () => planLabelQuery(grants, query));
+      return await runSharedQuery(db, () => planLabelQuery(grants, query));
     }
 
     // POST /apps/{appId}/data/records/file-urls — batch signed URLs.

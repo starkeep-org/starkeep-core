@@ -3461,6 +3461,32 @@ describe("the shared-plane query routes", () => {
     expect(db.calls(LABELS_SELECT)).toHaveLength(0);
   });
 
+  // Both routes once returned the query un-awaited from inside the handler's
+  // `try`. The `finally` closed the client mid-query, the rejection reached
+  // Node with no handler attached, and Lambda killed the worker (STA-79).
+  it.each<{ subPath: string; query: Record<string, string>; select: RegExp }>([
+    { subPath: "/data/metadata/image", query: {}, select: IMAGE_METADATA_SELECT },
+    {
+      subPath: "/data/labels",
+      query: { where: JSON.stringify({ app_id: "photos", key: "album" }) },
+      select: LABELS_SELECT,
+    },
+  ])(
+    "finishes the $subPath query before closing its client",
+    async ({ subPath, query, select }) => {
+      const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }])
+        .on(select, [])
+        .terminateInFlightOnEnd();
+      setDbFactory(db);
+      const res = await handler(
+        signedEvent({ appId: "sq-close", method: "GET", subPath, query }),
+        context,
+      );
+      expect(res.statusCode).toBe(200);
+      expect(db.calls(select)).toHaveLength(1);
+    },
+  );
+
   it("gates a label query on the labelled record's type", async () => {
     const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(LABELS_SELECT, [
       {
