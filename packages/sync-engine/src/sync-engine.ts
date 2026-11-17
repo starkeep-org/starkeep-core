@@ -1032,6 +1032,8 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
           // lost: a losing tombstone leaves the record live, and a losing live
           // row leaves it deleted. See the responder's copy.
           let held = rowAlreadyApplied ? current! : snapshot;
+          // Set when the guarded write found a newer row than `current`.
+          let keptOut = false;
 
           // Everything that writes this record is inside one guard, and a
           // failure inside it takes the record out of the round rather than
@@ -1066,6 +1068,7 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
               // a newer row between the read above and this write. This node
               // then keeps it, and the cascades below follow what it holds.
               if (!(await localDatabaseAdapter.putSnapshot(snapshot))) {
+                keptOut = true;
                 held = (await localDatabaseAdapter.get(snapshot.id)) ?? held;
               }
             }
@@ -1130,8 +1133,9 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
 
           // Only announce a row newly applied this round. A file arriving
           // later for a row the node already held announces itself when it
-          // lands.
-          if (!rowAlreadyApplied) appliedIds.push(snapshot.id);
+          // lands, and a snapshot the guard kept out changed nothing, as in
+          // the label branch below.
+          if (!rowAlreadyApplied && !keptOut) appliedIds.push(snapshot.id);
         } else if (item.kind === "label") {
           const incoming = item.label;
           // HLC LWW on the label's own row, which is the whole reason
