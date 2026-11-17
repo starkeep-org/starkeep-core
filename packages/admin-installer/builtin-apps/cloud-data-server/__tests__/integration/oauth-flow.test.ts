@@ -60,6 +60,10 @@ let cognitoRefresh: "ok" | "refused" | "unavailable";
 let revoked: string[];
 /** The installed apps that serve outside clients. */
 let apps: ConnectableApp[];
+/** When set, the next SQL statement that matches fails once. */
+let failNext: RegExp | null;
+/** When set, runs once just before the next SQL statement that matches. */
+let beforeNext: { pattern: RegExp; run: () => Promise<void> } | null;
 
 function deps(): ConnectDeps {
   return {
@@ -225,6 +229,15 @@ beforeAll(async () => {
   await pg.waitReady;
   client = {
     async query(text, values) {
+      if (failNext?.test(text)) {
+        failNext = null;
+        throw new Error("simulated database failure");
+      }
+      if (beforeNext?.pattern.test(text)) {
+        const { run } = beforeNext;
+        beforeNext = null;
+        await run();
+      }
       const result = await pg.query(text, values as unknown[] | undefined);
       return { rows: result.rows as Record<string, unknown>[] };
     },
@@ -246,6 +259,8 @@ beforeEach(async () => {
   cognitoRefresh = "ok";
   revoked = [];
   apps = [{ appId: "probe", name: "Probe", delegatedPaths: ["/mcp"] }];
+  failNext = null;
+  beforeNext = null;
 });
 
 describe("the code exchange", () => {
@@ -355,6 +370,42 @@ describe("the refresh", () => {
     const [grant] = await listDelegations(client, TEST_USER_ID);
     expect(grant!.revoked_at_ms).not.toBeNull();
     expect(revoked).toEqual(["cognito-refresh-c1"]);
+  });
+
+  it("keeps the presented token usable when issuing its successor fails", async () => {
+    const first = await exchange(await approvedCode());
+    failNext = /insert into "delegation"\."refresh_tokens"/i;
+    const failed = await refresh(first.body.refresh_token);
+    expect(failed.status).toBe(503);
+    expect(failNext).toBeNull();
+    // Long after the failure, the same token still refreshes: nothing rotated it.
+    now += ROTATION_GRACE_MS + 1000;
+    const retried = await refresh(first.body.refresh_token);
+    expect(retried.status).toBe(200);
+    const [grant] = await listDelegations(client, TEST_USER_ID);
+    expect(grant!.revoked_at_ms).toBeNull();
+  });
+
+  it("withdraws the successor when a concurrent refresh rotates the token first", async () => {
+    const first = await exchange(await approvedCode());
+    const presented = hashRefreshToken(first.body.refresh_token);
+    beforeNext = {
+      pattern: /update "delegation"\."refresh_tokens"/i,
+      run: async () => {
+        await pg.query(
+          "UPDATE delegation.refresh_tokens SET rotated_at_ms = $1 WHERE token_hash = $2",
+          [now, presented],
+        );
+      },
+    };
+    const lost = await refresh(first.body.refresh_token);
+    expect(lost.body.error).toBe("invalid_grant");
+    expect(beforeNext).toBeNull();
+    // Only the presented token remains: the losing refresh left no successor.
+    const stored = await pg.query<{ token_hash: string }>(
+      "SELECT token_hash FROM delegation.refresh_tokens",
+    );
+    expect(stored.rows).toEqual([{ token_hash: presented }]);
   });
 
   it("refuses another client's refresh", async () => {
