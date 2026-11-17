@@ -338,7 +338,8 @@ function contentPanel(content: string): HTMLPreElement {
 // The Open panel: one record in full.
 const open = section(
   "Open file",
-  "The selected file: its record, its content, its metadata row, its labels and its note. A record's own dates say when Starkeep made and changed the record. The file dates come from the source, and only a watched folder reports them.",
+  "The selected file: its record, its content, its metadata row, its labels and its note. A record's own dates say when Starkeep made and changed the record. The file dates come from the source, and only a watched folder reports them. " +
+    "Saving or deleting the note succeeds only if nobody changed it since the file was opened, so an edit in another tab is never silently overwritten.",
 );
 const noteInput = el("textarea", { rows: 2 });
 const pinnedInput = el("input", { type: "checkbox" });
@@ -365,7 +366,8 @@ async function renderOpen(): Promise<void> {
     selectedId = null;
     return renderOpen();
   }
-  const [record, content, metadata, note] = loaded;
+  const [record, content, metadata, noteState] = loaded;
+  const note = noteState?.note ?? null;
   noteInput.value = note?.text ?? "";
   pinnedInput.checked = note?.pinned ?? false;
   const rows: [string, string][] = [
@@ -403,19 +405,30 @@ async function renderOpen(): Promise<void> {
     labelled("Pinned", pinnedInput),
     button("Save note", () =>
       run("Save note", async () => {
-        const next: Note = {
-          recordId: id,
-          text: noteInput.value,
-          pinned: pinnedInput.checked,
-          updatedOn: new Date().toISOString(),
-        };
-        await api.saveNote(next);
+        // A new note only if there is still none; an edit only if the note
+        // is still the one this panel read.
+        if (noteState) {
+          await api.updateNote(
+            id,
+            { note: noteInput.value, pinned: pinnedInput.checked },
+            noteState.stamp,
+          );
+        } else {
+          const next: Note = {
+            recordId: id,
+            text: noteInput.value,
+            pinned: pinnedInput.checked,
+            updatedOn: new Date().toISOString(),
+          };
+          await api.addNote(next);
+        }
         await Promise.all([renderOpen(), renderNotes()]);
       }),
     ),
     button("Delete note", () =>
       run("Delete note", async () => {
-        await api.deleteNote(id);
+        if (!noteState) throw new Error("the file has no note");
+        await api.deleteNoteIfUnchanged(id, noteState.stamp);
         await Promise.all([renderOpen(), renderNotes()]);
       }),
     ),
@@ -546,16 +559,34 @@ const notes = section(
   "The app's own table. Only this app reads it, and it syncs between every place the app is installed.",
 );
 const searchInput = el("input", { placeholder: "search notes", size: 16 });
+const matchSelect = el("select");
+for (const [value, text] of [
+  ["contains", "Contains"],
+  ["starts", "Starts with"],
+]) {
+  matchSelect.append(el("option", { value: value!, textContent: text! }));
+}
+const sinceNotesInput = el("input", { placeholder: "2026-01-01T00:00:00Z", size: 22 });
+const thisPageInput = el("input", { type: "checkbox" });
 const pinnedOut = named(el("output", {}, "?"), "Pinned notes");
 notes.controls.append(
   labelled("Search", searchInput),
+  labelled("Match", matchSelect),
+  labelled("Edited since", sinceNotesInput),
+  labelled("Only files on this page", thisPageInput),
   button("Search notes", () => run("Search notes", renderNotes)),
   "Pinned notes:",
   pinnedOut,
 );
 
 async function renderNotes(): Promise<void> {
-  const [rows, pinned] = await Promise.all([api.searchNotes(searchInput.value), api.pinnedCount()]);
+  const query: api.NoteQuery = {
+    text: searchInput.value,
+    match: matchSelect.value === "starts" ? "starts" : "contains",
+    ...(sinceNotesInput.value.trim() ? { since: sinceNotesInput.value.trim() } : {}),
+    ...(thisPageInput.checked ? { recordIds: lastPage.map((r) => r.id) } : {}),
+  };
+  const [rows, pinned] = await Promise.all([api.searchNotes(query), api.pinnedCount()]);
   pinnedOut.value = String(pinned);
   notes.body.replaceChildren(
     renderTable<Note>(
@@ -572,13 +603,14 @@ async function renderNotes(): Promise<void> {
               button(n.pinned ? `Unpin ${n.text}` : `Pin ${n.text}`, () =>
                 run("Pin", async () => {
                   await api.patchNote(n.recordId, { pinned: !n.pinned });
-                  await renderNotes();
+                  // The Open panel holds the note's stamp, which this write moved.
+                  await Promise.all([renderNotes(), renderOpen()]);
                 }),
               ),
               button(`Delete note ${n.text}`, () =>
                 run("Delete note", async () => {
                   await api.deleteNote(n.recordId);
-                  await renderNotes();
+                  await Promise.all([renderNotes(), renderOpen()]);
                 }),
               ),
             ),
