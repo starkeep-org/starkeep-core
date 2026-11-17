@@ -1,5 +1,12 @@
 # @starkeep/storage-fs
 
+## 0.4.9
+
+### Patch Changes
+
+- Updated dependencies [7add5da]
+  - @starkeep/storage-adapter@0.10.0
+
 ## 0.4.8
 
 ### Patch Changes
