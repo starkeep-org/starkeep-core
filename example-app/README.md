@@ -102,6 +102,14 @@ pnpm bundle:smoke /tmp/example-dist.zip
 
 The e2e suite boots a local platform from a starkeep-core checkout. `scripts/link-core-harness.mjs` finds that checkout in `STARKEEP_CORE_DIR`, in an enclosing core checkout, or as `starkeep-core` beside your repository's root. See "Testing your app" in `docs/authoring-an-app.md`.
 
+The same suite runs against a real cloud, too. Run it after each starkeep-core release, and whenever you want to check the app in the cloud:
+
+```bash
+STARKEEP_AWS_TESTS=1 pnpm test:e2e:cloud
+```
+
+The cloud run deploys real AWS resources, so read core's `e2e-aws/README.md` first. It uses the tier-3 test stack and its settings: set `STARKEEP_AWS_E2E_REGION` once, as that README's "The test region" section says. Before the tests, the run brings the stack up to date, installs this app on it, and signs a new user in. A user made for the run starts with an empty library, even on a stack an earlier run kept up. A step that holds on one surface only, such as the local server's `Host` check or the cloud's public links, skips on the other. A passing run deletes its user and tears the stack down as `STARKEEP_AWS_TEARDOWN` says. A failing run leaves both up for debugging. Without `STARKEEP_AWS_TESTS=1`, every step skips and the run makes no AWS call.
+
 ## Copying it
 
 1. Copy this folder anywhere. It needs nothing from the repository around it.

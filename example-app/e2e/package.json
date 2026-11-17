@@ -3,9 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Tier 2: the example app installed through admin-web on a real local platform, driven in a browser.",
+  "description": "The example app driven in a browser: through admin-web on a real local platform, and on the tier-3 cloud test stack.",
   "scripts": {
     "test": "playwright test",
+    "test:cloud": "playwright test -c playwright.cloud.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
