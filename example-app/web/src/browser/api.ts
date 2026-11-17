@@ -420,10 +420,10 @@ export async function getMetadata(id: string): Promise<Record<string, unknown> |
   ).metadata;
 }
 
-/** `POST /data/records/file-urls`: several signed URLs in one call. */
-export async function fileUrls(ids: string[]): Promise<Record<string, unknown>> {
+/** `POST /data/records/file-urls`: several signed URLs in one call, by record id. */
+export async function fileUrls(ids: string[]): Promise<Record<string, { url: string }>> {
   return expectOk(
-    await data<{ urls: Record<string, unknown> }>("POST", "/data/records/file-urls", {
+    await data<{ urls: Record<string, { url: string }> }>("POST", "/data/records/file-urls", {
       json: { ids },
     }),
   ).urls;

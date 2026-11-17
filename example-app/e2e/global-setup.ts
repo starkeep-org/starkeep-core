@@ -16,6 +16,8 @@ export default async function globalSetup() {
   process.env.E2E_LDS_URL = stack.lds.url;
   process.env.E2E_ADMIN_URL = stack.adminUrl;
   process.env.E2E_DRIVE_URL = stack.driveUrl ?? "";
+  // admin-web's throwaway state directory, which the app it starts reads too.
+  process.env.E2E_ADMIN_DATA_DIR = stack.adminDataDir;
   return async () => {
     await stack.stop();
   };
