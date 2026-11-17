@@ -136,10 +136,13 @@ You need Java 11 or later and `tla2tools.jar`. Set `TLA2TOOLS` to the jar's path
 ```sh
 ./gen-models.sh                       # regenerate models/*.cfg from the table in the script
 ./check-all.sh                        # every model, compared with expected.txt (about 25 minutes)
+QUICK=1 ./check-all.sh                # only the models tiered "quick" (under a minute)
 ./check-all.sh fixed                  # only the models whose name contains "fixed"
 ./run.sh models/finding-crash.cfg     # one model, with TLC's full trace
 ```
 
 Full TLC output for each model is written to `traces/<name>.out`, which is gitignored.
+
+CI runs the quick tier on every pull request (the `exchange-round-model` job in `.github/workflows/ci.yml`), with a `tla2tools.jar` pinned by version and checksum. The four slow models (`fixed-relay`, `fixed-two-writers`, `deferred-relay` and `deferred-two-writers`) cover the same mechanisms on larger configurations, and are left to a manual run.
 
 To change the protocol, change the code and this spec together. Then rerun `./check-all.sh`, and turn any new counterexample into a test beside `exchange-round-findings.test.ts`.

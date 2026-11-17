@@ -8,6 +8,7 @@ cfg=$1
 mode=${2:-check}
 seconds=${3:-600}
 meta=$(mktemp -d)
+trap 'rm -rf "$meta"' EXIT
 flags=""
 [ "$mode" = simulate ] && flags="-simulate -depth 100"
 cd "$here"
