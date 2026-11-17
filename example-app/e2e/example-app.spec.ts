@@ -1,11 +1,16 @@
 /**
- * The example app on a real local platform, driven the way a person would.
+ * The example app on a real platform, driven the way a person would.
  *
- * The spec installs the app through admin-web, starts it, and walks the page's
- * headings top to bottom. Each step clicks a control and checks the visible
- * result, and the Activity table shows every request's status. Steps share
- * state on purpose: the file created first is the one later steps label,
- * annotate, copy and delete.
+ * The spec walks the page's headings top to bottom. Each step clicks a control
+ * and checks the visible result, and the Activity table shows every request's
+ * status. Steps share state on purpose: the file created first is the one
+ * later steps label, annotate, copy and delete.
+ *
+ * The same steps run on both surfaces (`surface.ts`). Locally the spec
+ * installs the app through admin-web and starts it. In the cloud,
+ * `cloud-setup.ts` has installed it on the test stack and signed a fresh
+ * user in, and the spec opens the page with that user's cookies. A step that
+ * holds on one surface only says so and skips on the other.
  */
 
 import { readFile, writeFile } from "node:fs/promises";
@@ -14,18 +19,29 @@ import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { installAppViaAdmin, startAppDaemonViaAdmin } from "@starkeep/e2e";
 import { APP_ID } from "@example-app/common";
+import { SURFACE, cloudRun, enabledCloudRun } from "./surface";
 
 test.describe.configure({ mode: "serial" });
+test.skip(
+  SURFACE === "cloud" && !cloudRun().enabled,
+  "The cloud run needs STARKEEP_AWS_TESTS=1 (e2e-aws/README.md)",
+);
 
 let page: Page;
 const statusLine = () => page.locator("#status");
 
 test.beforeAll(async ({ browser }) => {
-  const adminUrl = process.env.E2E_ADMIN_URL!;
-  await installAppViaAdmin(adminUrl, APP_ID);
-  const { url } = await startAppDaemonViaAdmin(adminUrl, APP_ID);
-  page = await browser.newPage();
-  await page.goto(url);
+  if (SURFACE === "cloud") {
+    const run = enabledCloudRun();
+    page = await browser.newPage({ storageState: run.storageState });
+    await page.goto(run.appUrl);
+  } else {
+    const adminUrl = process.env.E2E_ADMIN_URL!;
+    await installAppViaAdmin(adminUrl, APP_ID);
+    const { url } = await startAppDaemonViaAdmin(adminUrl, APP_ID);
+    page = await browser.newPage();
+    await page.goto(url);
+  }
   await expect(statusLine()).toHaveText("Load: done.");
 });
 
@@ -199,8 +215,11 @@ async function fetchText(url: string): Promise<string> {
   return res.text();
 }
 
-test("Connection: the local surface, and a refused write outside the grant", async () => {
-  await expect(table("Connection")).toContainText("local");
+test("Connection: the surface, the session, and a refused write outside the grant", async () => {
+  await expect(await cell("Connection", "Surface", "Value")).toHaveText(SURFACE);
+  await expect(await cell("Connection", "Session", "Value")).toHaveText(
+    SURFACE === "cloud" ? `signed in as ${enabledCloudRun().user.email}` : "none needed locally",
+  );
   await click("Run grant check", "Grant check");
   await expect(table("Connection")).toContainText("403 refused, as it should be");
   await expectLogged("POST", /^\/data\/records$/, 403);
@@ -208,14 +227,16 @@ test("Connection: the local surface, and a refused write outside the grant", asy
 
 test("Connection: the app's own JWT-gated route answers", async () => {
   // Locally the route is same-origin and needs no token. In the cloud the
-  // gateway's JWT authorizer guards it, and only a cloud run can check that;
-  // the example has no tier-3 suite yet.
+  // gateway's JWT authorizer guards it, so the page first asks its session
+  // for a token and sends it as a Bearer credential.
   await click("Call the JWT route", "JWT route");
   await expect(await cell("Connection", "JWT route", "Value")).toHaveText("200, echoed");
+  if (SURFACE === "cloud") await expectLogged("GET", /^\/api\/session\/token$/, 200);
   await expectLogged("POST", /^\/api\/echo$/, 200);
 });
 
 test("Connection: the local server refuses a non-loopback Host", async () => {
+  test.skip(SURFACE !== "local", "A check of the local server; CloudFront fronts the cloud");
   // A DNS-rebinding page reaches 127.0.0.1 under a hostname it controls, so
   // the request arrives with that hostname in `Host`. Node's fetch drops a
   // caller's `Host`, so this asks through node:http, which sends it as given.
@@ -242,6 +263,10 @@ test("Connection: the local server refuses a non-loopback Host", async () => {
 });
 
 test("Connection: the local server refuses a write from another site", async () => {
+  test.skip(
+    SURFACE !== "local",
+    "A check of the local server; the cloud's session cookies guard it",
+  );
   // A page on another site can send a blind `no-cors` POST to 127.0.0.1 with
   // a loopback `Host`, and the proxy would sign it. Only `Sec-Fetch-Site`
   // tells it apart, and node:http sends it as given.
@@ -324,7 +349,7 @@ test("Example files: upload a file through a presigned URL", async () => {
   await expect(await cell("Example files", "uploaded.skexample", "Words")).toHaveText("3");
   await expectLogged("POST", /^\/files\/presign$/, 200);
   // local-data-server answers a presigned PUT with 204; S3 answers 200.
-  await expectLogged("PUT", /^PUT <presigned upload URL>$/, 204);
+  await expectLogged("PUT", /^PUT <presigned upload URL>$/, SURFACE === "local" ? 204 : 200);
 });
 
 test("Notes: write, delete, pin and unpin a note on the open file", async () => {
@@ -748,6 +773,7 @@ test("Notes: a search reads past the first page", async () => {
 });
 
 test("Connection: the cloud address public links live under", async () => {
+  test.skip(SURFACE !== "local", "In the cloud the page's own origin is the address");
   // A computer signed in to a cloud records its address in config.json, in
   // the platform's state directory, which this stack keeps in a throwaway
   // folder. The app reads it on each request.
@@ -768,25 +794,54 @@ test("Connection: the cloud address public links live under", async () => {
 });
 
 test("Public links: unavailable without a cloud", async () => {
+  test.skip(SURFACE !== "local", "The cloud project creates, opens and revokes a link instead");
   // The tier-2 stack has no cloud, and public links live only in the cloud.
-  // The cloud project creates, opens and revokes one.
   await expect(page.getByText("Public links are unavailable here")).toBeVisible();
 });
 
-test("MCP: a local client creates, lists, reads, tags, notes and trashes files over loopback", async () => {
+test("Public links: create one to a file, open it signed out, and revoke it", async () => {
+  test.skip(SURFACE !== "cloud", "Public links live only in the cloud");
+  await click("Share hello.skexample", "Share");
+  await expectLogged("POST", /^\/data\/public-shares$/, 201);
+  const href = await (await cell("Public links", "hello.skexample", "Link"))
+    .getByRole("link")
+    .getAttribute("href");
+  expect(href).toMatch(
+    new RegExp(`^${new URL(page.url()).origin}/public-shares/[A-Za-z0-9_-]{22}/file/`),
+  );
+  // Anyone with the link sees the file, with no cookie: Node's fetch sends none.
+  expect(await fetchText(href!)).toBe("Hello, Starkeep.\nThis file is an example.");
+
+  await click("Revoke hello.skexample", "Revoke");
+  await expectLogged("DELETE", /^\/data\/public-shares\/[^/]+$/, 200);
+  await expect(table("Public links")).toContainText("Nothing yet.");
+  // CloudFront may serve the link's redirect from its cache for up to a
+  // minute (PUBLIC_SHARE_CACHE_SECONDS); after that the link is gone.
+  await expect
+    .poll(async () => (await fetch(href!, { redirect: "manual" })).status, {
+      timeout: 120_000,
+      intervals: [5_000],
+    })
+    .toBe(404);
+});
+
+test("MCP: an outside client creates, lists, reads, tags, notes and trashes files", async () => {
   // An outside client such as Claude Code calls the app's MCP route. On the
   // local surface loopback trust admits it with no token, as the app's own
-  // pages are admitted; in the cloud it would send a delegation token. Last,
-  // because the file and tag it adds would change the counts the tests above
-  // assert.
-  const mcp = `${new URL(page.url()).origin}/mcp`;
+  // pages are admitted. In the cloud it sends a `readwrite` delegation token,
+  // which the gateway's delegated authorizer checks before the app sees the
+  // request. Near the end, because the file and tag it adds would change the
+  // counts the tests above assert.
+  const mcp = new URL("mcp", page.url()).href;
+  const token = SURFACE === "cloud" ? enabledCloudRun().delegationTokens.readwrite : null;
   let nextId = 0;
-  async function send(body: string) {
+  async function send(body: string, bearer: string | null = token) {
     return fetch(mcp, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Accept: "application/json, text/event-stream",
+        ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
       },
       body,
     });
@@ -876,4 +931,68 @@ test("MCP: a local client creates, lists, reads, tags, notes and trashes files o
   const gone = await call("read_file", { recordId: created.id });
   expect(gone.isError).toBe(true);
   expect(gone.content[0]!.text).toMatch(/^The data server answered 404/);
+});
+
+test("MCP: the gateway refuses a call with no token, and a read token cannot write", async () => {
+  test.skip(SURFACE !== "cloud", "Locally loopback trust admits every caller");
+  const mcp = new URL("mcp", page.url()).href;
+  async function callTool(bearer: string | null, name: string, args: Record<string, unknown>) {
+    const res = await fetch(mcp, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name, arguments: args },
+      }),
+    });
+    return {
+      status: res.status,
+      result:
+        res.status === 200
+          ? ((await res.json()) as { result: { content: { text: string }[]; isError: boolean } })
+              .result
+          : null,
+    };
+  }
+  expect((await callTool(null, "list_files", {})).status).toBe(401);
+
+  const read = enabledCloudRun().delegationTokens.read;
+  const listed = await callTool(read, "list_files", {});
+  expect(listed.result?.isError, listed.result?.content[0]?.text).toBe(false);
+  // The token's mode narrows the app's grants: a `read` token reads and
+  // labels, and the data server refuses its row writes.
+  const hello = (
+    JSON.parse(listed.result!.content[0]!.text) as { id: string; name: string }[]
+  ).find((f) => f.name === "hello.skexample")!;
+  const write = await callTool(read, "write_note", { recordId: hello.id, text: "not allowed" });
+  expect(write.result?.isError).toBe(true);
+  expect(write.result?.content[0]?.text).toMatch(/^The data server answered 403/);
+});
+
+test("Connection: refresh the session, then sign out", async () => {
+  test.skip(SURFACE !== "cloud", "The local surface has no session");
+  const context = page.context();
+  const hasCookie = async (name: string) => (await context.cookies()).some((c) => c.name === name);
+  // Drop the short-lived token, as its expiry would; the refresh mints another
+  // from the session cookie.
+  await context.clearCookies({ name: "sk_token" });
+  await click("Refresh session", "Refresh session");
+  await expectLogged("POST", /^\/api\/session\/refresh$/, 200);
+  expect(await hasCookie("sk_token")).toBe(true);
+
+  // Sign out clears the app's cookies, ends the managed login session and
+  // returns to the app, which now shows its sign-in page.
+  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Sign in", exact: true })).toBeVisible();
+  expect(await hasCookie("sk_session")).toBe(false);
+  // The managed login session ended too, so a new sign-in asks for the email
+  // again rather than returning straight to the app.
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await page.waitForURL(/\.amazoncognito\.com\//);
+  await expect(page.locator('input[name="username"], input[type="email"]').first()).toBeVisible();
 });

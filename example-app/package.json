@@ -13,7 +13,8 @@
     "typecheck": "pnpm -r --filter '!@example-app/e2e' typecheck",
     "test": "pnpm -r --filter '!@example-app/e2e' --if-present test",
     "typecheck:e2e": "node scripts/link-core-harness.mjs && pnpm --filter @example-app/e2e typecheck",
-    "test:e2e": "node scripts/link-core-harness.mjs && pnpm --filter @example-app/e2e test"
+    "test:e2e": "node scripts/link-core-harness.mjs && pnpm --filter @example-app/e2e test",
+    "test:e2e:cloud": "node scripts/link-core-harness.mjs && pnpm --filter @example-app/e2e test:cloud"
   },
   "engines": {
     "node": ">=24"

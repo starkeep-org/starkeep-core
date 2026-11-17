@@ -1609,6 +1609,16 @@ example, and its `vitest.config.ts` adds the core checkout from the script's
 `coreDir()` to Vite's `server.fs.allow`. The journey deploys real AWS resources,
 so read core's `e2e-aws/README.md` first.
 
+Your tier-2 Playwright suite can also run against the tier-3 test stack, as the
+example's does with `pnpm test:e2e:cloud`. The suite cannot import
+`@starkeep/e2e-aws`, because Playwright refuses to load twice in one process. Its
+global setup therefore runs the harness's `src/app-cloud-run.ts prepare` as a
+child process. That step installs your app, signs a new user in, and writes the
+app's URL, the user's cookies and two delegation tokens to a file the spec
+reads. A reporter runs `finish` with the suite's outcome. Copy the example's
+`e2e/playwright.cloud.config.ts`, `e2e/cloud-setup.ts`,
+`e2e/cloud-finish-reporter.ts`, `e2e/cloud-run-step.ts` and `e2e/surface.ts`.
+
 ## Structuring an app with several flavors
 
 An app can have several flavors: a local web app, a cloud web app, a phone app,

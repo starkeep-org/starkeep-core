@@ -3,3 +3,5 @@ dist/
 test-results/
 playwright-report/
 *.tsbuildinfo
+# The cloud run's state: a test user's password, session cookies and tokens.
+.cloud-run/

@@ -78,6 +78,35 @@ defineCloudJourney(myApp, { runStateDir: resolve(APP_DIR, "e2e-aws") });
 Pass `runStateDir`: the dir holds that run's Cognito admin password and its
 registry database, which must not land in a checkout you do not own.
 
+## An app's own browser suite in the cloud
+
+An app's tier-2 Playwright suite can walk its page on the test stack, too.
+`src/app-cloud-run.ts` gives it the cloud. A Playwright suite cannot import this
+package, because Playwright refuses to load twice in one process. The suite runs
+the file as a child process instead:
+
+```bash
+pnpm --dir <core>/e2e-aws exec tsx src/app-cloud-run.ts prepare \
+  --app-dir <app> --out <file> --signed-in-control "Sign out"
+pnpm --dir <core>/e2e-aws exec tsx src/app-cloud-run.ts finish --out <file> --passed
+```
+
+- `prepare` brings the bootstrap stack up to date and installs the cloud data
+  server and the app. It creates a new member of `starkeep-users` for the run,
+  so the suite starts from an empty library on a kept-up stack. It signs that
+  user in to the app in Chromium and creates a `read` and a `readwrite`
+  delegation token. It writes the app's URL, the user, the tokens and a
+  Playwright storage-state file to `--out`.
+- `finish --passed` deletes the run's user and tears down as
+  `STARKEEP_AWS_TEARDOWN` says. `finish --failed` leaves the stack and the user
+  up for debugging.
+
+The run uses this package's run-state dir unless `--run-state-dir` names
+another, so a stack the journey kept up serves it. Without
+`STARKEEP_AWS_TESTS=1`, `prepare` writes `{ "enabled": false }` and makes no
+AWS call. The example app's `e2e/playwright.cloud.config.ts` is the worked
+example.
+
 ## What it does (ordered steps)
 
 1. Create-if-missing the bootstrap CloudFormation stack; read its outputs. Then
