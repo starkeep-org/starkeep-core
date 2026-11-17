@@ -1,13 +1,15 @@
 # Proposed fixes
 
-This note proposes fixes for the four findings in `README.md`. Each fix has been checked against the model. Fixes A and B are implemented; the others are not yet. They are offered for discussion, because two of them change the DSQL write path.
+This note proposes fixes for the four findings in `README.md`, and for the absence of anything that heals them. Each fix has been checked against the model. Fixes A and B are implemented; the others are not yet. They are offered for discussion, because two of them change the DSQL write path.
 
 ## The findings, briefly
 
 1. **Records before labels.** The responder applies every record in a shipment before any label. A label whose HLC is below one of those records is claimed by the cloud's coverage before it lands.
 2. **One HLC split across statements.** The responder writes one row per transaction, and the first row of a batch sharing one HLC lifts coverage to that HLC. This happens today: a labels-only shipment is enough.
 3. **Lost update.** The responder's LWW check (`get`) and its write (`put` or `putLabel`) are separate transactions, and the write is an unconditional upsert. A round that read the row before another round wrote a newer version then overwrites that version. The newer write has already raised coverage, so its author never re-ships it, and the replicas disagree from then on.
-4. **Nothing heals any of this automatically.** `verify()` compares digests that include labels, and on the right device it does repair findings 1 and 2. However, it runs only when someone presses the button in the admin UI (`sync-supervisor.ts` says "on request only", with no timer), and no app calls it.
+4. **The requester can claim a row it failed to apply.** The device carries on past a row that will not apply and advances that author's watermark to the HLC of the row before it. When that row shares the failed row's HLC, the watermark claims the failed row. No path in the code reaches this today, because the only row that can fail on a device is a record, and a record sorts first among the rows sharing its HLC.
+
+Moreover, **nothing heals any of this automatically.** `verify()` compares digests that include labels, and on the right device it does repair findings 1 and 2. However, it runs only when someone presses the button in the admin UI (`sync-supervisor.ts` says "on request only", with no timer), and no app calls it.
 
 In findings 1 and 2, `sync()` returns `complete: true` and logs nothing. Each finding has a TLA+ counterexample and a reproduction against the real engine and responder in `packages/sync-engine/__tests__/exchange-round-findings.test.ts`.
 
@@ -61,14 +63,28 @@ Not every write on the apply path belongs to a shipped run. The responder also w
 
 Note that C2 relies on fix B. A deferred raise in records-then-labels order would still lift coverage over a label applied later.
 
-## Fix D: run verify on a schedule (finding 4, defence in depth)
+## Fix D: run verify on a schedule (defence in depth)
 
 `verify()` repairs findings 1 and 2 when it runs on the right device: the writer for a loss on the cloud, and the reader for a loss on a second device. Running it on a slow timer (daily, say) in the supervisor would bound how long any such loss lasts, whatever its cause. This does not replace A to C, because a loss on the cloud is visible only from the device that wrote the row, and that device may be wiped first. However, it is cheap, and it is the only backstop for causes the model does not cover.
+
+## Fix E: advance a broken author only below the failed row's HLC (finding 4)
+
+**Status: proposed.** The requester's `ownSafeAdvance` takes `items[stop - 1]`, the row tried just before the first one that failed. We suggest stepping `stop` back past every row that shares the failed row's HLC first, so that the watermark lands on the last HLC strictly below it:
+
+```ts
+const failed = inboundItemHlc(items[stop]!);
+while (stop > 0 && compareHLC(inboundItemHlc(items[stop - 1]!), failed) === 0) stop -= 1;
+```
+
+The rows that applied at that HLC are re-shipped and absorbed by LWW, as every other re-ship is. This is the requester's side of the rule `cutRound` and `collectSince` already follow: one HLC is never split. Today it is a guard against a future change (a second record stamped with an existing HLC, or a label write that can fail) rather than a repair, which is why it is listed after the others.
+
+Model: `BelowBroken = TRUE`. `finding-device-batch` fails without it, and `fixed-device-batch` and `fixed-device-wide` pass with it. The replay in `exchange-round-findings.test.ts`, which stamps two records with one HLC, passes with the change above.
 
 ## Suggested order
 
 1. **Fix A.** It is small, independent of the others, and removes a permanent divergence.
 2. **Fixes B and C2 together.** The four `it.fails` tests should then pass, and vitest will flag them so that `.fails` can be removed.
 3. **Fix D.**
+4. **Fix E**, whenever convenient; it is independent of the others.
 
 For each step, the spec's constants should be set to match the code and `./check-all.sh` rerun, so that the model keeps describing what is deployed.

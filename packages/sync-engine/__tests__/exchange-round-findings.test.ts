@@ -34,6 +34,9 @@ import { buildSide } from "./sync-test-harness/side.js";
  *
  * Finding 3, the lost update, is fixed by `putSnapshot` and a guarded
  * `putLabel` (fix A), so its test is an ordinary one.
+ *
+ * Finding 4 is on the requester, and no path in the code reaches it today; its
+ * replay builds the shape by hand and is `it.fails` until fix E.
  */
 describe("exchange round: findings from the TLA+ model", () => {
   type Side = Awaited<ReturnType<typeof buildSide>>;
@@ -258,6 +261,54 @@ describe("exchange round: findings from the TLA+ model", () => {
     await m.sync();
     expect(await cloudLabels(C, id)).toHaveLength(3);
     expect((await M.db.getLabelsByRecordIds([id])).get(id) ?? []).toHaveLength(3);
+  });
+
+  // models/finding-device-batch.cfg
+  //
+  // The requester carries on past a row that will not apply, and advances
+  // the author's watermark to the HLC of the row before it (`ownSafeAdvance`,
+  // `items[stop - 1]`). When that row shares the failed row's HLC, the
+  // watermark claims the failed row, and no later scan above it returns it.
+  // Today only a record can fail on a device, and the only rows sharing an
+  // HLC are a label batch and a record with its labels, which sort record
+  // first; so no path in the code reaches this. Two records sharing an HLC
+  // stand in for whatever first does.
+  it.fails("a device that fails one row of an HLC is offered it again", async () => {
+    const { A, M, C } = await sides("A", "M", "C");
+    const hlc = A.clock.now();
+    const ids: StarkeepId[] = [];
+    for (let i = 0; i < 2; i++) {
+      const id = generateId() as StarkeepId;
+      const base = createDataRecord(
+        {
+          type: "image/jpeg",
+          originAppId: "photos",
+          contentHash: "sha256:x",
+          objectStorageKey: "",
+          mimeType: "application/octet-stream",
+          sizeBytes: 0,
+        },
+        A.clock,
+      );
+      await A.db.put({ ...base, id, updatedAt: hlc });
+      ids.push(id);
+    }
+    await engineFor(A, C).sync();
+
+    // M's second write of the HLC fails once.
+    const putSnapshot = M.db.putSnapshot.bind(M.db);
+    let writes = 0;
+    M.db.putSnapshot = async (record) => {
+      writes += 1;
+      if (writes === 2) throw new Error("[test] injected put failure");
+      return putSnapshot(record);
+    };
+    const m = engineFor(M, C);
+    await m.sync();
+    await m.sync();
+    await m.sync();
+
+    for (const id of ids) expect(await M.db.get(id), id).not.toBeNull();
   });
 
   // models/finding-lww-race.cfg
