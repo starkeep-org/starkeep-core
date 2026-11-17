@@ -163,6 +163,10 @@ export interface RuntimeConfig {
   apiGatewayUrl?: string;
   region?: string;
   userPoolId?: string;
+  /** The platform's consent page for this app. Cloud only. */
+  connectUrl?: string;
+  /** The platform's page that lists and revokes outside clients. Cloud only. */
+  connectionsUrl?: string;
 }
 
 /** `GET /starkeep-runtime-config`, the app's own route: which surface this is. */

@@ -6,8 +6,8 @@
  * `Authorization: Bearer skd_…` to `<cloud URL>/apps/example-app/mcp`. An
  * OAuth client, such as Claude Code or a claude.ai custom connector, gets the
  * token from the platform's sign-in and consent page by itself. For any other
- * client the user creates the token on the consent page
- * (`<gateway URL>/connect?app=example-app`) and pastes it into the client.
+ * client the user creates the token on the consent page, which the runtime
+ * config names as `connectUrl`, and pastes it into the client.
  * The manifest declares the route `auth: "delegated"`, so the gateway checks
  * the token first.
  * `verifyDelegation` says whose request it is, and every data call forwards
