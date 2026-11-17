@@ -1,10 +1,12 @@
 #!/bin/sh
 # Runs every model and compares TLC's verdict with expected.txt.
 # Usage: ./check-all.sh [name-filter]
+# With QUICK=1, only the models tiered "quick" in expected.txt run (CI does this).
 cd "$(dirname "$0")"
 fail=0
-while read -r name expect; do
+while read -r name expect tier; do
   case "$name" in ''|'#'*) continue;; esac
+  [ -n "$QUICK" ] && [ "$tier" != quick ] && continue
   [ -n "$1" ] && case "$name" in *$1*) ;; *) continue;; esac
   out=$(./run.sh "models/$name.cfg" check "${SECONDS_PER_MODEL:-600}" 2>&1)
   if echo "$out" | grep -q "No error has been found"; then got=pass

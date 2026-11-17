@@ -1,30 +1,30 @@
-# model                       expected verdict (pass, or the invariant TLC must report)
-finding-crash                 CloudNoLoss
-finding-concurrent            DeviceNoGap
-finding-batch-crash           CloudNoLoss
-finding-batch-concurrent      DeviceNoGap
-finding-lww-race              CloudNoLoss
-fixed-crash                   pass
-fixed-concurrent              pass
-fixed-batches                 pass
-fixed-labelbatch              pass
-fixed-two-writers             pass
-fixed-hlc-skew                pass
-fixed-relay                   pass
-deferred-crash                pass
-deferred-concurrent           pass
-deferred-batch-crash          pass
-deferred-batch-concurrent     pass
-deferred-batches              pass
-deferred-labelbatch           pass
-deferred-two-writers          pass
-deferred-relay                pass
-mutant-nocap                  DeviceNoGap
-mutant-notrim                 CloudNoLoss
-mutant-split                  CloudNoLoss
-mutant-perstream              CloudNoLoss
-witness-relayed-label         WitnessRelayedLabel
-witness-truncated             WitnessTruncatedRound
-witness-batch                 WitnessBatchDelivered
-witness-crash                 WitnessCrash
-witness-converged             WitnessAllConverged
+# model                       expected verdict (pass, or the invariant TLC must report)   tier
+finding-crash                 CloudNoLoss                 quick
+finding-concurrent            DeviceNoGap                 quick
+finding-batch-crash           CloudNoLoss                 quick
+finding-batch-concurrent      DeviceNoGap                 quick
+finding-lww-race              CloudNoLoss                 quick
+fixed-crash                   pass                        quick
+fixed-concurrent              pass                        quick
+fixed-batches                 pass                        quick
+fixed-labelbatch              pass                        quick
+fixed-two-writers             pass                        slow
+fixed-hlc-skew                pass                        quick
+fixed-relay                   pass                        slow
+deferred-crash                pass                        quick
+deferred-concurrent           pass                        quick
+deferred-batch-crash          pass                        quick
+deferred-batch-concurrent     pass                        quick
+deferred-batches              pass                        quick
+deferred-labelbatch           pass                        quick
+deferred-two-writers          pass                        slow
+deferred-relay                pass                        slow
+mutant-nocap                  DeviceNoGap                 quick
+mutant-notrim                 CloudNoLoss                 quick
+mutant-split                  CloudNoLoss                 quick
+mutant-perstream              CloudNoLoss                 quick
+witness-relayed-label         WitnessRelayedLabel         quick
+witness-truncated             WitnessTruncatedRound       quick
+witness-batch                 WitnessBatchDelivered       quick
+witness-crash                 WitnessCrash                quick
+witness-converged             WitnessAllConverged         quick

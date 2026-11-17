@@ -102,6 +102,43 @@ jobs:
       - name: Prune Turbo cache entries older than 7 days
         run: test ! -d .turbo/cache || find .turbo/cache -type f -mtime +7 -delete
 
+  # The TLA+ model of the exchange round (specs/exchange-round), so that the
+  # spec is rechecked whenever it, or the protocol it describes, changes. Runs
+  # the models tiered "quick" in expected.txt (about a minute); the four slow
+  # ones take up to seven minutes each and are run by hand. The jar is pinned
+  # by checksum, since the release is a pre-release whose assets could change.
+  # Advisory; branch protection requires the two Tier 1 jobs only.
+  exchange-round-model:
+    name: Exchange-round model (TLC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TLA2TOOLS_VERSION: v1.8.0
+      TLA2TOOLS_SHA256: 7e53aa636dac8a3cb0533f343115c0548e03fc0ce5edc7739becf58d3d0fb84f
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Download tla2tools.jar
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/tla2tools.jar" \
+            "https://github.com/tlaplus/tlaplus/releases/download/$TLA2TOOLS_VERSION/tla2tools.jar"
+          echo "$TLA2TOOLS_SHA256  $RUNNER_TEMP/tla2tools.jar" | sha256sum -c -
+      - run: ./check-all.sh
+        working-directory: specs/exchange-round
+        env:
+          QUICK: 1
+          TLA2TOOLS: ${{ runner.temp }}/tla2tools.jar
+          SECONDS_PER_MODEL: 300
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exchange-round-traces
+          path: specs/exchange-round/traces/
+          retention-days: 14
+
   # Integration: suites under each package's `__tests__/integration/`, which boot
   # a process, a socket or a database engine (the local data server as a child
   # process, the fake cloud on loopback, PGlite). Split in two jobs that run
