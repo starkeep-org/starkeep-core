@@ -173,6 +173,10 @@ import {
   the cloud-config env vars (`STARKEEP_API_GATEWAY_URL`,
   `STARKEEP_USER_POOL_ID`, etc.) as JSON. Mount it on any GET route. It reads
   the environment on every call, so a Node server needs no build-time opt-out.
+  In the cloud, the JSON also carries `connectUrl` and `connectionsUrl`, the
+  platform's consent pages for outside clients, on the gateway's execute-api
+  address. Link to those pages with these fields, not with `apiGatewayUrl`,
+  which names the browser-facing CloudFront base.
 
 ## Analysis reads in SQL: `@starkeep/app-client/snapshot`
 

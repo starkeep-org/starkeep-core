@@ -270,6 +270,13 @@ pool ids, S3 bucket/region). A local-only build sees these undefined and falls
 back to the same-origin local proxy; a cloud build populates them from the env
 its compute handler declares (§7).
 
+In the cloud, the config also carries `connectUrl` and `connectionsUrl`, the
+platform's consent pages for outside clients (§7b). The platform sets both from
+variables it gives every handler, so your manifest declares nothing for them.
+Locally both are undefined. `apiGatewayUrl` is the deployment's browser-facing
+base, usually its CloudFront address. The consent pages do not answer there, so
+never build their links from it.
+
 ## 4. Proxy + sign requests to the data server
 
 The browser must never hold the app's HMAC secret. Add a server-side proxy route
@@ -1044,12 +1051,16 @@ An outside client gets a token in one of two ways:
   needs no code for this beyond passing the request to `delegationRefusal`,
   as below.
 - **A pasted token.** For a script, or a client without OAuth, the user
-  creates a token on the platform's consent page, at
-  `<gateway URL>/connect?app=<appId>`, and picks `read` or `readwrite` and an
-  expiry. Link to that page from your app. The outside client sends the token
-  as `Authorization: Bearer skd_…` to your route's CloudFront URL.
+  creates a token on the platform's consent page and picks `read` or
+  `readwrite` and an expiry. Link to that page from your app: the runtime
+  config's `connectUrl` (§3) names it, with your app id filled in. The outside
+  client sends the token as `Authorization: Bearer skd_…` to your route's
+  CloudFront URL.
 
-The user lists and revokes both kinds at `<gateway URL>/connections`.
+The user lists and revokes both kinds on the page the runtime config's
+`connectionsUrl` names. Both pages answer only on the gateway's execute-api
+address, not on CloudFront, so take the links from the runtime config rather
+than from `apiGatewayUrl` or the page's own origin.
 
 In the handler, ask the platform who is calling and forward the token on every
 data call:
