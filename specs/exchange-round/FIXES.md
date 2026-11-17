@@ -1,6 +1,6 @@
 # Proposed fixes
 
-This note proposes fixes for the four findings in `README.md`, and for the absence of anything that heals them. Each fix has been checked against the model. Fixes A and B are implemented; the others are not yet. They are offered for discussion, because two of them change the DSQL write path.
+This note proposes fixes for the four findings in `README.md`, and for the absence of anything that heals them. Each fix has been checked against the model. Fixes A, B and E are implemented; the others are not yet. They are offered for discussion, because two of them change the DSQL write path.
 
 ## The findings, briefly
 
@@ -69,22 +69,22 @@ Note that C2 relies on fix B. A deferred raise in records-then-labels order woul
 
 ## Fix E: advance a broken author only below the failed row's HLC (finding 4)
 
-**Status: proposed.** The requester's `ownSafeAdvance` takes `items[stop - 1]`, the row tried just before the first one that failed. We suggest stepping `stop` back past every row that shares the failed row's HLC first, so that the watermark lands on the last HLC strictly below it:
+**Status: implemented** (#204). The requester's `ownSafeAdvance` took `items[stop - 1]`, the row tried just before the first one that failed. It now steps `stop` back past every row that shares the failed row's HLC first, so that the watermark lands on the last HLC strictly below it:
 
 ```ts
 const failed = inboundItemHlc(items[stop]!);
 while (stop > 0 && compareHLC(inboundItemHlc(items[stop - 1]!), failed) === 0) stop -= 1;
 ```
 
-The rows that applied at that HLC are re-shipped and absorbed by LWW, as every other re-ship is. This is the requester's side of the rule `cutRound` and `collectSince` already follow: one HLC is never split. Today it is a guard against a future change (a second record stamped with an existing HLC, or a label write that can fail) rather than a repair, which is why it is listed after the others.
+The rows that applied at that HLC are re-shipped and absorbed by LWW, as every other re-ship is. This is the requester's side of the rule `cutRound` and `collectSince` already follow: one HLC is never split. No write path produced the shape, so it is a guard against a future change (a second record stamped with an existing HLC, or a label write that can fail) rather than a repair. The inbound repair floor reads `ownSafeAdvance` too, so it no longer climbs over the failed row either.
 
-Model: `BelowBroken = TRUE`. `finding-device-batch` fails without it, and `fixed-device-batch` and `fixed-device-wide` pass with it. The replay in `exchange-round-findings.test.ts`, which stamps two records with one HLC, passes with the change above.
+Model: `BelowBroken = TRUE`, now the default. `finding-device-batch` fails without it, and `fixed-device-batch` and `fixed-device-wide` pass with it. The replay in `exchange-round-findings.test.ts`, which stamps two records with one HLC, is an ordinary test.
 
 ## Suggested order
 
 1. **Fix A.** It is small, independent of the others, and removes a permanent divergence.
-2. **Fixes B and C2 together.** The four `it.fails` tests should then pass, and vitest will flag them so that `.fails` can be removed.
+2. **Fixes B and C2 together.** The `it.fails` tests should then pass, and vitest will flag them so that `.fails` can be removed.
 3. **Fix D.**
-4. **Fix E**, whenever convenient; it is independent of the others.
+4. **Fix E**, independent of the others (implemented, #204).
 
 For each step, the spec's constants should be set to match the code and `./check-all.sh` rerun, so that the model keeps describing what is deployed.

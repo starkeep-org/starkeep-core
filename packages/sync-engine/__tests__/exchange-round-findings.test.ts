@@ -35,8 +35,8 @@ import { buildSide } from "./sync-test-harness/side.js";
  * Finding 3, the lost update, is fixed by `putSnapshot` and a guarded
  * `putLabel` (fix A), so its test is an ordinary one.
  *
- * Finding 4 is on the requester, and no path in the code reaches it today; its
- * replay builds the shape by hand and is `it.fails` until fix E.
+ * Finding 4 is on the requester, and no path in the code reached it; its
+ * replay builds the shape by hand, and fix E makes it pass.
  */
 describe("exchange round: findings from the TLA+ model", () => {
   type Side = Awaited<ReturnType<typeof buildSide>>;
@@ -266,14 +266,14 @@ describe("exchange round: findings from the TLA+ model", () => {
   // models/finding-device-batch.cfg
   //
   // The requester carries on past a row that will not apply, and advances
-  // the author's watermark to the HLC of the row before it (`ownSafeAdvance`,
-  // `items[stop - 1]`). When that row shares the failed row's HLC, the
-  // watermark claims the failed row, and no later scan above it returns it.
-  // Today only a record can fail on a device, and the only rows sharing an
-  // HLC are a label batch and a record with its labels, which sort record
-  // first; so no path in the code reaches this. Two records sharing an HLC
-  // stand in for whatever first does.
-  it.fails("a device that fails one row of an HLC is offered it again", async () => {
+  // the author's watermark only as far as the rows before it. It used to take
+  // the row just before, and when that row shared the failed row's HLC the
+  // watermark claimed the failed row, which no later scan above it returned.
+  // No path in the code reached this (only a record can fail on a device, and
+  // a record sorts first among rows sharing its HLC), so two records stamped
+  // with one HLC stand in for whatever first would. Fix E stops below the
+  // whole HLC.
+  it("a device that fails one row of an HLC is offered it again", async () => {
     const { A, M, C } = await sides("A", "M", "C");
     const hlc = A.clock.now();
     const ids: StarkeepId[] = [];

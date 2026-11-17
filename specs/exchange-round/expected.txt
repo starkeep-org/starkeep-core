@@ -22,8 +22,8 @@ deferred-labelbatch           pass                        quick
 deferred-two-writers          pass                        slow
 deferred-relay                pass                        slow
 halt-relay                    pass                        quick
-halt-crash                    pass                        quick
-rows-concurrent               pass                        quick
+halt-crash                    pass                        slow
+rows-concurrent               pass                        slow
 rows-fail                     pass                        quick
 rows-fail-record-batch        pass                        quick
 finding-device-batch          DeviceNoGap                 quick
