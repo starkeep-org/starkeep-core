@@ -1048,7 +1048,7 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           action: "s3:RestoreObject",
           resource: sharedObject,
           why:
-            "POST /restore thaws an archived original under the calling app's role. Without " +
+            "POST /thaw-archive thaws an archived original under the calling app's role. Without " +
             "the grant the endpoint records `restoring` and nothing ever becomes readable.",
         },
         {
@@ -1302,7 +1302,7 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           action: "s3:RestoreObject",
           resource: sharedObject,
           why:
-            "POST /restore issues RestoreObject to thaw an archived original. Without the grant " +
+            "POST /thaw-archive issues RestoreObject to thaw an archived original. Without the grant " +
             "the endpoint records `restoring` and thaws nothing — the exact gap item 19 closed.",
         },
       ];
