@@ -794,6 +794,37 @@ describe("the platform's archiving decision", () => {
     expect(tagsWritten()).toEqual([{ key: PARENT_KEY, tags: {} }]);
   });
 
+  it("tags the original again when its delete is taken back", async () => {
+    // The mirror of the delete's untagging: the restore brings the original
+    // and its canonical stand-in back, so the original meets the archive
+    // conditions again, and only the cloud holds the tags.
+    let inserts = 0;
+    const db = fakeDsqlWithGrants(GRANTS)
+      .on(GET_BY_ID, () => [parentRow(inserts === 0 ? { deleted_at: TOMBSTONE_HLC } : {})])
+      .on(/where "parent_id" = \$1 and "deleted_at" is not null/, [
+        { ...canonicalRow(), deleted_at: TOMBSTONE_HLC },
+      ])
+      // No live canonical holds the slot until the cascade writes it back.
+      .on(LIVE_STAND_IN, () => (inserts >= 2 ? [canonicalRow()] : []))
+      .on(SHARING, [parentRow()])
+      .on(LABELS_BY_IDS, [])
+      .on(RECORDS_INSERT, () => {
+        inserts += 1;
+        return [];
+      });
+    setDbFactory(db);
+    s3Mock.on(PutObjectTaggingCommand).resolves({});
+    const res = await handler(
+      request("rest", "POST", `/data/records/${PARENT_ID}/restore`),
+      context,
+    );
+    expect(res.statusCode, res.body).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ restored: true, ids: [PARENT_ID, CANONICAL_ID] });
+    expect(tagsWritten()).toEqual([
+      { key: PARENT_KEY, tags: { "starkeep:intent": "archive", "starkeep:ladder": "complete" } },
+    ]);
+  });
+
   it("leaves the tags alone when a live record still shares the object", async () => {
     // Object keys name bytes, so two records holding one file under two names share
     // an object. The tag is a fact about the object, not about either record.
