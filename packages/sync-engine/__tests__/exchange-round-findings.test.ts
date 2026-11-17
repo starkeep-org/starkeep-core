@@ -305,6 +305,107 @@ describe("exchange round: findings from the TLA+ model", () => {
     expect((await C.db.get(id))!.updatedAt).toEqual(newest);
   });
 
+  /** The ids whose image metadata is live, that is, not tombstoned. */
+  async function liveMetadataIds(side: Side): Promise<string[]> {
+    const result = await side.db.queryShared(
+      { kind: "metadata", category: "image" },
+      {
+        mode: "rows",
+        table: "record_image_metadata",
+        select: ["record_id"],
+        where: [],
+        order: [],
+        limit: 10,
+        pageToken: null,
+        include: [],
+      },
+    );
+    if (result.mode !== "rows") throw new Error("expected rows");
+    return result.rows.map((r) => String(r["record_id"]));
+  }
+
+  // Fix A, the responder's re-read. A tombstone that the guard keeps out must
+  // not cascade to the metadata: the cascade follows the row the cloud holds
+  // after the write, not the snapshot that lost.
+  it("a tombstone kept out by a newer live row leaves the cloud's metadata live", async () => {
+    const { A, B, C } = await sides("A", "B", "C");
+    const id = await seedRecord(A);
+    await engineFor(A, C).sync();
+    await engineFor(B, C).sync();
+    await C.db.putMetadata("image/jpeg", { recordId: id, width: 4032 });
+
+    // A deletes offline, and B then edits, so B's live row is the newer.
+    await A.db.delete(id, A.clock.now());
+    const current = (await B.db.get(id))!;
+    await B.db.put({ ...current, updatedAt: B.clock.now(), version: current.version + 1 });
+    const newest = (await B.db.get(id))!.updatedAt;
+
+    // Hold A's tombstone between the responder's get and its write.
+    const putSnapshot = C.db.putSnapshot.bind(C.db);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let reachedWrite!: () => void;
+    const atWrite = new Promise<void>((resolve) => (reachedWrite = resolve));
+    let held = false;
+    C.db.putSnapshot = async (record) => {
+      if (!held && record.id === id && record.updatedAt.nodeId === "A") {
+        held = true;
+        reachedWrite();
+        await gate;
+      }
+      return putSnapshot(record);
+    };
+
+    const aRound = engineFor(A, C).exchange();
+    await atWrite;
+    await engineFor(B, C).sync(); // B's live row lands while A's write is held.
+    release();
+    await aRound;
+
+    const stored = (await C.db.get(id))!;
+    expect(stored.updatedAt).toEqual(newest);
+    expect(stored.deletedAt).toBeNull();
+    expect(await liveMetadataIds(C)).toEqual([id]);
+  });
+
+  // Fix A on the requester. A local edit can land between the inbound loop's
+  // get and its write; the device keeps its edit, does not cascade the losing
+  // tombstone to its metadata, does not count the row as applied, and the edit
+  // still reaches the cloud.
+  it("a local edit landing mid-apply survives an older inbound tombstone", async () => {
+    const { A, L, C } = await sides("A", "L", "C");
+    const id = await seedRecord(A);
+    await engineFor(A, C).sync();
+    const lEngine = engineFor(L, C);
+    await lEngine.sync();
+    await L.db.putMetadata("image/jpeg", { recordId: id, width: 4032 });
+
+    await A.db.delete(id, A.clock.now());
+    await engineFor(A, C).sync();
+
+    // The local edit lands inside the apply, after the inbound loop's get.
+    const putSnapshot = L.db.putSnapshot.bind(L.db);
+    let edited = false;
+    L.db.putSnapshot = async (record) => {
+      if (!edited && record.id === id) {
+        edited = true;
+        const current = (await L.db.get(id))!;
+        await L.db.put({ ...current, updatedAt: L.clock.now(), version: current.version + 1 });
+      }
+      return putSnapshot(record);
+    };
+
+    const result = await lEngine.exchange();
+    expect(edited).toBe(true);
+    expect(result.applied).toBe(0);
+    const local = (await L.db.get(id))!;
+    expect(local.deletedAt).toBeNull();
+    expect(await liveMetadataIds(L)).toEqual([id]);
+
+    await lEngine.sync();
+    expect((await C.db.get(id))!.updatedAt).toEqual(local.updatedAt);
+  });
+
   // Control: with nothing interleaved, the same writes sync completely.
   it("the same writes sync completely when nothing interleaves", async () => {
     const { L, M, C } = await sides("L", "M", "C");
