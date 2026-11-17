@@ -2679,6 +2679,9 @@ describe("availability and restore", () => {
     const body = bodyOf(res);
     expect(body["error"]).toBe("ObjectArchived");
     expect(body["availability"]).toMatchObject({ tier: "DEEP_ARCHIVE" });
+    // The refusal names the thaw route. `/restore` takes a delete back, and
+    // answers a live record 409 `NotDeleted`.
+    expect(body["detail"]).toContain("POST /data/records/:id/thaw-archive");
     // Nothing was written: a read must not have side effects, least of all
     // billable ones.
     expect(db.calls(/insert into "shared"\."object_availability"/)).toHaveLength(0);
