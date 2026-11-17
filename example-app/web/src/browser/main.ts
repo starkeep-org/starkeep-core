@@ -188,6 +188,7 @@ for (const [value, text] of [
 const tagFilterInput = el("input", { placeholder: "tag value", size: 10 });
 const countOut = named(el("output", {}, "?"), "File count");
 const urlsOut = named(el("output", {}, ""), "URLs fetched");
+const urlsList = named(el("ul"), "Fetched URLs");
 
 files.controls.append(
   labelled("File name", nameInput),
@@ -228,9 +229,21 @@ files.controls.append(
     run("Fetch URLs", async () => {
       const urls = await api.fileUrls(lastPage.map((r) => r.id));
       urlsOut.value = `${Object.keys(urls).length} URLs`;
+      urlsList.replaceChildren(
+        ...lastPage
+          .filter((r) => urls[r.id])
+          .map((r) =>
+            el(
+              "li",
+              {},
+              el("a", { href: urls[r.id]!.url, target: "_blank" }, r.original_filename ?? r.id),
+            ),
+          ),
+      );
     }),
   ),
   urlsOut,
+  urlsList,
 );
 uploadInput.addEventListener("change", () => {
   const file = uploadInput.files?.[0];
@@ -671,6 +684,7 @@ const noteExports = section(
   "The app's own files: each export saves every note as one private JSON file.",
 );
 const exportOut = el("pre", { className: "content" });
+const exportUrlsList = named(el("ul"), "Export URLs");
 noteExports.controls.append(
   button("Save export", () =>
     run("Save export", async () => {
@@ -685,6 +699,11 @@ noteExports.controls.append(
       if (keys.length === 0) throw new Error("no exports yet");
       const urls = await api.exportUrls(keys);
       exportOut.textContent = `${Object.keys(urls).length} URLs fetched in one call.`;
+      exportUrlsList.replaceChildren(
+        ...Object.entries(urls).map(([subKey, url]) =>
+          el("li", {}, el("a", { href: url, target: "_blank" }, subKey)),
+        ),
+      );
     }),
   ),
 );
@@ -719,6 +738,7 @@ async function renderExports(): Promise<void> {
       rows,
     ),
     exportOut,
+    exportUrlsList,
   );
 }
 
