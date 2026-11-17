@@ -28,6 +28,8 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 const state = {
   /** Answers the pg_indexes / pg_roles EXISTS probes. */
   exists: false,
+  /** Answers the sys.iam_pg_role_mappings EXISTS probe. */
+  mappingExists: false,
   statements: [] as string[],
   /** A statement containing this text fails once with a DSQL OCC conflict. */
   conflictOnce: null as string | null,
@@ -65,6 +67,9 @@ vi.mock("pg", () => {
         code: "OC001",
       });
     }
+    if (text.includes("FROM sys.iam_pg_role_mappings")) {
+      return { rows: [{ exists: state.mappingExists }], rowCount: 1 };
+    }
     if (text.includes("FROM pg_indexes") || text.includes("FROM pg_roles")) {
       return { rows: [{ exists: state.exists }], rowCount: 1 };
     }
@@ -77,6 +82,7 @@ import { initializeSharedSchema } from "../src/dsql-schema-init";
 
 beforeEach(() => {
   state.exists = false;
+  state.mappingExists = false;
   state.statements = [];
   state.conflictOnce = null;
 });
@@ -435,5 +441,28 @@ describe("DSQL constraints the whole file lives inside", () => {
     for (const statement of await init()) {
       expect(statement).not.toMatch(/DO \$\$/);
     }
+  });
+});
+
+describe("the installer's IAM mapping", () => {
+  it("grants without a revoke when no mapping row exists", async () => {
+    const statements = await init();
+    expect(statements.some((t) => t.startsWith('AWS IAM GRANT "starkeep_installer"'))).toBe(true);
+    expect(statements.some((t) => t.startsWith("AWS IAM REVOKE"))).toBe(false);
+  });
+
+  // A recreated admin-app role keeps its ARN and gets a new principal id, so a
+  // row left from the old role must be rebound, not trusted.
+  it("revokes and re-grants when a mapping row already exists", async () => {
+    state.mappingExists = true;
+    const statements = await init();
+    const revokeIdx = statements.findIndex((t) =>
+      t.startsWith('AWS IAM REVOKE "starkeep_installer"'),
+    );
+    const grantIdx = statements.findIndex((t) =>
+      t.startsWith('AWS IAM GRANT "starkeep_installer"'),
+    );
+    expect(revokeIdx).toBeGreaterThanOrEqual(0);
+    expect(grantIdx).toBeGreaterThan(revokeIdx);
   });
 });

@@ -932,8 +932,19 @@ async function applySharedSchema(opts: SchemaInitOptions): Promise<void> {
     // This is the only IAM-to-PG mapping the schema initializer sets up; the
     // per-app mappings are added by run_dsql_ddl during install.
     //
-    // Probe sys.iam_pg_role_mappings first — AWS IAM GRANT is not idempotent
-    // in DSQL (re-granting an existing mapping errors).
+    // An existing row is rebound rather than trusted, for the reason given at
+    // the matching site in dsql-ddl.ts: a recreated role keeps its ARN but
+    // gets a new principal id that DSQL refuses. teardown-bootstrap.sh deletes
+    // `<prefix>-app-admin-role` and skips a deletion-protected cluster. A
+    // skipped grant here would leave the orchestrator unable to open the
+    // registry connection, and so unable to run the install that repairs it.
+    //
+    // The probe stays because AWS IAM GRANT is not idempotent in DSQL: a
+    // present row needs the revoke first, and the revoke errors on an absent
+    // one. This session is `admin`, not the installer role, so the rebind
+    // cannot cut its own connection. A registry connection open elsewhere
+    // during the gap sees 28000 or an OCC conflict, which registry.ts's
+    // retry reopens or replays.
     const adminAppRoleArn = `arn:aws:iam::${opts.accountId}:role/${opts.stackPrefix}-app-admin-role`;
     const existingMapping = await sql<{ exists: boolean }>`
       SELECT EXISTS (
@@ -941,9 +952,10 @@ async function applySharedSchema(opts: SchemaInitOptions): Promise<void> {
         WHERE pg_role_name = ${installer} AND arn = ${adminAppRoleArn}
       ) AS exists
     `.execute(db);
-    if (!existingMapping.rows[0]?.exists) {
-      await sql.raw(`AWS IAM GRANT "${installer}" TO '${adminAppRoleArn}'`).execute(db);
+    if (existingMapping.rows[0]?.exists) {
+      await sql.raw(`AWS IAM REVOKE "${installer}" FROM '${adminAppRoleArn}'`).execute(db);
     }
+    await sql.raw(`AWS IAM GRANT "${installer}" TO '${adminAppRoleArn}'`).execute(db);
   } finally {
     await db.destroy();
   }

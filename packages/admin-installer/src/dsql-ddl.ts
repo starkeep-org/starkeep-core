@@ -223,8 +223,22 @@ export async function runAppInstallDdl(
       // log in as which PG role, separate from PG-level membership. Without this
       // grant the app's runtime sts:DbConnect attempts fail with an opaque
       // FATAL 28000 ("unable to accept connection, access denied", no hint).
-      // Probe sys.iam_pg_role_mappings first because AWS IAM GRANT is not
-      // idempotent in DSQL — re-granting an existing mapping errors.
+      //
+      // An existing row is rebound rather than trusted. A row proves only that
+      // some principal once held this ARN. Deleting the app's IAM role leaves
+      // the row behind (teardown-cloud-apps.sh does this, and so does an
+      // uninstall that keeps the app's schema). Recreating the role keeps the
+      // ARN but issues a new principal id, which DSQL refuses with 28000. The
+      // catalog exposes pg_role_name, arn and grantor_pg_role_name but no
+      // principal id, so the install asserts the binding instead of
+      // inspecting it.
+      //
+      // The probe stays because AWS IAM GRANT is not idempotent in DSQL: a
+      // present row needs the revoke first, and the revoke errors on an absent
+      // one. DSQL rejects the pair inside one transaction (0A000). In the gap
+      // between them a live session sees one retryable 40001/OC001 and new
+      // connections see FATAL 28000. A rebind of a real app mapping took effect
+      // in 0.8s when measured on 2026-09-19.
       const appRoleArn = `arn:aws:iam::${opts.accountId}:role/${opts.stackPrefix}-app-${appId}-role`;
       const existingMapping = await sql<{ exists: boolean }>`
       SELECT EXISTS (
@@ -232,9 +246,10 @@ export async function runAppInstallDdl(
         WHERE pg_role_name = ${pgRole} AND arn = ${appRoleArn}
       ) AS exists
     `.execute(db);
-      if (!existingMapping.rows[0]?.exists) {
-        await sql.raw(`AWS IAM GRANT "${pgRole}" TO '${appRoleArn}'`).execute(db);
+      if (existingMapping.rows[0]?.exists) {
+        await sql.raw(`AWS IAM REVOKE "${pgRole}" FROM '${appRoleArn}'`).execute(db);
       }
+      await sql.raw(`AWS IAM GRANT "${pgRole}" TO '${appRoleArn}'`).execute(db);
 
       // App-private schema
       await sql`
