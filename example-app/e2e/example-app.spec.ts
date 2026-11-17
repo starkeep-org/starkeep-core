@@ -808,18 +808,19 @@ test("Public links: unavailable without a cloud", async () => {
 
 test("Public links: create one to a file, open it signed out, and revoke it", async () => {
   test.skip(SURFACE !== "cloud", "Public links live only in the cloud");
-  await click("Share hello.skexample", "Share");
+  // The paging step left the first page showing, where the newest file is.
+  await click("Share paged-9.skexample", "Share");
   await expectLogged("POST", /^\/data\/public-shares$/, 201);
-  const href = await (await cell("Public links", "hello.skexample", "Link"))
+  const href = await (await cell("Public links", "paged-9.skexample", "Link"))
     .getByRole("link")
     .getAttribute("href");
   expect(href).toMatch(
     new RegExp(`^${new URL(page.url()).origin}/public-shares/[A-Za-z0-9_-]{22}/file/`),
   );
   // Anyone with the link sees the file, with no cookie: Node's fetch sends none.
-  expect(await fetchText(href!)).toBe("Hello, Starkeep.\nThis file is an example.");
+  expect(await fetchText(href!)).toBe("page 9");
 
-  await click("Revoke hello.skexample", "Revoke");
+  await click("Revoke paged-9.skexample", "Revoke");
   await expectLogged("DELETE", /^\/data\/public-shares\/[^/]+$/, 200);
   await expect(table("Public links")).toContainText("Nothing yet.");
   // CloudFront may serve the link's redirect from its cache for up to a
