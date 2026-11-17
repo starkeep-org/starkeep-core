@@ -2,11 +2,14 @@
  * The example app's MCP endpoint: tools an outside client, such as Claude
  * Code, calls on the user's behalf.
  *
- * In the cloud the user creates a token for this app on the platform's
- * consent page (`<gateway URL>/connect?app=example-app`) and gives it to the
- * client, which sends it as `Authorization: Bearer skd_…` to
- * `<cloud URL>/apps/example-app/mcp`. The manifest declares the route
- * `auth: "delegated"`, so the gateway checks the token first.
+ * In the cloud the client sends a delegation token as
+ * `Authorization: Bearer skd_…` to `<cloud URL>/apps/example-app/mcp`. An
+ * OAuth client, such as Claude Code or a claude.ai custom connector, gets the
+ * token from the platform's sign-in and consent page by itself. For any other
+ * client the user creates the token on the consent page
+ * (`<gateway URL>/connect?app=example-app`) and pastes it into the client.
+ * The manifest declares the route `auth: "delegated"`, so the gateway checks
+ * the token first.
  * `verifyDelegation` says whose request it is, and every data call forwards
  * the token, so the platform applies the token's mode to each one: a `read`
  * token lists, reads and tags files and reads notes, and the writing tools

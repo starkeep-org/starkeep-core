@@ -30,7 +30,10 @@ Each heading is one group of operations, with a table of the current state and a
 `POST /mcp` serves the example's files and notes to an MCP client such as Claude Code: list, read, tag and create files, move a file to the Trash, and write or delete notes.
 
 - **Locally**, any program on the computer reaches it with no token: `claude mcp add --transport http example http://localhost:<port>/mcp`, with the port admin-web shows.
-- **In the cloud**, create a token at `<gateway URL>/connect?app=example-app`, where the gateway URL is `apiGatewayUrl` in `~/.starkeep/config.json`. A `read` token lists, reads and tags; `readwrite` also creates files, moves them to the Trash and writes notes. Then run `claude mcp add --transport http example <cloud URL>/apps/example-app/mcp --header "Authorization: Bearer <token>"`. Your tokens are listed, and can be revoked, at `<gateway URL>/connections`.
+- **In the cloud, with OAuth**, add `<cloud URL>/apps/example-app/mcp` as the server URL with no header, for example as a claude.ai custom connector or with `claude mcp add --transport http example <cloud URL>/apps/example-app/mcp`. The client sends you through sign-in and a consent page, where you pick `read` or `readwrite`, and renews its token by itself. A `read` grant lists, reads and tags; `readwrite` also creates files, moves them to the Trash and writes notes.
+- **In the cloud, with a pasted token**, for a script or a client without OAuth, create a token at `<gateway URL>/connect?app=example-app`, where the gateway URL is `apiGatewayUrl` in `~/.starkeep/config.json`, and pick the same modes. Then run `claude mcp add --transport http example <cloud URL>/apps/example-app/mcp --header "Authorization: Bearer <token>"`.
+
+Both kinds of connection are listed, and can be revoked, at `<gateway URL>/connections`.
 
 ### How labels read
 
