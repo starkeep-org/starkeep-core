@@ -91,7 +91,16 @@ pnpm exec playwright install chromium   # once, in e2e/
 pnpm test:e2e
 ```
 
-The suite boots a local platform from a starkeep-core checkout. `scripts/link-core-harness.mjs` finds that checkout in `STARKEEP_CORE_DIR`, in an enclosing core checkout, or as `starkeep-core` beside your repository's root. See "Testing your app" in `docs/authoring-an-app.md`.
+`pnpm test` runs the unit suites. They cover the MCP endpoint, the order of the server's routes, every page operation's URL shape, and the request gate.
+
+To check the cloud bundle loads before you install it, build it and send it a few requests:
+
+```bash
+STARKEEP_APP_BASE_PATH=/apps/example-app STARKEEP_BUNDLE_OUT=/tmp/example-dist.zip pnpm bundle
+pnpm bundle:smoke /tmp/example-dist.zip
+```
+
+The e2e suite boots a local platform from a starkeep-core checkout. `scripts/link-core-harness.mjs` finds that checkout in `STARKEEP_CORE_DIR`, in an enclosing core checkout, or as `starkeep-core` beside your repository's root. See "Testing your app" in `docs/authoring-an-app.md`.
 
 ## Copying it
 

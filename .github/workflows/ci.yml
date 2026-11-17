@@ -361,3 +361,8 @@ jobs:
         env:
           STARKEEP_APP_BASE_PATH: /apps/example-app
           STARKEEP_BUNDLE_OUT: ${{ runner.temp }}/example-dist.zip
+      # Load the bundle as Lambda would, from a folder with no node_modules,
+      # and send each entry a few gateway events. Building it proves nothing
+      # about a cold start.
+      - run: pnpm bundle:smoke "$RUNNER_TEMP/example-dist.zip"
+        working-directory: ${{ runner.temp }}/example-app

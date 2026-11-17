@@ -8,6 +8,7 @@
     "build": "vite build",
     "start": "vite build && tsx src/server/local.ts",
     "bundle": "node scripts/bundle.mjs",
+    "bundle:smoke": "node scripts/bundle-smoke.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },
