@@ -262,7 +262,9 @@ function failure(id: unknown, code: number, message: string): Response {
 /** Answer one MCP request. */
 export async function handleMcp(req: Request): Promise<Response> {
   const who = await verifyDelegation(req);
-  if (!who) return delegationRefusal();
+  // The request lets the refusal say `error="invalid_token"` when a bearer
+  // came with it, which tells an MCP client to refresh or sign in again.
+  if (!who) return delegationRefusal(req);
 
   let message: { id?: unknown; method?: unknown; params?: Record<string, unknown> };
   try {

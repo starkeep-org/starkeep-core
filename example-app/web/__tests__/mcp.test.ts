@@ -180,6 +180,19 @@ describe("who may call", () => {
     );
     expect(res.status).toBe(401);
     expect(res.headers.get("WWW-Authenticate")).toMatch(/^Bearer/);
+    expect(res.headers.get("WWW-Authenticate")).not.toContain("invalid_token");
+  });
+
+  it("tells a client whose bearer token was refused that the token is invalid", async () => {
+    const res = await handleMcp(
+      new Request("http://attacker.example/mcp", {
+        method: "POST",
+        headers: { Host: "attacker.example", Authorization: "Bearer stale" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      }),
+    );
+    expect(res.status).toBe(401);
+    expect(res.headers.get("WWW-Authenticate")).toContain('error="invalid_token"');
   });
 
   it("forwards no delegation token on the local surface", async () => {
