@@ -48,6 +48,7 @@ export {
 export { ensureAdminUser, signInTestAdmin } from "./admin-user.js";
 export { cloudAppTokens, sessionCookieHeader, type CloudAppTokens } from "./cloud-app-session.js";
 export { probeApp } from "./probe-app.js";
+export { createDelegationToken, type DelegationTokenRequest } from "./delegation-steps.js";
 /**
  * The browser side. Imported from here rather than from `@playwright/test`
  * directly: Playwright refuses to be loaded twice in one process, and a

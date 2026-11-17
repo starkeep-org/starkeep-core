@@ -105,47 +105,18 @@ export function defineDelegationSteps(d: DelegationStepsContext): void {
     return { http: 200, ...answer };
   }
 
-  /** Sign in on the managed login page, when it asks. A live Cognito session skips it. */
-  async function signInIfAsked(page: Page, email: string, password: string): Promise<void> {
-    const onCognito = await page
-      .waitForURL(/\.amazoncognito\.com\//, { timeout: 15_000 })
-      .then(() => true)
-      .catch(() => false);
-    if (!onCognito) return;
-    const emailField = page.locator('input[name="username"], input[type="email"]').first();
-    const passwordField = page.locator('input[type="password"]').first();
-    const submit = page.locator('button[type="submit"], input[type="submit"]').first();
-    // A remembered session returns to the deployment without showing a form.
-    const asked = await emailField
-      .waitFor({ state: "visible", timeout: 15_000 })
-      .then(() => true)
-      .catch(() => false);
-    if (!asked) return;
-    await emailField.fill(email);
-    if (!(await passwordField.isVisible())) {
-      await submit.click();
-      await passwordField.waitFor({ state: "visible", timeout: 30_000 });
-    }
-    await passwordField.fill(password);
-    await submit.click();
-  }
-
-  /** Create a token on the consent page and read it off the page that shows it once. */
-  async function createToken(
+  const createToken = (
     page: Page,
     who: { email: string; password: string },
     mode: "read" | "readwrite",
-  ): Promise<string> {
-    await page.goto(`${gateway()}/connect?app=${d.appId}&client=tier3-${mode}`);
-    await page.locator(`input[name="mode"][value="${mode}"]`).check();
-    await page.getByRole("button", { name: "Sign in and create the token" }).click();
-    await signInIfAsked(page, who.email, who.password);
-    const shown = page.locator("textarea[readonly]");
-    await shown.waitFor({ state: "visible", timeout: 60_000 });
-    const token = (await shown.inputValue()).trim();
-    expect(token.startsWith("skd_"), `the token page showed ${token.slice(0, 20)}`).toBe(true);
-    return token;
-  }
+  ) =>
+    createDelegationToken(page, {
+      gatewayUrl: gateway(),
+      appId: d.appId,
+      client: `tier3-${mode}`,
+      mode,
+      ...who,
+    });
 
   it("serves the consent pages on the gateway's own hostname and never through CloudFront", async () => {
     const jwks = await fetch(`${gateway()}/connect/jwks.json`);
@@ -283,4 +254,62 @@ export function defineDelegationSteps(d: DelegationStepsContext): void {
     const after = await tool(token, "list_records");
     expect(after.status, JSON.stringify(after.body)).toBe(401);
   });
+}
+
+/** Sign in on the managed login page, when it asks. A live Cognito session skips it. */
+async function signInIfAsked(page: Page, email: string, password: string): Promise<void> {
+  const onCognito = await page
+    .waitForURL(/\.amazoncognito\.com\//, { timeout: 15_000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!onCognito) return;
+  const emailField = page.locator('input[name="username"], input[type="email"]').first();
+  const passwordField = page.locator('input[type="password"]').first();
+  const submit = page.locator('button[type="submit"], input[type="submit"]').first();
+  // A remembered session returns to the deployment without showing a form.
+  const asked = await emailField
+    .waitFor({ state: "visible", timeout: 15_000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!asked) return;
+  await emailField.fill(email);
+  if (!(await passwordField.isVisible())) {
+    await submit.click();
+    await passwordField.waitFor({ state: "visible", timeout: 30_000 });
+  }
+  await passwordField.fill(password);
+  await submit.click();
+}
+
+export interface DelegationTokenRequest {
+  /** The deployment's execute-api URL, where the consent page answers. */
+  gatewayUrl: string;
+  appId: string;
+  /** The client name the token is listed under on the connections page. */
+  client: string;
+  mode: "read" | "readwrite";
+  email: string;
+  password: string;
+}
+
+/**
+ * Create a delegation token on the consent page, as a person does for an
+ * outside client, and read it off the page that shows it once.
+ */
+export async function createDelegationToken(
+  page: Page,
+  r: DelegationTokenRequest,
+): Promise<string> {
+  const gateway = r.gatewayUrl.replace(/\/+$/, "");
+  await page.goto(`${gateway}/connect?app=${r.appId}&client=${encodeURIComponent(r.client)}`);
+  await page.locator(`input[name="mode"][value="${r.mode}"]`).check();
+  await page.getByRole("button", { name: "Sign in and create the token" }).click();
+  await signInIfAsked(page, r.email, r.password);
+  const shown = page.locator("textarea[readonly]");
+  await shown.waitFor({ state: "visible", timeout: 60_000 });
+  const token = (await shown.inputValue()).trim();
+  if (!token.startsWith("skd_")) {
+    throw new Error(`the token page showed ${token.slice(0, 20)}, not a delegation token`);
+  }
+  return token;
 }
