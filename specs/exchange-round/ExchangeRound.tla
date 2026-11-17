@@ -72,9 +72,9 @@ CONSTANTS
                  \*        record can (its put or metadata throws) and a label
                  \*        cannot, so {"rec"} is the code as written.
   BelowBroken,   \* FALSE: a failed row's author advances to the HLC of the
-                 \*        last row tried before it (ownSafeAdvance, today).
+                 \*        last row tried before it (ownSafeAdvance before fix E).
                  \* TRUE:  only to the last HLC strictly below the failed
-                 \*        row's, so no row sharing its HLC is claimed.
+                 \*        row's, so no row sharing its HLC is claimed (today).
   GuardedWrite,  \* FALSE: the LWW check (get) and the write (put / putLabel)
                  \*        are separate transactions, and the write is an
                  \*        unconditional upsert (today).
@@ -124,7 +124,6 @@ VARIABLES
 
 vars == <<author, nwrites, written, db, own, peer, cdb, cwm, pc, queue, rd, pr, resp, crashes,
           inbox, adv, brk, halts, dfails>>
-dev  == <<inbox, adv, brk, halts, dfails>>
 
 Max(S) == CHOOSE x \in S : \A y \in S : y <= x
 Min(S) == CHOOSE x \in S : \A y \in S : x <= y
@@ -414,8 +413,8 @@ Receive(n) ==
 \* overwritten); ReceiveFail refuses one row (a record whose put throws, an
 \* app row the applier rejects) and the loop carries on past it. ReceiveEnd
 \* saves the watermarks: each author's own watermark advances to the HLC of
-\* the last row tried before its first failure, exactly as ownSafeAdvance
-\* does with items[stop - 1].
+\* the last row tried before its first failure, or with BelowBroken only to
+\* the last HLC below the failed row's (ownSafeAdvance).
 ReceiveStart(n) ==
   /\ DeviceApply = "rows"
   /\ pc[n] = "responded"

@@ -1218,8 +1218,17 @@ export function createSyncEngine(options: SyncEngineOptions): SyncEngine {
     elidedCount += download.elided;
 
     for (const [nodeId, items] of inboundByNode) {
-      const stop = brokenAt.get(nodeId) ?? items.length;
-      if (brokenAt.has(nodeId)) inboundBrokeFor.add(nodeId);
+      let stop = brokenAt.get(nodeId) ?? items.length;
+      if (brokenAt.has(nodeId)) {
+        inboundBrokeFor.add(nodeId);
+        // Never split an HLC. A row before the failed one may share its HLC,
+        // and advancing to it would claim the failed row too: the peer ships
+        // only above this watermark, so the row would never be offered again
+        // (`specs/exchange-round`, finding 4). Stop below the whole HLC; the
+        // rows of it that applied re-ship and LWW absorbs them.
+        const failed = inboundItemHlc(items[stop]!);
+        while (stop > 0 && compareHLC(inboundItemHlc(items[stop - 1]!), failed) === 0) stop -= 1;
+      }
       if (stop > 0) ownSafeAdvance.set(nodeId, inboundItemHlc(items[stop - 1]!));
     }
 

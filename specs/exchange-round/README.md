@@ -8,7 +8,7 @@ The model checks that rule end to end. It covers the requester's scan and cut, t
 
 ## Findings
 
-Findings 1 to 3 are in the responder's apply (`in-process-transport.ts`, step 1), which is also the cloud's code path (`cloud-data-server/src/api-handler.ts` builds the same transport). Finding 4 is in the requester's, and no path in the code reaches it today. Each has been reproduced against the real engine and responder in `packages/sync-engine/__tests__/exchange-round-findings.test.ts`, and an independent review of the code found no mechanism that prevents or automatically repairs them. Findings 1 and 3 are now fixed (fixes B and A in `FIXES.md`); finding 2 is not.
+Findings 1 to 3 are in the responder's apply (`in-process-transport.ts`, step 1), which is also the cloud's code path (`cloud-data-server/src/api-handler.ts` builds the same transport). Finding 4 is in the requester's, and no path in the code reached it. Each has been reproduced against the real engine and responder in `packages/sync-engine/__tests__/exchange-round-findings.test.ts`, and an independent review of the code found no mechanism that prevents or automatically repairs them. Findings 1, 3 and 4 are now fixed (fixes B, A and E in `FIXES.md`); finding 2 is not.
 
 ### 1. Records are applied before labels, so the cloud's coverage can claim a label it lacks
 
@@ -47,7 +47,7 @@ The responder decides LWW in JavaScript, with a `get` and then a `put` (or `getL
 
 ### 4. The requester can claim a row it failed to apply
 
-The requester's inbound loop carries on past a row that will not apply, and holds the author's watermark at the row before it: `ownSafeAdvance` takes `items[stop - 1]`, where `stop` is the first failed row. When the row before it shares its HLC, the watermark claims the failed row, and since the cloud ships only above that watermark, the row is never offered again (`models/finding-device-batch.cfg`, `DeviceNoGap`, depth 16).
+The requester's inbound loop carries on past a row that will not apply, and held the author's watermark at the row before it: `ownSafeAdvance` took `items[stop - 1]`, where `stop` is the first failed row. When the row before it shares its HLC, the watermark claims the failed row, and since the cloud ships only above that watermark, the row is never offered again (`models/finding-device-batch.cfg`, `DeviceNoGap`, depth 16).
 
 | Step | What happens                                                                   | State afterwards               |
 | ---- | ------------------------------------------------------------------------------ | ------------------------------ |
@@ -56,7 +56,7 @@ The requester's inbound loop carries on past a row that will not apply, and hold
 | 3    | M saves its watermarks. The row before the failure is `a@1`.                   | M's rows watermark for L is 1. |
 | 4    | M keeps syncing. The cloud ships L's rows above 1.                             | `b@1` is never offered to M.   |
 
-The model has to let a label fail to find this, and that is why the code does not reach it. Only a record can fail on a device (its `put` or metadata write throws); a label cannot. The only rows that share an HLC are a label batch and a record with its labels, as a delete or restore writes them, and records sort first among rows sharing an HLC. So the row before a failed record always has a lower HLC. `rows-fail-record-batch` checks exactly that shape and passes. The safety therefore rests on an ordering detail that nothing states, and a second record stamped with an existing HLC, or a label write that can fail, would expose it. The replay in `exchange-round-findings.test.ts` stamps two records with one HLC and is `it.fails`. Fix E in `FIXES.md` closes it.
+The model has to let a label fail to find this, and that is why the code did not reach it. Only a record can fail on a device (its `put` or metadata write throws); a label cannot. The only rows that share an HLC are a label batch and a record with its labels, as a delete or restore writes them, and records sort first among rows sharing an HLC. So the row before a failed record always has a lower HLC. `rows-fail-record-batch` checks exactly that shape, with the old rule, and passes. The safety rested on an ordering detail that nothing stated, and a second record stamped with an existing HLC, or a label write that can fail, would have exposed it. Fix E stops the watermark below the failed row's whole HLC, so the order no longer matters; the replay in `exchange-round-findings.test.ts`, which stamps two records with one HLC, is now an ordinary test.
 
 ### Does anything heal these?
 
@@ -68,56 +68,56 @@ Not automatically. `verify()` compares per-bucket row counts across records and 
 
 The apply failures do not open a new window on the cloud. A halt keeps a contiguous prefix of the author's run, as a crash does, and leaves the other authors alone (`halt-relay`, `halt-crash`). The device applying one row at a time is safe too, with crashes (`rows-concurrent`) and with a failed row whose HLC is its own (`rows-fail`). `witness-converged-after-failures` shows that every device can still converge after a refusal on each side.
 
-Fixes A and B are implemented, and the tests for findings 1 and 3 are ordinary ones. Fix C is a proposal checked against the model: the two tests for finding 2 are still `it.fails`, and they will start failing, as a prompt to remove `.fails`, once it is made. `merged-crash` and `merged-concurrent` describe the code as it stands, and pass because every HLC in them is a single row.
+Fixes A, B and E are implemented, and the tests for findings 1, 3 and 4 are ordinary ones. Fix C is a proposal checked against the model: the two tests for finding 2 are still `it.fails`, and they will start failing, as a prompt to remove `.fails`, once it is made. `merged-crash` and `merged-concurrent` describe the code as it stands, and pass because every HLC in them is a single row.
 
 ## Results
 
 `./check-all.sh` compares each model's verdict with `expected.txt`. Every `pass` row is exhaustive: TLC explored every reachable state.
 
-| Model                            | Shape                                                          | Expected and got | Distinct states | Depth |
-| -------------------------------- | -------------------------------------------------------------- | ---------------- | --------------- | ----- |
-| finding-crash                    | records then labels, guarded writes, 1 crash                   | CloudNoLoss      | 349             | 13    |
-| finding-concurrent               | records then labels, guarded writes, 2 devices                 | DeviceNoGap      | 464             | 10    |
-| merged-crash                     | the code today: merged, one statement per row; crash           | pass             | 404             | 14    |
-| merged-concurrent                | as above, 2 devices                                            | pass             | 1,435           | 22    |
-| finding-batch-crash              | batch of 2 sharing an HLC, guarded writes, 1 crash             | CloudNoLoss      | 96              | 11    |
-| finding-batch-concurrent         | batch of 2 sharing an HLC, guarded writes, 2 devices           | DeviceNoGap      | 153             | 12    |
-| finding-lww-race                 | read-then-write LWW before fix A, 2 writers, one key           | CloudNoLoss      | 721             | 13    |
-| fixed-crash                      | guarded, merged, one transaction per HLC; 1 crash              | pass             | 404             | 14    |
-| fixed-concurrent                 | as above, 2 devices                                            | pass             | 1,435           | 22    |
-| fixed-batches                    | 3 records, batches of 2, 1 crash                               | pass             | 174,688         | 20    |
-| fixed-labelbatch                 | 2 devices, label batch, Limit 1, 1 crash                       | pass             | 36,102          | 25    |
-| fixed-two-writers                | 2 writers, 2 records + 1 label, Limit 1, 1 crash               | pass             | 1,294,812       | 33    |
-| fixed-hlc-skew                   | 2 writers, HLCs not in real-time order                         | pass             | 381,993         | 33    |
-| fixed-relay                      | 2 writers, batches, Limit 2, 1 crash                           | pass             | 11,432,190      | 33    |
-| deferred-crash                   | guarded, merged, deferred coverage; 1 crash                    | pass             | 582             | 17    |
-| deferred-concurrent              | as above, 2 devices                                            | pass             | 1,657           | 24    |
-| deferred-batch-crash             | batch of 2, 1 crash                                            | pass             | 120             | 14    |
-| deferred-batch-concurrent        | batch of 2, 2 devices                                          | pass             | 246             | 19    |
-| deferred-batches                 | 3 records, batches of 2, 1 crash                               | pass             | 315,125         | 27    |
-| deferred-labelbatch              | 2 devices, label batch, Limit 1, 1 crash                       | pass             | 56,814          | 29    |
-| deferred-two-writers             | 2 writers, Limit 1, 1 crash                                    | pass             | 2,109,054       | 36    |
-| deferred-relay                   | 2 writers, batches, Limit 2                                    | pass             | 4,411,065       | 38    |
-| halt-relay                       | the code today; 2 writers, Limit 2, the cloud halts one author | pass             | 216,761         | 31    |
-| halt-crash                       | as above with Limit 1 and 1 crash                              | pass             | 772,458         | 34    |
-| rows-concurrent                  | device applies row by row; 2 writers, 1 crash                  | pass             | 1,572,724       | 46    |
-| rows-fail                        | as above, the device fails one row                             | pass             | 802,362         | 47    |
-| rows-fail-record-batch           | a record and its labels under one HLC; a record fails          | pass             | 118,831         | 45    |
-| finding-device-batch             | a label batch, and a label fails on the device                 | DeviceNoGap      | 603             | 16    |
-| fixed-device-batch               | as above with fix E                                            | pass             | 1,544           | 33    |
-| fixed-device-wide                | fix E; 2 writers, label batches, 1 crash                       | pass             | 3,304,535       | 47    |
-| mutant-nocap                     | deferred coverage without the scan cap                         | DeviceNoGap      | 170             | 11    |
-| mutant-notrim                    | `collectSince` without the HLC-boundary trim                   | CloudNoLoss      | 188             | 10    |
-| mutant-split                     | `cutRound` cutting items, not whole timestamps                 | CloudNoLoss      | 170             | 9     |
-| mutant-perstream                 | ceiling per stream instead of the minimum                      | CloudNoLoss      | 15,912          | 9     |
-| witness-relayed-label            | a device holds another device's label                          | reached          | 14,038          | 9     |
-| witness-truncated                | a round ships less than it owes                                | reached          | 399             | 5     |
-| witness-batch                    | a batch arrives whole on another device                        | reached          | 2,086           | 8     |
-| witness-crash                    | a crash happens                                                | reached          | 486             | 5     |
-| witness-converged                | every write done, everyone holds the same rows                 | reached          | 20,334          | 10    |
-| witness-halt                     | the cloud halts an author                                      | reached          | 350             | 6     |
-| witness-device-fail              | a row fails on a device                                        | reached          | 3,824           | 9     |
-| witness-converged-after-failures | as witness-converged, after a halt and a device failure        | reached          | 9,706           | 16    |
+| Model                            | Shape                                                               | Expected and got | Distinct states | Depth |
+| -------------------------------- | ------------------------------------------------------------------- | ---------------- | --------------- | ----- |
+| finding-crash                    | records then labels, guarded writes, 1 crash                        | CloudNoLoss      | 349             | 13    |
+| finding-concurrent               | records then labels, guarded writes, 2 devices                      | DeviceNoGap      | 464             | 10    |
+| merged-crash                     | the code today: merged, one statement per row; crash                | pass             | 404             | 14    |
+| merged-concurrent                | as above, 2 devices                                                 | pass             | 1,435           | 22    |
+| finding-batch-crash              | batch of 2 sharing an HLC, guarded writes, 1 crash                  | CloudNoLoss      | 96              | 11    |
+| finding-batch-concurrent         | batch of 2 sharing an HLC, guarded writes, 2 devices                | DeviceNoGap      | 153             | 12    |
+| finding-lww-race                 | read-then-write LWW before fix A, 2 writers, one key                | CloudNoLoss      | 721             | 13    |
+| fixed-crash                      | guarded, merged, one transaction per HLC; 1 crash                   | pass             | 404             | 14    |
+| fixed-concurrent                 | as above, 2 devices                                                 | pass             | 1,435           | 22    |
+| fixed-batches                    | 3 records, batches of 2, 1 crash                                    | pass             | 174,688         | 20    |
+| fixed-labelbatch                 | 2 devices, label batch, Limit 1, 1 crash                            | pass             | 36,102          | 25    |
+| fixed-two-writers                | 2 writers, 2 records + 1 label, Limit 1, 1 crash                    | pass             | 1,294,812       | 33    |
+| fixed-hlc-skew                   | 2 writers, HLCs not in real-time order                              | pass             | 381,993         | 33    |
+| fixed-relay                      | 2 writers, batches, Limit 2, 1 crash                                | pass             | 11,432,190      | 33    |
+| deferred-crash                   | guarded, merged, deferred coverage; 1 crash                         | pass             | 582             | 17    |
+| deferred-concurrent              | as above, 2 devices                                                 | pass             | 1,657           | 24    |
+| deferred-batch-crash             | batch of 2, 1 crash                                                 | pass             | 120             | 14    |
+| deferred-batch-concurrent        | batch of 2, 2 devices                                               | pass             | 246             | 19    |
+| deferred-batches                 | 3 records, batches of 2, 1 crash                                    | pass             | 315,125         | 27    |
+| deferred-labelbatch              | 2 devices, label batch, Limit 1, 1 crash                            | pass             | 56,814          | 29    |
+| deferred-two-writers             | 2 writers, Limit 1, 1 crash                                         | pass             | 2,109,054       | 36    |
+| deferred-relay                   | 2 writers, batches, Limit 2                                         | pass             | 4,411,065       | 38    |
+| halt-relay                       | the code today; 2 writers, Limit 2, the cloud halts one author      | pass             | 216,761         | 31    |
+| halt-crash                       | as above with Limit 1 and 1 crash                                   | pass             | 772,458         | 34    |
+| rows-concurrent                  | device applies row by row; 2 writers, 1 crash                       | pass             | 1,572,724       | 46    |
+| rows-fail                        | as above, the device fails one row                                  | pass             | 802,362         | 47    |
+| rows-fail-record-batch           | before fix E: a record and its labels under one HLC; a record fails | pass             | 118,831         | 45    |
+| finding-device-batch             | before fix E: a label batch, and a label fails on the device        | DeviceNoGap      | 603             | 16    |
+| fixed-device-batch               | the code today: as above with fix E                                 | pass             | 1,544           | 33    |
+| fixed-device-wide                | fix E; 2 writers, label batches, 1 crash                            | pass             | 3,304,535       | 47    |
+| mutant-nocap                     | deferred coverage without the scan cap                              | DeviceNoGap      | 170             | 11    |
+| mutant-notrim                    | `collectSince` without the HLC-boundary trim                        | CloudNoLoss      | 188             | 10    |
+| mutant-split                     | `cutRound` cutting items, not whole timestamps                      | CloudNoLoss      | 170             | 9     |
+| mutant-perstream                 | ceiling per stream instead of the minimum                           | CloudNoLoss      | 15,912          | 9     |
+| witness-relayed-label            | a device holds another device's label                               | reached          | 14,038          | 9     |
+| witness-truncated                | a round ships less than it owes                                     | reached          | 399             | 5     |
+| witness-batch                    | a batch arrives whole on another device                             | reached          | 2,086           | 8     |
+| witness-crash                    | a crash happens                                                     | reached          | 486             | 5     |
+| witness-converged                | every write done, everyone holds the same rows                      | reached          | 20,334          | 10    |
+| witness-halt                     | the cloud halts an author                                           | reached          | 350             | 6     |
+| witness-device-fail              | a row fails on a device                                             | reached          | 3,824           | 9     |
+| witness-converged-after-failures | as witness-converged, after a halt and a device failure             | reached          | 9,706           | 16    |
 
 The mutants show the model catches the rules the code's comments call load-bearing. The witnesses show the interesting states are reachable, so a clean run is not a vacuous one.
 
