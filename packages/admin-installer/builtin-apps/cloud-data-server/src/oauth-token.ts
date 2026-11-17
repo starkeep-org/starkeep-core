@@ -37,6 +37,7 @@ import {
 } from "./delegation-tokens.js";
 import {
   claimAuthorization,
+  deleteRefreshToken,
   endRefreshTokens,
   findAuthorizationByCode,
   findDelegation,
@@ -96,22 +97,19 @@ async function endGrant(
   if (refresh) await revokeAtCognito(deps, refresh);
 }
 
-/** Issue an access token and a fresh refresh token for a live delegation. */
+/**
+ * Issue an access token and a fresh refresh token for a live delegation.
+ * With `replaces`, the presented refresh token's hash, the old token rotates
+ * only after its successor is stored, so a failure on the way leaves the
+ * client holding a token that still works.
+ */
 async function issueTokens(
   deps: ConnectDeps,
   key: DelegationSigningKey,
   grant: DelegationRow,
   now: number,
+  replaces?: string,
 ): Promise<ConnectResponse> {
-  const refresh = mintRefreshToken();
-  await insertRefreshToken(await deps.db(), {
-    token_hash: refresh.hash,
-    grant_id: grant.id,
-    app_id: grant.app_id,
-    created_at_ms: now,
-    expires_at_ms: grant.expires_at_ms,
-    rotated_at_ms: null,
-  });
   const expiresAtMs = Math.min(now + OAUTH_ACCESS_TOKEN_TTL_S * 1000, grant.expires_at_ms);
   const accessToken = signDelegationToken(key, {
     userId: grant.user_id,
@@ -122,6 +120,21 @@ async function issueTokens(
     expiresAtMs,
     nowMs: now,
   });
+  const db = await deps.db();
+  const refresh = mintRefreshToken();
+  await insertRefreshToken(db, {
+    token_hash: refresh.hash,
+    grant_id: grant.id,
+    app_id: grant.app_id,
+    created_at_ms: now,
+    expires_at_ms: grant.expires_at_ms,
+    rotated_at_ms: null,
+  });
+  if (replaces !== undefined && !(await rotateRefreshToken(db, replaces, now))) {
+    // A concurrent refresh with the same token rotated it first.
+    await deleteRefreshToken(db, refresh.hash);
+    return oauthError("invalid_grant", "The refresh token was already used");
+  }
   return json(200, {
     access_token: accessToken,
     token_type: "Bearer",
@@ -257,11 +270,7 @@ async function refresh(
     return oauthError("invalid_grant", "This account may no longer use its data here");
   }
 
-  if (!(await rotateRefreshToken(db, token.token_hash, now))) {
-    // A concurrent refresh with the same token rotated it first.
-    return oauthError("invalid_grant", "The refresh token was already used");
-  }
-  return await issueTokens(deps, key, grant, now);
+  return await issueTokens(deps, key, grant, now, token.token_hash);
 }
 
 /** `POST /connect/token`. */

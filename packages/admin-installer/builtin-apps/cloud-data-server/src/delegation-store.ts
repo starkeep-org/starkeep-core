@@ -533,6 +533,14 @@ export async function rotateRefreshToken(
   return rows.length === 1;
 }
 
+/** Delete one refresh token: a successor whose rotation lost a race. */
+export async function deleteRefreshToken(client: DatabaseClient, tokenHash: string): Promise<void> {
+  await run(
+    client,
+    compiler.deleteFrom(REFRESH_TOKENS_TABLE).where("token_hash", "=", tokenHash).compile(),
+  );
+}
+
 /** End every live refresh token under one grant, as a revocation does. */
 export async function endRefreshTokens(
   client: DatabaseClient,
