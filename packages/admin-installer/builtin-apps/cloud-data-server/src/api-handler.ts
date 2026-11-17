@@ -133,6 +133,9 @@ import {
   resolveContentRead,
   planRecordDelete,
   applyRecordDelete,
+  planRecordRestore,
+  applyRecordRestore,
+  RESTORE_SLOT_TAKEN,
   keepCanonicalOfArchivedOriginal,
   evaluateArchiving,
   applyArchiveEvaluation,
@@ -5331,19 +5334,48 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       });
     }
 
-    // POST /apps/{appId}/data/records/:id/restore
+    // POST /apps/{appId}/data/records/:id/restore — take a delete back.
     //
-    // Restoring is a real feature, not an error path — and it is the *only* way
+    // The same route and the same planner pair as local-data-server, so an app
+    // restores from the Trash the same way on either surface. The cascade it
+    // lifts is the cascade the delete wrote: the record, its stand-ins, its
+    // derived children, their labels and their metadata rows. Archived bytes
+    // are a separate matter, with a route of their own (`/thaw-archive` below).
+    const restoreMatch = subPath.match(/^\/data\/records\/([^/]+)\/restore$/);
+    if (restoreMatch && method === "POST") {
+      const id = decodeURIComponent(restoreMatch[1]!) as StarkeepId;
+      // get → plan → apply is one OCC unit; a retry re-reads.
+      return await withOccRetry("POST /data/records/:id/restore", async () => {
+        // Tombstones included, deliberately: this is the one read whose whole
+        // purpose is to find a deleted record.
+        const record = await db.get(id);
+        if (!record || !canRead(grants, record.type)) return clientErr("Record not found", 404);
+        if (!canWrite(grants, record.type)) return clientErr("Forbidden", 403);
+        const plan = await planRecordRestore(db, record);
+        if (!plan.ok) return ok(plan.body, plan.status);
+        const restored = await applyRecordRestore(db, plan, clock);
+        // A sibling took the record's stand-in slot after the plan.
+        if (restored.length === 0) return ok(RESTORE_SLOT_TAKEN, 409);
+        // The mirror of the delete's trigger: a restored original, or its
+        // restored canonical stand-in, may meet the archive conditions again.
+        await runArchiveTriggers(db, platformStorage, archiveTriggersFor(restored, []));
+        return ok({ restored: true, ids: restored.map((r) => r.id) });
+      });
+    }
+
+    // POST /apps/{appId}/data/records/:id/thaw-archive
+    //
+    // Thawing is a real feature, not an error path — and it is the *only* way
     // archived bytes become readable. Reads never trigger one, so this endpoint
     // is where the cost and the wait become someone's decision rather than
     // their discovery.
     //
     // Two-step by design. Without `confirm`, it returns an estimate and does
-    // nothing; with it, the restore is issued. A single-step endpoint would
+    // nothing; with it, the thaw is issued. A single-step endpoint would
     // make the numbers something a caller learns *after* committing to them.
-    const restoreMatch = subPath.match(/^\/data\/records\/([^/]+)\/restore$/);
-    if (restoreMatch && method === "POST") {
-      const id = decodeURIComponent(restoreMatch[1]!) as StarkeepId;
+    const thawMatch = subPath.match(/^\/data\/records\/([^/]+)\/thaw-archive$/);
+    if (thawMatch && method === "POST") {
+      const id = decodeURIComponent(thawMatch[1]!) as StarkeepId;
       const record = await db.get(id);
       if (!record || record.deletedAt) return clientErr("Record not found", 404);
       // A read grant is enough to *ask*: restoring does not change the bytes,

@@ -441,7 +441,7 @@ export async function initializeSharedSchema(opts: SchemaInitOptions): Promise<v
     // before this table existed.
     //
     // INSERT and UPDATE (no DELETE): rows are written by the S3-event and
-    // reconcile paths and by POST /restore recording `restoring`, always as an
+    // reconcile paths and by POST /thaw-archive recording `restoring`, always as an
     // upsert — putAvailability is the only writer and nothing removes a row.
     await sql
       .raw(`GRANT SELECT, INSERT, UPDATE ON shared.object_availability TO PUBLIC`)

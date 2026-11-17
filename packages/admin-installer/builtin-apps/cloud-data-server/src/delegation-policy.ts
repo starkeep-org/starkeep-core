@@ -16,8 +16,8 @@
  *   deletes by tombstone only: a record to the Trash, an app row to a
  *   tombstone. Both stay recoverable inside the retention window.
  * - No delegation erases bytes (`DELETE /files/<key>`,
- *   `DELETE /app-data/files/<key>`, `POST /data/reap`), restores from the
- *   archive, syncs, publishes a public share, or reads the stand-in backlog
+ *   `DELETE /app-data/files/<key>`, `POST /data/reap`), takes a record back
+ *   from the Trash, thaws archived bytes, syncs, publishes a public share, or reads the stand-in backlog
  *   or the deployment's settings.
  */
 import type { DelegationMode } from "@starkeep/protocol-primitives";
@@ -87,6 +87,7 @@ const NEVER: readonly Rule[] = [
   rule("DELETE", `/app-data/files/${KEY}`),
   rule("POST", "/data/reap"),
   rule("POST", `/data/records/${SEG}/restore`),
+  rule("POST", `/data/records/${SEG}/thaw-archive`),
   rule("POST", "/sync/exchange"),
   rule("GET", "/data/stand-ins/backlog"),
   rule("GET", "/data/trash"),

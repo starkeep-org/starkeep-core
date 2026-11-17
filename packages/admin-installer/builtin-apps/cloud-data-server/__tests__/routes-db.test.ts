@@ -1106,6 +1106,73 @@ describe("per-record routes honor read/write grants", () => {
     expect(dbRo.calls(/update "shared"\."records" set "deleted_at"/)).toHaveLength(0);
   });
 
+  // The Trash restore, as on local-data-server: the same route takes a delete
+  // back on either surface. Archived bytes thaw through `/thaw-archive`.
+  describe("POST /data/records/:id/restore takes a delete back", () => {
+    function deletedRow(id: string, type = "image/jpeg") {
+      const row = recordRow({ id, type });
+      return { ...row, deleted_at: row["updated_at"] };
+    }
+
+    it("lifts a deleted record's tombstone and answers its ids", async () => {
+      const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }])
+        .on(/from "shared"\."records" where "id" =/, [deletedRow("t1")])
+        .on(/where "parent_id" = \$1 and "deleted_at" is not null/, [])
+        .on(RECORDS_INSERT, []);
+      setDbFactory(db);
+      const res = await handler(
+        signedEvent({ appId: "tr1", method: "POST", subPath: "/data/records/t1/restore" }),
+        context,
+      );
+      expect(res.statusCode, JSON.stringify(bodyOf(res))).toBe(200);
+      expect(bodyOf(res)).toEqual({ restored: true, ids: ["t1"] });
+      // The record comes back through the adapter's upsert, `deleted_at` ($6) cleared.
+      const lift = db.calls(RECORDS_INSERT);
+      expect(lift).toHaveLength(1);
+      expect(lift[0]!.values[0]).toBe("t1");
+      expect(lift[0]!.values[5]).toBeNull();
+    });
+
+    it("answers 409 NotDeleted for a live record", async () => {
+      const db = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }]).on(
+        /from "shared"\."records" where "id" =/,
+        [recordRow({ id: "t2", type: "image/jpeg" })],
+      );
+      setDbFactory(db);
+      const res = await handler(
+        signedEvent({ appId: "tr2", method: "POST", subPath: "/data/records/t2/restore" }),
+        context,
+      );
+      expect(res.statusCode).toBe(409);
+      expect(bodyOf(res)["error"]).toBe("NotDeleted");
+    });
+
+    it("404s a type the caller cannot read and 403s one it can only read", async () => {
+      const unreadable = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "readwrite" }]).on(
+        /from "shared"\."records" where "id" =/,
+        [deletedRow("t3", "audio/mp3")],
+      );
+      setDbFactory(unreadable);
+      const hidden = await handler(
+        signedEvent({ appId: "tr3", method: "POST", subPath: "/data/records/t3/restore" }),
+        context,
+      );
+      expect(hidden.statusCode).toBe(404);
+
+      const readOnly = fakeDsqlWithGrants([{ type_id: "image/jpeg", access: "read" }]).on(
+        /from "shared"\."records" where "id" =/,
+        [deletedRow("t4")],
+      );
+      setDbFactory(readOnly);
+      const refused = await handler(
+        signedEvent({ appId: "tr4", method: "POST", subPath: "/data/records/t4/restore" }),
+        context,
+      );
+      expect(refused.statusCode).toBe(403);
+      expect(readOnly.calls(/update "shared"\."records" set "deleted_at"/)).toHaveLength(0);
+    });
+  });
+
   it("chokepoint catches a route/data mismatch: readable type, foreign-category key", async () => {
     // The record's TYPE is readable (image/jpeg), so the route-level canRead
     // check passes — but its object key points at a category the caller cannot
@@ -2632,7 +2699,7 @@ describe("availability and restore", () => {
     expect(bodyOf(res)["error"]).toBe("ObjectRestoring");
   });
 
-  describe("POST /data/records/:id/restore", () => {
+  describe("POST /data/records/:id/thaw-archive", () => {
     function archivedDb() {
       return fakeDsqlWithGrants(grants, [archivedRow()]).on(RECORDS_SELECT, [
         recordRow({
@@ -2654,7 +2721,7 @@ describe("availability and restore", () => {
         signedEvent({
           appId: "app1",
           method: "POST",
-          subPath: "/data/records/rec-1/restore",
+          subPath: "/data/records/rec-1/thaw-archive",
           body: {},
         }),
         context,
@@ -2677,7 +2744,7 @@ describe("availability and restore", () => {
         signedEvent({
           appId: "app1",
           method: "POST",
-          subPath: "/data/records/rec-1/restore",
+          subPath: "/data/records/rec-1/thaw-archive",
           body: { confirm: true },
         }),
         context,
@@ -2697,7 +2764,7 @@ describe("availability and restore", () => {
         signedEvent({
           appId: "app1",
           method: "POST",
-          subPath: "/data/records/rec-1/restore",
+          subPath: "/data/records/rec-1/thaw-archive",
           body: { confirm: true },
         }),
         context,
@@ -2720,7 +2787,7 @@ describe("availability and restore", () => {
         signedEvent({
           appId: "app1",
           method: "POST",
-          subPath: "/data/records/rec-1/restore",
+          subPath: "/data/records/rec-1/thaw-archive",
           body: {},
         }),
         context,
@@ -2736,7 +2803,7 @@ describe("availability and restore", () => {
         signedEvent({
           appId: "app1",
           method: "POST",
-          subPath: "/data/records/rec-1/restore",
+          subPath: "/data/records/rec-1/thaw-archive",
           body: { tier: "Bulk" },
         }),
         context,
@@ -2756,7 +2823,7 @@ describe("availability and restore", () => {
         signedEvent({
           appId: "app1",
           method: "POST",
-          subPath: "/data/records/rec-1/restore",
+          subPath: "/data/records/rec-1/thaw-archive",
           body: { confirm: true },
         }),
         context,
@@ -2776,7 +2843,7 @@ describe("availability and restore", () => {
         signedEvent({
           appId: "app1",
           method: "POST",
-          subPath: "/data/records/rec-1/restore",
+          subPath: "/data/records/rec-1/thaw-archive",
           body: { confirm: true },
         }),
         context,
@@ -2798,7 +2865,7 @@ describe("availability and restore", () => {
         signedEvent({
           appId: "app1",
           method: "POST",
-          subPath: "/data/records/rec-1/restore",
+          subPath: "/data/records/rec-1/thaw-archive",
           body: { confirm: true },
         }),
         context,

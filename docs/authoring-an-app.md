@@ -1062,8 +1062,8 @@ What the platform enforces on every data call the route makes:
 - **The mode.** A `read` token reads and writes labels. A `readwrite` token
   also writes records, files, metadata and rows, and deletes by tombstone
   only: a record moves to the Trash, and a row becomes a tombstone. No token
-  erases a file's bytes, restores from the archive, syncs or publishes a
-  public link. Your app's grants still apply: the mode narrows them and never
+  erases a file's bytes, takes a record back from the Trash, thaws archived
+  bytes, syncs or publishes a public link. Your app's grants still apply: the mode narrows them and never
   widens them.
 - **Revocation and sign-out.** An expired token is refused at once, and a
   revoked one within a minute. "Sign out all devices", "Disable" and removal from `starkeep-users` end the
@@ -1415,6 +1415,20 @@ app would assume, and one who chose a week is making a shorter one.
 `retention_days: null` means that machine cannot read the library's settings file
 yet and so does not know the value; nothing is reaped while that is true, so an
 app can treat it as "no deadline right now" rather than as an error.
+
+**Taking a delete back.** `POST /data/records/:id/restore` takes a record back
+from the Trash on both data servers. The restore lifts everything the delete
+removed: the record, its stand-ins, its derived records, their labels and their
+metadata rows. It needs write access to the record's type. A live record answers
+409 `NotDeleted`. Inside the retention window the restore is exact. Past it, the
+record comes back without its metadata, which your app reports again. The
+platform knows nothing of your app's own rows, so a row your app deleted with
+the record stays deleted.
+
+Archived bytes are a separate matter. In the cloud, an old original can move to
+an archive storage tier, and reading it again takes a thaw:
+`POST /data/records/:id/thaw-archive`. Without `confirm: true` the route answers
+a cost and time estimate and does nothing. With it, the thaw starts.
 
 **Your own housekeeping is yours.** The platform deletes the shared record and
 everything the platform owns about it. A row in your app's own table keyed by
