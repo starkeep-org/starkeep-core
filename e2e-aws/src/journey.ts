@@ -2452,6 +2452,17 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         });
 
         await runInstallCli("cli-uninstall-app", [app.appId], paths, session);
+        // This desktop holds the app's rows too. A node that keeps the data and
+        // still syncs the app should upload it again after the deletion (STA-96
+        // tracks that), which would refill the cloud. Uninstalling the app here
+        // stops its channel and keeps the local copy, so no node can refill
+        // the cloud and the empty reinstall below is the correct outcome.
+        const localUninstall = await fetch(
+          `${lds!.url}/admin/apps/${encodeURIComponent(app.appId)}`,
+          { method: "DELETE" },
+        );
+        expect(localUninstall.status).toBe(200);
+
         const out = await deleteData();
         expect(out).toContain("cloud data deleted");
 
