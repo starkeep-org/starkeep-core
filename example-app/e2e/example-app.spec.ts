@@ -27,6 +27,13 @@ test.skip(
   "The cloud run needs STARKEEP_AWS_TESTS=1 (e2e-aws/README.md)",
 );
 
+/**
+ * What a new record's `POST /data/records` answers. The cloud answers 201 for
+ * an insert and 200 for a dedup; local-data-server answers 200 for both. Both
+ * mark a dedup with `deduped: true` in the body.
+ */
+const RECORD_CREATED = SURFACE === "cloud" ? 201 : 200;
+
 let page: Page;
 const statusLine = () => page.locator("#status");
 
@@ -183,7 +190,7 @@ async function seedFile(name: string, text: string): Promise<string> {
       sizeBytes,
     },
   });
-  expect(made.status).toBe(200);
+  expect(made.status).toBe(RECORD_CREATED);
   return (made.body as { record: { id: string } }).record.id;
 }
 
@@ -335,7 +342,7 @@ test("Example files: create one from text, with its counts inline", async () => 
   await expectLogged("GET", /^\/data\/records\/[^/]+\/metadata\/example$/, 200);
   await expect(table("Types")).toContainText("example/plaintext");
   await expectLogged("POST", /^\/data\/files\?type=example%2Fplaintext$/, 200);
-  await expectLogged("POST", /^\/data\/records$/, 200);
+  await expectLogged("POST", /^\/data\/records$/, RECORD_CREATED);
 });
 
 test("Example files: upload a file through a presigned URL", async () => {

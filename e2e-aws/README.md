@@ -92,7 +92,8 @@ pnpm --dir <core>/e2e-aws exec tsx src/app-cloud-run.ts finish --out <file> --pa
 ```
 
 - `prepare` brings the bootstrap stack up to date and installs the cloud data
-  server and the app. It creates a new member of `starkeep-users` for the run,
+  server, Drive and the app, in the order admin-web's setup wizard uses. It
+  creates a new member of `starkeep-users` for the run,
   so the suite starts from an empty library on a kept-up stack. It signs that
   user in to the app in Chromium and creates a `read` and a `readwrite`
   delegation token. It writes the app's URL, the user, the tokens and a

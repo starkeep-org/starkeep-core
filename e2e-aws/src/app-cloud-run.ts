@@ -6,7 +6,7 @@
  * computer. This module gives that suite a cloud to walk:
  *
  * - `prepare` brings the test stack up to date, installs the cloud data
- *   server and the app, and creates a user for this run alone. It signs that
+ *   server, Drive and the app, and creates a user for this run alone. It signs that
  *   user in to the app in a real browser, creates a `read` and a `readwrite`
  *   delegation token for the app's MCP route, and writes what the suite needs
  *   to a JSON file ({@link AppCloudRun}).
@@ -124,6 +124,10 @@ export async function prepareAppCloudRun(options: PrepareAppCloudRunOptions): Pr
   // --ephemeral, as in the journey: the test stack is torn down, so the
   // install skips the production data-protection settings.
   await runInstallCli("cli-install-cloud-data-server", ["--ephemeral"], paths, session);
+  // Drive next, as admin-web's setup wizard installs it. The cloud data server
+  // reaches the platform's own tables (delegations, public shares, the app
+  // registry) as Drive, so the consent pages answer 503 without it.
+  await runInstallCli("cli-install-drive", [], paths, session);
   await runInstallCli("cli-install-app", [appId], paths, session);
   const config = readConfig(paths)!;
   if (!config.publicBaseUrl || !config.apiGatewayUrl) {
