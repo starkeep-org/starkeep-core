@@ -48,17 +48,6 @@ export {
 export { ensureAdminUser, signInTestAdmin } from "./admin-user.js";
 export { cloudAppTokens, sessionCookieHeader, type CloudAppTokens } from "./cloud-app-session.js";
 export { probeApp } from "./probe-app.js";
-export { createDelegationToken, type DelegationTokenRequest } from "./delegation-steps.js";
-/**
- * A cloud for an app's own browser suite. A Playwright suite runs
- * `src/app-cloud-run.ts` as a child process instead of importing these.
- */
-export {
-  prepareAppCloudRun,
-  finishAppCloudRun,
-  type AppCloudRun,
-  type PrepareAppCloudRunOptions,
-} from "./app-cloud-run.js";
 /**
  * The browser side. Imported from here rather than from `@playwright/test`
  * directly: Playwright refuses to be loaded twice in one process, and a
