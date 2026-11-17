@@ -164,7 +164,7 @@ describe("installLocal — app-syncable schema", () => {
  * type, a new index, a new label key or a new table was applied at first
  * install and never again. The registry rows for Memo and Photos drifted eight
  * days behind their manifests that way, and the only action that *would* have
- * applied them — Uninstall — drops the app's syncable tables.
+ * applied them — Uninstall — then dropped the app's syncable tables.
  */
 describe("reapplying an install upgrades it", () => {
   /** `MANIFEST` a version later: a new index, a new column, a new table. */

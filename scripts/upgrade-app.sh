@@ -4,10 +4,11 @@
 # An app's manifest reaches its install exactly once, at install time. Change a
 # column type, add an index, add a table or a label key, narrow a grant, and the
 # installed app keeps the manifest it was installed with — because `installLocal`
-# gates its schema steps on a completed-step ledger. The only action that *does*
-# apply a manifest change is Uninstall, which drops the app's syncable tables.
+# gates its schema steps on a completed-step ledger. Uninstall and reinstall
+# applies a manifest change too: uninstall keeps the app's syncable tables, and
+# the reinstall adopts them.
 #
-# This is the non-destructive route. It POSTs the app's on-disk manifest to
+# This route needs no uninstall. It POSTs the app's on-disk manifest to
 # `/admin/apps/install`, which reapplies every schema step: it creates tables
 # and indexes that do not exist, rewrites the access grants, the label keys and
 # the namespace row the query parser validates against, and refreshes the stored

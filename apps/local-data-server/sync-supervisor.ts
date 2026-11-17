@@ -214,6 +214,15 @@ export interface SyncSupervisor {
    */
   rescan(): void;
   /**
+   * Stop one app's engine and wait until nothing it started is still running.
+   *
+   * `rescan()` stops an uninstalled app's engine without waiting, because it
+   * is synchronous. Deleting the app's data needs the wait: a drain that
+   * finishes after the deletion writes the app's watermarks back. Resolves at
+   * once for an app with no engine and no drain in flight.
+   */
+  stopAppAndDrain(appId: string): Promise<void>;
+  /**
    * The cloud's object storage, as the Drive channel reaches it, for proving a
    * replica before this node lets bytes go. Null until the Drive engine runs.
    *
@@ -684,6 +693,9 @@ export function createSyncSupervisor(options: SyncSupervisorOptions): SyncSuperv
     engines.get(targetAppId)?.engine.uploader.nudge();
   });
 
+  /** Drains of stopped engines still in flight, by app. */
+  const pendingDrains = new Map<string, Promise<void>>();
+
   function rescan(): void {
     // No credential, no engine: every request would be refused.
     if (!hasCredential()) return;
@@ -719,12 +731,32 @@ export function createSyncSupervisor(options: SyncSupervisorOptions): SyncSuperv
       const entry = engines.get(appId)!;
       stopEngineFor(appId);
       // Not awaited: `rescan()` is synchronous by contract and its callers are
-      // registry-change handlers. `stopped` is what makes this short.
-      void drained(entry);
+      // registry-change handlers. `stopped` is what makes this short. Tracked,
+      // so `stopAppAndDrain` can wait for it.
+      trackDrain(appId, entry);
     }
   }
 
+  function trackDrain(appId: string, entry: EngineEntry): Promise<void> {
+    const drain = drained(entry);
+    pendingDrains.set(appId, drain);
+    void drain.finally(() => {
+      if (pendingDrains.get(appId) === drain) pendingDrains.delete(appId);
+    });
+    return drain;
+  }
+
+  async function stopAppAndDrain(appId: string): Promise<void> {
+    const entry = engines.get(appId);
+    if (entry) {
+      stopEngineFor(appId);
+      trackDrain(appId, entry);
+    }
+    await pendingDrains.get(appId);
+  }
+
   return {
+    stopAppAndDrain,
     cloudReplicaProbe() {
       return driveRemoteStorage ? { nodeId: "cloud", storage: driveRemoteStorage } : null;
     },

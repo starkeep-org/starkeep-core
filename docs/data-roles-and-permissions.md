@@ -10,7 +10,7 @@ Starkeep operates on two classes of data: "Shared data" is your content (photos,
 
 - **Shared data** is the _user's_ content (photos, documents): typed against a platform-owned registry and stored in the single `shared.records` table plus the `shared/<userId>/<category>/*` object-storage prefix. It is **cross-app and platform-owned** — multiple apps can hold grants on the same type, items outlive the uninstall of any app that touched them, and no app _owns_ shared data. An app is a tenant with declared, narrow access: it reaches only the categories/types its manifest was granted.
 
-- **App-specific data** is an _app's_ own private state (a photo caption, a tag taxonomy, layout preferences): stored in the app's namespaced schema (`app_<appId>.*`) and filespace (`apps/<appId>/<userId>/syncable/*`). It is **per-app and app-owned** — invisible to every other app, and torn down when the app is uninstalled at a location. It never interoperates across apps.
+- **App-specific data** is an _app's_ own private state (a photo caption, a tag taxonomy, layout preferences): stored in the app's namespaced schema (`app_<appId>.*`) and filespace (`apps/<appId>/<userId>/syncable/*`). It is **per-app and app-owned** — invisible to every other app. Uninstalling the app on a device keeps it, and deleting it there is a separate action. It never interoperates across apps.
 
 These are handled differently at the identity layer, and that difference is the source of most of the nuance below:
 
@@ -21,7 +21,7 @@ These are handled differently at the identity layer, and that difference is the 
 | **Runtime read/write identity** (per-request `/data/*`) | the **calling app's** per-app role, assumed per request by the broker                                       | the **calling app's** per-app role                                                               |
 | **Sync write identity** (cloud side)                    | the single **Starkeep Drive** (User-Data-Owner) role, on one always-on channel                              | the app's **own** per-app role, on the app's own channel — only while the app is cloud-installed |
 | **Attribution of authorship**                           | IAM-enforced on the runtime path; on the sync path, carried by the immutable `origin_app_id` data attribute | IAM-enforced — the row lives in the app's own schema/prefix                                      |
-| **Survives uninstall**                                  | yes                                                                                                         | no (at that location)                                                                            |
+| **Survives uninstall**                                  | yes                                                                                                         | yes on a device, until a separate delete; no in the cloud                                        |
 
 Two consequences are worth stating up front, because the principles below lean on them:
 

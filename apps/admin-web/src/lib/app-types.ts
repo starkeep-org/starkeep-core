@@ -44,6 +44,36 @@ export interface AppList {
   apps: LocalAppEntry[];
   problems: ScanProblem[];
   dirs: ScannedDir[];
+  /** Data that uninstalls kept on this machine. */
+  kept: KeptAppData[];
+}
+
+/**
+ * An app's data that an uninstall kept on this machine. The app is not
+ * installed here; reinstalling it reattaches the data, and "Delete data…"
+ * deletes it.
+ */
+export interface KeptAppData {
+  appId: string;
+  /** The app's name when it was uninstalled. */
+  name: string;
+  retainedAt: string;
+}
+
+/** The body of `GET /api/apps/:appId/data`: counts of the app's data here. */
+export interface AppDataPreview {
+  appId: string;
+  installed: boolean;
+  /** True when the data is kept from an uninstall. */
+  retained: boolean;
+  tables: Array<{ name: string; rowCount: number }>;
+  totalRows: number;
+  files: { count: number; totalBytes: number } | null;
+  /**
+   * What this machine knows of the cloud's copy from its last exchange:
+   * none, every row and file, or missing some.
+   */
+  cloudCopy: "none" | "current" | "behind";
 }
 
 export interface FileAccess {

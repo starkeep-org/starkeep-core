@@ -2,6 +2,7 @@ import type { RawDatabase } from "@starkeep/storage-adapter";
 import { sql, type CompiledQuery } from "kysely";
 import type { AppManifest, FileAccess, LabelKey } from "@starkeep/admin-manifest";
 import { appSyncableTableName, sqliteCompiler as k } from "@starkeep/storage-sqlite";
+import { parseAppSyncableTables, type AppSyncableTableInfo } from "@starkeep/shared-space-api";
 
 export type Operation = "install" | "uninstall";
 export type StepStatus = "pending" | "done" | "failed";
@@ -361,4 +362,110 @@ interface RegisteredAppRow {
   installed_at: string;
   updated_at: string;
   source_dir: string | null;
+}
+
+/**
+ * App data that outlived its app's uninstall.
+ *
+ * Uninstall keeps an app's syncable tables and its `apps/<appId>/` files, and
+ * this row records them once the namespace row is gone. The table list comes
+ * from the namespace at uninstall time, so deleting the data later does not
+ * depend on a manifest that may no longer exist. The row exists only while no
+ * app with this id is installed: a reinstall adopts the data and deletes it.
+ */
+export interface RetainedAppData {
+  appId: string;
+  name: string;
+  /** Physical tables are `appSyncableTableName(appId, name)`. */
+  tables: AppSyncableTableInfo[];
+  filesEnabled: boolean;
+  retainedAt: string;
+}
+
+interface RetainedAppDataRow {
+  app_id: string;
+  name: string;
+  tables_json: string;
+  files_enabled: number;
+  retained_at: string;
+}
+
+const RETAINED_COLUMNS = ["app_id", "name", "tables_json", "files_enabled", "retained_at"] as const;
+
+function toRetained(row: RetainedAppDataRow): RetainedAppData {
+  return {
+    appId: row.app_id,
+    name: row.name,
+    tables: parseAppSyncableTables(row.app_id, row.tables_json),
+    filesEnabled: row.files_enabled === 1,
+    retainedAt: row.retained_at,
+  };
+}
+
+export function upsertRetainedAppData(
+  db: RawDatabase,
+  entry: Omit<RetainedAppData, "retainedAt">,
+): void {
+  run(
+    db,
+    k
+      .insertInto("retained_app_data")
+      .values({
+        app_id: entry.appId,
+        name: entry.name,
+        tables_json: JSON.stringify(entry.tables),
+        files_enabled: entry.filesEnabled ? 1 : 0,
+      })
+      .onConflict((oc) =>
+        oc.column("app_id").doUpdateSet((eb) => ({
+          name: eb.ref("excluded.name"),
+          tables_json: eb.ref("excluded.tables_json"),
+          files_enabled: eb.ref("excluded.files_enabled"),
+          retained_at: sql`datetime('now')`,
+        })),
+      )
+      .compile(),
+  );
+}
+
+export function getRetainedAppData(db: RawDatabase, appId: string): RetainedAppData | null {
+  const [row] = all<RetainedAppDataRow>(
+    db,
+    k
+      .selectFrom("retained_app_data")
+      .select([...RETAINED_COLUMNS])
+      .where("app_id", "=", appId)
+      .compile(),
+  );
+  return row ? toRetained(row) : null;
+}
+
+export function listRetainedAppData(db: RawDatabase): RetainedAppData[] {
+  return all<RetainedAppDataRow>(
+    db,
+    k
+      .selectFrom("retained_app_data")
+      .select([...RETAINED_COLUMNS])
+      .orderBy("retained_at", "asc")
+      .compile(),
+  ).map(toRetained);
+}
+
+export function deleteRetainedAppData(db: RawDatabase, appId: string): void {
+  run(db, k.deleteFrom("retained_app_data").where("app_id", "=", appId).compile());
+}
+
+/**
+ * Run `fn` in one SQLite transaction. The local installer's steps are
+ * synchronous, so a step that must not stop half-way wraps itself in this.
+ */
+export function inTransaction(db: RawDatabase, fn: () => void): void {
+  db.exec("BEGIN");
+  try {
+    fn();
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
 }
