@@ -21,6 +21,8 @@
     "cli:install-drive": "tsx scripts/cli-install-drive.ts",
     "cli:install-app": "tsx scripts/cli-install-app.ts",
     "cli:install-app-local": "tsx scripts/cli-install-app-local.ts",
+    "cli:uninstall-app": "tsx scripts/cli-uninstall-app.ts",
+    "cli:delete-app-data": "tsx scripts/cli-delete-app-data.ts",
     "check:temp-vs-boundary": "tsx scripts/check-temp-vs-boundary.ts",
     "debug:dsql-inspect": "tsx scripts/debug-dsql-inspect.ts",
     "debug:dsql-as-app": "tsx scripts/debug-dsql-as-app.ts",

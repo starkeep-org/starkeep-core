@@ -71,7 +71,8 @@ export async function runInstallCli(
     | "cli-install-cloud-data-server"
     | "cli-install-drive"
     | "cli-install-app"
-    | "cli-uninstall-app",
+    | "cli-uninstall-app"
+    | "cli-delete-app-data",
   args: string[],
   paths: RunPaths,
   session: AdminSession,

@@ -619,6 +619,24 @@ async function applySharedSchema(opts: SchemaInitOptions): Promise<void> {
       .raw(`GRANT INSERT, UPDATE, DELETE ON shared.app_syncable_namespaces TO "${installer}"`)
       .execute(db);
 
+    // App data kept after a cloud uninstall. Uninstall keeps an app's
+    // `app_<appId>` schema, its Postgres role and its files-bucket prefix, and
+    // this row records them once the namespace row is gone. A row means "kept
+    // data with no app installed": a reinstall adopts the data and deletes the
+    // row, and `cli:delete-app-data` deletes both. The install DDL writes and
+    // deletes it as admin. The installer role reads it, so an uninstall can
+    // check that the table exists before it changes anything.
+    await db.schema
+      .createTable("shared.retained_app_data")
+      .ifNotExists()
+      .addColumn("app_id", "text", (c) => c.notNull().primaryKey())
+      .addColumn("name", "text", (c) => c.notNull())
+      .addColumn("tables_json", "text", (c) => c.notNull())
+      .addColumn("files_enabled", "boolean", (c) => c.notNull().defaultTo(false))
+      .addColumn("retained_at", "timestamptz", (c) => c.notNull().defaultTo(sql`now()`))
+      .execute();
+    await sql.raw(`GRANT SELECT ON shared.retained_app_data TO "${installer}"`).execute(db);
+
     // Duplicate-file prevention: (parent + filename + bytes) is unique among
     // live records. DSQL doesn't support partial indexes (no `WHERE` on CREATE
     // INDEX), so we include `deleted_at` in the key and use NULLS NOT

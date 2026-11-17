@@ -2430,6 +2430,42 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         const { records } = (await listRes.json()) as { records: Array<{ id: string }> };
         expect(records.some((r) => r.id === syncedRecordId)).toBe(true);
       });
+
+      // Uninstall keeps the app's own data, and a reinstall must be able to
+      // reach it. The reinstall recreates the app's IAM role, so this also
+      // proves the install rebinds the DSQL login mapping: a stale one refuses
+      // every connection with 28000.
+      it(`reinstalling ${app.appId} brings back its kept app-private row`, async () => {
+        await runInstallCli("cli-install-app", [app.appId], paths, session);
+        await loadCloudSecret(app.appId);
+        const query = await cloudApp(appUnderTest).fetch(`/app-data/db/${app.appTable.name}`);
+        expect(query.status).toBe(200);
+        expect(await query.text()).toContain(app.appTable.expectInBody);
+      });
+
+      it(`cli-delete-app-data deletes ${app.appId}'s kept data, and only after an uninstall`, async () => {
+        const deleteData = () =>
+          runInstallCli("cli-delete-app-data", [app.appId, "--confirm", app.appId], paths, session);
+        // Refused while the app is installed, before anything changes.
+        await expect(deleteData()).rejects.toMatchObject({
+          output: expect.stringContaining("is installed in the cloud"),
+        });
+
+        await runInstallCli("cli-uninstall-app", [app.appId], paths, session);
+        const out = await deleteData();
+        expect(out).toContain("cloud data deleted");
+
+        // A reinstall now starts from an empty schema.
+        await runInstallCli("cli-install-app", [app.appId], paths, session);
+        await loadCloudSecret(app.appId);
+        const query = await cloudApp(appUnderTest).fetch(`/app-data/db/${app.appTable.name}`);
+        expect(query.status).toBe(200);
+        expect(await query.text()).not.toContain(app.appTable.expectInBody);
+
+        // Leave nothing of the app behind for the stack teardown.
+        await runInstallCli("cli-uninstall-app", [app.appId], paths, session);
+        await deleteData();
+      });
     },
   );
 }
