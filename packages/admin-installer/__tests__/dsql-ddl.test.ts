@@ -118,15 +118,32 @@ describe("install DDL for the photos manifest", () => {
     expect(s).toContain(
       `AWS IAM GRANT "starkeep_app_photos" TO 'arn:aws:iam::111122223333:role/starkeep-app-photos-role'`,
     );
+    // A cold install has nothing to revoke, and AWS IAM REVOKE errors when the
+    // mapping is absent.
+    expect(s.some((t) => t.startsWith("AWS IAM REVOKE"))).toBe(false);
   });
 
-  it("skips CREATE ROLE and AWS IAM GRANT when the probes report existing", async () => {
+  it("skips CREATE ROLE when the pg_roles probe reports the role existing", async () => {
+    state.pgRoleExists = true;
+    await installPhotos();
+    expect(stmts().some((t) => t.startsWith("CREATE ROLE"))).toBe(false);
+  });
+
+  // A mapping row proves only that some principal once held this ARN. Deleting
+  // and recreating the app's IAM role keeps the ARN and changes the principal
+  // id, so a skipped grant leaves the app unable to reach its own schema.
+  it("rebinds the IAM mapping when the probe reports a row already present", async () => {
     state.pgRoleExists = true;
     state.iamMappingExists = true;
     await installPhotos();
     const s = stmts();
-    expect(s.some((t) => t.startsWith("CREATE ROLE"))).toBe(false);
-    expect(s.some((t) => t.startsWith("AWS IAM GRANT"))).toBe(false);
+    const arn = "arn:aws:iam::111122223333:role/starkeep-app-photos-role";
+    const revokeIdx = s.indexOf(`AWS IAM REVOKE "starkeep_app_photos" FROM '${arn}'`);
+    const grantIdx = s.indexOf(`AWS IAM GRANT "starkeep_app_photos" TO '${arn}'`);
+    expect(revokeIdx).toBeGreaterThanOrEqual(0);
+    expect(grantIdx).toBeGreaterThan(revokeIdx);
+    expect(s.some((t) => t.startsWith("DROP ROLE"))).toBe(false);
+    expect(s.some((t) => t.includes("DROP SCHEMA"))).toBe(false);
   });
 
   it("creates the private schema with ownership and default privileges", async () => {
