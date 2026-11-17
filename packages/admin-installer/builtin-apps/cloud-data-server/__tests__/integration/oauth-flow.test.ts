@@ -16,8 +16,16 @@ import {
   type ConnectRequest,
   type ConnectResponse,
 } from "../../src/connect-routes.js";
-import { delegationSigningKeyFromPem, verifyDelegationToken } from "../../src/delegation-tokens.js";
-import { findDelegation, listDelegations } from "../../src/delegation-store.js";
+import {
+  delegationSigningKeyFromPem,
+  hashRefreshToken,
+  verifyDelegationToken,
+} from "../../src/delegation-tokens.js";
+import {
+  findDelegation,
+  listDelegations,
+  type ConnectableApp,
+} from "../../src/delegation-store.js";
 import { resetUserCheckCache } from "../../src/delegation-user-check.js";
 import { resetAuthorizationCleanup } from "../../src/oauth-authorize.js";
 import { resetClientCache } from "../../src/oauth-clients.js";
@@ -48,8 +56,10 @@ let pg: PGlite;
 let client: DatabaseClient;
 let now: number;
 /** What Cognito's token endpoint answers to a refresh-token grant. */
-let cognitoRefresh: "ok" | "refused";
+let cognitoRefresh: "ok" | "refused" | "unavailable";
 let revoked: string[];
+/** The installed apps that serve outside clients. */
+let apps: ConnectableApp[];
 
 function deps(): ConnectDeps {
   return {
@@ -58,7 +68,7 @@ function deps(): ConnectDeps {
     host: HOST,
     signingKey: async () => key,
     db: async () => client,
-    connectableApps: async () => [{ appId: "probe", name: "Probe", delegatedPaths: ["/mcp"] }],
+    connectableApps: async () => apps,
     viewerHosts: async () => ["cloud.example.com"],
     groupsMayUseData: (g) => g.includes("starkeep-users"),
     forgetDelegation: () => {},
@@ -84,6 +94,9 @@ function deps(): ConnectDeps {
       }
       if (body.get("grant_type") === "refresh_token" && cognitoRefresh === "refused") {
         return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+      }
+      if (body.get("grant_type") === "refresh_token" && cognitoRefresh === "unavailable") {
+        return new Response(JSON.stringify({ error: "internal" }), { status: 500 });
       }
       return new Response(
         JSON.stringify({
@@ -232,6 +245,7 @@ beforeEach(async () => {
   now = Date.now();
   cognitoRefresh = "ok";
   revoked = [];
+  apps = [{ appId: "probe", name: "Probe", delegatedPaths: ["/mcp"] }];
 });
 
 describe("the code exchange", () => {
@@ -259,8 +273,7 @@ describe("the code exchange", () => {
     const stored = await pg.query<{ token_hash: string }>(
       "SELECT token_hash FROM delegation.refresh_tokens",
     );
-    expect(stored.rows).toHaveLength(1);
-    expect(stored.rows[0]!.token_hash).not.toContain(res.body.refresh_token.slice(4));
+    expect(stored.rows).toEqual([{ token_hash: hashRefreshToken(res.body.refresh_token) }]);
   });
 
   it.each([
@@ -296,6 +309,15 @@ describe("the code exchange", () => {
     expect(grant!.revoked_at_ms).not.toBeNull();
     expect(revoked).toEqual(["cognito-refresh-c1"]);
     expect((await refresh(first.body.refresh_token)).body.error).toBe("invalid_grant");
+  });
+
+  it("refuses a code for an app uninstalled since the consent, and creates nothing", async () => {
+    const code = await approvedCode();
+    apps = [];
+    const res = await exchange(code);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("invalid_grant");
+    expect(await listDelegations(client, TEST_USER_ID)).toEqual([]);
   });
 
   it("refuses an unsupported grant type", async () => {
@@ -356,6 +378,21 @@ describe("the refresh", () => {
     expect((await refresh(first.body.refresh_token)).body.error).toBe("invalid_grant");
     const [grant] = await listDelegations(client, TEST_USER_ID);
     expect(grant!.revoked_at_ms).not.toBeNull();
+  });
+
+  it("answers 503 when Cognito does not answer, and neither revokes nor rotates", async () => {
+    const first = await exchange(await approvedCode());
+    resetUserCheckCache();
+    cognitoRefresh = "unavailable";
+    const res = await refresh(first.body.refresh_token);
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe("temporarily_unavailable");
+    const [grant] = await listDelegations(client, TEST_USER_ID);
+    expect(grant!.revoked_at_ms).toBeNull();
+    expect(revoked).toEqual([]);
+    // The same refresh token works once Cognito answers again.
+    cognitoRefresh = "ok";
+    expect((await refresh(first.body.refresh_token)).status).toBe(200);
   });
 
   it("refuses a refresh after the delegation's expiry", async () => {
