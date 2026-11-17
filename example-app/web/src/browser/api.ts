@@ -569,23 +569,101 @@ export async function labelKeys(): Promise<LabelKey[]> {
 
 const NOTES = `/app-data/db/${TABLES.notes}`;
 
-/** `GET /app-data/db/notes?where=…`: one record's note. */
-export async function getNote(recordId: string): Promise<Note | null> {
+/**
+ * A note as read, with its row's `updated_at` stamp. The stamp is the
+ * platform's sync clock, not a date: send it back unchanged as `ifUpdatedAt`
+ * to write only if nobody else wrote the row since this read.
+ */
+export interface NoteState {
+  readonly note: Note;
+  readonly stamp: string;
+}
+
+/** The note's own columns plus the stamp: `select` without `aggregate`. */
+const NOTE_COLUMNS = "record_id,note,pinned,updated_on,updated_at";
+
+/** `GET /app-data/db/notes?where=…&select=…`: one record's note and its stamp. */
+export async function getNote(recordId: string): Promise<NoteState | null> {
   const body = expectOk(
     await data<{ rows: Record<string, unknown>[] }>(
       "GET",
-      `${NOTES}${q({ where: JSON.stringify({ record_id: recordId }), limit: 1 })}`,
+      `${NOTES}${q({
+        where: JSON.stringify({ record_id: recordId }),
+        select: NOTE_COLUMNS,
+        limit: 1,
+      })}`,
     ),
   );
-  return body.rows[0] ? decodeNote(body.rows[0]) : null;
+  const row = body.rows[0];
+  return row ? { note: decodeNote(row), stamp: String(row["updated_at"]) } : null;
 }
 
-/** `POST /app-data/db/notes`: write a note. An existing row is replaced. */
-export async function saveNote(note: Note): Promise<void> {
-  expectOk(await data("POST", NOTES, { json: { row: encodeNote(note) } }));
+/** The answer a conditional write gets when another write came first. */
+function refuseIfSkipped(result: Result<{ skipped?: string } | null>): void {
+  if (result.status === 409 && result.body?.skipped === "stale") {
+    throw new ApiError(409, "the note changed since the file was opened; open it again");
+  }
+  if (result.ok && result.body?.skipped === "live") {
+    throw new ApiError(409, "a note was added since the file was opened; open it again");
+  }
+  expectOk(result);
 }
 
-/** `PATCH /app-data/db/notes`: change some columns of one note. */
+/**
+ * `POST /app-data/db/notes` with `ifAbsent`: write a new note only if the
+ * file has none. A note another tab or an MCP client wrote first stays, and
+ * the call throws.
+ *
+ * `ifAbsent` also skips a key whose row was deleted, which is what makes it
+ * safe for seeding: a reseed never brings back a row the person deleted. Here
+ * the person asked for a new note, so a deleted one is written over with a
+ * plain upsert, which clears the deletion.
+ */
+export async function addNote(note: Note): Promise<void> {
+  const row = encodeNote(note);
+  const result = await data<{ skipped?: string }>("POST", NOTES, {
+    json: { row, ifAbsent: true },
+  });
+  if (result.ok && result.body?.skipped === "deleted") {
+    expectOk(await data("POST", NOTES, { json: { row } }));
+    return;
+  }
+  refuseIfSkipped(result);
+}
+
+/**
+ * `PATCH /app-data/db/notes` with `ifUpdatedAt`: change the note only if
+ * nobody wrote it since `stamp` was read. Throws on a 409 `stale`.
+ */
+export async function updateNote(
+  recordId: string,
+  patch: { note?: string; pinned?: boolean },
+  stamp: string,
+): Promise<void> {
+  refuseIfSkipped(
+    await data<{ skipped?: string }>("PATCH", NOTES, {
+      json: {
+        where: { record_id: recordId },
+        patch: { ...patch, updated_on: new Date().toISOString() },
+        ifUpdatedAt: stamp,
+      },
+    }),
+  );
+}
+
+/** `DELETE /app-data/db/notes` with `ifUpdatedAt`: delete only an unchanged note. */
+export async function deleteNoteIfUnchanged(recordId: string, stamp: string): Promise<void> {
+  refuseIfSkipped(
+    await data<{ skipped?: string }>("DELETE", NOTES, {
+      json: { where: { record_id: recordId }, ifUpdatedAt: stamp },
+    }),
+  );
+}
+
+/**
+ * `PATCH /app-data/db/notes`: pin or unpin one note. Setting a value, rather
+ * than toggling the one read, needs no guard.
+ */
 export async function patchNote(
   recordId: string,
   patch: { note?: string; pinned?: boolean },
@@ -613,26 +691,65 @@ export async function deleteNote(recordId: string): Promise<void> {
   expectOk(result);
 }
 
+/** Which notes a search asks for. Every field narrows the result. */
+export interface NoteQuery {
+  /** Text the note holds. */
+  readonly text?: string;
+  /** `contains` matches anywhere with `like`; `starts` uses `prefix`. */
+  readonly match?: "contains" | "starts";
+  /** Notes edited at or after this ISO 8601 instant, with `gte`. */
+  readonly since?: string;
+  /** Notes on these records only, with `in`. */
+  readonly recordIds?: readonly string[];
+}
+
+/** Rows per request when reading notes; `page_token` fetches the rest. */
+export const NOTES_PAGE = 25;
+
+/** Every row a `where` matches, newest first, one page at a time. */
+async function allNotes(where: Record<string, unknown>): Promise<Note[]> {
+  const notes: Note[] = [];
+  let pageToken: string | undefined;
+  do {
+    const page = expectOk(
+      await data<{ rows: Record<string, unknown>[]; truncated: boolean; page_token?: string }>(
+        "GET",
+        `${NOTES}${q({
+          where: JSON.stringify(where),
+          order: "updated_on.desc.nullslast,record_id.asc",
+          limit: NOTES_PAGE,
+          page_token: pageToken,
+        })}`,
+      ),
+    );
+    notes.push(...page.rows.map(decodeNote));
+    pageToken = page.truncated && page.page_token ? page.page_token : undefined;
+  } while (pageToken !== undefined);
+  return notes;
+}
+
 /**
  * `GET /app-data/db/notes`: search, pinned first, then newest.
  *
- * Two requests, because a boolean column has no ordering and the grammar has
- * no `or`: one for the pinned notes, one for the rest, each newest first.
+ * Two queries, because a boolean column has no ordering and the grammar has
+ * no `or`: one for the pinned notes, one for the rest, each newest first and
+ * each read to its last page.
  */
-export async function searchNotes(search: string): Promise<Note[]> {
-  const text = search ? { note: { like: `%${search.replace(/[\\%_]/g, (c) => `\\${c}`)}%` } } : {};
-  const page = async (pinned: boolean) =>
-    expectOk(
-      await data<{ rows: Record<string, unknown>[] }>(
-        "GET",
-        `${NOTES}${q({
-          where: JSON.stringify({ ...text, pinned: { is: pinned } }),
-          order: "updated_on.desc.nullslast",
-          limit: 50,
-        })}`,
-      ),
-    ).rows.map(decodeNote);
-  const [pinned, rest] = await Promise.all([page(true), page(false)]);
+export async function searchNotes(query: NoteQuery = {}): Promise<Note[]> {
+  if (query.recordIds?.length === 0) return [];
+  const where: Record<string, unknown> = {};
+  if (query.text) {
+    where["note"] =
+      query.match === "starts"
+        ? { prefix: query.text }
+        : { like: `%${query.text.replace(/[\\%_]/g, (c) => `\\${c}`)}%` };
+  }
+  if (query.since) where["updated_on"] = { gte: query.since };
+  if (query.recordIds) where["record_id"] = { in: query.recordIds };
+  const [pinned, rest] = await Promise.all([
+    allNotes({ ...where, pinned: { is: true } }),
+    allNotes({ ...where, pinned: { is: false } }),
+  ]);
   return [...pinned, ...rest];
 }
 
@@ -696,7 +813,7 @@ export interface NoteExport {
  * `PUT <url>`, then `POST /app-data/files/<subKey>/record`.
  */
 export async function saveExport(): Promise<string> {
-  const notes = await searchNotes("");
+  const notes = await searchNotes();
   const bytes = new TextEncoder().encode(JSON.stringify({ notes }, null, 2));
   const contentHash = await sha256Hex(bytes.buffer as ArrayBuffer);
   const name = `notes-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;

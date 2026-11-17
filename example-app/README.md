@@ -12,10 +12,10 @@ Each heading is one group of operations, with a table of the current state and a
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Connection    | Which surface the page runs on, who is signed in, the 403 a write outside the app's grant gets, and a call to the app's own JWT-gated route.                             |
 | Example files | Create from text, upload through a presigned URL, derive a copy, filter, page, count and delete.                                                                         |
-| Open file     | One file's record, size, dates, content, metadata row, labels and note.                                                                                                  |
+| Open file     | One file's record, size, dates, content, metadata row, labels and note. The note saves only if nobody changed it since the file was opened.                              |
 | Metadata      | The `example` category's metadata table, queried directly, with totals.                                                                                                  |
 | Labels        | Add, set and retract tags and a bare flag; count files per tag; list every app's declared keys.                                                                          |
-| Notes         | The app's own `notes` table: write, pin, search and delete.                                                                                                              |
+| Notes         | The app's own `notes` table: write, pin, delete, and search by text, prefix, edit date or the files on the page.                                                         |
 | Analysis      | Notes per day, in SQL the app's server runs over a snapshot of the notes table, with its load time and a Refresh button.                                                 |
 | Note exports  | The app's own files: save every note as a private JSON file, then list, open and delete the files.                                                                       |
 | Deleted       | Every example file deleted since an instant, a restore, and the trash retention window.                                                                                  |
