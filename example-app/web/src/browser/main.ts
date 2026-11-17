@@ -209,8 +209,8 @@ files.controls.append(
       filter =
         kind === "originals"
           ? { kind: "originals" }
-          : kind === "children" && selectedId
-            ? { kind: "children", parentId: selectedId }
+          : kind === "children"
+            ? { kind: "children", parentId: selectedOrThrow() }
             : kind === "tag"
               ? { kind: "tag", value: tagFilterInput.value }
               : { kind: "all" };
@@ -306,8 +306,10 @@ async function renderFiles(): Promise<void> {
               ),
               button(`Delete ${r.original_filename}`, () =>
                 run("Delete", async () => {
-                  await api.deleteFile(r.id);
-                  if (selectedId === r.id) selectedId = null;
+                  // The delete takes the file's derived copies too, and the
+                  // open file may be one of them.
+                  const ids = await api.deleteFile(r.id);
+                  if (selectedId !== null && ids.includes(selectedId)) selectedId = null;
                   await refreshAll();
                 }),
               ),
@@ -348,12 +350,22 @@ async function renderOpen(): Promise<void> {
     return;
   }
   const id = selectedId;
-  const [record, content, metadata, note] = await Promise.all([
-    api.getRecord(id),
-    api.readContent(id),
-    api.getMetadata(id),
-    api.getNote(id),
-  ]);
+  let loaded;
+  try {
+    loaded = await Promise.all([
+      api.getRecord(id),
+      api.readContent(id),
+      api.getMetadata(id),
+      api.getNote(id),
+    ]);
+  } catch (err) {
+    // The file is gone: deleted in another tab, or by an MCP client. Every
+    // route above answers 404 only for a missing or deleted record.
+    if (!(err instanceof api.ApiError && err.status === 404) || selectedId !== id) throw err;
+    selectedId = null;
+    return renderOpen();
+  }
+  const [record, content, metadata, note] = loaded;
   noteInput.value = note?.text ?? "";
   pinnedInput.checked = note?.pinned ?? false;
   const rows: [string, string][] = [
