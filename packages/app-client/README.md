@@ -176,7 +176,7 @@ import {
   In the cloud, the JSON also carries `connectUrl` and `connectionsUrl`, the
   platform's consent pages for outside clients, on the gateway's execute-api
   address. Link to those pages with these fields, not with `apiGatewayUrl`,
-  which names the browser-facing CloudFront base.
+  which names the browser-facing base, usually the CloudFront address.
 
 ## Analysis reads in SQL: `@starkeep/app-client/snapshot`
 
