@@ -191,8 +191,7 @@ try {
       );
       console.log(
         "Devices that keep this app's data do not upload it again after the deletion: " +
-          "each device keeps its own copy, and the cloud's copy stays partial until STA-96 " +
-          "is fixed.\n",
+          "each device keeps its own copy, and the cloud's copy stays partial.\n",
       );
       if (nonInteractive) return true;
       const answer = await prompt(`Type ${appId} to delete its cloud data: `);

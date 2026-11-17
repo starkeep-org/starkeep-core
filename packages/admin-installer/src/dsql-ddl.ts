@@ -597,7 +597,20 @@ export async function runAppInstallDdl(
       // statements above adopted its schema and tables with IF NOT EXISTS, and
       // the namespace row names them. A kept table the new manifest no longer
       // declares stays in the schema unlisted, as a table an upgrade drops does.
-      await db.deleteFrom("shared.retained_app_data").where("app_id", "=", appId).execute();
+      //
+      // A cluster whose shared schema predates the table holds no kept data,
+      // so the install has no record to delete there. Probing keeps installs
+      // working until the cloud data server is redeployed; only the uninstall
+      // needs the table, and it refuses without it.
+      const keptDataTable = await db
+        .selectFrom("information_schema.tables")
+        .select("table_name")
+        .where("table_schema", "=", "shared")
+        .where("table_name", "=", "retained_app_data")
+        .executeTakeFirst();
+      if (keptDataTable) {
+        await db.deleteFrom("shared.retained_app_data").where("app_id", "=", appId).execute();
+      }
     } finally {
       await db.destroy().catch(() => {});
     }
