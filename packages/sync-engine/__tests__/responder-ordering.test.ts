@@ -1,8 +1,9 @@
 /**
  * The responder's shared-record apply order.
  *
- * Step 2 of `in-process-transport.ts` applies shared records per author in HLC
- * order, as step 1 does app rows. It used to iterate the wire order, which was
+ * Step 1 of `in-process-transport.ts` applies shared records per author in HLC
+ * order, merged with the author's labels and app rows. It used to iterate the
+ * wire order, which was
  * safe only because a shared-record `put()` that throws aborts the whole
  * exchange: no response, so no coverage report over a partially-applied author.
  * A halt is only safe over a contiguous prefix, and the sort keeps every
@@ -18,12 +19,17 @@ import {
   compareHLC,
   createDataRecord,
   generateId,
+  serializeHLC,
   type AnyRecord,
+  type HLCTimestamp,
+  type RecordLabel,
   type StarkeepId,
 } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter } from "@starkeep/storage-adapter";
 import { createInProcessSyncTransport } from "../src/transports/in-process-transport.js";
+import { failingApplier } from "./sync-test-harness/failure-injection.js";
 import { buildSide } from "./sync-test-harness/side.js";
+import type { AppSyncableRowEntry } from "../src/types.js";
 
 type Side = Awaited<ReturnType<typeof buildSide>>;
 
@@ -188,5 +194,98 @@ describe("a shared-record apply that fails", () => {
     expect(await cloud.db.get(early.id)).not.toBeNull();
     expect(await cloud.db.get(late.id)).not.toBeNull();
     expect(compareHLC(response.responderWatermarks["L"]!, late.updatedAt)).toBe(0);
+  });
+});
+
+/** A label on `recordId` authored at `at`, not stored anywhere yet. */
+function authoredLabel(recordId: StarkeepId, at: HLCTimestamp): RecordLabel {
+  return {
+    recordId,
+    appId: "photos",
+    key: "favourite",
+    value: "",
+    recordType: "image/jpeg",
+    createdAt: at,
+    updatedAt: at,
+    nodeId: at.nodeId,
+    deletedAt: null,
+  };
+}
+
+/** Refuse every label write, leaving the rest of the adapter untouched. */
+function refusingLabels(db: DatabaseAdapter): DatabaseAdapter {
+  return new Proxy(db, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop, target);
+      if (typeof value !== "function") return value;
+      if (prop === "putLabel") {
+        return async () => {
+          throw new Error("[test] injected label failure");
+        };
+      }
+      return (...args: unknown[]) => (value as (...a: unknown[]) => unknown).apply(target, args);
+    },
+  }) as DatabaseAdapter;
+}
+
+describe("an author's records, labels and app rows", () => {
+  it("apply in one HLC order, so a failed label leaves no later record applied", async () => {
+    // Records used to apply before any label. Here the later record would
+    // land before the label failed, and the record coverage it raised would
+    // claim the label's HLC (`specs/exchange-round`, finding 1).
+    const { local, cloud } = await twoSides();
+    const early = authoredRecord(local, "L", 10);
+    const late = authoredRecord(local, "L", 20);
+    const label = authoredLabel(early.id, { wallTime: 15, counter: 0, nodeId: "L" });
+
+    const transport = responderFor(cloud, refusingLabels(cloud.db));
+    await expect(
+      transport.exchange({ watermarks: {}, records: [late, early], labels: [label] }),
+    ).rejects.toThrow(/injected label failure/);
+
+    expect(await cloud.db.get(early.id), "the row below the label landed").not.toBeNull();
+    expect(await cloud.db.get(late.id), "the row above it did not").toBeNull();
+    expect(compareHLC((await cloud.db.getNodeWatermarks())["L"]!, early.updatedAt)).toBe(0);
+  });
+
+  it("halt together at a failed app row, keeping what lies below it", async () => {
+    // A halt used to skip every one of the author's records and labels. In
+    // merged order it stops the run where the app row failed: the rows below
+    // it are a contiguous prefix and stay, the rows above it re-ship.
+    const { local, cloud } = await twoSides();
+    const early = authoredRecord(local, "L", 10);
+    const late = authoredRecord(local, "L", 30);
+    const label = authoredLabel(early.id, { wallTime: 25, counter: 0, nodeId: "L" });
+    const at = { wallTime: 20, counter: 0, nodeId: "L" };
+    const row: AppSyncableRowEntry = {
+      timestamp: at,
+      appId: "photos",
+      table: "test_rows",
+      op: "insert",
+      row: { id: "r1", updated_at: serializeHLC(at) },
+    };
+
+    const transport = createInProcessSyncTransport({
+      databaseAdapter: cloud.db,
+      clock: cloud.clock,
+      objectStorage: cloud.storage,
+      syncSharedRecords: true,
+      appSyncableSource: {
+        namespaces: cloud.namespaces,
+        applier: failingApplier(cloud.applier, () => true),
+      },
+    });
+    const response = await transport.exchange({
+      watermarks: {},
+      records: [late, early],
+      labels: [label],
+      appSyncableRows: [row],
+    });
+
+    expect(response.haltedAuthors).toEqual(["L"]);
+    expect(await cloud.db.get(early.id)).not.toBeNull();
+    expect(await cloud.db.get(late.id)).toBeNull();
+    expect((await cloud.db.getLabelsByRecordIds([early.id])).get(early.id) ?? []).toHaveLength(0);
+    expect(compareHLC(response.responderWatermarks["L"]!, early.updatedAt)).toBe(0);
   });
 });

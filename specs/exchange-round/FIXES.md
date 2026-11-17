@@ -1,6 +1,6 @@
 # Proposed fixes
 
-This note proposes fixes for the four findings in `README.md`. Each fix has been checked against the model. Fix A is implemented; the others are not yet. They are offered for discussion, because two of them change the DSQL write path.
+This note proposes fixes for the four findings in `README.md`. Each fix has been checked against the model. Fixes A and B are implemented; the others are not yet. They are offered for discussion, because two of them change the DSQL write path.
 
 ## The findings, briefly
 
@@ -13,7 +13,7 @@ In findings 1 and 2, `sync()` returns `complete: true` and logs nothing. Each fi
 
 ## Fix A: compare and write in one statement (finding 3)
 
-**Status: implemented** on `pedromdrp/guarded-snapshot-writes`. `DatabaseAdapter.putSnapshot` and a guarded `putLabel` are used by both apply loops, on DSQL, SQLite and the mock; the model's finding configs now describe the code with this fix in place.
+**Status: implemented** (#196). `DatabaseAdapter.putSnapshot` and a guarded `putLabel` are used by both apply loops, on DSQL, SQLite and the mock; the model's finding configs now describe the code with this fix in place.
 
 The sync apply path should write a snapshot only if it is newer than what the row holds, as part of the upsert itself:
 
@@ -35,7 +35,9 @@ Model: `GuardedWrite = TRUE`. `finding-lww-race` fails without it, and every `fi
 
 ## Fix B: apply in merged per-author HLC order (finding 1)
 
-The responder should apply its inbound items as the requester already does. That is, group them by author with `groupInboundByNodeId`, sort each group by HLC across records, labels and app rows, and apply in that order. We suggest moving `groupInboundByNodeId` out of `sync-engine.ts` into a module both sides import, as was done with `round-cut.ts`. The halted-node rule carries over unchanged, and becomes simpler, because a halt stops one author's run at one point.
+**Status: implemented** on `pedromdrp/merged-apply-order`. Both sides group and sort through `sync-engine/src/inbound-order.ts`, and the responder's apply is one loop per author (`in-process-transport.ts`, step 1). The tests for finding 1 are ordinary ones, and `merged-crash` and `merged-concurrent` model the code as it now stands.
+
+The responder should apply its inbound items as the requester already does. That is, group them by author with `groupInboundByNodeId`, sort each group by HLC across records, labels and app rows, and apply in that order. We suggest moving `groupInboundByNodeId` out of `sync-engine.ts` into a module both sides import, as was done with `round-cut.ts`. The halted-node rule becomes simpler, because a halt stops one author's run at one point: what lies below the failed row stays applied, and the rest re-ships.
 
 This is what `docs/system-design.md` already describes. It fixes finding 1 for items with distinct HLCs. On its own it does not fix finding 2, which is why it comes with fix C.
 

@@ -9,7 +9,7 @@
  *
  * And it covers a lot. A responder folds `shared_records`, `shared_record_labels`
  * and every registered app-syncable table into one timestamp per author
- * (`in-process-transport.ts`, step 5). The receiver then advances a single
+ * (`in-process-transport.ts`, step 4). The receiver then advances a single
  * watermark per author over the merged inbound stream. One scalar, N tables.
  *
  * A delta scan, by construction, runs **per table** — that is exactly what the

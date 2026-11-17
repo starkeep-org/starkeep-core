@@ -43,6 +43,7 @@ import {
   type FileRowSources,
 } from "../file-rows.js";
 import { computeCeilings, cutRound, type RoundItem, type StreamTruncation } from "../round-cut.js";
+import { groupInboundByNodeId } from "../inbound-order.js";
 import { DEFAULT_RESPONDER_MAX_ITEMS, DEFAULT_RESPONDER_MAX_BYTES } from "../exchange-request.js";
 
 /** One row eligible to ship back, tagged with which stream it came from. */
@@ -372,186 +373,176 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
 
   return {
     async exchange(request: SyncExchangeRequest): Promise<SyncExchangeResponse> {
-      // 1. Apply incoming app-syncable rows per nodeId in HLC order, stopping
-      //    a node's application on its first failure (including a missing
-      //    namespace). Holdings must stay a contiguous per-node prefix:
-      //    applying a later same-node item after an earlier one failed would
-      //    lift that node's coverage watermark over the failed row, and the
-      //    requester would never re-ship it. App rows go first because their
-      //    failures are the only silent ones (shared-record put() throws fail
-      //    the whole exchange); nodes halted here also skip their shared
-      //    records below.
+      // 1. Apply what the requester shipped: per author, in HLC order, across
+      //    app-syncable rows, records and labels together (`inbound-order.ts`),
+      //    as the requester's inbound loop does. Every write raises its author's
+      //    coverage, so applying all of an author's records before its labels
+      //    would report coverage over a label not yet written whenever the
+      //    label's HLC sits below a record, and a crash or a concurrent reader
+      //    in that window would lose the label for good
+      //    (`specs/exchange-round`, finding 1).
+      //
+      //    An app row that fails, or names an app this side does not know,
+      //    halts its author for the rest of this round. What was applied before
+      //    it is a contiguous prefix of the author's run, so the coverage it
+      //    raised is honest, and the rest re-ships next round. A shared-record
+      //    or label write that throws fails the whole exchange instead, so no
+      //    response reports coverage over a partial author.
+      //
+      //    Only the Drive channel (syncSharedRecords=true) applies records and
+      //    labels; a per-app channel drops them, which is the channel-split
+      //    guard.
       const haltedNodes = new Set<string>();
-      const inboundAppRowsByNode = new Map<string, AppSyncableRowEntry[]>();
-      for (const entry of request.appSyncableRows ?? []) {
-        const arr = inboundAppRowsByNode.get(entry.timestamp.nodeId) ?? [];
-        arr.push(entry);
-        inboundAppRowsByNode.set(entry.timestamp.nodeId, arr);
-      }
-      for (const entries of inboundAppRowsByNode.values()) {
-        entries.sort((a, b) => compareHLC(a.timestamp, b.timestamp));
-        for (const entry of entries) {
-          if (!appSyncableSource || !appSyncableSource.namespaces.get(entry.appId)) {
-            console.warn(
-              `[sync] exchange skipped appSyncableRow for unknown app "${entry.appId}"; halting node ${entry.timestamp.nodeId} this round`,
-            );
-            haltedNodes.add(entry.timestamp.nodeId);
-            break;
-          }
-          clock.receive(entry.timestamp);
-          try {
-            await appSyncableSource.applier.apply(entry);
-          } catch (err) {
-            console.warn(
-              `[sync] exchange apply appSyncableRow failed (app=${entry.appId} table=${entry.table}): ${(err as Error).message}; halting node ${entry.timestamp.nodeId} this round`,
-            );
-            haltedNodes.add(entry.timestamp.nodeId);
-            break;
-          }
-        }
-      }
-
-      // 2. Apply incoming records — pure put(snapshot). HLC LWW: skip if local
-      //    copy is at-or-ahead of incoming. Only the Drive channel
-      //    (syncSharedRecords=true) applies shared records. Records from
-      //    nodes halted in step 1 are skipped to preserve the contiguous
-      //    prefix (they re-ship next round).
-      //
-      //    ## Per node, in HLC order.
-      //
-      //    A shared-record `put()` that throws aborts the whole exchange, so
-      //    no response reports coverage over a partial author. Applying each
-      //    author's records in HLC order keeps that true if a record ever
-      //    halts its node without throwing: a halt is only safe over a
-      //    contiguous prefix, because a later record applied ahead of the
-      //    halted one would lift the node's coverage over it.
-      //
-      //    (Records are still applied entirely before labels rather than merged
-      //    per author in HLC order, unlike the requester's inbound loop. A
-      //    halted node's labels are all skipped below, the ones under the halt
-      //    included, which only costs their re-ship.)
       const appliedRecords: DataRecord[] = [];
       const appliedLabels: RecordLabel[] = [];
-      if (syncSharedRecords) {
-        const inboundRecords = [...(request.records ?? [])].sort((a, b) => {
-          if (a.updatedAt.nodeId !== b.updatedAt.nodeId) {
-            return a.updatedAt.nodeId < b.updatedAt.nodeId ? -1 : 1;
-          }
-          return compareHLC(a.updatedAt, b.updatedAt);
-        });
-        for (const item of inboundRecords) {
-          if (haltedNodes.has(item.updatedAt.nodeId)) continue;
-          // The metadata passenger comes off before the row is written; see
-          // `SyncRecordItem`.
-          const { metadata: incomingMetadata, ...snapshot } = item;
-          const current = await databaseAdapter.get(snapshot.id);
-          const rowAlreadyApplied =
-            current !== null && compareHLC(current.updatedAt, snapshot.updatedAt) >= 0;
-          // What this side holds for the record once the LWW comparison and the
-          // keep rule have had their say: the row written below, or the row this
-          // side already had when the incoming one lost. The metadata cascade
-          // reads *this* rather than the incoming snapshot, because the two can
-          // disagree — a refused tombstone leaves the record live, and cascading
-          // on the snapshot would take its metadata anyway.
-          let held: DataRecord = current ?? snapshot;
-          if (!rowAlreadyApplied) {
-            clock.receive(snapshot.updatedAt);
-            let row: DataRecord = snapshot;
-            if (
-              snapshot.deletedAt &&
-              current !== null &&
-              !current.deletedAt &&
-              keepLiveOnTombstone &&
-              (await keepLiveOnTombstone(current, snapshot, request))
-            ) {
-              // Refused: the live row goes back out under this side's clock.
-              row = { ...current, updatedAt: clock.now(), version: current.version + 1 };
-            } else if (!snapshot.deletedAt) {
-              // Two stand-ins for one slot: the one this side already holds
-              // won, and the incoming one is stored as this side's tombstone so
-              // the reply carries the verdict back. See `stand-in-slots.ts`.
-              const admitted = await admitIncomingStandIn(databaseAdapter, snapshot, clock);
-              if (admitted.lostTo) {
-                console.warn(
-                  `[sync] stand-in ${snapshot.id} lost its slot to ${admitted.lostTo}; storing it as a tombstone`,
-                );
-              }
-              row = admitted.row;
+
+      // Whether the row applied; false halts its author.
+      const applyAppRow = async (entry: AppSyncableRowEntry): Promise<boolean> => {
+        if (!appSyncableSource || !appSyncableSource.namespaces.get(entry.appId)) {
+          console.warn(
+            `[sync] exchange skipped appSyncableRow for unknown app "${entry.appId}"; halting node ${entry.timestamp.nodeId} this round`,
+          );
+          return false;
+        }
+        clock.receive(entry.timestamp);
+        try {
+          await appSyncableSource.applier.apply(entry);
+        } catch (err) {
+          console.warn(
+            `[sync] exchange apply appSyncableRow failed (app=${entry.appId} table=${entry.table}): ${(err as Error).message}; halting node ${entry.timestamp.nodeId} this round`,
+          );
+          return false;
+        }
+        return true;
+      };
+
+      // A record is a pure snapshot under HLC last-writer-wins: skipped when
+      // this side's copy is at or ahead of it.
+      const applyRecord = async (item: SyncRecordItem): Promise<void> => {
+        // The metadata passenger comes off before the row is written; see
+        // `SyncRecordItem`.
+        const { metadata: incomingMetadata, ...snapshot } = item;
+        const current = await databaseAdapter.get(snapshot.id);
+        const rowAlreadyApplied =
+          current !== null && compareHLC(current.updatedAt, snapshot.updatedAt) >= 0;
+        // What this side holds for the record once the LWW comparison and the
+        // keep rule have had their say: the row written below, or the row this
+        // side already had when the incoming one lost. The metadata cascade
+        // reads *this* rather than the incoming snapshot, because the two can
+        // disagree — a refused tombstone leaves the record live, and cascading
+        // on the snapshot would take its metadata anyway.
+        let held: DataRecord = current ?? snapshot;
+        if (!rowAlreadyApplied) {
+          clock.receive(snapshot.updatedAt);
+          let row: DataRecord = snapshot;
+          if (
+            snapshot.deletedAt &&
+            current !== null &&
+            !current.deletedAt &&
+            keepLiveOnTombstone &&
+            (await keepLiveOnTombstone(current, snapshot, request))
+          ) {
+            // Refused: the live row goes back out under this side's clock.
+            row = { ...current, updatedAt: clock.now(), version: current.version + 1 };
+          } else if (!snapshot.deletedAt) {
+            // Two stand-ins for one slot: the one this side already holds
+            // won, and the incoming one is stored as this side's tombstone so
+            // the reply carries the verdict back. See `stand-in-slots.ts`.
+            const admitted = await admitIncomingStandIn(databaseAdapter, snapshot, clock);
+            if (admitted.lostTo) {
+              console.warn(
+                `[sync] stand-in ${snapshot.id} lost its slot to ${admitted.lostTo}; storing it as a tombstone`,
+              );
             }
-            // Last-writer-wins is decided again inside the write: the `get`
-            // above is its own transaction, and another device's round can
-            // land a newer row before this one writes. When it has, this side
-            // keeps that row, and the cascades below follow what it holds.
-            if (await databaseAdapter.putSnapshot(row)) {
-              appliedRecords.push(row);
-              held = row;
-            } else {
-              held = (await databaseAdapter.get(snapshot.id)) ?? held;
-            }
+            row = admitted.row;
           }
-          // **Outside** the LWW guard: an equal or older record row can still
-          // carry columns this side lacks, and the record's clock does not move
-          // when metadata is written, so a stale-looking row says nothing about
-          // its metadata. A tombstone cascades instead, matching what a local
-          // delete already does — tombstoning the row rather than dropping it,
-          // which is what lets a restore bring it back.
-          if (held.deletedAt) {
-            await deleteRecordMetadata(databaseAdapter, held, held.deletedAt);
-          } else if (current?.deletedAt) {
-            // A restore arriving: the mirror cascade, run whether or not a
-            // metadata passenger came with the row. See the requester's copy.
-            await restoreRecordMetadata(databaseAdapter, held);
-          }
-          if (!held.deletedAt && incomingMetadata) {
-            // `detectOwedBack: false` — a responder never answers "I hold
-            // columns you did not name" by moving the record's clock. Doing so
-            // would re-author the row, and this side's coverage report is
-            // computed from row authorship: re-authoring the last row it held
-            // from some author erases that author from the report, and the
-            // requester then re-ships that author's whole history every round.
-            //
-            // Nothing is lost by declining. The scan below runs after this
-            // apply, so a row this side holds above the requester's watermark
-            // ships back merged in this very response — and a row that is not
-            // above it is one the requester has already received.
-            await applyRecordMetadata(databaseAdapter, snapshot, incomingMetadata, {
-              detectOwedBack: false,
-            });
+          // Last-writer-wins is decided again inside the write: the `get`
+          // above is its own transaction, and another device's round can
+          // land a newer row before this one writes. When it has, this side
+          // keeps that row, and the cascades below follow what it holds.
+          if (await databaseAdapter.putSnapshot(row)) {
+            appliedRecords.push(row);
+            held = row;
+          } else {
+            held = (await databaseAdapter.get(snapshot.id)) ?? held;
           }
         }
-      } else if ((request.records?.length ?? 0) > 0) {
-        // Per-app channel received shared records — a channel-split violation
-        // on the requester side. Drop them (the channel-split guard) but warn
-        // so the misbehaving peer is discoverable.
+        // **Outside** the LWW guard: an equal or older record row can still
+        // carry columns this side lacks, and the record's clock does not move
+        // when metadata is written, so a stale-looking row says nothing about
+        // its metadata. A tombstone cascades instead, matching what a local
+        // delete already does — tombstoning the row rather than dropping it,
+        // which is what lets a restore bring it back.
+        if (held.deletedAt) {
+          await deleteRecordMetadata(databaseAdapter, held, held.deletedAt);
+        } else if (current?.deletedAt) {
+          // A restore arriving: the mirror cascade, run whether or not a
+          // metadata passenger came with the row. See the requester's copy.
+          await restoreRecordMetadata(databaseAdapter, held);
+        }
+        if (!held.deletedAt && incomingMetadata) {
+          // `detectOwedBack: false` — a responder never answers "I hold
+          // columns you did not name" by moving the record's clock. Doing so
+          // would re-author the row, and this side's coverage report is
+          // computed from row authorship: re-authoring the last row it held
+          // from some author erases that author from the report, and the
+          // requester then re-ships that author's whole history every round.
+          //
+          // Nothing is lost by declining. The scan below runs after this
+          // apply, so a row this side holds above the requester's watermark
+          // ships back merged in this very response — and a row that is not
+          // above it is one the requester has already received.
+          await applyRecordMetadata(databaseAdapter, snapshot, incomingMetadata, {
+            detectOwedBack: false,
+          });
+        }
+      };
+
+      // A label: the same last-writer-wins, on the label row's own timestamp.
+      const applyLabel = async (incoming: RecordLabel): Promise<void> => {
+        const current = await databaseAdapter.getLabel(
+          incoming.recordId,
+          incoming.appId,
+          incoming.key,
+          incoming.value,
+        );
+        if (current && compareHLC(current.updatedAt, incoming.updatedAt) >= 0) return;
+        clock.receive(incoming.updatedAt);
+        // Snapshot write: an inbound retraction must stay retracted. The
+        // write keeps a newer row a concurrent round landed since the read.
+        if (await databaseAdapter.putLabel(incoming)) appliedLabels.push(incoming);
+      };
+
+      if (!syncSharedRecords && (request.records?.length ?? 0) > 0) {
+        // A channel-split violation on the requester side. Dropped, with a
+        // warning so the misbehaving peer is discoverable.
         console.warn(
           `[sync] in-process transport dropped ${request.records?.length ?? 0} shared record(s) on a per-app channel (syncSharedRecords=false)`,
         );
       }
-
-      // 2b. Apply incoming labels — same HLC LWW, same halted-node rule, on
-      //     the label row's own timestamp. Labels are shared data, so a
-      //     per-app channel drops them exactly as it drops records.
-      if (syncSharedRecords) {
-        for (const incoming of request.labels ?? []) {
-          if (haltedNodes.has(incoming.updatedAt.nodeId)) continue;
-          const current = await databaseAdapter.getLabel(
-            incoming.recordId,
-            incoming.appId,
-            incoming.key,
-            incoming.value,
-          );
-          if (current && compareHLC(current.updatedAt, incoming.updatedAt) >= 0) {
-            continue;
-          }
-          clock.receive(incoming.updatedAt);
-          // Snapshot write: an inbound retraction must stay retracted. The
-          // write keeps a newer row a concurrent round landed since the read.
-          if (await databaseAdapter.putLabel(incoming)) appliedLabels.push(incoming);
-        }
-      } else if ((request.labels?.length ?? 0) > 0) {
+      if (!syncSharedRecords && (request.labels?.length ?? 0) > 0) {
         console.warn(
           `[sync] in-process transport dropped ${request.labels?.length ?? 0} record label(s) on a per-app channel (syncSharedRecords=false)`,
         );
+      }
+      const inboundByNode = groupInboundByNodeId(
+        syncSharedRecords ? (request.records ?? []) : [],
+        syncSharedRecords ? (request.labels ?? []) : [],
+        request.appSyncableRows ?? [],
+      );
+      for (const [nodeId, items] of inboundByNode) {
+        for (const item of items) {
+          if (item.kind === "appRow") {
+            if (!(await applyAppRow(item.entry))) {
+              haltedNodes.add(nodeId);
+              break;
+            }
+          } else if (item.kind === "record") {
+            await applyRecord(item.record);
+          } else {
+            await applyLabel(item.label);
+          }
+        }
       }
 
       if (onApplied && (appliedRecords.length > 0 || appliedLabels.length > 0)) {
@@ -562,7 +553,7 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
         }
       }
 
-      // 3. Scan what the caller hasn't seen — records, then labels, then
+      // 2. Scan what the caller hasn't seen — records, then labels, then
       //    app-syncable rows — as **delta scans**: the caller's per-nodeId
       //    watermarks go into the query, which seeks the
       //    `(node_id, updated_at)` index once per author rather than reading
@@ -613,7 +604,7 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
         }
       }
 
-      // 4. App-syncable rows, same delta rule across the registered tables.
+      // 3. App-syncable rows, same delta rule across the registered tables.
       //    Every table is scanned every round: a table skipped for want of
       //    budget is a stream that enumerated nothing, which pins every
       //    author's ceiling to "nothing safe" and empties the round.
@@ -682,7 +673,7 @@ export function createInProcessSyncTransport(options: InProcessTransportOptions)
         }
       }
 
-      // 5. Coverage watermarks over this channel's full post-apply state
+      // 4. Coverage watermarks over this channel's full post-apply state
       //    (see SyncExchangeResponse.responderWatermarks). Scoped to the
       //    channel's own data plane: shared records only on the Drive
       //    channel, only the registered namespaces' tables on per-app

@@ -8,13 +8,13 @@ The model checks that rule end to end. It covers the requester's scan and cut, t
 
 ## Findings
 
-All three findings are in the responder's apply (`in-process-transport.ts`, steps 2 and 2b), which is also the cloud's code path (`cloud-data-server/src/api-handler.ts` builds the same transport). Each has been reproduced against the real engine and responder in `packages/sync-engine/__tests__/exchange-round-findings.test.ts`, and an independent review of the code found no mechanism that prevents or automatically repairs them.
+All three findings are in the responder's apply (`in-process-transport.ts`, step 1), which is also the cloud's code path (`cloud-data-server/src/api-handler.ts` builds the same transport). Each has been reproduced against the real engine and responder in `packages/sync-engine/__tests__/exchange-round-findings.test.ts`, and an independent review of the code found no mechanism that prevents or automatically repairs them. Findings 1 and 3 are now fixed (fixes B and A in `FIXES.md`); finding 2 is not.
 
 ### 1. Records are applied before labels, so the cloud's coverage can claim a label it lacks
 
-The responder applies every record in a shipment, then every label. Each write is its own DSQL transaction and raises its author's coverage entry (`node-watermarks.ts`). When a label's HLC sits below one of the shipment's records, there is a window in which the cloud's coverage claims that label without holding it. Any ordinary sequence opens this window: photo, label on it, next photo.
+The responder applied every record in a shipment, then every label. Each write is its own DSQL transaction and raises its author's coverage entry (`node-watermarks.ts`). When a label's HLC sits below one of the shipment's records, there is a window in which the cloud's coverage claims that label without holding it. Any ordinary sequence opens this window: photo, label on it, next photo.
 
-`docs/system-design.md` says the opposite ("applied in merged per-node HLC order with records"). The requester's inbound loop does merge the two streams; the responder's does not. A comment at step 2 notes the difference and judges it harmless ("only costs their re-ship"). That holds for a halted node, but not for a crash or a concurrent reader.
+`docs/system-design.md` says the opposite ("applied in merged per-node HLC order with records"). The requester's inbound loop merged the two streams; the responder's did not, and a comment in its apply judged the difference harmless ("only costs their re-ship"). That held for a halted node, but not for a crash or a concurrent reader. Fix B makes the responder apply in merged order, through the same `inbound-order.ts` the requester uses.
 
 **1a. Crash (`models/finding-crash.cfg`, `CloudNoLoss`, depth 14).** The label never reaches the cloud.
 
@@ -53,7 +53,7 @@ Not automatically. `verify()` compares per-bucket row counts across records and 
 
 `FIXES.md` proposes fixes and the order to make them in. In brief, these are guarded writes (`GuardedWrite = TRUE`), merged per-author apply order (`MergedApply = TRUE`), and one of two ways of keeping an HLC whole. The simpler, one transaction per HLC (`ApplyUnit = "timestamp"`), does not fit DSQL's 3,000-row transaction cap as `setLabels` stands. The other is deferred coverage: rows commit one at a time, coverage is raised once a whole HLC has been applied, and the cloud's scans never ship a row above its own coverage (`ApplyUnit = "deferred"`). Every `fixed-*` and `deferred-*` model passes; `mutant-nocap` shows that the scan cap is needed as well as the deferred raise.
 
-These are proposals checked against the model, not changes that have been made. All four reproduction tests are `it.fails`, and they will start failing, as a prompt to remove `.fails`, once the code is fixed.
+Fixes A and B are implemented, and the tests for findings 1 and 3 are ordinary ones. Fix C is a proposal checked against the model: the two tests for finding 2 are still `it.fails`, and they will start failing, as a prompt to remove `.fails`, once it is made. `merged-crash` and `merged-concurrent` describe the code as it stands, and pass because every HLC in them is a single row.
 
 ## Results
 
@@ -63,6 +63,8 @@ These are proposals checked against the model, not changes that have been made. 
 | ------------------------- | ---------------------------------------------------- | ---------------- | --------------- | ----- |
 | finding-crash             | records then labels, guarded writes, 1 crash         | CloudNoLoss      | 349             | 13    |
 | finding-concurrent        | records then labels, guarded writes, 2 devices       | DeviceNoGap      | 464             | 10    |
+| merged-crash              | the code today: merged, one statement per row; crash | pass             | 404             | 14    |
+| merged-concurrent         | as above, 2 devices                                  | pass             | 1,435           | 22    |
 | finding-batch-crash       | batch of 2 sharing an HLC, guarded writes, 1 crash   | CloudNoLoss      | 96              | 11    |
 | finding-batch-concurrent  | batch of 2 sharing an HLC, guarded writes, 2 devices | DeviceNoGap      | 153             | 12    |
 | finding-lww-race          | read-then-write LWW before fix A, 2 writers, one key | CloudNoLoss      | 721             | 13    |
@@ -103,23 +105,23 @@ Liveness is not checked. `witness-converged` shows that convergence is reachable
 
 ## Action-to-code map
 
-| Action                          | Code                                                                                                                                                                                                                                                                  |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Write(n, S, t)`                | An app write, e.g. `sdk.setLabels`: one `clock.now()` for the whole batch. The HLC is above everything the device holds, because every applied row went through `clock.receive`.                                                                                      |
-| `Scan`, `Collect`               | `collectSince`, `planNodeScans`, `trimToHlcBoundary` in `storage-adapter/src/database/since-queries.ts`                                                                                                                                                               |
-| `Ceiling`, `Eligible`           | `computeCeilings` in `sync-engine/src/round-cut.ts`                                                                                                                                                                                                                   |
-| `Cut`                           | `cutRound` in `round-cut.ts`                                                                                                                                                                                                                                          |
-| `Start(n, push)`                | `exchange()` in `sync-engine/src/sync-engine.ts`, outbound half; the pull-first round is `exchange({ push: false })` in `sync()`                                                                                                                                      |
-| `CloudRead(n)`, `CloudWrite(n)` | `in-process-transport.ts`, steps 2 (records) and 2b (labels) as written: `get` / `getLabel`, the LWW comparison, then `put` / `putLabel`, each its own DSQL transaction; the coverage raise is `buildWatermarkRaises` in `storage-aurora-dsql/src/node-watermarks.ts` |
-| `CloudApply(n)`                 | The same apply with the comparison inside the write (fix A), optionally one transaction per HLC (`ApplyUnit = "timestamp"`)                                                                                                                                           |
-| `CloudRaise(n)`                 | Proposed fix C2: the deferred coverage raise after an HLC's last row                                                                                                                                                                                                  |
-| `CloudRespond(n)`               | `in-process-transport.ts`, steps 3 to 5                                                                                                                                                                                                                               |
-| `Crash(n)`                      | A Lambda timeout, or a response lost on the way back                                                                                                                                                                                                                  |
-| `Receive(n)`                    | `exchange()`, inbound half: LWW apply, `ownSafeAdvance` into `setWatermarks`, and the authoritative replace into `setPeerWatermarks`                                                                                                                                  |
+| Action                          | Code                                                                                                                                                                                                                                          |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Write(n, S, t)`                | An app write, e.g. `sdk.setLabels`: one `clock.now()` for the whole batch. The HLC is above everything the device holds, because every applied row went through `clock.receive`.                                                              |
+| `Scan`, `Collect`               | `collectSince`, `planNodeScans`, `trimToHlcBoundary` in `storage-adapter/src/database/since-queries.ts`                                                                                                                                       |
+| `Ceiling`, `Eligible`           | `computeCeilings` in `sync-engine/src/round-cut.ts`                                                                                                                                                                                           |
+| `Cut`                           | `cutRound` in `round-cut.ts`                                                                                                                                                                                                                  |
+| `Start(n, push)`                | `exchange()` in `sync-engine/src/sync-engine.ts`, outbound half; the pull-first round is `exchange({ push: false })` in `sync()`                                                                                                              |
+| `CloudRead(n)`, `CloudWrite(n)` | `in-process-transport.ts`, step 1, before fix A: `get` / `getLabel`, the LWW comparison, then `put` / `putLabel`, each its own DSQL transaction; the coverage raise is `buildWatermarkRaises` in `storage-aurora-dsql/src/node-watermarks.ts` |
+| `CloudApply(n)`                 | The same apply with the comparison inside the write (fix A), optionally one transaction per HLC (`ApplyUnit = "timestamp"`)                                                                                                                   |
+| `CloudRaise(n)`                 | Proposed fix C2: the deferred coverage raise after an HLC's last row                                                                                                                                                                          |
+| `CloudRespond(n)`               | `in-process-transport.ts`, steps 2 to 4                                                                                                                                                                                                       |
+| `Crash(n)`                      | A Lambda timeout, or a response lost on the way back                                                                                                                                                                                          |
+| `Receive(n)`                    | `exchange()`, inbound half: LWW apply, `ownSafeAdvance` into `setWatermarks`, and the authoritative replace into `setPeerWatermarks`                                                                                                          |
 
 ## What is not modelled
 
-- App-syncable tables. A third stream would behave like the label stream; note that the responder's step 1 applies app rows before records.
+- App-syncable tables. A third stream would behave like the label stream; the responder merges it into the same per-author order.
 - Byte budgets. Rows cost 0 bytes in both cuts.
 - Repair floors, digests, the uploader and the bytes watermark.
 - Apply failures and `haltedAuthors`; `coverageComplete = false`; `refusedAuthors`.
