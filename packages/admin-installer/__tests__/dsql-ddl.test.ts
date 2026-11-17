@@ -17,6 +17,11 @@ const state = {
   queries: [] as Array<{ text: string; params: unknown[] }>,
   /** Rows a SELECT answers with, by a substring of its text; first match wins. */
   answers: [] as Array<{ match: string; rows: Record<string, unknown>[] }>,
+  /**
+   * True for a cluster whose shared schema predates `shared.retained_app_data`:
+   * a statement naming the table fails with 42P01, as DSQL's would.
+   */
+  retainedTableMissing: false,
 };
 
 vi.mock("@aws-sdk/dsql-signer", () => ({
@@ -47,6 +52,11 @@ vi.mock("pg", () => {
     const normalized = text.replace(/\s+/g, " ").trim();
     state.statements.push(normalized);
     state.queries.push({ text: normalized, params: params ?? [] });
+    if (state.retainedTableMissing && normalized.includes('"shared"."retained_app_data"')) {
+      throw Object.assign(new Error('relation "shared.retained_app_data" does not exist'), {
+        code: "42P01",
+      });
+    }
     if (text.includes("FROM pg_roles")) {
       return { rows: [{ exists: state.pgRoleExists }], rowCount: 1 };
     }
@@ -101,6 +111,7 @@ const opts: DsqlDdlOptions = {
 beforeEach(() => {
   state.pgRoleExists = false;
   state.answers = [];
+  state.retainedTableMissing = false;
   state.iamMappingExists = false;
   state.statements = [];
   state.queries = [];
@@ -735,6 +746,9 @@ describe("uninstall DDL", () => {
 
 describe("install over kept data", () => {
   it("deletes the kept-data record once the namespace row names the tables", async () => {
+    state.answers = [
+      { match: 'from "information_schema"."tables"', rows: [{ table_name: "retained_app_data" }] },
+    ];
     await installPhotos();
     const s = stmts();
     const namespace = s.findIndex((t) =>
@@ -744,6 +758,17 @@ describe("install over kept data", () => {
     expect(record).toBeGreaterThan(namespace);
     // Adopted, not recreated: every create in the install is IF NOT EXISTS.
     expect(s.some((t) => t.includes("DROP SCHEMA"))).toBe(false);
+  });
+
+  // A deployment whose cloud data server predates the kept-data table can hold
+  // no kept data, so an install there has no record to delete and must not
+  // fail on the missing table. Only the uninstall needs the table.
+  it("completes on a cluster whose shared schema predates the kept-data table", async () => {
+    state.retainedTableMissing = true;
+    await expect(installPhotos()).resolves.toBeUndefined();
+    expect(stmts().some((t) => t.startsWith('delete from "shared"."retained_app_data"'))).toBe(
+      false,
+    );
   });
 });
 
