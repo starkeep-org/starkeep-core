@@ -1,5 +1,17 @@
 # @starkeep/shared-space-api
 
+## 0.9.1
+
+### Patch Changes
+
+- Updated dependencies [47e07bd]
+- Updated dependencies [4838b92]
+- Updated dependencies [7add5da]
+- Updated dependencies [9ae5c68]
+  - @starkeep/sync-engine@0.12.0
+  - @starkeep/protocol-primitives@0.12.0
+  - @starkeep/storage-adapter@0.10.0
+
 ## 0.9.0
 
 ### Minor Changes

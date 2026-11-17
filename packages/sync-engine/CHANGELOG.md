@@ -1,5 +1,20 @@
 # @starkeep/sync-engine
 
+## 0.12.0
+
+### Minor Changes
+
+- 7add5da: The sync apply path decides last-writer-wins inside its writes. `DatabaseAdapter.putSnapshot` is an upsert that replaces a row only with a strictly later `updatedAt`, and `putLabel` has the same guard; both resolve `true` when they wrote and `false` when a newer row was kept. Before this, the apply paths compared HLCs with a `get` and then wrote with an unconditional upsert in a separate transaction, so a concurrent round could land a newer row in between and the older write replaced it, after the newer one had raised its author's coverage. The responder and the requester now write through these methods and re-read the row when a write is kept out, and the requester no longer announces or counts a record whose snapshot was kept out. On DSQL the coverage raise is issued either way and records nothing after a skipped write. `put` keeps its unconditional behaviour for the local write paths. An adapter implementing `DatabaseAdapter` outside this repository needs a `putSnapshot`, and its `putLabel` must return a boolean.
+
+### Patch Changes
+
+- 47e07bd: When a row from the peer fails to apply, the requester now advances that author's watermark, and its inbound repair floor, only to the last HLC strictly below the failed row. It used to take the row just before the failure, and when that row shared the failed row's HLC, the watermark claimed the failed row and it was never offered again. No current write path produced that shape, since only a record can fail and a record sorts first among rows sharing its HLC.
+- 9ae5c68: The responder applies a shipment per author in HLC order across app rows, records and labels together, as the requester already did; both sides now group and sort through one module, `inbound-order.ts`. It used to apply every record before any label, and each write raises its author's coverage, so a label whose HLC sat below one of the records was briefly claimed by the cloud's coverage before it landed. A round that died in that window, or another device that synced in it, lost the label for good. An app row that fails still halts its author for the round, but now at the row that failed: what lies below it stays applied, where before every record and label from that author was skipped.
+- Updated dependencies [4838b92]
+- Updated dependencies [7add5da]
+  - @starkeep/protocol-primitives@0.12.0
+  - @starkeep/storage-adapter@0.10.0
+
 ## 0.11.0
 
 ### Minor Changes
