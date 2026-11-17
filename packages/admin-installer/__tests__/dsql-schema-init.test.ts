@@ -466,3 +466,15 @@ describe("the installer's IAM mapping", () => {
     expect(grantIdx).toBeGreaterThan(revokeIdx);
   });
 });
+
+describe("shared.retained_app_data", () => {
+  it("records kept app data by app, readable by the installer role", async () => {
+    const statements = await init();
+    const create = find(statements, 'create table if not exists "shared"."retained_app_data"');
+    expect(create).toMatch(/"app_id" text not null primary key/);
+    expect(create).toMatch(/"tables_json" text not null/);
+    expect(statements).toContain(
+      'GRANT SELECT ON shared.retained_app_data TO "starkeep_installer"',
+    );
+  });
+});

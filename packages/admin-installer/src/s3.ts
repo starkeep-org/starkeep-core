@@ -115,7 +115,11 @@ async function deletePrefix(s3: S3Client, bucket: string, prefix: string): Promi
   } while (continuationToken);
 }
 
-/** Delete all objects under apps/<appId>/ in the files bucket (app-owned data). */
+/**
+ * Delete all objects under apps/<appId>/ in the files bucket (app-owned data).
+ * `cli:delete-app-data` runs it under an app role it has just created, so S3
+ * may refuse until the role's policy propagates.
+ */
 export async function deleteAppFilesObjects(
   appId: string,
   filesBucket: string,
@@ -123,7 +127,11 @@ export async function deleteAppFilesObjects(
   appCreds: AwsCredentials,
 ): Promise<void> {
   const s3 = makeS3Client(appCreds, region);
-  await deletePrefix(s3, filesBucket, `apps/${appId}/`);
+  await retryOnAccessDenied(
+    `delete ${filesBucket}/apps/${appId}/`,
+    () => deletePrefix(s3, filesBucket, `apps/${appId}/`),
+    { maxAttempts: 30, maxDelayMs: 10_000 },
+  );
 }
 
 /**

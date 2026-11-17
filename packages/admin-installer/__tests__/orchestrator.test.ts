@@ -48,6 +48,7 @@ const fakeRegistry = {
   listInstalledApps: vi.fn(async () => []),
   // The manifest the last install recorded; null means never installed.
   storedManifest: vi.fn(async (): Promise<AppManifest | null> => null),
+  listRetainedAppData: vi.fn(async (): Promise<unknown[]> => []),
   close: vi.fn(async () => {}),
 };
 
@@ -126,7 +127,7 @@ import {
 } from "../src/iam";
 import { deleteAppCredsParameter, ensureAppCredsParameter } from "../src/app-creds";
 import { runAppInstallDdl, runAppUninstallDdl } from "../src/dsql-ddl";
-import { putAppKeepFile, uploadAppBundle } from "../src/s3";
+import { deleteAppFilesObjects, putAppKeepFile, uploadAppBundle } from "../src/s3";
 import { installComputeStack, uninstallComputeStack } from "../src/compute-stack";
 import { setMobileAppCallback } from "../src/app-sign-in-clients";
 import { validateManifest, type AppManifest } from "@starkeep/admin-manifest";
@@ -656,7 +657,6 @@ describe("uninstall", () => {
       "delete_s3_artifacts",
       "delete_static_assets",
       "detach_temp_uninstall_infra_policy",
-      "delete_s3_files",
       "attach_temp_install_ddl_policy",
       "run_dsql_uninstall_ddl",
       "detach_temp_install_ddl_policy",
@@ -683,7 +683,7 @@ describe("uninstall", () => {
       registryCredentials,
     });
     // Uninstall ran fully even though install's ledger was complete.
-    expect(doneSteps("uninstall")).toHaveLength(13);
+    expect(doneSteps("uninstall")).toHaveLength(12);
   });
 
   it("forgets both ledgers once it completes", async () => {
@@ -718,6 +718,29 @@ describe("uninstall", () => {
     expect(deleteAppRoleWithPolicies).toHaveBeenCalledTimes(2);
     expect(deleteAppExecRoleWithPolicies).toHaveBeenCalledTimes(2);
     expect(deleteAppCredsParameter).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the app's files and passes its name to the kept-data record", async () => {
+    await uninstallApp({ appId: "photos", manifest: photosManifest, config, registryCredentials });
+    expect(deleteAppFilesObjects).not.toHaveBeenCalled();
+    expect(runAppUninstallDdl).toHaveBeenCalledWith(
+      expect.anything(),
+      "photos",
+      photosManifest.name,
+      photosManifest.infraRequirements.fileAccess,
+      photosManifest.infraRequirements.fileAccessAll,
+    );
+  });
+
+  // A cluster whose shared schema predates the kept-data table could not
+  // record the data, so the uninstall refuses before it changes anything.
+  it("stops before any step when the kept-data table is missing", async () => {
+    fakeRegistry.listRetainedAppData.mockRejectedValueOnce(new Error("no table"));
+    await expect(
+      uninstallApp({ appId: "photos", manifest: photosManifest, config, registryCredentials }),
+    ).rejects.toThrow("no table");
+    expect(doneSteps("uninstall")).toEqual([]);
+    expect(uninstallComputeStack).not.toHaveBeenCalled();
   });
 });
 

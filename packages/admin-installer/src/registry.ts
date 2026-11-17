@@ -107,7 +107,36 @@ export interface Registry {
    * row or its row predates the stored manifest.
    */
   storedManifest(appId: string): Promise<AppManifest | null>;
+  /**
+   * Data that cloud uninstalls kept, one entry per app with no install.
+   * Throws {@link RetainedDataTableMissingError} on a cluster whose shared
+   * schema predates the table, so an uninstall can refuse before it changes
+   * anything.
+   */
+  listRetainedAppData(): Promise<RetainedAppDataEntry[]>;
   close(): Promise<void>;
+}
+
+/** One app's data that a cloud uninstall kept. */
+export interface RetainedAppDataEntry {
+  appId: string;
+  name: string;
+  retainedAt: string;
+}
+
+/**
+ * The cluster has no `shared.retained_app_data`, because its shared schema
+ * predates it. Redeploying the cloud data server creates it.
+ */
+export class RetainedDataTableMissingError extends Error {
+  constructor() {
+    super(
+      "This cloud's database has no shared.retained_app_data table, so an uninstall could not " +
+        "record the data it keeps. Redeploy the cloud data server (cli:install-cloud-data-server), " +
+        "which creates the table, then run the uninstall again.",
+    );
+    this.name = "RetainedDataTableMissingError";
+  }
 }
 
 export function createDsqlRegistry(opts: RegistryOptions): Registry {
@@ -356,6 +385,29 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
           .executeTakeFirst()) as { manifest: string | null } | undefined;
         return row?.manifest ? (JSON.parse(row.manifest) as AppManifest) : null;
       });
+    },
+
+    async listRetainedAppData() {
+      try {
+        return await withRetry(async (k) => {
+          const rows = await k
+            .selectFrom("shared.retained_app_data")
+            .select(["app_id", "name", "retained_at"])
+            .orderBy("retained_at", "asc")
+            .execute();
+          return rows.map((r) => ({
+            appId: String(r.app_id),
+            name: String(r.name),
+            retainedAt: String(r.retained_at),
+          }));
+        });
+      } catch (err) {
+        // 42P01 = undefined_table.
+        if ((err as { code?: string } | null)?.code === "42P01") {
+          throw new RetainedDataTableMissingError();
+        }
+        throw err;
+      }
     },
 
     async deleteAppRegistryEntry(appId) {

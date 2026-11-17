@@ -1312,7 +1312,8 @@ const CONTEXTS: Record<string, ContextBuilder> = {
   "install-app-role": {
     description:
       "Per-app role at install time (data-plane writes the orchestrator issues " +
-      "directly under the app role — currently just the .keep marker). Identity " +
+      "directly under the app role: the .keep marker), and as cli:delete-app-data " +
+      "recreates it to delete the app's kept files. Identity " +
       "is the inline runtime policy; capped by the app permissions boundary. " +
       "Set APP_ID to scope.",
     build({ stackPrefix, appId, accountId }) {
@@ -1347,6 +1348,17 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           action: "s3:PutObject",
           resource: keepFileArn,
           why: "putAppKeepFile writes the zero-byte sentinel that marks the app's S3 presence.",
+        },
+        {
+          action: "s3:ListBucket",
+          resource: `arn:aws:s3:::${stackPrefix}-files-*`,
+          contextVariables: { "s3:prefix": `apps/${id}/` },
+          why: "cli:delete-app-data lists the app's whole prefix to delete the files an uninstall kept.",
+        },
+        {
+          action: "s3:DeleteObject",
+          resource: `arn:aws:s3:::${stackPrefix}-files-*/apps/${id}/user-1/syncable/photo.jpg`,
+          why: "cli:delete-app-data deletes each kept file, across every user under the prefix.",
         },
       ];
     },

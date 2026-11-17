@@ -32,6 +32,7 @@ import {
   FILE_RECORDS_TABLE_INFO,
   BYTE_COVERAGE_TABLE,
   appSyncableTableInfo,
+  parseAppSyncableTables,
   syncableIndexName,
 } from "@starkeep/shared-space-api";
 import type { AppSyncableTableInfo } from "@starkeep/shared-space-api";
@@ -591,6 +592,12 @@ export async function runAppInstallDdl(
           )
           .execute();
       }
+
+      // Data an earlier uninstall kept is this install's data now: the
+      // statements above adopted its schema and tables with IF NOT EXISTS, and
+      // the namespace row names them. A kept table the new manifest no longer
+      // declares stays in the schema unlisted, as a table an upgrade drops does.
+      await db.deleteFrom("shared.retained_app_data").where("app_id", "=", appId).execute();
     } finally {
       await db.destroy().catch(() => {});
     }
@@ -598,18 +605,32 @@ export async function runAppInstallDdl(
 }
 
 /**
- * Per-app uninstall DDL. Revokes grants and drops the app schema + PG role.
- * Shared tables and their rows are NOT dropped.
+ * Per-app uninstall DDL. Uninstall removes the app and keeps its data.
+ *
+ * It revokes the role's grants on `shared.*`, deletes the app's access grants,
+ * label-key declarations, public shares and delegations, and revokes the DSQL
+ * IAM mapping. It keeps the `app_<appId>` schema, every row in it and the PG
+ * role, which owns the schema: `DROP ROLE` fails while the role owns objects.
+ * It records the kept data in `shared.retained_app_data` before it deletes the
+ * namespace row, so the table list outlives the manifest.
+ *
+ * The mapping goes because the uninstall deletes the app's IAM role. A mapping
+ * naming a deleted role names an ARN that anyone holding iam:CreateRole can
+ * claim, and `<prefix>-app-<appId>-role` is predictable, so whoever created it
+ * would inherit this PG role and its schema. The install rebinds the mapping.
+ *
+ * Deleting the kept data is {@link runAppDataDeleteDdl}, which only
+ * `cli:delete-app-data` calls.
  */
 export async function runAppUninstallDdl(
   opts: DsqlDdlOptions,
   appId: string,
+  appName: string,
   fileAccess: FileAccess[],
   fileAccessAll: boolean,
 ): Promise<void> {
   const pgRole = appIdToPgRole(opts.stackPrefix, appId);
-  const schemaName = `app_${appId.replace(/-/g, "_")}`;
-  // Idempotent throughout (REVOKE, DELETE, DROP IF EXISTS, probe-then-act), so a
+  // Idempotent throughout (REVOKE, DELETE, upsert, probe-then-act), so a
   // transient DSQL drop mid-DDL replays cleanly on a fresh connection. This is
   // the path that flaked in the Tier-3 e2e with a raw `read ETIMEDOUT`.
   await retryOnTransientDbError(`uninstall DDL ${appId}`, async () => {
@@ -626,10 +647,8 @@ export async function runAppUninstallDdl(
         await sql`REVOKE ALL ON ${sql.raw(metaTable)} FROM ${sql.raw(pgRole)}`.execute(db);
       }
 
-      // Schema-level USAGE on `shared` is granted on install (line ~157 of the
-      // install DDL). Without this revoke, DROP ROLE trips PG 2BP01
-      // ("privileges for schema shared"). Drop after table-level revokes so
-      // nothing in `shared.*` still depends on the role.
+      // Schema-level USAGE on `shared` is granted on install. The install
+      // grants it again, so revoking it here costs a reinstall nothing.
       await sql`REVOKE USAGE ON SCHEMA shared FROM ${sql.raw(pgRole)}`.execute(db);
 
       await db.deleteFrom("shared.access_grants").where("app_id", "=", appId).execute();
@@ -643,7 +662,36 @@ export async function runAppUninstallDdl(
       // longer clean up). Permanently purging a removed app's claims is an
       // explicit admin action, not a side effect of uninstall.
       await db.deleteFrom("shared.app_label_keys").where("app_id", "=", appId).execute();
+
+      // The record goes in before the namespace row comes out. A replay after
+      // a drop between the two finds no namespace row and the record already
+      // written, so no ordering of failures loses the table list.
+      const namespace = await db
+        .selectFrom("shared.app_syncable_namespaces")
+        .select(["tables_json", "files_enabled"])
+        .where("app_id", "=", appId)
+        .executeTakeFirst();
+      if (namespace) {
+        await db
+          .insertInto("shared.retained_app_data")
+          .values({
+            app_id: appId,
+            name: appName,
+            tables_json: namespace.tables_json,
+            files_enabled: namespace.files_enabled,
+          })
+          .onConflict((oc) =>
+            oc.column("app_id").doUpdateSet((eb) => ({
+              name: eb.ref("excluded.name"),
+              tables_json: eb.ref("excluded.tables_json"),
+              files_enabled: eb.ref("excluded.files_enabled"),
+              retained_at: sql`now()`,
+            })),
+          )
+          .execute();
+      }
       await db.deleteFrom("shared.app_syncable_namespaces").where("app_id", "=", appId).execute();
+
       // Unlike labels, an app's public shares do not outlive it. A public link
       // reads through the creating app's role and grants, so with the app gone
       // nothing could serve the link, and a reinstall must not bring back a
@@ -658,33 +706,159 @@ export async function runAppUninstallDdl(
       await db.deleteFrom("delegation.grants").where("app_id", "=", appId).execute();
       await db.deleteFrom("delegation.refresh_tokens").where("app_id", "=", appId).execute();
       await db.deleteFrom("delegation.authorizations").where("app_id", "=", appId).execute();
-      await sql`DROP SCHEMA IF EXISTS ${sql.raw(schemaName)} CASCADE`.execute(db);
 
-      // Revoke the DSQL-side IAM mapping before DROP ROLE — DROP ROLE fails if
-      // any AWS IAM GRANT still references it. Probe first because AWS IAM
-      // REVOKE errors when the mapping is absent.
-      const appRoleArn = `arn:aws:iam::${opts.accountId}:role/${opts.stackPrefix}-app-${appId}-role`;
-      const existingMapping = await sql<{ exists: boolean }>`
-      SELECT EXISTS (
-        SELECT 1 FROM sys.iam_pg_role_mappings
-        WHERE pg_role_name = ${pgRole} AND arn = ${appRoleArn}
-      ) AS exists
-    `.execute(db);
-      if (existingMapping.rows[0]?.exists) {
-        await sql.raw(`AWS IAM REVOKE "${pgRole}" FROM '${appRoleArn}'`).execute(db);
-      }
-
-      // DSQL doesn't support DO blocks — same pattern as install: probe then act.
-      const existingRole = await sql<{ exists: boolean }>`
-      SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${pgRole}) AS exists
-    `.execute(db);
-      if (existingRole.rows[0]?.exists) {
-        await sql.raw(`DROP ROLE "${pgRole}"`).execute(db);
-      }
+      await revokeMapping(db, opts, appId);
     } finally {
       await db.destroy().catch(() => {});
     }
   });
+}
+
+/**
+ * Delete the data a cloud uninstall kept: drop the `app_<appId>` schema and
+ * every row in it, then the PG role, then the kept-data record. Only
+ * `cli:delete-app-data` calls it, and only for an app that is not installed.
+ *
+ * The record goes last, so a failure part-way leaves it and a rerun finishes.
+ * Dropping the schema also drops the app's node watermarks, which live in it.
+ */
+export async function runAppDataDeleteDdl(opts: DsqlDdlOptions, appId: string): Promise<void> {
+  const pgRole = appIdToPgRole(opts.stackPrefix, appId);
+  const schemaName = `app_${appId.replace(/-/g, "_")}`;
+  await retryOnTransientDbError(`delete app data ${appId}`, async () => {
+    const db = await makeDb(opts);
+    try {
+      await sql`DROP SCHEMA IF EXISTS ${sql.raw(schemaName)} CASCADE`.execute(db);
+      // DROP ROLE fails while any AWS IAM GRANT still references the role.
+      await revokeMapping(db, opts, appId);
+      // DSQL doesn't support DO blocks — same pattern as install: probe then act.
+      const existingRole = await sql<{ exists: boolean }>`
+        SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${pgRole}) AS exists
+      `.execute(db);
+      if (existingRole.rows[0]?.exists) {
+        await sql.raw(`DROP ROLE "${pgRole}"`).execute(db);
+      }
+      await db.deleteFrom("shared.retained_app_data").where("app_id", "=", appId).execute();
+    } finally {
+      await db.destroy().catch(() => {});
+    }
+  });
+}
+
+/** A cloud uninstall's kept data, as `shared.retained_app_data` records it. */
+export interface RetainedAppDataDsql {
+  appId: string;
+  name: string;
+  tables: AppSyncableTableInfo[];
+  filesEnabled: boolean;
+  retainedAt: string;
+}
+
+/** What deleting one app's kept cloud data would destroy, by counts. */
+export interface AppDataCountsDsql {
+  retained: RetainedAppDataDsql;
+  /** Declared tables, rows not soft-deleted, every user together. */
+  tables: Array<{ name: string; rowCount: number }>;
+  totalRows: number;
+  /** From the reserved file-records table. Null when the app keeps no files. */
+  files: { count: number; totalBytes: number } | null;
+}
+
+/**
+ * Read one app's kept cloud data and count it. Null when the cloud keeps no
+ * data for the app. A table the record names but the schema lacks counts as
+ * zero, so a half-finished earlier deletion still previews.
+ */
+export async function countRetainedAppDataDsql(
+  opts: DsqlDdlOptions,
+  appId: string,
+): Promise<AppDataCountsDsql | null> {
+  const schemaName = `app_${appId.replace(/-/g, "_")}`;
+  return retryOnTransientDbError(`count app data ${appId}`, async () => {
+    const db = await makeDb(opts);
+    try {
+      const row = await db
+        .selectFrom("shared.retained_app_data")
+        .select(["app_id", "name", "tables_json", "files_enabled", "retained_at"])
+        .where("app_id", "=", appId)
+        .executeTakeFirst();
+      if (!row) return null;
+      const retained: RetainedAppDataDsql = {
+        appId,
+        name: String(row.name),
+        tables: parseAppSyncableTables(appId, String(row.tables_json)),
+        filesEnabled: row.files_enabled === true,
+        retainedAt: String(row.retained_at),
+      };
+      const present = new Set(
+        (
+          await db
+            .selectFrom("information_schema.tables")
+            .select("table_name")
+            .where("table_schema", "=", schemaName)
+            .execute()
+        ).map((t) => t.table_name),
+      );
+      const tables: Array<{ name: string; rowCount: number }> = [];
+      let files: { count: number; totalBytes: number } | null = retained.filesEnabled
+        ? { count: 0, totalBytes: 0 }
+        : null;
+      for (const t of retained.tables) {
+        if (!present.has(t.name)) {
+          if (t.name !== FILE_RECORDS_TABLE) tables.push({ name: t.name, rowCount: 0 });
+          continue;
+        }
+        if (t.name === FILE_RECORDS_TABLE) {
+          const f = await db
+            .selectFrom(`${schemaName}.${FILE_RECORDS_TABLE}`)
+            .select([
+              (eb) => eb.fn.countAll<string>().as("n"),
+              sql<string>`coalesce(sum(size_bytes), 0)`.as("bytes"),
+            ])
+            .where("deleted_at", "is", null)
+            .executeTakeFirst();
+          files = { count: Number(f?.n ?? 0), totalBytes: Number(f?.bytes ?? 0) };
+          continue;
+        }
+        const c = await db
+          .selectFrom(`${schemaName}.${t.name}`)
+          .select((eb) => eb.fn.countAll<string>().as("n"))
+          .where("deleted_at", "is", null)
+          .executeTakeFirst();
+        tables.push({ name: t.name, rowCount: Number(c?.n ?? 0) });
+      }
+      return {
+        retained,
+        tables,
+        totalRows: tables.reduce((sum, t) => sum + t.rowCount, 0),
+        files,
+      };
+    } finally {
+      await db.destroy().catch(() => {});
+    }
+  });
+}
+
+/**
+ * Revoke the app role's DSQL IAM mapping when one exists. Probe first, because
+ * AWS IAM REVOKE errors on an absent mapping and a replay must be a no-op.
+ */
+async function revokeMapping(
+  db: Kysely<DdlDb>,
+  opts: DsqlDdlOptions,
+  appId: string,
+): Promise<void> {
+  const pgRole = appIdToPgRole(opts.stackPrefix, appId);
+  const appRoleArn = `arn:aws:iam::${opts.accountId}:role/${opts.stackPrefix}-app-${appId}-role`;
+  const existingMapping = await sql<{ exists: boolean }>`
+    SELECT EXISTS (
+      SELECT 1 FROM sys.iam_pg_role_mappings
+      WHERE pg_role_name = ${pgRole} AND arn = ${appRoleArn}
+    ) AS exists
+  `.execute(db);
+  if (existingMapping.rows[0]?.exists) {
+    await sql.raw(`AWS IAM REVOKE "${pgRole}" FROM '${appRoleArn}'`).execute(db);
+  }
 }
 
 function appIdToPgRole(stackPrefix: string, appId: string): string {

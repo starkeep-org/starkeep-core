@@ -994,7 +994,8 @@ export function buildRuntimePolicy(
       },
     },
     {
-      // Uninstall enumerates the app's whole prefix to delete it.
+      // `cli:delete-app-data` enumerates the app's whole prefix to delete it,
+      // under an app role it recreates for that purpose.
       Sid: "AppS3ListOwnPrefixNoUser",
       Effect: "Allow",
       Action: "s3:ListBucket",

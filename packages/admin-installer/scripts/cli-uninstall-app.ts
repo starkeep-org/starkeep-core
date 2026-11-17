@@ -2,10 +2,14 @@
 /**
  * Uninstall a Starkeep app from the cloud — the counterpart of
  * cli-install-app. Runs the orchestrator's uninstall state machine: compute
- * stack down, S3 artifacts/files gone, per-app DSQL schema and PG role
- * dropped, SSM app-creds parameter deleted, registry row closed out. Shared
- * records the app created are deliberately left in place (they belong to the
- * user, not the app).
+ * stack and bundle down, grants and the DSQL login mapping revoked, IAM roles
+ * and the SSM app-creds parameter deleted, registry row closed out.
+ *
+ * Uninstall removes the app and keeps its data. The app's `app_<appId>` schema
+ * and its files under `apps/<appId>/` stay, and a reinstall gets them back.
+ * Shared records the app created stay too; they belong to the user, not the
+ * app. Deleting the app's own data is a separate command,
+ * `cli:delete-app-data`.
  *
  * The uninstall DDL needs the app's declared app-specific tables, so it reads
  * the manifest the cloud registry stored at install. A registry row that
@@ -22,9 +26,8 @@
  * `--web` removes only the cloud web app (its compute), and `--mobile` only the
  * mobile app (its Android identity and sign-in callback). Either keeps the
  * app's data side, which the other surface and the desktop's sync may still
- * use. With neither flag, the uninstall removes the app entirely, and an
- * interactive run asks the operator to type the app id first, because it
- * deletes the app's own cloud data. `--non-interactive` skips that question.
+ * use. With neither flag, the uninstall removes the app entirely. It deletes
+ * no app data either way, so it asks for no typed confirmation.
  */
 
 // First import: load repo-root .env / .env.local so STARKEEP_DIR is populated.
@@ -187,23 +190,6 @@ console.log(`  Stage  : ${stackPrefix}`);
 console.log(`  Account: ${accountId}`);
 console.log("");
 
-// A full uninstall deletes the app's own cloud data. Removing one surface
-// keeps the data side, so it asks nothing. A non-interactive run is the
-// caller's own decision, as with its credentials.
-if (surfaces.length === 0 && !nonInteractive) {
-  console.log(
-    `This deletes ${appId}'s own data in the cloud: the tables in its ` +
-      `app_${appId.replace(/-/g, "_")} schema, its files under apps/${appId}/ in ` +
-      `${config.s3Bucket}, and its public links. Records it shared with other ` +
-      "apps stay.\n",
-  );
-  const answer = await prompt(`Type ${appId} to uninstall it: `);
-  if (answer.trim() !== appId) {
-    console.log("Uninstall cancelled. Nothing changed.");
-    process.exit(1);
-  }
-}
-
 await uninstallApp({
   appId,
   manifest,
@@ -241,5 +227,6 @@ await uninstallApp({
 console.log(
   surfaces.length > 0
     ? `\n${appId}'s ${surfaces.join(" and ")} app removed; its data stays installed.`
-    : `\n${appId} cloud uninstall complete.`,
+    : `\n${appId} cloud uninstall complete. Its data stays in the cloud, and reinstalling ` +
+        `${appId} gets it back. To delete it, run cli:delete-app-data ${appId}.`,
 );

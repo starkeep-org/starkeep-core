@@ -43,12 +43,7 @@ import {
   ensureAppCredsParameter,
 } from "./app-creds";
 import { runAppInstallDdl, runAppUninstallDdl, type DsqlDdlOptions } from "./dsql-ddl";
-import {
-  putAppKeepFile,
-  uploadAppBundle,
-  deleteAppFilesObjects,
-  deleteAppArtifactsObjects,
-} from "./s3";
+import { putAppKeepFile, uploadAppBundle, deleteAppArtifactsObjects } from "./s3";
 import {
   appAssetsBucketName,
   collectStaticAssets,
@@ -181,7 +176,8 @@ export interface UninstallInput {
   /**
    * Remove only these surfaces and keep the data side, which the other
    * surface or the desktop's sync may still use. Omitted, uninstall removes
-   * the app entirely: every surface, the data side and the registry row.
+   * the app entirely: every surface, its access to data and the registry row.
+   * Either way the app's own data stays; `cli:delete-app-data` deletes it.
    */
   surfaces?: readonly AppSurface[];
 }
@@ -663,22 +659,22 @@ async function uninstallAppInner(input: UninstallInput, registry: Registry): Pro
   const done = await registry.getCompletedSteps(appId, "uninstall");
 
   const managerCreds = await roleChain([config.managerRoleArn]);
-  const appRoleArn = `arn:aws:iam::${config.accountId}:role/${config.stackPrefix}-app-${appId}-role`;
 
   if (input.surfaces !== undefined) {
     await removeSurfacesInner(input, input.surfaces, registry, done, managerCreds);
     return;
   }
 
+  // Uninstall keeps the app's data and records it in shared.retained_app_data.
+  // A cluster whose shared schema predates that table could not record it, so
+  // the uninstall stops here, before it changes anything, and says how to fix
+  // it. Skipping the record would leave kept data that nothing lists.
+  await registry.listRetainedAppData();
+
   if (ir.compute.enabled) await removeComputeSteps(appId, config, registry, done, managerCreds);
 
-  // Files-bucket cleanup runs under the app's role (its runtime policy +
-  // permissions boundary scope it to apps/<appId>/*).
-  const appCreds: AwsCredentials = await roleChain([config.managerRoleArn, appRoleArn]);
-
-  await runStep(registry, appId, "uninstall", "delete_s3_files", done, () =>
-    deleteAppFilesObjects(appId, config.filesBucket, config.region, appCreds),
-  );
+  // The app's files under apps/<appId>/ in the files bucket stay, as its
+  // schema does. `cli:delete-app-data` deletes both.
 
   await runStep(registry, appId, "uninstall", "attach_temp_install_ddl_policy", done, () =>
     attachTempInstallDdlPolicy(config.stackPrefix, appId, managerCreds),
@@ -693,7 +689,7 @@ async function uninstallAppInner(input: UninstallInput, registry: Registry): Pro
       accountId: config.accountId,
       credentials: ddlCreds,
     };
-    await runAppUninstallDdl(dsqlOpts, appId, ir.fileAccess, ir.fileAccessAll);
+    await runAppUninstallDdl(dsqlOpts, appId, manifest.name, ir.fileAccess, ir.fileAccessAll);
   });
 
   await runStep(registry, appId, "uninstall", "detach_temp_install_ddl_policy", done, () =>

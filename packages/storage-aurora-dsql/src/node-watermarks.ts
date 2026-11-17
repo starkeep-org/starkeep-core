@@ -34,7 +34,7 @@
  * ## Hard deletes
  *
  * Only two paths delete synced rows outright, and both take the entries with
- * them: uninstall drops the app's schema, and `clear-user-cloud-data.ts`
+ * them: `cli:delete-app-data` drops the app's schema, and `clear-user-cloud-data.ts`
  * deletes every owned table's rows for the user. A new hard delete of a synced
  * row must clear the matching entries too. Otherwise the cloud would report
  * coverage it no longer has, and requesters would stop pushing those rows.

@@ -15,6 +15,8 @@ const state = {
   statements: [] as string[],
   /** Statements with their bound parameters, for the few assertions about values. */
   queries: [] as Array<{ text: string; params: unknown[] }>,
+  /** Rows a SELECT answers with, by a substring of its text; first match wins. */
+  answers: [] as Array<{ match: string; rows: Record<string, unknown>[] }>,
 };
 
 vi.mock("@aws-sdk/dsql-signer", () => ({
@@ -51,14 +53,28 @@ vi.mock("pg", () => {
     if (text.includes("FROM sys.iam_pg_role_mappings")) {
       return { rows: [{ exists: state.iamMappingExists }], rowCount: 1 };
     }
+    if (/^select/i.test(normalized)) {
+      const answer = state.answers.find((a) => normalized.includes(a.match));
+      if (answer) return { rows: answer.rows, rowCount: answer.rows.length };
+    }
     return { rows: [], rowCount: 0 };
   }
   return { default: { Pool: FakePool }, Pool: FakePool };
 });
 
-import { runAppInstallDdl, runAppUninstallDdl, type DsqlDdlOptions } from "../src/dsql-ddl";
+import {
+  countRetainedAppDataDsql,
+  runAppDataDeleteDdl,
+  runAppInstallDdl,
+  runAppUninstallDdl,
+  type DsqlDdlOptions,
+} from "../src/dsql-ddl";
 import { validateManifest } from "@starkeep/admin-manifest";
-import { FILE_RECORDS_COLUMNS } from "@starkeep/shared-space-api";
+import {
+  FILE_RECORDS_COLUMNS,
+  FILE_RECORDS_TABLE_INFO,
+  appSyncableTableInfo,
+} from "@starkeep/shared-space-api";
 import { pgColumnType } from "@starkeep/protocol-primitives";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -84,6 +100,7 @@ const opts: DsqlDdlOptions = {
 
 beforeEach(() => {
   state.pgRoleExists = false;
+  state.answers = [];
   state.iamMappingExists = false;
   state.statements = [];
   state.queries = [];
@@ -620,12 +637,16 @@ describe("install DDL: the public-sharing capability", () => {
 });
 
 describe("uninstall DDL", () => {
+  const uninstallPhotos = () => {
+    const ir = photosManifest.infraRequirements;
+    return runAppUninstallDdl(opts, "photos", "Photos", ir.fileAccess, ir.fileAccessAll);
+  };
+
   it("deletes the app's public shares, its capability, its delegations and their OAuth rows", async () => {
     // A public link reads through the creating app's role, so with the app
     // gone nothing could serve it, and a reinstall must not revive it. An
     // outside client's access ends with the app for the same reason.
-    const ir = photosManifest.infraRequirements;
-    await runAppUninstallDdl(opts, "photos", ir.fileAccess, ir.fileAccessAll);
+    await uninstallPhotos();
     for (const table of [
       '"public_sharing"."public_shares"',
       '"public_sharing"."app_capabilities"',
@@ -639,46 +660,62 @@ describe("uninstall DDL", () => {
     }
   });
 
-  it("revokes grants, deletes registry rows, drops schema and role — shared tables survive", async () => {
+  it("revokes the app's grants and login, and keeps its schema and PG role", async () => {
     state.pgRoleExists = true;
     state.iamMappingExists = true;
-    const ir = photosManifest.infraRequirements;
-    await runAppUninstallDdl(opts, "photos", ir.fileAccess, ir.fileAccessAll);
+    await uninstallPhotos();
     const s = stmts();
     expect(s.some((t) => t.includes("REVOKE ALL ON shared.records FROM starkeep_app_photos"))).toBe(
       true,
     );
     expect(s.some((t) => t.includes("REVOKE ALL ON shared.record_image_metadata"))).toBe(true);
+    expect(s).toContain("REVOKE ALL ON shared.node_watermarks_records FROM starkeep_app_photos");
     expect(
       s.some((t) => t.includes("REVOKE USAGE ON SCHEMA shared FROM starkeep_app_photos")),
     ).toBe(true);
-    // Before USAGE and DROP ROLE: a grant left in `shared` fails DROP ROLE with 2BP01.
-    const revokeWatermarks = s.indexOf(
-      "REVOKE ALL ON shared.node_watermarks_records FROM starkeep_app_photos",
-    );
-    expect(revokeWatermarks).toBeGreaterThan(-1);
-    expect(revokeWatermarks).toBeLessThan(
-      s.indexOf("REVOKE USAGE ON SCHEMA shared FROM starkeep_app_photos"),
-    );
     expect(s.some((t) => t.includes('delete from "shared"."access_grants" where "app_id" ='))).toBe(
       true,
     );
     expect(s.some((t) => t.includes('delete from "shared"."app_syncable_namespaces"'))).toBe(true);
-    expect(s).toContain("DROP SCHEMA IF EXISTS app_photos CASCADE");
+    // A mapping left naming the deleted IAM role could be claimed by whoever
+    // recreates that predictable role name.
     expect(s).toContain(
       `AWS IAM REVOKE "starkeep_app_photos" FROM 'arn:aws:iam::111122223333:role/starkeep-app-photos-role'`,
     );
-    expect(s).toContain('DROP ROLE "starkeep_app_photos"');
-    // Never drops shared schema objects
+    // The data stays: no schema, role or table goes.
+    expect(s.some((t) => t.includes("DROP SCHEMA"))).toBe(false);
+    expect(s.some((t) => t.startsWith("DROP ROLE"))).toBe(false);
     expect(s.some((t) => t.includes("DROP TABLE"))).toBe(false);
-    expect(s.some((t) => t.includes("DROP SCHEMA shared"))).toBe(false);
   });
 
-  it("skips AWS IAM REVOKE and DROP ROLE when probes report absent", async () => {
-    await runAppUninstallDdl(opts, "photos", [], false);
-    const s = stmts();
-    expect(s.some((t) => t.startsWith("AWS IAM REVOKE"))).toBe(false);
-    expect(s.some((t) => t.startsWith("DROP ROLE"))).toBe(false);
+  it("records the kept tables before it deletes the namespace row", async () => {
+    const tablesJson = JSON.stringify([{ name: "captions", pkColumns: ["id"] }]);
+    state.answers = [
+      {
+        match: 'from "shared"."app_syncable_namespaces"',
+        rows: [{ tables_json: tablesJson, files_enabled: true }],
+      },
+    ];
+    await uninstallPhotos();
+    const insert = state.queries.findIndex((q) =>
+      q.text.startsWith('insert into "shared"."retained_app_data"'),
+    );
+    const del = state.queries.findIndex((q) =>
+      q.text.startsWith('delete from "shared"."app_syncable_namespaces"'),
+    );
+    expect(insert).toBeGreaterThanOrEqual(0);
+    expect(del).toBeGreaterThan(insert);
+    expect(state.queries[insert]!.params).toEqual(["photos", "Photos", tablesJson, true]);
+  });
+
+  it("writes no kept-data record for an app with no namespace row", async () => {
+    await uninstallPhotos();
+    expect(stmts().some((t) => t.includes('"shared"."retained_app_data"'))).toBe(false);
+  });
+
+  it("skips AWS IAM REVOKE when the probe reports no mapping", async () => {
+    await runAppUninstallDdl(opts, "photos", "Photos", [], false);
+    expect(stmts().some((t) => t.startsWith("AWS IAM REVOKE"))).toBe(false);
   });
 
   it("deletes the app's label DECLARATIONS but never its label rows", async () => {
@@ -687,12 +724,99 @@ describe("uninstall DDL", () => {
     // temporarily removed. Purging a departed app's claims is an explicit
     // admin action, not a side effect of uninstall.
     state.pgRoleExists = true;
-    const ir = photosManifest.infraRequirements;
-    await runAppUninstallDdl(opts, "photos", ir.fileAccess, ir.fileAccessAll);
+    await uninstallPhotos();
     const s = stmts();
     expect(
       s.some((t) => t.includes('delete from "shared"."app_label_keys" where "app_id" =')),
     ).toBe(true);
     expect(s.some((t) => t.includes('"shared"."record_labels"'))).toBe(false);
+  });
+});
+
+describe("install over kept data", () => {
+  it("deletes the kept-data record once the namespace row names the tables", async () => {
+    await installPhotos();
+    const s = stmts();
+    const namespace = s.findIndex((t) =>
+      t.startsWith('insert into "shared"."app_syncable_namespaces"'),
+    );
+    const record = s.findIndex((t) => t.startsWith('delete from "shared"."retained_app_data"'));
+    expect(record).toBeGreaterThan(namespace);
+    // Adopted, not recreated: every create in the install is IF NOT EXISTS.
+    expect(s.some((t) => t.includes("DROP SCHEMA"))).toBe(false);
+  });
+});
+
+describe("delete-data DDL", () => {
+  it("drops the schema, the mapping and the role, and deletes the record last", async () => {
+    state.pgRoleExists = true;
+    state.iamMappingExists = true;
+    await runAppDataDeleteDdl(opts, "photos");
+    const s = stmts();
+    const drop = s.indexOf("DROP SCHEMA IF EXISTS app_photos CASCADE");
+    const revoke = s.indexOf(
+      `AWS IAM REVOKE "starkeep_app_photos" FROM 'arn:aws:iam::111122223333:role/starkeep-app-photos-role'`,
+    );
+    const dropRole = s.indexOf('DROP ROLE "starkeep_app_photos"');
+    const record = s.findIndex((t) => t.startsWith('delete from "shared"."retained_app_data"'));
+    expect(drop).toBeGreaterThanOrEqual(0);
+    expect(revoke).toBeGreaterThan(drop);
+    expect(dropRole).toBeGreaterThan(revoke);
+    expect(record).toBeGreaterThan(dropRole);
+    expect(s.some((t) => t.includes("DROP SCHEMA shared"))).toBe(false);
+  });
+
+  it("is a no-op replay when the role and mapping are already gone", async () => {
+    await runAppDataDeleteDdl(opts, "photos");
+    const s = stmts();
+    expect(s.some((t) => t.startsWith("AWS IAM REVOKE"))).toBe(false);
+    expect(s.some((t) => t.startsWith("DROP ROLE"))).toBe(false);
+  });
+});
+
+describe("counting kept cloud data", () => {
+  it("counts live rows per table and the files, and reports a missing table as zero", async () => {
+    const columns = [{ name: "id", type: "text" as const, primaryKey: true, notNull: true }];
+    const tables = [
+      appSyncableTableInfo("captions", columns),
+      appSyncableTableInfo("gone", columns),
+      FILE_RECORDS_TABLE_INFO,
+    ];
+    state.answers = [
+      {
+        match: 'from "shared"."retained_app_data"',
+        rows: [
+          {
+            app_id: "photos",
+            name: "Photos",
+            tables_json: JSON.stringify(tables),
+            files_enabled: true,
+            retained_at: "2026-11-17T10:00:00Z",
+          },
+        ],
+      },
+      {
+        match: 'from "information_schema"."tables"',
+        rows: [{ table_name: "captions" }, { table_name: "_starkeep_sync_records" }],
+      },
+      { match: 'from "app_photos"."_starkeep_sync_records"', rows: [{ n: "3", bytes: "4096" }] },
+      { match: 'from "app_photos"."captions"', rows: [{ n: "12" }] },
+    ];
+    const counts = await countRetainedAppDataDsql(opts, "photos");
+    expect(counts).toMatchObject({
+      tables: [
+        { name: "captions", rowCount: 12 },
+        { name: "gone", rowCount: 0 },
+      ],
+      totalRows: 12,
+      files: { count: 3, totalBytes: 4096 },
+    });
+    expect(stmts().filter((t) => t.includes('from "app_photos"."captions"'))[0]).toContain(
+      '"deleted_at" is null',
+    );
+  });
+
+  it("answers null when the cloud keeps no data for the app", async () => {
+    expect(await countRetainedAppDataDsql(opts, "photos")).toBeNull();
   });
 });
