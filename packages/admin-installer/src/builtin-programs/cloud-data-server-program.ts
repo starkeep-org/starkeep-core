@@ -73,10 +73,14 @@ import {
 // ---------------------------------------------------------------------------
 const GATEWAY_THROTTLE_RATE_LIMIT = 50; // steady-state req/s across the whole shared stage
 const GATEWAY_THROTTLE_BURST_LIMIT = 100; // token-bucket burst allowance
-// The anonymous OAuth endpoints get a tighter limit of their own.
+// The anonymous OAuth endpoints get a tighter limit of their own. A client
+// reads the protected resource metadata once per connection, so the limit
+// costs it nothing, and each read queries DSQL.
 const OAUTH_THROTTLE_RATE_LIMIT = 5;
 const OAUTH_THROTTLE_BURST_LIMIT = 10;
+const OAUTH_PRM_ROUTE_KEY = `GET ${OAUTH_PRM_PREFIX}/apps/{appId}/{path+}`;
 const OAUTH_THROTTLED_ROUTE_KEYS = [
+  OAUTH_PRM_ROUTE_KEY,
   `GET ${CONNECT_AUTHORIZE_ROUTE}`,
   `POST ${CONNECT_AUTHORIZE_APPROVE_ROUTE}`,
   `POST ${CONNECT_TOKEN_ROUTE}`,
@@ -1007,7 +1011,7 @@ export function buildCloudDataServerProgram(
     // CloudFront only and the rest on the execute-api hostname only.
     const oauthRoutes = (
       [
-        ["route-oauth-protected-resource", `GET ${OAUTH_PRM_PREFIX}/apps/{appId}/{path+}`],
+        ["route-oauth-protected-resource", OAUTH_PRM_ROUTE_KEY],
         ["route-oauth-authorization-server", `GET ${OAUTH_AS_METADATA_ROUTE}`],
         ["route-connect-authorize", `GET ${CONNECT_AUTHORIZE_ROUTE}`],
         ["route-connect-authorize-approve", `POST ${CONNECT_AUTHORIZE_APPROVE_ROUTE}`],
