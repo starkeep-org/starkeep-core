@@ -447,12 +447,14 @@ export async function deleteRecord(id: string): Promise<string[]> {
  * app's own rows that point at a record: a note names its file only by
  * `record_id`. The app deletes those rows itself, from the ids the record
  * delete answers. The record goes first, so a failed delete leaves the note in
- * place. Restoring the file does not bring its note back.
+ * place. Restoring the file does not bring its note back. Answers the ids of
+ * every record the delete took.
  */
-export async function deleteFile(id: string): Promise<void> {
+export async function deleteFile(id: string): Promise<string[]> {
   const ids = await deleteRecord(id);
   // The table delete matches one value per column, so one request per note.
   for (const recordId of ids) await deleteNote(recordId);
+  return ids;
 }
 
 // ---------------------------------------------------------------------------
@@ -469,22 +471,22 @@ export async function recomputeMetadata(id: string): Promise<void> {
   );
 }
 
-/** `GET /data/metadata/example`: the category table, largest first. */
+/** `GET /data/metadata/:category`: the category table, largest first. */
 export async function queryMetadata(): Promise<Record<string, unknown>[]> {
   return expectOk(
     await data<{ rows: Record<string, unknown>[] }>(
       "GET",
-      `/data/metadata/example${q({ order: "word_count.desc.nullslast", limit: 10 })}`,
+      `/data/metadata/${EXAMPLE_CATEGORY}${q({ order: "word_count.desc.nullslast", limit: 10 })}`,
     ),
   ).rows;
 }
 
-/** `GET /data/metadata/example?aggregate=…`: totals over the whole table. */
+/** `GET /data/metadata/:category?aggregate=…`: totals over the whole table. */
 export async function metadataTotals(): Promise<Record<string, unknown>> {
   const body = expectOk(
     await data<{ groups: Record<string, unknown>[] }>(
       "GET",
-      `/data/metadata/example${q({
+      `/data/metadata/${EXAMPLE_CATEGORY}${q({
         aggregate: JSON.stringify({
           files: { fn: "count" },
           words: { fn: "sum", col: "word_count" },

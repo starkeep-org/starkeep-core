@@ -95,7 +95,8 @@ interface RecordRow {
   id: string;
   original_filename?: string | null;
   created_at?: string;
-  labels?: { key: string; value?: string | null }[];
+  /** As both data servers send it: `key` bare, `label` namespaced as `<app_id>/<key>`. */
+  labels?: { app_id: string; key: string; value?: string | null }[];
   metadata?: Record<string, unknown>;
 }
 
@@ -104,7 +105,10 @@ function summarize(r: RecordRow) {
     id: r.id,
     name: r.original_filename ?? null,
     created: r.created_at ?? null,
-    tags: (r.labels ?? []).filter((l) => l.key.endsWith(`/${LABEL_KEYS.tag}`)).map((l) => l.value),
+    // The app's own `tag` key only: another app may declare a `tag` key too.
+    tags: (r.labels ?? [])
+      .filter((l) => l.app_id === APP_ID && l.key === LABEL_KEYS.tag)
+      .map((l) => l.value),
     metrics: r.metadata ?? null,
   };
 }

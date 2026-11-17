@@ -386,8 +386,11 @@ test("Deleted: a deletion appears in the reconcile, restores, and takes derived 
   await expect(table("Example files")).toContainText("uploaded.skexample");
   await expectLogged("POST", /^\/data\/records\/[^/]+\/restore$/, 200);
 
-  // Deleting a record deletes its derived copies with it.
+  // Deleting a record deletes its derived copies with it, and the open copy
+  // goes with it: the panel empties, and the page reports the delete as done.
+  await click("Open hello-upper.skexample", "Open");
   await click("Delete hello.skexample", "Delete");
+  await expect(page.getByText("Select a file with its Open button.")).toBeVisible();
   await expect(table("Example files")).not.toContainText("hello.skexample");
   await expect(table("Example files")).not.toContainText("hello-upper.skexample");
   await expect(table("Deleted files")).toContainText("hello.skexample");
@@ -397,6 +400,13 @@ test("Deleted: a deletion appears in the reconcile, restores, and takes derived 
   // note delete answers 404, and the two requests run in the order of the ids.
   await expect(table("Notes")).not.toContainText("first note");
   await expectLoggedAny("DELETE", /^\/app-data\/db\/notes$/, 200);
+
+  // With nothing open, "Copies of the selected file" has no file to ask about.
+  await page.getByLabel("Show").selectOption("children");
+  await page.getByRole("button", { name: "Apply filter", exact: true }).click();
+  await expect(statusLine()).toHaveText("Filter failed: select a file first");
+  await page.getByLabel("Show").selectOption("all");
+  await click("Apply filter", "Filter");
 
   // The platform's default window, read through GET /data/trash.
   await expect(await cell("Trash", "Retention window", "Value")).toHaveText("30 days");
@@ -451,8 +461,12 @@ test("MCP: a local client creates, lists, reads, tags and notes files over loopb
   expect(await tool("read_file", { recordId: created.id })).toBe("Written by an MCP client.");
 
   await tool("tag_file", { recordId: created.id, tag: "mcp" });
-  const tagged = JSON.parse(await tool("list_files", { tag: "mcp" })) as { id: string }[];
+  const tagged = JSON.parse(await tool("list_files", { tag: "mcp" })) as {
+    id: string;
+    tags: string[];
+  }[];
   expect(tagged.map((f) => f.id)).toEqual([created.id]);
+  expect(tagged[0]!.tags).toEqual(["mcp"]);
 
   await tool("write_note", { recordId: created.id, text: "an MCP note" });
   expect(await tool("list_notes")).toContain("an MCP note");
