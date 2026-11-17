@@ -40,7 +40,7 @@ import { CloudAddress } from "../components/CloudAddress";
 import { CustomDomainSection } from "../components/CustomDomainSection";
 import { LocalFoldersModal, type Watch } from "../components/LocalFoldersModal";
 import { CommandOutputModal } from "../components/CommandOutputModal";
-import { targetsOf, type LocalAppEntry } from "../lib/app-types";
+import { targetsOf, type KeptAppData, type LocalAppEntry } from "../lib/app-types";
 import {
   initiateAuth,
   respondNewPasswordChallenge,
@@ -65,14 +65,17 @@ export function DashboardPage() {
   // Discovered apps (from /api/apps/list). Membership in the local vs. cloud
   // sections is derived from each manifest's `targets` (default ["local"]).
   const [apps, setApps] = useState<LocalAppEntry[] | null>(null);
+  // Data that uninstalls kept on this machine.
+  const [kept, setKept] = useState<KeptAppData[]>([]);
   const [appsError, setAppsError] = useState<string | null>(null);
   const refreshApps = useCallback(async () => {
     setAppsError(null);
     try {
       const res = await fetch("/api/apps/list");
       if (!res.ok) throw new Error(`list failed: ${res.status}`);
-      const body = (await res.json()) as { apps: LocalAppEntry[] };
+      const body = (await res.json()) as { apps: LocalAppEntry[]; kept?: KeptAppData[] };
       setApps(body.apps);
+      setKept(body.kept ?? []);
     } catch (err) {
       setAppsError(err instanceof Error ? err.message : String(err));
     }
@@ -531,6 +534,7 @@ export function DashboardPage() {
 
           <LocalAppsSection
             apps={localApps}
+            kept={kept}
             refresh={refreshApps}
             localOnline={localOnline}
             leading={

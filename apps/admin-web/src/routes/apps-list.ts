@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { DEFAULT_APPS_DIR, expandHome } from "@starkeep/admin-installer/app-discovery";
-import { pinnedSourceState, pinsOf, readRegistry, scanApps } from "../lib/app-scan";
+import { pinnedSourceState, pinsOf, readKeptData, readRegistry, scanApps } from "../lib/app-scan";
 import type { LocalAppEntry, ManifestSummary } from "../lib/app-types";
 
 /**
@@ -18,7 +18,7 @@ export async function GET() {
   // That is not the same fact as "the registry has no row for this app", and
   // collapsing the two made every card read "Not installed" whenever the data
   // server was down, which is the opposite of the truth for installed apps.
-  const registry = await readRegistry();
+  const [registry, kept] = await Promise.all([readRegistry(), readKeptData()]);
   const { apps: scanned, problems, dirs } = scanApps({ pinned: pinsOf(registry) });
   const scannedById = new Map(scanned.map((s) => [s.appId, s]));
   const registryIds = new Set((registry ?? []).map((r) => r.appId));
@@ -68,5 +68,11 @@ export async function GET() {
     });
   }
 
-  return Response.json({ apps, problems, dirs, dataServerReachable: registry !== null });
+  return Response.json({
+    apps,
+    problems,
+    dirs,
+    kept,
+    dataServerReachable: registry !== null,
+  });
 }

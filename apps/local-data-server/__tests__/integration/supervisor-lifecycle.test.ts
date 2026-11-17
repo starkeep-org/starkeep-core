@@ -323,6 +323,61 @@ describe("rescan() dropping an app during its drain", () => {
   }, 20_000);
 });
 
+describe("stopAppAndDrain()", () => {
+  // Deleting an app's data clears its watermarks. A drain that `rescan()` left
+  // running would write them back after the deletion, so the deletion waits on
+  // this until nothing the app's engine started is still on the wire.
+  it("resolves only after the drain rescan() left running has finished", async () => {
+    let bbbInFlight = 0;
+    const server = createServer((req, res) => {
+      const forBbb = (req.url ?? "").includes("/apps/bbb-app/");
+      if (forBbb) bbbInFlight += 1;
+      setTimeout(() => {
+        if (forBbb) bbbInFlight -= 1;
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "nope" }));
+      }, 150);
+      req.resume();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+
+    let installed = [{ appId: "bbb-app" }];
+    try {
+      supervisor = await build({
+        apps: [{ appId: "bbb-app" }],
+        installed: () => installed,
+        exchangeIntervalMs: 5,
+        cloudUrl: `http://127.0.0.1:${port}`,
+      });
+      supervisor.start();
+      const deadline = Date.now() + 5_000;
+      while (bbbInFlight === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(bbbInFlight, "a round should be in flight for this to mean anything").toBeGreaterThan(
+        0,
+      );
+
+      installed = [];
+      supervisor.rescan();
+      await supervisor.stopAppAndDrain("bbb-app");
+      expect(bbbInFlight, "stopAppAndDrain resolved with a round still on the wire").toBe(0);
+    } finally {
+      await supervisor?.stop();
+      supervisor = null;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 20_000);
+
+  it("resolves at once for an app with no engine", async () => {
+    supervisor = await build({ apps: [] });
+    supervisor.start();
+    await supervisor.stopAppAndDrain("never-installed");
+  });
+});
+
 describe("the credential on outbound sync", () => {
   /**
    * Every data-plane call carries this machine's device token and nothing

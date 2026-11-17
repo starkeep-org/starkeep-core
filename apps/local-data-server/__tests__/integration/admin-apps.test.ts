@@ -203,58 +203,83 @@ describe("install", () => {
 describe("uninstall", () => {
   let app: InstalledApp;
   let sharedRecordId: string;
+  const filesDir = () => join(server.starkeepDir, "objects", "apps", "doomed-app");
+
+  async function notes(a: InstalledApp): Promise<Array<Record<string, unknown>>> {
+    const query = await a.fetch(
+      `/app-data/db/notes?where=${encodeURIComponent(JSON.stringify({ note_id: "kept" }))}`,
+    );
+    expect(query.status).toBe(200);
+    return ((await query.json()) as { rows: Array<Record<string, unknown>> }).rows;
+  }
+
+  async function retainedIds(): Promise<string[]> {
+    const res = await fetch(`${server.url}/admin/retained-app-data`);
+    const { retained } = (await res.json()) as { retained: Array<{ appId: string }> };
+    return retained.map((r) => r.appId);
+  }
+
+  function syncStateKeys(): string[] {
+    const db = new DatabaseSync(join(server.starkeepDir, "data.db"), { readOnly: true });
+    try {
+      return (
+        db.prepare("SELECT key FROM sync_state WHERE key LIKE 'doomed-app:%'").all() as Array<{
+          key: string;
+        }>
+      ).map((r) => r.key);
+    } finally {
+      db.close();
+    }
+  }
+
+  function seedSyncState(): void {
+    const db = new DatabaseSync(join(server.starkeepDir, "data.db"));
+    try {
+      // The table exists only once a sync engine has run; this server has no cloud.
+      db.exec(
+        "CREATE TABLE IF NOT EXISTS sync_state (key text primary key, value_json text not null, updated_at integer not null)",
+      );
+      db.prepare(
+        "INSERT OR REPLACE INTO sync_state (key, value_json, updated_at) VALUES (?, ?, 0)",
+      ).run("doomed-app:peer_watermarks", "{}");
+    } finally {
+      db.close();
+    }
+  }
 
   beforeAll(async () => {
     app = await installApp(server, testAppManifest({ id: "doomed-app" }));
     const created = await createRecordWithBytes(app, { fileName: "survivor.jpg" });
     sharedRecordId = created.record.id;
-    // Leave app-specific data behind too.
     await app.fetch("/app-data/db/notes", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ row: { note_id: "doomed", body: "bye" } }),
+      body: JSON.stringify({ row: { note_id: "kept", body: "still here" } }),
     });
     await putAppFile(app, "keep/me.bin", "app private bytes");
   });
 
-  it("drops tables, grants, namespace, and the files prefix — shared records survive", async () => {
-    const before = registryTableNames();
-    expect(before).toContain("doomed_app_syncable_notes");
-
-    const res = await fetch(`${server.url}/admin/apps/doomed-app`, { method: "DELETE" });
+  it("keeps the app's tables and files, and revokes its identity", async () => {
+    // A body asking for deletion is ignored: uninstall has no destructive flag.
+    const res = await fetch(`${server.url}/admin/apps/doomed-app`, {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ deleteData: true, retainData: false }),
+    });
     expect(res.status).toBe(200);
 
-    // Registry row gone.
     const list = await fetch(`${server.url}/admin/apps`);
     const { apps } = (await list.json()) as { apps: Array<{ appId: string }> };
     expect(apps.some((a) => a.appId === "doomed-app")).toBe(false);
 
-    // App tables gone.
-    const after = registryTableNames();
-    expect(after.some((n) => n.startsWith("doomed_app_syncable_"))).toBe(false);
+    expect(registryTableNames()).toContain("doomed_app_syncable_notes");
+    expect((await stat(filesDir())).isDirectory()).toBe(true);
+    expect(await retainedIds()).toContain("doomed-app");
 
-    // The app's HMAC identity is revoked.
     const denied = await app.fetch("/data/types");
     expect(denied.status).toBe(401);
 
-    // Syncable files prefix removed from object storage (async deletion —
-    // poll). The uninstall contract targets apps/<id>/syncable/, not the
-    // whole apps/<id>/ subtree.
-    const prefixPath = join(server.starkeepDir, "objects", "apps", "doomed-app", "syncable");
-    const deadline = Date.now() + 5_000;
-    let gone = false;
-    while (Date.now() < deadline) {
-      try {
-        await stat(prefixPath);
-      } catch {
-        gone = true;
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    expect(gone).toBe(true);
-
-    // Shared record survives, visible to an all-access identity.
+    // Shared records survive too, as they always have.
     const db = new DatabaseSync(join(server.starkeepDir, "data.db"), { readOnly: true });
     try {
       const row = db
@@ -267,18 +292,93 @@ describe("uninstall", () => {
     }
   }, 15_000);
 
+  it("previews kept data by counts", async () => {
+    const res = await fetch(`${server.url}/admin/apps/doomed-app/data-preview`);
+    expect(res.status).toBe(200);
+    const preview = (await res.json()) as {
+      installed: boolean;
+      retained: boolean;
+      totalRows: number;
+      tables: Array<{ name: string; rowCount: number }>;
+      files: { count: number; totalBytes: number } | null;
+      cloudCopy: string;
+    };
+    expect(preview.installed).toBe(false);
+    expect(preview.retained).toBe(true);
+    expect(preview.tables.find((t) => t.name === "notes")?.rowCount).toBe(1);
+    expect(preview.totalRows).toBe(1);
+    expect(preview.files).toEqual({ count: 1, totalBytes: "app private bytes".length });
+    // This server has no cloud, so nothing ever exchanged the app's data.
+    expect(preview.cloudCopy).toBe("none");
+  });
+
   it("uninstall of a never-installed app cleanly no-ops", async () => {
     const res = await fetch(`${server.url}/admin/apps/never-was`, { method: "DELETE" });
     expect(res.status).toBe(200);
     expect(((await res.json()) as { ok: boolean }).ok).toBe(true);
   });
 
-  it("reinstall after uninstall mints a fresh secret and a clean ledger", async () => {
+  it("a reinstall adopts the kept rows and clears the kept-data record", async () => {
     const again = await installApp(server, testAppManifest({ id: "doomed-app" }));
     expect(again.hmacSecret).not.toBe(app.hmacSecret);
-    const ok = await again.fetch("/data/types");
-    expect(ok.status).toBe(200);
-    // Cleanup for other files' sake.
+    expect(await notes(again)).toMatchObject([{ note_id: "kept", body: "still here" }]);
+    expect(await retainedIds()).not.toContain("doomed-app");
+    app = again;
+  });
+
+  it("refuses to delete an installed app's data", async () => {
+    const res = await fetch(`${server.url}/admin/apps/doomed-app/delete-data`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: "doomed-app" }),
+    });
+    expect(res.status).toBe(409);
+    expect(registryTableNames()).toContain("doomed_app_syncable_notes");
+  });
+
+  it("refuses a delete whose confirmation does not name the app", async () => {
+    await fetch(`${server.url}/admin/apps/doomed-app`, { method: "DELETE" });
+    for (const body of [{}, { confirm: "doomed" }, { confirm: true }]) {
+      const res = await fetch(`${server.url}/admin/apps/doomed-app/delete-data`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(400);
+    }
+    expect(registryTableNames()).toContain("doomed_app_syncable_notes");
+    expect(await retainedIds()).toContain("doomed-app");
+  });
+
+  it("deletes kept data, files and sync state on a confirmed request", async () => {
+    seedSyncState();
+    expect(syncStateKeys()).toContain("doomed-app:peer_watermarks");
+
+    const res = await fetch(`${server.url}/admin/apps/doomed-app/delete-data`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: "doomed-app" }),
+    });
+    expect(res.status).toBe(200);
+
+    expect(registryTableNames().some((n) => n.startsWith("doomed_app_syncable_"))).toBe(false);
+    await expect(stat(filesDir())).rejects.toThrow();
+    expect(await retainedIds()).not.toContain("doomed-app");
+    expect(syncStateKeys()).toEqual([]);
+
+    const preview = await fetch(`${server.url}/admin/apps/doomed-app/data-preview`);
+    expect(preview.status).toBe(404);
+    const again = await fetch(`${server.url}/admin/apps/doomed-app/delete-data`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: "doomed-app" }),
+    });
+    expect(again.status).toBe(404);
+  });
+
+  it("a reinstall after deletion starts empty", async () => {
+    const fresh = await installApp(server, testAppManifest({ id: "doomed-app" }));
+    expect(await notes(fresh)).toEqual([]);
     await fetch(`${server.url}/admin/apps/doomed-app`, { method: "DELETE" });
   });
 });

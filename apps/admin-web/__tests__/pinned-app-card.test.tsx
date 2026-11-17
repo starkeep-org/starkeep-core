@@ -105,7 +105,7 @@ describe("a pinned folder that is gone", () => {
     show({ ...installed, sourceState: "missing" });
     const note = screen.getByText(/Source folder not found/).textContent;
     expect(note).toContain("/apps/dice");
-    expect(note).toContain("Uninstalling deletes its data on this machine.");
+    expect(note).toContain("Uninstalling keeps its data on this machine.");
     expect((screen.getByRole("button", { name: "Start Dice" }) as HTMLButtonElement).disabled).toBe(
       true,
     );
@@ -115,15 +115,13 @@ describe("a pinned folder that is gone", () => {
     expect(screen.queryByRole("menuitem", { name: "Update from folder" })).toBeNull();
   });
 
-  it("warns that Uninstall deletes the app's data on this machine, and uninstalls nothing on cancel", async () => {
+  it("says Uninstall keeps the app's data, and uninstalls nothing on cancel", async () => {
     serve();
-    const confirm = vi.fn(() => false);
-    vi.stubGlobal("confirm", confirm);
     show({ ...installed, sourceState: "missing" });
-    await chooseFromMenu("Uninstall");
-    expect(confirm).toHaveBeenCalledWith(
-      expect.stringContaining("This deletes Dice's own data on this machine"),
-    );
+    const user = await chooseFromMenu("Uninstall");
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toContain("Dice’s own data stays on this machine");
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
     expect(vi.mocked(fetch).mock.calls.map(([url]) => url)).not.toContain("/api/apps/uninstall");
   });
 });

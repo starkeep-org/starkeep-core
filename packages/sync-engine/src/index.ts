@@ -196,6 +196,7 @@ export {
 export {
   createMemoryUploadQueueStore,
   createSqliteUploadQueueStore,
+  deleteSqliteUploadQueueChannel,
   type UploadQueueStore,
   type UploadQueueEntry,
   type QueuedFile,

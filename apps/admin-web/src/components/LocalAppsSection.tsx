@@ -7,6 +7,7 @@ import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
 import { APPS_CHANGED_EVENT } from "@/components/AppDiscovery";
 import { CommandOutput } from "@/components/CommandOutput";
 import { ConsentDialog } from "@/components/ConsentDialog";
+import { DeleteDataDialog, KeptDataNotice, UninstallDialog } from "@/components/AppDataDialogs";
 import { useAppUpdate } from "@/components/AppUpdate";
 import { runInstallStream } from "@/lib/install-stream-client";
 import { ACTION_OCCASIONAL, ACTION_OPEN, ACTION_START } from "@/lib/action-colors";
@@ -14,16 +15,20 @@ import {
   type DaemonStatus,
   type DependencyPlan,
   type InstallStep,
+  type KeptAppData,
   type LocalAppEntry,
 } from "@/lib/app-types";
 
 export function LocalAppsSection({
   apps,
+  kept = [],
   refresh,
   localOnline,
   leading,
 }: {
   apps: LocalAppEntry[] | null;
+  /** Data that uninstalls kept on this machine, by app. */
+  kept?: KeptAppData[];
   refresh: () => Promise<void>;
   // Whether the local data server is reachable, owned by the Dashboard so the
   // Data Server card and these cards cannot disagree. Installs route through
@@ -38,6 +43,11 @@ export function LocalAppsSection({
   // alert offers to move the app to another port.
   const [portInUse, setPortInUse] = useState<{ appId: string; port: number } | null>(null);
   const [pendingConsent, setPendingConsent] = useState<LocalAppEntry | null>(null);
+  // The app whose uninstall dialog is open, and the app whose kept data the
+  // delete dialog is about.
+  const [uninstallFor, setUninstallFor] = useState<LocalAppEntry | null>(null);
+  const [deleteDataFor, setDeleteDataFor] = useState<{ appId: string; name: string } | null>(null);
+  const keptIds = new Set(kept.map((k) => k.appId));
   const [busyAppId, setBusyAppId] = useState<string | null>(null);
   const [runStatus, setRunStatus] = useState<Record<string, DaemonStatus>>({});
   // App whose install-step ledger is currently displayed (null when closed).
@@ -218,16 +228,9 @@ export function LocalAppsSection({
     }
   };
 
+  // Uninstall keeps the app's own tables and files on this machine, so the
+  // dialog asks for no typed confirmation. Deleting them is "Delete data…".
   const handleUninstall = async (entry: LocalAppEntry) => {
-    // Uninstall drops the app's own tables and files on this machine, and
-    // writes no tombstones, so the deletion stays here. Shared records stay.
-    const name = entry.manifest.name ?? entry.appId;
-    if (
-      !confirm(
-        `Uninstall ${name}? This deletes ${name}'s own data on this machine: its tables and files. Reinstalling may not bring it back. Records it shared with other apps stay.`,
-      )
-    )
-      return;
     setBusyAppId(entry.appId);
     setError(null);
     try {
@@ -245,6 +248,7 @@ export function LocalAppsSection({
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusyAppId(null);
+      setUninstallFor(null);
     }
   };
 
@@ -383,6 +387,9 @@ export function LocalAppsSection({
           // not a warning. It replaces the description, which comes from the
           // approved manifest too.
           const sourceInvalid = installed && entry.sourceState === "invalid";
+          // Data an earlier uninstall kept. Only a registry answer of "not
+          // installed" offers to delete it.
+          const keptData = entry.status === "not_installed" && keptIds.has(entry.appId);
 
           // One primary button per state: install what is not installed, start
           // what is stopped, open what is running. Everything else — stopping,
@@ -402,7 +409,7 @@ export function LocalAppsSection({
             });
             actions.push({
               label: installBusy ? "Uninstalling…" : "Uninstall",
-              onSelect: () => handleUninstall(entry),
+              onSelect: () => setUninstallFor(entry),
               disabled: installBusy || running || busy,
               destructive: true,
               title: running ? "Stop the app before uninstalling" : undefined,
@@ -412,6 +419,14 @@ export function LocalAppsSection({
           // status may hide an installed app.
           if (entry.bundledExample && entry.status === "not_installed") {
             actions.push({ label: "Hide", onSelect: () => handleHide(entry) });
+          }
+          if (keptData) {
+            actions.push({
+              label: "Delete data…",
+              onSelect: () => setDeleteDataFor({ appId: entry.appId, name }),
+              disabled: installBusy,
+              destructive: true,
+            });
           }
 
           return (
@@ -434,7 +449,7 @@ export function LocalAppsSection({
                 sourceMissing ? (
                   <p className="text-xs break-all text-destructive">
                     Source folder not found: <code>{entry.sourceDir}</code>. Restore the folder to
-                    start the app. Uninstalling deletes its data on this machine.
+                    start the app. Uninstalling keeps its data on this machine.
                   </p>
                 ) : sourceChanged ? (
                   <p className="text-xs text-muted-foreground">
@@ -491,6 +506,7 @@ export function LocalAppsSection({
                       Not installed
                     </Badge>
                   )}
+                  {keptData && <DataKeptBadge />}
                 </>
               }
               primary={
@@ -565,6 +581,38 @@ export function LocalAppsSection({
             />
           );
         })}
+        {apps !== null &&
+          kept
+            .filter((k) => !apps.some((a) => a.appId === k.appId))
+            .map((k) => (
+              // Kept data whose app no configured folder holds. The card keeps
+              // the data visible and deletable after the folder is gone.
+              <AppCard
+                key={`kept-${k.appId}`}
+                name={k.name}
+                description={
+                  <>
+                    An earlier uninstall kept this app&rsquo;s data on this machine. Add the
+                    app&rsquo;s folder in Discover apps to reinstall it.
+                  </>
+                }
+                badges={
+                  <>
+                    <Badge variant="outline" className="text-xs">
+                      Not installed
+                    </Badge>
+                    <DataKeptBadge />
+                  </>
+                }
+                actions={[
+                  {
+                    label: "Delete data…",
+                    onSelect: () => setDeleteDataFor({ appId: k.appId, name: k.name }),
+                    destructive: true,
+                  },
+                ]}
+              />
+            ))}
       </AppCardGrid>
 
       {pendingConsent && (
@@ -572,8 +620,35 @@ export function LocalAppsSection({
           entry={pendingConsent}
           onApprove={() => void handleApprove(pendingConsent)}
           onCancel={() => setPendingConsent(null)}
-        />
+        >
+          {keptIds.has(pendingConsent.appId) && (
+            <KeptDataNotice
+              appId={pendingConsent.appId}
+              name={pendingConsent.manifest.name ?? pendingConsent.appId}
+            />
+          )}
+        </ConsentDialog>
       )}
+
+      <UninstallDialog
+        appId={uninstallFor?.appId ?? null}
+        name={uninstallFor?.manifest.name ?? uninstallFor?.appId ?? ""}
+        busy={uninstallFor !== null && busyAppId === uninstallFor.appId}
+        onConfirm={() => {
+          if (uninstallFor) void handleUninstall(uninstallFor);
+        }}
+        onCancel={() => setUninstallFor(null)}
+      />
+
+      <DeleteDataDialog
+        appId={deleteDataFor?.appId ?? null}
+        name={deleteDataFor?.name ?? ""}
+        onDeleted={() => {
+          setDeleteDataFor(null);
+          void refresh();
+        }}
+        onCancel={() => setDeleteDataFor(null)}
+      />
 
       <Dialog
         open={depsRun !== null}
@@ -601,6 +676,19 @@ export function LocalAppsSection({
         }}
       />
     </div>
+  );
+}
+
+/** Marks an app whose data an earlier uninstall kept on this machine. */
+function DataKeptBadge() {
+  return (
+    <Badge
+      variant="secondary"
+      className="text-xs"
+      title="An earlier uninstall kept this app's data. Reinstalling brings it back."
+    >
+      Data kept
+    </Badge>
   );
 }
 

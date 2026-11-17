@@ -5,8 +5,8 @@
  * the install consent gate shows what the manifest asked for, the daemon route
  * really starts and stops a process, a record one app writes is visible to
  * another and its app-private rows are not, identical bytes dedup, uninstall
- * drops app data and keeps shared records, and a corrupted HMAC secret turns
- * into a refusal the app surfaces.
+ * keeps app data and shared records, Delete data deletes the app data, and a
+ * corrupted HMAC secret turns into a refusal the app surfaces.
  *
  * Probe rather than a real application, because none of these claims is about
  * any particular app and core must not assume one exists. Photos asserts the
@@ -293,26 +293,24 @@ test("re-uploading identical bytes dedups at the platform layer", async ({ page 
   expect(await page.getByAltText(FIXTURE_NAME).count()).toBe(countBefore);
 });
 
-test("uninstall: app data is gone, shared records survive in Drive", async ({ page }) => {
+/** Stop Probe and uninstall it through its card and the uninstall dialog. */
+async function uninstallProbe(page: Page): Promise<Locator> {
   await page.goto(adminUrl());
   const card = probeCard(page);
   await cardMenuAction(page, card, "Stop");
   await expect(card.getByRole("button", { name: /^Start / })).toBeVisible({ timeout: 60_000 });
-
-  page.on("dialog", (dialog) => void dialog.accept());
   await cardMenuAction(page, card, "Uninstall");
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("data stays on this machine");
+  await dialog.getByRole("button", { name: "Uninstall" }).click();
   await expect(card.getByRole("button", { name: /^Install / })).toBeVisible({
     timeout: 60_000,
   });
+  return card;
+}
 
-  // The shared record survives the uninstall.
-  await page.goto(driveUrl());
-  await expect(page.getByRole("row").filter({ hasText: FIXTURE_NAME }).first()).toBeVisible();
-});
-
-test("reinstall re-exposes shared records; app-private rows are gone", async ({ page }) => {
-  await page.goto(adminUrl());
-  const card = probeCard(page);
+/** Install Probe from its card, start it, and return the note rows it reads. */
+async function reinstallProbe(page: Page, card: Locator): Promise<string> {
   await card.getByRole("button", { name: /^Install / }).click();
   await page.getByRole("button", { name: "Approve & Install" }).click();
   // Exact, because a substring match also finds the "Not installed" badge and
@@ -324,14 +322,47 @@ test("reinstall re-exposes shared records; app-private rows are gone", async ({ 
   probeUrl = url;
 
   await page.goto(probeUrl);
-  // Shared data is visible again through the fresh grant…
+  // Shared data is visible again through the fresh grant.
   await expect(page.getByAltText(FIXTURE_NAME).first()).toBeVisible({ timeout: 120_000 });
-
-  // …but the note lived in the app's own table, which uninstall dropped.
-  const notes = await page.evaluate(async () => {
+  return page.evaluate(async () => {
     const res = await fetch("/api/local-data/app-data/db/probe_notes");
     return res.ok ? await res.text() : `status ${res.status}`;
   });
+}
+
+test("uninstall keeps app data, and shared records survive in Drive", async ({ page }) => {
+  const card = await uninstallProbe(page);
+  await expect(card.getByText("Data kept", { exact: true })).toBeVisible();
+
+  // The shared record survives the uninstall.
+  await page.goto(driveUrl());
+  await expect(page.getByRole("row").filter({ hasText: FIXTURE_NAME }).first()).toBeVisible();
+});
+
+test("reinstall brings back the kept app-private rows", async ({ page }) => {
+  await page.goto(adminUrl());
+  const card = probeCard(page);
+  await card.getByRole("button", { name: /^Install / }).click();
+  // The consent panel says the install reattaches the kept data.
+  await expect(page.getByText("This install brings back Probe’s kept data")).toBeVisible();
+  await page.getByRole("button", { name: "Cancel" }).click();
+
+  const notes = await reinstallProbe(page, card);
+  expect(notes).toContain(NOTE);
+});
+
+test("Delete data removes the kept rows, and a reinstall starts empty", async ({ page }) => {
+  const card = await uninstallProbe(page);
+  await cardMenuAction(page, card, "Delete data…");
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("row");
+  const remove = dialog.getByRole("button", { name: "Delete data" });
+  await expect(remove).toBeDisabled();
+  await dialog.getByRole("textbox").fill("probe");
+  await remove.click();
+  await expect(card.getByText("Data kept", { exact: true })).toBeHidden({ timeout: 30_000 });
+
+  const notes = await reinstallProbe(page, card);
   expect(notes).not.toContain(NOTE);
 });
 

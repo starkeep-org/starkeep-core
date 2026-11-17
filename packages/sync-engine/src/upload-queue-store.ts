@@ -375,6 +375,28 @@ interface SentRow {
   sent_at: number;
 }
 
+/**
+ * Delete every upload-queue row one channel owns: queued, sent, the per-author
+ * cursors and any open batch. Deleting an app's data on a node uses it, because
+ * a queued entry names a file that no longer exists and a sent entry claims the
+ * cloud holds a file this node may need to upload again.
+ *
+ * A database whose queue tables were never created has nothing to delete.
+ */
+export function deleteSqliteUploadQueueChannel(db: RawDatabase, channel: string): void {
+  for (const table of [QUEUE, SENT, CURSOR, BATCH]) {
+    const exists = qb
+      .selectFrom("sqlite_master")
+      .select("name")
+      .where("type", "=", "table")
+      .where("name", "=", table)
+      .compile();
+    if (!db.prepare(exists.sql).get(...(exists.parameters as string[]))) continue;
+    const compiled = qb.deleteFrom(table).where("channel", "=", channel).compile();
+    db.prepare(compiled.sql).run(...(compiled.parameters as string[]));
+  }
+}
+
 export function createSqliteUploadQueueStore(
   options: SqliteUploadQueueStoreOptions,
 ): UploadQueueStore {

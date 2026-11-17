@@ -22,6 +22,7 @@ import { Hono } from "hono";
 import * as appsList from "./routes/apps-list";
 import * as appsInstall from "./routes/apps-install";
 import * as appsUninstall from "./routes/apps-uninstall";
+import * as appsData from "./routes/apps-data";
 import * as appsCloudList from "./routes/apps-cloud-list";
 import * as appsCloudInstall from "./routes/apps-cloud-install";
 import * as appsDependencies from "./routes/apps-dependencies";
@@ -70,6 +71,14 @@ api.post("/apps/:appId/dependencies", (c) =>
 );
 api.get("/apps/:appId/install-status", (c) =>
   appsInstallStatus.GET(c.req.raw, { params: Promise.resolve(c.req.param()) }),
+);
+// The app's own data on this machine, which uninstall keeps: its counts, and
+// the separate action that deletes it.
+api.get("/apps/:appId/data", (c) =>
+  appsData.GET(c.req.raw, { params: Promise.resolve(c.req.param()) }),
+);
+api.post("/apps/:appId/delete-data", (c) =>
+  appsData.POST(c.req.raw, { params: Promise.resolve(c.req.param()) }),
 );
 
 // Cloud setup: the two installs the wizard runs, and the config they write.

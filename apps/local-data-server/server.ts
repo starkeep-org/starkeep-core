@@ -16,14 +16,22 @@ import { createHmac, createHash, randomBytes, randomUUID, timingSafeEqual } from
 import {
   installLocal,
   uninstallLocal,
+  deleteAppDataLocal,
+  AppInstalledError,
+  NoRetainedDataError,
   LocalInstallError,
   ManifestValidationError,
   ProtocolVersionError,
 } from "../../packages/admin-installer/src/local/installer.js";
 import {
+  appRegistryRow,
+  getRetainedAppData,
   listAppRegistry,
   listInstallSteps,
+  listRetainedAppData,
 } from "../../packages/admin-installer/src/local/registry.js";
+import { buildAppDataPreview } from "./app-data-preview.js";
+import { deletePerAppSyncState } from "./per-app-sync-state-store.js";
 import { LOCAL_WATCHER_APP_ID } from "../../packages/admin-installer/src/iam.js";
 import { canonicalSignedPath, APP_SIG_MAX_SKEW_MS } from "../../packages/app-client/src/sign.js";
 import { SqliteDatabaseAdapter } from "../../packages/storage-sqlite/src/adapter.js";
@@ -31,6 +39,7 @@ import { nodeSqliteDriver } from "../../packages/storage-sqlite/src/node-driver.
 import {
   SqliteAppSyncableNamespaceStore,
   SqliteAppSyncableApplier,
+  getAppSyncableNamespace,
   sqliteCompiler as qb,
 } from "../../packages/storage-sqlite/src/index.js";
 import {
@@ -61,6 +70,7 @@ import { createNodeClock, createStarkeepSdk } from "../../packages/sdk/src/sdk.j
 import {
   createSqliteSyncStateStore,
   createChangeNotifier,
+  deleteSqliteUploadQueueChannel,
 } from "../../packages/sync-engine/src/index.js";
 import { setHashFactory } from "@starkeep/storage-adapter";
 import {
@@ -1448,7 +1458,7 @@ async function main() {
       }
 
       // The app admin routes, on the same reasoning. Install writes the
-      // manifest whose `localRun` admin-web's Start spawns, and uninstall
+      // manifest whose `localRun` admin-web's Start spawns, and delete-data
       // drops the app's tables and files. Admin-web and `upgrade-app.sh` call
       // them without an `Origin`; a web page cannot.
       if ((path === "/admin" || path.startsWith("/admin/")) && req.headers.origin !== undefined) {
@@ -4570,20 +4580,114 @@ async function main() {
       }
 
       // DELETE /admin/apps/:appId — run the local uninstaller for an app.
+      // Uninstall keeps the app's data; deleting it is
+      // POST /admin/apps/:appId/delete-data. A request body is ignored, so no
+      // field a caller sends can turn an uninstall into a deletion.
       const uninstallMatch = path.match(/^\/admin\/apps\/([^/]+)$/);
       if (uninstallMatch && req.method === "DELETE") {
         const targetAppId = decodeURIComponent(uninstallMatch[1]!);
-        uninstallLocal(localDb, targetAppId, {
-          deleteFilesPrefix: async (prefix) => {
-            // Storage layout is the FS adapter's basePath/<key>. The app's
-            // files are their own directory tree under apps/<appId>/, so
-            // removing them is just an rm -rf of that subtree.
-            const target = join(objectsBasePath, prefix);
-            await rm(target, { recursive: true, force: true });
-          },
-        });
+        uninstallLocal(localDb, targetAppId);
         // Tear down the per-app sync loop.
         supervisor?.rescan();
+        json(res, { ok: true, appId: targetAppId });
+        return;
+      }
+
+      // GET /admin/retained-app-data — data that uninstalls kept, one entry
+      // per app with no install on this machine. Admin-web lists these so
+      // kept data stays visible after the app's folder is gone.
+      if (path === "/admin/retained-app-data" && req.method === "GET") {
+        const retained = listRetainedAppData(localDb).map((r) => ({
+          appId: r.appId,
+          name: r.name,
+          retainedAt: r.retainedAt,
+          filesEnabled: r.filesEnabled,
+        }));
+        json(res, { retained });
+        return;
+      }
+
+      // GET /admin/apps/:appId/data-preview — counts of the app's own data on
+      // this machine, and whether the cloud holds a copy. Answers for an
+      // installed app (the reinstall notice) and for kept data (the delete
+      // dialog). Counts only: no row values or filenames leave this route.
+      const previewMatch = path.match(/^\/admin\/apps\/([^/]+)\/data-preview$/);
+      if (previewMatch && req.method === "GET") {
+        const targetAppId = decodeURIComponent(previewMatch[1]!);
+        const installed = appRegistryRow(localDb, targetAppId) !== null;
+        const namespace = installed ? getAppSyncableNamespace(localDb, targetAppId) : null;
+        const retained = installed ? null : getRetainedAppData(localDb, targetAppId);
+        const source = namespace ?? retained;
+        if (!source) {
+          res.writeHead(404);
+          json(res, {
+            error: "NoAppData",
+            message: `This machine holds no data for ${targetAppId}.`,
+          });
+          return;
+        }
+        json(res, {
+          installed,
+          retained: retained !== null,
+          ...buildAppDataPreview(localDb, targetAppId, source.tables, source.filesEnabled),
+        });
+        return;
+      }
+
+      // POST /admin/apps/:appId/delete-data — delete the data an uninstall
+      // kept on this machine. Body: `{ confirm: <appId> }`, the id the
+      // operator typed. Refuses an installed app (409), a missing record
+      // (404) and a confirmation that does not match (400). The cloud copy
+      // and other devices' copies stay.
+      const deleteDataMatch = path.match(/^\/admin\/apps\/([^/]+)\/delete-data$/);
+      if (deleteDataMatch && req.method === "POST") {
+        const targetAppId = decodeURIComponent(deleteDataMatch[1]!);
+        const body = JSON.parse((await readBody(req)) || "{}") as { confirm?: unknown };
+        if (body.confirm !== targetAppId) {
+          res.writeHead(400);
+          json(res, {
+            error: "ConfirmationMismatch",
+            message: `Type ${targetAppId} to confirm deleting its data.`,
+          });
+          return;
+        }
+        if (appRegistryRow(localDb, targetAppId)) {
+          res.writeHead(409);
+          json(res, {
+            error: "AppInstalledError",
+            message: new AppInstalledError(targetAppId).message,
+          });
+          return;
+        }
+        // Stop the engine and wait for its drain before anything is deleted:
+        // a drain that finishes afterwards writes the watermarks back.
+        await supervisor?.stopAppAndDrain(targetAppId);
+        try {
+          await deleteAppDataLocal(localDb, targetAppId, {
+            deleteFilesPrefix: async (prefix) => {
+              // Storage layout is the FS adapter's basePath/<key>. The app's
+              // files are their own directory tree under apps/<appId>/.
+              await rm(join(objectsBasePath, prefix), { recursive: true, force: true });
+            },
+            clearSyncState: (appId) => {
+              deletePerAppSyncState(localDb, appId);
+              deleteSqliteUploadQueueChannel(localDb, appId);
+            },
+          });
+        } catch (err) {
+          if (err instanceof AppInstalledError) {
+            res.writeHead(409);
+            json(res, { error: err.name, message: err.message });
+            return;
+          }
+          if (err instanceof NoRetainedDataError) {
+            res.writeHead(404);
+            json(res, { error: err.name, message: err.message });
+            return;
+          }
+          throw err;
+        }
+        console.log(`[admin] deleted kept data for app=${targetAppId}`);
         json(res, { ok: true, appId: targetAppId });
         return;
       }

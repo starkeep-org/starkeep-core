@@ -9,6 +9,7 @@ import {
   type ScanResult,
 } from "@starkeep/admin-installer/app-discovery";
 import { localDataServerUrlFromEnv } from "./local-daemon-urls";
+import type { KeptAppData } from "./app-types";
 
 export type {
   ScannedApp,
@@ -69,6 +70,21 @@ export async function readRegistry(): Promise<RegistryApp[] | null> {
     return ((await res.json()) as { apps: RegistryApp[] }).apps;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Data that uninstalls kept on this machine, one entry per app with no
+ * install. Empty when the local data server could not be asked, because the
+ * cards then show no install state either.
+ */
+export async function readKeptData(): Promise<KeptAppData[]> {
+  try {
+    const res = await fetch(`${localDataServerUrlFromEnv()}/admin/retained-app-data`);
+    if (!res.ok) return [];
+    return ((await res.json()) as { retained: KeptAppData[] }).retained;
+  } catch {
+    return [];
   }
 }
 

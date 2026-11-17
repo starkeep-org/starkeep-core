@@ -389,6 +389,23 @@ function applyLocalSchemaDdl(db: RawDatabase): void {
       .compile().sql,
   );
 
+  // App data kept after uninstall. Uninstall removes the app and keeps its
+  // syncable tables and files; this row records which tables those are once
+  // the namespace row is gone. One row means "kept data with no app installed":
+  // a reinstall adopts the tables and deletes the row, and deleting the data
+  // deletes it too. Additive, so an existing DB gains it on the next start.
+  db.exec(
+    qb.schema
+      .createTable("retained_app_data")
+      .ifNotExists()
+      .addColumn("app_id", "text", (c) => c.primaryKey())
+      .addColumn("name", "text", (c) => c.notNull())
+      .addColumn("tables_json", "text", (c) => c.notNull())
+      .addColumn("files_enabled", "integer", (c) => c.notNull().defaultTo(0))
+      .addColumn("retained_at", "text", (c) => c.notNull().defaultTo(sql`(datetime('now'))`))
+      .compile().sql,
+  );
+
   // Per-category metadata tables on parity with DSQL. Generated from CATEGORIES
   // so adding a category or a column is a single edit in @starkeep/protocol-primitives's
   // core-types.ts. `other` has no metadata columns and gets no table.

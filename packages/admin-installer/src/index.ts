@@ -40,19 +40,24 @@ export type {
 export {
   installLocal,
   uninstallLocal,
+  deleteAppDataLocal,
+  AppInstalledError,
+  NoRetainedDataError,
   LocalInstallError,
   ManifestValidationError,
   ProtocolVersionError,
 } from "./local/installer";
 export { protocolRefusal } from "./protocol-check";
-export type { InstallLocalResult, UninstallLocalOptions } from "./local/installer";
+export type { InstallLocalResult, DeleteAppDataLocalOptions } from "./local/installer";
 export {
   listAppRegistry,
   appRegistryRow,
   updateAppRegistryManifest,
   listInstallSteps,
+  listRetainedAppData,
+  getRetainedAppData,
 } from "./local/registry";
-export type { RegisteredApp, InstallStepRow } from "./local/registry";
+export type { RegisteredApp, InstallStepRow, RetainedAppData } from "./local/registry";
 
 // The cloud registry — the authoritative list of apps installed against a
 // stack. Exported so the tier-3 suite can ask what is deployed instead of

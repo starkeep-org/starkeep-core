@@ -9,14 +9,18 @@ import {
   deleteAccessGrants,
   deleteAppLabelKeys,
   deleteAppRegistry,
+  deleteRetainedAppData,
   dropAppSyncableTables,
   getCompletedSteps,
+  getRetainedAppData,
+  inTransaction,
   insertAccessGrants,
   insertAppLabelKeys,
   insertAppRegistry,
   updateAppRegistryManifest,
   recordStep,
   setAppStatus,
+  upsertRetainedAppData,
   type Operation,
 } from "./registry.js";
 import {
@@ -186,7 +190,16 @@ export function installLocal(
       // Column types travel with the registry row for the same reason they do on
       // the DSQL side: the query parser validates a filter value against its
       // column, and it runs in the data server, which never sees a manifest.
-      upsertAppSyncableNamespace(db, appId, appSyncableNamespaceTables(syncable), syncable.files);
+      //
+      // Data kept by an earlier uninstall becomes this install's data here:
+      // `create_syncable_tables` adopted the kept tables with IF NOT EXISTS, and
+      // the namespace row now names them, so the kept-data record goes in the
+      // same transaction. A kept table the new manifest no longer declares stays
+      // in the database unlisted, the same as a table an upgrade drops.
+      inTransaction(db, () => {
+        upsertAppSyncableNamespace(db, appId, appSyncableNamespaceTables(syncable), syncable.files);
+        deleteRetainedAppData(db, appId);
+      });
     },
     alwaysRun,
   );
@@ -207,28 +220,19 @@ export function installLocal(
 }
 
 /**
- * Uninstall an app locally: drops its access grants and registry row. Shared
- * records produced by the app stay behind — they belong to the data, not the
- * app — matching the cloud-side design.
+ * Uninstall an app locally. Uninstall removes the app and keeps its data.
+ *
+ * It removes the registry row, the access grants, the label-key declarations
+ * and the syncable namespace row. It keeps the app's syncable tables and its
+ * `apps/<appId>/` files, and records them in `retained_app_data` so they stay
+ * visible and a reinstall adopts them. Shared records and label rows the app
+ * wrote also stay; they belong to the data, not the app.
+ *
+ * Deleting the kept data is a separate action: {@link deleteAppDataLocal}.
+ * Nothing on this path deletes app data, so a caller that passes nothing can
+ * never lose it.
  */
-export interface UninstallLocalOptions {
-  /**
-   * Called with the `apps/<appId>/` prefix so the caller can delete any
-   * object-storage entries for the uninstalled app. The prefix spans every
-   * user segment under the app (`apps/<appId>/<userId>/syncable/`): a node
-   * holds one library, plus any `local` files binding has yet to sweep. The installer itself
-   * doesn't know about the storage adapter; the local-data-server wires this
-   * up. Errors here don't roll back the uninstall — the DB cleanup is
-   * authoritative — but they are logged.
-   */
-  deleteFilesPrefix?: (prefix: string) => void | Promise<void>;
-}
-
-export function uninstallLocal(
-  db: RawDatabase,
-  appId: string,
-  options: UninstallLocalOptions = {},
-): void {
+export function uninstallLocal(db: RawDatabase, appId: string): void {
   const existing = appRegistryRow(db, appId);
   if (!existing) {
     // Nothing to do, but clear any lingering step ledger from a failed
@@ -255,32 +259,24 @@ export function uninstallLocal(
     deleteAppLabelKeys(db, appId);
   });
 
-  runStep(db, appId, "uninstall", "drop_syncable_tables", done, () => {
-    const ns = getAppSyncableNamespace(db, appId);
-    if (ns) dropAppSyncableTables(db, appId, ns.tableNames);
-  });
-
-  runStep(db, appId, "uninstall", "delete_syncable_files", done, () => {
-    const ns = getAppSyncableNamespace(db, appId);
-    if (ns?.filesEnabled && options.deleteFilesPrefix) {
-      const prefix = `apps/${appId}/`;
-      try {
-        const result = options.deleteFilesPrefix(prefix);
-        if (result && typeof (result as Promise<void>).then === "function") {
-          // Step ledger is synchronous; fire-and-forget the async deletion.
-          // Local-data-server logs any failure via the returned Promise.
-          (result as Promise<void>).catch((err) =>
-            console.error(`uninstall: failed to clear ${prefix}:`, err),
-          );
-        }
-      } catch (err) {
-        console.error(`uninstall: failed to clear ${prefix}:`, err);
+  // The namespace row is the only list of the app's tables, so the kept-data
+  // record takes its place in one transaction. A crash between the two would
+  // otherwise leave tables nothing names.
+  runStep(db, appId, "uninstall", "retain_syncable_data", done, () => {
+    inTransaction(db, () => {
+      const ns = getAppSyncableNamespace(db, appId);
+      // Every install writes a namespace row, empty for an app that declares
+      // no syncable data. An empty one keeps nothing worth listing.
+      if (ns && ns.tables.length > 0) {
+        upsertRetainedAppData(db, {
+          appId,
+          name: existing.name,
+          tables: ns.tables,
+          filesEnabled: ns.filesEnabled,
+        });
       }
-    }
-  });
-
-  runStep(db, appId, "uninstall", "delete_syncable_namespace", done, () => {
-    deleteAppSyncableNamespace(db, appId);
+      deleteAppSyncableNamespace(db, appId);
+    });
   });
 
   runStep(db, appId, "uninstall", "delete_app_registry_row", done, () => {
@@ -288,6 +284,69 @@ export function uninstallLocal(
   });
 
   clearStepLedger(db, appId);
+}
+
+/** Deleting kept data refused because the app is installed on this node. */
+export class AppInstalledError extends LocalInstallError {
+  constructor(appId: string) {
+    super(`${appId} is installed. Uninstall it before deleting its data.`);
+    this.name = "AppInstalledError";
+  }
+}
+
+/** Deleting kept data refused because this node keeps none for the app. */
+export class NoRetainedDataError extends LocalInstallError {
+  constructor(appId: string) {
+    super(`This machine keeps no data for ${appId}.`);
+    this.name = "NoRetainedDataError";
+  }
+}
+
+export interface DeleteAppDataLocalOptions {
+  /**
+   * Delete everything under the `apps/<appId>/` object-storage prefix. The
+   * installer does not know the storage adapter; the local-data-server does.
+   */
+  deleteFilesPrefix: (prefix: string) => Promise<void>;
+  /**
+   * Delete the app's per-app `sync_state` keys and upload queue. Once the rows
+   * are gone, a watermark claiming the cloud holds them is false, and a
+   * reinstall would never download them again.
+   */
+  clearSyncState: (appId: string) => void;
+}
+
+/**
+ * Delete the data an uninstall kept: the app's syncable tables, its
+ * `apps/<appId>/` files and its sync state on this node. The cloud copy and
+ * every other node's copy stay. It writes no tombstones, so nothing it does
+ * reaches a peer.
+ *
+ * The caller stops and drains the app's sync engine first. A drain that
+ * finishes after this writes a watermark back.
+ *
+ * Each step is idempotent and the kept-data record goes last, so a failure
+ * part-way leaves the record in place and a retry finishes the job.
+ */
+export async function deleteAppDataLocal(
+  db: RawDatabase,
+  appId: string,
+  options: DeleteAppDataLocalOptions,
+): Promise<void> {
+  if (appRegistryRow(db, appId)) throw new AppInstalledError(appId);
+  const retained = getRetainedAppData(db, appId);
+  if (!retained) throw new NoRetainedDataError(appId);
+
+  dropAppSyncableTables(
+    db,
+    appId,
+    retained.tables.map((t) => t.name),
+  );
+  if (retained.filesEnabled) {
+    await options.deleteFilesPrefix(`apps/${appId}/`);
+  }
+  options.clearSyncState(appId);
+  deleteRetainedAppData(db, appId);
 }
 
 function runStep(
