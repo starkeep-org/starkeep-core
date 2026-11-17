@@ -2,10 +2,12 @@
  * The order in which a side applies what a peer shipped it: per author, in HLC
  * order, across records, labels and app-syncable rows together.
  *
- * Both ends of an exchange apply through this. The requester walks each
- * author's run and stops at the first row that would not apply; the responder
- * does the same. Either way, every write raises its author's coverage on the
- * way, so the order is what keeps that coverage honest. Applying all of an
+ * Both ends of an exchange apply in this order, but they treat a failed row
+ * differently. The requester carries on past it and holds its watermark for
+ * that author at the failed row (`brokenAt` in `sync-engine.ts`); the
+ * responder stops the author's run there and halts it for the round. On the
+ * responder every write raises its author's coverage on the way, so the order
+ * is what keeps that coverage honest. Applying all of an
  * author's records before any of its labels lifts coverage over a label whose
  * HLC sits below one of the records, and a crash or a concurrent reader in that
  * window loses the label for good (`specs/exchange-round`, finding 1).

@@ -26,7 +26,9 @@ import {
   type StarkeepId,
 } from "@starkeep/protocol-primitives";
 import type { DatabaseAdapter } from "@starkeep/storage-adapter";
+import { createSyncEngine } from "../src/sync-engine.js";
 import { createInProcessSyncTransport } from "../src/transports/in-process-transport.js";
+import { createMemorySyncStateStore } from "./sync-test-harness/memory-sync-state.js";
 import { failingApplier } from "./sync-test-harness/failure-injection.js";
 import { buildSide } from "./sync-test-harness/side.js";
 import type { AppSyncableRowEntry } from "../src/types.js";
@@ -287,5 +289,127 @@ describe("an author's records, labels and app rows", () => {
     expect(await cloud.db.get(late.id)).toBeNull();
     expect((await cloud.db.getLabelsByRecordIds([early.id])).get(early.id) ?? []).toHaveLength(0);
     expect(compareHLC(response.responderWatermarks["L"]!, early.updatedAt)).toBe(0);
+  });
+
+  it("halt one author without touching another in the same shipment", async () => {
+    // The halt is a `break` out of one author's run, not out of the shipment.
+    // Two devices' rows arrive together; only M's app row fails, so L's rows
+    // all land and only M is named as halted.
+    const { local, cloud } = await twoSides();
+    const lEarly = authoredRecord(local, "L", 10);
+    const lLate = authoredRecord(local, "L", 30);
+    const lLabel = authoredLabel(lEarly.id, { wallTime: 25, counter: 0, nodeId: "L" });
+    const lAt = { wallTime: 20, counter: 0, nodeId: "L" };
+    const mEarly = authoredRecord(local, "M", 10);
+    const mLate = authoredRecord(local, "M", 30);
+    const mAt = { wallTime: 20, counter: 0, nodeId: "M" };
+    const appRow = (id: string, at: HLCTimestamp): AppSyncableRowEntry => ({
+      timestamp: at,
+      appId: "photos",
+      table: "test_rows",
+      op: "insert",
+      row: { id, updated_at: serializeHLC(at) },
+    });
+
+    const transport = createInProcessSyncTransport({
+      databaseAdapter: cloud.db,
+      clock: cloud.clock,
+      objectStorage: cloud.storage,
+      syncSharedRecords: true,
+      appSyncableSource: {
+        namespaces: cloud.namespaces,
+        applier: failingApplier(cloud.applier, (e) => e.timestamp.nodeId === "M"),
+      },
+    });
+    const response = await transport.exchange({
+      watermarks: {},
+      records: [mLate, lLate, mEarly, lEarly],
+      labels: [lLabel],
+      appSyncableRows: [appRow("m1", mAt), appRow("l1", lAt)],
+    });
+
+    expect(response.haltedAuthors).toEqual(["M"]);
+    expect(await cloud.db.get(lEarly.id)).not.toBeNull();
+    expect(await cloud.db.get(lLate.id)).not.toBeNull();
+    expect((await cloud.db.getLabelsByRecordIds([lEarly.id])).get(lEarly.id)).toHaveLength(1);
+    expect(cloud.appRows.size).toBe(1);
+    expect(compareHLC(response.responderWatermarks["L"]!, lLate.updatedAt)).toBe(0);
+    expect(await cloud.db.get(mEarly.id)).not.toBeNull();
+    expect(await cloud.db.get(mLate.id)).toBeNull();
+    expect(compareHLC(response.responderWatermarks["M"]!, mEarly.updatedAt)).toBe(0);
+  });
+
+  it("re-ship from the halt through the engine, and converge once the app row applies", async () => {
+    // The responder-only cases above stop after one exchange. Here the
+    // requester's engine drives the rounds: after the halt it must re-ship
+    // what lies above it, and once the app row applies the cloud holds all of
+    // the author's run.
+    let t = 0;
+    const wallClock = () => t++;
+    const local = await buildSide({ role: "local", nodeId: "L", wallClock, appId: "photos" });
+    const cloud = await buildSide({ role: "cloud", nodeId: "C", wallClock, appId: "photos" });
+
+    const putRecord = async (): Promise<StarkeepId> => {
+      const record = authoredRecord(local, "L", 0);
+      const stored = { ...record, updatedAt: local.clock.now() };
+      await local.db.put(stored);
+      return stored.id;
+    };
+    // Record, app row, label, record: the halt falls between the two records.
+    const early = await putRecord();
+    const at = local.clock.now();
+    await local.applier.apply({
+      timestamp: at,
+      appId: "photos",
+      table: "test_rows",
+      op: "insert",
+      row: { id: "r1", updated_at: serializeHLC(at) },
+    });
+    await local.db.upsertLabels([
+      {
+        recordId: early,
+        appId: "photos",
+        key: "favourite",
+        value: "",
+        recordType: "image/jpeg",
+        hlc: local.clock.now(),
+      },
+    ]);
+    const late = await putRecord();
+
+    let failing = true;
+    const engine = createSyncEngine({
+      localDatabaseAdapter: local.db,
+      localObjectStorage: local.storage,
+      remoteObjectStorage: cloud.storage,
+      transport: createInProcessSyncTransport({
+        databaseAdapter: cloud.db,
+        clock: cloud.clock,
+        objectStorage: cloud.storage,
+        syncSharedRecords: true,
+        appSyncableSource: {
+          namespaces: cloud.namespaces,
+          applier: failingApplier(cloud.applier, () => failing),
+        },
+      }),
+      clock: local.clock,
+      syncState: createMemorySyncStateStore(),
+      syncSharedRecords: true,
+      appSyncableSource: { namespaces: local.namespaces, applier: local.applier },
+    });
+
+    expect((await engine.sync()).complete).toBe(false);
+    expect(await cloud.db.get(early), "below the halt").not.toBeNull();
+    expect(await cloud.db.get(late), "above the halt").toBeNull();
+    expect(cloud.appRows.size).toBe(0);
+
+    failing = false;
+    expect((await engine.sync()).complete).toBe(true);
+    expect(await cloud.db.get(late)).not.toBeNull();
+    expect((await cloud.db.getLabelsByRecordIds([early])).get(early)).toHaveLength(1);
+    expect([...cloud.appRows.values()].map((r) => r["id"])).toEqual(["r1"]);
+    expect(
+      compareHLC((await cloud.db.getNodeWatermarks())["L"]!, (await local.db.get(late))!.updatedAt),
+    ).toBe(0);
   });
 });

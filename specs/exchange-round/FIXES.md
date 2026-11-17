@@ -35,7 +35,7 @@ Model: `GuardedWrite = TRUE`. `finding-lww-race` fails without it, and every `fi
 
 ## Fix B: apply in merged per-author HLC order (finding 1)
 
-**Status: implemented** on `pedromdrp/merged-apply-order`. Both sides group and sort through `sync-engine/src/inbound-order.ts`, and the responder's apply is one loop per author (`in-process-transport.ts`, step 1). The tests for finding 1 are ordinary ones, and `merged-crash` and `merged-concurrent` model the code as it now stands.
+**Status: implemented** (#202). Both sides group and sort through `sync-engine/src/inbound-order.ts`, and the responder's apply is one loop per author (`in-process-transport.ts`, step 1). The tests for finding 1 are ordinary ones, and `merged-crash` and `merged-concurrent` model the code as it now stands.
 
 The responder should apply its inbound items as the requester already does. That is, group them by author with `groupInboundByNodeId`, sort each group by HLC across records, labels and app rows, and apply in that order. We suggest moving `groupInboundByNodeId` out of `sync-engine.ts` into a module both sides import, as was done with `round-cut.ts`. The halted-node rule becomes simpler, because a halt stops one author's run at one point: what lies below the failed row stays applied, and the rest re-ships.
 
