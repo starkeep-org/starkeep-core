@@ -21,6 +21,7 @@ export const probeApp: JourneyApp = {
   // claims the record is a derived rung of some original, which would make the
   // later variant-resolution reads treat this record as its own variant.
   labelKeys: { flag: "flag", valued: "tag" },
+  publicSharing: true,
   appTable: {
     name: "probe_notes",
     row: (recordId) => ({ record_id: recordId, note: "tier-3 note" }),

@@ -20,3 +20,9 @@ export {
   type LdsApp,
 } from "./lds.js";
 export { solidPng } from "./fixtures.js";
+export {
+  sweepAppRoutes,
+  type RouteSweepApp,
+  type RouteSweepTarget,
+  type SweepAnswer,
+} from "./route-sweep.js";

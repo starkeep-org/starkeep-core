@@ -27,6 +27,7 @@ import {
   solidPng,
   startAppDaemonViaAdmin,
   stopAppDaemonViaAdmin,
+  sweepAppRoutes,
 } from "@starkeep/e2e";
 
 test.describe.configure({ mode: "serial" });
@@ -239,6 +240,48 @@ test("a local MCP client reaches the app's tools with no token, as loopback trus
   expect(notes.status).toBe(200);
   expect(JSON.stringify(notes.body)).toContain("from an MCP client");
 });
+
+test("every app-facing data route answers through the app's own proxy", async () => {
+  // The tier-3 journey runs the same sweep through the cloud-served proxy.
+  // See e2e/src/route-sweep.ts for why both surfaces need it.
+  const checked = await sweepAppRoutes(
+    {
+      surface: "local",
+      async send(method, path, json) {
+        const res = await fetch(`${probeUrl}/api/local-data${path}`, {
+          method,
+          ...(json !== undefined
+            ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(json) }
+            : {}),
+        });
+        const text = await res.text();
+        let body: unknown = text;
+        try {
+          body = JSON.parse(text);
+        } catch {
+          // Keep the text.
+        }
+        return { status: res.status, body };
+      },
+    },
+    {
+      appId: "probe",
+      // Random colors, so the two records the sweep makes never dedup into the
+      // fixture the other steps upload.
+      file: {
+        type: "image/png",
+        contentType: "image/png",
+        bytes: () => solidPng([rand(), rand(), rand()], 9),
+      },
+      labelKey: "tag",
+      table: { name: "probe_notes", keyColumn: "record_id", valueColumn: "note" },
+      publicSharing: true,
+    },
+  );
+  expect(checked.length).toBeGreaterThan(20);
+});
+
+const rand = () => Math.floor(Math.random() * 256);
 
 test("re-uploading identical bytes dedups at the platform layer", async ({ page }) => {
   await page.goto(probeUrl);

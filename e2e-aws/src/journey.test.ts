@@ -45,6 +45,7 @@ function configuredApp(dir: string): JourneyApp {
   const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as {
     id?: string;
     infraRequirements?: {
+      publicSharing?: boolean;
       fileAccess?: Array<{ types: string[]; access: string; metadataWrite?: boolean }>;
       labelKeys?: Array<{ key: string }>;
       appSpecificSyncable?: { tables?: Array<{ name: string; columns: Array<{ name: string }> }> };
@@ -130,6 +131,7 @@ function configuredApp(dir: string): JourneyApp {
     appDir,
     sharedFile,
     labelKeys: { flag: keys[0]!, valued: keys[1]! },
+    publicSharing: ir.publicSharing === true,
     appTable: {
       name: table.name,
       row: (recordId) => ({ [table.columns[0]!.name]: recordId, [valueColumn]: marker }),
