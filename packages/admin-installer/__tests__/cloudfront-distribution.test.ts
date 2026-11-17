@@ -427,9 +427,12 @@ describe("the origin split between CloudFront and the execute-api hostname", () 
       throttlingBurstLimit: 100,
     });
     expect(stage!.inputs.routeSettings).toEqual(
-      ["GET /connect/authorize", "POST /connect/authorize/approve", "POST /connect/token"].map(
-        (routeKey) => ({ routeKey, throttlingRateLimit: 5, throttlingBurstLimit: 10 }),
-      ),
+      [
+        "GET /.well-known/oauth-protected-resource/apps/{appId}/{path+}",
+        "GET /connect/authorize",
+        "POST /connect/authorize/approve",
+        "POST /connect/token",
+      ].map((routeKey) => ({ routeKey, throttlingRateLimit: 5, throttlingBurstLimit: 10 })),
     );
   });
 
