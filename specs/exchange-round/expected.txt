@@ -21,6 +21,14 @@ deferred-batches              pass                        quick
 deferred-labelbatch           pass                        quick
 deferred-two-writers          pass                        slow
 deferred-relay                pass                        slow
+halt-relay                    pass                        quick
+halt-crash                    pass                        quick
+rows-concurrent               pass                        quick
+rows-fail                     pass                        quick
+rows-fail-record-batch        pass                        quick
+finding-device-batch          DeviceNoGap                 quick
+fixed-device-batch            pass                        quick
+fixed-device-wide             pass                        slow
 mutant-nocap                  DeviceNoGap                 quick
 mutant-notrim                 CloudNoLoss                 quick
 mutant-split                  CloudNoLoss                 quick
@@ -30,3 +38,6 @@ witness-truncated             WitnessTruncatedRound       quick
 witness-batch                 WitnessBatchDelivered       quick
 witness-crash                 WitnessCrash                quick
 witness-converged             WitnessAllConverged         quick
+witness-halt                  WitnessHalt                 quick
+witness-device-fail           WitnessDeviceFail           quick
+witness-converged-after-failures WitnessConvergedAfterFailures quick
