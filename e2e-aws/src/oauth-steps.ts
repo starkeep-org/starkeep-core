@@ -5,8 +5,8 @@
  * discovery and token code Claude Code runs, with Probe's client metadata
  * document as its `client_id` and a loopback redirect URI. Playwright plays
  * the user: it signs in on the managed login page and approves on the consent
- * page. The redirect to the loopback address is caught in the browser, so the
- * suite needs no listener and no outside host.
+ * page. The suite reads the code off the browser's request to the loopback
+ * address, so it needs no listener and no outside host.
  *
  * What the steps hold (plan-delegated-access-phase2-implementation-2026-11-16.md):
  *
@@ -164,26 +164,27 @@ export function defineOAuthSteps(d: OAuthStepsContext): void {
 
     browser = await chromium.launch();
     const page = await browser.newPage();
-    let landed: URL | undefined;
-    // The loopback redirect never reaches a listener: the browser's request
-    // is caught here, which is all a native client's listener would read.
-    await page.route("http://127.0.0.1:*/**", async (route) => {
-      landed = new URL(route.request().url());
-      await route.fulfill({ status: 200, contentType: "text/plain", body: "done" });
-    });
     await page.goto(authorizationUrl.toString());
     await signInIfAsked(page, d.admin().email, d.admin().password);
     await page
       .getByRole("button", { name: "Allow" })
       .waitFor({ state: "visible", timeout: 60_000 });
     await expect.poll(async () => await page.content()).toContain(d.admin().email);
+    // The redirect to the loopback address reaches no listener, and need not:
+    // the browser's request carries the URL a native client's listener would
+    // read. Playwright's routing does not intercept a redirected navigation,
+    // so the step reads the request rather than fulfilling it.
+    const callback = page.waitForRequest((r) => r.url().startsWith(REDIRECT_URI), {
+      timeout: 30_000,
+    });
     await page.getByRole("button", { name: "Allow" }).click();
-    await expect.poll(() => landed?.href ?? "", { timeout: 30_000 }).toContain("code=");
+    const landed = new URL((await callback).url());
+    expect(landed.searchParams.get("code"), landed.href).toBeTruthy();
     await page.close();
 
-    expect(landed!.searchParams.get("iss")).toBe(gateway());
-    expect(landed!.searchParams.get("state")).toBe(authorizationUrl.searchParams.get("state"));
-    const code = landed!.searchParams.get("code")!;
+    expect(landed.searchParams.get("iss")).toBe(gateway());
+    expect(landed.searchParams.get("state")).toBe(authorizationUrl.searchParams.get("state"));
+    const code = landed.searchParams.get("code")!;
     expect(await auth(provider, { serverUrl: mcpUrl(), authorizationCode: code })).toBe(
       "AUTHORIZED",
     );
