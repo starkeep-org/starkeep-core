@@ -364,22 +364,22 @@ async function renderOpen(): Promise<void> {
     return;
   }
   const id = selectedId;
-  let loaded;
+  // The four reads run at once, but only the record read decides whether the
+  // file is gone. A live file whose bytes this computer lacks answers 404 from
+  // its content read too, and that is an error to report.
+  const rest = Promise.all([api.readContent(id), api.getMetadata(id), api.getNote(id)]);
+  // Awaited below, unless a missing record ends the render first.
+  rest.catch(() => {});
+  let record: api.ExampleRecord;
   try {
-    loaded = await Promise.all([
-      api.getRecord(id),
-      api.readContent(id),
-      api.getMetadata(id),
-      api.getNote(id),
-    ]);
+    record = await api.getRecord(id);
   } catch (err) {
-    // The file is gone: deleted in another tab, or by an MCP client. Every
-    // route above answers 404 only for a missing or deleted record.
+    // Deleted in another tab, or by an MCP client.
     if (!(err instanceof api.ApiError && err.status === 404) || selectedId !== id) throw err;
     selectedId = null;
     return renderOpen();
   }
-  const [record, content, metadata, noteState] = loaded;
+  const [content, metadata, noteState] = await rest;
   const note = noteState?.note ?? null;
   noteInput.value = note?.text ?? "";
   pinnedInput.checked = note?.pinned ?? false;

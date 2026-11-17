@@ -13,7 +13,7 @@
  * holds on one surface only says so and skips on the other.
  */
 
-import { readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
@@ -1003,4 +1003,37 @@ test("Connection: refresh the session, then sign out", async () => {
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.waitForURL(/\.amazoncognito\.com\//);
   await expect(page.locator('input[name="username"], input[type="email"]').first()).toBeVisible();
+});
+
+test("Open file: a live file whose bytes are missing reports the error, and a deleted one empties the panel", async () => {
+  test.skip(SURFACE !== "local", "Only the local surface lets the suite remove a file's bytes");
+  // A file whose bytes this computer lost. The record is live, so the panel
+  // must report the failed read rather than treat the file as deleted.
+  const text = `bytes gone ${Date.now()}`;
+  const id = await seedFile("bytes-gone.skexample", text);
+  const objects = join(process.env.E2E_LDS_DIR!, "objects");
+  let removed = 0;
+  for (const entry of await readdir(objects, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const path = join(entry.parentPath, entry.name);
+    if ((await readFile(path, "utf8")) === text) {
+      await rm(path);
+      removed += 1;
+    }
+  }
+  expect(removed).toBe(1);
+  await click("Apply filter", "Filter");
+  await clickExpectingFailure(
+    "Open bytes-gone.skexample",
+    "Open failed: File not on this node, and this node does not sync with a cloud",
+  );
+  await expectLogged("GET", /^\/data\/records\/[^/]+\/file-url$/, 404);
+  await expect(page.getByText("Select a file with its Open button.")).not.toBeVisible();
+
+  // The same file deleted from another tab: the next redraw of the panel
+  // finds no record and empties it.
+  expect((await viaProxy("DELETE", `/data/records/${id}`)).status).toBe(200);
+  await click("Pin paging note 1", "Pin");
+  await expect(page.getByText("Select a file with its Open button.")).toBeVisible();
+  await expectLogged("GET", /^\/data\/records\/[^/?]+\?include=labels$/, 404);
 });
