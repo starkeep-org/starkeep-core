@@ -23,7 +23,7 @@ WHERE excluded.updated_at > shared.records.updated_at
 
 `putLabel` needs the same guard on its own primary key. Serialized HLCs compare as strings in HLC order (fixed-width hex wall time, then counter, then node id, which is also how `compareHLC` breaks ties). The delta scans already rely on this.
 
-Nothing else on DSQL changes. `buildWatermarkRaises` takes its value from the rows the transaction wrote, so a write that the guard skips raises nothing, which is already the rule for a write that loses LWW.
+Nothing else on DSQL changes. `put` and `putLabel` record the stamp of the version they write, and the raise is issued whatever the upsert did. However, `buildWatermarkRaise` takes its value from the rows that carry that stamp (`node_id = author AND updated_at IN stamps`), not from the stamp itself. After a skipped write the row holds the newer version, so no row carries the skipped stamp and the raise records nothing, which is already the rule for a write that loses LWW. Issuing the raise either way also keeps `guardNodeWatermarks` satisfied, since it judges a commit by the statements it issued.
 
 We suggest new adapter methods (`putSnapshot`, `putLabelSnapshot`, or a flag) used by both apply loops, rather than changing `put`, so that local and API writes keep their current behaviour. The JavaScript `get` stays, because the metadata cascades and the stand-in admission need to know what the row held. Those decisions can still race with a concurrent round, and they should be reviewed separately; the guard removes only the overwrite.
 
@@ -51,7 +51,9 @@ There are two ways to achieve this. The model passes both.
 2. After the last row of each (author, HLC) run, one statement raises that author's coverage entry to that HLC. It does so whether or not the rows were newly written, because a re-shipped run that is already present must still complete it. Otherwise a crash between the rows and the raise would leave the run hidden forever.
 3. The responder's scans treat its own coverage as one more `StreamTruncation`: no row above the cloud's coverage for its author is shipped. A run that is still being applied is therefore invisible to every other device, and a crash leaves coverage low, so the requester re-ships the run.
 
-The third change is needed as well as the deferred raise: `mutant-nocap` drops it, and TLC finds the concurrent reader again. C2 needs no large transactions. It does change `guardNodeWatermarks`, which today refuses a commit that skipped a raise; the sync apply path would be exempt, with the raise as its own guarded statement.
+The third change is needed as well as the deferred raise: `mutant-nocap` drops it, and TLC finds the concurrent reader again.
+
+Not every write on the apply path belongs to a shipped run. The responder also writes rows under the cloud's own clock: the refusal that `keepLiveOnTombstone` writes, and the tombstone of a losing stand-in (`tombstoneOf`). Those rows are authored by the cloud's node id, so no shipped run will ever raise that author's coverage, and under the third change they would stay above it and be hidden from every reader, including the requester that needs the verdict. These writes must therefore keep their inline raise. They take a fresh HLC each, so a single write is a whole run and the inline raise cannot expose part of one. The model leaves cloud-authored rows out (README, "What is not modelled"), so it would not catch a C2 that forgot this; the implementation needs a test for it. C2 needs no large transactions. It does change `guardNodeWatermarks`, which today refuses a commit that skipped a raise; the sync apply path would be exempt, with the raise as its own guarded statement.
 
 Note that C2 relies on fix B. A deferred raise in records-then-labels order would still lift coverage over a label applied later.
 

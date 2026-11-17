@@ -13,20 +13,26 @@ import { buildSide } from "./sync-test-harness/side.js";
  * author's coverage. So between the last record and the first label the cloud
  * reports coverage over a label it does not hold yet, whenever that label's
  * HLC sits below one of the records. A label written before the next photo is
- * imported is enough.
+ * imported is enough (finding 1). A batch of labels sharing one HLC opens the
+ * same window inside itself: the first row lifts coverage to the whole
+ * timestamp (finding 2).
  *
- * Two ways that window becomes permanent:
+ * Two ways such a window becomes permanent:
  *
  *   1. The round dies inside it. sync() pulls before it pushes whenever it owes
- *      the peer something, the pull reports coverage over the label, and the
- *      push then scans above it. The label never reaches the cloud.
- *   2. Another device reads inside it. It receives the later record, advances
- *      its watermark past the label, and is never offered the label again.
+ *      the peer something, the pull reports coverage over the missing rows, and
+ *      the push then scans above them. They never reach the cloud.
+ *   2. Another device reads inside it. It advances its watermark past the
+ *      missing rows, and is never offered them again.
  *
- * Both tests are `it.fails`: they assert the correct outcome and currently
- * fail. When the responder applies in merged per-author HLC order, one
- * transaction per HLC, they start passing and vitest flags them for the
- * `.fails` to be removed.
+ * The four tests for findings 1 and 2 cover both routes for each, and are
+ * `it.fails`: they assert the correct outcome and currently fail. Fixes B and
+ * C in `specs/exchange-round/FIXES.md` (merged per-author HLC order, with
+ * deferred coverage on DSQL) make them pass, and vitest then flags them for
+ * the `.fails` to be removed.
+ *
+ * The lost-update test (finding 3) is also `it.fails`. It needs fix A, the
+ * guarded snapshot write, rather than a change of apply order.
  */
 describe("exchange round: findings from the TLA+ model", () => {
   type Side = Awaited<ReturnType<typeof buildSide>>;
@@ -196,6 +202,59 @@ describe("exchange round: findings from the TLA+ model", () => {
     const result = await engine.sync();
     expect(result.complete).toBe(true);
     expect(await cloudLabels(C, id)).toHaveLength(3);
+  });
+
+  // models/finding-batch-concurrent.cfg
+  //
+  // The same batch, with another device reading between its first and second
+  // row instead of a crash. The reader receives the first row, advances its
+  // watermark to the batch's HLC, and the rest of the batch sits at that HLC,
+  // which no later scan above the watermark returns.
+  it.fails("a device reading mid-batch is not left without the rest of the batch", async () => {
+    const { L, M, C } = await sides("L", "M", "C");
+    const id = await seedRecord(L);
+    const engine = engineFor(L, C);
+    await engine.sync();
+
+    const hlc = L.clock.now();
+    await L.db.upsertLabels(
+      ["a", "b", "c"].map((value) => ({
+        recordId: id,
+        appId: "photos",
+        key: "faces",
+        value,
+        recordType: "image/jpeg",
+        hlc,
+      })),
+    );
+
+    // Hold L's round at the batch's second row, after the first landed.
+    const putLabel = C.db.putLabel.bind(C.db);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let reachedSecond!: () => void;
+    const atSecond = new Promise<void>((resolve) => (reachedSecond = resolve));
+    let writes = 0;
+    C.db.putLabel = async (label) => {
+      writes += 1;
+      if (writes === 2) {
+        reachedSecond();
+        await gate;
+      }
+      return putLabel(label);
+    };
+
+    const lRound = engine.exchange();
+    await atSecond;
+    const m = engineFor(M, C);
+    await m.sync(); // M reads the cloud inside the batch.
+    release();
+    await lRound;
+
+    await m.sync();
+    await m.sync();
+    expect(await cloudLabels(C, id)).toHaveLength(3);
+    expect((await M.db.getLabelsByRecordIds([id])).get(id) ?? []).toHaveLength(3);
   });
 
   // models/finding-lww-race.cfg
