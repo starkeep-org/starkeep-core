@@ -14,3 +14,9 @@ test-apps/probe/serve.mjs
 test-apps/probe/.build-staging/
 test-apps/probe/assets/
 test-apps/probe/.write-assets.mjs
+
+# The example app's cloud e2e run state, written per run and ignored by
+# example-app/.gitignore. Prettier reads only the root ignore files, so a
+# machine that has run `pnpm test:e2e:cloud` fails `pnpm format:check`, and
+# with it `pnpm release:publish`.
+example-app/e2e/.cloud-run/
