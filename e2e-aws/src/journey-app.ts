@@ -97,6 +97,11 @@ export interface JourneyApp {
   readonly labelKeys: JourneyLabelKeys;
   /** The app-private table the app-data step writes to. */
   readonly appTable: JourneyAppTable;
+  /**
+   * Whether the manifest asks to publish public links (`publicSharing`). The
+   * route sweep creates and revokes a link only for an app that may.
+   */
+  readonly publicSharing?: boolean;
   /** A JWT-gated route of the app's own, for the CloudFront Bearer step. */
   readonly jwtRoute: JourneyJwtRoute;
   /** Present when the app serves a browser UI the journey should drive. */

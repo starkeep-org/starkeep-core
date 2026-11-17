@@ -29,7 +29,12 @@ offers an app:
   `tag` valued) and an app-private `probe_notes` table;
 - `GET /api/notes-summary`, an analysis read in SQL over a cached snapshot of
   `probe_notes`, from `@starkeep/app-client/snapshot`;
-- a JWT-gated `POST /api/echo` compute route.
+- a JWT-gated `POST /api/echo` compute route;
+- `publicSharing`, so the suites can create and revoke a public link.
+
+Both suites also send every app-facing data route through the signing proxy
+once: the tier-2 spec on the local surface, and the tier-3 journey through
+CloudFront. The sweep lives in `e2e/src/route-sweep.ts`.
 
 ## How it runs
 

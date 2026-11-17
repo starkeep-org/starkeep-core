@@ -39,6 +39,7 @@ import {
   createRecordWithBytes,
   eventually,
   solidPng,
+  sweepAppRoutes,
   type LdsApp,
 } from "@starkeep/e2e";
 import { signedFetch, USER_TOKEN_HEADER, type AppCredentials } from "@starkeep/app-client";
@@ -2335,6 +2336,53 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
       // two derivations *do* meet is what turns this suite into a live proof of
       // that, at the tier where it actually cost a run to discover. Do not
       // reorder these to keep them apart — the meeting is the point.
+      it(`every app-facing data route answers through the cloud-served ${app.appId} proxy`, async () => {
+        // The routes an app's page calls that the steps above do not: metadata
+        // queries, label aggregates, paging, reconcile and restore, the trash
+        // and types reads, app-file URLs, conditional row writes and public
+        // links. Each goes through the app's Lambda, API Gateway and the cloud
+        // data server's Lambda, where three of the example app's bugs lived
+        // and no server-level suite reaches. Probe's tier-2 spec runs the same
+        // sweep on the local surface; see e2e/src/route-sweep.ts.
+        const cookie = await signInToApp(app.appId);
+        const proxyBase = `${config.publicBaseUrl}/apps/${app.appId}/api/local-data`;
+        const [keyColumn, valueColumn] = Object.keys(app.appTable.row("sweep"));
+        await sweepAppRoutes(
+          {
+            surface: "cloud",
+            async send(method, path, json) {
+              const res = await fetch(`${proxyBase}${path}`, {
+                method,
+                headers: {
+                  cookie,
+                  ...(json !== undefined ? { "Content-Type": "application/json" } : {}),
+                },
+                ...(json !== undefined ? { body: JSON.stringify(json) } : {}),
+              });
+              const text = await res.text();
+              let body: unknown = text;
+              try {
+                body = JSON.parse(text);
+              } catch {
+                // Keep the text, such as a gateway's error page.
+              }
+              return { status: res.status, body };
+            },
+          },
+          {
+            appId: app.appId,
+            file: {
+              type: sharedFile.type,
+              contentType: sharedFile.contentType,
+              bytes: sharedFile.bytes,
+            },
+            labelKey: app.labelKeys.valued,
+            table: { name: app.appTable.name, keyColumn: keyColumn!, valueColumn: valueColumn! },
+            publicSharing: app.publicSharing === true,
+          },
+        );
+      });
+
       app.extraSteps?.(ctx);
 
       // An outside client holding a delegation token the user created on the
