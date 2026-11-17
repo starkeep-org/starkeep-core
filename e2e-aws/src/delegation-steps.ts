@@ -39,6 +39,13 @@ import type { TestStackConfig } from "./run-state.js";
 
 const OUTSIDE_USER_EMAIL = "tier3-outside-client@starkeep.test";
 
+/**
+ * This run's mark on its client names. A stack kept up between runs keeps the
+ * tokens earlier runs created, and the connections page lists them all, so
+ * the revoke step finds this run's token by a name no earlier run used.
+ */
+const RUN = randomBytes(3).toString("hex");
+
 export interface DelegationStepsContext {
   readonly config: () => TestStackConfig;
   readonly appId: string;
@@ -113,7 +120,7 @@ export function defineDelegationSteps(d: DelegationStepsContext): void {
     createDelegationToken(page, {
       gatewayUrl: gateway(),
       appId: d.appId,
-      client: `tier3-${mode}`,
+      client: `tier3-${mode}-${RUN}`,
       mode,
       ...who,
     });
@@ -182,16 +189,15 @@ export function defineDelegationSteps(d: DelegationStepsContext): void {
     const page = await browser!.newPage();
     await page.goto(`${gateway()}/connections`);
     await signInIfAsked(page, d.admin().email, d.admin().password);
-    const row = page.getByRole("row").filter({ hasText: "tier3-read" }).first();
-    await row.getByRole("button", { name: "Revoke" }).click();
+    // The row whose Program cell is exactly this run's read client. A text
+    // match on the read client's name would also take the readwrite client's.
+    const readRow = () =>
+      page
+        .getByRole("row")
+        .filter({ has: page.getByRole("cell", { name: `tier3-read-${RUN}`, exact: true }) });
+    await readRow().getByRole("button", { name: "Revoke" }).click();
     await page.waitForURL(/\/connections$/);
-    await expect
-      .poll(
-        async () =>
-          (await page.getByRole("row").filter({ hasText: "tier3-read" }).first().textContent()) ??
-          "",
-      )
-      .toContain("Revoked");
+    await expect.poll(async () => (await readRow().textContent()) ?? "").toContain("Revoked");
     await page.close();
 
     // The revoke reaches the data server's row cache on its own container at
