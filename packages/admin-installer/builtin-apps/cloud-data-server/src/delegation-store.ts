@@ -217,11 +217,6 @@ export function delegatedPathsOf(manifestJson: unknown): string[] {
   }
 }
 
-/** Whether a manifest declares any route an outside client may call. */
-export function manifestServesOutsideClients(manifestJson: unknown): boolean {
-  return delegatedPathsOf(manifestJson).length > 0;
-}
-
 /** An installed app that serves outside clients. */
 export interface ConnectableApp {
   appId: string;
