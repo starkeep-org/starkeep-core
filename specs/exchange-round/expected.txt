@@ -1,6 +1,8 @@
 # model                       expected verdict (pass, or the invariant TLC must report)   tier
 finding-crash                 CloudNoLoss                 quick
 finding-concurrent            DeviceNoGap                 quick
+merged-crash                  pass                        quick
+merged-concurrent             pass                        quick
 finding-batch-crash           CloudNoLoss                 quick
 finding-batch-concurrent      DeviceNoGap                 quick
 finding-lww-race              CloudNoLoss                 quick

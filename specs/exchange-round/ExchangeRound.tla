@@ -48,9 +48,9 @@ CONSTANTS
   Writers,       \* devices that write
   RealTimeHLC,   \* TRUE: each write takes the next HLC value
   MergedApply,   \* FALSE: responder applies all records, then all labels
-                 \*        (in-process-transport.ts steps 2 and 2b, today).
+                 \*        (in-process-transport.ts before fix B).
                  \* TRUE:  per author in HLC order across both streams, as
-                 \*        docs/system-design.md describes.
+                 \*        docs/system-design.md describes (step 1, today).
   ApplyUnit,     \* "statement": every put is its own DSQL transaction (today).
                  \* "timestamp": all rows sharing one HLC commit together.
                  \* "deferred":  rows commit one at a time and raise nothing;
@@ -235,7 +235,7 @@ Start(n, push) ==
                  IF push THEN SortItems(Shipment(db[n], peer[n])) ELSE << >>]
   /\ UNCHANGED <<author, nwrites, written, db, own, peer, cdb, cwm, rd, pr, resp, crashes>>
 
-\* in-process-transport.ts steps 2 / 2b: one put, LWW on HLC. A put that wins
+\* in-process-transport.ts step 1: one put, LWW on HLC. A put that wins
 \* raises its author's coverage entry in the same transaction
 \* (node-watermarks.ts buildWatermarkRaises); one that loses records nothing.
 \* With ApplyUnit = "timestamp" the head item and every item after it sharing
@@ -306,7 +306,7 @@ CloudWrite(n) ==
   /\ rd'    = [rd EXCEPT ![n] = -1]
   /\ UNCHANGED <<author, nwrites, written, db, own, peer, pc, pr, resp, crashes>>
 
-\* in-process-transport.ts steps 3-5: scan above the requester's advertised
+\* in-process-transport.ts steps 2-4: scan above the requester's advertised
 \* watermarks, cut, and report coverage over the post-apply state.
 CloudRespond(n) ==
   /\ pc[n] = "applying"

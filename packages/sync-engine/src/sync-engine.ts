@@ -100,6 +100,7 @@ import { createChangeNotifier } from "./change-notifier.js";
 import { createMemoryUploadQueueStore } from "./upload-queue-store.js";
 import { createUploadTarget, createUploader } from "./uploader.js";
 import { createFileSyncEngine } from "./file-sync-engine.js";
+import { groupInboundByNodeId, inboundItemHlc } from "./inbound-order.js";
 import {
   applyRecordMetadata,
   applyRepairFloors,
@@ -1968,11 +1969,6 @@ type OutboundItem =
   | { kind: "label"; label: RecordLabel }
   | { kind: "appRow"; entry: AppSyncableRowEntry };
 
-type InboundItem =
-  | { kind: "record"; record: SyncRecordItem }
-  | { kind: "label"; label: RecordLabel }
-  | { kind: "appRow"; entry: AppSyncableRowEntry };
-
 /**
  * The shortest gap between two "these blobs landed" events in one round.
  *
@@ -1983,12 +1979,6 @@ type InboundItem =
 const LANDED_EVENT_INTERVAL_MS = 1_000;
 
 function outboundItemHlc(item: OutboundItem): HLCTimestamp {
-  if (item.kind === "record") return item.record.updatedAt;
-  if (item.kind === "label") return item.label.updatedAt;
-  return item.entry.timestamp;
-}
-
-function inboundItemHlc(item: InboundItem): HLCTimestamp {
   if (item.kind === "record") return item.record.updatedAt;
   if (item.kind === "label") return item.label.updatedAt;
   return item.entry.timestamp;
@@ -2016,27 +2006,6 @@ function groupOutboundByNodeId(
   }
   for (const arr of out.values()) {
     arr.sort((a, b) => compareHLC(outboundItemHlc(a), outboundItemHlc(b)));
-  }
-  return out;
-}
-
-function groupInboundByNodeId(
-  records: readonly SyncRecordItem[],
-  labels: readonly RecordLabel[],
-  appRows: readonly AppSyncableRowEntry[],
-): Map<string, InboundItem[]> {
-  const out = new Map<string, InboundItem[]>();
-  for (const r of records) {
-    pushToBucket(out, r.updatedAt.nodeId, { kind: "record", record: r });
-  }
-  for (const l of labels) {
-    pushToBucket(out, l.updatedAt.nodeId, { kind: "label", label: l });
-  }
-  for (const e of appRows) {
-    pushToBucket(out, e.timestamp.nodeId, { kind: "appRow", entry: e });
-  }
-  for (const arr of out.values()) {
-    arr.sort((a, b) => compareHLC(inboundItemHlc(a), inboundItemHlc(b)));
   }
   return out;
 }

@@ -20,10 +20,16 @@ mk() {
     for i in $inv; do echo "  $i"; done
   } > "models/$name.cfg"
 }
-# --- Findings: the responder as written today (records, then labels), with
+# --- Before fix B: the responder applied every record, then every label, with
 #     its writes guarded (fix A).
 mk finding-crash         "$LOSS" MergedApply=FALSE ApplyUnit=\"statement\" GuardedWrite=TRUE MaxCrashes=1
 mk finding-concurrent    "$LOSS" MergedApply=FALSE ApplyUnit=\"statement\" GuardedWrite=TRUE NumNodes=2
+# --- The responder as written today: merged order (fix B), one statement per
+#     row. With every HLC a single row this is safe, which closes finding 1;
+#     the state spaces equal fixed-crash and fixed-concurrent, since one row per
+#     HLC makes the two apply units the same.
+mk merged-crash          "$SAFE" ApplyUnit=\"statement\" MaxCrashes=1
+mk merged-concurrent     "$SAFE" ApplyUnit=\"statement\" NumNodes=2
 # --- Merged order alone is not enough: one HLC split across two statements.
 mk finding-batch-crash      "$LOSS" ApplyUnit=\"statement\" GuardedWrite=TRUE NumRec=2 NumLab=0 MaxTime=1 MaxWrites=1 BatchMax=2 MaxCrashes=1
 mk finding-batch-concurrent "$LOSS" ApplyUnit=\"statement\" GuardedWrite=TRUE NumNodes=2 NumRec=2 NumLab=0 MaxTime=1 MaxWrites=1 BatchMax=2

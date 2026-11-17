@@ -8,12 +8,12 @@ import { buildSide } from "./sync-test-harness/side.js";
 /**
  * Replays of the counterexamples TLC found in `specs/exchange-round`.
  *
- * The responder applies a shipment one statement at a time: every record, then
- * every label (in-process-transport.ts, steps 2 and 2b). Each write raises its
- * author's coverage. So between the last record and the first label the cloud
- * reports coverage over a label it does not hold yet, whenever that label's
- * HLC sits below one of the records. A label written before the next photo is
- * imported is enough (finding 1). A batch of labels sharing one HLC opens the
+ * The responder applies a shipment one statement at a time, and each write
+ * raises its author's coverage. It used to apply every record, then every
+ * label, so between the last record and the first label the cloud reported
+ * coverage over a label it did not hold yet, whenever that label's HLC sat
+ * below one of the records. A label written before the next photo was
+ * imported was enough (finding 1). A batch of labels sharing one HLC opens the
  * same window inside itself: the first row lifts coverage to the whole
  * timestamp (finding 2).
  *
@@ -25,11 +25,12 @@ import { buildSide } from "./sync-test-harness/side.js";
  *   2. Another device reads inside it. It advances its watermark past the
  *      missing rows, and is never offered them again.
  *
- * The four tests for findings 1 and 2 cover both routes for each, and are
- * `it.fails`: they assert the correct outcome and currently fail. Fixes B and
- * C in `specs/exchange-round/FIXES.md` (merged per-author HLC order, with
- * deferred coverage on DSQL) make them pass, and vitest then flags them for
- * the `.fails` to be removed.
+ * Each finding has a test for each route. The responder now applies in merged
+ * per-author HLC order (fix B in `specs/exchange-round/FIXES.md`), so the two
+ * tests for finding 1 are ordinary ones. The two for finding 2 are still
+ * `it.fails`: they assert the correct outcome and currently fail. Fix C keeps
+ * an HLC whole and makes them pass, and vitest then flags them for the
+ * `.fails` to be removed.
  *
  * Finding 3, the lost update, is fixed by `putSnapshot` and a guarded
  * `putLabel` (fix A), so its test is an ordinary one.
@@ -115,11 +116,12 @@ describe("exchange round: findings from the TLA+ model", () => {
   }
 
   // models/finding-crash.cfg
-  it.fails("a round that dies between records and labels does not lose the label", async () => {
+  it("a round that dies between records and labels does not lose the label", async () => {
     const { L, C } = await sides("L", "C");
     const labelled = await photoLabelPhoto(L);
 
-    // The Lambda dies after the records phase: the first label write never runs.
+    // The Lambda dies at the label write. Before fix B it died with both
+    // records applied, and coverage already over the label.
     const putLabel = C.db.putLabel.bind(C.db);
     let dead = true;
     C.db.putLabel = async (label) => {
@@ -137,11 +139,12 @@ describe("exchange round: findings from the TLA+ model", () => {
   });
 
   // models/finding-concurrent.cfg
-  it.fails("a device reading mid-apply is not left without the label", async () => {
+  it("a device reading mid-apply is not left without the label", async () => {
     const { L, M, C } = await sides("L", "M", "C");
     const labelled = await photoLabelPhoto(L);
 
-    // Hold L's round at its first label write, after both records landed.
+    // Hold L's round at its label write. Before fix B both records had
+    // landed by then, and M was shipped the later one.
     const putLabel = C.db.putLabel.bind(C.db);
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
