@@ -2065,7 +2065,7 @@ function toRecordAvailability(
  * thaw would turn one careless call into a bill and a long wait, and the caller
  * would have no idea it had happened — which is exactly how a future slideshow
  * feature would thaw an entire archive. The 409 carries what a caller needs to
- * decide whether to ask for a restore; asking is a separate, explicit act.
+ * decide whether to ask for a thaw; asking is a separate, explicit act.
  */
 function archivedReadRefusal(availability: RecordAvailability) {
   if (availability.state === "archived") {
@@ -2076,8 +2076,8 @@ function archivedReadRefusal(availability: RecordAvailability) {
         availability,
         detail:
           `These bytes are in ${availability.tier} and cannot be read for about ` +
-          `${availability.expectedLatencyHours}h. Request a restore explicitly; ` +
-          `reads never trigger one.`,
+          `${availability.expectedLatencyHours}h. Request a thaw explicitly with ` +
+          `POST /data/records/:id/thaw-archive; reads never trigger one.`,
       },
     };
   }
