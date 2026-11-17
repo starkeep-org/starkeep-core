@@ -31,9 +31,9 @@ Each heading is one group of operations, with a table of the current state and a
 
 - **Locally**, any program on the computer reaches it with no token: `claude mcp add --transport http example http://localhost:<port>/mcp`, with the port admin-web shows.
 - **In the cloud, with OAuth**, add `<cloud URL>/apps/example-app/mcp` as the server URL with no header, for example as a claude.ai custom connector or with `claude mcp add --transport http example <cloud URL>/apps/example-app/mcp`. The client sends you through sign-in and a consent page, where you pick `read` or `readwrite`, and renews its token by itself. A `read` grant lists, reads and tags; `readwrite` also creates files, moves them to the Trash and writes notes.
-- **In the cloud, with a pasted token**, for a script or a client without OAuth, create a token at `<gateway URL>/connect?app=example-app`, where the gateway URL is `apiGatewayUrl` in `~/.starkeep/config.json`, and pick the same modes. Then run `claude mcp add --transport http example <cloud URL>/apps/example-app/mcp --header "Authorization: Bearer <token>"`.
+- **In the cloud, with a pasted token**, for a script or a client without OAuth, follow the **Connect page** link in the page's Connection table, create a token there, and pick the same modes. Then run `claude mcp add --transport http example <cloud URL>/apps/example-app/mcp --header "Authorization: Bearer <token>"`.
 
-Both kinds of connection are listed, and can be revoked, at `<gateway URL>/connections`.
+The **Connections page** link in the same table lists both kinds of connection, and the user revokes them there. The page reads both links from the `connectUrl` and `connectionsUrl` fields of the app's runtime config. Both pages answer on the gateway's execute-api host, not on the cloud URL.
 
 ### How labels read
 

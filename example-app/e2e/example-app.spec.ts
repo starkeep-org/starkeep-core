@@ -232,6 +232,25 @@ test("Connection: the surface, the session, and a refused write outside the gran
   await expectLogged("POST", /^\/data\/records$/, 403);
 });
 
+test("Connection: the platform's consent pages, on the gateway's host", async () => {
+  const connect = (await cell("Connection", "Connect page", "Value")).getByRole("link");
+  const connections = (await cell("Connection", "Connections page", "Value")).getByRole("link");
+  if (SURFACE === "local") {
+    await expect(await cell("Connection", "Connect page", "Value")).toHaveText("none locally");
+    await expect(await cell("Connection", "Connections page", "Value")).toHaveText("none locally");
+    await expect(connect).toHaveCount(0);
+    await expect(connections).toHaveCount(0);
+    return;
+  }
+  // The pages answer on the execute-api host, never on the page's own
+  // CloudFront origin, where the same paths answer 404.
+  const gateway = enabledCloudRun().gatewayUrl.replace(/\/+$/, "");
+  await expect(connect).toHaveAttribute("href", `${gateway}/connect?app=${APP_ID}`);
+  await expect(connections).toHaveAttribute("href", `${gateway}/connections`);
+  const res = await fetch((await connect.getAttribute("href"))!);
+  expect(res.status).toBe(200);
+});
+
 test("Connection: the app's own JWT-gated route answers", async () => {
   // Locally the route is same-origin and needs no token. In the cloud the
   // gateway's JWT authorizer guards it, so the page first asks its session

@@ -10,7 +10,7 @@
 import { LABEL_KEYS, type Note } from "@example-app/common";
 import * as api from "./api.js";
 import { activityEntries, onActivity } from "./activity.js";
-import { button, group, renderTable, type Column } from "./table.js";
+import { button, group, renderTable, type Cell, type Column } from "./table.js";
 
 // ---------------------------------------------------------------------------
 // Page scaffolding
@@ -89,9 +89,9 @@ let reconciledFrom = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
 const connection = section(
   "Connection",
-  "Which surface this page runs on, who is signed in, what a write outside the app's grant gets back, and a call to the app's own JWT-gated route.",
+  "Which surface this page runs on, who is signed in, where outside clients get access, what a write outside the app's grant gets back, and a call to the app's own JWT-gated route.",
 );
-const connectionRows: { name: string; value: string }[] = [];
+const connectionRows: { name: string; value: Cell }[] = [];
 let grantCheckResult = "not run";
 let jwtRouteResult = "not run";
 
@@ -116,6 +116,11 @@ async function renderConnection(): Promise<void> {
           ? "signed out"
           : "none needed locally",
     },
+    // The platform's consent pages answer on the gateway's execute-api host,
+    // not on this page's origin, so the runtime config names them. Locally
+    // an outside client needs no token, and the config names neither page.
+    { name: "Connect page", value: pageLink(config.connectUrl) },
+    { name: "Connections page", value: pageLink(config.connectionsUrl) },
     { name: "Grant check (write text/txt)", value: grantCheckResult },
     { name: "JWT route (POST /api/echo)", value: jwtRouteResult },
   );
@@ -125,10 +130,15 @@ async function renderConnection(): Promise<void> {
       [
         { heading: "Item", cell: (r) => r.name },
         { heading: "Value", cell: (r) => r.value },
-      ] satisfies Column<{ name: string; value: string }>[],
+      ] satisfies Column<{ name: string; value: Cell }>[],
       connectionRows,
     ),
   );
+}
+
+/** A link to one of the platform's pages, or a note that the surface has none. */
+function pageLink(url: string | undefined): Cell {
+  return url ? el("a", { href: url, textContent: url }) : "none locally";
 }
 
 connection.controls.append(
