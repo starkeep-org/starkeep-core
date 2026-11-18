@@ -13,7 +13,9 @@ import { describe, it } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { applyConnectionPragmas } from "../src/schema/bootstrap.js";
 import {
+  appSyncableJoinConformance,
   appSyncableQueryConformance,
+  JOIN_TABLES,
   METADATA_SHAPED_COLUMNS,
   QUERY_COLUMNS,
   type QueryConformanceHarness,
@@ -65,14 +67,34 @@ function makeHarness(): QueryConformanceHarness {
     ).join(", ")})`,
   );
 
+  // The join cases' parent, child and grandchild, created as the installer
+  // would create them.
+  for (const t of JOIN_TABLES) {
+    const name = appSyncableTableName(APP, t.name);
+    db.exec(
+      `CREATE TABLE ${name} (${t.columns
+        .map((c) => {
+          const check = c.type === "boolean" ? ` CHECK (${c.name} IN (0, 1))` : "";
+          return `${c.name} ${SQLITE_TYPES[c.type]}${check}${c.primaryKey ? " PRIMARY KEY" : ""}`;
+        })
+        .join(", ")})`,
+    );
+    db.exec(`CREATE INDEX idx_${name}_node_watermark ON ${name} (node_id, updated_at)`);
+  }
+
   const ns: AppSyncableNamespace = {
     appId: APP,
     tables: [
       { name: TABLE, pkColumns: ["id"], columns: QUERY_COLUMNS },
       { name: METADATA_TABLE, pkColumns: ["record_id"], columns: METADATA_SHAPED_COLUMNS },
+      ...JOIN_TABLES.map((t) => ({
+        name: t.name,
+        pkColumns: [...t.pkColumns],
+        columns: t.columns,
+      })),
     ],
     filesEnabled: false,
-    tableNames: [TABLE, METADATA_TABLE],
+    tableNames: [TABLE, METADATA_TABLE, ...JOIN_TABLES.map((t) => t.name)],
   };
   const namespaces: AppSyncableNamespaceStore = {
     get: (id) => (id === APP ? ns : null),
@@ -100,6 +122,14 @@ function makeHarness(): QueryConformanceHarness {
 
 describe("app-syncable query conformance — SQLite", () => {
   for (const testCase of appSyncableQueryConformance) {
+    it(testCase.name, async () => {
+      await testCase.run(makeHarness());
+    });
+  }
+});
+
+describe("app-syncable join conformance — SQLite", () => {
+  for (const testCase of appSyncableJoinConformance) {
     it(testCase.name, async () => {
       await testCase.run(makeHarness());
     });

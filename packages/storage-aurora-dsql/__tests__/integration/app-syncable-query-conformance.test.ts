@@ -12,7 +12,9 @@
 import { describe, it, afterAll, afterEach } from "vitest";
 import type { PGlite } from "@electric-sql/pglite";
 import {
+  appSyncableJoinConformance,
   appSyncableQueryConformance,
+  JOIN_TABLES,
   METADATA_SHAPED_COLUMNS,
   QUERY_COLUMNS,
   type QueryConformanceHarness,
@@ -65,7 +67,7 @@ async function makeHarness(): Promise<QueryConformanceHarness> {
   const pg = await takeDatabase();
 
   // The owner leads every primary key, as `dsql-ddl.ts` emits it.
-  const withOwner = (cols: typeof QUERY_COLUMNS) =>
+  const withOwner = (cols: readonly (typeof QUERY_COLUMNS)[number][]) =>
     [
       "user_id TEXT NOT NULL",
       ...cols.map((c) => `${c.name} ${pgColumnType(c.type)}${c.primaryKey ? " NOT NULL" : ""}`),
@@ -84,6 +86,7 @@ async function makeHarness(): Promise<QueryConformanceHarness> {
     CREATE TABLE ${SCHEMA}.${TABLE} (${columns});
     CREATE INDEX idx_${TABLE}_node_watermark ON ${SCHEMA}.${TABLE} (user_id, node_id, updated_at);
     CREATE TABLE ${SCHEMA}.${METADATA_TABLE} (${metadataColumns});
+    ${JOIN_TABLES.map((t) => `CREATE TABLE ${SCHEMA}.${t.name} (${withOwner(t.columns)});`).join("\n")}
   `);
   await createAppNodeWatermarks(pg, SCHEMA);
 
@@ -92,9 +95,14 @@ async function makeHarness(): Promise<QueryConformanceHarness> {
     tables: [
       { name: TABLE, pkColumns: ["id"], columns: QUERY_COLUMNS },
       { name: METADATA_TABLE, pkColumns: ["record_id"], columns: METADATA_SHAPED_COLUMNS },
+      ...JOIN_TABLES.map((t) => ({
+        name: t.name,
+        pkColumns: [...t.pkColumns],
+        columns: t.columns,
+      })),
     ],
     filesEnabled: false,
-    tableNames: [TABLE, METADATA_TABLE],
+    tableNames: [TABLE, METADATA_TABLE, ...JOIN_TABLES.map((t) => t.name)],
   };
   const namespaces: AppSyncableNamespaceStore = {
     get: (id) => (id === APP ? ns : null),
@@ -128,6 +136,14 @@ async function makeHarness(): Promise<QueryConformanceHarness> {
 
 describe("app-syncable query conformance — Postgres", () => {
   for (const testCase of appSyncableQueryConformance) {
+    it(testCase.name, async () => {
+      await testCase.run(await makeHarness());
+    });
+  }
+});
+
+describe("app-syncable join conformance — Postgres", () => {
+  for (const testCase of appSyncableJoinConformance) {
     it(testCase.name, async () => {
       await testCase.run(await makeHarness());
     });
