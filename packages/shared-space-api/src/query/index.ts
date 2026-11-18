@@ -1,4 +1,9 @@
 export {
+  FLAT_ORDER_DEPRECATED_AT,
+  flatOrderDeprecation,
+  isFlatOrder,
+} from "./order-deprecation.js";
+export {
   parseQuery,
   DEFAULT_LIMIT,
   MAX_LIMIT,
