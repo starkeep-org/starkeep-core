@@ -103,13 +103,28 @@ describe("an app whose data an uninstall kept", () => {
     expect(refresh).toHaveBeenCalled();
   });
 
-  it("says a reinstall downloads the data when the cloud holds all of it", async () => {
+  // The cloud serves an app's data to a machine only while the app is
+  // installed in the cloud, so the promise of a download carries that
+  // condition. A cloud uninstall keeps the cloud copy but serves nothing.
+  it("says a reinstall downloads the data while the app is installed in the cloud", async () => {
     serve();
     preview.cloudCopy = "current";
     show([notInstalled], [keptDice]);
     const { dialog } = await openDeleteDialog("Dice");
-    expect(await within(dialog).findByText(/downloads it again/)).toBeTruthy();
+    expect(
+      await within(dialog).findByText(/downloads it again while Dice is installed in the cloud/),
+    ).toBeTruthy();
     expect(within(dialog).queryByText("The deletion is permanent")).toBeNull();
+  });
+
+  it("puts the same condition on downloading an older cloud copy", async () => {
+    serve();
+    preview.cloudCopy = "behind";
+    show([notInstalled], [keptDice]);
+    const { dialog } = await openDeleteDialog("Dice");
+    expect(
+      await within(dialog).findByText(/older cloud copy while Dice is installed in the cloud/),
+    ).toBeTruthy();
   });
 
   it("keeps a card for kept data whose app folder is gone", async () => {
