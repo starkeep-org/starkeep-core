@@ -19,6 +19,7 @@ const RESERVED = [
   "limit",
   "page_token",
   "include",
+  "join",
 ] as const;
 
 /** Where a request's parameters come from, whatever transport carried them. */

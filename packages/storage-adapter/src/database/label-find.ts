@@ -107,6 +107,7 @@ export function planFindByLabel(query: FindByLabelQuery): LabelFindPlan | null {
       // projection: `deleted_at` is not a column the schema declares, and
       // `rowToLabel` is total over the stored row.
       select: null,
+      joins: [],
       where,
       order: LABEL_ORDER,
       limit: query.limit ?? DEFAULT_FIND_LIMIT,

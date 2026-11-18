@@ -15,6 +15,7 @@ import { requireWellFormedFileIndexRow } from "@starkeep/shared-space-api";
 import {
   buildAppAggregateQuery,
   buildAppRowQuery,
+  outputColumns,
   collectAggregatePage,
   collectRowPage,
   SQLITE_APP_QUERY_DIALECT,
@@ -429,21 +430,21 @@ export class SqliteAppSyncableApplier implements AppSyncableApplier, ScanCapable
     options: BuildOptions = {},
   ): Promise<ParsedQueryResult> {
     const fullName = appSyncableTableName(appId, table);
-
-    const booleanColumns = this.booleanColumnsOf(appId, table);
+    // Joins and subqueries name the app's other tables by manifest name.
+    const build: BuildOptions = {
+      ...options,
+      physicalName: (other) => appSyncableTableName(appId, other),
+    };
+    const booleanColumns = booleanColumnNames(
+      outputColumns(query, (name) => this.columnsOf(appId, name)),
+    );
 
     if (query.mode === "aggregate") {
-      const compiled = buildAppAggregateQuery(
-        qb,
-        fullName,
-        query,
-        SQLITE_APP_QUERY_DIALECT,
-        options,
-      );
+      const compiled = buildAppAggregateQuery(qb, fullName, query, SQLITE_APP_QUERY_DIALECT, build);
       return collectAggregatePage(query, fromSqliteRows(this.selectRows(compiled), booleanColumns));
     }
 
-    const compiled = buildAppRowQuery(qb, fullName, query, options);
+    const compiled = buildAppRowQuery(qb, fullName, query, build);
     // `node:sqlite` has no streaming cursor, so the fetch budget is applied
     // over an array rather than over an iterator here. The row limit bounds what
     // that array can hold, and the response budget engages only on pathological
@@ -457,9 +458,12 @@ export class SqliteAppSyncableApplier implements AppSyncableApplier, ScanCapable
 
   /** The names of a declared table's `boolean` columns, or null when it has none. */
   private booleanColumnsOf(appId: string, table: string): Set<string> | null {
-    return booleanColumnNames(
-      this.namespace.get(appId)?.tables.find((t) => t.name === table)?.columns,
-    );
+    return booleanColumnNames(this.columnsOf(appId, table));
+  }
+
+  /** A declared table's columns, or undefined when the namespace does not hold it. */
+  private columnsOf(appId: string, table: string) {
+    return this.namespace.get(appId)?.tables.find((t) => t.name === table)?.columns;
   }
 
   /** Bind and run a compiled SELECT, adapting values SQLite cannot bind. */

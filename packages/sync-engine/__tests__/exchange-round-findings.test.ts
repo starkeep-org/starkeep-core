@@ -367,6 +367,7 @@ describe("exchange round: findings from the TLA+ model", () => {
         mode: "rows",
         table: "record_image_metadata",
         select: ["record_id"],
+        joins: [],
         where: [],
         order: [],
         limit: 10,

@@ -50,6 +50,7 @@ import {
   type SoftDeletedScope,
   type SortField,
   type WhereClause,
+  literalWhere,
 } from "@starkeep/storage-adapter";
 import { ApiError } from "../errors.js";
 import { MAX_LIMIT, parseQuery } from "./parse.js";
@@ -268,13 +269,16 @@ export function planRecordQuery(
     ...(selectParam === undefined ? {} : { select: selectParam }),
   };
 
+  // No table resolver, so every multi-table form is refused and the parsed
+  // `where` holds literal clauses only.
   const parsed = parseQuery(schema, params);
+  const parsedWhere = literalWhere(parsed.where);
 
   // The grant, as a predicate on the discriminant rather than a filter over
   // what a scan returned. Omitted under `allAccess`, whose authorization is by
   // app id and cannot be written as a finite set of types.
   const readableTypes = [...grants.readableTypes].sort();
-  if (!grants.allAccess) assertNamedTypesReadable(parsed.where, grants);
+  if (!grants.allAccess) assertNamedTypesReadable(parsedWhere, grants);
   const empty = !grants.allAccess && readableTypes.length === 0;
   const serverWhere: WhereClause[] = grants.allAccess
     ? []
@@ -286,7 +290,7 @@ export function planRecordQuery(
   // with `include=stand-ins` or by naming `stand_in_role` in `where` — a
   // caller filtering on the role is plainly asking about stand-ins, and
   // silently ANDing "is not a stand-in" onto that would answer nothing.
-  const collapse = !includeStandIns && !parsed.where.some((c) => c.column === "stand_in_role");
+  const collapse = !includeStandIns && !parsedWhere.some((c) => c.column === "stand_in_role");
   const collapseClause: WhereClause[] = collapse
     ? [{ column: "stand_in_role", predicate: { op: "is", value: null } }]
     : [];
@@ -345,7 +349,7 @@ export function planRecordQuery(
 
   const query: Query = {
     filters,
-    where: [...rows.where, ...collapseClause, ...serverWhere],
+    where: [...parsedWhere, ...collapseClause, ...serverWhere],
     ...(rows.order.length > 0 ? { sort: sortFor(rows) } : {}),
     limit: rows.limit,
     ...(pageTokenParam === undefined ? {} : { cursor: pageTokenParam }),

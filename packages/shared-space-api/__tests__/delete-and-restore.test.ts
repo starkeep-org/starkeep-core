@@ -318,6 +318,7 @@ async function metadataQueryIds(category = "image"): Promise<string[]> {
       mode: "rows",
       table: `record_${category}_metadata`,
       select: ["record_id"],
+      joins: [],
       where: [],
       order: [],
       limit: 50,

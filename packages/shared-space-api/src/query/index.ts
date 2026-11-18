@@ -1,4 +1,12 @@
-export { parseQuery, DEFAULT_LIMIT, MAX_LIMIT, MAX_IN_LIST } from "./parse.js";
+export {
+  parseQuery,
+  DEFAULT_LIMIT,
+  MAX_LIMIT,
+  MAX_IN_LIST,
+  MAX_SUBQUERY_DEPTH,
+  type AppTables,
+  type ParseOptions,
+} from "./parse.js";
 export {
   appOrderSignature,
   encodePageToken,
@@ -43,4 +51,14 @@ export {
   type RowQuery,
   type RowQueryResult,
   type WhereClause,
+  type WhereTerm,
+  type ColumnRef,
+  type CompareOp,
+  type CompareTerm,
+  type ExistsTerm,
+  type InSubqueryTerm,
+  type JoinSpec,
+  type Subquery,
+  isWhereClause,
+  literalWhere,
 } from "./types.js";

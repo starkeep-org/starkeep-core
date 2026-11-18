@@ -14,10 +14,15 @@ import type {
   ChangeNotifier,
 } from "@starkeep/sync-engine";
 import type { AppFileEntry, AppSpecificOperations, ApiSubject, RowWriteResult } from "../types.js";
-import { parseQuery } from "../query/parse.js";
+import { parseQuery, type AppTables } from "../query/parse.js";
 import { checkValue } from "../query/values.js";
 import { SYSTEM_COLUMN_NAMES } from "./columns.js";
-import type { ParsedQuery, ParsedQueryResult, QueryTableSchema } from "../query/types.js";
+import {
+  QueryParseError,
+  type ParsedQuery,
+  type ParsedQueryResult,
+  type QueryTableSchema,
+} from "../query/types.js";
 import { validateTableName } from "./validation.js";
 import {
   FILE_RECORDS_TABLE,
@@ -197,6 +202,24 @@ export function createAppSpecificFactory(
     }
 
     /**
+     * The app's tables, as joins and subqueries see them.
+     *
+     * The same guard as the path: a reserved or undeclared table is not
+     * reachable through a join either.
+     */
+    const queryTables: AppTables = {
+      names: [...declaredTables],
+      schemaOf(table) {
+        try {
+          resolveTable(table);
+        } catch (err) {
+          throw new QueryParseError(err instanceof Error ? err.message : String(err));
+        }
+        return schemaFor(table);
+      },
+    };
+
+    /**
      * Check an app's row values against the columns it declared, and return the
      * row in the canonical form each value's declared type defines.
      *
@@ -262,6 +285,7 @@ export function createAppSpecificFactory(
         mode: "rows",
         table: FILE_RECORDS_TABLE,
         select: null,
+        joins: [],
         where: [{ column: "id", predicate: { op: "eq", value: key } }],
         order: [{ column: "id", direction: "asc", nulls: "last" }],
         limit: 1,
@@ -367,7 +391,7 @@ export function createAppSpecificFactory(
         resolveTable(table);
         // Parse, then run. Reads go directly to the applier's store — no
         // change-log roundtrip, since a read produces no entry.
-        const parsed = parseQuery(schemaFor(table), params);
+        const parsed = parseQuery(schemaFor(table), params, { tables: queryTables });
         return requireQueryCapable().runQuery(appId, table, parsed);
       },
 

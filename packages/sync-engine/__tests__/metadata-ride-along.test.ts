@@ -129,6 +129,7 @@ async function liveMetadataIds(db: MockDatabaseAdapter): Promise<string[]> {
       mode: "rows",
       table: "record_image_metadata",
       select: ["record_id"],
+      joins: [],
       where: [],
       order: [],
       limit: 10,

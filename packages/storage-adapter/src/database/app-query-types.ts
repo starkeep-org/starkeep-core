@@ -60,6 +60,15 @@ export type Predicate =
   | { readonly op: "ne"; readonly value: QueryValue }
   | { readonly op: "lt" | "lte" | "gt" | "gte"; readonly value: string | number }
   | { readonly op: "in"; readonly values: readonly QueryValue[] }
+  /**
+   * The complement of `in`: a null column value matches, as with `ne`.
+   *
+   * SQL's own `x NOT IN (…)` drops the row where `x` is null, so `not_in [v]`
+   * and `ne v` would disagree on the null bucket. The compiler adds the bucket
+   * back. The parser refuses `null` inside the list, because one null makes
+   * SQL's `NOT IN` unknown for every row.
+   */
+  | { readonly op: "not_in"; readonly values: readonly QueryValue[] }
   /** `is` covers null, true and false — the whole value-less-operator case. */
   | { readonly op: "is"; readonly value: null | boolean }
   /**
@@ -102,10 +111,118 @@ export type Predicate =
  */
 export const LIKE_ESCAPE_CHAR = "\\";
 
-/** One `WHERE` term: a column and a predicate over it, ANDed with the rest. */
+/**
+ * One literal `WHERE` term: a column and a predicate over a value, ANDed with
+ * the rest.
+ *
+ * `column` is a {@link ColumnRef}. The shared plane only ever holds bare names.
+ */
 export interface WhereClause {
-  readonly column: string;
+  readonly column: ColumnRef;
   readonly predicate: Predicate;
+}
+
+/**
+ * A column, as the parsed query names it.
+ *
+ * A bare name is a column of the queried (base) table. A qualified name
+ * `<qualifier>.<column>` is a column of a joined table or of a subquery's
+ * table, where the qualifier is the table's name or its `as`. The parser
+ * normalizes a qualified base-table name to the bare form, so one column has
+ * one spelling. Names never hold a dot otherwise (`[a-z_][a-z0-9_]*`), so the
+ * two forms cannot be confused.
+ */
+export type ColumnRef = string;
+
+/** The comparison operators that accept a column operand. */
+export type CompareOp = "eq" | "ne" | "lt" | "lte" | "gt" | "gte";
+
+/**
+ * A column compared with another column: a join key, or a correlation between
+ * a subquery and an enclosing table.
+ *
+ * `eq` never matches a null on either side, as in SQL. `ne` is compiled as the
+ * exact complement of `eq`, nulls included, as the literal forms are.
+ */
+export interface CompareTerm {
+  readonly kind: "compare";
+  readonly column: ColumnRef;
+  readonly op: CompareOp;
+  readonly other: ColumnRef;
+}
+
+/** A subquery over one of the calling app's tables. */
+export interface Subquery {
+  /** The manifest name of the subquery's table. */
+  readonly table: string;
+  /** The table's name, or its `as`. Every column of the table is `<qualifier>.<column>`. */
+  readonly qualifier: string;
+  readonly where: readonly WhereTerm[];
+}
+
+/** `exists (select 1 from … where …)`, or its negation. */
+export interface ExistsTerm {
+  readonly kind: "exists";
+  readonly negated: boolean;
+  readonly sub: Subquery;
+}
+
+/**
+ * `<column> in (select <select> from … where …)`, or `not_in`.
+ *
+ * `not_in` is the complement of `in`, as the literal form is: a null `column`
+ * matches. The parser requires a `notNull` select column for `not_in`, so the
+ * subquery never yields the null that makes SQL's `NOT IN` unknown everywhere.
+ */
+export interface InSubqueryTerm {
+  readonly kind: "in_subquery";
+  readonly column: ColumnRef;
+  readonly negated: boolean;
+  readonly sub: Subquery & { readonly select: ColumnRef };
+}
+
+/**
+ * One term of a `where`, a join's `on` or a subquery's `where`, ANDed with the
+ * rest.
+ *
+ * A {@link WhereClause} carries no `kind`, so the shared plane's literal
+ * clauses need no change. Only the app-syncable plane holds the other forms.
+ */
+export type WhereTerm = WhereClause | CompareTerm | ExistsTerm | InSubqueryTerm;
+
+/** Is this term a literal clause, the one form the shared plane holds? */
+export function isWhereClause(term: WhereTerm): term is WhereClause {
+  return !("kind" in term);
+}
+
+/**
+ * Narrow a parsed `where` to literal clauses, for the shared plane.
+ *
+ * The parser never hands the shared plane another form, because the shared
+ * plane passes no table resolver. The check makes that promise loud here
+ * rather than silent in a consumer that reads `column` and `predicate`.
+ */
+export function literalWhere(where: readonly WhereTerm[]): WhereClause[] {
+  return where.map((term) => {
+    if (!isWhereClause(term)) {
+      throw new Error(`a ${term.kind} term reached a plane that holds literal clauses only`);
+    }
+    return term;
+  });
+}
+
+/**
+ * One joined table.
+ *
+ * `on` holds at least one {@link CompareTerm} between the joined table and an
+ * earlier one, so the grammar has no cross join. The compiler ANDs the joined
+ * table's soft-delete filter into `on`, so a left join stays a left join.
+ */
+export interface JoinSpec {
+  readonly table: string;
+  readonly qualifier: string;
+  readonly kind: "inner" | "left";
+  readonly on: readonly WhereTerm[];
 }
 
 /**
@@ -156,16 +273,26 @@ export interface RowQuery {
   readonly mode: "rows";
   /** Bare table name. The endpoint path names it; `resolveTable` scopes it. */
   readonly table: string;
-  /** Columns to project, or null for every column. */
-  readonly select: readonly string[] | null;
-  readonly where: readonly WhereClause[];
+  /**
+   * Columns to project, or null for every column of the base table.
+   *
+   * Never null when `joins` is non-empty: the parser requires `select` then.
+   * A base-table column comes back under its bare name, and a joined column
+   * under its qualified name, such as `"programs.name"`.
+   */
+  readonly select: readonly ColumnRef[] | null;
+  /** Joined tables, in order. Empty on the shared plane and when absent. */
+  readonly joins: readonly JoinSpec[];
+  readonly where: readonly WhereTerm[];
   /**
    * The full ordering, tiebreaker included.
    *
    * The parser appends the table's primary-key columns to whatever the caller
    * asked for, because a keyset cursor has to name exactly one row and a sort
    * key does not. A caller ordering by `due` alone gets `due, id` and can page
-   * through ties without losing or repeating them.
+   * through ties without losing or repeating them. With joins, each joined
+   * table's primary-key columns follow, in join order, because a to-many join
+   * returns several rows per base row.
    */
   readonly order: readonly OrderTerm[];
   readonly limit: number;
@@ -191,9 +318,11 @@ export interface AggregateQuery {
    * `42803`, and therefore the one place the two engines would otherwise return
    * different answers to the same query.
    */
-  readonly groupBy: readonly string[];
+  readonly groupBy: readonly ColumnRef[];
   readonly aggregates: readonly AggregateTerm[];
-  readonly where: readonly WhereClause[];
+  /** Joined tables, in order. Empty on the shared plane and when absent. */
+  readonly joins: readonly JoinSpec[];
+  readonly where: readonly WhereTerm[];
   /** May name a grouping column or an aggregate output name, and nothing else. */
   readonly order: readonly OrderTerm[];
   readonly limit: number;
@@ -300,6 +429,8 @@ export interface QueryParams {
   readonly limit?: string;
   readonly page_token?: string;
   readonly include?: string;
+  /** A JSON array of joins. App-syncable plane only. */
+  readonly join?: string;
 }
 
 /** A rejection carrying the message the caller sees. Never a stack trace. */
