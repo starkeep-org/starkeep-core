@@ -66,6 +66,7 @@ import {
   type WhereTerm,
 } from "./types.js";
 import { checkValue, isNumericColumn, isOrderableColumn } from "./values.js";
+import { isFlatOrder } from "./order-deprecation.js";
 
 /**
  * The page a caller gets by not asking.
@@ -876,57 +877,85 @@ function parseSelect(scope: Scope, raw: string | undefined): ColumnRef[] | null 
   return [...new Set(refs)];
 }
 
-const ORDER_MODIFIERS = new Set(["asc", "desc", "nullsfirst", "nullslast"]);
-
 /**
- * Parse `order`, e.g. `due.asc,id.desc.nullsfirst,programs.name.desc`.
+ * Parse `order`, in either of its two spellings.
  *
- * The null position may be given explicitly and is otherwise derived: nulls
- * last, whichever direction the key runs. Derived rather than left to the
- * engine because the two engines derive it differently, and stated on every
- * term in the parsed value so nothing downstream has to remember the rule.
+ * The JSON form, `[{"col":"tasks.due","dir":"desc","nulls":"first"}]`, names
+ * any column in scope. `dir` defaults to `asc`.
  *
- * A term's name is one part or two. `isQualified` decides, from the first two
- * parts, whether they name a qualified column; the rest are modifiers.
+ * The flat form, `due.asc,id.desc.nullsfirst`, is deprecated (STA-101) and
+ * names bare columns only. Every dot after the name separates a modifier, so
+ * the dot never also separates a table from a column. A qualified name needs
+ * the JSON form, which a JSON array's leading `[` tells apart: no column name
+ * begins with one.
+ *
+ * In both forms the null position may be given explicitly and is otherwise
+ * derived: nulls last, whichever direction the key runs. Derived rather than
+ * left to the engine because the two engines derive it differently, and stated
+ * on every term in the parsed value so nothing downstream has to remember the
+ * rule.
  */
-function parseOrder(
-  raw: string | undefined,
-  isQualified: (first: string, second: string) => boolean,
-  resolve: (name: string) => ColumnRef,
-): OrderTerm[] {
+function parseOrder(raw: string | undefined, resolve: (name: string) => ColumnRef): OrderTerm[] {
   if (raw === undefined || raw.trim() === "") return [];
-  return splitList(raw).map((term) => {
-    const parts = term.split(".");
-    const width = parts.length >= 2 && isQualified(parts[0]!, parts[1]!) ? 2 : 1;
-    const name = parts.slice(0, width).join(".");
-    if (parts[0]!.length === 0) throw new QueryParseError(`order term "${term}" names no column`);
-    const column = resolve(name);
+  return isFlatOrder(raw) ? parseFlatOrder(raw, resolve) : parseJsonOrder(raw, resolve);
+}
 
+function parseJsonOrder(raw: string, resolve: (name: string) => ColumnRef): OrderTerm[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new QueryParseError(
+      `order must be JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new QueryParseError(
+      `order must be a non-empty JSON array, such as [{"col":"due","dir":"desc"}]`,
+    );
+  }
+  return parsed.map((entry) => {
+    if (!isPlainObject(entry)) {
+      throw new QueryParseError(`each order term must be a JSON object, such as {"col":"due"}`);
+    }
+    refuseUnknownFields(entry, ["col", "dir", "nulls"], "an order term");
+    const { col, dir, nulls } = entry;
+    if (typeof col !== "string" || col === "") {
+      throw new QueryParseError(`each order term must name its column in "col"`);
+    }
+    if (dir !== undefined && dir !== "asc" && dir !== "desc") {
+      throw new QueryParseError(`an order term's dir must be "asc" or "desc"`);
+    }
+    if (nulls !== undefined && nulls !== "first" && nulls !== "last") {
+      throw new QueryParseError(`an order term's nulls must be "first" or "last"`);
+    }
+    return { column: resolve(col), direction: dir ?? "asc", nulls: nulls ?? "last" };
+  });
+}
+
+function parseFlatOrder(raw: string, resolve: (name: string) => ColumnRef): OrderTerm[] {
+  return splitList(raw).map((term) => {
+    const [name, ...modifiers] = term.split(".");
+    if (!name) throw new QueryParseError(`order term "${term}" names no column`);
+
+    // The modifiers are read before the name resolves, so `tasks.due` points
+    // to the JSON form rather than reporting that `tasks` is not a column.
     let direction: "asc" | "desc" = "asc";
     let nulls: "first" | "last" | null = null;
-    for (const modifier of parts.slice(width)) {
+    for (const modifier of modifiers) {
       if (modifier === "asc" || modifier === "desc") direction = modifier;
       else if (modifier === "nullsfirst") nulls = "first";
       else if (modifier === "nullslast") nulls = "last";
       else {
         throw new QueryParseError(
-          `"${modifier}" is not an order modifier; use asc, desc, nullsfirst or nullslast`,
+          `"${modifier}" is not an order modifier; use asc, desc, nullsfirst or nullslast. ` +
+            `A column of a joined table needs the JSON form of order, such as ` +
+            `[{"col":"${name}.${modifier}"}]`,
         );
       }
     }
-    return { column, direction, nulls: nulls ?? "last" };
+    return { column: resolve(name), direction, nulls: nulls ?? "last" };
   });
-}
-
-/**
- * Whether `first.second` names a qualified column in a row query's order.
- *
- * A qualifier in scope wins, so `programs.name` is the joined column. A first
- * part that is not a qualifier, or a second part that is a modifier, reads as a
- * bare name followed by modifiers, as before joins existed.
- */
-function rowOrderIsQualified(scope: Scope): (first: string, second: string) => boolean {
-  return (first, second) => scope.has(first) && !ORDER_MODIFIERS.has(second);
 }
 
 function parseLimit(raw: string | undefined): number {
@@ -1062,7 +1091,7 @@ function parseRowQuery(
   if (joins.length > 0 && select === null) {
     throw new QueryParseError(`a query with join must name its columns in select`);
   }
-  const requested = parseOrder(params.order, rowOrderIsQualified(scope), (name) => {
+  const requested = parseOrder(params.order, (name) => {
     if (!name.includes(".")) {
       if (name === SOFT_DELETE_COLUMN) {
         throw new QueryParseError(`"${SOFT_DELETE_COLUMN}" is owned by the server`);
@@ -1169,25 +1198,20 @@ function parseAggregateQuery(
   const aggregates = parseAggregate(scope, params.aggregate!, groupBy);
   const outputs = new Set([...groupBy, ...aggregates.map((a) => a.name)]);
 
-  const order = parseOrder(
-    params.order,
-    (first, second) =>
-      outputs.has(`${first}.${second}`) || (first === schema.name && outputs.has(second)),
-    (name) => {
-      // A qualified base-table group key comes back bare, so the order names
-      // it bare too.
-      const normalized =
-        name.startsWith(`${schema.name}.`) && !outputs.has(name)
-          ? name.slice(schema.name.length + 1)
-          : name;
-      if (!outputs.has(normalized)) {
-        throw new QueryParseError(
-          `order may name a grouping column or an aggregate output; "${name}" is neither`,
-        );
-      }
-      return normalized;
-    },
-  );
+  const order = parseOrder(params.order, (name) => {
+    // A qualified base-table group key comes back bare, so the order names it
+    // bare too.
+    const normalized =
+      name.startsWith(`${schema.name}.`) && !outputs.has(name)
+        ? name.slice(schema.name.length + 1)
+        : name;
+    if (!outputs.has(normalized)) {
+      throw new QueryParseError(
+        `order may name a grouping column or an aggregate output; "${name}" is neither`,
+      );
+    }
+    return normalized;
+  });
 
   return {
     mode: "aggregate",

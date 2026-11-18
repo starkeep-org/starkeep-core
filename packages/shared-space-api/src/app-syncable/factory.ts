@@ -463,7 +463,7 @@ export function createAppSpecificFactory(
         // and the page token's checks are the table query's own.
         const params: { where: string; order: string; limit?: string; page_token?: string } = {
           where: JSON.stringify({ id: { prefix: listPrefix } }),
-          order: "id.asc",
+          order: JSON.stringify([{ col: "id" }]),
         };
         if (opts?.limit !== undefined) params.limit = opts.limit;
         if (opts?.pageToken !== undefined) params.page_token = opts.pageToken;

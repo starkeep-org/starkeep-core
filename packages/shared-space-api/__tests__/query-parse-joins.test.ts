@@ -58,6 +58,8 @@ const TASKS = table("tasks", [
 const COMMENTS = table("comments", [
   ["task_id", "text", true],
   ["author", "text"],
+  // Named like an order modifier, which only the JSON form of order can name.
+  ["desc", "text"],
 ]);
 
 const SCHEMAS = new Map([PROJECTS, TASKS, COMMENTS].map((s) => [s.name, s]));
@@ -322,7 +324,7 @@ describe("join", () => {
       join: [TASKS_OF_PROJECT],
       select: "id,tasks.title",
       where: { "tasks.done": { is: false }, budget: { gt: 10 } },
-      order: "tasks.due.desc.nullsfirst,name",
+      order: [{ col: "tasks.due", dir: "desc", nulls: "first" }, { col: "name" }],
     });
     expect(q.where).toContainEqual({ column: "tasks.done", predicate: { op: "is", value: false } });
     expect(q.order[0]).toEqual({ column: "tasks.due", direction: "desc", nulls: "first" });
@@ -613,7 +615,10 @@ describe("aggregates over joins", () => {
       join: [TASKS_OF_PROJECT],
       select: "name,tasks.done",
       aggregate: { n: { fn: "count" }, latest: { fn: "max", col: "tasks.due" } },
-      order: "tasks.done.desc,n.desc",
+      order: [
+        { col: "tasks.done", dir: "desc" },
+        { col: "n", dir: "desc" },
+      ],
     });
     expect(q.groupBy).toEqual(["name", "tasks.done"]);
     expect(q.aggregates[1]).toEqual({
@@ -633,7 +638,7 @@ describe("aggregates over joins", () => {
     const q = groups({
       select: "projects.name",
       aggregate: { n: { fn: "count" } },
-      order: "projects.name.desc",
+      order: [{ col: "projects.name", dir: "desc" }],
     });
     expect(q.order).toEqual([{ column: "name", direction: "desc", nulls: "last" }]);
   });
@@ -647,6 +652,69 @@ describe("aggregates over joins", () => {
       },
       /collides with a column/,
     );
+  });
+});
+
+describe("order", () => {
+  const COMMENTS_OF_TASK = {
+    table: "comments",
+    kind: "left",
+    on: { "comments.task_id": { eq: { col: "tasks.id" } } },
+  };
+
+  it("names a joined column called like a modifier in the JSON form", () => {
+    const q = rows(
+      { join: [COMMENTS_OF_TASK], select: "id", order: [{ col: "comments.desc", dir: "desc" }] },
+      TASKS,
+    );
+    expect(q.order[0]).toEqual({ column: "comments.desc", direction: "desc", nulls: "last" });
+  });
+
+  it("defaults dir to asc and nulls to last, and accepts bare names", () => {
+    const q = rows({ order: [{ col: "name" }, { col: "budget", nulls: "first" }] });
+    expect(q.order.slice(0, 2)).toEqual([
+      { column: "name", direction: "asc", nulls: "last" },
+      { column: "budget", direction: "asc", nulls: "first" },
+    ]);
+  });
+
+  it("refuses a malformed JSON order", () => {
+    rejects({ order: "[" }, /order must be JSON/);
+    rejects({ order: "[]" }, /order must be a non-empty JSON array/);
+    rejects({ order: [] }, /order must be a non-empty JSON array/);
+    rejects({ order: ["name"] }, /each order term must be a JSON object/);
+    rejects({ order: [{}] }, /each order term must name its column in "col"/);
+    rejects({ order: [{ col: "name", direction: "desc" }] }, /"direction" is not one of them/);
+    rejects({ order: [{ col: "name", dir: "down" }] }, /dir must be "asc" or "desc"/);
+    rejects({ order: [{ col: "name", nulls: "top" }] }, /nulls must be "first" or "last"/);
+    rejects({ order: [{ col: "photo" }] }, /has no ordering/);
+  });
+
+  it("reads the flat form for bare names, where every dot separates a modifier", () => {
+    const q = rows({ order: "name.desc.nullsfirst,budget" });
+    expect(q.order.slice(0, 2)).toEqual([
+      { column: "name", direction: "desc", nulls: "first" },
+      { column: "budget", direction: "asc", nulls: "last" },
+    ]);
+  });
+
+  it("refuses a qualified name in the flat form and points to the JSON form", () => {
+    rejects(
+      { join: [TASKS_OF_PROJECT], select: "id", order: "tasks.due.desc" },
+      /"due" is not an order modifier.*JSON form.*\{"col":"tasks\.due"\}/,
+    );
+  });
+
+  it("orders an aggregate by a qualified group key in the JSON form only", () => {
+    const params = {
+      join: [TASKS_OF_PROJECT],
+      select: "tasks.title",
+      aggregate: { n: { fn: "count" } },
+    };
+    expect(groups({ ...params, order: [{ col: "tasks.title" }] }).order).toEqual([
+      { column: "tasks.title", direction: "asc", nulls: "last" },
+    ]);
+    rejects({ ...params, order: "tasks.title" }, /"title" is not an order modifier/);
   });
 });
 
@@ -681,5 +749,11 @@ describe("the shared plane", () => {
       { column: "name", predicate: { op: "eq", value: "x" } },
       { column: "budget", predicate: { op: "not_in", values: [1] } },
     ]);
+  });
+
+  it("accepts the JSON form of order, and refuses a joined name in it", () => {
+    const parsed = parseQuery(PROJECTS, encode({ order: [{ col: "name", dir: "desc" }] }));
+    expect(parsed.order[0]).toEqual({ column: "name", direction: "desc", nulls: "last" });
+    sharedRejects({ order: [{ col: "tasks.due" }] }, /applies to app tables only/);
   });
 });
