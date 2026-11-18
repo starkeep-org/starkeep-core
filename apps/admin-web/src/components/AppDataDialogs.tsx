@@ -256,7 +256,8 @@ function CloudCopyNote({ preview, name }: { preview: AppDataPreview; name: strin
         <AlertTitle>The cloud copy is missing recent changes</AlertTitle>
         <AlertDescription>
           This machine holds changes that it had not synced to the cloud. The deletion loses them.
-          Reinstalling {name} here downloads the older cloud copy.
+          Reinstalling {name} here downloads the older cloud copy while {name} is installed in the
+          cloud.
         </AlertDescription>
       </Alert>
     );
@@ -264,7 +265,7 @@ function CloudCopyNote({ preview, name }: { preview: AppDataPreview; name: strin
   return (
     <p className="text-muted-foreground">
       The cloud held all of this data at the last sync. Reinstalling {name} on this machine
-      downloads it again.
+      downloads it again while {name} is installed in the cloud.
     </p>
   );
 }
