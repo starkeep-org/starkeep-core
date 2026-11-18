@@ -690,12 +690,13 @@ function predicateFor(column: AppSyncableColumnInfo, op: string, operand: unknow
       }
       const values = operand.map((v) => value(column, v));
       if (op === "in") return { op: "in", values };
-      // One null in the list makes SQL's NOT IN unknown for every row, which
-      // is an empty answer rather than an error.
+      // One null in the list makes SQL's NOT IN unknown for every row, so the
+      // list refuses it. A caller who lists null means "and not null", which
+      // `ne null` says: `not_in` already keeps the null rows.
       if (values.includes(null)) {
         throw new QueryParseError(
-          `not_in cannot hold null, because NOT IN with a null matches nothing; ` +
-            `add {"is": null} or {"ne": null} as a separate filter`,
+          `not_in cannot hold null; not_in already keeps the rows where "${name}" is null, ` +
+            `and {"ne": null} beside it drops them`,
         );
       }
       return { op: "not_in", values };

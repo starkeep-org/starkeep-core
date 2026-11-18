@@ -382,6 +382,15 @@ describe("column operands and explicit operators", () => {
     rejects({ where: { name: { not_in: ["a", null] } } }, /not_in cannot hold null/);
     rejects({ where: { name: { not_in: [] } } }, /matches everything/);
   });
+
+  it("points a null inside not_in to ne null, since not_in already keeps the null rows", () => {
+    const params = encode({ where: { name: { not_in: ["a", null] } } });
+    const parse = () => parseQuery(PROJECTS, params, { tables: TABLES });
+    expect(parse).toThrow(/already keeps the rows where "name" is null/);
+    expect(parse).toThrow(/\{"ne": null\}/);
+    // `{"is": null}` beside `not_in` would keep only the null rows.
+    expect(parse).not.toThrow(/"is": null/);
+  });
 });
 
 describe("exists and not_exists", () => {
