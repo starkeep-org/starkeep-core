@@ -221,6 +221,8 @@ export async function sweepAppRoutes(
     (untagged["records"] as { id: string }[]).map((r) => r.id),
     [b],
   );
+  // The flat order spelling, deprecated by STA-101 but still parsed. The
+  // multi-table reads below use the JSON form, so the sweep covers both.
   const first = ok(
     await send("GET", `/data/records${q({ where: both, order: "created_at.asc", limit: 1 })}`),
     route("GET /data/records?limit"),
@@ -453,7 +455,8 @@ async function sweepMultiTableReads(
     join: [{ table: C, kind: "left", on: childOf }],
     select: `${pk},${ck},${cv}`,
     where: own,
-    order: `${pk}.asc`,
+    // The JSON form of order, which alone names a joined column.
+    order: [{ col: pk }, { col: ck }],
   });
   assert.deepEqual(pairs(left, [pk, ck, cv]), [
     `${p1}/${c1}/red`,
@@ -472,7 +475,7 @@ async function sweepMultiTableReads(
   const exists = await read("GET /app-data/db/:table?where exists", {
     where: { ...own, exists: [sub] },
     select: pk,
-    order: `${pk}.asc`,
+    order: [{ col: pk }],
   });
   assert.deepEqual(pairs(exists, [pk]), [p1]);
   const notExists = await read("GET /app-data/db/:table?where not_exists", {
@@ -507,7 +510,7 @@ async function sweepMultiTableReads(
     select: pk,
     aggregate: { n: { fn: "count", col: ck } },
     where: own,
-    order: `${pk}.asc`,
+    order: [{ col: pk }],
   });
   assert.deepEqual(
     (counted["groups"] as Record<string, unknown>[]).map((g) => `${g[pk]}/${Number(g["n"])}`),
@@ -522,7 +525,7 @@ async function sweepMultiTableReads(
       join: [{ table: C, kind: "left", on: childOf }],
       select: `${pk},${ck}`,
       where: own,
-      order: `${pk}.asc`,
+      order: [{ col: pk }, { col: ck, dir: "desc" }],
       limit: 1,
       ...(token ? { page_token: token } : {}),
     });
@@ -530,7 +533,7 @@ async function sweepMultiTableReads(
     token = (body["page_token"] as string | null) ?? null;
     if (!token) break;
   }
-  assert.deepEqual(walked, [`${p1}/${c1}`, `${p1}/${c2}`, `${p2}/null`]);
+  assert.deepEqual(walked, [`${p1}/${c2}`, `${p1}/${c1}`, `${p2}/null`]);
 
   for (const c of children) {
     ok(

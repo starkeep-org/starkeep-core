@@ -509,7 +509,7 @@ sigil to keep them apart from column names — an unrecognized parameter is a
 GET /app-data/db/card_state
   ?where={"deck_id":"d1","suspended":0,"due":{"lte":"2026-09-09T00:00:00.000Z"}}
   &select=id,due,strength
-  &order=due.asc,id.asc
+  &order=[{"col":"due"},{"col":"id"}]
   &limit=200
   &page_token=<opaque>
 ```
@@ -527,9 +527,14 @@ GET /app-data/db/card_state
   Required when `join` is present.
 - **`join`** — strict JSON, a list of your app's other tables to join. See
   "Joins and subqueries" below.
-- **`order`** — `col.asc`, `col.desc`, optionally `.nullsfirst` or
-  `.nullslast`. State the null position when it matters: the two backends
-  default it differently, so the grammar makes you say.
+- **`order`** — strict JSON, a list of sort keys such as
+  `[{"col":"due","dir":"desc","nulls":"first"}]`. `dir` is `asc` or `desc` and
+  defaults to `asc`. `nulls` is `first` or `last` and defaults to `last`. State
+  the null position when it matters: the two backends default it differently,
+  so the grammar makes you say. The older flat spelling, `due.desc.nullsfirst`,
+  still works for columns of the path's table, but it is deprecated. A response
+  to it carries a `Deprecation` header, and the spelling cannot name a joined
+  column.
 - **`limit`** — default 30, maximum 500.
 - **`aggregate`** — strict JSON, each key naming one output column:
   `{"due_count":{"fn":"count"},"next_due":{"fn":"min","col":"due"}}`. The
@@ -568,7 +573,7 @@ GET /app-data/db/projects
   ?join=[{"table":"tasks","kind":"left",
           "on":{"tasks.project_id":{"eq":{"col":"projects.id"}},"tasks.done":false}}]
   &select=id,name,tasks.id,tasks.title
-  &order=name.asc
+  &order=[{"col":"name"},{"col":"tasks.title"}]
 ```
 
 The response returns one row per project and open task, and one row with null
@@ -777,7 +782,7 @@ still decides conflicts across surfaces.
 **Sort ordered lists with a primary-key tiebreak.** Two surfaces that each
 append to a list before syncing can write the same position. Sort by the
 position column and then the primary key, for example
-`order=position.asc,id.asc`, so every surface shows duplicates in the same
+`order=[{"col":"position"},{"col":"id"}]`, so every surface shows duplicates in the same
 order. Compute display numbers such as "Day 3" from the sorted order rather than
 storing them.
 
@@ -1388,7 +1393,7 @@ tables. Every parameter means what it means there — `where`, `select`, `order`
 # One category's derived metadata, ordered by when the shutter fired.
 GET /data/metadata/image
   ?where={"captured_at":{"gte":"2026-01-01T00:00:00.000Z"}}
-  &order=captured_at.desc
+  &order=[{"col":"captured_at","dir":"desc"}]
   &limit=200
 
 # How many photos per person, most-tagged first — one index scan.
@@ -1396,7 +1401,7 @@ GET /data/labels
   ?where={"app_id":"faces","key":"person"}
   &select=value
   &aggregate={"n":{"fn":"count"}}
-  &order=n.desc
+  &order=[{"col":"n","dir":"desc"}]
 ```
 
 The category in the path picks the table, and the columns you may name are that
@@ -1440,7 +1445,7 @@ list.
 ```
 # The library in capture order, originals only, ready to paint.
 GET /data/records
-  ?order=captured_at.desc
+  ?order=[{"col":"captured_at","dir":"desc"}]
   &limit=100
   &include=metadata,labels
   &notLabel=photos/rendition
