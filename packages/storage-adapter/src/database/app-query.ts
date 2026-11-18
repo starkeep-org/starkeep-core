@@ -180,7 +180,11 @@ function aliasedTable(c: Compilation, table: string, qualifier: string): string 
   return `${c.physicalName(table)} as ${qualifier}`;
 }
 
-/** Does any term, at any depth, hold a subquery? */
+/**
+ * Does a top-level term hold a subquery?
+ *
+ * The top level decides alone: a nested subquery sits inside one at the top.
+ */
 function holdsSubquery(terms: readonly WhereTerm[]): boolean {
   return terms.some((t) => !isWhereClause(t) && t.kind !== "compare");
 }
