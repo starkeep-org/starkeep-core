@@ -44,6 +44,13 @@ export interface RouteSweepApp {
   labelKey: string;
   /** An app-syncable table, its primary-key column and one text column. */
   table: { name: string; keyColumn: string; valueColumn: string };
+  /**
+   * A second table whose rows belong to a row of `table`, for joins and
+   * subqueries. `parentColumn` is a NOT NULL text column holding the parent's
+   * key, and `valueColumn` a text column. The sweep skips the multi-table
+   * reads for an app that names none.
+   */
+  childTable?: { name: string; keyColumn: string; parentColumn: string; valueColumn: string };
   /** Whether the manifest asks to publish public links (`publicSharing`). */
   publicSharing: boolean;
 }
@@ -341,6 +348,8 @@ export async function sweepAppRoutes(
     route("DELETE /app-data/db/:table ifUpdatedAt"),
   );
 
+  if (app.childTable) await sweepMultiTableReads(send, app.table, app.childTable, run, route);
+
   // Public links: an owner route on the cloud surface, and nowhere else.
   if (target.surface === "local") {
     const local = await send("GET", "/data/public-shares");
@@ -378,4 +387,161 @@ export async function sweepAppRoutes(
   ok(await send("DELETE", `/data/records/${a}`), route("DELETE /data/records/:id"));
   ok(await send("DELETE", `/data/records/${b}`), route("DELETE /data/records/:id"));
   return [...new Set(checked)];
+}
+
+/**
+ * Joins, subqueries and column operands through the row route.
+ *
+ * Two parents, the first with two children and the second with none. Each
+ * read is checked for exactly the rows the grammar promises, so the sweep
+ * proves on each engine, DSQL included, what the conformance suite proves on
+ * SQLite and PGlite.
+ */
+async function sweepMultiTableReads(
+  send: RouteSweepTarget["send"],
+  parent: RouteSweepApp["table"],
+  child: NonNullable<RouteSweepApp["childTable"]>,
+  run: string,
+  route: (name: string) => string,
+): Promise<void> {
+  const P = parent.name;
+  const C = child.name;
+  const parents = [`sweep-${run}-p1`, `sweep-${run}-p2`];
+  const children = [
+    { key: `sweep-${run}-c1`, parent: parents[0]!, value: "red" },
+    { key: `sweep-${run}-c2`, parent: parents[0]!, value: "blue" },
+  ];
+  for (const key of parents) {
+    ok(
+      await send("POST", `/app-data/db/${P}`, {
+        row: { [parent.keyColumn]: key, [parent.valueColumn]: `note ${key}` },
+      }),
+      route("POST /app-data/db/:table"),
+    );
+  }
+  for (const c of children) {
+    ok(
+      await send("POST", `/app-data/db/${C}`, {
+        row: {
+          [child.keyColumn]: c.key,
+          [child.parentColumn]: c.parent,
+          [child.valueColumn]: c.value,
+        },
+      }),
+      route("POST /app-data/db/:table"),
+    );
+  }
+
+  const pk = parent.keyColumn;
+  const ck = `${C}.${child.keyColumn}`;
+  const cv = `${C}.${child.valueColumn}`;
+  const own = { [pk]: { prefix: `sweep-${run}-` } };
+  const childOf = { [`${C}.${child.parentColumn}`]: { eq: { col: `${P}.${pk}` } } };
+  const read = async (name: string, params: Record<string, unknown>) => {
+    const encoded: Record<string, string> = {};
+    for (const [k, v] of Object.entries(params)) {
+      encoded[k] = typeof v === "string" || typeof v === "number" ? String(v) : JSON.stringify(v);
+    }
+    return ok(await send("GET", `/app-data/db/${P}${q(encoded)}`), route(name));
+  };
+  const pairs = (body: Record<string, unknown>, keys: string[]) =>
+    (body["rows"] as Record<string, unknown>[]).map((r) => keys.map((k) => String(r[k])).join("/"));
+  const [p1, p2] = parents;
+  const [c1, c2] = children.map((c) => c.key);
+
+  const left = await read("GET /app-data/db/:table?join (left)", {
+    join: [{ table: C, kind: "left", on: childOf }],
+    select: `${pk},${ck},${cv}`,
+    where: own,
+    order: `${pk}.asc`,
+  });
+  assert.deepEqual(pairs(left, [pk, ck, cv]), [
+    `${p1}/${c1}/red`,
+    `${p1}/${c2}/blue`,
+    `${p2}/null/null`,
+  ]);
+
+  const filtered = await read("GET /app-data/db/:table?join (inner, filter in on)", {
+    join: [{ table: C, kind: "inner", on: { ...childOf, [cv]: "blue" } }],
+    select: `${pk},${ck}`,
+    where: own,
+  });
+  assert.deepEqual(pairs(filtered, [pk, ck]), [`${p1}/${c2}`]);
+
+  const sub = { table: C, where: childOf };
+  const exists = await read("GET /app-data/db/:table?where exists", {
+    where: { ...own, exists: [sub] },
+    select: pk,
+    order: `${pk}.asc`,
+  });
+  assert.deepEqual(pairs(exists, [pk]), [p1]);
+  const notExists = await read("GET /app-data/db/:table?where not_exists", {
+    where: { ...own, not_exists: [sub] },
+    select: pk,
+  });
+  assert.deepEqual(pairs(notExists, [pk]), [p2]);
+
+  const reds = { table: C, select: `${C}.${child.parentColumn}`, where: { [cv]: "red" } };
+  const inSub = await read("GET /app-data/db/:table?where in subquery", {
+    where: { [pk]: { prefix: `sweep-${run}-`, in: reds } },
+    select: pk,
+  });
+  assert.deepEqual(pairs(inSub, [pk]), [p1]);
+  const notInSub = await read("GET /app-data/db/:table?where not_in subquery", {
+    where: { [pk]: { prefix: `sweep-${run}-`, not_in: reds } },
+    select: pk,
+  });
+  assert.deepEqual(pairs(notInSub, [pk]), [p2]);
+
+  // A column operand across tables. `ne` keeps the unmatched parent, whose
+  // joined value is null, as the literal `ne` keeps the null bucket.
+  const ne = await read("GET /app-data/db/:table?join, where column operand", {
+    join: [{ table: C, kind: "left", on: childOf }],
+    select: `${pk},${ck}`,
+    where: { ...own, [cv]: { ne: { col: `${P}.${parent.valueColumn}` } } },
+  });
+  assert.deepEqual(pairs(ne, [pk, ck]), [`${p1}/${c1}`, `${p1}/${c2}`, `${p2}/null`]);
+
+  const counted = await read("GET /app-data/db/:table?join, aggregate", {
+    join: [{ table: C, kind: "left", on: childOf }],
+    select: pk,
+    aggregate: { n: { fn: "count", col: ck } },
+    where: own,
+    order: `${pk}.asc`,
+  });
+  assert.deepEqual(
+    (counted["groups"] as Record<string, unknown>[]).map((g) => `${g[pk]}/${Number(g["n"])}`),
+    [`${p1}/2`, `${p2}/0`],
+  );
+
+  // A page token across a to-many join visits each joined row once.
+  const walked: string[] = [];
+  let token: string | null = null;
+  for (let page = 0; page < 5; page += 1) {
+    const body = await read("GET /app-data/db/:table?join, page_token", {
+      join: [{ table: C, kind: "left", on: childOf }],
+      select: `${pk},${ck}`,
+      where: own,
+      order: `${pk}.asc`,
+      limit: 1,
+      ...(token ? { page_token: token } : {}),
+    });
+    walked.push(...pairs(body, [pk, ck]));
+    token = (body["page_token"] as string | null) ?? null;
+    if (!token) break;
+  }
+  assert.deepEqual(walked, [`${p1}/${c1}`, `${p1}/${c2}`, `${p2}/null`]);
+
+  for (const c of children) {
+    ok(
+      await send("DELETE", `/app-data/db/${C}`, { where: { [child.keyColumn]: c.key } }),
+      route("DELETE /app-data/db/:table"),
+    );
+  }
+  for (const key of parents) {
+    ok(
+      await send("DELETE", `/app-data/db/${P}`, { where: { [pk]: key } }),
+      route("DELETE /app-data/db/:table"),
+    );
+  }
 }
