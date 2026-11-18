@@ -2379,6 +2379,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
             },
             labelKey: app.labelKeys.valued,
             table: { name: app.appTable.name, keyColumn: keyColumn!, valueColumn: valueColumn! },
+            ...(app.appChildTable ? { childTable: app.appChildTable } : {}),
             publicSharing: app.publicSharing === true,
           },
         );

@@ -515,14 +515,18 @@ GET /app-data/db/card_state
 ```
 
 - **`where`** — strict JSON. A column maps either to a scalar, meaning
-  equality, or to an object of operator to value. Operators are `lt`, `lte`,
-  `gt`, `gte`, `ne`, `in`, `is`, `prefix` and `like`, joined with AND. `is`
-  takes `null`, `true` or `false`; `is true` and `is false` apply to a `boolean`
-  column only. `in` takes a JSON array, so nothing needs comma-escaping. There
-  is no `or`; issue two requests and merge. The four ordered comparisons refuse
-  a `blob` and a `boolean` column, neither of which has an ordering worth
-  asking for.
+  equality, or to an object of operator to value. Operators are `eq`, `ne`,
+  `lt`, `lte`, `gt`, `gte`, `in`, `not_in`, `is`, `prefix` and `like`, joined
+  with AND. `{"eq": v}` means the same as the bare scalar `v`. `is` takes
+  `null`, `true` or `false`; `is true` and `is false` apply to a `boolean`
+  column only. `in` and `not_in` take a JSON array, so nothing needs
+  comma-escaping. There is no `or`; issue two requests and merge. The four
+  ordered comparisons refuse a `blob` and a `boolean` column, neither of which
+  has an ordering worth asking for.
 - **`select`** — a comma-separated column list. Omitted means every column.
+  Required when `join` is present.
+- **`join`** — strict JSON, a list of your app's other tables to join. See
+  "Joins and subqueries" below.
 - **`order`** — `col.asc`, `col.desc`, optionally `.nullsfirst` or
   `.nullslast`. State the null position when it matters: the two backends
   default it differently, so the grammar makes you say.
@@ -551,7 +555,78 @@ is case-insensitive for ASCII in stock SQLite and case-sensitive in Postgres, so
 the platform pins the local side to the Postgres behaviour; a pattern that
 matches in the cloud matches locally and the reverse.
 
-**Five things that surprise people, and are cheaper to read than to discover:**
+#### Joins and subqueries
+
+A query can read your app's other tables in the same request. The examples use
+two tables: `projects`, and `tasks` with a `project_id` column.
+
+`join` takes a list of joins. Each join names a `table`, a `kind` of `inner` or
+`left`, and an `on`:
+
+```
+GET /app-data/db/projects
+  ?join=[{"table":"tasks","kind":"left",
+          "on":{"tasks.project_id":{"eq":{"col":"projects.id"}},"tasks.done":false}}]
+  &select=id,name,tasks.id,tasks.title
+  &order=name.asc
+```
+
+The response returns one row per project and open task, and one row with null
+task columns for a project with no open task.
+
+- **Names.** A bare name means a column of the table in the path. A name with a
+  dot, such as `tasks.title`, means a column of the named table. Inside `on`
+  and inside a subquery, every name carries its table.
+- **Column operands.** `{"col": "<table>.<column>"}` compares one column with
+  another. It works with `eq`, `ne`, `lt`, `lte`, `gt` and `gte`, and the two
+  columns must share a type, or both be numeric. Every `on` must compare a
+  column of its own table with a column of an earlier table. The grammar has no
+  cross join.
+- **`on` and `where`.** A filter inside `on` decides which joined row matches,
+  and a left join keeps the project when nothing matches. The same filter in
+  `where` drops the project instead. SQL makes the same distinction.
+- **`as`.** A table that is already in the query needs an `as`, such as
+  `{"table":"tasks","as":"parent","kind":"left","on":{"parent.id":{"eq":{"col":"tasks.parent_id"}}}}`.
+  An `as` cannot be the name of one of your tables.
+- **The response row.** A column of the path's table comes back under its bare
+  name, such as `"name"`. A joined column comes back under its qualified name,
+  such as `"tasks.title"`. A left join with no match returns null for every
+  joined column. Test the joined table's `id` to tell "no match" from a matched
+  row with null values.
+- **Deleted rows.** The server leaves deleted rows of every joined table out of
+  the match, so a left join keeps the project and nulls the task columns.
+
+`exists` and `not_exists` test related rows without returning them. Each takes
+a list of subqueries, and every subquery in the list must hold:
+
+```
+GET /app-data/db/projects
+  ?where={"exists":[{"table":"tasks",
+                     "where":{"tasks.project_id":{"eq":{"col":"projects.id"}},"tasks.done":false}}]}
+```
+
+A subquery takes `table`, an optional `as` and `where`. The `where` must
+compare a column of the subquery's table with a column of an enclosing table.
+A subquery may hold further `exists` entries, up to four levels deep.
+
+`in` and `not_in` also take a subquery that selects one column:
+
+```
+GET /app-data/db/projects
+  ?where={"id":{"in":{"table":"tasks","select":"tasks.project_id",
+                      "where":{"tasks.done":false}}}}
+```
+
+The selected column must share the outer column's type. `not_in` is the exact
+opposite of `in`: a row whose outer column is null matches `not_in`, as it
+matches `ne`. SQL's own `NOT IN` drops that row. A `not_in` subquery must
+select a NOT NULL column, and a `not_in` list cannot hold `null`. Use
+`not_exists` for a nullable column.
+
+`exists` and `not_exists` are reserved, so a table cannot declare a column with
+either name.
+
+**Eight things that surprise people, and are cheaper to read than to discover:**
 
 1. `sum` and `avg` return `null` over zero matching rows, not `0`. A coalesced
    result cannot tell an empty match from a zero total, so the server does not
@@ -567,6 +642,16 @@ matches in the cloud matches locally and the reverse.
 5. The grammar follows PostgREST's filter spelling and claims conformance to
    nothing. Top-level parameter names are reserved; column names live under
    `where`, `select` and `order`.
+6. With a join, `limit` counts joined rows, not rows of the path's table.
+   `limit=1` over projects joined to tasks returns one task. To read "the
+   latest project with all its tasks", order by the project columns first,
+   read pages, and stop when the project id changes. The page token holds every
+   table's key, so the pages neither skip nor repeat a row.
+7. One query should join at most one to-many table per parent. Two to-many
+   joins from one parent multiply: twelve tasks and six members return 72 rows
+   per project. Issue one query per to-many table instead.
+8. A `count` over a to-many join counts joined rows. `count` with
+   `"col":"tasks.id"` counts tasks, and a project with none counts 0.
 
 The response is `{rows, truncated, page_token}`, or `{groups, truncated}` in
 aggregate mode.

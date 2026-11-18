@@ -275,6 +275,12 @@ test("every app-facing data route answers through the app's own proxy", async ()
       },
       labelKey: "tag",
       table: { name: "probe_notes", keyColumn: "record_id", valueColumn: "note" },
+      childTable: {
+        name: "probe_note_tags",
+        keyColumn: "id",
+        parentColumn: "note_id",
+        valueColumn: "tag",
+      },
       publicSharing: true,
     },
   );

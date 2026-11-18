@@ -98,6 +98,18 @@ export interface JourneyApp {
   /** The app-private table the app-data step writes to. */
   readonly appTable: JourneyAppTable;
   /**
+   * A second app-private table whose rows belong to `appTable`'s rows, for the
+   * route sweep's joins and subqueries. Absent for an app that declares none,
+   * and the sweep then skips those reads.
+   */
+  readonly appChildTable?: {
+    readonly name: string;
+    readonly keyColumn: string;
+    /** A NOT NULL text column holding the parent row's key. */
+    readonly parentColumn: string;
+    readonly valueColumn: string;
+  };
+  /**
    * Whether the manifest asks to publish public links (`publicSharing`). The
    * route sweep creates and revokes a link only for an app that may.
    */

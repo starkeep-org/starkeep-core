@@ -27,6 +27,12 @@ export const probeApp: JourneyApp = {
     row: (recordId) => ({ record_id: recordId, note: "tier-3 note" }),
     expectInBody: "tier-3 note",
   },
+  appChildTable: {
+    name: "probe_note_tags",
+    keyColumn: "id",
+    parentColumn: "note_id",
+    valueColumn: "tag",
+  },
   jwtRoute: {
     path: "/api/echo",
     method: "POST",

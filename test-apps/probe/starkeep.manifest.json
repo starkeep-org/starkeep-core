@@ -51,6 +51,27 @@
               "type": "text"
             }
           ]
+        },
+        {
+          "name": "probe_note_tags",
+          "columns": [
+            {
+              "name": "id",
+              "type": "text",
+              "primaryKey": true,
+              "notNull": true
+            },
+            {
+              "name": "note_id",
+              "type": "text",
+              "notNull": true
+            },
+            {
+              "name": "tag",
+              "type": "text"
+            }
+          ],
+          "indexes": [{ "columns": ["note_id"] }]
         }
       ]
     },
