@@ -435,6 +435,8 @@ function compareTerm(
   operand: Record<string, unknown>,
   context: PredicateContext,
 ): WhereTerm {
+  // The shared plane's consumers read literal clauses only.
+  scope.requireTables("a column operand");
   refuseUnknownFields(operand, ["col"], "a column operand");
   if (typeof operand["col"] !== "string") {
     throw new QueryParseError(`a column operand's "col" must name a column`);

@@ -206,7 +206,8 @@ function termExpression(c: Compilation, term: WhereTerm): RawBuilder<boolean> {
 
     case "exists": {
       const sub = subquerySelect(c, term.sub, sql`1`);
-      return term.negated ? sql<boolean>`not exists (${sub})` : sql<boolean>`exists (${sub})`;
+      // Kysely parenthesizes an embedded select itself.
+      return term.negated ? sql<boolean>`not exists ${sub}` : sql<boolean>`exists ${sub}`;
     }
 
     case "in_subquery": {
@@ -216,8 +217,8 @@ function termExpression(c: Compilation, term: WhereTerm): RawBuilder<boolean> {
       // a NOT NULL select column, so the subquery never yields the null that
       // makes `NOT IN` unknown for every row.
       return term.negated
-        ? sql<boolean>`(${outer} is null or ${outer} not in (${sub}))`
-        : sql<boolean>`${outer} in (${sub})`;
+        ? sql<boolean>`(${outer} is null or ${outer} not in ${sub})`
+        : sql<boolean>`${outer} in ${sub}`;
     }
   }
 }

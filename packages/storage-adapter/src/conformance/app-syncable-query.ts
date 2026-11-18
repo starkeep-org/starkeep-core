@@ -40,6 +40,14 @@ import type { AppColumnInfo, ParsedQueryResult, RowQuery } from "../database/app
 import type { BuildOptions } from "../database/app-query.js";
 import type { KeyedRowEntry } from "../database/app-syncable-rows.js";
 
+export {
+  appSyncableJoinConformance,
+  JOIN_TABLES,
+  seedJoinRows,
+  type JoinConformanceCase,
+  type JoinConformanceHarness,
+} from "./app-syncable-join-query.js";
+
 /** The applier surface these cases exercise. */
 export interface QueryConformanceApplier {
   apply(entry: KeyedRowEntry): Promise<void> | void;
