@@ -47,6 +47,7 @@ import {
   CorruptFileIndexRowError,
 } from "../../packages/shared-space-api/src/app-syncable/factory.js";
 import { queryParamsFrom } from "../../packages/shared-space-api/src/query/params.js";
+import { flatOrderDeprecation } from "../../packages/shared-space-api/src/query/order-deprecation.js";
 import { appFileListingJson } from "../../packages/shared-space-api/src/app-syncable/file-listing.js";
 import {
   refuseMisplacedConditions,
@@ -1391,6 +1392,11 @@ async function main() {
       }
       // readBody caches the raw bytes on the request itself, so downstream
       // handlers calling readBody or readBodyBuffer hit the cache.
+
+      // The flat `order` spelling still parses on every route that reads
+      // `order`, and is answered with a `Deprecation` header (STA-101).
+      const deprecation = flatOrderDeprecation(url.searchParams.get("order") ?? undefined, appId);
+      for (const [name, value] of Object.entries(deprecation ?? {})) res.setHeader(name, value);
     }
 
     try {
