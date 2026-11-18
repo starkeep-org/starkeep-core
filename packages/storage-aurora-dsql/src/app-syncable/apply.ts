@@ -13,6 +13,7 @@ import { requireWellFormedFileIndexRow } from "@starkeep/shared-space-api";
 import {
   buildAppAggregateQuery,
   buildAppRowQuery,
+  outputColumns,
   collectAggregatePage,
   collectRowPage,
   POSTGRES_APP_QUERY_DIALECT,
@@ -459,7 +460,11 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
     query: ParsedQuery,
     options: BuildOptions = {},
   ): Promise<ParsedQueryResult> {
-    const schemaTable = `app_${appId.replace(/-/g, "_")}.${table}`;
+    const schema = `app_${appId.replace(/-/g, "_")}`;
+    const schemaTable = `${schema}.${table}`;
+    // Joins and subqueries name the app's other tables by manifest name.
+    const build: BuildOptions = { ...options, physicalName: (other) => `${schema}.${other}` };
+    const converters = pgConvertersFor(outputColumns(query, (name) => this.columnsOf(appId, name)));
 
     if (query.mode === "aggregate") {
       const compiled = buildAppAggregateQuery(
@@ -467,19 +472,16 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
         schemaTable,
         query,
         POSTGRES_APP_QUERY_DIALECT,
-        options,
+        build,
       );
       const result = await this.run(compiled);
       return collectAggregatePage(
         query,
-        fromPgRows(
-          result.rows,
-          withAggregateOutputs(this.convertersFor(appId, table), query.aggregates),
-        ),
+        fromPgRows(result.rows, withAggregateOutputs(converters, query.aggregates)),
       );
     }
 
-    const compiled = buildAppRowQuery(this.qb, schemaTable, query, options);
+    const compiled = buildAppRowQuery(this.qb, schemaTable, query, build);
     // The broker holds a plain `pg` client rather than a cursor, so the rows
     // arrive as an array and the fetch budget is applied over it. The row limit
     // bounds what that array can hold; the response budget's job here is to keep
@@ -488,14 +490,17 @@ export class DsqlAppSyncableApplier implements AppSyncableApplier, ScanCapableAp
     const { rows } = await this.run(compiled);
     // Converted before the page is collected rather than after, so the page
     // token is cut from the same representation the rows carry.
-    return collectRowPage(query, fromPgRows(rows, this.convertersFor(appId, table)));
+    return collectRowPage(query, fromPgRows(rows, converters));
   }
 
   /** The value conversions a declared table's columns call for on this engine. */
   private convertersFor(appId: string, table: string) {
-    return pgConvertersFor(
-      this.namespace.get(appId)?.tables.find((t) => t.name === table)?.columns,
-    );
+    return pgConvertersFor(this.columnsOf(appId, table));
+  }
+
+  /** A declared table's columns, or undefined when the namespace does not hold it. */
+  private columnsOf(appId: string, table: string) {
+    return this.namespace.get(appId)?.tables.find((t) => t.name === table)?.columns;
   }
 }
 

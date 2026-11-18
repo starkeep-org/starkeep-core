@@ -263,6 +263,7 @@ describe("app-specific rows", () => {
       mode: "rows",
       table: "cards",
       select: null,
+      joins: [],
       where: [],
       order: [{ column: "id", direction: "asc", nulls: "last" }],
       limit: 100,

@@ -204,6 +204,7 @@ async function rowsVisibleTo(softDeleted: SoftDeletedScope): Promise<string[]> {
       mode: "rows",
       table: "record_image_metadata",
       select: ["record_id"],
+      joins: [],
       where: [],
       order: [],
       limit: 10,

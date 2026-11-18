@@ -21,7 +21,7 @@
  * That is the right trade for an adapter whose whole store is a `Map`.
  */
 
-import { LIKE_ESCAPE_CHAR } from "./app-query-types.js";
+import { LIKE_ESCAPE_CHAR, literalWhere } from "./app-query-types.js";
 import type {
   AggregateQuery,
   AggregateTerm,
@@ -41,8 +41,15 @@ export async function runInMemoryQuery(
   query: ParsedQuery,
   options: { readonly serverWhere?: readonly WhereClause[] } = {},
 ): Promise<ParsedQueryResult> {
+  // The shared plane is the only caller, and the parser never hands it a join
+  // or a subquery. Refusing them keeps the mock's promise: it refuses a
+  // question the real adapters answer rather than answering it differently.
+  if (query.joins.length > 0) {
+    throw new Error("the in-memory query evaluator does not answer joins");
+  }
+  const where = literalWhere(query.where);
   const matching = rows.filter(
-    (row) => matches(row, options.serverWhere ?? []) && matches(row, query.where),
+    (row) => matches(row, options.serverWhere ?? []) && matches(row, where),
   );
   return query.mode === "aggregate"
     ? collectAggregatePage(query, aggregate(matching, query))
@@ -93,6 +100,9 @@ function holds(raw: unknown, predicate: Predicate): boolean {
     }
     case "in":
       return predicate.values.includes(value);
+    case "not_in":
+      // The complement of `in`: the null bucket stays, as the compiler keeps it.
+      return value === null || !predicate.values.includes(value);
     case "prefix": {
       if (typeof value !== "string") return false;
       if (value < predicate.lower) return false;

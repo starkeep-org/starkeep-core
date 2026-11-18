@@ -27,16 +27,20 @@ import type {
   SelectQueryBuilder,
 } from "kysely";
 import { sql } from "kysely";
-import { LIKE_ESCAPE_CHAR } from "./app-query-types.js";
+import { LIKE_ESCAPE_CHAR, isWhereClause } from "./app-query-types.js";
 import type {
   AggregateQuery,
   AggregateQueryResult,
+  ColumnRef,
+  JoinSpec,
   OrderTerm,
   Predicate,
   RowQuery,
   RowQueryResult,
   SoftDeletedScope,
+  Subquery,
   WhereClause,
+  WhereTerm,
 } from "./app-query-types.js";
 import { encodePageToken, pageTokenFrom } from "./app-page-token.js";
 
@@ -120,6 +124,13 @@ export function predicateExpression(
     case "in":
       return sql<boolean>`${ref} in (${sql.join(predicate.values.map((v) => sql`${v}`))})`;
 
+    case "not_in":
+      // The complement of `in`, so the null bucket comes back as it does for
+      // `ne`: SQL's `NOT IN` alone drops the row where the column is null.
+      return sql<boolean>`(${ref} is null or ${ref} not in (${sql.join(
+        predicate.values.map((v) => sql`${v}`),
+      )}))`;
+
     case "is":
       return predicate.value === null
         ? sql<boolean>`${ref} is null`
@@ -142,14 +153,137 @@ export function predicateExpression(
   }
 }
 
-function applyPredicate(qb: Qb, column: string, predicate: Predicate): Qb {
-  return qb.where(predicateExpression(sql.ref(column), predicate) as never) as Qb;
+/**
+ * What compiling one query needs beyond the query itself.
+ *
+ * `base` is the alias the base table compiles under, or null when the query
+ * names one table and its columns stay unqualified. A query with a join or a
+ * subquery aliases the base table as its bare name, so every column reference
+ * can be qualified and none is ambiguous.
+ */
+interface Compilation {
+  readonly k: Kysely<AppQueryDb>;
+  readonly base: string | null;
+  readonly physicalName: ((table: string) => string) | undefined;
 }
 
-function applyWhere(qb: Qb, where: readonly WhereClause[]): Qb {
+/** A parsed column reference as SQL: a bare name qualified by the base alias. */
+function columnRef(c: Compilation, column: ColumnRef): RawBuilder<unknown> {
+  return sql.ref(c.base === null || column.includes(".") ? column : `${c.base}.${column}`);
+}
+
+/** The physical table a join or subquery reads, aliased as its qualifier. */
+function aliasedTable(c: Compilation, table: string, qualifier: string): string {
+  if (!c.physicalName) {
+    throw new Error(`a join or subquery needs BuildOptions.physicalName to name "${table}"`);
+  }
+  return `${c.physicalName(table)} as ${qualifier}`;
+}
+
+/** Does any term, at any depth, hold a subquery? */
+function holdsSubquery(terms: readonly WhereTerm[]): boolean {
+  return terms.some((t) => !isWhereClause(t) && t.kind !== "compare");
+}
+
+/**
+ * One term as a boolean SQL expression.
+ *
+ * Literal clauses go through {@link predicateExpression}, the one place the
+ * null rules live. A column operand follows the same rules: `eq` never matches
+ * a null on either side, and `ne` is its exact complement.
+ */
+function termExpression(c: Compilation, term: WhereTerm): RawBuilder<boolean> {
+  if (isWhereClause(term)) return predicateExpression(columnRef(c, term.column), term.predicate);
+
+  switch (term.kind) {
+    case "compare": {
+      const a = columnRef(c, term.column);
+      const b = columnRef(c, term.other);
+      if (term.op === "ne") return sql<boolean>`(${a} is null or ${b} is null or ${a} <> ${b})`;
+      const op = { eq: "=", lt: "<", lte: "<=", gt: ">", gte: ">=" }[term.op];
+      return sql<boolean>`${a} ${sql.raw(op)} ${b}`;
+    }
+
+    case "exists": {
+      const sub = subquerySelect(c, term.sub, sql`1`);
+      return term.negated ? sql<boolean>`not exists (${sub})` : sql<boolean>`exists (${sub})`;
+    }
+
+    case "in_subquery": {
+      const outer = columnRef(c, term.column);
+      const sub = subquerySelect(c, term.sub, columnRef(c, term.sub.select));
+      // The complement of `in`, as the literal `not_in` is. The parser requires
+      // a NOT NULL select column, so the subquery never yields the null that
+      // makes `NOT IN` unknown for every row.
+      return term.negated
+        ? sql<boolean>`(${outer} is null or ${outer} not in (${sub}))`
+        : sql<boolean>`${outer} in (${sub})`;
+    }
+  }
+}
+
+/**
+ * `select <expr> from <table> as <qualifier> where …`, soft-delete included.
+ *
+ * Built as a Kysely select rather than as text, so the cloud's owner-scope
+ * plugin finds the table and adds its own `user_id` predicate, as it does for
+ * every nested select.
+ */
+function subquerySelect(c: Compilation, sub: Subquery, expr: RawBuilder<unknown>) {
+  let qb = c.k.selectFrom(aliasedTable(c, sub.table, sub.qualifier) as never) as Qb;
+  qb = qb.select(expr.as("v")) as Qb;
+  qb = qb.where(sql<boolean>`${sql.ref(`${sub.qualifier}.deleted_at`)} is null` as never) as Qb;
+  for (const term of sub.where) qb = qb.where(termExpression(c, term) as never) as Qb;
+  return qb;
+}
+
+function applyWhere(c: Compilation, qb: Qb, where: readonly WhereTerm[]): Qb {
   let out = qb;
-  for (const clause of where) out = applyPredicate(out, clause.column, clause.predicate);
+  for (const term of where) out = out.where(termExpression(c, term) as never) as Qb;
   return out;
+}
+
+/**
+ * Each join, with the joined table's soft-delete filter inside its `on`.
+ *
+ * In `on` rather than in `where`, so a left join with no live match keeps the
+ * base row and nulls the joined columns, as the caller asked.
+ */
+function applyJoins(c: Compilation, qb: Qb, joins: readonly JoinSpec[]): Qb {
+  let out = qb;
+  for (const join of joins) {
+    const table = aliasedTable(c, join.table, join.qualifier);
+    const on = sql.join(
+      [
+        sql<boolean>`${sql.ref(`${join.qualifier}.deleted_at`)} is null`,
+        ...join.on.map((term) => termExpression(c, term)),
+      ],
+      sql` and `,
+    );
+    const expression = sql<boolean>`${on}`;
+    out = (
+      join.kind === "inner"
+        ? out.innerJoin(table as never, (jb) => jb.on(expression as never))
+        : out.leftJoin(table as never, (jb) => jb.on(expression as never))
+    ) as Qb;
+  }
+  return out;
+}
+
+/** The compilation context for one query, aliased only when another table is in play. */
+function compilationFor(
+  k: Kysely<AppQueryDb>,
+  query: RowQuery | AggregateQuery,
+  options: BuildOptions,
+): Compilation {
+  const multi = query.joins.length > 0 || holdsSubquery(query.where);
+  return { k, base: multi ? query.table : null, physicalName: options.physicalName };
+}
+
+/** `FROM <table>`, aliased as the base name when the query needs qualified names. */
+function selectFromBase(c: Compilation, fullTableName: string): Qb {
+  const from = c.base === null ? fullTableName : `${fullTableName} as ${c.base}`;
+  return c.k.selectFrom(from as never) as Qb;
 }
 
 /**
@@ -159,10 +293,10 @@ function applyWhere(qb: Qb, where: readonly WhereClause[]): Qb {
  * learned in 3.30 and which the two backends default differently on. The same
  * shape `record-queries.ts` already uses, for the same reason.
  */
-function applyOrder(qb: Qb, order: readonly OrderTerm[]): Qb {
+function applyOrder(c: Compilation, qb: Qb, order: readonly OrderTerm[]): Qb {
   let out = qb;
   for (const term of order) {
-    const ref = sql.ref(term.column);
+    const ref = columnRef(c, term.column);
     out = out.orderBy(sql`(${ref} is null)`, term.nulls === "first" ? "desc" : "asc") as Qb;
     out = out.orderBy(ref, term.direction) as Qb;
   }
@@ -181,7 +315,7 @@ function applyOrder(qb: Qb, order: readonly OrderTerm[]): Qb {
  *   OR (K1 equal AND K2 after)
  *   OR (K1 equal AND K2 equal AND K3 after)
  */
-function applyPageToken(qb: Qb, query: RowQuery): Qb {
+function applyPageToken(c: Compilation, qb: Qb, query: RowQuery): Qb {
   const token = query.pageToken;
   if (!token) return qb;
   const order = query.order;
@@ -190,7 +324,7 @@ function applyPageToken(qb: Qb, query: RowQuery): Qb {
     const after = (i: number) => {
       const term = order[i]!;
       const key = token.keys[i]!;
-      const ref = sql.ref(term.column);
+      const ref = columnRef(c, term.column);
       const op = term.direction === "desc" ? "<" : ">";
       if (key.isNull) {
         // The token sits in the null bucket. Whether anything is after it
@@ -206,7 +340,7 @@ function applyPageToken(qb: Qb, query: RowQuery): Qb {
     const equal = (i: number) => {
       const term = order[i]!;
       const key = token.keys[i]!;
-      const ref = sql.ref(term.column);
+      const ref = columnRef(c, term.column);
       return key.isNull
         ? sql<boolean>`${ref} is null`
         : sql<boolean>`(${ref} is not null and ${ref} = ${key.value})`;
@@ -257,19 +391,27 @@ export interface BuildOptions {
    * no column to filter on.
    */
   readonly softDeleted?: SoftDeletedScope;
+  /**
+   * The physical name of one of the app's tables, for joins and subqueries.
+   *
+   * Required only by a query that holds one; the shared plane never does.
+   * `softDeleted` applies to the base table alone. A joined or subquery table
+   * always excludes its deleted rows.
+   */
+  readonly physicalName?: (table: string) => string;
 }
 
 /** The soft-delete predicate, applied unless the table has no such column. */
-function applySoftDelete(qb: Qb, options: BuildOptions): Qb {
+function applySoftDelete(c: Compilation, qb: Qb, options: BuildOptions): Qb {
   // The server owns this predicate. A caller cannot name the column at all, so
   // this cannot be contradicted.
   if (options.excludeSoftDeleted === false) return qb;
   const scope = options.softDeleted ?? "exclude";
   if (scope === "include") return qb;
   if (scope === "only") {
-    return qb.where(sql<boolean>`${sql.ref("deleted_at")} is not null` as never) as Qb;
+    return qb.where(sql<boolean>`${columnRef(c, "deleted_at")} is not null` as never) as Qb;
   }
-  return qb.where(sql<boolean>`${sql.ref("deleted_at")} is null` as never) as Qb;
+  return qb.where(sql<boolean>`${columnRef(c, "deleted_at")} is null` as never) as Qb;
 }
 
 /** One page of rows, plus the one extra row that reveals a further page. */
@@ -279,23 +421,29 @@ export function buildAppRowQuery(
   query: RowQuery,
   options: BuildOptions = {},
 ): CompiledQuery {
-  let qb = k.selectFrom(fullTableName as never) as Qb;
+  const c = compilationFor(k, query, options);
+  let qb = selectFromBase(c, fullTableName);
+  qb = applyJoins(c, qb, query.joins);
 
   if (query.select === null) {
-    qb = qb.selectAll() as Qb;
+    // Every column of the base table. The parser requires `select` with a
+    // join, so `*` never reaches a joined table.
+    qb = (c.base === null ? qb.selectAll() : qb.selectAll(c.base as never)) as Qb;
   } else {
-    qb = qb.select(query.select.map((c) => sql.ref(c).as(c)) as never) as Qb;
+    // A base column comes back under its bare name and a joined column under
+    // its qualified one, so `id` and `programs.id` never collide.
+    qb = qb.select(query.select.map((col) => columnRef(c, col).as(col)) as never) as Qb;
   }
   // The ordering values ride back under reserved aliases so the page token is
   // cut from what the database ordered on, whatever the projection selected.
   query.order.forEach((term, index) => {
-    qb = qb.select(sql.ref(term.column).as(orderKeyAlias(index))) as Qb;
+    qb = qb.select(columnRef(c, term.column).as(orderKeyAlias(index))) as Qb;
   });
-  qb = applySoftDelete(qb, options);
-  qb = applyWhere(qb, options.serverWhere ?? []);
-  qb = applyWhere(qb, query.where);
-  qb = applyPageToken(qb, query);
-  qb = applyOrder(qb, query.order);
+  qb = applySoftDelete(c, qb, options);
+  qb = applyWhere(c, qb, options.serverWhere ?? []);
+  qb = applyWhere(c, qb, query.where);
+  qb = applyPageToken(c, qb, query);
+  qb = applyOrder(c, qb, query.order);
   // One row past the limit, which is what distinguishes a full page from a
   // complete result. Every predicate is now applied by the engine, so a fetched
   // row is a matching row rather than a candidate.
@@ -312,28 +460,32 @@ export function buildAppAggregateQuery(
   dialect: AppQueryDialect,
   options: BuildOptions = {},
 ): CompiledQuery {
-  let qb = k.selectFrom(fullTableName as never) as Qb;
+  const c = compilationFor(k, query, options);
+  let qb = selectFromBase(c, fullTableName);
+  qb = applyJoins(c, qb, query.joins);
 
   for (const column of query.groupBy) {
-    qb = qb.select(sql.ref(column).as(column)) as Qb;
+    qb = qb.select(columnRef(c, column).as(column)) as Qb;
   }
   for (const term of query.aggregates) {
-    qb = qb.select(aggregateExpression(term, dialect).as(term.name)) as Qb;
+    qb = qb.select(aggregateExpression(c, term, dialect).as(term.name)) as Qb;
   }
 
-  qb = applySoftDelete(qb, options);
-  qb = applyWhere(qb, options.serverWhere ?? []);
-  qb = applyWhere(qb, query.where);
+  qb = applySoftDelete(c, qb, options);
+  qb = applyWhere(c, qb, options.serverWhere ?? []);
+  qb = applyWhere(c, qb, query.where);
 
   for (const column of query.groupBy) {
-    qb = qb.groupBy(sql.ref(column)) as Qb;
+    qb = qb.groupBy(columnRef(c, column)) as Qb;
   }
   // An aggregate output is ordered by its alias rather than by a repeat of the
   // expression: both engines resolve an output name in ORDER BY, and repeating
   // `count(*)` there would be a second expression free to disagree with the
-  // first.
+  // first. A qualified group key's alias holds a dot, so it is quoted as one
+  // identifier rather than split into table and column.
   for (const term of query.order) {
-    qb = qb.orderBy(sql.ref(term.column), term.direction) as Qb;
+    const output = term.column.includes(".") ? sql.id(term.column) : sql.ref(term.column);
+    qb = qb.orderBy(output, term.direction) as Qb;
   }
   // One row past the limit, which is what distinguishes a full page from a
   // complete result. Every predicate is now applied by the engine, so a fetched
@@ -344,6 +496,7 @@ export function buildAppAggregateQuery(
 }
 
 function aggregateExpression(
+  c: Compilation,
   term: { fn: string; col: string | null; distinct: boolean },
   dialect: AppQueryDialect,
 ) {
@@ -352,10 +505,10 @@ function aggregateExpression(
     // column; `count(x)` skips nulls. The difference is the caller's to choose
     // and is why both spellings exist in the grammar.
     if (term.col === null) return sql<number>`count(*)`;
-    const ref = sql.ref(term.col);
+    const ref = columnRef(c, term.col);
     return term.distinct ? sql<number>`count(distinct ${ref})` : sql<number>`count(${ref})`;
   }
-  const ref = sql.ref(term.col!);
+  const ref = columnRef(c, term.col!);
   switch (term.fn) {
     case "sum":
       // Not coalesced to 0 over zero rows, deliberately: a coalesced result
@@ -370,6 +523,45 @@ function aggregateExpression(
     default:
       return sql<unknown>`max(${ref})`;
   }
+}
+
+/**
+ * The declared column behind each key a query's rows come back under.
+ *
+ * Both appliers convert values by key: a `timestamp` or `bigint` on Postgres,
+ * a `boolean` on SQLite. A joined column comes back under its qualified key, so
+ * a map built from the base table's columns alone would leave it unconverted on
+ * one engine. Aggregate inputs are included too, so `withAggregateOutputs` can
+ * find the conversion a `min` over a joined column needs.
+ *
+ * `columnsOf` answers a table's declared columns by manifest name, or null
+ * when the table is unknown.
+ */
+export function outputColumns<C extends { readonly name: string; readonly type: string }>(
+  query: RowQuery | AggregateQuery,
+  columnsOf: (table: string) => readonly C[] | null | undefined,
+): Array<{ readonly name: string; readonly type: string }> | null {
+  const base = columnsOf(query.table);
+  if (!base) return null;
+  const tables = new Map(query.joins.map((j) => [j.qualifier, j.table]));
+  const lookup = (ref: ColumnRef) => {
+    const dot = ref.indexOf(".");
+    if (dot === -1) return base.find((col) => col.name === ref);
+    const table = tables.get(ref.slice(0, dot));
+    const name = ref.slice(dot + 1);
+    return table === undefined ? undefined : columnsOf(table)?.find((col) => col.name === name);
+  };
+
+  const refs =
+    query.mode === "rows"
+      ? (query.select ?? base.map((col) => col.name))
+      : [...query.groupBy, ...query.aggregates.flatMap((a) => (a.col === null ? [] : [a.col]))];
+  const out: Array<{ readonly name: string; readonly type: string }> = [];
+  for (const ref of new Set(refs)) {
+    const column = lookup(ref);
+    if (column) out.push({ name: ref, type: column.type });
+  }
+  return out;
 }
 
 /** Strip the reserved ordering aliases from a row before it goes on the wire. */
