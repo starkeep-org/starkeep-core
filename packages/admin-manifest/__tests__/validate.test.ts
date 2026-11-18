@@ -292,6 +292,34 @@ describe("syncable table column rules", () => {
     }
   });
 
+  it("rejects the exists / not_exists column names the query grammar reserves", () => {
+    for (const name of ["exists", "not_exists"]) {
+      const result = validateManifest(withTable([{ name, type: "text" }]));
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((e) => e.includes("row-query grammar"))).toBe(true);
+    }
+  });
+
+  it("rejects two columns with one name in one table", () => {
+    const result = validateManifest(
+      withTable([
+        { name: "title", type: "text" },
+        { name: "title", type: "integer" },
+      ]),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("two columns with one name"))).toBe(true);
+  });
+
+  it("rejects two tables with one name", () => {
+    const table = { name: "notes", columns: [{ name: "id", type: "text", primaryKey: true }] };
+    const result = validateManifest(
+      minimal({ infraRequirements: { appSpecificSyncable: { tables: [table, table] } } }),
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("share one name"))).toBe(true);
+  });
+
   it("enforces snake_case column names", () => {
     for (const bad of ["camelCase", "9starts_with_digit", "has-dash", "has space"]) {
       const result = validateManifest(withTable([{ name: bad, type: "text" }]));
