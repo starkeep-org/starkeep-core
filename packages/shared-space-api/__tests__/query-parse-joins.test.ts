@@ -590,6 +590,15 @@ describe("in and not_in with a subquery", () => {
     expect(q.where[0]).toMatchObject({ kind: "in_subquery", negated: true });
   });
 
+  it("refuses a sync-internal select column, which would filter on it", () => {
+    for (const column of ["node_id", "updated_at"]) {
+      rejects(
+        { where: { name: { in: { table: "tasks", select: `tasks.${column}` } } } },
+        /sync-internal column/,
+      );
+    }
+  });
+
   it("refuses fields an in subquery does not take", () => {
     rejects(
       { where: { id: { in: { table: "tasks", select: "tasks.project_id", order: "x" } } } },

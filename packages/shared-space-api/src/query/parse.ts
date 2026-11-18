@@ -591,6 +591,12 @@ function parseSubquery(
   if (selectColumn.name === SOFT_DELETE_COLUMN) {
     throw new QueryParseError(`"${SOFT_DELETE_COLUMN}" is owned by the server`);
   }
+  // The selected column filters the outer row, so it obeys where's rule.
+  if (PROJECTION_ONLY_SYSTEM_COLUMNS.has(selectColumn.name)) {
+    throw new QueryParseError(
+      `"${selectColumn.name}" is a sync-internal column and may appear in select and order only`,
+    );
+  }
   return { table, qualifier, where, selectColumn };
 }
 
