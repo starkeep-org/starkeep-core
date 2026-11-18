@@ -329,6 +329,14 @@ function reachesPrefix(entry: string, prefix: string): boolean {
 const RESERVED_SYNC_COLUMNS = new Set(["updated_at", "deleted_at"]);
 
 /**
+ * Keys the row-query grammar reads beside column names in a predicate object
+ * (`where`, a join's `on`, a subquery's `where`). A column with one of these
+ * names could never be filtered, because the parser reads the key as the
+ * subquery form.
+ */
+const RESERVED_QUERY_KEYS = new Set(["exists", "not_exists"]);
+
+/**
  * The column-type vocabulary, from the one place that owns it.
  *
  * `bigint` and `timestamp` join the five this schema used to list, because the
@@ -353,6 +361,9 @@ export const syncableTableColumnSchema = z
   })
   .refine((col) => !RESERVED_SYNC_COLUMNS.has(col.name), {
     message: `Column names "updated_at" and "deleted_at" are reserved by the sync runtime`,
+  })
+  .refine((col) => !RESERVED_QUERY_KEYS.has(col.name), {
+    message: `Column names "exists" and "not_exists" are reserved by the row-query grammar`,
   });
 
 /**
@@ -395,6 +406,11 @@ export const syncableTableSchema = z
      * rather than removed it.
      */
     indexes: z.array(syncableTableIndexSchema).default([]),
+  })
+  // A query names a column by `<table>.<column>`, so one name must mean one
+  // column. The DDL would refuse the duplicate too, but only at install time.
+  .refine((table) => new Set(table.columns.map((c) => c.name)).size === table.columns.length, {
+    message: `A syncable table must not declare two columns with one name.`,
   })
   // An index naming a column the table does not declare would be a DDL failure
   // at install time, on the operator's machine, with a Postgres error message.
@@ -441,7 +457,14 @@ export const syncableTableSchema = z
   });
 
 export const appSpecificSyncableSchema = z.strictObject({
-  tables: z.array(syncableTableSchema).default([]),
+  // A join or subquery names a table by its manifest name, so one name must
+  // mean one table.
+  tables: z
+    .array(syncableTableSchema)
+    .default([])
+    .refine((tables) => new Set(tables.map((t) => t.name)).size === tables.length, {
+      message: `Two syncable tables must not share one name.`,
+    }),
   // Opt-in for apps/<appId>/syncable/ object-storage prefix. App-specific
   // (private) data is not necessarily file-backed — apps with row-only
   // app-specific data leave this false. (Shared data is always file-backed
