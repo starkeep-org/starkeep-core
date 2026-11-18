@@ -1947,6 +1947,38 @@ describe("/app-data routes", () => {
     expect(sql.values).toContain(11);
   });
 
+  it("answers the flat order spelling with a Deprecation header, and JSON without one", async () => {
+    const db = fakeDsqlWithGrants()
+      .on(NS_SELECT, [notesNamespace])
+      .on(/from "app_appdata1"\."notes"/, []);
+    setDbFactory(db);
+    const read = (order: string) =>
+      handler(
+        signedEvent({
+          appId: "appdata1",
+          method: "GET",
+          subPath: "/app-data/db/notes",
+          query: { select: "id", order },
+        }),
+        context,
+      );
+
+    const flat = await read("id.desc");
+    expect(flat.statusCode).toBe(200);
+    expect(flat.headers).toMatchObject({
+      "Content-Type": "application/json",
+      Deprecation: "@1794960000",
+      Link: expect.stringMatching(/rel="deprecation"$/),
+    });
+
+    const json = await read(JSON.stringify([{ col: "id", dir: "desc" }]));
+    expect(json.statusCode).toBe(200);
+    expect(json.headers).not.toHaveProperty("Deprecation");
+    // Both spellings compile to the same ordering.
+    const [flatSql, jsonSql] = db.calls(/from "app_appdata1"\."notes"/);
+    expect(jsonSql!.text).toBe(flatSql!.text);
+  });
+
   it("refuses the flat parameter form the old grammar read as a filter", async () => {
     setDbFactory(fakeDsqlWithGrants().on(NS_SELECT, [notesNamespace]));
     const res = await handler(

@@ -118,6 +118,7 @@ import {
   planMetadataQuery,
   planRecordQuery,
   queryParamsFrom,
+  flatOrderDeprecation,
   ApiError,
   liveStandIn,
   planFidelityReport,
@@ -3059,6 +3060,26 @@ async function admitDelegation(req: {
 }
 
 export async function handler(event: APIGatewayEvent, context: LambdaContext) {
+  const extraHeaders: Record<string, string> = {};
+  const response = await handleEvent(event, context, extraHeaders);
+  if (Object.keys(extraHeaders).length === 0) return response;
+  const headers = "headers" in response ? response.headers : undefined;
+  return { ...response, headers: { ...headers, ...extraHeaders } };
+}
+
+/**
+ * Every event the function receives, answered.
+ *
+ * `extraHeaders` collects headers that a route deep inside adds to whatever
+ * response the event ends with, so no single `return` has to carry them. The
+ * deprecation notice for the flat `order` spelling (STA-101) is the one such
+ * header.
+ */
+async function handleEvent(
+  event: APIGatewayEvent,
+  context: LambdaContext,
+  extraHeaders: Record<string, string>,
+) {
   // S3 notifications arrive at the same function as HTTP requests, so the shape
   // has to be discriminated before anything reads `requestContext` — which an
   // S3 event does not have, and which would throw before any of the routing
@@ -3626,6 +3647,9 @@ export async function handler(event: APIGatewayEvent, context: LambdaContext) {
       }));
 
     const query = event.queryStringParameters ?? {};
+    // The flat `order` spelling still parses on every route that reads
+    // `order`, and is answered with a `Deprecation` header (STA-101).
+    Object.assign(extraHeaders, flatOrderDeprecation(query["order"], appId) ?? {});
 
     // Lazy per-request app-syncable source: needed by both /sync/exchange (the
     // per-app channel, not Drive) and /app-data/*. Build at most once; both

@@ -99,6 +99,22 @@ afterAll(async () => {
   await server.stop();
 });
 
+describe("the two order spellings", () => {
+  it("answers the flat spelling with a Deprecation header, and JSON with the same rows and none", async () => {
+    const flat = await app.fetch(q({ select: "id", order: "due.desc.nullslast" }));
+    expect(flat.status).toBe(200);
+    expect(flat.headers.get("deprecation")).toBe("@1794960000");
+    expect(flat.headers.get("link")).toMatch(/authoring-an-app\.md>; rel="deprecation"$/);
+
+    const json = await app.fetch(
+      q({ select: "id", order: JSON.stringify([{ col: "due", dir: "desc", nulls: "last" }]) }),
+    );
+    expect(json.status).toBe(200);
+    expect(json.headers.get("deprecation")).toBeNull();
+    expect(await json.json()).toEqual(await flat.json());
+  });
+});
+
 describe("filtering and projection", () => {
   it("filters, projects and orders in one request", async () => {
     const body = await rows({
