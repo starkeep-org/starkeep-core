@@ -17,11 +17,12 @@
  * so its layout is "files at the zip root" — `api-handler.handler` resolves to
  * api-handler.js's `handler` export.
  *
- * The zip carries four entry points. The session, origin and delegated
+ * The zip carries five entry points. The session, origin and delegated
  * authorizers are much smaller Lambdas that share this artifact rather than
  * getting their own: each is deployed alongside the broker, versioned with
  * it, and giving each a separate build would be a second thing to remember
- * to rebuild.
+ * to rebuild. The job dispatcher (`dispatcher.handler`) shares the broker's
+ * code and role, so it ships in the same artifact.
  */
 
 import { execSync } from "node:child_process";
@@ -60,15 +61,18 @@ mkdirSync(stagingDir, { recursive: true });
 
 // CommonJS, because Lambda's default loader expects it unless the zip carries
 // a package.json with type=module or the file is named .mjs.
-for (const entry of [
-  "api-handler",
-  "session-authorizer",
-  "origin-authorizer",
-  "delegated-authorizer",
-]) {
+// Each entry's output name, and the source file it bundles.
+const ENTRIES = {
+  "api-handler": "api-handler",
+  "session-authorizer": "session-authorizer",
+  "origin-authorizer": "origin-authorizer",
+  "delegated-authorizer": "delegated-authorizer",
+  dispatcher: "dispatcher-handler",
+};
+for (const [entry, source] of Object.entries(ENTRIES)) {
   console.log(`Bundling ${entry} with esbuild…`);
   await build({
-    entryPoints: [join(pkgDir, "src", `${entry}.ts`)],
+    entryPoints: [join(pkgDir, "src", `${source}.ts`)],
     bundle: true,
     platform: "node",
     target: "node24",
@@ -81,7 +85,9 @@ for (const entry of [
 console.log("Creating dist.zip…");
 if (existsSync(outputZip)) rmSync(outputZip);
 execSync(
-  `zip -j "${outputZip}" api-handler.js session-authorizer.js origin-authorizer.js delegated-authorizer.js`,
+  `zip -j "${outputZip}" ${Object.keys(ENTRIES)
+    .map((entry) => `${entry}.js`)
+    .join(" ")}`,
   {
     cwd: stagingDir,
     stdio: "inherit",
