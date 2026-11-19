@@ -60,6 +60,7 @@ function deps(): ConnectDeps {
     db: async () => db.createClient({ hostname: "x", region: "x" }),
     connectableApps: async () => [{ appId: "probe", name: "Probe", delegatedPaths: ["/mcp"] }],
     viewerHosts: async () => ["cloud.example.com", "d111.cloudfront.net"],
+    publicHost: async () => "cloud.example.com",
     groupsMayUseData: (g) => g.includes("starkeep-users"),
     forgetDelegation: () => {},
     clients: { fetchDocument: async () => clientDoc() },

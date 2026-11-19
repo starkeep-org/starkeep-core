@@ -74,6 +74,7 @@ function deps(): ConnectDeps {
     db: async () => client,
     connectableApps: async () => apps,
     viewerHosts: async () => ["cloud.example.com"],
+    publicHost: async () => "cloud.example.com",
     groupsMayUseData: (g) => g.includes("starkeep-users"),
     forgetDelegation: () => {},
     now: () => now,
