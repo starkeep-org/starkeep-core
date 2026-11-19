@@ -1,6 +1,6 @@
 /**
  * The words an install shows before it acts: what the app may read and write,
- * and whether it can create public links.
+ * whether it can create public links, and which background jobs it offers.
  *
  * Admin's consent dialog and the terminal install both print these words, so
  * the person approves the same sentence either way. Free of `node:*` imports,
@@ -15,7 +15,15 @@ export interface ConsentManifest {
     fileAccess?: ReadonlyArray<ConsentGrant>;
     fileAccessAll?: boolean;
     publicSharing?: boolean;
+    jobs?: ReadonlyArray<ConsentJob>;
   };
+}
+
+/** One scheduled job, as the manifest declares it. */
+export interface ConsentJob {
+  name: string;
+  mode: "read" | "readwrite";
+  description: string;
 }
 
 /** One file grant, as the manifest declares it. */
@@ -81,6 +89,26 @@ export function publicSharingConsent(manifest: ConsentManifest): string | null {
   if (manifest.infraRequirements?.publicSharing !== true) return null;
   const name = manifest.name ?? manifest.id ?? "This app";
   return `${name} can create web links to your ${sharedContentOf(manifest)}. Anyone who has a valid link can view the content you share without signing in.`;
+}
+
+/**
+ * What the install dialogs say about the app's background jobs: one line per
+ * job, with its name, its sentence and what it may do with the user's data,
+ * then a note that each user turns each job on. Empty for an app without
+ * jobs. The jobs run in the cloud, but a cloud install skips the dialog for a
+ * manifest the person approved locally, so both installs show the lines.
+ */
+export function jobsConsent(manifest: ConsentManifest): string[] {
+  const jobs = manifest.infraRequirements?.jobs ?? [];
+  if (jobs.length === 0) return [];
+  return [
+    ...jobs.map(
+      (j) =>
+        `${j.name}: ${j.description} It may ${j.mode === "read" ? "read" : "read and write"} ` +
+        `the data of each user who turns it on.`,
+    ),
+    "Each user turns each job on separately, and the job runs in the cloud for that user only.",
+  ];
 }
 
 /** The grant categories as a lowercase phrase, such as "images and videos". */

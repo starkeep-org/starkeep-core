@@ -24,6 +24,7 @@ import {
   accessLead,
   categoriesOf,
   grantPermissions,
+  jobsConsent,
   publicSharingConsent,
   type AppSurface,
   type DependencyPlan,
@@ -143,6 +144,17 @@ export function ConsentDialog({
           <div className="border rounded-md p-3 text-sm flex flex-col gap-1">
             <span className="font-medium">Public links</span>
             <span className="text-muted-foreground">{publicSharingConsent(entry.manifest)}</span>
+          </div>
+        )}
+
+        {showAccess && jobsConsent(entry.manifest).length > 0 && (
+          <div className="border rounded-md p-3 text-sm flex flex-col gap-1">
+            <span className="font-medium">Background jobs</span>
+            {jobsConsent(entry.manifest).map((line) => (
+              <span key={line} className="text-muted-foreground">
+                {line}
+              </span>
+            ))}
           </div>
         )}
 
