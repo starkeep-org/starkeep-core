@@ -1,4 +1,4 @@
-import { fetchMtdCostsByService } from "../lib/cost-usage-report";
+import { fetchMtdCostsByService } from "@starkeep/operator/costs";
 import type { STSCredentials } from "../lib/cognito-auth";
 
 export async function POST(req: Request) {

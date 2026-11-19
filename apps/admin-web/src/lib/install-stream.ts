@@ -31,7 +31,7 @@
 
 import { copyFileSync, readFileSync } from "node:fs";
 import { isCredentialFailureLine } from "./credential-errors";
-import { followRun, runLogPath, runStatus, startRun } from "./detached-run";
+import { followRun, runLogPath, runStatus, startRun } from "@starkeep/operator/runs";
 
 export interface InstallStreamOptions {
   /** The run slot. One run at a time per slot. */

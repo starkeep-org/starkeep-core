@@ -13,7 +13,7 @@
  * admin-web's own page for the same reason.
  */
 
-import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
+import { localDataServerUrlFromEnv } from "@starkeep/operator/urls";
 import { crossSiteRefusal, fromOwnPage } from "../lib/same-origin";
 
 async function forward(path: string, init: RequestInit = {}): Promise<Response> {

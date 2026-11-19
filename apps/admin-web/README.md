@@ -33,10 +33,11 @@ resolves. It runs as TypeScript under `tsx`, the way
 `apps/local-data-server` does, because admin-web only ever runs from this
 checkout on the operator's own machine.
 
-`src/lib/app-scan.ts`, `src/lib/daemon-control.ts` and
-`src/lib/exec-commands.ts` are server-side only: they reach
-`node:child_process` and `node:fs`, and nothing the browser loads may import
-them. An eslint rule catches the import and
+The route handlers reach local daemons, detached installer runs, app discovery
+and `~/.starkeep/config.json` through `packages/operator`
+(`@starkeep/operator`), which the `starkeep` CLI shares. That package reaches
+`node:child_process` and `node:fs`, so nothing the browser loads may import
+it. An eslint rule catches the import and
 `__tests__/server-module-isolation.test.ts` walks the whole graph.
 
 ## What It Does

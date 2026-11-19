@@ -8,10 +8,10 @@ import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const dataDir = mkdtempSync(join(tmpdir(), "adminweb-detached-run-"));
+const dataDir = mkdtempSync(join(tmpdir(), "operator-detached-run-"));
 process.env.STARKEEP_DIR = dataDir;
 
-const { followRun, runLogPath, runStatus, startRun } = await import("../src/lib/detached-run");
+const { followRun, runLogPath, runStatus, startRun } = await import("../src/runs");
 
 afterAll(() => {
   rmSync(dataDir, { recursive: true, force: true });

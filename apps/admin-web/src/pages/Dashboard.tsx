@@ -50,7 +50,7 @@ import {
   type CognitoConfig,
   type STSCredentials,
 } from "../lib/cognito-auth";
-import { projectFullMonth, type ServiceCost } from "../lib/cost-usage-report";
+import { projectFullMonth, type ServiceCost } from "../lib/cost-projection";
 import { localDataServerUrl } from "../lib/runtime-config";
 import { ACTION_OCCASIONAL, ACTION_OPEN, ACTION_START } from "../lib/action-colors";
 

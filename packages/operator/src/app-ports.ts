@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
-import { localDataServerUrlFromEnv } from "./local-daemon-urls";
+import { localDataServerUrlFromEnv } from "./urls";
 
 /**
  * Each installed local app keeps one port, and so one browser origin, for as

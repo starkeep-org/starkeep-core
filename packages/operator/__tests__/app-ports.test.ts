@@ -6,12 +6,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import {
-  DEFAULT_APP_PORT_RANGE,
-  appPort,
-  appPortRangeFromEnv,
-  hashedPort,
-} from "../src/lib/app-ports";
+import { DEFAULT_APP_PORT_RANGE, appPort, appPortRangeFromEnv, hashedPort } from "../src/app-ports";
 
 const RANGE = DEFAULT_APP_PORT_RANGE;
 const INSTANCE = "9820";

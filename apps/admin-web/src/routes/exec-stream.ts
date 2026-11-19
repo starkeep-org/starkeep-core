@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { REPO_ROOT, STREAM_COMMANDS, type StreamCommandId } from "../lib/exec-commands";
+import { REPO_ROOT, STREAM_COMMANDS, type StreamCommandId } from "@starkeep/operator/commands";
 import type { STSCredentials } from "../lib/cognito-auth";
 import { installerEnv, withoutAwsVariables } from "@starkeep/admin-installer/aws-env";
 

@@ -1,8 +1,8 @@
 import { join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
-import { appSource, idMismatch, pinnedSourceState } from "../lib/app-scan";
+import { appSource, idMismatch, pinnedSourceState } from "@starkeep/operator/apps";
 import { MANIFEST_NOT_APPROVED } from "../lib/app-types";
-import { REPO_ROOT } from "../lib/exec-commands";
+import { REPO_ROOT } from "@starkeep/operator/commands";
 import { installStream } from "../lib/install-stream";
 import { installerEnv } from "@starkeep/admin-installer/aws-env";
 import { readFolderManifest } from "@starkeep/admin-installer/app-discovery";

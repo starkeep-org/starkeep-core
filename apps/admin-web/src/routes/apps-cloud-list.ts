@@ -12,7 +12,7 @@
  */
 
 import { sourceFingerprint } from "@starkeep/admin-installer/app-discovery";
-import { appFolders, sameManifest } from "../lib/app-scan";
+import { appFolders, sameManifest } from "@starkeep/operator/apps";
 import type { ManifestSummary } from "../lib/app-types";
 import { compiler, openInstallerPool } from "../lib/installer-dsql";
 
