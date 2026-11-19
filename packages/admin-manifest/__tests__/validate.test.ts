@@ -1244,6 +1244,39 @@ describe("infraRequirements.jobs", () => {
     expect(result.errors.some((e) => e.includes("jobs run in the cloud only"))).toBe(true);
   });
 
+  it("accepts a job whose handler's timeout leaves the dispatcher room to record the run", () => {
+    const result = validateManifest(
+      withJobs([job], {
+        infraRequirements: {
+          compute: {
+            enabled: true,
+            handlers: [{ name: "api", handler: "index.handler", timeoutSeconds: 840 }],
+          },
+          jobs: [job],
+        },
+      }),
+    );
+    expect(result.errors).toEqual([]);
+  });
+
+  it("refuses a job whose handler may outlast the dispatcher's own timeout", () => {
+    const result = validateManifest(
+      withJobs([job], {
+        infraRequirements: {
+          compute: {
+            enabled: true,
+            handlers: [{ name: "api", handler: "index.handler", timeoutSeconds: 841 }],
+          },
+          jobs: [job],
+        },
+      }),
+    );
+    expect(result.errors).toContain(
+      'infraRequirements.jobs["sync"].handler: "api" has timeoutSeconds 841; a job\'s handler ' +
+        "may take at most 840, so the dispatcher, which waits for the run, can record it",
+    );
+  });
+
   it("refuses jobs under a protocolMinVersion below 1.1.0", () => {
     const result = validateManifest(withJobs([job], { protocolMinVersion: "1.0.0" }));
     expect(result.errors.some((e) => e.includes('protocolMinVersion "1.1.0"'))).toBe(true);

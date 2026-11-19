@@ -644,7 +644,9 @@ export function buildCloudDataServerProgram(
         code: new pulumi.asset.FileArchive(ctx.distZipPath),
         sourceCodeHash: ctx.bundleHash,
         memorySize: 256,
-        // A run may last its handler's whole timeout, up to 900 s.
+        // Lambda's maximum. The dispatcher waits for each run's answer, so a
+        // job's handler may declare at most 840 s (admin-manifest's
+        // validateManifest), which leaves a minute to record the outcome.
         timeout: 900,
         environment: { variables: brokerEnv },
         tags: {

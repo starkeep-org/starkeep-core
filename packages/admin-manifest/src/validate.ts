@@ -14,6 +14,14 @@ import {
 } from "@starkeep/protocol-primitives";
 import { declaredHandlerRoutes, publicPathRoutePath } from "./routes.js";
 
+/**
+ * The longest timeout a job's handler may declare. The cloud's job dispatcher
+ * waits for each run's answer to record it, and Lambda stops the dispatcher at
+ * 900 seconds, so a run must end with a minute to spare for the dispatcher's
+ * own work: the user check, the token and the outcome's write.
+ */
+const MAX_JOB_HANDLER_TIMEOUT_SECONDS = 840;
+
 export interface ValidationResult {
   valid: boolean;
   manifest: AppManifest | null;
@@ -244,7 +252,7 @@ export function validateManifest(raw: unknown): ValidationResult {
   // never run the job.
   const jobs = manifest.infraRequirements.jobs;
   if (jobs.length > 0) {
-    const handlerNames = new Set(manifest.infraRequirements.compute.handlers.map((h) => h.name));
+    const handlers = new Map(manifest.infraRequirements.compute.handlers.map((h) => [h.name, h]));
     const seenJobs = new Set<string>();
     for (const job of jobs) {
       const where = `infraRequirements.jobs["${job.name}"]`;
@@ -252,8 +260,15 @@ export function validateManifest(raw: unknown): ValidationResult {
         errors.push(`infraRequirements.jobs: duplicate job "${job.name}"`);
       }
       seenJobs.add(job.name);
-      if (!handlerNames.has(job.handler)) {
+      const handler = handlers.get(job.handler);
+      if (!handler) {
         errors.push(`${where}.handler: "${job.handler}" is not a declared compute handler`);
+      } else if (handler.timeoutSeconds > MAX_JOB_HANDLER_TIMEOUT_SECONDS) {
+        errors.push(
+          `${where}.handler: "${job.handler}" has timeoutSeconds ${handler.timeoutSeconds}; a ` +
+            `job's handler may take at most ${MAX_JOB_HANDLER_TIMEOUT_SECONDS}, so the ` +
+            `dispatcher, which waits for the run, can record it`,
+        );
       }
     }
     if (!manifest.infraRequirements.compute.enabled) {
