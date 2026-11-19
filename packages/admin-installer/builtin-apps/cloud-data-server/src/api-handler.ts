@@ -3135,7 +3135,10 @@ async function admitDelegation(req: {
 
   if (claims.sk_channel === "job") {
     let cached = jobRowCache.get(claims.sk_dlg);
-    if (!cached || cached.until <= now) {
+    // A token for a run the cached row does not hold reads the row again:
+    // the enrollment's next run claims a new lease, often within the
+    // cache's minute, and must not be refused for the last run's.
+    if (!cached || cached.until <= now || cached.row?.lease_id !== claims.sk_run) {
       cached = {
         row: await findEnrollment(await db(), claims.sk_dlg),
         until: now + DELEGATION_ROW_TTL_MS,
