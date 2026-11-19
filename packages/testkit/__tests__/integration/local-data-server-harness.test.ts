@@ -1,7 +1,20 @@
 import { describe, it, expect } from "vitest";
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { startLocalDataServer } from "../../src/local-data-server.js";
+import { createServer, type Server } from "node:net";
+import { getFreePort, startLocalDataServer } from "../../src/local-data-server.js";
+
+/** Holds a loopback port, as another process in a parallel test run would. */
+async function occupyPort(): Promise<{ port: number; release(): Promise<void> }> {
+  const holder: Server = createServer();
+  await new Promise<void>((resolve) => holder.listen(0, "127.0.0.1", resolve));
+  const address = holder.address();
+  if (address === null || typeof address === "string") throw new Error("no port");
+  return {
+    port: address.port,
+    release: () => new Promise((resolve) => holder.close(() => resolve())),
+  };
+}
 
 // Boots a real server process per test, so this file is the harness's own
 // smoke coverage; the broad route assertions live in the local-data-server's
@@ -57,5 +70,43 @@ describe("local-data-server harness", () => {
         startTimeoutMs: 10_000,
       }),
     ).rejects.toThrow(/did not become healthy|not-a-dir/);
+  }, 30_000);
+
+  it("retries on a fresh port when another process takes the ephemeral one first", async () => {
+    const taken = await occupyPort();
+    const picked: number[] = [];
+    try {
+      const server = await startLocalDataServer({
+        pickPort: async () => {
+          const port = picked.length === 0 ? taken.port : await getFreePort();
+          picked.push(port);
+          return port;
+        },
+      });
+      try {
+        expect(picked[0]).toBe(taken.port);
+        expect(picked).toHaveLength(2);
+        expect(server.port).toBe(picked[1]);
+        expect((await fetch(`${server.url}/health`)).status).toBe(200);
+      } finally {
+        await server.stop();
+      }
+    } finally {
+      await taken.release();
+    }
+  }, 60_000);
+
+  it("fails fast with the crash output when a fixed port is taken", async () => {
+    const taken = await occupyPort();
+    try {
+      const started = Date.now();
+      await expect(startLocalDataServer({ port: taken.port })).rejects.toThrow(
+        /exited \(code 1.*before becoming healthy[\s\S]*EADDRINUSE/,
+      );
+      // Well under the 30 s start timeout: the harness saw the child die.
+      expect(Date.now() - started).toBeLessThan(15_000);
+    } finally {
+      await taken.release();
+    }
   }, 30_000);
 });
