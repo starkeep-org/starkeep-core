@@ -181,7 +181,13 @@ import {
   LABEL_QUERY_TARGET,
 } from "@starkeep/storage-adapter";
 import type { StoredAvailability } from "@starkeep/storage-adapter";
-import { ok, clientErr, type APIGatewayEvent, type LambdaContext } from "./handler-utils.js";
+import {
+  ok,
+  clientErr,
+  type APIGatewayEvent,
+  type APIGatewayResponse,
+  type LambdaContext,
+} from "./handler-utils.js";
 import { handleConnectRoute, isConnectRoute } from "./connect-routes.js";
 import { handleOAuthMetadata, isOAuthMetadataPath } from "./oauth-metadata.js";
 import { delegatedMayCall, isDelegatedWrite } from "./delegation-policy.js";
@@ -3059,12 +3065,14 @@ async function admitDelegation(req: {
   return { userId: row.user_id };
 }
 
-export async function handler(event: APIGatewayEvent, context: LambdaContext) {
+export async function handler(
+  event: APIGatewayEvent,
+  context: LambdaContext,
+): Promise<APIGatewayResponse> {
   const extraHeaders: Record<string, string> = {};
   const response = await handleEvent(event, context, extraHeaders);
   if (Object.keys(extraHeaders).length === 0) return response;
-  const headers = "headers" in response ? response.headers : undefined;
-  return { ...response, headers: { ...headers, ...extraHeaders } };
+  return { ...response, headers: { ...response.headers, ...extraHeaders } };
 }
 
 /**
@@ -3079,7 +3087,7 @@ async function handleEvent(
   event: APIGatewayEvent,
   context: LambdaContext,
   extraHeaders: Record<string, string>,
-) {
+): Promise<APIGatewayResponse> {
   // S3 notifications arrive at the same function as HTTP requests, so the shape
   // has to be discriminated before anything reads `requestContext` — which an
   // S3 event does not have, and which would throw before any of the routing

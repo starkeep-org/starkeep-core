@@ -18,13 +18,25 @@ export interface APIGatewayEvent {
   queryStringParameters?: Record<string, string>;
 }
 
+/**
+ * What the function answers an HTTP request with, in HTTP API payload v2.
+ * `headers` is optional because some answers carry only a status and a body.
+ */
+export interface APIGatewayResponse {
+  statusCode: number;
+  headers?: Record<string, string>;
+  /** HTTP API payload v2 sends each entry as its own `Set-Cookie`. */
+  cookies?: string[];
+  body: string;
+}
+
 // Minimal subset of the Lambda invocation context we rely on. The full type
 // lives in aws-lambda but we don't take a dependency just for one field.
 export interface LambdaContext {
   invokedFunctionArn: string;
 }
 
-export function ok(body: unknown, status = 200) {
+export function ok(body: unknown, status = 200): APIGatewayResponse {
   return {
     statusCode: status,
     headers: { "Content-Type": "application/json" },
@@ -32,7 +44,7 @@ export function ok(body: unknown, status = 200) {
   };
 }
 
-export function clientErr(message: string, status: number) {
+export function clientErr(message: string, status: number): APIGatewayResponse {
   return {
     statusCode: status,
     headers: { "Content-Type": "application/json" },
