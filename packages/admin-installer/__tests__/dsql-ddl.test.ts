@@ -653,7 +653,7 @@ describe("uninstall DDL", () => {
     return runAppUninstallDdl(opts, "photos", "Photos", ir.fileAccess, ir.fileAccessAll);
   };
 
-  it("deletes the app's public shares, its capability, its delegations and their OAuth rows", async () => {
+  it("deletes the app's public shares, its capability, its delegations, their OAuth rows and its job enrollments", async () => {
     // A public link reads through the creating app's role, so with the app
     // gone nothing could serve it, and a reinstall must not revive it. An
     // outside client's access ends with the app for the same reason.
@@ -664,6 +664,7 @@ describe("uninstall DDL", () => {
       '"delegation"."grants"',
       '"delegation"."refresh_tokens"',
       '"delegation"."authorizations"',
+      '"delegation"."jobs"',
     ]) {
       const del = state.queries.find((q) => q.text.includes(`delete from ${table}`));
       expect(del?.text).toContain('where "app_id" =');

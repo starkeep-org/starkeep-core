@@ -276,7 +276,7 @@ describe("delegation tables", () => {
     const created = statements
       .map((s) => /create table if not exists "delegation"\."([a-z_]+)"/i.exec(s)?.[1])
       .filter((t): t is string => Boolean(t));
-    expect(created).toEqual(["grants", "authorizations", "refresh_tokens"]);
+    expect(created).toEqual(["grants", "authorizations", "refresh_tokens", "jobs"]);
     for (const table of created) {
       expect(
         statements.some((s) => /^GRANT /.test(s) && s.includes(`delegation.${table} TO PUBLIC`)),
@@ -301,6 +301,18 @@ describe("delegation tables", () => {
     const statements = await init();
     expect(find(statements, "idx_delegation_authorizations_code")).toMatch(/\(code_hash\)/);
     expect(find(statements, "idx_delegation_refresh_tokens_grant")).toMatch(/\(grant_id\)/);
+  });
+
+  it("declares job enrollments with a mode check, the lease columns and two indexes", async () => {
+    const statements = await init();
+    const create = find(statements, 'create table if not exists "delegation"."jobs"')!;
+    expect(create).toMatch(/check \(mode IN \('read', 'readwrite'\)\)/);
+    for (const column of ["time_of_day", "next_due_at_ms", "lease_id", "lease_until_ms"]) {
+      expect(create).toMatch(new RegExp(`"${column}"`));
+    }
+    expect(create).toMatch(/"failures" integer default 0 not null/);
+    expect(find(statements, "idx_delegation_jobs_due")).toMatch(/\(next_due_at_ms\)/);
+    expect(find(statements, "idx_delegation_jobs_user")).toMatch(/\(user_id, app_id\)/);
   });
 });
 
