@@ -738,30 +738,22 @@ export function buildTempInstallCloudDataServerPolicy(
           "cloudfront:DeleteDistribution",
           "cloudfront:TagResource",
           "cloudfront:UntagResource",
+          // One suffix pattern per resource type below, for the role's
+          // inline-policy quota. Each matches only that type's own verbs:
+          // Create, Update and Delete, plus reads already granted above.
+          //
           // Origin Access Control (S3 origin lockdown).
-          "cloudfront:CreateOriginAccessControl",
-          "cloudfront:UpdateOriginAccessControl",
-          "cloudfront:DeleteOriginAccessControl",
+          "cloudfront:*OriginAccessControl",
           // Custom cache policy for the shared/* behavior.
-          "cloudfront:CreateCachePolicy",
-          "cloudfront:UpdateCachePolicy",
-          "cloudfront:DeleteCachePolicy",
+          "cloudfront:*CachePolicy",
           // URL-signing public key + key group.
-          "cloudfront:CreatePublicKey",
-          "cloudfront:UpdatePublicKey",
-          "cloudfront:DeletePublicKey",
-          "cloudfront:CreateKeyGroup",
-          "cloudfront:UpdateKeyGroup",
-          "cloudfront:DeleteKeyGroup",
+          "cloudfront:*PublicKey",
+          "cloudfront:*KeyGroup",
           // The signed-out-redirect viewer-request function on the default
-          // behavior. PublishFunction is separate from CreateFunction and the
-          // resource sets publish: true; DescribeFunction returns the ETag that
-          // update and delete both require.
-          "cloudfront:CreateFunction",
-          "cloudfront:DescribeFunction",
-          "cloudfront:UpdateFunction",
-          "cloudfront:PublishFunction",
-          "cloudfront:DeleteFunction",
+          // behavior: Create, Describe (the ETag that update and delete both
+          // require), Update, Publish (the resource sets publish: true),
+          // Delete, and Test, which runs a function and changes nothing.
+          "cloudfront:*Function",
         ],
         Resource: "*",
       },

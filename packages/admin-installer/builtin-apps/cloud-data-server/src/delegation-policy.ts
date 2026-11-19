@@ -112,10 +112,18 @@ export function isDelegatedWrite(method: string, subPath: string): boolean {
 }
 
 /**
+ * The vault calls a job's run makes, in both modes: it reads its user's
+ * secret, and writes back a value its provider rotated. A `read` job may
+ * write too, because the vault holds no user data. No `app`-channel list
+ * names a vault route, so an outside client never reaches one.
+ */
+const JOB_VAULT: readonly Rule[] = [rule("GET", `/vault/${SEG}`), rule("PUT", `/vault/${SEG}`)];
+
+/**
  * Whether one run of a scheduled job in `mode` may call `method subPath`.
  * A job's run reaches the user's data under the same rules as a delegation
- * in the same mode.
+ * in the same mode, and also reads and writes its user's vault.
  */
 export function jobMayCall(mode: DelegationMode, method: string, subPath: string): boolean {
-  return delegatedMayCall(mode, method, subPath);
+  return matches(JOB_VAULT, method, subPath) || delegatedMayCall(mode, method, subPath);
 }

@@ -196,6 +196,7 @@ import { findEnrollment, leaseIsLive, stopEnrollment, type JobRow } from "./job-
 import { SIGNED_OUT_MESSAGE } from "./job-messages.js";
 import type { DispatcherDeps, InvokeResult, ManualRunEvent } from "./dispatcher.js";
 import { handleJobRoute, jobRouteOf } from "./job-routes.js";
+import { handleVaultRoute, vaultRouteOf } from "./vault-routes.js";
 import {
   findDelegation,
   isLive,
@@ -3084,7 +3085,7 @@ async function admitDelegation(req: {
   body: Buffer;
   accountId: string;
   toClose: Array<() => Promise<void>>;
-}): Promise<{ userId: string } | { status: number; message: string }> {
+}): Promise<{ userId: string; channel: "app" | "job" } | { status: number; message: string }> {
   const key = await loadDelegationSigningKey();
   const pool = connectorsPoolConfig();
   const cognitoDomain = process.env.STARKEEP_COGNITO_DOMAIN;
@@ -3181,7 +3182,7 @@ async function admitDelegation(req: {
       }
       return { status: 503, message: "Sign-in is unavailable right now. Try again." };
     }
-    return { userId: row.user_id };
+    return { userId: row.user_id, channel: "job" };
   }
 
   let cached = delegationRowCache.get(claims.sk_dlg);
@@ -3241,7 +3242,7 @@ async function admitDelegation(req: {
       console.warn("[delegation] recording use failed:", err);
     }
   }
-  return { userId: row.user_id };
+  return { userId: row.user_id, channel: "app" };
 }
 
 export async function handler(
@@ -3551,6 +3552,8 @@ async function handleEvent(
      * starts or lists a job.
      */
     let serverForUser = false;
+    /** True on the delegated branch for a scheduled job's run. */
+    let jobRun = false;
     if (delegationToken !== undefined) {
       const refusal = await admitDelegation({
         token: delegationToken,
@@ -3564,6 +3567,7 @@ async function handleEvent(
       });
       if ("status" in refusal) return clientErr(refusal.message, refusal.status);
       subjectUserId = refusal.userId;
+      jobRun = refusal.channel === "job";
     } else if (mobileKeyId) {
       // A mobile app. The token says who; the attested key says which app,
       // and the app's manifest grants then bound what the request may do.
@@ -3786,6 +3790,31 @@ async function handleEvent(
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(answer.body),
           };
+    }
+
+    // /apps/{appId}/vault and /apps/{appId}/vault/{name} — the user's
+    // credential vault for this app. The vault lives in SSM under this
+    // function's own grant and touches no data-plane table, so it runs before
+    // any app role is assumed. See vault-routes.ts for who may call what.
+    const vaultRoute = vaultRouteOf(method, subPath);
+    if (vaultRoute) {
+      const answer = await handleVaultRoute(
+        vaultRoute,
+        serverForUser ? "user" : jobRun ? "job" : "other",
+        {
+          ssm: getSsmClient(),
+          stackPrefix: process.env.STACK_PREFIX ?? "starkeep",
+          appId,
+          userId: subjectUserId,
+        },
+        bodyBytes,
+      );
+      if (answer.status === 204) return { statusCode: 204, body: "" };
+      return {
+        statusCode: answer.status,
+        headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+        body: JSON.stringify(answer.body),
+      };
     }
 
     const subject: BrokerSubject = { appId, userId: subjectUserId };

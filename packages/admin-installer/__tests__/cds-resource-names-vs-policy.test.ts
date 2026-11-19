@@ -222,17 +222,21 @@ describe("cloud-data-server resource names sit inside the policies that govern t
       "apigatewayv2/api:Api": "apigatewayv2:CreateApi",
       "apigatewayv2/authorizer:Authorizer": "apigatewayv2:CreateAuthorizer",
       "dsql/cluster:Cluster": "dsql:CreateCluster",
+      "cloudwatch/eventRule:EventRule": "events:PutRule",
+      "cloudwatch/eventTarget:EventTarget": "events:PutTargets",
+      "lambda/functionEventInvokeConfig:FunctionEventInvokeConfig":
+        "lambda:PutFunctionEventInvokeConfig",
     };
     const policy = parse(buildTempInstallCloudDataServerPolicy(STACK_PREFIX, ACCOUNT_ID, REGION));
-    const granted = new Set(
-      policy.filter((s) => s.Effect === "Allow").flatMap((s) => toArray(s.Action)),
-    );
+    // Patterns count: the policy grants some verbs as `cloudfront:*Function`.
+    const granted = policy.filter((s) => s.Effect === "Allow").flatMap((s) => toArray(s.Action));
     const declared = new Set(created.map((r) => r.type.replace(/^aws:/, "")));
     for (const [type, verb] of Object.entries(createVerbByType)) {
       if (!declared.has(type)) continue;
-      expect(granted.has(verb), `program creates ${type} but the temp policy lacks ${verb}`).toBe(
-        true,
-      );
+      expect(
+        granted.some((pattern) => matchesArn(pattern, verb)),
+        `program creates ${type} but the temp policy lacks ${verb}`,
+      ).toBe(true);
     }
   });
 

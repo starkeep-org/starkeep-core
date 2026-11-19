@@ -1,7 +1,7 @@
 /**
- * Scheduled jobs run in the cloud only. The local data server answers an
- * app's job list and "run now" with 501 and `cloud-required`, so the app can
- * say that background jobs need a cloud.
+ * Scheduled jobs and the credential vault are in the cloud only. The local
+ * data server answers an app's job list, "run now" and every vault route with
+ * 501 and `cloud-required`, so the app can say that they need a cloud.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { listJobs, runJobNow } from "@starkeep/app-client";
@@ -20,11 +20,15 @@ afterAll(async () => {
   await server.stop();
 });
 
-describe("job routes on the local surface", () => {
+describe("job and vault routes on the local surface", () => {
   it("answer 501 cloud-required to a signed call", async () => {
     for (const [method, path] of [
       ["GET", "/jobs"],
       ["POST", "/jobs/tick/run"],
+      ["GET", "/vault"],
+      ["PUT", "/vault/peloton"],
+      ["GET", "/vault/peloton"],
+      ["DELETE", "/vault/peloton"],
     ] as const) {
       const res = await app.fetch(path, { method });
       expect(res.status, `${method} ${path}`).toBe(501);

@@ -1413,6 +1413,12 @@ async function main() {
         json(res, { error: "Background jobs run in the cloud only.", code: "cloud-required" });
         return;
       }
+      // The credential vault lives in the cloud only, for the same reason.
+      if (path === "/vault" || path.startsWith("/vault/")) {
+        res.writeHead(501);
+        json(res, { error: "The credential vault is in the cloud only.", code: "cloud-required" });
+        return;
+      }
 
       if (path === "/config" && req.method === "GET") {
         const freshConfig = await loadStarkeepConfig();

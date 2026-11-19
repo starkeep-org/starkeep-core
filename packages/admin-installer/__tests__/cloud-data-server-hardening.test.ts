@@ -659,7 +659,7 @@ describe("scheduled jobs", () => {
     });
   });
 
-  it("routes the platform's job path, the job routes and the job consent pages to the broker", async () => {
+  it("routes the platform's job path, the job routes, the job consent pages and the vault to the broker", async () => {
     await buildProgram(false);
     const keys = byTypeSuffix("apigatewayv2/route:Route").map((r) => r.inputs.routeKey);
     for (const key of [
@@ -670,6 +670,8 @@ describe("scheduled jobs", () => {
       "POST /connect/job/approve",
       "POST /connections/jobs/{id}/schedule",
       "POST /connections/jobs/{id}/revoke",
+      "ANY /apps/{appId}/vault",
+      "ANY /apps/{appId}/vault/{proxy+}",
     ]) {
       expect(keys).toContain(key);
     }

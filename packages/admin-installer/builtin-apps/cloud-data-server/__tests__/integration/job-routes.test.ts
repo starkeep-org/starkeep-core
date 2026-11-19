@@ -1,11 +1,20 @@
 /**
  * The job routes and the job channel against one real Postgres: the app's
  * server lists a user's jobs and starts a run, and a run's token reads and
- * writes exactly its user's app rows while its lease holds.
+ * writes exactly its user's app rows while its lease holds. The credential
+ * vault's caller matrix runs here too, because a job's run is one of its
+ * callers; Parameter Store is an in-memory fake.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { mockClient } from "aws-sdk-client-mock";
-import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
+import {
+  DeleteParameterCommand,
+  GetParameterCommand,
+  GetParametersByPathCommand,
+  ParameterNotFound,
+  PutParameterCommand,
+  SSMClient,
+} from "@aws-sdk/client-ssm";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { PGlite } from "@electric-sql/pglite";
@@ -70,6 +79,8 @@ let setKey: HandlerModule["__setDelegationSigningKeyForTests"];
 let pg: PGlite;
 let client: DatabaseClient;
 let userToken: string;
+/** The fake Parameter Store's vault values, by name. */
+const vaultStore = new Map<string, string>();
 
 beforeAll(async () => {
   process.env.STACK_PREFIX = "teststack";
@@ -166,10 +177,34 @@ beforeEach(async () => {
   stsMock.reset();
   lambdaMock.reset();
   lambdaMock.on(InvokeCommand).resolves({ StatusCode: 202 });
+  vaultStore.clear();
   ssmMock.on(GetParameterCommand).callsFake(async (input: { Name?: string }) => {
+    if (input.Name!.includes("/_vault/")) {
+      const value = vaultStore.get(input.Name!);
+      if (value === undefined) throw new ParameterNotFound({ message: "gone", $metadata: {} });
+      return { Parameter: { Name: input.Name, Value: value } };
+    }
     const appId = input.Name!.split("/").pop()!;
     return { Parameter: { Value: JSON.stringify({ hmacSecret: `secret-${appId}` }) } };
   });
+  ssmMock.on(PutParameterCommand).callsFake(async (input: { Name?: string; Value?: string }) => {
+    vaultStore.set(input.Name!, input.Value!);
+    return { Version: 1 };
+  });
+  ssmMock.on(DeleteParameterCommand).callsFake(async (input: { Name?: string }) => {
+    if (!vaultStore.delete(input.Name!)) {
+      throw new ParameterNotFound({ message: "gone", $metadata: {} });
+    }
+    return {};
+  });
+  ssmMock.on(GetParametersByPathCommand).callsFake(async (input: { Path?: string }) => ({
+    Parameters: [...vaultStore.keys()]
+      .filter(
+        (name) =>
+          name.startsWith(`${input.Path}/`) && !name.slice(input.Path!.length + 1).includes("/"),
+      )
+      .map((Name) => ({ Name, LastModifiedDate: new Date(1_800_000_000_000) })),
+  }));
   stsMock.on(AssumeRoleCommand).resolves({
     Credentials: {
       AccessKeyId: "AKIAFAKE",
@@ -393,5 +428,105 @@ describe("other callers", () => {
     });
     // Refused by the policy before the row lookup, so no row is needed.
     expect((await call("GET", "/jobs", { delegation: token })).status).toBe(403);
+  });
+});
+
+describe("the credential vault", () => {
+  const VAULT = `/teststack/app-creds/_vault/${APP}`;
+
+  async function jobToken(): Promise<string> {
+    const id = await enroll(A, "tick");
+    expect((await call("POST", "/jobs/tick/run", { user: userToken })).status).toBe(202);
+    const row = (await findEnrollment(client, id))!;
+    return signDelegationToken(key, {
+      userId: A,
+      appId: APP,
+      delegationId: id,
+      mode: "readwrite",
+      channel: "job",
+      job: { name: "tick", runId: row.lease_id! },
+      expiresAtMs: row.lease_until_ms!,
+    });
+  }
+
+  it("lets the user store, list and delete a secret, but never read it back", async () => {
+    const put = await call("PUT", "/vault/peloton", { user: userToken }, { value: "rt-1" });
+    expect(put.status).toBe(204);
+    expect(vaultStore.get(`${VAULT}/${A}/peloton`)).toBe("rt-1");
+
+    const list = await call("GET", "/vault", { user: userToken });
+    expect(list.status).toBe(200);
+    expect(list.body).toEqual({ secrets: [{ name: "peloton", updatedAt: 1_800_000_000_000 }] });
+    expect(JSON.stringify(list.body)).not.toContain("rt-1");
+
+    const read = await call("GET", "/vault/peloton", { user: userToken });
+    expect(read.status).toBe(403);
+    expect(JSON.stringify(read.body)).not.toContain("rt-1");
+
+    expect((await call("DELETE", "/vault/peloton", { user: userToken })).status).toBe(204);
+    expect(vaultStore.size).toBe(0);
+  });
+
+  it("lets a job's run read its user's secret and write a rotated one, and nothing more", async () => {
+    vaultStore.set(`${VAULT}/${A}/peloton`, "rt-1");
+    vaultStore.set(`${VAULT}/${B}/peloton`, "b-secret");
+    const token = await jobToken();
+
+    const read = await call("GET", "/vault/peloton", { delegation: token });
+    expect(read.status, JSON.stringify(read.body)).toBe(200);
+    expect(read.body).toEqual({ value: "rt-1" });
+
+    const rotate = await call("PUT", "/vault/peloton", { delegation: token }, { value: "rt-2" });
+    expect(rotate.status).toBe(204);
+    expect(vaultStore.get(`${VAULT}/${A}/peloton`)).toBe("rt-2");
+    expect(vaultStore.get(`${VAULT}/${B}/peloton`)).toBe("b-secret");
+
+    expect((await call("GET", "/vault/missing", { delegation: token })).status).toBe(404);
+    expect((await call("DELETE", "/vault/peloton", { delegation: token })).status).toBe(403);
+    expect((await call("GET", "/vault", { delegation: token })).status).toBe(403);
+  });
+
+  it("refuses an outside client's delegation on every vault route", async () => {
+    vaultStore.set(`${VAULT}/${A}/peloton`, "rt-1");
+    const token = signDelegationToken(key, {
+      userId: A,
+      appId: APP,
+      delegationId: "dlg-x",
+      mode: "readwrite",
+      channel: "app",
+      expiresAtMs: Date.now() + 60_000,
+    });
+    for (const [method, path, body] of [
+      ["GET", "/vault", undefined],
+      ["GET", "/vault/peloton", undefined],
+      ["PUT", "/vault/peloton", { value: "stolen" }],
+      ["DELETE", "/vault/peloton", undefined],
+    ] as const) {
+      const res = await call(method, path, { delegation: token }, body);
+      expect(res.status, `${method} ${path}`).toBe(403);
+    }
+    expect(vaultStore.get(`${VAULT}/${A}/peloton`)).toBe("rt-1");
+  });
+
+  it("refuses a signed-in device on every vault route", async () => {
+    process.env.STARKEEP_DEVICE_USER_POOL_CLIENT_ID = "test-client-id";
+    try {
+      for (const method of ["GET", "PUT", "DELETE"]) {
+        const res = await call(method, "/vault/peloton", { user: userToken, sign: false });
+        expect(res.status, method).toBe(403);
+      }
+    } finally {
+      delete process.env.STARKEEP_DEVICE_USER_POOL_CLIENT_ID;
+    }
+  });
+
+  it("refuses a malformed name, an empty value and an oversized one", async () => {
+    expect((await call("PUT", "/vault/Bad.Name", { user: userToken }, { value: "x" })).status).toBe(
+      404,
+    );
+    expect((await call("PUT", "/vault/ok", { user: userToken }, { value: "" })).status).toBe(400);
+    const big = { value: "x".repeat(4097) };
+    expect((await call("PUT", "/vault/ok", { user: userToken }, big)).status).toBe(400);
+    expect(vaultStore.size).toBe(0);
   });
 });
