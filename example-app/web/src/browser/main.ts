@@ -344,7 +344,7 @@ async function renderFiles(): Promise<void> {
                 run("Delete", async () => {
                   // The delete takes the file's derived copies too, and the
                   // open file may be one of them.
-                  const ids = await api.deleteFile(r.id);
+                  const ids = await api.deleteRecord(r.id);
                   if (selectedId !== null && ids.includes(selectedId)) selectedId = null;
                   await refreshAll();
                 }),

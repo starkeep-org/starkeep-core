@@ -76,7 +76,6 @@ const CALLS: Record<string, () => Promise<unknown>> = {
   getMetadata: () => api.getMetadata("REC1"),
   fileUrls: () => api.fileUrls(["REC1"]),
   deleteRecord: () => api.deleteRecord("REC1"),
-  deleteFile: () => api.deleteFile("REC1"),
   recomputeMetadata: () => api.recomputeMetadata("REC1"),
   queryMetadata: () => api.queryMetadata(),
   metadataTotals: () => api.metadataTotals(),

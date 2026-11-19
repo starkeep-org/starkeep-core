@@ -330,6 +330,8 @@ describe("the tools", () => {
       isError: false,
     });
     expect(calls[0]).toMatchObject({ method: "DELETE", path: "/data/records/REC%201" });
+    // The file's note and memberships stay, as they do for the page's Delete.
+    expect(calls).toHaveLength(1);
   });
 
   it("answers a missing argument as a tool error, before any data call", async () => {

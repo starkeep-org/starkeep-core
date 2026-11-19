@@ -19,7 +19,7 @@ Each heading is one group of operations, with a table of the current state and a
 | Notes         | The app's own `notes` table: write, pin, delete, and search by text, prefix, edit date, the files on or off the page, or a collection.                                   |
 | Analysis      | Notes per day, in SQL the app's server runs over a snapshot of the notes table, with its load time and a Refresh button.                                                 |
 | Note exports  | The app's own files: save every note as a private JSON file, then list, open and delete the files.                                                                       |
-| Deleted       | Every example file deleted since an instant, a restore, and the trash retention window.                                                                                  |
+| Deleted       | Every example file deleted since an instant, a restore, and the trash retention window. A deleted file keeps its note and collections, so a restore returns them.        |
 | Types         | Record counts for every type the app may read.                                                                                                                           |
 | Public links  | Web links to your example files, made with a file's Share button. Anyone who has a valid link can view the shared content without signing in. Public links need a cloud. |
 | Activity      | Every request the page made, with method, path, status and duration.                                                                                                     |

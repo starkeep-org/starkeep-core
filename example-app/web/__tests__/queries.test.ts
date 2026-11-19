@@ -345,21 +345,13 @@ describe("loadSampleData", () => {
   });
 });
 
-describe("deleteFile", () => {
-  it("removes each deleted record's memberships by both key columns", async () => {
-    stub((s) => {
-      if (s.method === "DELETE" && s.url.pathname.includes("/data/records/")) {
-        return { ids: ["r1"] };
-      }
-      if (s.method === "GET") return { rows: [{ collection_id: "c1" }], truncated: false };
-      return { changes: 1 };
-    });
-    await api.deleteFile("r1");
-    const itemDeletes = sent.filter(
-      (s) => s.method === "DELETE" && s.url.pathname.endsWith("/collection_items"),
-    );
-    expect(itemDeletes.map((s) => s.body)).toEqual([
-      { where: { collection_id: "c1", record_id: "r1" } },
+describe("deleteRecord", () => {
+  it("moves the file to the Trash and leaves its note and memberships alone", async () => {
+    stub(() => ({ ids: ["r1", "r1-copy"] }));
+    expect(await api.deleteRecord("r1")).toEqual(["r1", "r1-copy"]);
+    // The MCP trash_file tool sends the same one request, through trashFile.
+    expect(sent.map((s) => `${s.method} ${s.url.pathname}`)).toEqual([
+      "DELETE /api/local-data/data/records/r1",
     ]);
   });
 });
