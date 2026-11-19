@@ -670,6 +670,23 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           resource: `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/platform/mobile-keys/${"a".repeat(64)}`,
           why: "The mobile branch reads the attested key a request names, to verify its signature.",
         },
+        // ---- The credential vault (STA-10). --------------------------------
+        ...["ssm:PutParameter", "ssm:DeleteParameter", "ssm:GetParameter"].map((action) => ({
+          action,
+          resource: `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/app-creds/_vault/${targetAppId}/user-1/peloton`,
+          why: "The vault stores, deletes and, for a job's run, reads one user's secret.",
+        })),
+        {
+          action: "ssm:GetParametersByPath",
+          resource: `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/app-creds/_vault/${targetAppId}/user-1`,
+          why: "GET /apps/<appId>/vault lists one user's secret names, read without decryption.",
+        },
+        {
+          action: "kms:Encrypt",
+          resource: "*",
+          contextVariables: { "kms:ViaService": `ssm.${region}.amazonaws.com` },
+          why: "Writing a SecureString encrypts under the SSM service key.",
+        },
         {
           action: "lambda:InvokeFunction",
           resource: `arn:aws:lambda:${region}:${accountId}:function:${stackPrefix}-app-${targetAppId}-api`,
