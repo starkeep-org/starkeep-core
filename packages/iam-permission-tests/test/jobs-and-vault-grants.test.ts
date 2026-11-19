@@ -5,7 +5,8 @@
  * - The data server's role may invoke an app's function, and no function
  *   outside the deployment's prefix.
  * - The foundational boundary admits writes under `app-creds/_vault/` and no
- *   other `app-creds/` write.
+ *   other `app-creds/` write, listing names by path, and encrypting through
+ *   SSM.
  * - Manager may list parameter names, and still may not read an `app-creds/`
  *   value, so no Starkeep admin reads a user's vault through Manager.
  */
@@ -115,8 +116,18 @@ describe("the vault's ceiling", () => {
     },
   );
 
-  test("the boundary admits listing parameter names", async () => {
-    expect(await verdict(boundaryOnly, "ssm:DescribeParameters", "*")).toBe("Allowed");
+  test("the boundary admits listing one user's vault names by path", async () => {
+    expect(
+      await verdict(boundaryOnly, "ssm:GetParametersByPath", param("app-creds/_vault/photos/u1")),
+    ).toBe("Allowed");
+  });
+
+  test("the boundary admits encrypting a SecureString through SSM only", async () => {
+    const ssm = { "kms:ViaService": `ssm.${REGION}.amazonaws.com` };
+    expect((await simulateOne(boundaryOnly, ACCOUNT, "kms:Encrypt", "*", ssm)).verdict).toBe(
+      "Allowed",
+    );
+    expect(await verdict(boundaryOnly, "kms:Encrypt", "*")).toBe("ImplicitlyDenied");
   });
 });
 
