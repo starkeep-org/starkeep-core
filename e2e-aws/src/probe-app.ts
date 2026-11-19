@@ -22,6 +22,7 @@ export const probeApp: JourneyApp = {
   // later variant-resolution reads treat this record as its own variant.
   labelKeys: { flag: "flag", valued: "tag" },
   publicSharing: true,
+  job: "probe-tick",
   appTable: {
     name: "probe_notes",
     row: (recordId) => ({ record_id: recordId, note: "tier-3 note" }),

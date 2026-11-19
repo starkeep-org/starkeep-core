@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "Platform test fixture: the smallest app that exercises every surface the platform offers an app.",
   "tier": "official",
+  "protocolMinVersion": "1.1.0",
   "targets": ["local", "cloud"],
   "localRun": {
     "command": "node",
@@ -20,6 +21,15 @@
       }
     ],
     "publicSharing": true,
+    "jobs": [
+      {
+        "name": "probe-tick",
+        "handler": "static",
+        "mode": "readwrite",
+        "defaultTime": null,
+        "description": "Writes one note stamped with the run's id, so the platform's suites can see each run land."
+      }
+    ],
     "labelKeys": [
       {
         "key": "variant",

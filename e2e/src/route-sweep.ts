@@ -53,6 +53,11 @@ export interface RouteSweepApp {
   childTable?: { name: string; keyColumn: string; parentColumn: string; valueColumn: string };
   /** Whether the manifest asks to publish public links (`publicSharing`). */
   publicSharing: boolean;
+  /**
+   * A scheduled job the manifest declares, for the job routes. The sweep
+   * skips them for an app that names none.
+   */
+  job?: string;
 }
 
 const q = (params: Record<string, string | number>) =>
@@ -382,6 +387,30 @@ export async function sweepAppRoutes(
       );
       const after = ok(await send("GET", "/data/public-shares"), route("GET /data/public-shares"));
       assert.ok(!(after["publicShares"] as { id: string }[]).some((s) => s.id === share.id));
+    }
+  }
+
+  // Scheduled jobs: the list on the cloud surface, and on the local surface
+  // the cloud-required answer an app shows its user. A run's own path is the
+  // journey's to drive, because it needs an enrollment.
+  if (app.job) {
+    if (target.surface === "local") {
+      for (const [method, path] of [
+        ["GET", "/jobs"],
+        ["POST", `/jobs/${app.job}/run`],
+      ] as const) {
+        const local = await send(method, path);
+        route(`${method} ${path.replace(app.job, ":name")}, local`);
+        assert.equal(local.status, 501, `${method} ${path} answered ${local.status} locally`);
+        assert.equal((local.body as { code?: unknown }).code, "cloud-required");
+      }
+    } else {
+      const listed = ok(await send("GET", "/jobs"), route("GET /jobs"));
+      const jobs = listed["jobs"] as { name: string; consentUrl: string }[];
+      assert.ok(
+        jobs.some((j) => j.name === app.job && j.consentUrl.includes("/connect/job?")),
+        `GET /jobs did not list ${app.job} with its consent page`,
+      );
     }
   }
 

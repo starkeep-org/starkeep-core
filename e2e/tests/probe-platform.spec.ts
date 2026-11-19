@@ -282,6 +282,7 @@ test("every app-facing data route answers through the app's own proxy", async ()
         valueColumn: "tag",
       },
       publicSharing: true,
+      job: "probe-tick",
     },
   );
   expect(checked.length).toBeGreaterThan(20);
