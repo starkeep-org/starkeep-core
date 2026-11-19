@@ -943,6 +943,53 @@ async function applySharedSchema(opts: SchemaInitOptions): Promise<void> {
          ON delegation.refresh_tokens (grant_id)`,
     );
 
+    // A user's enrollment in one app's scheduled job: the job channel's
+    // grant, and the job's schedule and last run. Its own table rather than a
+    // `job` channel on `delegation.grants`, because DSQL cannot replace that
+    // table's CHECK constraint on `channel` in place, and because the
+    // schedule's columns mean nothing on an outside client's row. The id
+    // derives from the user, the app and the job, so turning a job back on
+    // reuses its row. The dispatcher claims a run by setting the lease
+    // columns with a conditional UPDATE. See `job-store.ts` in the
+    // cloud-data-server.
+    await db.schema
+      .createTable("delegation.jobs")
+      .ifNotExists()
+      .addColumn("id", "text", (c) => c.notNull().primaryKey())
+      .addColumn("user_id", "text", (c) => c.notNull())
+      .addColumn("app_id", "text", (c) => c.notNull())
+      .addColumn("job", "text", (c) => c.notNull())
+      .addColumn("mode", "text", (c) => c.notNull().check(sql`mode IN ('read', 'readwrite')`))
+      .addColumn("time_zone", "text", (c) => c.notNull())
+      // `HH:MM` in `time_zone`. Null: the job runs only when the user asks.
+      .addColumn("time_of_day", "text")
+      .addColumn("cognito_refresh_ciphertext", "text", (c) => c.notNull())
+      .addColumn("created_at_ms", "bigint", (c) => c.notNull())
+      .addColumn("updated_at_ms", "bigint", (c) => c.notNull())
+      .addColumn("revoked_at_ms", "bigint")
+      .addColumn("next_due_at_ms", "bigint")
+      .addColumn("lease_id", "text")
+      .addColumn("lease_until_ms", "bigint")
+      .addColumn("last_started_at_ms", "bigint")
+      .addColumn("last_finished_at_ms", "bigint")
+      .addColumn("last_status", "text")
+      .addColumn("last_message", "text")
+      .addColumn("attention", "text")
+      .addColumn("failures", "integer", (c) => c.notNull().defaultTo(0))
+      .execute();
+    await sql.raw(`GRANT SELECT, INSERT, UPDATE, DELETE ON delegation.jobs TO PUBLIC`).execute(db);
+    // The dispatcher's due query, and the app's and the connections page's lists.
+    await ensureIndex(
+      db,
+      `CREATE INDEX ASYNC IF NOT EXISTS idx_delegation_jobs_due
+         ON delegation.jobs (next_due_at_ms)`,
+    );
+    await ensureIndex(
+      db,
+      `CREATE INDEX ASYNC IF NOT EXISTS idx_delegation_jobs_user
+         ON delegation.jobs (user_id, app_id)`,
+    );
+
     // DSQL-side IAM-to-PG mapping for the cloud install registry. The
     // orchestrator opens its registry connection as the admin-app IAM role
     // (federated entry point — the same identity the human admin used to

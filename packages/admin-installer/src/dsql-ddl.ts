@@ -719,6 +719,9 @@ export async function runAppUninstallDdl(
       await db.deleteFrom("delegation.grants").where("app_id", "=", appId).execute();
       await db.deleteFrom("delegation.refresh_tokens").where("app_id", "=", appId).execute();
       await db.deleteFrom("delegation.authorizations").where("app_id", "=", appId).execute();
+      // Its users' job enrollments end too. A reinstall must not run a job
+      // nobody turned on for that install.
+      await db.deleteFrom("delegation.jobs").where("app_id", "=", appId).execute();
 
       await revokeMapping(db, opts, appId);
     } finally {

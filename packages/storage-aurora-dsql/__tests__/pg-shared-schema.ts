@@ -181,6 +181,28 @@ export async function createSharedSchema(pg: PGlite): Promise<void> {
       expires_at_ms bigint NOT NULL,
       rotated_at_ms bigint
     );
+    CREATE TABLE delegation.jobs (
+      id text PRIMARY KEY,
+      user_id text NOT NULL,
+      app_id text NOT NULL,
+      job text NOT NULL,
+      mode text NOT NULL CHECK (mode IN ('read', 'readwrite')),
+      time_zone text NOT NULL,
+      time_of_day text,
+      cognito_refresh_ciphertext text NOT NULL,
+      created_at_ms bigint NOT NULL,
+      updated_at_ms bigint NOT NULL,
+      revoked_at_ms bigint,
+      next_due_at_ms bigint,
+      lease_id text,
+      lease_until_ms bigint,
+      last_started_at_ms bigint,
+      last_finished_at_ms bigint,
+      last_status text,
+      last_message text,
+      attention text,
+      failures integer NOT NULL DEFAULT 0
+    );
   `);
   for (const c of CATEGORIES.filter((c) => hasMetadataTable(c.id))) {
     await pg.exec(pgMetadataDdl(c));
