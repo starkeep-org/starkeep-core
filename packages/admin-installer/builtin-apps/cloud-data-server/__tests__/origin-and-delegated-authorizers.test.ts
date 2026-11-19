@@ -95,6 +95,19 @@ describe("delegated authorizer", () => {
     }
   });
 
+  it("fails with Unauthorized for a job token, which never opens a gateway route", async () => {
+    const job = signDelegationToken(key, {
+      userId: "user-1",
+      appId: "probe",
+      delegationId: "e-1",
+      mode: "read",
+      channel: "job",
+      job: { name: "tick", runId: "run-1" },
+      expiresAtMs: Date.now() + 60_000,
+    });
+    await expect(delegated(req({ auth: `Bearer ${job}` }))).rejects.toThrow(/^Unauthorized$/);
+  });
+
   it("fails with Unauthorized for a token signed by another key", async () => {
     const other = delegationSigningKeyFromPem(makeDelegationKeyPem().privateKeyPem);
     const forged = signDelegationToken(other, {

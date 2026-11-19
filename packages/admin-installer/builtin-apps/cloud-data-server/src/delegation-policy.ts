@@ -110,3 +110,12 @@ export function delegatedMayCall(mode: DelegationMode, method: string, subPath: 
 export function isDelegatedWrite(method: string, subPath: string): boolean {
   return matches(WRITES, method, subPath) || matches(LABEL_WRITES, method, subPath);
 }
+
+/**
+ * Whether one run of a scheduled job in `mode` may call `method subPath`.
+ * A job's run reaches the user's data under the same rules as a delegation
+ * in the same mode.
+ */
+export function jobMayCall(mode: DelegationMode, method: string, subPath: string): boolean {
+  return delegatedMayCall(mode, method, subPath);
+}

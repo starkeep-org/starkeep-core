@@ -2,12 +2,7 @@
  * The next due time of a scheduled job, across clock changes.
  */
 import { describe, expect, it } from "vitest";
-import {
-  isKnownTimeZone,
-  nextDueAt,
-  selectableTimeZones,
-  zoneOrUtc,
-} from "../src/job-schedule.js";
+import { isKnownTimeZone, nextDueAt, selectableTimeZones, zoneOrUtc } from "../src/job-schedule.js";
 
 const iso = (t: number) => new Date(t).toISOString();
 const at = (s: string) => Date.parse(s);
