@@ -45,6 +45,15 @@ export {
   verifyJob,
 } from "./jobs";
 export {
+  type SecretEntry,
+  type VaultCaller,
+  type VaultResult,
+  deleteSecret,
+  listSecrets,
+  putSecret,
+  readSecret,
+} from "./vault";
+export {
   createDataProxyHandler,
   sessionAuth,
   type DataProxyOptions,

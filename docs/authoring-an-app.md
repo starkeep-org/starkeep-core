@@ -128,6 +128,7 @@ would test the build step. Copy the example app rather than Probe.
 | `appSpecificSyncable` tables/files     | Optional              | App-private rows and blobs that sync alongside shared records.                                                                                   |
 | `compute` handlers + a `bundle` script | Optional (cloud only) | Lambda handlers and the deployment-zip builder for a cloud install.                                                                              |
 | `jobs`                                 | Optional (cloud only) | Work the platform runs for each user who turns it on, on a schedule or on request (§7c).                                                         |
+| The credential vault                   | Optional (cloud only) | Each user's secrets for your app's third-party services, read only by your jobs (§7d).                                                           |
 | Sign-in page + session routes          | Required in cloud     | A `/sign-in` page (`createSignInPage`, or your own) and the `/api/session` routes, so a person can sign in to the cloud surface (§8).            |
 | Server-side end-user check             | **Required in cloud** | Nothing upstream of your app checks who the end user is. See §10.                                                                                |
 
@@ -1311,6 +1312,44 @@ On the local surface no job runs. `verifyJob` refuses every request, and
 `listJobs` and `runJobNow` answer `cloudRequired: true`, so your app can tell
 the user that background jobs need a cloud. Probe's `test-apps/probe` declares
 the job `probe-tick` as a complete example.
+
+### 7d. Third-party credentials (cloud target only)
+
+A job that syncs from another service needs the user's credential for that
+service: an API key, or a refresh token the service rotates on every use.
+Keep it in the platform's credential vault, not in your app's rows. Rows sync
+to every device and any reader of the rows could fetch the value, while the
+vault keeps one encrypted secret per user in the cloud, where only your jobs
+read it.
+
+- **Storing.** Your server calls `putSecret(appId, name, value, { userToken })`
+  with the value the user typed. `listSecrets` returns names and times, and
+  `deleteSecret` removes one.
+- **Reading.** Only a run of one of your jobs reads a secret, for its own user:
+  `readSecret(appId, name, { delegation: run.token })`. The browser never reads
+  a secret back, so a page can show "connected" but never the credential.
+- **Rotating.** A run writes the provider's new value with
+  `putSecret(appId, name, value, { delegation: run.token })`. One run of a job
+  holds the user's lease at a time (§7c), so a rotated token never meets a
+  second run holding the old one.
+
+```ts
+import { putSecret, readSecret } from "@starkeep/app-client";
+
+// The settings page's "Connect Peloton": your server, with the user's token.
+await putSecret("my-app", "peloton", refreshToken, { userToken });
+
+// In the job's route, with the run's token.
+const current = await readSecret("my-app", "peloton", { delegation: run.token });
+if (current.ok && current.value) {
+  const next = await refreshWithPeloton(current.value);
+  await putSecret("my-app", "peloton", next.refreshToken, { delegation: run.token });
+}
+```
+
+A name is lowercase letters, digits, `_` and `-`, at most 64 characters, and a
+value holds at most 4,096 bytes. Uninstalling your app deletes every user's
+secrets for it. On the local surface every call answers `cloudRequired: true`.
 
 ### 8. Sign-in (cloud target only)
 
