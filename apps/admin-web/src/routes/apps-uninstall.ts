@@ -1,8 +1,8 @@
 import { existsSync, unlinkSync } from "node:fs";
 import { starkeepDir } from "@starkeep/app-client";
 import { join } from "node:path";
-import { stopById } from "../lib/daemon-control";
-import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
+import { stopById } from "@starkeep/operator/daemons";
+import { localDataServerUrlFromEnv } from "@starkeep/operator/urls";
 
 const STARKEEP_DIR = starkeepDir();
 const APP_CREDS_DIR = join(STARKEEP_DIR, "app-creds");

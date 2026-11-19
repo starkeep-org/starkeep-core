@@ -1,4 +1,4 @@
-import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
+import { localDataServerUrlFromEnv } from "@starkeep/operator/urls";
 
 /**
  * An app's own data on this machine, proxied to the local-data-server.

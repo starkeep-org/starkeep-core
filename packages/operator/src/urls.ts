@@ -15,7 +15,7 @@
  * `STARKEEP_DRIVE_PORT` for its daemons, plus `STARKEEP_APP_PORT_RANGE` for
  * its installed apps (see `app-ports.ts`). Read per call, not captured at load.
  */
-import { daemonPort } from "./exec-commands";
+import { daemonPort } from "./commands";
 
 export function localDataServerUrlFromEnv(): string {
   return (

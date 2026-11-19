@@ -1,25 +1,17 @@
 /**
- * The commands admin-web spawns, and where it spawns them from.
+ * The commands admin-web and the CLI spawn, and where they spawn them from.
  *
- * Server-side only. Nothing the browser loads may import this module — it names
- * the process table, and `daemon-control.ts` reaches `node:child_process`
- * through it. The rule used to be carried by a `server-only` import, which is a
- * marker the previous bundler resolved and no bundler here does; it is now an
- * eslint `no-restricted-imports` rule plus
- * `__tests__/server-module-isolation.test.ts`, which walks the real graph.
+ * Server-side only. Nothing admin-web's browser half loads may import this
+ * package: an eslint `no-restricted-imports` rule and admin-web's
+ * `__tests__/server-module-isolation.test.ts` hold that line.
  */
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { repoRoot } from "./repo-root";
 
 export type DaemonId = "local-data-server" | "drive";
 export type StreamCommandId = "reset-local-data" | "local-deploy";
 
-// Resolved from this file rather than from `process.cwd()`. The server used to
-// be started by a framework that always ran from `apps/admin-web`; it is now a
-// plain Node process, which can be started from anywhere, and a repo root that
-// depended on the caller's directory would silently spawn every daemon and CLI
-// against the wrong tree.
-export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+// See `repo-root.ts` for why the root comes from this file's location.
+export const REPO_ROOT = repoRoot();
 
 // Each daemon resolves its own listen port from the environment, and admin-web
 // must read the *same* variable: daemons are spawned as children and inherit
@@ -35,7 +27,7 @@ export function daemonPort(envVar: string, fallback: number): number {
 // Workspace daemons spawned from REPO_ROOT with a pnpm filter. These are not
 // "installed apps" — they're parts of the platform that admin-web can bring up
 // for local dev. (Installed apps come from a manifest's `localRun` block via
-// app-scan; see daemon/route.ts.)
+// app-scan; see `apps.ts`.)
 export const DAEMON_COMMANDS: Record<DaemonId, { args: string[]; port?: number }> = {
   // STARKEEP_PORT is the data server's own knob (see its server.ts).
   "local-data-server": {
@@ -56,7 +48,7 @@ export const DAEMON_COMMANDS: Record<DaemonId, { args: string[]; port?: number }
 
 // The UI's cloud install goes through /api/cloud-data-server/install, which
 // runs the installer detached so it survives admin-web restarts (see
-// lib/install-stream.ts). `local-deploy` here has no caller in the UI.
+// admin-web's lib/install-stream.ts). `local-deploy` here has no caller in the UI.
 // reset-cloud-data is unimplemented in the new model.
 export const STREAM_COMMANDS: Record<StreamCommandId, { args: string[]; requiresCreds: boolean }> =
   {

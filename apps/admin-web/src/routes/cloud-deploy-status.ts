@@ -9,7 +9,7 @@
  * Response: { cloudDataServer: "none" | "running" | "ended", drive: same }
  */
 
-import { runStatus } from "../lib/detached-run";
+import { runStatus } from "@starkeep/operator/runs";
 
 export function GET() {
   return Response.json({

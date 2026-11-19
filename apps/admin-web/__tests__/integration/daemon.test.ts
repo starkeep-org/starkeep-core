@@ -12,7 +12,7 @@ import { createServer as createHttpServer, type Server as HttpServer } from "nod
 import { createServer as createNetServer, type AddressInfo, type Server } from "node:net";
 import { join } from "node:path";
 import { getFreePort } from "@starkeep/testkit";
-import { portIsFree } from "../../src/lib/app-ports";
+import { portIsFree } from "@starkeep/operator/app-ports";
 import {
   eventually,
   getRequest,

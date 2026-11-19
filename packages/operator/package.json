@@ -1,0 +1,41 @@
+{
+  "name": "@starkeep/operator",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "What admin-web and the starkeep CLI share: local daemons, detached runs, config, app discovery and the admin session.",
+  "exports": {
+    "./app-ports": "./src/app-ports.ts",
+    "./apps": "./src/apps.ts",
+    "./commands": "./src/commands.ts",
+    "./config": "./src/config.ts",
+    "./costs": "./src/costs.ts",
+    "./credentials": "./src/credentials.ts",
+    "./daemons": "./src/daemons.ts",
+    "./events": "./src/events.ts",
+    "./locks": "./src/locks.ts",
+    "./manager-credentials": "./src/manager-credentials.ts",
+    "./repo-root": "./src/repo-root.ts",
+    "./runs": "./src/runs.ts",
+    "./service-control": "./src/service-control.ts",
+    "./services": "./src/services.ts",
+    "./urls": "./src/urls.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "test": "vitest run --project unit",
+    "test:integration": "vitest run --project integration"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.700.0",
+    "@aws-sdk/client-sts": "^3.700.0",
+    "@starkeep/admin-installer": "workspace:*",
+    "@starkeep/app-client": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^5.7.0",
+    "vitest": "^5.0.5"
+  }
+}

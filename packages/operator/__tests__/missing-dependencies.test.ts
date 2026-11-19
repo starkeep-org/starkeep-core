@@ -8,10 +8,10 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { makeDataDir } from "./helpers";
 
 // daemon-control resolves the Starkeep directory when it loads.
-let missingDependencies: (typeof import("../src/lib/daemon-control"))["missingDependencies"];
+let missingDependencies: (typeof import("../src/daemons"))["missingDependencies"];
 beforeAll(async () => {
-  process.env.STARKEEP_DIR = makeDataDir("adminweb-deps-");
-  ({ missingDependencies } = await import("../src/lib/daemon-control"));
+  process.env.STARKEEP_DIR = makeDataDir("operator-deps-");
+  ({ missingDependencies } = await import("../src/daemons"));
 });
 
 function dir(...parts: string[]): string {

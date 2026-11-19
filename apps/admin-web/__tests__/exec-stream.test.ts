@@ -21,7 +21,7 @@ vi.mock("node:child_process", async (importOriginal) => ({
 process.env.STARKEEP_DIR = makeDataDir("adminweb-exec-stream-");
 
 const { POST: rawPOST } = await import("../src/routes/exec-stream");
-const { REPO_ROOT, STREAM_COMMANDS } = await import("../src/lib/exec-commands");
+const { REPO_ROOT, STREAM_COMMANDS } = await import("@starkeep/operator/commands");
 const POST = rawPOST;
 
 const CREDENTIALS = {

@@ -28,7 +28,7 @@ import {
   type CustomDomainConfigFields,
 } from "@starkeep/admin-installer/custom-domain";
 import { regionFromUserPoolId } from "../lib/cloud-config";
-import { readStarkeepConfig } from "../lib/manager-credentials";
+import { readStarkeepConfig } from "@starkeep/operator/config";
 import { crossSiteRefusal, fromOwnPage } from "../lib/same-origin";
 import type { STSCredentials } from "../lib/cognito-auth";
 import * as config from "./config";

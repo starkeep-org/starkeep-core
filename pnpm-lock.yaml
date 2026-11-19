@@ -123,6 +123,9 @@ importers:
       '@starkeep/aws-bootstrap':
         specifier: workspace:*
         version: link:../../packages/aws-bootstrap
+      '@starkeep/operator':
+        specifier: workspace:*
+        version: link:../../packages/operator
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -773,6 +776,31 @@ importers:
       vitest:
         specifier: ^5.0.5
         version: 5.0.5(@opentelemetry/api@1.9.1)(@types/node@24.19.2)(jsdom@30.0.1(@noble/hashes@2.2.0))(msw@2.14.6(@types/node@24.19.2)(typescript@5.9.3))(vite@8.3.5(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(terser@5.16.9)(tsx@4.21.0)(yaml@2.9.0))
+
+  packages/operator:
+    dependencies:
+      '@aws-sdk/client-s3':
+        specifier: ^3.700.0
+        version: 3.1009.0
+      '@aws-sdk/client-sts':
+        specifier: ^3.700.0
+        version: 3.1030.0
+      '@starkeep/admin-installer':
+        specifier: workspace:*
+        version: link:../admin-installer
+      '@starkeep/app-client':
+        specifier: workspace:*
+        version: link:../app-client
+    devDependencies:
+      '@types/node':
+        specifier: ^24.19.2
+        version: 24.19.2
+      typescript:
+        specifier: ^5.7.0
+        version: 5.9.3
+      vitest:
+        specifier: ^5.0.5
+        version: 5.0.5(@opentelemetry/api@1.9.1)(@types/node@24.19.2)(jsdom@30.0.1(@noble/hashes@2.2.0))(msw@2.14.6(@types/node@24.19.2)(typescript@5.9.3))(vite@8.3.5(@types/node@24.19.2)(esbuild@0.28.1)(jiti@2.7.0)(terser@5.16.9)(tsx@4.23.13)(yaml@2.9.0))
 
   packages/protocol-primitives:
     dependencies:

@@ -41,7 +41,7 @@ import {
   type UserType,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { randomBytes } from "node:crypto";
-import { readStarkeepConfig } from "../lib/manager-credentials";
+import { readStarkeepConfig } from "@starkeep/operator/config";
 import type { STSCredentials } from "../lib/cognito-auth";
 
 export const ADMINS_GROUP = "starkeep-admins";

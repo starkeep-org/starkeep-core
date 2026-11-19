@@ -12,7 +12,7 @@
  *
  * The install routes run their installer detached, through an `sh` wrapper
  * that appends the installer's output to a log file and records its exit code
- * in another (see `src/lib/detached-run.ts`). For such a spawn the fake reports
+ * in another (see `@starkeep/operator/runs`). For such a spawn the fake reports
  * the wrapped installer's command and arguments, `say` appends to the log, and
  * `exit` records the code, which is all the routes ever read.
  *

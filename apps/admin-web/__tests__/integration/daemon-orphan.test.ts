@@ -14,7 +14,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { DaemonId } from "../../src/lib/exec-commands";
+import type { DaemonId } from "@starkeep/operator/commands";
 import { getFreePort } from "@starkeep/testkit";
 import { eventually, isAlive, jsonRequest, makeDataDir, getRequest } from "../helpers";
 
@@ -51,8 +51,8 @@ beforeAll(async () => {
   process.env.STARKEEP_DIR = dataDir;
   daemonPOST = (await import("../../src/routes/exec-daemon")).POST;
   statusGET = (await import("../../src/routes/exec-daemon-status")).GET;
-  ({ DAEMON_COMMANDS: daemonCommands } = await import("../../src/lib/exec-commands"));
-  ({ isWorkspaceDaemonRunning } = await import("../../src/lib/daemon-control"));
+  ({ DAEMON_COMMANDS: daemonCommands } = await import("@starkeep/operator/commands"));
+  ({ isWorkspaceDaemonRunning } = await import("@starkeep/operator/daemons"));
 });
 
 /** A pid that is certainly dead: spawn a process that exits at once. */

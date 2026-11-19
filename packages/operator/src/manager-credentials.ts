@@ -13,29 +13,11 @@
  * does a privileged write, and it is already on disk.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { starkeepDir } from "@starkeep/app-client";
 import type { AwsCredentials } from "@starkeep/admin-installer/app-creds";
 // A subpath: `session` imports nothing but the STS client.
 import { roleChain } from "@starkeep/admin-installer/session";
-import type { STSCredentials } from "./cognito-auth";
-
-export interface StarkeepConfig {
-  stackPrefix?: string;
-  accountId?: string;
-  managerRoleArn?: string;
-  publicBaseUrl?: string;
-  apiGatewayUrl?: string;
-}
-
-export function readStarkeepConfig(): StarkeepConfig {
-  const path = join(starkeepDir(), "config.json");
-  if (!existsSync(path)) {
-    throw new Error("~/.starkeep/config.json not found — complete the cloud setup first");
-  }
-  return JSON.parse(readFileSync(path, "utf-8")) as StarkeepConfig;
-}
+import type { STSCredentials } from "./credentials";
+import type { StarkeepConfig } from "./config";
 
 /**
  * The two credential shapes differ by one field: admin-web carries `expiration`

@@ -19,7 +19,7 @@ async function loadDaemonCommands(env: Partial<Record<(typeof PORT_VARS)[number]
   }
   // The module reads env at load time, so each case needs a fresh copy.
   vi.resetModules();
-  return await import("../src/lib/exec-commands");
+  return await import("../src/commands");
 }
 
 afterEach(() => {
@@ -67,8 +67,8 @@ describe("workspace daemon ports", () => {
  */
 describe("workspace daemon commands name a script that exists", () => {
   const packageFor: Record<string, string> = {
-    "@starkeep/local-data-server": "../../local-data-server/package.json",
-    "@starkeep/drive": "../../drive/package.json",
+    "@starkeep/local-data-server": "../../../apps/local-data-server/package.json",
+    "@starkeep/drive": "../../../apps/drive/package.json",
   };
 
   it.each(Object.keys(packageFor))("%s", async (workspace) => {

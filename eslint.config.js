@@ -69,16 +69,9 @@ export default [
         {
           patterns: [
             {
-              group: [
-                "**/lib/app-scan",
-                "**/lib/daemon-control",
-                "**/lib/exec-commands",
-                "@/lib/app-scan",
-                "@/lib/daemon-control",
-                "@/lib/exec-commands",
-              ],
+              group: ["@starkeep/operator", "@starkeep/operator/*"],
               message:
-                "This module reaches node:child_process or node:fs and must stay server-side. " +
+                "@starkeep/operator reaches node:child_process or node:fs and must stay server-side. " +
                 "Call the API route that owns it instead; importing it here puts Node built-ins " +
                 "in the browser bundle.",
             },
