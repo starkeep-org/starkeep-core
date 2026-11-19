@@ -20,7 +20,18 @@ import type { ComputeContext } from "./compute-stack";
  * APIGW v2 specificity regardless of any app's {proxy+} claim, so a
  * literal collision in a manifest is always a mistake.
  */
-const RESERVED_SUBPATHS = new Set(["data", "files", "sync", "health", "app-data"]);
+const RESERVED_SUBPATHS = new Set([
+  "data",
+  "files",
+  "sync",
+  "health",
+  "app-data",
+  // The platform's own path, where the dispatcher runs an app's jobs.
+  "_starkeep",
+  // An app's job list and "run now", and its users' credential vault.
+  "jobs",
+  "vault",
+]);
 
 /**
  * Pulumi resource name for one route of one handler.
@@ -235,7 +246,7 @@ export function buildPulumiProgram(
               throw new Error(
                 `App "${ctx.appId}" handler "${handler.name}" declares route "${route.declared}" ` +
                   `which after prefixing becomes "${prefixedRouteKey}". The sub-paths ` +
-                  `/apps/${ctx.appId}/{data,files,sync,health,app-data}/... are reserved for the ` +
+                  `/apps/${ctx.appId}/{${[...RESERVED_SUBPATHS].join(",")}}/... are reserved for the ` +
                   `cloud-data-server and cannot be claimed by an app handler. ` +
                   `Note: these paths are also unreachable via a wildcard like "GET /{proxy+}" — ` +
                   `API Gateway v2 routes the broker's more-specific reserved routes first, ` +

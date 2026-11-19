@@ -221,10 +221,23 @@ export function buildBrokerPowerPolicy(stackPrefix: string, accountId: string): 
     Version: "2012-10-17",
     Statement: [
       {
+        // Two grants in one statement, because the role's inline policies sit
+        // at IAM's quota. Each action applies only to its own resource type,
+        // so neither reaches the other's resource.
+        //
+        // - `sts:AssumeRole` on every app role: the data plane's single hop.
+        // - `lambda:InvokeFunction` on every app function: the job dispatcher
+        //   runs one user's job by invoking the app's own function, and the
+        //   broker hands a "run now" to the dispatcher. The role already
+        //   holds the delegation signing key, so invoking an app's function
+        //   gives it no reach a token it could mint would not.
         Sid: "BrokerAssumeAppRoles",
         Effect: "Allow",
-        Action: "sts:AssumeRole",
-        Resource: `arn:aws:iam::${accountId}:role/${stackPrefix}-app-*`,
+        Action: ["sts:AssumeRole", "lambda:InvokeFunction"],
+        Resource: [
+          `arn:aws:iam::${accountId}:role/${stackPrefix}-app-*`,
+          `arn:aws:lambda:*:${accountId}:function:${stackPrefix}-app-*`,
+        ],
       },
       {
         // The broker tags each per-app session with the user the request

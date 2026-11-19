@@ -51,6 +51,8 @@ export interface Account {
   identityPools: { IdentityPoolId: string; IdentityPoolName: string }[];
   lambdas: string[];
   logGroups: string[];
+  /** EventBridge rule names. Each has one target. */
+  eventRules: string[];
   roles: Role[];
   /** Managed policy ARNs. */
   policies: string[];
@@ -79,6 +81,7 @@ export function emptyAccount(): Account {
     identityPools: [],
     lambdas: [],
     logGroups: [],
+    eventRules: [],
     roles: [],
     policies: [],
     apis: [],
@@ -120,6 +123,7 @@ export function deployment(prefix: string): Account {
       `/aws/lambda/${prefix}-app-cloud-data-server-api`,
       `/aws/lambda/${prefix}-app-photos-web`,
     ],
+    eventRules: [`${prefix}-jobs-tick`],
     roles: [
       { RoleName: `${prefix}-app-photos-role`, Tags: managed, InlinePolicies: ["runtime"] },
       { RoleName: `${prefix}-app-cloud-data-server-role`, Tags: managed },
@@ -191,6 +195,7 @@ export function identifiersOf(a: Account): string[] {
     ...a.identityPools.map((p) => p.IdentityPoolId),
     ...a.lambdas,
     ...a.logGroups,
+    ...a.eventRules,
     ...a.roles.map((r) => r.RoleName),
     ...a.policies,
     ...a.apis.flatMap((x) => [x.ApiId, x.Name]),
@@ -311,6 +316,15 @@ switch (service + " " + op) {
     const prefix = opt("--log-group-name-prefix") || "";
     out({ logGroups: st.logGroups.filter((g) => g.startsWith(prefix)).map((g) => ({ logGroupName: g })) });
   }
+  case "events list-rules":
+    out({ Rules: st.eventRules.filter((n) => n.startsWith(opt("--name-prefix") || "")).map((n) => ({ Name: n })) });
+  case "events list-targets-by-rule":
+    find(st.eventRules, (n) => n === opt("--rule"), "Rule");
+    out({ Targets: [{ Id: "jobs-tick-target" }] });
+  case "events remove-targets":
+    find(st.eventRules, (n) => n === opt("--rule"), "Rule");
+    out({ FailedEntryCount: 0 });
+  case "events delete-rule": remove(st.eventRules, (n) => n === opt("--name"), "Rule");
   case "logs delete-log-group": remove(st.logGroups, (g) => g === opt("--log-group-name"), "Log group");
 
   case "iam list-roles":

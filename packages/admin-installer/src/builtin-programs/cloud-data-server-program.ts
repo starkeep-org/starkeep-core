@@ -7,6 +7,8 @@
  *   - Lambda function (the protocol-core broker) using the per-app role
  *     ${stackPrefix}-app-cloud-data-server-role minted by Manager outside Pulumi
  *   - CloudWatch log group for the Lambda
+ *   - The job dispatcher (a second function on the same role and bundle) and
+ *     the EventBridge rule that wakes it every five minutes
  *   - API Gateway v2 + Cognito JWT authorizer + explicit reserved sub-namespaces
  *
  * Stack outputs match the previous SST shape so per-app Pulumi installs can
@@ -44,6 +46,8 @@ import {
   CONNECT_CALLBACK_ROUTE,
   CONNECT_JWKS_ROUTE,
   CONNECTIONS_ROUTE,
+  CONNECT_JOB_APPROVE_ROUTE,
+  CONNECT_JOB_ROUTE,
   ORIGIN_HEADER,
   INTENT_TAG_KEY,
   LADDER_TAG_KEY,
@@ -84,7 +88,14 @@ const OAUTH_THROTTLED_ROUTE_KEYS = [
   `GET ${CONNECT_AUTHORIZE_ROUTE}`,
   `POST ${CONNECT_AUTHORIZE_APPROVE_ROUTE}`,
   `POST ${CONNECT_TOKEN_ROUTE}`,
+  `POST ${CONNECT_JOB_APPROVE_ROUTE}`,
 ];
+
+/**
+ * How often the job dispatcher wakes. Due times live in DSQL, so the rule
+ * never changes when a user enrolls or re-times a job.
+ */
+export const JOBS_TICK_SCHEDULE = "rate(5 minutes)";
 // TEMPORARILY DISABLED (see usage site below): unusable on a default AWS account
 // whose total Lambda concurrency limit is 10 — any reservation drops unreserved
 // below its floor of 10 and 400s the install. Re-enable with the account quota fix.
@@ -526,6 +537,46 @@ export function buildCloudDataServerProgram(
     // -----------------------------------------------------------------------
     // Lambda function
     // -----------------------------------------------------------------------
+    const dispatcherName = `${ctx.stackPrefix}-app-cloud-data-server-dispatcher`;
+    // The broker's environment, which the job dispatcher shares: it reads the
+    // same database, keys and pools as the broker.
+    const brokerEnv = {
+      AURORA_ENDPOINT: auroraHostname,
+      S3_BUCKET: bucket.bucket,
+      STACK_PREFIX: ctx.stackPrefix,
+      STARKEEP_APP_ID: "cloud-data-server",
+      STARKEEP_STACK_PREFIX: ctx.stackPrefix,
+      // The broker requires an end-user credential on every data-plane
+      // call and verifies the ID token against this pool's JWKS. With
+      // these unset it cannot verify anyone, and it refuses rather than
+      // admitting — so a missing value here is an outage, not a hole.
+      STARKEEP_USER_POOL_ID: ctx.userPoolId,
+      STARKEEP_USER_POOL_CLIENT_ID: ctx.cloudAppsUserPoolClientId,
+      // The device client, whose tokens alone admit a signed-in
+      // desktop. Unset turns device sign-in off, never on.
+      STARKEEP_DEVICE_USER_POOL_CLIENT_ID: ctx.deviceUserPoolClientId,
+      // The mobile-apps client, whose tokens need an attested key's
+      // signature. Unset turns mobile sign-in off, never on.
+      STARKEEP_MOBILE_USER_POOL_CLIENT_ID: ctx.mobileAppsUserPoolClientId,
+      // The connectors client, behind the consent and connections
+      // pages. Unset turns delegated access off, never on.
+      STARKEEP_CONNECTORS_USER_POOL_CLIENT_ID: ctx.connectorsUserPoolClientId,
+      // Where /auth/start sends a browser to sign in.
+      STARKEEP_COGNITO_DOMAIN: ctx.cognitoDomain,
+      // Part B: SSM SecureString holding { keyPairId, domain, privateKey }
+      // for signing shared-file CloudFront URLs. Name only — the Lambda
+      // reads and caches the value once per warm container.
+      CLOUDFRONT_SIGNING_PARAM: cloudfrontSigningParamName,
+      // SSM SecureString holding the delegation signing key's PEM. Name
+      // only, as above.
+      DELEGATION_SIGNING_PARAM: delegationSigningParamName,
+      // Forwarded only when the installer process sets it (the Tier-3
+      // e2e suite does, to shorten the broker's HMAC secret cache).
+      // Absent in real installs → broker keeps its 5-min default.
+      ...(process.env.HMAC_CACHE_TTL_MS !== undefined
+        ? { HMAC_CACHE_TTL_MS: process.env.HMAC_CACHE_TTL_MS }
+        : {}),
+    };
     const fn = new aws.lambda.Function(
       "api",
       {
@@ -550,41 +601,9 @@ export function buildCloudDataServerProgram(
         // reservedConcurrentExecutions: LAMBDA_RESERVED_CONCURRENCY,
         environment: {
           variables: {
-            AURORA_ENDPOINT: auroraHostname,
-            S3_BUCKET: bucket.bucket,
-            STACK_PREFIX: ctx.stackPrefix,
-            STARKEEP_APP_ID: "cloud-data-server",
-            STARKEEP_STACK_PREFIX: ctx.stackPrefix,
-            // The broker requires an end-user credential on every data-plane
-            // call and verifies the ID token against this pool's JWKS. With
-            // these unset it cannot verify anyone, and it refuses rather than
-            // admitting — so a missing value here is an outage, not a hole.
-            STARKEEP_USER_POOL_ID: ctx.userPoolId,
-            STARKEEP_USER_POOL_CLIENT_ID: ctx.cloudAppsUserPoolClientId,
-            // The device client, whose tokens alone admit a signed-in
-            // desktop. Unset turns device sign-in off, never on.
-            STARKEEP_DEVICE_USER_POOL_CLIENT_ID: ctx.deviceUserPoolClientId,
-            // The mobile-apps client, whose tokens need an attested key's
-            // signature. Unset turns mobile sign-in off, never on.
-            STARKEEP_MOBILE_USER_POOL_CLIENT_ID: ctx.mobileAppsUserPoolClientId,
-            // The connectors client, behind the consent and connections
-            // pages. Unset turns delegated access off, never on.
-            STARKEEP_CONNECTORS_USER_POOL_CLIENT_ID: ctx.connectorsUserPoolClientId,
-            // Where /auth/start sends a browser to sign in.
-            STARKEEP_COGNITO_DOMAIN: ctx.cognitoDomain,
-            // Part B: SSM SecureString holding { keyPairId, domain, privateKey }
-            // for signing shared-file CloudFront URLs. Name only — the Lambda
-            // reads and caches the value once per warm container.
-            CLOUDFRONT_SIGNING_PARAM: cloudfrontSigningParamName,
-            // SSM SecureString holding the delegation signing key's PEM. Name
-            // only, as above.
-            DELEGATION_SIGNING_PARAM: delegationSigningParamName,
-            // Forwarded only when the installer process sets it (the Tier-3
-            // e2e suite does, to shorten the broker's HMAC secret cache).
-            // Absent in real installs → broker keeps its 5-min default.
-            ...(process.env.HMAC_CACHE_TTL_MS !== undefined
-              ? { HMAC_CACHE_TTL_MS: process.env.HMAC_CACHE_TTL_MS }
-              : {}),
+            ...brokerEnv,
+            // The job dispatcher, which a user's "run now" hands its run to.
+            STARKEEP_DISPATCHER_FUNCTION: dispatcherName,
           },
         },
         tags: {
@@ -593,6 +612,73 @@ export function buildCloudDataServerProgram(
         },
       },
       { dependsOn: [logGroup] },
+    );
+
+    // -----------------------------------------------------------------------
+    // Scheduled jobs: the dispatcher and its five-minute tick
+    // -----------------------------------------------------------------------
+    //
+    // A second function in the broker's bundle and on the broker's role: the
+    // foundational boundary lets this program pass only that role to Lambda,
+    // and the role already holds the delegation signing key, so the
+    // dispatcher's power to invoke app functions adds no reach a token the
+    // role could mint would not already give it. The tick is a scheduled
+    // EventBridge rule rather than an EventBridge Scheduler schedule, which
+    // would need an IAM role of its own that the boundary forbids this
+    // program to create. Due times live in DSQL, so the rule never changes.
+    const dispatcherLogGroup = new aws.cloudwatch.LogGroup("dispatcher-log-group", {
+      name: `/aws/lambda/${dispatcherName}`,
+      retentionInDays: 14,
+      tags: {
+        "starkeep:managed": "true",
+        "starkeep:appId": "cloud-data-server",
+      },
+    });
+    const dispatcherFn = new aws.lambda.Function(
+      "dispatcher",
+      {
+        name: dispatcherName,
+        role: ctx.appRoleArn,
+        runtime: aws.lambda.Runtime.NodeJS24dX,
+        handler: "dispatcher.handler",
+        code: new pulumi.asset.FileArchive(ctx.distZipPath),
+        sourceCodeHash: ctx.bundleHash,
+        memorySize: 256,
+        // A run may last its handler's whole timeout, up to 900 s.
+        timeout: 900,
+        environment: { variables: brokerEnv },
+        tags: {
+          "starkeep:managed": "true",
+          "starkeep:appId": "cloud-data-server",
+        },
+      },
+      { dependsOn: [dispatcherLogGroup] },
+    );
+    // No retries: the next tick replaces a retry, and a retried manual run
+    // would find its lease already released.
+    new aws.lambda.FunctionEventInvokeConfig("dispatcher-invoke-config", {
+      functionName: dispatcherFn.name,
+      maximumRetryAttempts: 0,
+    });
+    const jobsTick = new aws.cloudwatch.EventRule("jobs-tick", {
+      name: `${ctx.stackPrefix}-jobs-tick`,
+      description: "Wakes the Starkeep job dispatcher, which runs each due job enrollment.",
+      scheduleExpression: JOBS_TICK_SCHEDULE,
+      tags: {
+        "starkeep:managed": "true",
+        "starkeep:appId": "cloud-data-server",
+      },
+    });
+    const jobsTickPermission = new aws.lambda.Permission("jobs-tick-invoke", {
+      action: "lambda:InvokeFunction",
+      function: dispatcherFn.name,
+      principal: "events.amazonaws.com",
+      sourceArn: jobsTick.arn,
+    });
+    new aws.cloudwatch.EventTarget(
+      "jobs-tick-target",
+      { rule: jobsTick.name, arn: dispatcherFn.arn },
+      { dependsOn: [jobsTickPermission] },
     );
 
     // -----------------------------------------------------------------------
@@ -995,6 +1081,11 @@ export function buildCloudDataServerProgram(
       ["route-connect-jwks", `GET ${CONNECT_JWKS_ROUTE}`],
       ["route-connections", `GET ${CONNECTIONS_ROUTE}`],
       ["route-connections-revoke", `POST ${CONNECTIONS_ROUTE}/{id}/revoke`],
+      // A scheduled job's consent page, and the connections page's job forms.
+      ["route-connect-job", `GET ${CONNECT_JOB_ROUTE}`],
+      ["route-connect-job-approve", `POST ${CONNECT_JOB_APPROVE_ROUTE}`],
+      ["route-connections-job-schedule", `POST ${CONNECTIONS_ROUTE}/jobs/{id}/schedule`],
+      ["route-connections-job-revoke", `POST ${CONNECTIONS_ROUTE}/jobs/{id}/revoke`],
     ] as const) {
       new aws.apigatewayv2.Route(name, {
         apiId: api.id,
@@ -1124,6 +1215,31 @@ export function buildCloudDataServerProgram(
     new aws.apigatewayv2.Route("route-app-data-proxy", {
       apiId: api.id,
       routeKey: "ANY /apps/{appId}/app-data/{proxy+}",
+      target: pulumi.interpolate`integrations/${integration.id}`,
+    });
+
+    // An app's scheduled jobs, for its own server acting for the signed-in
+    // user: the list and "run now". The handler checks the app's signature
+    // and the user's token.
+    new aws.apigatewayv2.Route("route-app-jobs", {
+      apiId: api.id,
+      routeKey: "GET /apps/{appId}/jobs",
+      target: pulumi.interpolate`integrations/${integration.id}`,
+    });
+    new aws.apigatewayv2.Route("route-app-job-run", {
+      apiId: api.id,
+      routeKey: "POST /apps/{appId}/jobs/{name}/run",
+      target: pulumi.interpolate`integrations/${integration.id}`,
+    });
+
+    // The path where the dispatcher runs an app's job,
+    // /apps/<appId>/_starkeep/jobs/<name>, belongs to the platform. The
+    // dispatcher invokes the app's function directly, so this route only
+    // keeps an app's own catch-all from receiving the path from outside: the
+    // broker answers 404.
+    new aws.apigatewayv2.Route("route-app-reserved", {
+      apiId: api.id,
+      routeKey: "ANY /apps/{appId}/_starkeep/{proxy+}",
       target: pulumi.interpolate`integrations/${integration.id}`,
     });
 

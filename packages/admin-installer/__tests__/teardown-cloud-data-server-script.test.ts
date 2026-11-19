@@ -62,6 +62,7 @@ describe("teardown-cloud-data-server.sh", () => {
     expect(status, output).toBe(0);
     expect(account.lambdas.filter((l) => l.startsWith("sktest-"))).toEqual([]);
     expect(account.logGroups.filter((l) => l.includes("sktest-"))).toEqual([]);
+    expect(account.eventRules).toEqual(["live-jobs-tick"]);
     expect(account.apis.map((a) => a.ApiId)).not.toContain("sktestapi");
     expect(account.dsqlClusters.map((c) => c.identifier)).not.toContain("sktestcluster");
     expect(account.distributions.map((d) => d.Id)).not.toContain("ESKTEST");

@@ -130,7 +130,15 @@ describe("inline policies", () => {
     expect(broker.Statement[3].Resource).toBe(
       "arn:aws:ssm:*:111122223333:parameter/starkeep/platform/*",
     );
-    expect(broker.Statement[0].Resource).toBe("arn:aws:iam::111122223333:role/starkeep-app-*");
+    // The single hop into app roles, and the job dispatcher's invoke of app
+    // functions, share one statement.
+    expect(broker.Statement[0]).toMatchObject({
+      Action: ["sts:AssumeRole", "lambda:InvokeFunction"],
+      Resource: [
+        "arn:aws:iam::111122223333:role/starkeep-app-*",
+        "arn:aws:lambda:*:111122223333:function:starkeep-app-*",
+      ],
+    });
     // The broker may name a session's user and nothing else: a session tag
     // overrides the role's `starkeep:appId` tag of the same key.
     expect(broker.Statement[1]).toMatchObject({

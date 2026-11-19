@@ -175,7 +175,16 @@ describe("route prefix rewriting", () => {
   });
 
   it("hard-fails on a literal route claiming a reserved sub-path", async () => {
-    for (const reserved of ["data", "files", "sync", "health", "app-data"]) {
+    for (const reserved of [
+      "data",
+      "files",
+      "sync",
+      "health",
+      "app-data",
+      "_starkeep",
+      "jobs",
+      "vault",
+    ]) {
       await expect(
         run(manifestWithHandlers([{ name: "h", routes: [`GET /${reserved}/x`] }])),
         reserved,

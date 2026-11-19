@@ -563,33 +563,45 @@ export function buildTempInstallCloudDataServerPolicy(
         Action: [
           "lambda:CreateFunction",
           "lambda:DeleteFunction",
-          "lambda:GetFunction",
-          "lambda:GetFunctionConfiguration",
           "lambda:UpdateFunctionCode",
           "lambda:UpdateFunctionConfiguration",
           "lambda:TagResource",
           "lambda:UntagResource",
-          "lambda:ListTags",
           "lambda:AddPermission",
           "lambda:RemovePermission",
-          "lambda:GetPolicy",
           "lambda:PublishVersion",
-          "lambda:ListVersionsByFunction",
-          "lambda:GetFunctionCodeSigningConfig",
-          "lambda:GetFunctionConcurrency",
           // The broker Lambda declares reservedConcurrentExecutions (its hard
           // dollar ceiling); AWS sets that via a separate PutFunctionConcurrency
           // call on both create and update, so the install needs the write verb
-          // in addition to the Get above. Only the cloud-data-server stack sets
+          // in addition to the reads. Only the cloud-data-server stack sets
           // reserved concurrency — per-app installs don't, so the install-infra
-          // temp policy deliberately carries only the Get.
+          // temp policy deliberately carries only the reads.
           "lambda:PutFunctionConcurrency",
-          "lambda:GetFunctionUrlConfig",
-          "lambda:ListFunctionEventInvokeConfigs",
-          // G9k — Pulumi reads runtime-management config on every refresh.
-          "lambda:GetRuntimeManagementConfig",
+          // The job dispatcher's invoke config, which turns retries off: its
+          // Put, Update and Delete verbs.
+          "lambda:*FunctionEventInvokeConfig",
+          // Every read Pulumi makes on a refresh: GetFunction,
+          // GetFunctionConfiguration, GetPolicy, GetFunctionConcurrency,
+          // GetFunctionCodeSigningConfig, GetFunctionUrlConfig,
+          // GetRuntimeManagementConfig (G9k), GetFunctionEventInvokeConfig,
+          // ListTags, ListVersionsByFunction and ListFunctionEventInvokeConfigs.
+          // Two patterns rather than the eleven verbs: the role's inline
+          // policies sit at IAM's quota, and a read grants no write.
+          "lambda:Get*",
+          "lambda:List*",
         ],
         Resource: `arn:aws:lambda:*:${accountId}:function:${stackPrefix}-app-${appId}-*`,
+      },
+      {
+        // The job dispatcher's five-minute tick: every verb, on the one rule.
+        // A scheduled rule invokes the dispatcher through the function's
+        // resource policy, so no role is passed. One wildcard rather than the
+        // nine verbs Pulumi uses keeps the role's inline policies within
+        // IAM's quota.
+        Sid: "TempInstallJobsTick",
+        Effect: "Allow",
+        Action: "events:*",
+        Resource: `arn:aws:events:*:${accountId}:rule/${stackPrefix}-jobs-tick`,
       },
       {
         Sid: "TempInstallLogs",

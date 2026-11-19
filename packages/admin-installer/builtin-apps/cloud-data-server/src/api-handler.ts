@@ -3457,6 +3457,13 @@ async function handleEvent(
     if (!parsed) return clientErr("Not found", 404);
     const { appId, subPath } = parsed;
 
+    // /apps/<appId>/_starkeep/... belongs to the platform: the dispatcher
+    // runs a job there by invoking the app's function directly. The gateway
+    // routes the prefix here only so an app's catch-all never receives it.
+    if (subPath === "/_starkeep" || subPath.startsWith("/_starkeep/")) {
+      return clientErr("Not found", 404);
+    }
+
     // HMAC verification gate. Every /apps/{appId}/* route (sync exchange,
     // /data/*, /files/*, /app-data/*, /health) is HMAC-signed by the caller;
     // signatures are checked against the per-app SecureString in SSM. Path-
