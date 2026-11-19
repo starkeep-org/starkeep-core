@@ -195,6 +195,7 @@ import { delegatedMayCall, isDelegatedWrite, jobMayCall } from "./delegation-pol
 import { findEnrollment, leaseIsLive, stopEnrollment, type JobRow } from "./job-store.js";
 import { SIGNED_OUT_MESSAGE } from "./job-messages.js";
 import type { DispatcherDeps, InvokeResult, ManualRunEvent } from "./dispatcher.js";
+import { handleJobRoute, jobRouteOf } from "./job-routes.js";
 import {
   findDelegation,
   isLive,
@@ -3529,6 +3530,13 @@ async function handleEvent(
      * app-scoped health check, which needs no token.
      */
     let subjectUserId: string | null = null;
+    /**
+     * True only on the server branch with a verified user: the app's own
+     * server, acting for its signed-in user. The job routes answer no other
+     * caller, so no device, mobile key or delegation (a job run included)
+     * starts or lists a job.
+     */
+    let serverForUser = false;
     if (delegationToken !== undefined) {
       const refusal = await admitDelegation({
         token: delegationToken,
@@ -3709,6 +3717,7 @@ async function handleEvent(
           return clientErr("This account has no data library on this cloud", 403);
         }
         subjectUserId = claims.sub;
+        serverForUser = true;
       }
     }
 
@@ -3742,6 +3751,29 @@ async function handleEvent(
     if (subjectUserId === null || !USER_SEGMENT_PATTERN.test(subjectUserId)) {
       return clientErr("This request names no user", 401);
     }
+    // GET /apps/{appId}/jobs and POST /apps/{appId}/jobs/{name}/run — the
+    // app's scheduled jobs for this user. They read and write the platform's
+    // enrollment table, not the user's data, so they run before any app role
+    // is assumed. See job-routes.ts.
+    const jobRoute = jobRouteOf(method, subPath);
+    if (jobRoute) {
+      if (!serverForUser) {
+        return clientErr("Only the app's own server, for its signed-in user, reaches jobs", 403);
+      }
+      const answer = await handleJobRoute(jobRoute, appId, subjectUserId, {
+        db: () => platformClient(accountId, toClose),
+        gatewayHost: event.requestContext.domainName ?? "",
+        startManualRun,
+      });
+      return answer.status < 400
+        ? ok(answer.body, answer.status)
+        : {
+            statusCode: answer.status,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(answer.body),
+          };
+    }
+
     const subject: BrokerSubject = { appId, userId: subjectUserId };
     const creds = await getAppCreds(appId, accountId, subject.userId);
 
