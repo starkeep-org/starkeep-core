@@ -3,6 +3,7 @@
  * signed, unexpired, with every claim well formed; anything else is null,
  * never a throw.
  */
+import { createSign } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   delegationJwks,
@@ -88,6 +89,58 @@ describe("delegation tokens", () => {
     for (const junk of ["", "skd_", "skd_a.b", "skd_a.b.c", "skd_....", "Bearer x"]) {
       expect(verifyDelegationToken(junk, publicKey, NOW)).toBeNull();
     }
+  });
+
+  it("carries a job token's job and run, and only on the job channel", () => {
+    const job = token({ channel: "job", job: { name: "tick", runId: "run-1" } });
+    expect(verifyDelegationToken(job, publicKey, NOW)).toMatchObject({
+      sk_channel: "job",
+      sk_job: "tick",
+      sk_run: "run-1",
+    });
+    const app = verifyDelegationToken(token(), publicKey, NOW)!;
+    expect("sk_job" in app || "sk_run" in app).toBe(false);
+    expect(() => token({ channel: "job" })).toThrow();
+    expect(() => token({ job: { name: "tick", runId: "run-1" } })).toThrow();
+  });
+
+  it("refuses a signed job token without its run, and an app token with one", () => {
+    const sign = (claims: Record<string, unknown>) => {
+      const b64 = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url");
+      const input = `${b64({ alg: "ES256", typ: "JWT", kid: key.kid })}.${b64(claims)}`;
+      const sig = createSign("sha256")
+        .update(input)
+        .sign({ key: key.privateKey, dsaEncoding: "ieee-p1363" });
+      return `skd_${input}.${sig.toString("base64url")}`;
+    };
+    const base = {
+      sub: "user-1",
+      aud: "probe",
+      sk_dlg: "e-1",
+      sk_mode: "read",
+      exp: NOW / 1000 + 60,
+      iat: NOW / 1000,
+    };
+    expect(
+      verifyDelegationToken(sign({ ...base, sk_channel: "job", sk_job: "tick" }), publicKey, NOW),
+    ).toBeNull();
+    expect(
+      verifyDelegationToken(sign({ ...base, sk_channel: "job", sk_run: "r" }), publicKey, NOW),
+    ).toBeNull();
+    expect(
+      verifyDelegationToken(
+        sign({ ...base, sk_channel: "app", sk_job: "tick", sk_run: "r" }),
+        publicKey,
+        NOW,
+      ),
+    ).toBeNull();
+    expect(
+      verifyDelegationToken(
+        sign({ ...base, sk_channel: "job", sk_job: "tick", sk_run: "r" }),
+        publicKey,
+        NOW,
+      ),
+    ).not.toBeNull();
   });
 
   it("publishes the public key as a JWKS entry", () => {

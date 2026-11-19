@@ -190,7 +190,9 @@ import {
 } from "./handler-utils.js";
 import { handleConnectRoute, isConnectRoute } from "./connect-routes.js";
 import { handleOAuthMetadata, isOAuthMetadataPath } from "./oauth-metadata.js";
-import { delegatedMayCall, isDelegatedWrite } from "./delegation-policy.js";
+import { delegatedMayCall, isDelegatedWrite, jobMayCall } from "./delegation-policy.js";
+import { findEnrollment, leaseIsLive, stopEnrollment, type JobRow } from "./job-store.js";
+import { SIGNED_OUT_MESSAGE } from "./job-messages.js";
 import {
   findDelegation,
   isLive,
@@ -1635,6 +1637,7 @@ async function loadDelegationSigningKey(): Promise<DelegationSigningKey | null> 
 export function __setDelegationSigningKeyForTests(key: DelegationSigningKey | null): void {
   delegationKeyCache = key ? { key, fetchedAt: Number.MAX_SAFE_INTEGER / 2 } : null;
   delegationRowCache.clear();
+  jobRowCache.clear();
 }
 
 /**
@@ -1643,6 +1646,8 @@ export function __setDelegationSigningKeyForTests(key: DelegationSigningKey | nu
  */
 const DELEGATION_ROW_TTL_MS = 60_000;
 const delegationRowCache = new Map<string, { row: DelegationRow | null; until: number }>();
+/** Job enrollments by id, for up to a minute, as delegations are. */
+const jobRowCache = new Map<string, { row: JobRow | null; until: number }>();
 
 /**
  * A database client as Starkeep Drive with no user tag: the platform's
@@ -2943,10 +2948,16 @@ function eventKindOf(eventName: string): AvailabilityEventKind | null {
  *
  * 1. The token verifies, and its `aud` names the path's app.
  * 2. The row exists, is live, and names the same user, app and mode.
- * 3. The app's signature verifies for the same app: phase 1 issues only
- *    `app`-channel delegations, served by the app's own endpoint.
+ * 3. The app's signature verifies for the same app. Both channels this cloud
+ *    serves, `app` and `job`, reach the data server through the app's own
+ *    code, which signs every call.
  * 4. The stored refresh token mints an ID token whose groups may use data.
  * 5. The route sits on the mode's allowlist.
+ *
+ * On the `job` channel, the row is a job enrollment in `delegation.jobs`
+ * rather than a delegation, and it must also name the token's job and hold a
+ * live lease whose id is the token's run. A token copied out of one run
+ * therefore stops working when that run ends.
  *
  * Past this, the request runs as the app for the delegation's user, and the
  * app's grants apply as on any app call.
@@ -2972,7 +2983,7 @@ async function admitDelegation(req: {
   if (claims.aud !== req.appId) {
     return { status: 403, message: "This delegation is for another app" };
   }
-  if (claims.sk_channel !== "app") {
+  if (claims.sk_channel !== "app" && claims.sk_channel !== "job") {
     return { status: 403, message: "This cloud serves delegations through an app's endpoint only" };
   }
   // A delegated call acts for the delegation's user alone. A user token
@@ -2991,16 +3002,70 @@ async function admitDelegation(req: {
     hmacSecret,
   );
   if (!hmacCheck.ok) return { status: hmacCheck.status, message: hmacCheck.message };
-  if (!delegatedMayCall(claims.sk_mode, req.method, req.subPath)) {
+  const mayCall =
+    claims.sk_channel === "job"
+      ? jobMayCall(claims.sk_mode, req.method, req.subPath)
+      : delegatedMayCall(claims.sk_mode, req.method, req.subPath);
+  if (!mayCall) {
+    const who = claims.sk_channel === "job" ? "job" : "delegation";
     return {
       status: 403,
-      message: `A ${claims.sk_mode} delegation may not call ${req.method} ${req.subPath}`,
+      message: `A ${claims.sk_mode} ${who} may not call ${req.method} ${req.subPath}`,
     };
   }
 
   const now = Date.now();
   let client: DatabaseClient | null = null;
   const db = async () => (client ??= await platformClient(req.accountId, req.toClose));
+  const userCheck = (id: string, userId: string, refresh: string) =>
+    checkDelegationUser(id, userId, refresh, { pool, cognitoDomain, groupsMayUseData });
+
+  if (claims.sk_channel === "job") {
+    let cached = jobRowCache.get(claims.sk_dlg);
+    if (!cached || cached.until <= now) {
+      cached = {
+        row: await findEnrollment(await db(), claims.sk_dlg),
+        until: now + DELEGATION_ROW_TTL_MS,
+      };
+      jobRowCache.set(claims.sk_dlg, cached);
+    }
+    const row = cached.row;
+    if (
+      !row ||
+      row.user_id !== claims.sub ||
+      row.app_id !== req.appId ||
+      row.mode !== claims.sk_mode ||
+      row.job !== claims.sk_job ||
+      row.revoked_at_ms !== null ||
+      row.lease_id !== claims.sk_run ||
+      !leaseIsLive(row, now)
+    ) {
+      return { status: 401, message: "This job run has ended or was turned off" };
+    }
+    if (!USER_SEGMENT_PATTERN.test(row.user_id)) {
+      return { status: 401, message: "This request names no user" };
+    }
+    const refresh = openRefreshToken(key.refreshKey, row.id, row.cognito_refresh_ciphertext);
+    if (!refresh) return { status: 401, message: "This job run has ended or was turned off" };
+    const check = await userCheck(row.id, row.user_id, refresh);
+    if (!check.ok) {
+      if (check.reason === "refused") {
+        // Signed out everywhere, disabled or deleted: the job stops, and the
+        // connections page says why, until the user turns it on again.
+        jobRowCache.delete(row.id);
+        await stopEnrollment(await db(), row.id, "signed-out", SIGNED_OUT_MESSAGE, now).catch(
+          (err: unknown) => console.warn("[jobs] stopping a signed-out enrollment failed:", err),
+        );
+        return { status: 401, message: "This job run has ended or was turned off" };
+      }
+      if (check.reason === "no-library") {
+        return { status: 403, message: "This account has no data library on this cloud" };
+      }
+      return { status: 503, message: "Sign-in is unavailable right now. Try again." };
+    }
+    return { userId: row.user_id };
+  }
+
   let cached = delegationRowCache.get(claims.sk_dlg);
   if (!cached || cached.until <= now) {
     cached = {
@@ -3026,11 +3091,7 @@ async function admitDelegation(req: {
 
   const refresh = openRefreshToken(key.refreshKey, row.id, row.cognito_refresh_ciphertext);
   if (!refresh) return { status: 401, message: "This delegation was revoked or has expired" };
-  const check = await checkDelegationUser(row.id, row.user_id, refresh, {
-    pool,
-    cognitoDomain,
-    groupsMayUseData,
-  });
+  const check = await userCheck(row.id, row.user_id, refresh);
   if (!check.ok) {
     if (check.reason === "refused") {
       // Signed out everywhere, disabled or deleted: the delegation ends.

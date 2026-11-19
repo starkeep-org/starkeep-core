@@ -86,10 +86,15 @@ export interface NewDelegationToken {
   /** Milliseconds since the epoch. */
   expiresAtMs: number;
   nowMs?: number;
+  /** A `job` token's job name and run (lease) id. Required on the `job` channel. */
+  job?: { name: string; runId: string };
 }
 
 /** Issue a token for one delegation. */
 export function signDelegationToken(key: DelegationSigningKey, t: NewDelegationToken): string {
+  if ((t.channel === "job") !== (t.job !== undefined)) {
+    throw new Error("A job token, and only a job token, names its job and run");
+  }
   const iat = Math.floor((t.nowMs ?? Date.now()) / 1000);
   const claims: DelegationClaims = {
     sub: t.userId,
@@ -97,6 +102,7 @@ export function signDelegationToken(key: DelegationSigningKey, t: NewDelegationT
     sk_dlg: t.delegationId,
     sk_mode: t.mode,
     sk_channel: t.channel,
+    ...(t.job ? { sk_job: t.job.name, sk_run: t.job.runId } : {}),
     exp: Math.floor(t.expiresAtMs / 1000),
     iat,
   };
@@ -146,20 +152,26 @@ export function verifyDelegationToken(
     // Claims are believed only after the signature checks out.
     const p = decodeJson(payloadB64);
     if (!p) return null;
-    const { sub, aud, sk_dlg, sk_mode, sk_channel, exp, iat } = p;
+    const { sub, aud, sk_dlg, sk_mode, sk_channel, sk_job, sk_run, exp, iat } = p;
     if (typeof sub !== "string" || !sub) return null;
     if (typeof aud !== "string" || !aud) return null;
     if (typeof sk_dlg !== "string" || !sk_dlg) return null;
     if (!DELEGATION_MODES.includes(sk_mode as DelegationMode)) return null;
-    if (sk_channel !== "app" && sk_channel !== "platform") return null;
+    if (sk_channel !== "app" && sk_channel !== "job" && sk_channel !== "platform") return null;
     if (typeof exp !== "number" || exp * 1000 <= nowMs) return null;
     if (typeof iat !== "number") return null;
+    // A job token names its job and its run; no other token names either.
+    const isJob = sk_channel === "job";
+    const hasJob = typeof sk_job === "string" && !!sk_job;
+    const hasRun = typeof sk_run === "string" && !!sk_run;
+    if (isJob ? !hasJob || !hasRun : sk_job !== undefined || sk_run !== undefined) return null;
     return {
       sub,
       aud,
       sk_dlg,
       sk_mode: sk_mode as DelegationMode,
       sk_channel,
+      ...(isJob ? { sk_job: sk_job as string, sk_run: sk_run as string } : {}),
       exp,
       iat,
     };

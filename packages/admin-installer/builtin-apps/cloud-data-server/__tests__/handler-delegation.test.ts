@@ -24,6 +24,7 @@ import {
 import { resetUserCheckCache } from "../src/delegation-user-check.js";
 import { resetKeySetCache } from "../src/verify-user-token.js";
 import type { DelegationRow } from "../src/delegation-store.js";
+import type { JobRow } from "../src/job-store.js";
 import { FakeDsql } from "./fake-dsql.js";
 import { makeDelegationKeyPem } from "./delegation-key.js";
 import { installUserTokenFixture, mintTestUserToken, TEST_USER_ID } from "./user-token.js";
@@ -480,5 +481,123 @@ describe("the consent pages", () => {
     )) as { statusCode: number; body: string };
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).keys[0].kid).toBe(key.kid);
+  });
+});
+
+describe("the job channel", () => {
+  const ENROLLMENT = "enr-1";
+  function jobRow(over: Partial<JobRow> = {}): Record<string, unknown> {
+    const row: JobRow = {
+      id: ENROLLMENT,
+      user_id: TEST_USER_ID,
+      app_id: APP,
+      job: "tick",
+      mode: "read",
+      time_zone: "UTC",
+      time_of_day: null,
+      cognito_refresh_ciphertext: sealRefreshToken(key.refreshKey, ENROLLMENT, "refresh-1"),
+      created_at_ms: Date.now() - 1000,
+      updated_at_ms: Date.now() - 1000,
+      revoked_at_ms: null,
+      next_due_at_ms: null,
+      lease_id: "run-1",
+      lease_until_ms: Date.now() + 60_000,
+      last_started_at_ms: Date.now() - 10,
+      last_finished_at_ms: null,
+      last_status: null,
+      last_message: null,
+      attention: null,
+      failures: 0,
+      ...over,
+    };
+    return row as unknown as Record<string, unknown>;
+  }
+  function jobToken(over: Partial<Parameters<typeof signDelegationToken>[1]> = {}): string {
+    return token({
+      delegationId: ENROLLMENT,
+      channel: "job",
+      job: { name: "tick", runId: "run-1" },
+      expiresAtMs: Date.now() + 60_000,
+      ...over,
+    });
+  }
+  function enrolled(over: Partial<JobRow> = {}) {
+    db = new FakeDsql();
+    db.on(/from "delegation"\."jobs"/, [jobRow(over)]);
+    db.on(/update "delegation"\."jobs"/, []);
+    setDbFactory(db);
+    setKey(key);
+  }
+  const read = (delegation: string) =>
+    call({ method: "GET", subPath: "/app-data/db/probe_notes", delegation });
+
+  it("admits a run that holds its enrollment's lease", async () => {
+    enrolled();
+    const res = await read(jobToken());
+    expect(passedGate(res), res.body).toBe(true);
+    expect(db.calls(/from "delegation"\."grants"/)).toHaveLength(0);
+  });
+
+  it("refuses a run whose lease passed to another run", async () => {
+    enrolled({ lease_id: "run-2" });
+    expect((await read(jobToken())).statusCode).toBe(401);
+  });
+
+  it("refuses a run whose lease expired, while the token has not", async () => {
+    enrolled({ lease_until_ms: Date.now() - 1 });
+    expect((await read(jobToken())).statusCode).toBe(401);
+  });
+
+  it("refuses a run with no lease at all", async () => {
+    enrolled({ lease_id: null, lease_until_ms: null });
+    expect((await read(jobToken())).statusCode).toBe(401);
+  });
+
+  it("refuses a turned-off enrollment", async () => {
+    enrolled({ revoked_at_ms: Date.now() - 5 });
+    expect((await read(jobToken())).statusCode).toBe(401);
+  });
+
+  it("refuses a token for another job, user or mode", async () => {
+    enrolled({ job: "other" });
+    expect((await read(jobToken())).statusCode).toBe(401);
+    enrolled({ user_id: "someone-else" });
+    expect((await read(jobToken())).statusCode).toBe(401);
+    enrolled({ mode: "readwrite" });
+    expect((await read(jobToken())).statusCode).toBe(401);
+  });
+
+  it("holds a read job to the read allowlist", async () => {
+    enrolled();
+    const res = await call({
+      method: "POST",
+      subPath: "/app-data/db/probe_notes",
+      delegation: jobToken(),
+      body: "{}",
+    });
+    expect(res.statusCode).toBe(403);
+    expect(res.body).toMatch(/read job may not call/);
+  });
+
+  it("stops the enrollment of a user who signed out everywhere, without revoking it", async () => {
+    enrolled();
+    refreshAnswer = async () =>
+      new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+    expect((await read(jobToken())).statusCode).toBe(401);
+    const stop = db.calls(/update "delegation"\."jobs" set "attention"/);
+    expect(stop).toHaveLength(1);
+    expect(stop[0]!.values).toContain("signed-out");
+    expect(db.calls(/"revoked_at_ms" =/)).toHaveLength(0);
+  });
+
+  it("refuses a job token without the app's signature", async () => {
+    enrolled();
+    const res = await call({
+      method: "GET",
+      subPath: "/app-data/db/probe_notes",
+      delegation: jobToken(),
+      sign: false,
+    });
+    expect(res.statusCode).toBe(401);
   });
 });

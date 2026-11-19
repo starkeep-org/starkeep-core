@@ -5,7 +5,10 @@
  *
  * It checks what needs no database: the request came through CloudFront, the
  * bearer is a delegation token this deployment signed, the token has not
- * expired, and the token's `aud` names the app whose route this is. The
+ * expired, the token's `aud` names the app whose route this is, and the
+ * token is on the `app` channel. A `job` token belongs to one run of a
+ * scheduled job, which the dispatcher delivers by invoking the app's function
+ * directly, so it never opens a gateway route. The
  * broker checks the delegation row, the user's groups and the mode on every
  * data call the app then makes, so a token revoked after the authorizer
  * cached its decision reaches app code, and reaches data only until the
@@ -86,6 +89,7 @@ function decide(event: AuthorizerEvent): SimpleResponse {
   if (!match) throw new TokenRefused();
   const claims = verifyDelegationToken(match[1]!, key);
   if (!claims) throw new TokenRefused();
+  if (claims.sk_channel !== "app") throw new TokenRefused();
   const appId = appIdOfPath(event.rawPath);
   if (!appId || claims.aud !== appId) throw new TokenRefused();
   return {
