@@ -20,7 +20,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
-import { REPO_ROOT } from "../lib/exec-commands";
+import { REPO_ROOT } from "@starkeep/operator/commands";
 import { getRegion } from "../lib/cloud-config";
 import { installStream } from "../lib/install-stream";
 import { installerEnv } from "@starkeep/admin-installer/aws-env";

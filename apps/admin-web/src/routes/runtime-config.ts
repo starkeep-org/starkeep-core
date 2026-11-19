@@ -1,4 +1,4 @@
-import { driveUrlFromEnv, localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
+import { driveUrlFromEnv, localDataServerUrlFromEnv } from "@starkeep/operator/urls";
 
 // Runtime config bootstrap for the browser. The admin-web UI talks to the
 // local-data-server and the Drive app directly; their URLs are loopback

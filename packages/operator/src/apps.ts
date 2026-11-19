@@ -8,8 +8,7 @@ import {
   type ScanOptions,
   type ScanResult,
 } from "@starkeep/admin-installer/app-discovery";
-import { localDataServerUrlFromEnv } from "./local-daemon-urls";
-import type { KeptAppData } from "./app-types";
+import { localDataServerUrlFromEnv } from "./urls";
 
 export type {
   ScannedApp,
@@ -60,6 +59,18 @@ export interface RegistryApp {
   sourceDir: string | null;
   /** When this install happened; a reinstall gives a new value. */
   installedAt?: string;
+}
+
+/**
+ * An app's data that an uninstall kept on this machine. admin-web's browser
+ * half keeps its own copy of this shape in `lib/app-types.ts`, because it
+ * cannot import this package.
+ */
+export interface KeptAppData {
+  appId: string;
+  /** The app's name when it was uninstalled. */
+  name: string;
+  retainedAt: string;
 }
 
 /** The local app registry, or null when the local data server cannot be asked. */

@@ -4,7 +4,7 @@
  * Minted per action rather than held: the credentials expire, and a stale one
  * surfaces as an opaque AWS error at the moment the operator is trying to do
  * something. The server routes that receive it hop to Manager before touching
- * SSM (`lib/manager-credentials.ts`).
+ * SSM (`@starkeep/operator/manager-credentials`).
  */
 
 import {

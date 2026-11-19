@@ -15,9 +15,10 @@
  * *browser* half is a real build.
  *
  * The port comes from `STARKEEP_DRIVE_PORT`, which is the same variable
- * `admin-web/src/lib/exec-commands.ts` reads to decide where to probe. Drive is
- * spawned as admin-web's child and inherits its environment, so the two cannot
- * disagree — and `admin-web/__tests__/exec-commands.test.ts` holds the pair.
+ * `packages/operator/src/commands.ts` reads to decide where to probe. Drive is
+ * spawned as a child of admin-web or the CLI and inherits its environment, so
+ * the two cannot disagree — and `packages/operator/__tests__/commands.test.ts`
+ * holds the pair.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";

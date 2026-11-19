@@ -19,7 +19,7 @@ import {
   DescribeUserPoolCommand,
   ListUserPoolClientsCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
-import { readStarkeepConfig } from "../lib/manager-credentials";
+import { readStarkeepConfig } from "@starkeep/operator/config";
 import type { STSCredentials } from "../lib/cognito-auth";
 
 interface SessionBody {

@@ -45,7 +45,7 @@ import {
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { starkeepDir } from "@starkeep/app-client";
-import { isAlive } from "./daemon-control";
+import { isAlive } from "./daemons";
 
 /** How often a follower looks for new output and for the run's end. */
 const POLL_MS = 100;

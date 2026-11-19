@@ -14,7 +14,7 @@ import {
   type CommandResolution,
 } from "@starkeep/admin-installer/approved-commands";
 import { dirname, join, resolve } from "node:path";
-import { DAEMON_COMMANDS, REPO_ROOT, type DaemonId } from "./exec-commands";
+import { DAEMON_COMMANDS, REPO_ROOT, type DaemonId } from "./commands";
 
 const STARKEEP_DIR = starkeepDir();
 export const PIDS_DIR = join(STARKEEP_DIR, "pids");
@@ -401,7 +401,7 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<StartOutcom
   // something to show.
   child.on("error", (err) => {
     try {
-      appendFileSync(logPath, `\n[admin-web] failed to spawn '${command}': ${err.message}\n`);
+      appendFileSync(logPath, `\n[starkeep] failed to spawn '${command}': ${err.message}\n`);
     } catch {
       /* log no longer writable — nothing better to do */
     }
@@ -410,7 +410,7 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<StartOutcom
     try {
       appendFileSync(
         logPath,
-        `\n[admin-web] '${command} ${args.join(" ")}' exited (code ${code}, signal ${signal})\n`,
+        `\n[starkeep] '${command} ${args.join(" ")}' exited (code ${code}, signal ${signal})\n`,
       );
     } catch {
       /* ditto */

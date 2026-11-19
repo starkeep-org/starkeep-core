@@ -1,6 +1,6 @@
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from "@aws-sdk/client-s3";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-import type { STSCredentials } from "./cognito-auth";
+import type { STSCredentials } from "./credentials";
 
 export interface ServiceCost {
   service: string;
@@ -195,15 +195,4 @@ export async function fetchMtdCostsByService(
     .sort((a, b) => b.amount - a.amount);
 
   return [...known, ...unknown];
-}
-
-export function projectFullMonth(costs: ServiceCost[], today = new Date()): ServiceCost[] {
-  const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
-  // Days elapsed = day-of-month (1-based), minimum 1 to avoid division by zero.
-  const daysElapsed = Math.max(today.getDate(), 1);
-  const factor = daysInMonth / daysElapsed;
-  return costs.map(({ service, amount }) => ({
-    service,
-    amount: amount * factor,
-  }));
 }

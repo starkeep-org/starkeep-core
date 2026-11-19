@@ -27,6 +27,7 @@
     "@starkeep/admin-installer": "workspace:*",
     "@starkeep/app-client": "workspace:*",
     "@starkeep/aws-bootstrap": "workspace:*",
+    "@starkeep/operator": "workspace:*",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "hono": "^4.12.30",

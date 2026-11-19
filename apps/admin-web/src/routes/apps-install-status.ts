@@ -1,4 +1,4 @@
-import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
+import { localDataServerUrlFromEnv } from "@starkeep/operator/urls";
 
 /**
  * Proxy the local-data-server's install-step ledger for `appId`. Lets the UI

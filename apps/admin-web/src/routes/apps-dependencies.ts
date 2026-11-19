@@ -21,7 +21,7 @@ import {
   type CommandResolution,
   type CommandSource,
 } from "@starkeep/admin-installer/approved-commands";
-import { appSource } from "../lib/app-scan";
+import { appSource } from "@starkeep/operator/apps";
 import { installStream } from "../lib/install-stream";
 
 type Params = { params: Promise<{ appId: string }> };
