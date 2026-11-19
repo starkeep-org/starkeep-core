@@ -1289,7 +1289,8 @@ app.post("/_starkeep/jobs/sync", async (c) => {
 Answer 2xx when the run succeeded. The `message` in a JSON answer shows beside
 the run on the connections page and in `listJobs`. Any other answer, a thrown
 error or a timeout counts as a failed run. Keep a run within the handler's
-`timeoutSeconds`.
+`timeoutSeconds`. A job's handler may declare at most 840 seconds, so the
+platform has time to record the run's outcome.
 
 What the platform guarantees:
 
