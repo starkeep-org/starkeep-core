@@ -543,6 +543,34 @@ describe("the job channel", () => {
     expect((await read(jobToken())).statusCode).toBe(401);
   });
 
+  it("admits the next run on a container that cached the last run's lease", async () => {
+    enrolled();
+    expect(passedGate(await read(jobToken()))).toBe(true);
+    // The first run ended and a "run now" claimed a new lease within the
+    // row cache's minute. The cached row still names run-1.
+    db = new FakeDsql();
+    db.on(/from "delegation"\."jobs"/, [jobRow({ lease_id: "run-2" })]);
+    db.on(/update "delegation"\."jobs"/, []);
+    setDbFactory(db);
+    const res = await read(jobToken({ job: { name: "tick", runId: "run-2" } }));
+    expect(passedGate(res), res.body).toBe(true);
+  });
+
+  it("still refuses an ended run's token on a container that cached its lease", async () => {
+    enrolled();
+    expect(passedGate(await read(jobToken()))).toBe(true);
+    db = new FakeDsql();
+    db.on(/from "delegation"\."jobs"/, [jobRow({ lease_id: "run-2" })]);
+    db.on(/update "delegation"\."jobs"/, []);
+    setDbFactory(db);
+    // run-1's own token keeps working until the cached row expires, which
+    // the row cache's minute bounds; a token for a run the row never held
+    // is refused after one fresh read.
+    const res = await read(jobToken({ job: { name: "tick", runId: "run-3" } }));
+    expect(res.statusCode).toBe(401);
+    expect(db.calls(/from "delegation"\."jobs"/)).toHaveLength(1);
+  });
+
   it("refuses a run whose lease expired, while the token has not", async () => {
     enrolled({ lease_until_ms: Date.now() - 1 });
     expect((await read(jobToken())).statusCode).toBe(401);
