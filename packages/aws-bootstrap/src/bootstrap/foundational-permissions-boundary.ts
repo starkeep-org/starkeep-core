@@ -9,7 +9,8 @@ import type { IamStatement } from "../iam-utils.js";
  * forbids — currently just ${StackPrefix}-app-cloud-data-server-role. It
  * permits DSQL cluster admin, S3 bucket admin on the well-known foundational
  * bucket name patterns, Lambda/log-group/API-Gateway admin scoped to the
- * cloud-data-server prefix, CloudFront admin (the platform distribution +
+ * cloud-data-server prefix, invoking any app's function (the job
+ * dispatcher), the jobs tick's EventBridge rule, CloudFront admin (the platform distribution +
  * URL-signing key material), the custom domain's ACM certificate and Route53
  * records, the CUR report definition API, and a single
  * PassRole carve-out (own role, lambda only). All other iam:* actions stay
@@ -196,11 +197,20 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       ],
     },
     {
-      // cloud-data-server registers each mobile app's attested key here.
+      // The parameters cloud-data-server writes and deletes:
+      //  - /platform/mobile-keys/*: each mobile app's attested key.
+      //  - /app-creds/_vault/*: the credential vault, one SecureString per
+      //    user's third-party secret. Under app-creds/ rather than
+      //    platform/, because Manager may read and decrypt platform/* but
+      //    only write and delete app-creds/*, so no Starkeep admin reads a
+      //    user's secret through Manager.
       Sid: "WriteMobileKeys",
       Effect: "Allow",
-      Action: "ssm:PutParameter",
-      Resource: `arn:aws:ssm:*:*:parameter/${stackPrefix}/platform/mobile-keys/*`,
+      Action: ["ssm:PutParameter", "ssm:DeleteParameter"],
+      Resource: [
+        `arn:aws:ssm:*:*:parameter/${stackPrefix}/platform/mobile-keys/*`,
+        `arn:aws:ssm:*:*:parameter/${stackPrefix}/app-creds/_vault/*`,
+      ],
     },
     {
       // SecureString decrypt for the two SSM SecureStrings this role reads
@@ -218,36 +228,33 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       },
     },
     {
+      // Every Lambda verb, on the cloud-data-server's own functions only: the
+      // broker, the authorizers and the job dispatcher. A wildcard ceiling,
+      // as for CloudFront and the custom domain below, because the 19
+      // enumerated verbs left no room in the 6144-character limit for the
+      // job dispatcher's invoke config. The install-time temp policy grants
+      // the specific verbs, and only while an install runs.
       Sid: "Lambda",
       Effect: "Allow",
-      Action: [
-        "lambda:CreateFunction",
-        "lambda:DeleteFunction",
-        "lambda:GetFunction",
-        "lambda:GetFunctionConfiguration",
-        "lambda:UpdateFunctionCode",
-        "lambda:UpdateFunctionConfiguration",
-        // The broker Lambda declares reservedConcurrentExecutions; AWS sets it
-        // via a separate PutFunctionConcurrency call (create and update alike).
-        "lambda:PutFunctionConcurrency",
-        "lambda:TagResource",
-        "lambda:UntagResource",
-        "lambda:ListTags",
-        "lambda:AddPermission",
-        "lambda:RemovePermission",
-        "lambda:GetPolicy",
-        "lambda:PublishVersion",
-        "lambda:InvokeFunction",
-        // Refresh-time reads fired by Pulumi's aws.lambda.Function on every
-        // refresh (G6b, G9k).
-        "lambda:ListVersionsByFunction",
-        "lambda:GetFunctionCodeSigningConfig",
-        "lambda:GetFunctionConcurrency",
-        "lambda:GetFunctionUrlConfig",
-        "lambda:ListFunctionEventInvokeConfigs",
-        "lambda:GetRuntimeManagementConfig",
-      ],
+      Action: "lambda:*",
       Resource: `arn:aws:lambda:*:*:function:${stackPrefix}-app-${cdsAppId}-*`,
+    },
+    {
+      // The job dispatcher runs one user's job by invoking that app's own
+      // function, and the broker hands a "run now" to the dispatcher.
+      Sid: "InvokeAppFunctions",
+      Effect: "Allow",
+      Action: "lambda:InvokeFunction",
+      Resource: `arn:aws:lambda:*:*:function:${stackPrefix}-app-*`,
+    },
+    {
+      // The job dispatcher's five-minute tick, `${stackPrefix}-jobs-tick`. A
+      // scheduled rule invokes the dispatcher through the function's
+      // resource policy, so no role is passed.
+      Sid: "JobsTick",
+      Effect: "Allow",
+      Action: "events:*",
+      Resource: `arn:aws:events:*:*:rule/${stackPrefix}-*`,
     },
     {
       Sid: "Logs",
@@ -269,9 +276,12 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       // the all-zeros resource arn:aws:logs:…:log-group::log-stream:, so it
       // must be granted on Resource:"*" regardless of which group we want
       // to filter for in the API call.
+      //
+      // ssm:DescribeParameters is list-level too. It returns names and
+      // metadata, never values, and lists a user's vault names.
       Sid: "LogsList",
       Effect: "Allow",
-      Action: ["logs:DescribeLogGroups"],
+      Action: ["logs:DescribeLogGroups", "ssm:DescribeParameters"],
       Resource: "*",
     },
     {

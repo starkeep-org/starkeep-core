@@ -68,6 +68,7 @@ describe("manager policy (the install/uninstall allow-list)", () => {
         "ssm:DeleteParameter",
         "ssm:AddTagsToResource",
         "ssm:RemoveTagsFromResource",
+        "ssm:DescribeParameters",
         "kms:Encrypt",
         "kms:GenerateDataKey",
         "kms:Decrypt",
@@ -261,6 +262,36 @@ describe("foundational boundary (cloud-data-server only)", () => {
     // TagSession: the broker names the user each session acts for.
     expect(assume.Action).toEqual(["sts:AssumeRole", "sts:TagSession"]);
     expect(cfnString(assume.Resource as CfnValue)).toContain(`role/${PREFIX}-app-`);
+  });
+
+  it("may invoke any app's function, and holds every Lambda verb on its own functions only", () => {
+    expect(byId(statements, "InvokeAppFunctions")).toMatchObject({
+      Action: "lambda:InvokeFunction",
+      Resource: `arn:aws:lambda:*:*:function:${PREFIX}-app-*`,
+    });
+    expect(byId(statements, "Lambda")).toMatchObject({
+      Action: "lambda:*",
+      Resource: `arn:aws:lambda:*:*:function:${PREFIX}-app-cloud-data-server-*`,
+    });
+  });
+
+  it("may manage the jobs tick's EventBridge rule under its own prefix", () => {
+    expect(byId(statements, "JobsTick")).toMatchObject({
+      Action: "events:*",
+      Resource: `arn:aws:events:*:*:rule/${PREFIX}-*`,
+    });
+  });
+
+  it("writes and deletes the vault and mobile keys, and reads values nowhere new", () => {
+    const write = byId(statements, "WriteMobileKeys");
+    expect(write.Action).toEqual(["ssm:PutParameter", "ssm:DeleteParameter"]);
+    expect(write.Resource).toEqual([
+      `arn:aws:ssm:*:*:parameter/${PREFIX}/platform/mobile-keys/*`,
+      `arn:aws:ssm:*:*:parameter/${PREFIX}/app-creds/_vault/*`,
+    ]);
+    // Listing names, never values.
+    expect(byId(statements, "LogsList").Action).toContain("ssm:DescribeParameters");
+    expect(byId(statements, "ReadSsmParameters").Action).toBe("ssm:GetParameter");
   });
 
   it("denies mutating IAM (service-linked-role creation aside)", () => {

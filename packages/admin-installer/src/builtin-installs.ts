@@ -773,8 +773,28 @@ export async function installCloudDataServer(
         "so the next run can reuse warmed IAM/S3 propagation state. " +
         "Re-run the installer to retry, or detach manually if abandoning the install.",
     );
-    throw err;
+    throw withBootstrapHint(err);
   }
+}
+
+/**
+ * The error, with what to do about it when the foundational permissions
+ * boundary refused a call. The boundary lives in the bootstrap stack, which a
+ * cloud data server install never changes, so a refusal there means the
+ * bootstrap predates what this install deploys, such as the job dispatcher's
+ * EventBridge rule. Any other error comes back unchanged.
+ */
+export function withBootstrapHint(err: unknown): unknown {
+  const message = err instanceof Error ? err.message : String(err);
+  if (!/no permissions boundary allows/i.test(message)) return err;
+  const hinted = new Error(
+    "This deployment's bootstrap predates this cloud data server: its permissions boundary " +
+      "refused a call the install needs. Run scripts/update-bootstrap.sh, review the change " +
+      "set, run it again with --apply, then deploy again.\n\n" +
+      message,
+  );
+  if (err instanceof Error) hinted.stack = `${hinted.message}\n${err.stack ?? ""}`;
+  return hinted;
 }
 
 /**
