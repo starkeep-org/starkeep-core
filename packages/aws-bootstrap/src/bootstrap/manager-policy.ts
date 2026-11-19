@@ -129,6 +129,15 @@ export function managerPolicyStatements(stackPrefix: string): IamStatement[] {
       Resource: SUB(`arn:aws:ssm:*:*:parameter/${stackPrefix}/app-creds/*`),
     },
     {
+      // Lists parameter names and metadata, never values: the uninstall finds
+      // an app's vault names under app-creds/_vault/<appId>/ with it, then
+      // deletes them under ManagerManageAppCreds, which still reads nothing.
+      Sid: "ManagerDescribeParameters",
+      Effect: "Allow",
+      Action: "ssm:DescribeParameters",
+      Resource: "*",
+    },
+    {
       // The platform's own non-secret parameters: the deployment's settings.
       // Unlike the app secrets, Manager reads these too, because admin-web
       // edits settings through it.

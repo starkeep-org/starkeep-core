@@ -25,6 +25,7 @@ import {
   buildRuntimePolicy,
   USER_DATA_OWNER_APP_ID,
 } from "../../admin-installer/src/temp-policies";
+import { buildBrokerPowerPolicy } from "../../admin-installer/src/iam";
 import { adminAppPolicyStatements } from "../../aws-bootstrap/src/bootstrap/admin-app-policy";
 import { foundationalPermissionsBoundaryStatements } from "../../aws-bootstrap/src/bootstrap/foundational-permissions-boundary";
 import { installDdlBoundaryStatements } from "../../aws-bootstrap/src/bootstrap/install-ddl-boundary";
@@ -150,36 +151,11 @@ function assumedRoleArn(accountId: string, roleName: string, session = "test"): 
   return `arn:aws:sts::${accountId}:assumed-role/${roleName}/${session}`;
 }
 
+/** The broker-power policy the installer attaches to the CDS role, built by the installer. */
 function brokerPowerPolicy(stackPrefix: string, accountId: string): PolicyDoc {
   return {
     name: "broker-power",
-    policy: {
-      Version: "2012-10-17",
-      Statement: [
-        {
-          Sid: "BrokerAssumeAppRoles",
-          Effect: "Allow",
-          Action: "sts:AssumeRole",
-          // Matches iam.ts:147 exactly — `-app-*` (no trailing `-role`) so
-          // any future role-name suffix variants are covered too.
-          Resource: `arn:aws:iam::${accountId}:role/${stackPrefix}-app-*`,
-        },
-        {
-          // Matches iam.ts `BrokerReadPlatformParameters`.
-          Sid: "BrokerReadPlatformParameters",
-          Effect: "Allow",
-          Action: "ssm:GetParameter",
-          Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/platform/*`,
-        },
-        {
-          // Matches iam.ts `BrokerWriteMobileKeys`.
-          Sid: "BrokerWriteMobileKeys",
-          Effect: "Allow",
-          Action: "ssm:PutParameter",
-          Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/platform/mobile-keys/*`,
-        },
-      ],
-    },
+    policy: JSON.parse(buildBrokerPowerPolicy(stackPrefix, accountId)) as PolicyDoc["policy"],
   };
 }
 
@@ -509,6 +485,31 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           contextVariables: { "kms:ViaService": `ssm.${region}.amazonaws.com` },
           why: "Passphrase is a SecureString post-rotation; decryption flows through KMS via SSM.",
         },
+        // ---- Scheduled jobs (STA-104). -------------------------------------
+        // The dispatcher is a second function on the CDS role, with an invoke
+        // config that turns retries off, woken by one EventBridge rule.
+        {
+          action: "lambda:CreateFunction",
+          resource: `arn:aws:lambda:${region}:${accountId}:function:${stackPrefix}-app-cloud-data-server-dispatcher`,
+          why: "Creates the job dispatcher beside the broker.",
+        },
+        {
+          action: "lambda:PutFunctionEventInvokeConfig",
+          resource: `arn:aws:lambda:${region}:${accountId}:function:${stackPrefix}-app-cloud-data-server-dispatcher`,
+          why: "Sets the dispatcher's retries to zero: the next tick replaces a retry.",
+        },
+        {
+          action: "lambda:GetFunctionEventInvokeConfig",
+          resource: `arn:aws:lambda:${region}:${accountId}:function:${stackPrefix}-app-cloud-data-server-dispatcher`,
+          why: "Pulumi reads the invoke config back on every refresh.",
+        },
+        ...["events:PutRule", "events:DescribeRule", "events:PutTargets", "events:TagResource"].map(
+          (action) => ({
+            action,
+            resource: `arn:aws:events:${region}:${accountId}:rule/${stackPrefix}-jobs-tick`,
+            why: "Creates the jobs tick, rate(5 minutes), and points it at the dispatcher.",
+          }),
+        ),
         {
           action: "lambda:PutFunctionConcurrency",
           resource: `arn:aws:lambda:${region}:${accountId}:function:${stackPrefix}-app-cloud-data-server-api`,
@@ -668,6 +669,16 @@ const CONTEXTS: Record<string, ContextBuilder> = {
           action: "ssm:GetParameter",
           resource: `arn:aws:ssm:${region}:${accountId}:parameter/${stackPrefix}/platform/mobile-keys/${"a".repeat(64)}`,
           why: "The mobile branch reads the attested key a request names, to verify its signature.",
+        },
+        {
+          action: "lambda:InvokeFunction",
+          resource: `arn:aws:lambda:${region}:${accountId}:function:${stackPrefix}-app-${targetAppId}-api`,
+          why: "The job dispatcher runs one user's job by invoking the app's own function.",
+        },
+        {
+          action: "lambda:InvokeFunction",
+          resource: `arn:aws:lambda:${region}:${accountId}:function:${stackPrefix}-app-cloud-data-server-dispatcher`,
+          why: 'The broker hands a user\'s "run now" to the dispatcher asynchronously.',
         },
         {
           action: "logs:CreateLogStream",
