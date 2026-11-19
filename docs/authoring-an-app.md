@@ -127,6 +127,7 @@ would test the build step. Copy the example app rather than Probe.
 | A data client                          | If the app uses data  | The code that actually calls `/data/records`, `/files/presign`, etc.                                                                             |
 | `appSpecificSyncable` tables/files     | Optional              | App-private rows and blobs that sync alongside shared records.                                                                                   |
 | `compute` handlers + a `bundle` script | Optional (cloud only) | Lambda handlers and the deployment-zip builder for a cloud install.                                                                              |
+| `jobs`                                 | Optional (cloud only) | Work the platform runs for each user who turns it on, on a schedule or on request (§7c).                                                         |
 | Sign-in page + session routes          | Required in cloud     | A `/sign-in` page (`createSignInPage`, or your own) and the `/api/session` routes, so a person can sign in to the cloud surface (§8).            |
 | Server-side end-user check             | **Required in cloud** | Nothing upstream of your app checks who the end user is. See §10.                                                                                |
 
@@ -1201,6 +1202,114 @@ What the platform enforces on every data call the route makes:
 On the local surface, `verifyDelegation` admits any loopback caller with full
 app power and no token, as your app's own pages are admitted. A local endpoint
 therefore grants full app power to any process on the machine.
+
+### 7c. Background jobs (cloud target only)
+
+A background job is work your app runs for one user without the user's
+browser: a nightly sync from another service, a weekly summary. Declare each
+job in the manifest. Each user turns each job on separately, on a platform
+consent page, and the platform then runs the job for that user in the cloud.
+
+```jsonc
+"protocolMinVersion": "1.1.0",
+"targets": ["local", "cloud"],
+"infraRequirements": {
+  "compute": { "enabled": true, "handlers": [{ "name": "api", "handler": "index.handler" }] },
+  "jobs": [
+    {
+      "name": "sync",
+      "handler": "api",
+      "mode": "readwrite",
+      "defaultTime": "06:30",
+      "description": "Pulls yesterday's workouts from your provider."
+    }
+  ]
+}
+```
+
+- `name` is a lowercase name of at most 32 characters.
+- `handler` names one of your compute handlers, which the platform invokes to
+  run the job.
+- `mode` bounds each run, as an outside client's mode does (§7b): `read` reads
+  and writes labels, and `readwrite` also writes and tombstones.
+- `defaultTime` is the time of day the consent page offers first, in the
+  user's own time zone. `null` offers "Only when I ask" first.
+- `description` is the one sentence the consent page shows.
+
+An app with jobs needs `protocolMinVersion` `1.1.0` or later, compute and the
+`cloud` target. An app may declare up to eight jobs.
+
+**Turning a job on.** Call `listJobs` from your server with the user's token.
+Each job carries the user's state and the consent page's address. Send the
+browser to `jobConsentUrl(job, { timeZone, returnTo })`, with the browser's
+zone from `Intl.DateTimeFormat().resolvedOptions().timeZone` and a path in
+your app to return to. The user picks a time or "Only when I ask", signs in,
+and lands back in your app. The job stays on until the user turns it off on
+the connections page or signs out everywhere.
+
+```ts
+import { jobConsentUrl, listJobs, runJobNow } from "@starkeep/app-client";
+
+const { cloudRequired, jobs } = await listJobs("my-app", { userToken });
+const sync = jobs.find((j) => j.name === "sync");
+const link = sync && jobConsentUrl(sync, { timeZone, returnTo: "/apps/my-app/settings" });
+// "Sync now": queues one run through the platform, as a scheduled run does.
+const started = await runJobNow("my-app", "sync", { userToken });
+```
+
+`runJobNow` answers `{ ok: false, code: "running" }` while a run is under way,
+and `code: "not-enabled"` until the user turns the job on. A job's
+`attention` says why it needs the user: `failed` after a failed run,
+`signed-out`, `no-library` or `needs-consent`. The last one means your app
+dropped the job or asked for a wider mode since the user turned it on, and the
+user must turn it on again.
+
+**Running a job.** The platform invokes your handler with
+`POST /apps/<appId>/_starkeep/jobs/<name>` and the body
+`{ job, runId, trigger, scheduledFor }`. Mount the route ahead of any session
+gate, because a run holds no session cookie. Check the run with `verifyJob`,
+and forward its token on every data call:
+
+```ts
+import { jobRefusal, signedFetch, verifyJob } from "@starkeep/app-client";
+
+app.post("/_starkeep/jobs/sync", async (c) => {
+  const run = await verifyJob(c.req.raw, "sync");
+  if (!run) return jobRefusal();
+  await signedFetch(creds, "/app-data/db/workouts", {
+    method: "POST",
+    body: JSON.stringify({ row: { workout_id: "w1", source: "garmin" } }),
+    headers: { "Content-Type": "application/json" },
+    delegation: run.token,
+  });
+  return c.json({ message: "3 new workouts" });
+});
+```
+
+Answer 2xx when the run succeeded. The `message` in a JSON answer shows beside
+the run on the connections page and in `listJobs`. Any other answer, a thrown
+error or a timeout counts as a failed run. Keep a run within the handler's
+`timeoutSeconds`.
+
+What the platform guarantees:
+
+- **One run at a time.** A run holds a lease on the user's enrollment, so two
+  runs of one job for one user never overlap, including a scheduled run and
+  "Sync now". A credential that its provider rotates on every use stays
+  intact.
+- **A token for one run only.** The run's token works only until the run
+  ends. It never opens a route declared `auth: "delegated"`, and
+  `verifyDelegation` refuses it.
+- **Pacing.** The platform runs at most two jobs at once across the
+  deployment and wakes every five minutes, so a run may start up to five
+  minutes after its time.
+- **Not in the gateway.** The gateway answers any outside request to
+  `/_starkeep/` with a 404, so nobody but the platform reaches your job route.
+
+On the local surface no job runs. `verifyJob` refuses every request, and
+`listJobs` and `runJobNow` answer `cloudRequired: true`, so your app can tell
+the user that background jobs need a cloud. Probe's `test-apps/probe` declares
+the job `probe-tick` as a complete example.
 
 ### 8. Sign-in (cloud target only)
 
