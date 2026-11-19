@@ -16,7 +16,7 @@
  * this platform does not meet. Both data servers report the constant on
  * `GET /health` as `protocolVersion`.
  */
-export const PROTOCOL_VERSION = "1.0.0";
+export const PROTOCOL_VERSION = "1.1.0";
 
 /** A protocol version as `[major, minor, patch]`, or null when malformed. */
 export function parseProtocolVersion(version: string): [number, number, number] | null {

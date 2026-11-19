@@ -33,11 +33,18 @@ export type DelegationMode = "read" | "readwrite";
 export const DELEGATION_MODES: readonly DelegationMode[] = ["read", "readwrite"];
 
 /**
- * Which surface a delegation reaches. `app`: the app's own endpoint, which
- * signs every data call with the app's secret beside the token. `platform`:
- * a platform-hosted connector (not built yet; the data server refuses it).
+ * Which surface a delegation reaches.
+ *
+ * - `app`: the app's own endpoint, which signs every data call with the
+ *   app's secret beside the token. An outside client holds the token.
+ * - `job`: one run of an app's scheduled job. The platform's dispatcher mints
+ *   the token for one user's enrollment, and the token works only while that
+ *   run holds the enrollment's lease. The app signs every data call with its
+ *   secret, as on `app`.
+ * - `platform`: a platform-hosted connector. Not built, and the data server
+ *   refuses it.
  */
-export type DelegationChannel = "app" | "platform";
+export type DelegationChannel = "app" | "job" | "platform";
 
 /** The consent page, its form's target and the managed login return. */
 export const CONNECT_ROUTE = "/connect";
@@ -60,6 +67,52 @@ export function parseConnectionRevokePath(path: string): string | null {
   return REVOKE_PATTERN.exec(path)?.[1] ?? null;
 }
 
+// ---------------------------------------------------------------------------
+// Scheduled jobs
+// ---------------------------------------------------------------------------
+//
+// An app declares jobs in its manifest. A user enrolls in one job on a
+// platform consent page, and the enrollment is the grant. A fixed tick wakes
+// the platform's dispatcher, which runs each due enrollment by invoking the
+// app's function at {@link JOB_ROUTE_PREFIX} with a `job` token.
+
+/** The path, under `/apps/<appId>`, where the dispatcher runs a job: `/_starkeep/jobs/<name>`. */
+export const JOB_ROUTE_PREFIX = "/_starkeep/jobs/";
+
+/** At most this many job runs hold a lease at once, across the deployment. */
+export const JOB_SLOTS = 2;
+
+/** A run's lease outlives the handler's timeout by this margin, in seconds. */
+export const JOB_LEASE_MARGIN_S = 60;
+
+/** A job name, as the manifest declares it. */
+export const JOB_NAME_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
+
+/** The job consent page and its form's target. */
+export const CONNECT_JOB_ROUTE = "/connect/job";
+export const CONNECT_JOB_APPROVE_ROUTE = "/connect/job/approve";
+
+const JOB_ACTION_PATTERN = /^\/connections\/jobs\/([A-Za-z0-9_-]{1,64})\/(revoke|schedule)$/;
+
+/** The path that turns one job enrollment off. */
+export function jobRevokePath(enrollmentId: string): string {
+  return `${CONNECTIONS_ROUTE}/jobs/${enrollmentId}/revoke`;
+}
+
+/** The path that changes one job enrollment's time. */
+export function jobSchedulePath(enrollmentId: string): string {
+  return `${CONNECTIONS_ROUTE}/jobs/${enrollmentId}/schedule`;
+}
+
+/** The enrollment and the action a job path names, or null for any other path. */
+export function parseJobActionPath(
+  path: string,
+): { enrollmentId: string; action: "revoke" | "schedule" } | null {
+  const match = JOB_ACTION_PATTERN.exec(path);
+  if (!match) return null;
+  return { enrollmentId: match[1]!, action: match[2] as "revoke" | "schedule" };
+}
+
 /** Whether `path` is one of the consent or connections routes. */
 export function isConnectPath(path: string): boolean {
   return (
@@ -80,6 +133,10 @@ export interface DelegationClaims {
   readonly sk_dlg: string;
   readonly sk_mode: DelegationMode;
   readonly sk_channel: DelegationChannel;
+  /** On a `job` token: the job's name. */
+  readonly sk_job?: string;
+  /** On a `job` token: the run's lease id. */
+  readonly sk_run?: string;
   /** Seconds since the epoch. */
   readonly exp: number;
   readonly iat: number;
