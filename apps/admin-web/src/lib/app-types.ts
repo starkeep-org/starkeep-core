@@ -5,6 +5,7 @@
 export {
   accessLead,
   categoriesOf,
+  consentDiffers,
   dependencyConsent,
   grantPermissions,
   publicSharingConsent,
@@ -155,26 +156,6 @@ export interface InstallStep {
   status: "pending" | "done" | "failed";
   error: string | null;
   updatedAt: string;
-}
-
-/**
- * Whether `next` asks for anything the consent dialog shows that `current`
- * does not — different file access, or public links — so updating an
- * installed app to it needs the user's approval again.
- */
-export function consentDiffers(current: ManifestSummary, next: ManifestSummary): boolean {
-  const grants = (m: ManifestSummary) => ({
-    all: m.infraRequirements?.fileAccessAll === true,
-    publicSharing: m.infraRequirements?.publicSharing === true,
-    fileAccess: (m.infraRequirements?.fileAccess ?? [])
-      .map((f) => ({
-        types: [...f.types].sort(),
-        access: f.access,
-        metadataWrite: f.metadataWrite === true,
-      }))
-      .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
-  });
-  return JSON.stringify(grants(current)) !== JSON.stringify(grants(next));
 }
 
 /** What `GET /api/apps/:appId/dependencies` says Install will run first. */

@@ -13,6 +13,7 @@
     "./credentials": "./src/credentials.ts",
     "./daemons": "./src/daemons.ts",
     "./events": "./src/events.ts",
+    "./local-apps": "./src/local-apps.ts",
     "./locks": "./src/locks.ts",
     "./manager-credentials": "./src/manager-credentials.ts",
     "./repo-root": "./src/repo-root.ts",
