@@ -11,6 +11,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { mockClient } from "aws-sdk-client-mock";
 import { ACMClient, DescribeCertificateCommand } from "@aws-sdk/client-acm";
+import { MAX_STACK_PREFIX_LENGTH } from "@starkeep/aws-bootstrap";
 import { jsonRequest, makeDataDir, writeAdminConfig } from "./helpers";
 
 const dnsMock = {
@@ -69,11 +70,12 @@ describe("PUT", () => {
   });
 
   it("refuses a domain whose grants would overflow the role's policy quota", async () => {
-    // A change of domain names both, and two names this long cannot fit.
+    // A change of domain names both, and two names this long cannot fit
+    // beside the longest stack prefix, which the policies name throughout.
     const long = (c: string) =>
       `${c.repeat(63)}.${c.repeat(63)}.${c.repeat(63)}.${c.repeat(57)}.com`;
     writeAdminConfig(dataDir, {
-      stackPrefix: "sk",
+      stackPrefix: "x".repeat(MAX_STACK_PREFIX_LENGTH),
       userPoolId: "us-east-2_x",
       customDomainStatus: {
         name: long("a"),
