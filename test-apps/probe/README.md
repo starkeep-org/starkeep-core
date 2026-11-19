@@ -31,6 +31,10 @@ offers an app:
   `probe_notes`, from `@starkeep/app-client/snapshot`;
 - a JWT-gated `POST /api/echo` compute route;
 - `publicSharing`, so the suites can create and revoke a public link.
+- the scheduled job `probe-tick`, which writes one note per run through the
+  run's own token;
+- one credential-vault secret, `probe-secret`, which the page stores and never
+  reads back, and which `probe-tick` reads and rotates on each run.
 
 Both suites also send every app-facing data route through the signing proxy
 once: the tier-2 spec on the local surface, and the tier-3 journey through

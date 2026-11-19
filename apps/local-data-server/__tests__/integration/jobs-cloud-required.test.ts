@@ -4,7 +4,7 @@
  * 501 and `cloud-required`, so the app can say that they need a cloud.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { listJobs, runJobNow } from "@starkeep/app-client";
+import { listJobs, listSecrets, putSecret, runJobNow } from "@starkeep/app-client";
 import { startLocalDataServer, type LocalDataServer } from "@starkeep/testkit";
 import { installApp, testAppManifest, type InstalledApp } from "../helpers.js";
 
@@ -47,6 +47,14 @@ describe("job and vault routes on the local surface", () => {
       jobs: [],
     });
     expect(await runJobNow(app.appId, "tick", { userToken: null, creds })).toEqual({
+      ok: false,
+      cloudRequired: true,
+    });
+    expect(await listSecrets(app.appId, { userToken: null, creds })).toEqual({
+      ok: false,
+      cloudRequired: true,
+    });
+    expect(await putSecret(app.appId, "peloton", "x", { userToken: null, creds })).toEqual({
       ok: false,
       cloudRequired: true,
     });

@@ -8,8 +8,8 @@
  * signing proxy, a shared-record write path, a declared label vocabulary, an
  * app-private table, an analysis read over a snapshot of that table, a
  * JWT-gated compute route, an MCP route for outside clients holding a
- * delegation token, and a scheduled job the platform runs for each user who
- * turns it on.
+ * delegation token, a scheduled job the platform runs for each user who
+ * turns it on, and a credential vault secret that job rotates.
  *
  * It is also the platform's worked example of the shape every Starkeep app
  * takes. The server half is a Hono app; `serve.ts` runs it under
@@ -39,7 +39,10 @@ import {
   createDataProxyHandler,
   jobRefusal,
   listJobs,
+  listSecrets,
   loadAppCredentials,
+  putSecret,
+  readSecret,
   runJobNow,
   sessionAuth,
   signedFetch,
@@ -58,6 +61,9 @@ import { handleMcp } from "./mcp.js";
 
 /** The app id, fixed to match `starkeep.manifest.json`. */
 export const APP_ID = "probe";
+
+/** The one vault secret Probe keeps for each user, which `probe-tick` rotates. */
+export const PROBE_SECRET = "probe-secret";
 
 /** Cloud mode is what the platform sets on an installed app's Lambda. */
 function isCloud(): boolean {
@@ -124,6 +130,10 @@ function shellPage(base: string, cloud: boolean): string {
 <p id="jobs" aria-live="polite"></p>
 <p><a id="job-consent" hidden>Turn on probe-tick</a>
 <button id="job-run" type="button" hidden>Run probe-tick now</button></p>
+<h2>Vault</h2>
+<p id="vault" aria-live="polite"></p>
+<p><label>Secret <input id="secret" type="password" autocomplete="off"></label>
+<button id="secret-save" type="button">Save secret</button></p>
 <script>window.__PROBE__ = ${JSON.stringify({ base, cloud })};</script>
 <script src="${base}/_immutable/${ASSET_NAME}"></script>
 </body></html>`;
@@ -147,8 +157,22 @@ app.post("/_starkeep/jobs/probe-tick", async (c) => {
   if (!run) return jobRefusal();
   const creds = await loadAppCredentials(APP_ID);
   if (!creds) return json({ message: `${APP_ID} has no credentials here` }, 503);
+  // The vault's rotation, as a provider that issues a new refresh token on
+  // every use needs it: read the user's secret, and write the next value.
+  const read = await readSecret(APP_ID, PROBE_SECRET, { delegation: run.token, creds });
+  if (!read.ok) return json({ message: `Reading the secret failed` }, 502);
+  if (read.value !== null) {
+    const rotated = await putSecret(APP_ID, PROBE_SECRET, `${read.value}+1`, {
+      delegation: run.token,
+      creds,
+    });
+    if (!rotated.ok) return json({ message: `Rotating the secret failed` }, 502);
+  }
   const body = JSON.stringify({
-    row: { record_id: `tick-${run.runId}`, note: `probe-tick run ${run.runId}` },
+    row: {
+      record_id: `tick-${run.runId}`,
+      note: `probe-tick run ${run.runId} read ${read.value ?? "no secret"}`,
+    },
   });
   const res = await signedFetch(creds, "/app-data/db/probe_notes", {
     method: "POST",
@@ -242,6 +266,24 @@ app.post("/api/jobs/probe-tick/run", async (c) => {
   const res = json(result, result.ok ? 202 : result.cloudRequired ? 501 : result.status);
   if (user.setCookie) res.headers.append("Set-Cookie", user.setCookie);
   return res;
+});
+
+// The vault: the page lists the user's secrets and stores one, and never
+// reads a value back. Only `probe-tick` reads it.
+app.get("/api/vault", async (c) => {
+  const user = await userTokenFor(c.req.raw);
+  if (isCloud() && !user.token) return json({ error: "Sign in first" }, 401);
+  const listed = await listSecrets(APP_ID, { userToken: user.token });
+  return json(listed, listed.ok ? 200 : listed.cloudRequired ? 501 : listed.status);
+});
+
+app.put(`/api/vault/${PROBE_SECRET}`, async (c) => {
+  const user = await userTokenFor(c.req.raw);
+  if (isCloud() && !user.token) return json({ error: "Sign in first" }, 401);
+  const { value } = (await c.req.json().catch(() => ({}))) as { value?: unknown };
+  if (typeof value !== "string") return json({ error: "Send { value }" }, 400);
+  const stored = await putSecret(APP_ID, PROBE_SECRET, value, { userToken: user.token });
+  return json(stored, stored.ok ? 200 : stored.cloudRequired ? 501 : stored.status);
 });
 
 app.get("/", () => html(shellPage(appBasePath(), isCloud())));

@@ -156,6 +156,27 @@ runEl.addEventListener("click", async () => {
 });
 renderJobs();
 
+// The vault: the page lists names and stores a secret, and never reads one back.
+const vaultEl = document.getElementById("vault");
+async function renderVault() {
+  const res = await fetch(base + "/api/vault");
+  const body = await res.json();
+  if (body.cloudRequired) { vaultEl.textContent = "The vault needs a cloud."; return; }
+  if (!body.ok) { vaultEl.textContent = "vault → " + res.status; return; }
+  vaultEl.textContent = body.value.length ? "Stored: " + body.value.map((s) => s.name).join(", ") : "No secrets stored.";
+}
+document.getElementById("secret-save").addEventListener("click", async () => {
+  const input = document.getElementById("secret");
+  const res = await fetch(base + "/api/vault/probe-secret", {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value: input.value }),
+  });
+  input.value = "";
+  if (!res.ok) { vaultEl.textContent = "save → " + res.status; return; }
+  renderVault();
+});
+renderVault();
+
 document.getElementById("file").addEventListener("change", (e) => {
   const file = e.target.files[0];
   if (file) upload(file);
