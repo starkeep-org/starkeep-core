@@ -114,7 +114,12 @@ export interface JourneyApp {
    * route sweep creates and revokes a link only for an app that may.
    */
   readonly publicSharing?: boolean;
-  /** A scheduled job the manifest declares, for the route sweep's job routes. */
+  /**
+   * A scheduled job the manifest declares, with a route that writes one row of
+   * `appTable` per run and answers `{ message: "Wrote tick-<runId>" }`, as
+   * Probe's `probe-tick` does. The route sweep checks the job routes, and the
+   * journey turns the job on, runs it and turns it off.
+   */
   readonly job?: string;
   /** A JWT-gated route of the app's own, for the CloudFront Bearer step. */
   readonly jwtRoute: JourneyJwtRoute;

@@ -81,6 +81,7 @@ import type { JourneyApp, JourneyContext, JourneySharedFile } from "./journey-ap
 import { defineMemberSteps } from "./member-steps.js";
 import { defineDelegationSteps } from "./delegation-steps.js";
 import { defineOAuthSteps } from "./oauth-steps.js";
+import { defineJobSteps, expectNoEnrollment } from "./job-steps.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -2407,6 +2408,20 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         });
       }
 
+      // A scheduled job the user turns on, which the platform runs on request
+      // and at its time of day, for an app that declares one.
+      if (app.job) {
+        defineJobSteps({
+          config: () => config,
+          appId: app.appId,
+          job: app.job,
+          ...(app.outsideClient ? { mcpPath: app.outsideClient.mcpPath } : {}),
+          admin: () => admin,
+          cookie: () => signInToApp(app.appId),
+          table: app.appTable.name,
+        });
+      }
+
       // A second account, end to end: a member created by the admin, a second
       // machine that signs in as the member, and two libraries kept apart.
       defineMemberSteps({
@@ -2444,6 +2459,18 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         expect(query.status).toBe(200);
         expect(await query.text()).toContain(app.appTable.expectInBody);
       });
+
+      if (app.job) {
+        it(`the uninstall deleted ${app.appId}'s job enrollments`, async () => {
+          // The enrollment was turned off before the uninstall, so it still
+          // held its last run. A reinstall shows none: the row is gone.
+          await expectNoEnrollment(
+            `${config.publicBaseUrl!.replace(/\/+$/, "")}/apps/${app.appId}`,
+            app.job!,
+            await signInToApp(app.appId),
+          );
+        });
+      }
 
       it(`cli-delete-app-data deletes ${app.appId}'s kept data, and only after an uninstall`, async () => {
         const deleteData = () =>
