@@ -218,7 +218,7 @@ describe("the tools", () => {
     ]);
     const params = new URL(calls[0]!.path, "http://x").searchParams;
     expect(params.get("include")).toBe("metadata,labels");
-    expect(params.get("order")).toBe("created_at.desc");
+    expect(JSON.parse(params.get("order")!)).toEqual([{ col: "created_at", dir: "desc" }]);
     expect(params.has("label")).toBe(false);
   });
 

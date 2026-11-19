@@ -18,7 +18,7 @@ import http from "node:http";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { installAppViaAdmin, startAppDaemonViaAdmin } from "@starkeep/e2e";
-import { APP_ID } from "@example-app/common";
+import { APP_ID, SAMPLE_FILES } from "@example-app/common";
 import { SURFACE, cloudRun, enabledCloudRun } from "./surface";
 
 test.describe.configure({ mode: "serial" });
@@ -481,11 +481,11 @@ test("Notes: search by text, prefix, edit date and page", async () => {
   await page.getByLabel("Edited since").fill("");
 
   // `in` over the ids of the files the Example files table shows.
-  await page.getByLabel("Only files on this page").check();
+  await page.getByLabel("Files", { exact: true }).selectOption({ label: "Files on this page" });
   await click("Search notes", "Search notes");
   await expect(await column("Notes", "Note")).toHaveCount(2);
   await expectLogged("GET", /^\/app-data\/db\/notes\?.*%22in%22/, 200);
-  await page.getByLabel("Only files on this page").uncheck();
+  await page.getByLabel("Files", { exact: true }).selectOption({ label: "All files" });
 
   // The Notes table's own Delete removes a note without opening its file.
   await click("Delete note 50% off_now", "Delete note");
@@ -999,6 +999,137 @@ test("MCP: the gateway refuses a call with no token, and a read token cannot wri
   const write = await callTool(read, "write_note", { recordId: hello.id, text: "not allowed" });
   expect(write.result?.isError).toBe(true);
   expect(write.result?.content[0]?.text).toMatch(/^The data server answered 403/);
+});
+
+test("Sample data: load the set once, and a second load adds nothing", async () => {
+  await page.getByLabel("Show").selectOption("all");
+  await click("Apply filter", "Filter");
+  await click("Load sample data", "Load sample data");
+  await expect(page.getByLabel("Sample data")).toHaveText(
+    `${SAMPLE_FILES.length + 1} sample files, their notes and three collections.`,
+  );
+  // The newest page holds the sample files and the derived copy, each with
+  // the sample flag beside its own labels.
+  for (const file of SAMPLE_FILES) {
+    await expect(await cell("Example files", file.name, "Labels")).toContainText(
+      "example-app/sample",
+    );
+  }
+  await expect(await cell("Example files", "poem-upper.skexample", "Labels")).toContainText(
+    "example-app/derived=uppercase",
+  );
+  await expect(await cell("Tag counts", "kitchen", "Files")).toHaveText("2");
+  await expect(await cell("Notes", "Check the pantry before shopping", "Pinned")).toHaveText("yes");
+  await expectLoggedAny("GET", /^\/data\/records\?label=example-app%2Fsample&limit=1$/, 200);
+
+  await click("Load sample data", "Load sample data");
+  await expect(page.getByLabel("Sample data")).toHaveText(
+    "Sample files already exist; delete them to load the set again.",
+  );
+});
+
+test("Collections: a count over a left join, and contents joined to notes and other collections", async () => {
+  await expect(await cell("Collections", "Recipes", "Files")).toHaveText("3");
+  await expect(await cell("Collections", "Reading list", "Files")).toHaveText("3");
+  await expect(await cell("Collections", "Old drafts", "Files")).toHaveText("3");
+  await expect(await cell("Collections", "Old drafts", "Archived")).toHaveText("yes");
+  await expectLogged("GET", /^\/app-data\/db\/collections\?join=.*&aggregate=/, 200);
+
+  await click("Show Recipes", "Show collection");
+  await expect(await column("Collection contents", "File")).toHaveCount(3);
+  await expect(await cell("Collection contents", "grocery-list.skexample", "Note")).toHaveText(
+    "Check the pantry before shopping",
+  );
+  await expect(await cell("Collection contents", "bread.skexample", "Note")).toHaveText("none");
+  await expect(await cell("Collection contents", "pancakes.skexample", "Also in")).toHaveText(
+    "Reading list",
+  );
+  // Bread's only other collection is archived. The archive filter sits in
+  // the join's `on`, so bread stays listed with an empty "Also in".
+  await expect(await cell("Collection contents", "bread.skexample", "Also in")).toHaveText("");
+  await expectLogged("GET", /^\/app-data\/db\/collection_items\?.*join=/, 200);
+
+  await click("Unarchive Old drafts", "Unarchive collection");
+  await expect(await cell("Collection contents", "bread.skexample", "Also in")).toHaveText(
+    "Old drafts",
+  );
+  await click("Archive Old drafts", "Archive collection");
+  await expect(await cell("Collection contents", "bread.skexample", "Also in")).toHaveText("");
+});
+
+test("Collections: an empty one counts 0, and the open file joins and leaves collections", async () => {
+  await page.getByLabel("Collection name").fill("Favorites");
+  await click("Create collection", "Create collection");
+  await expect(await cell("Collections", "Favorites", "Files")).toHaveText("0");
+  await expect(table("Collection contents")).toContainText("Favorites holds no files.");
+
+  // `exists` lists the collections that hold the file. `not_exists` offers
+  // the unarchived ones that do not, so the archived Old drafts is not offered.
+  await click("Open haiku.skexample", "Open");
+  await expect(await cell("Open file", "Collections", "Value")).toHaveText("Old drafts (archived)");
+  await expect(page.getByRole("button", { name: "Add to Old drafts", exact: true })).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Remove from Old drafts", exact: true }),
+  ).toBeVisible();
+  await expectLogged(
+    "GET",
+    /^\/app-data\/db\/collections\?where=%7B%22archived%22.*not_exists/,
+    200,
+  );
+
+  await click("Add to Favorites", "Add to collection");
+  await expect(await cell("Open file", "Collections", "Value")).toHaveText(
+    "Favorites, Old drafts (archived)",
+  );
+  await expect(await cell("Collections", "Favorites", "Files")).toHaveText("1");
+  await expect(await cell("Collection contents", "haiku.skexample", "Also in")).toHaveText("");
+
+  await click("Remove haiku.skexample from Favorites", "Remove from collection");
+  await expect(await cell("Collections", "Favorites", "Files")).toHaveText("0");
+  await expect(await cell("Open file", "Collections", "Value")).toHaveText("Old drafts (archived)");
+
+  await page.getByLabel("Collection name").fill("Keepers");
+  await click("Rename Favorites", "Rename collection");
+  await expect(await cell("Collections", "Keepers", "Files")).toHaveText("0");
+  await click("Delete collection Keepers", "Delete collection");
+  await expect(table("Collections")).not.toContainText("Keepers");
+});
+
+test("Notes: filter by a collection, by no collection, and by files off the page", async () => {
+  const files = page.getByLabel("Files", { exact: true });
+  await files.selectOption({ label: "Files in Reading list" });
+  await click("Search notes", "Search notes");
+  // None is pinned, so newest first: one, three and seven days old.
+  await expect(await column("Notes", "Note")).toHaveText([
+    "Double the batch for guests",
+    "Ask the library about the sequel",
+    "Second stanza needs work",
+  ]);
+  await expectLogged("GET", /^\/app-data\/db\/notes\?.*%22in%22%3A%7B%22table%22/, 200);
+
+  await files.selectOption({ label: "Files in no collection" });
+  await click("Search notes", "Search notes");
+  await expect(table("Notes")).toContainText("Send the summary on Friday");
+  await expect(table("Notes")).not.toContainText("Check the pantry before shopping");
+  await expectLogged("GET", /^\/app-data\/db\/notes\?.*%22not_in%22%3A%7B%22table%22/, 200);
+
+  // The newest page holds every sample file, so no sample note is off it.
+  await files.selectOption({ label: "Files not on this page" });
+  await click("Search notes", "Search notes");
+  for (const file of SAMPLE_FILES) {
+    if (file.note) await expect(table("Notes")).not.toContainText(file.note.text);
+  }
+  await expectLogged("GET", /^\/app-data\/db\/notes\?.*%22not_in%22%3A%5B/, 200);
+
+  await files.selectOption({ label: "All files" });
+  await click("Search notes", "Search notes");
+});
+
+test("Collections: deleting a file takes it out of every collection", async () => {
+  await click("Delete bread.skexample", "Delete");
+  await expect(await cell("Collections", "Recipes", "Files")).toHaveText("2");
+  await expect(await cell("Collections", "Old drafts", "Files")).toHaveText("2");
+  await expectLoggedAny("DELETE", /^\/app-data\/db\/collection_items$/, 200);
 });
 
 test("Connection: refresh the session, then sign out", async () => {

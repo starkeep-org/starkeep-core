@@ -92,9 +92,25 @@ const CALLS: Record<string, () => Promise<unknown>> = {
   deleteNoteIfUnchanged: () => api.deleteNoteIfUnchanged("REC1", "stamp"),
   patchNote: () => api.patchNote("REC1", { pinned: true }),
   deleteNote: () => api.deleteNote("REC1"),
-  searchNotes: () =>
-    api.searchNotes({ text: "a/b", match: "starts", since: "2026-01-01", recordIds: ["REC1"] }),
+  searchNotes: async () => {
+    const base = { text: "a/b", match: "starts", since: "2026-01-01" } as const;
+    await api.searchNotes({ ...base, files: { kind: "page", ids: ["REC1"] } });
+    await api.searchNotes({ ...base, files: { kind: "notPage", ids: ["REC1"] } });
+    await api.searchNotes({ ...base, files: { kind: "collection", collectionId: "a/b" } });
+    await api.searchNotes({ ...base, files: { kind: "noCollection" } });
+  },
   pinnedCount: () => api.pinnedCount(),
+  listCollections: () => api.listCollections(),
+  createCollection: () => api.createCollection("a/b"),
+  patchCollection: () => api.patchCollection("C1", { name: "a/b", archived: true }),
+  deleteCollection: () => api.deleteCollection("C1"),
+  addToCollection: () => api.addToCollection("C1", "REC1"),
+  removeFromCollection: () => api.removeFromCollection("C1", "REC1"),
+  collectionsHolding: () => api.collectionsHolding("REC1"),
+  collectionsLacking: () => api.collectionsLacking("REC1"),
+  collectionContents: () => api.collectionContents("C1"),
+  recordNames: () => api.recordNames(["REC1"]),
+  loadSampleData: () => api.loadSampleData(),
   notesByDay: () => api.notesByDay(0),
   saveExport: () => api.saveExport(),
   listExports: () => api.listExports(),
@@ -140,6 +156,18 @@ describe("every exported operation", () => {
     for (const url of requested) {
       const path = new URL(url, "http://page.example/").pathname;
       expect(path, url).not.toMatch(/%2F/i);
+    }
+  });
+});
+
+describe("every order the page sends", () => {
+  it.each(Object.keys(CALLS))("%s uses the JSON spelling", async (name) => {
+    await CALLS[name]!();
+    for (const url of requested) {
+      const order = new URL(url, "http://page.example/").searchParams.get("order");
+      if (order === null) continue;
+      // The flat spelling, such as `due.desc`, is deprecated.
+      expect(Array.isArray(JSON.parse(order)), url).toBe(true);
     }
   });
 });

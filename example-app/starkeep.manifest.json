@@ -33,6 +33,10 @@
       {
         "key": "derived",
         "description": "Marks a derived copy, valued with how the copy was made, such as uppercase."
+      },
+      {
+        "key": "sample",
+        "description": "A bare flag: the example app's Load sample data button made this file."
       }
     ],
     "appSpecificSyncable": {
@@ -47,6 +51,24 @@
             { "name": "updated_on", "type": "timestamp" }
           ],
           "indexes": [{ "columns": ["pinned"] }]
+        },
+        {
+          "name": "collections",
+          "columns": [
+            { "name": "id", "type": "text", "primaryKey": true, "notNull": true },
+            { "name": "name", "type": "text", "notNull": true },
+            { "name": "archived", "type": "boolean" },
+            { "name": "created_on", "type": "timestamp" }
+          ]
+        },
+        {
+          "name": "collection_items",
+          "columns": [
+            { "name": "collection_id", "type": "text", "primaryKey": true, "notNull": true },
+            { "name": "record_id", "type": "text", "primaryKey": true, "notNull": true },
+            { "name": "added_on", "type": "timestamp" }
+          ],
+          "indexes": [{ "columns": ["record_id"] }]
         }
       ]
     },
