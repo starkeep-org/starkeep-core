@@ -282,16 +282,24 @@ describe("foundational boundary (cloud-data-server only)", () => {
     });
   });
 
-  it("writes and deletes the vault and mobile keys, and reads values nowhere new", () => {
+  it("writes, lists and deletes the vault and mobile keys, and reads values nowhere new", () => {
     const write = byId(statements, "WriteMobileKeys");
     expect(write.Action).toEqual(["ssm:PutParameter", "ssm:DeleteParameter"]);
     expect(write.Resource).toEqual([
       `arn:aws:ssm:*:*:parameter/${PREFIX}/platform/mobile-keys/*`,
       `arn:aws:ssm:*:*:parameter/${PREFIX}/app-creds/_vault/*`,
     ]);
-    // Listing names, never values.
-    expect(byId(statements, "LogsList").Action).toContain("ssm:DescribeParameters");
-    expect(byId(statements, "ReadSsmParameters").Action).toBe("ssm:GetParameter");
+    // The vault lists one user's names by path, and writes SecureStrings
+    // under the SSM service key.
+    expect(byId(statements, "ReadSsmParameters").Action).toEqual([
+      "ssm:GetParameter",
+      "ssm:GetParametersByPath",
+    ]);
+    expect(byId(statements, "SsmSecureStringKmsDecrypt").Action).toEqual([
+      "kms:Decrypt",
+      "kms:Encrypt",
+      "kms:GenerateDataKey",
+    ]);
   });
 
   it("denies mutating IAM (service-linked-role creation aside)", () => {

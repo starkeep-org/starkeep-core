@@ -187,9 +187,11 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       //    admits it so the intersection holds at runtime.
       //  - /platform/*: the deployment's settings, which cloud-data-server
       //    reads to serve them. Not secret.
+      // GetParametersByPath lists one user's vault names under
+      // /app-creds/_vault/<appId>/<userId>, read without decryption.
       Sid: "ReadSsmParameters",
       Effect: "Allow",
-      Action: "ssm:GetParameter",
+      Action: ["ssm:GetParameter", "ssm:GetParametersByPath"],
       Resource: [
         `arn:aws:ssm:*:*:parameter/${stackPrefix}/pulumi/passphrase`,
         `arn:aws:ssm:*:*:parameter/${stackPrefix}/app-creds/*`,
@@ -219,9 +221,11 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       // service key, so a single kms:ViaService-scoped statement covers both —
       // folded together to keep this boundary under the 6144-char
       // managed-policy size limit.
+      // Encrypt and GenerateDataKey: the vault writes SecureStrings under the
+      // same SSM service key.
       Sid: "SsmSecureStringKmsDecrypt",
       Effect: "Allow",
-      Action: "kms:Decrypt",
+      Action: ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"],
       Resource: "*",
       Condition: {
         StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },
@@ -276,12 +280,9 @@ export function foundationalPermissionsBoundaryStatements(stackPrefix: string): 
       // the all-zeros resource arn:aws:logs:…:log-group::log-stream:, so it
       // must be granted on Resource:"*" regardless of which group we want
       // to filter for in the API call.
-      //
-      // ssm:DescribeParameters is list-level too. It returns names and
-      // metadata, never values, and lists a user's vault names.
       Sid: "LogsList",
       Effect: "Allow",
-      Action: ["logs:DescribeLogGroups", "ssm:DescribeParameters"],
+      Action: ["logs:DescribeLogGroups"],
       Resource: "*",
     },
     {
