@@ -387,7 +387,7 @@ async function renderOpen(): Promise<void> {
     return;
   }
   const id = selectedId;
-  // The four reads run at once, but only the record read decides whether the
+  // The six reads run at once, but only the record read decides whether the
   // file is gone. A live file whose bytes this computer lacks answers 404 from
   // its content read too, and that is an error to report.
   const rest = Promise.all([
