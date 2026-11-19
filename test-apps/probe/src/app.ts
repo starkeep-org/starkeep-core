@@ -7,8 +7,9 @@
  * touches every surface the platform offers: a served shell, a sign-in flow, a
  * signing proxy, a shared-record write path, a declared label vocabulary, an
  * app-private table, an analysis read over a snapshot of that table, a
- * JWT-gated compute route, and an MCP route for outside clients holding a
- * delegation token.
+ * JWT-gated compute route, an MCP route for outside clients holding a
+ * delegation token, and a scheduled job the platform runs for each user who
+ * turns it on.
  *
  * It is also the platform's worked example of the shape every Starkeep app
  * takes. The server half is a Hono app; `serve.ts` runs it under
@@ -34,7 +35,17 @@
 
 import { Hono } from "hono";
 import { createSessionRoutes, createSignInPage } from "@starkeep/app-client/auth";
-import { createDataProxyHandler, sessionAuth } from "@starkeep/app-client";
+import {
+  createDataProxyHandler,
+  jobRefusal,
+  listJobs,
+  loadAppCredentials,
+  runJobNow,
+  sessionAuth,
+  signedFetch,
+  verifyJob,
+} from "@starkeep/app-client";
+import { mintIdToken } from "@starkeep/app-client/auth";
 import { appBasePath, honoOriginGate } from "@starkeep/app-client/hono";
 import {
   createSnapshotSql,
@@ -109,6 +120,10 @@ function shellPage(base: string, cloud: boolean): string {
 <label>Upload<input type="file" id="file" accept="image/png,image/jpeg"></label>
 <p id="status" role="status"></p>
 <div id="grid"></div>
+<h2>Background jobs</h2>
+<p id="jobs" role="status"></p>
+<p><a id="job-consent" hidden>Turn on probe-tick</a>
+<button id="job-run" type="button" hidden>Run probe-tick now</button></p>
 <script>window.__PROBE__ = ${JSON.stringify({ base, cloud })};</script>
 <script src="${base}/_immutable/${ASSET_NAME}"></script>
 </body></html>`;
@@ -122,6 +137,28 @@ export const app = new Hono();
 // `verifyDelegation`, and in the cloud the gateway's delegated authorizer has
 // already checked the token. See ./mcp.ts.
 app.post("/mcp", (c) => handleMcp(APP_ID, c.req.raw));
+
+// The scheduled job's route, ahead of the origin gate for the same reason: the
+// platform's dispatcher runs it with a `job` token and no session cookie. Each
+// run writes one note stamped with its run id, through the run's own token, so
+// a suite can see exactly which runs landed and as which user.
+app.post("/_starkeep/jobs/probe-tick", async (c) => {
+  const run = await verifyJob(c.req.raw, "probe-tick");
+  if (!run) return jobRefusal();
+  const creds = await loadAppCredentials(APP_ID);
+  if (!creds) return json({ message: `${APP_ID} has no credentials here` }, 503);
+  const body = JSON.stringify({
+    row: { record_id: `tick-${run.runId}`, note: `probe-tick run ${run.runId}` },
+  });
+  const res = await signedFetch(creds, "/app-data/db/probe_notes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+    delegation: run.token,
+  });
+  if (!res.ok) return json({ message: `Writing the note answered ${res.status}` }, 502);
+  return json({ message: `Wrote tick-${run.runId}` });
+});
 
 // The origin gate, deny-by-default over the manifest's own `publicPaths`. It is
 // inert on the local surface and redundant with the gateway's session
@@ -178,6 +215,33 @@ app.get("/api/notes-summary", async (c) => {
 app.put("/api/upload", (c) => {
   if (isCloud()) return json({ error: "The upload relay is a local-surface route" }, 404);
   return relayUpload(c.req.raw);
+});
+
+// The page's job controls: the user's jobs and the consent page's address,
+// and "run now". Both act for the signed-in user, so in the cloud they carry
+// the user's token; on the local surface the platform answers cloudRequired.
+async function userTokenFor(req: Request): Promise<{ token: string | null; setCookie?: string }> {
+  if (!isCloud()) return { token: null };
+  const minted = await mintIdToken(req, APP_ID);
+  return minted ? { token: minted.token, setCookie: minted.setCookie } : { token: null };
+}
+
+app.get("/api/jobs", async (c) => {
+  const user = await userTokenFor(c.req.raw);
+  if (isCloud() && !user.token) return json({ error: "Sign in first" }, 401);
+  const list = await listJobs(APP_ID, { userToken: user.token });
+  const res = json(list);
+  if (user.setCookie) res.headers.append("Set-Cookie", user.setCookie);
+  return res;
+});
+
+app.post("/api/jobs/probe-tick/run", async (c) => {
+  const user = await userTokenFor(c.req.raw);
+  if (isCloud() && !user.token) return json({ error: "Sign in first" }, 401);
+  const result = await runJobNow(APP_ID, "probe-tick", { userToken: user.token });
+  const res = json(result, result.ok ? 202 : result.cloudRequired ? 501 : result.status);
+  if (user.setCookie) res.headers.append("Set-Cookie", user.setCookie);
+  return res;
 });
 
 app.get("/", () => html(shellPage(appBasePath(), isCloud())));

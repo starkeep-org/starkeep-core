@@ -114,6 +114,8 @@ export interface JourneyApp {
    * route sweep creates and revokes a link only for an app that may.
    */
   readonly publicSharing?: boolean;
+  /** A scheduled job the manifest declares, for the route sweep's job routes. */
+  readonly job?: string;
   /** A JWT-gated route of the app's own, for the CloudFront Bearer step. */
   readonly jwtRoute: JourneyJwtRoute;
   /** Present when the app serves a browser UI the journey should drive. */

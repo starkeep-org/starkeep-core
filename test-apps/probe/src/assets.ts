@@ -127,6 +127,35 @@ async function upload(file) {
     : "Uploaded " + file.name;
 }
 
+// Background jobs: the platform's job list, its consent page, and "run now".
+// On the local surface the platform answers cloudRequired, and the page says so.
+const jobsEl = document.getElementById("jobs");
+const consentEl = document.getElementById("job-consent");
+const runEl = document.getElementById("job-run");
+async function renderJobs() {
+  const res = await fetch(base + "/api/jobs");
+  if (!res.ok) { jobsEl.textContent = "jobs → " + res.status; return; }
+  const list = await res.json();
+  if (list.cloudRequired) { jobsEl.textContent = "Background jobs need a cloud."; return; }
+  const tick = list.jobs.find((j) => j.name === "probe-tick");
+  if (!tick) { jobsEl.textContent = "probe-tick is not offered."; return; }
+  const consent = new URL(tick.consentUrl);
+  consent.searchParams.set("tz", Intl.DateTimeFormat().resolvedOptions().timeZone);
+  consent.searchParams.set("return", base + "/");
+  consentEl.href = consent.toString();
+  consentEl.hidden = false;
+  runEl.hidden = !tick.enabled;
+  const last = tick.lastRun ? tick.lastRun.status + (tick.lastRun.message ? ": " + tick.lastRun.message : "") : "never run";
+  jobsEl.textContent = "probe-tick: " + (tick.enabled ? "on" : "off") + ", " + last +
+    (tick.attention ? " (" + tick.attention + ")" : "");
+}
+runEl.addEventListener("click", async () => {
+  const res = await fetch(base + "/api/jobs/probe-tick/run", { method: "POST" });
+  const body = await res.json();
+  jobsEl.textContent = body.ok ? "probe-tick run " + body.runId + " started" : "run now → " + (body.code || res.status);
+});
+renderJobs();
+
 document.getElementById("file").addEventListener("change", (e) => {
   const file = e.target.files[0];
   if (file) upload(file);
