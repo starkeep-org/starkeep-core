@@ -3,7 +3,7 @@
  * plan-headless-delegated-access-2026-11-13.md, Decision 4.
  */
 import { describe, expect, it } from "vitest";
-import { delegatedMayCall, isDelegatedWrite } from "../src/delegation-policy.js";
+import { delegatedMayCall, isDelegatedWrite, jobMayCall } from "../src/delegation-policy.js";
 
 const ID = "01J00000000000000000000000";
 const KEY = "shared/image/ab/abcdef";
@@ -79,5 +79,31 @@ describe("isDelegatedWrite", () => {
     expect(isDelegatedWrite("POST", "/data/labels")).toBe(true);
     expect(isDelegatedWrite("POST", "/data/records/file-urls")).toBe(false);
     expect(isDelegatedWrite("GET", "/data/records")).toBe(false);
+  });
+});
+
+describe("the vault", () => {
+  it("is on no outside client's list, in either mode", () => {
+    for (const mode of ["read", "readwrite"] as const) {
+      for (const method of ["GET", "PUT", "DELETE"]) {
+        expect(delegatedMayCall(mode, method, "/vault/peloton"), `${mode} ${method}`).toBe(false);
+      }
+      expect(delegatedMayCall(mode, "GET", "/vault")).toBe(false);
+    }
+  });
+
+  it("lets a job's run read and write a secret in both modes, and nothing more", () => {
+    for (const mode of ["read", "readwrite"] as const) {
+      expect(jobMayCall(mode, "GET", "/vault/peloton")).toBe(true);
+      expect(jobMayCall(mode, "PUT", "/vault/peloton")).toBe(true);
+      expect(jobMayCall(mode, "DELETE", "/vault/peloton")).toBe(false);
+      expect(jobMayCall(mode, "GET", "/vault")).toBe(false);
+      expect(jobMayCall(mode, "GET", "/vault/a/b")).toBe(false);
+    }
+  });
+
+  it("holds a job's data calls to its mode, as a delegation's", () => {
+    expect(jobMayCall("read", "POST", "/app-data/db/notes")).toBe(false);
+    expect(jobMayCall("readwrite", "POST", "/app-data/db/notes")).toBe(true);
   });
 });

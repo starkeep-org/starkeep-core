@@ -256,9 +256,12 @@ export function buildBrokerPowerPolicy(stackPrefix: string, accountId: string): 
         // Broker reads every per-app HMAC credential so it can verify
         // signatures on /apps/{appId}/* requests. Scoped to the
         // per-stack creds path; no other SSM parameters are reachable.
+        //
+        // GetParametersByPath lists one user's vault names under
+        // app-creds/_vault/<appId>/<userId>/, read without decryption.
         Sid: "BrokerReadAppCreds",
         Effect: "Allow",
-        Action: "ssm:GetParameter",
+        Action: ["ssm:GetParameter", "ssm:GetParametersByPath"],
         Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/app-creds/*`,
       },
       {
@@ -273,16 +276,25 @@ export function buildBrokerPowerPolicy(stackPrefix: string, accountId: string): 
         // A mobile app's attested key, registered once per install of
         // the app on a phone and read on each of its requests. Public
         // keys and ids only, so a plain String parameter.
+        //
+        // The credential vault, too: a user's secrets for an app's third-party
+        // services, one SecureString each, under app-creds/_vault/. One
+        // statement for both, because the role's inline policies sit at IAM's
+        // quota.
         Sid: "BrokerWriteMobileKeys",
         Effect: "Allow",
-        Action: "ssm:PutParameter",
-        Resource: `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/platform/mobile-keys/*`,
+        Action: ["ssm:PutParameter", "ssm:DeleteParameter"],
+        Resource: [
+          `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/platform/mobile-keys/*`,
+          `arn:aws:ssm:*:${accountId}:parameter/${stackPrefix}/app-creds/_vault/*`,
+        ],
       },
       {
         // SecureString — decrypt via the SSM service key.
+        // Encrypt and GenerateDataKey: the vault writes SecureStrings.
         Sid: "BrokerReadAppCredsKmsDecrypt",
         Effect: "Allow",
-        Action: "kms:Decrypt",
+        Action: ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"],
         Resource: "*",
         Condition: {
           StringLike: { "kms:ViaService": "ssm.*.amazonaws.com" },

@@ -1234,6 +1234,19 @@ export function buildCloudDataServerProgram(
       target: pulumi.interpolate`integrations/${integration.id}`,
     });
 
+    // A user's credential vault for one app: the list, and one secret by
+    // name. The handler decides who may call what (vault-routes.ts).
+    new aws.apigatewayv2.Route("route-app-vault", {
+      apiId: api.id,
+      routeKey: "ANY /apps/{appId}/vault",
+      target: pulumi.interpolate`integrations/${integration.id}`,
+    });
+    new aws.apigatewayv2.Route("route-app-vault-secret", {
+      apiId: api.id,
+      routeKey: "ANY /apps/{appId}/vault/{proxy+}",
+      target: pulumi.interpolate`integrations/${integration.id}`,
+    });
+
     // The path where the dispatcher runs an app's job,
     // /apps/<appId>/_starkeep/jobs/<name>, belongs to the platform. The
     // dispatcher invokes the app's function directly, so this route only
