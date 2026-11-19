@@ -308,6 +308,21 @@ Residual risks:
 - **App code sees the run's token.** The token works only until the run's lease ends.
 - **The bound on concurrent runs is soft.** Overlapping dispatchers can each claim one slot past the bound.
 
+### The credential vault
+
+The vault keeps one person's secrets for one app's third-party services, such as a provider's refresh token, as Parameter Store SecureStrings under the account's `aws/ssm` key. Each secret lives at `/<prefix>/app-creds/_vault/<appId>/<userId>/<name>`.
+
+- **Why `app-creds/`.** Manager may read and decrypt `platform/*`, and every Starkeep admin acts as Manager through admin-web, so a secret there would be every admin's. Under `app-creds/`, Manager may write and delete but never read. An app's execution role reads exactly its own `app-creds/<appId>` and nothing below it, and no app id starts with `_`.
+- **The broker role.** It already reads and decrypts `app-creds/*`. The vault adds `ssm:PutParameter` and `ssm:DeleteParameter` under `app-creds/_vault/*`, `ssm:GetParametersByPath` on `app-creds/*` to list one person's names without decryption, and `kms:Encrypt` and `kms:GenerateDataKey` through SSM.
+- **Who reaches a secret.** `GET /apps/<appId>/vault` lists names and times, and `PUT` and `DELETE /apps/<appId>/vault/<name>` store and remove one, for the person, through the app's server with its signature and the person's token. `GET /apps/<appId>/vault/<name>` answers only a scheduled job's run for its own person, which may also `PUT` a rotated value. An outside client's delegation, a device and a mobile key reach no vault route: no `app`-channel allowlist and no device allowlist names one, and the handler refuses them as well.
+- **Versions.** Parameter Store keeps 100 versions and deletes the oldest on each write, unless the oldest carries a label. The vault never labels a version, so a secret that rotates on every use keeps rotating.
+- **Lifecycle.** Uninstalling an app deletes every person's secrets for it, as Manager, which lists names with `ssm:DescribeParameters` and never reads a value. The bootstrap teardown sweeps `app-creds/` recursively. Starkeep deletes no user, so a person's secrets stay until the person deletes them, the app is uninstalled, or the deployment is torn down.
+
+Residual risks:
+
+- **AWS account administrators outside Starkeep** can read every secret, as they can read every other parameter.
+- **A job's run reads its person's secrets** for the run's life. The run's token is bound to its lease, so the read ends with the run.
+
 ---
 
 ## The local data server

@@ -58,6 +58,8 @@ export interface RouteSweepApp {
    * skips them for an app that names none.
    */
   job?: string;
+  /** Whether to sweep the credential vault's routes, which every cloud app may call. */
+  vault?: boolean;
 }
 
 const q = (params: Record<string, string | number>) =>
@@ -411,6 +413,33 @@ export async function sweepAppRoutes(
         jobs.some((j) => j.name === app.job && j.consentUrl.includes("/connect/job?")),
         `GET /jobs did not list ${app.job} with its consent page`,
       );
+    }
+  }
+
+  // The credential vault: the user stores, lists and deletes a secret, and is
+  // refused a read, which only the app's scheduled jobs make. On the local
+  // surface, every route answers cloud-required.
+  if (app.vault) {
+    const name = `sweep-${run}`;
+    if (target.surface === "local") {
+      const local = await send("GET", "/vault");
+      route("GET /vault, local");
+      assert.equal(local.status, 501, `GET /vault answered ${local.status} locally`);
+      assert.equal((local.body as { code?: unknown }).code, "cloud-required");
+    } else {
+      const put = await send("PUT", `/vault/${name}`, { value: `sweep ${run}` });
+      route("PUT /vault/:name");
+      assert.equal(put.status, 204, `PUT /vault/:name answered ${put.status}`);
+      const listed = ok(await send("GET", "/vault"), route("GET /vault"));
+      const names = (listed["secrets"] as { name: string }[]).map((s) => s.name);
+      assert.ok(names.includes(name), `GET /vault did not list ${name}`);
+      assert.ok(!JSON.stringify(listed).includes(`sweep ${run}`), "GET /vault returned a value");
+      const read = await send("GET", `/vault/${name}`);
+      route("GET /vault/:name, refused");
+      assert.equal(read.status, 403, `a user's read of a secret answered ${read.status}`);
+      const del = await send("DELETE", `/vault/${name}`);
+      route("DELETE /vault/:name");
+      assert.equal(del.status, 204, `DELETE /vault/:name answered ${del.status}`);
     }
   }
 

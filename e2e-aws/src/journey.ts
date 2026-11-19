@@ -81,7 +81,7 @@ import type { JourneyApp, JourneyContext, JourneySharedFile } from "./journey-ap
 import { defineMemberSteps } from "./member-steps.js";
 import { defineDelegationSteps } from "./delegation-steps.js";
 import { defineOAuthSteps } from "./oauth-steps.js";
-import { defineJobSteps, expectNoEnrollment } from "./job-steps.js";
+import { defineJobSteps, expectNoEnrollment, expectNoVault } from "./job-steps.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -2383,6 +2383,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
             ...(app.appChildTable ? { childTable: app.appChildTable } : {}),
             publicSharing: app.publicSharing === true,
             ...(app.job ? { job: app.job } : {}),
+            ...(app.vault ? { vault: true } : {}),
           },
         );
       });
@@ -2419,6 +2420,12 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
           admin: () => admin,
           cookie: () => signInToApp(app.appId),
           table: app.appTable.name,
+          ...(app.vault ? { vaultSecret: app.vaultSecret ?? "probe-secret" } : {}),
+          appCreds: () => ({
+            appId: app.appId,
+            hmacSecret: cloudSecret(app.appId),
+            dataServerUrl: `${config.apiGatewayUrl}/apps/${encodeURIComponent(app.appId)}`,
+          }),
         });
       }
 
@@ -2469,6 +2476,12 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
             app.job!,
             await signInToApp(app.appId),
           );
+        });
+      }
+
+      if (app.vault) {
+        it(`the uninstall deleted ${app.appId}'s users' vault secrets`, async () => {
+          await expectNoVault(config.stackPrefix, app.appId);
         });
       }
 
