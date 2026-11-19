@@ -300,6 +300,14 @@ test("re-uploading identical bytes dedups at the platform layer", async ({ page 
   expect(await page.getByAltText(FIXTURE_NAME).count()).toBe(countBefore);
 });
 
+test("the page says background jobs need a cloud, on the local surface", async ({ page }) => {
+  await page.goto(probeUrl);
+  await expect(page.locator("#jobs")).toHaveText("Background jobs need a cloud.");
+  const run = await fetch(`${probeUrl}/api/jobs/probe-tick/run`, { method: "POST" });
+  expect(run.status).toBe(501);
+  expect(await run.json()).toEqual({ ok: false, cloudRequired: true });
+});
+
 /** Stop Probe and uninstall it through its card and the uninstall dialog. */
 async function uninstallProbe(page: Page): Promise<Locator> {
   await page.goto(adminUrl());
