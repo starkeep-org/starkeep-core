@@ -21,12 +21,29 @@ export { type ProxyRequest, type ProxyResponse, proxyToDataServer } from "./prox
 export {
   DELEGATION_HEADER,
   type DelegatedPrincipal,
+  type DelegationChannel,
   type DelegationMode,
+  type VerifiedDelegationToken,
   type RefusedRequest,
   delegationRefusal,
   verifyDelegation,
   verifyDelegationToken,
 } from "./delegation";
+export {
+  JOB_ROUTE_PREFIX,
+  type JobAttention,
+  type JobCallOptions,
+  type JobList,
+  type JobRequest,
+  type JobRun,
+  type JobState,
+  type RunNowResult,
+  jobConsentUrl,
+  jobRefusal,
+  listJobs,
+  runJobNow,
+  verifyJob,
+} from "./jobs";
 export {
   createDataProxyHandler,
   sessionAuth,

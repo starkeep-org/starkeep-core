@@ -1405,6 +1405,15 @@ async function main() {
         return;
       }
 
+      // Scheduled jobs run in the cloud only. An app's job list and "run now"
+      // answer here so the app can tell the user so, rather than failing on
+      // an unknown route.
+      if (path === "/jobs" || /^\/jobs\/[^/]+\/run$/.test(path)) {
+        res.writeHead(501);
+        json(res, { error: "Background jobs run in the cloud only.", code: "cloud-required" });
+        return;
+      }
+
       if (path === "/config" && req.method === "GET") {
         const freshConfig = await loadStarkeepConfig();
         const freshRegion = freshConfig.userPoolId

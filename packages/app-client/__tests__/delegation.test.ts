@@ -74,6 +74,14 @@ describe("verifyDelegation in the cloud", () => {
     });
   });
 
+  it("refuses a scheduled job's token, which never opens an outside client's route", async () => {
+    const job = token({ sk_channel: "job", sk_job: "tick", sk_run: "run-1" });
+    expect(await verifyDelegation(req({ authorization: `Bearer ${job}` }))).toBeNull();
+    expect(
+      await verifyDelegation(req({ authorization: `Bearer ${token({ sk_channel: "platform" })}` })),
+    ).toBeNull();
+  });
+
   it("fetches the key set once and reuses it", async () => {
     await verifyDelegation(req({ authorization: `Bearer ${token()}` }));
     await verifyDelegation(req({ authorization: `Bearer ${token()}` }));

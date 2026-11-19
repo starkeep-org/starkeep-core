@@ -32,6 +32,23 @@ const JWKS_TTL_MS = 60 * 60 * 1000;
 
 export type DelegationMode = "read" | "readwrite";
 
+/**
+ * Which surface a token reaches. `app`: an outside client, through the app's
+ * endpoint. `job`: one run of a scheduled job (see `jobs.ts`).
+ */
+export type DelegationChannel = "app" | "job";
+
+/** The claims of a verified token, before a caller decides which channel it accepts. */
+export interface VerifiedDelegationToken {
+  userId: string;
+  delegationId: string;
+  mode: DelegationMode;
+  token: string;
+  channel: DelegationChannel;
+  /** On a `job` token: the job and the run. */
+  job: { name: string; runId: string } | null;
+}
+
 export interface DelegatedPrincipal {
   surface: "cloud" | "local";
   /** The user the request acts for. Null on the local surface, which names none. */
@@ -103,7 +120,7 @@ function decodeJson(segment: string): Record<string, unknown> | null {
 export async function verifyDelegationToken(
   token: string,
   opts: { appId: string; cloudDataBase: string; now?: number },
-): Promise<Omit<DelegatedPrincipal, "surface"> | null> {
+): Promise<VerifiedDelegationToken | null> {
   try {
     if (!token.startsWith(TOKEN_PREFIX)) return null;
     const parts = token.slice(TOKEN_PREFIX.length).split(".");
@@ -122,12 +139,20 @@ export async function verifyDelegationToken(
     if (!ok) return null;
     const claims = decodeJson(p);
     if (!claims) return null;
-    const { sub, aud, sk_dlg, sk_mode, exp } = claims;
+    const { sub, aud, sk_dlg, sk_mode, sk_channel, sk_job, sk_run, exp } = claims;
     if (aud !== opts.appId) return null;
     if (typeof exp !== "number" || exp * 1000 <= (opts.now ?? Date.now())) return null;
     if (typeof sub !== "string" || !sub || typeof sk_dlg !== "string" || !sk_dlg) return null;
     if (sk_mode !== "read" && sk_mode !== "readwrite") return null;
-    return { userId: sub, delegationId: sk_dlg, mode: sk_mode, token };
+    if (sk_channel !== "app" && sk_channel !== "job") return null;
+    let job: VerifiedDelegationToken["job"] = null;
+    if (sk_channel === "job") {
+      if (typeof sk_job !== "string" || !sk_job || typeof sk_run !== "string" || !sk_run) {
+        return null;
+      }
+      job = { name: sk_job, runId: sk_run };
+    }
+    return { userId: sub, delegationId: sk_dlg, mode: sk_mode, token, channel: sk_channel, job };
   } catch {
     return null;
   }
@@ -137,7 +162,9 @@ export async function verifyDelegationToken(
  * Who an outside client's request acts for, or null to refuse it.
  *
  * In the cloud: the bearer is a delegation token this deployment signed, for
- * this app, unexpired. The gateway already checked as much; the app checks
+ * this app, on the `app` channel, unexpired. A scheduled job's token is
+ * refused here, so a job's run never opens a route meant for outside
+ * clients; `verifyJob` reads those. The gateway already checked as much; the app checks
  * again because it is about to forward the token, and because a route whose
  * manifest entry says `jwt` by mistake would otherwise trust a header no one
  * checked. The platform checks revocation and the mode on every data call.
@@ -155,7 +182,14 @@ export async function verifyDelegation(req: GuardedRequest): Promise<DelegatedPr
   const match = /^Bearer\s+(\S+)$/i.exec(req.headers.get("authorization") ?? "");
   if (!match) return null;
   const verified = await verifyDelegationToken(match[1]!, { appId, cloudDataBase });
-  return verified ? { surface: "cloud", ...verified } : null;
+  if (!verified || verified.channel !== "app") return null;
+  return {
+    surface: "cloud",
+    userId: verified.userId,
+    delegationId: verified.delegationId,
+    mode: verified.mode,
+    token: verified.token,
+  };
 }
 
 /** The parts of a refused request {@link delegationRefusal} reads. */
