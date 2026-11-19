@@ -25,7 +25,10 @@ describe("repoRoot", () => {
     const outer = join(scratch, "outer");
     const inner = join(outer, "apps", "some-app");
     mkdirSync(inner, { recursive: true });
-    writeFileSync(join(outer, "pnpm-workspace.yaml"), 'packages:\n  - "packages/*"\n  - "apps/*"\n');
+    writeFileSync(
+      join(outer, "pnpm-workspace.yaml"),
+      'packages:\n  - "packages/*"\n  - "apps/*"\n',
+    );
     writeFileSync(join(inner, "pnpm-workspace.yaml"), "packages:\n  - web\n");
     expect(findRepoRoot(join(inner, "src"))).toBe(outer);
   });
