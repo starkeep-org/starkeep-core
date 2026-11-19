@@ -717,12 +717,9 @@ test("Note exports: the list reads every page", async () => {
   await expectLogged("GET", /^\/app-data\/files\?prefix=exports%2F&page_token=/, 200);
 });
 
-test("Deleted: a deletion appears in the reconcile, restores, and takes derived copies and notes", async () => {
+test("Deleted: a deletion appears in the reconcile, restores, and takes derived copies but not notes", async () => {
   await click("Delete uploaded.skexample", "Delete");
   await expectLogged("DELETE", /^\/data\/records\/[^/?]+$/, 200);
-  // The Notes steps deleted this file's note, so the note delete finds a
-  // deleted row and answers 200 with `skipped: "deleted"`.
-  await expectLogged("DELETE", /^\/app-data\/db\/notes$/, 200);
   await expect(table("Example files")).not.toContainText("uploaded.skexample");
   await expect(table("Deleted files")).toContainText("uploaded.skexample");
   await expectLogged("GET", /^\/data\/records\?deleted=only&/, 200);
@@ -739,14 +736,9 @@ test("Deleted: a deletion appears in the reconcile, restores, and takes derived 
   await expect(table("Example files")).not.toContainText("hello-upper.skexample");
   await expect(table("Deleted files")).toContainText("hello.skexample");
   await expect(table("Deleted files")).toContainText("hello-upper.skexample");
-  // The note on hello.skexample goes with its file. The app deletes it from
-  // the ids the record delete answered. The derived copy never had a note, so
-  // its note delete answers 404 with a missing row, and the app counts the
-  // delete as done. The two requests run in the order of the ids the server
-  // answered.
-  await expect(table("Notes")).not.toContainText("first note");
-  await expectLoggedAny("DELETE", /^\/app-data\/db\/notes$/, 404);
-  await expectLoggedAny("DELETE", /^\/app-data\/db\/notes$/, 200);
+  // The note on hello.skexample stays while its file sits in the Trash. The
+  // platform tombstones records only, and the app leaves its own rows alone.
+  await expect(table("Notes")).toContainText("first note");
 
   // With nothing open, "Copies of the selected file" has no file to ask about.
   await page.getByLabel("Show").selectOption("children");
@@ -755,14 +747,13 @@ test("Deleted: a deletion appears in the reconcile, restores, and takes derived 
   await click("Apply filter", "Filter");
 
   // A restore lifts the cascade the delete wrote: the copy comes back too.
-  // The note does not: the app deleted it, and the platform knows nothing of
-  // the app's own rows.
+  // The note never left, so the file comes back with it.
   await click("Restore hello.skexample", "Restore");
   await expect(table("Example files")).toContainText("hello-upper.skexample");
   await expect(await cell("Example files", "hello-upper.skexample", "Copy of")).toHaveText("yes");
   await expect(table("Deleted files")).not.toContainText("hello");
   await click("Open hello.skexample", "Open");
-  await expect(await cell("Open file", "Note", "Value")).toHaveText("none");
+  await expect(await cell("Open file", "Note", "Value")).toHaveText("first note");
 
   // The platform's default window, read through GET /data/trash.
   await expect(await cell("Trash", "Retention window", "Value")).toHaveText("30 days");
@@ -1125,11 +1116,19 @@ test("Notes: filter by a collection, by no collection, and by files off the page
   await click("Search notes", "Search notes");
 });
 
-test("Collections: deleting a file takes it out of every collection", async () => {
+test("Collections: a deleted file keeps its collections, and a restore returns it to them", async () => {
+  await click("Show Recipes", "Show collection");
   await click("Delete bread.skexample", "Delete");
-  await expect(await cell("Collections", "Recipes", "Files")).toHaveText("2");
-  await expect(await cell("Collections", "Old drafts", "Files")).toHaveText("2");
-  await expectLoggedAny("DELETE", /^\/app-data\/db\/collection_items$/, 200);
+  // The membership rows stay, so the counts hold the file in the Trash, and
+  // the contents name it by id because a live-records read cannot find it.
+  await expect(await cell("Collections", "Recipes", "Files")).toHaveText("3");
+  await expect(await cell("Collections", "Old drafts", "Files")).toHaveText("3");
+  await expect(table("Collection contents")).not.toContainText("bread.skexample");
+  await expect(table("Collection contents")).toContainText("(deleted)");
+
+  await click("Restore bread.skexample", "Restore");
+  await expect(await cell("Collection contents", "bread.skexample", "Note")).toHaveText("none");
+  await expect(table("Collection contents")).not.toContainText("(deleted)");
 });
 
 test("Connection: refresh the session, then sign out", async () => {

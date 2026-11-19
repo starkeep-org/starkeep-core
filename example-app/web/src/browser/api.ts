@@ -27,6 +27,7 @@ import {
   decodeNote,
   encodeNote,
   textMetrics,
+  trashFile,
   type Collection,
   type CollectionItemRow,
   type CollectionRow,
@@ -441,41 +442,14 @@ export async function fileUrls(ids: string[]): Promise<Record<string, { url: str
 }
 
 /**
- * `DELETE /data/records/:id`. Deleting a record deletes its derived copies
- * with it: deleting a file also deletes its uppercase copy. Answers the id of
+ * `DELETE /data/records/:id`, through {@link trashFile}, which the MCP
+ * `trash_file` tool shares. Deleting a record deletes its derived copies with
+ * it: deleting a file also deletes its uppercase copy. The file's note and
+ * collection memberships stay, so a restore returns them. Answers the id of
  * every record the delete took, the file's own first.
  */
 export async function deleteRecord(id: string): Promise<string[]> {
-  return expectOk(
-    await data<{ ids: string[] }>("DELETE", `/data/records/${encodeURIComponent(id)}`),
-  ).ids;
-}
-
-/**
- * Delete a file, then the note and the collection memberships of every record
- * the delete took.
- *
- * The platform deletes a record's derived copies, but it knows nothing of the
- * app's own rows that point at a record: a note and a `collection_items` row
- * name their file only by `record_id`. The app deletes those rows itself, from
- * the ids the record delete answers. The record goes first, so a failed delete
- * leaves the rows in place. Restoring the file does not bring them back.
- * Answers the ids of every record the delete took.
- */
-export async function deleteFile(id: string): Promise<string[]> {
-  const ids = await deleteRecord(id);
-  // A table delete names the whole primary key, so one request per row.
-  for (const recordId of ids) {
-    await deleteNote(recordId);
-    const items = await allRows(ITEMS, {
-      where: JSON.stringify({ record_id: recordId }),
-      select: "collection_id",
-      order: JSON.stringify([{ col: "collection_id" }]),
-      limit: 500,
-    });
-    for (const item of items) await removeFromCollection(String(item["collection_id"]), recordId);
-  }
-  return ids;
+  return trashFile(async (method, path) => expectOk(await data(method, path)), id);
 }
 
 // ---------------------------------------------------------------------------

@@ -40,6 +40,7 @@ import {
   decodeNote,
   encodeNote,
   textMetrics,
+  trashFile,
 } from "@example-app/common";
 
 const PROTOCOL_VERSION = "2025-06-18";
@@ -248,7 +249,7 @@ const TOOLS: Record<string, Tool> = {
       "Move an example file to the Trash, where the user can still recover it. Needs read and write access.",
     inputSchema: object({ recordId: { type: "string" } }, ["recordId"]),
     async run(ctx, args) {
-      await data(ctx, "DELETE", `/data/records/${encodeURIComponent(str(args, "recordId"))}`);
+      await trashFile((method, path) => data(ctx, method, path), str(args, "recordId"));
       return "Moved to the Trash.";
     },
   },
