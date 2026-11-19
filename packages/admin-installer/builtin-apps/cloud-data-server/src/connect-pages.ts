@@ -44,8 +44,10 @@ export interface ConnectDeps {
   connectableApps(): Promise<ConnectableApp[]>;
   /** The deployment's browser-facing host names: the resources' hosts. */
   viewerHosts(): Promise<string[]>;
+  /** The deployment's canonical browser-facing host, where apps answer. */
+  publicHost(): Promise<string>;
   groupsMayUseData(groups: readonly string[]): boolean;
-  /** Drop a revoked delegation from this container's row cache. */
+  /** Drop a revoked delegation or job enrollment from this container's row caches. */
   forgetDelegation(id: string): void;
   fetch?: typeof globalThis.fetch;
   now?: () => number;
@@ -130,7 +132,8 @@ const STYLE =
   "line-height:1.5}label{display:block;margin:.75rem 0 .25rem}input,select{font:inherit}" +
   "code,textarea{font-family:ui-monospace,monospace}textarea{width:100%;height:8rem}" +
   "table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:.25rem .5rem;" +
-  "border-bottom:1px solid #ccc}.warn{color:#8a4b00}dt{font-weight:600}dd{margin:0 0 .5rem}";
+  "border-bottom:1px solid #ccc}.warn{color:#8a4b00}dt{font-weight:600}dd{margin:0 0 .5rem}" +
+  "td form{display:inline-block;margin:.25rem 0}";
 
 export function html(
   deps: Pick<ConnectDeps, "cognitoDomain">,

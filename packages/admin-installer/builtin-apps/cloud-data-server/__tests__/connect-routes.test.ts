@@ -46,6 +46,7 @@ function deps(): ConnectDeps {
     db: async () => db.createClient({ hostname: "x", region: "x" }),
     connectableApps: async () => [{ appId: "probe", name: "Probe", delegatedPaths: ["/mcp"] }],
     viewerHosts: async () => ["cloud.example.com"],
+    publicHost: async () => "cloud.example.com",
     groupsMayUseData: (g) => g.includes("starkeep-users"),
     forgetDelegation: () => {},
     fetch: async (input, init) => {
@@ -111,6 +112,8 @@ beforeAll(async () => {
 beforeEach(() => {
   db = new FakeDsql();
   db.on(/insert into "delegation"\."grants"/, []);
+  // The connections page's background jobs: none, unless a case scripts some.
+  db.otherwise(/from "delegation"\."jobs"/, []);
   cognitoCalls = [];
   groups = ["starkeep-users"];
 });

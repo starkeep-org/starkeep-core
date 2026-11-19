@@ -15,7 +15,11 @@
  * - `GET /connect/authorize` and `POST /connect/authorize/approve` serve an
  *   OAuth client's authorization request; see `oauth-authorize.ts`.
  * - `GET /connections` lists the user's delegations, and
- *   `POST /connections/<id>/revoke` ends one.
+ *   `POST /connections/<id>/revoke` ends one. The same page lists the user's
+ *   background jobs.
+ * - `GET /connect/job` and `POST /connect/job/approve` turn on one app's
+ *   scheduled job for the user, and `POST /connections/jobs/<id>/schedule`
+ *   and `/revoke` change or end it; see `job-consent.ts`.
  * - `GET /connect/jwks.json` publishes the public key.
  *
  * Every consent runs its own sign-in, so each delegation keeps its own
@@ -39,10 +43,13 @@ import {
   CONNECT_ROUTE,
   CONNECT_TOKEN_ROUTE,
   CONNECTIONS_ROUTE,
+  CONNECT_JOB_APPROVE_ROUTE,
+  CONNECT_JOB_ROUTE,
   DELEGATION_MODES,
   connectionRevokePath,
   escapeMarkup,
   parseConnectionRevokePath,
+  parseJobActionPath,
   type DelegationMode,
 } from "@starkeep/protocol-primitives";
 import {
@@ -91,6 +98,15 @@ import {
   type PendingOAuth,
 } from "./oauth-authorize.js";
 import { handleTokenRequest } from "./oauth-token.js";
+import {
+  approveJob,
+  jobAction,
+  jobCallback,
+  jobConsentPage,
+  jobsSection,
+  readPendingJob,
+  type PendingJob,
+} from "./job-consent.js";
 import { verifyUserToken } from "./verify-user-token.js";
 
 const SESSION_COOKIE = "sk_connections";
@@ -113,6 +129,7 @@ export function isConnectRoute(method: string, rawPath: string): boolean {
       CONNECT_AUTHORIZE_ROUTE,
       CONNECT_CALLBACK_ROUTE,
       CONNECT_JWKS_ROUTE,
+      CONNECT_JOB_ROUTE,
       CONNECTIONS_ROUTE,
     ].includes(rawPath);
   }
@@ -121,7 +138,9 @@ export function isConnectRoute(method: string, rawPath: string): boolean {
       rawPath === CONNECT_APPROVE_ROUTE ||
       rawPath === CONNECT_AUTHORIZE_APPROVE_ROUTE ||
       rawPath === CONNECT_TOKEN_ROUTE ||
-      parseConnectionRevokePath(rawPath) !== null
+      rawPath === CONNECT_JOB_APPROVE_ROUTE ||
+      parseConnectionRevokePath(rawPath) !== null ||
+      parseJobActionPath(rawPath) !== null
     );
   }
   return false;
@@ -143,7 +162,7 @@ interface PendingList extends PendingBase {
   kind: "list";
 }
 
-type Pending = PendingConsent | PendingList | PendingOAuth;
+type Pending = PendingConsent | PendingList | PendingOAuth | PendingJob;
 
 function readPending(req: ConnectRequest): Pending | null {
   const p = readPendingJson(req);
@@ -151,6 +170,7 @@ function readPending(req: ConnectRequest): Pending | null {
   const ids = { state: p.state as string, verifier: p.verifier as string };
   if (p.kind === "list") return { kind: "list", ...ids };
   if (p.kind === "oauth") return readPendingOAuth(p, ids);
+  if (p.kind === "job") return readPendingJob(p, ids);
   if (p.kind !== "consent") return null;
   const form = checkConsentForm({ app: p.app, mode: p.mode, days: p.days, client: p.client });
   return form.ok ? { kind: "consent", ...ids, ...form.value } : null;
@@ -293,6 +313,7 @@ async function callback(req: ConnectRequest, deps: ConnectDeps): Promise<Connect
   }
 
   if (pending.kind === "oauth") return await oauthCallback(req, deps, pending, tokens);
+  if (pending.kind === "job") return await jobCallback(deps, pending, tokens);
 
   // Checked again here, not only on the form: the app may have been
   // uninstalled during the sign-in, and uninstall's delete of its
@@ -417,7 +438,9 @@ async function connectionsPage(req: ConnectRequest, deps: ConnectDeps): Promise<
           )
           .join("") +
         `</table>`;
-  const body = `${list}<p><a href="${CONNECT_ROUTE}">Connect another program</a></p>`;
+  const body =
+    `${list}<p><a href="${CONNECT_ROUTE}">Connect another program</a></p>` +
+    (await jobsSection(deps, userId, token));
   return html(deps, 200, "Your connections", body, cookies);
 }
 
@@ -448,6 +471,22 @@ async function revoke(
     if (refresh) await revokeAtCognito(deps, refresh);
   }
   return redirect(CONNECTIONS_ROUTE);
+}
+
+async function jobActionRoute(
+  req: ConnectRequest,
+  deps: ConnectDeps,
+  action: NonNullable<ReturnType<typeof parseJobActionPath>>,
+): Promise<ConnectResponse> {
+  if (!sameOriginPost(req.headers, deps.host)) {
+    return message(deps, 403, "This request did not come from the connections page.");
+  }
+  if (!csrfOk(req, new URLSearchParams(req.body))) {
+    return message(deps, 403, "This form has expired. Open your connections again.");
+  }
+  const userId = await sessionUser(req, deps);
+  if (!userId) return redirect(CONNECTIONS_ROUTE);
+  return await jobAction(req, deps, userId, action);
 }
 
 // ---------------------------------------------------------------------------
@@ -489,8 +528,16 @@ export async function handleConnectRoute(
     if (req.method === "GET" && req.rawPath === CONNECTIONS_ROUTE) {
       return await connectionsPage(req, deps);
     }
+    if (req.method === "GET" && req.rawPath === CONNECT_JOB_ROUTE) {
+      return await jobConsentPage(req, deps);
+    }
+    if (req.method === "POST" && req.rawPath === CONNECT_JOB_APPROVE_ROUTE) {
+      return await approveJob(req, deps);
+    }
     const revokeId = req.method === "POST" ? parseConnectionRevokePath(req.rawPath) : null;
     if (revokeId) return await revoke(req, deps, revokeId);
+    const jobPath = req.method === "POST" ? parseJobActionPath(req.rawPath) : null;
+    if (jobPath) return await jobActionRoute(req, deps, jobPath);
     return message(deps, 404, "Not found.");
   } catch (err) {
     console.error("[connect] unexpected failure:", err);

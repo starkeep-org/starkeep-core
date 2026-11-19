@@ -3395,7 +3395,11 @@ async function handleEvent(
             return [...(cfg.hosts ?? [cfg.domain])];
           },
           groupsMayUseData,
-          forgetDelegation: (id) => delegationRowCache.delete(id),
+          publicHost: async () => (await loadCloudFrontSigningConfig()).domain,
+          forgetDelegation: (id) => {
+            delegationRowCache.delete(id);
+            jobRowCache.delete(id);
+          },
         },
       );
     }
