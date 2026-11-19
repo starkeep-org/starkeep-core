@@ -259,20 +259,42 @@ describe("loadSampleData", () => {
     expect(sent[0]!.url.searchParams.get("label")).toBe("example-app/sample");
   });
 
-  it("writes every file, a derived copy, and the rows with ifAbsent", async () => {
-    let next = 0;
+  /**
+   * Answer a sample load. Each new record's id is `id:<file name>`, so a test
+   * can check that each note and membership names its own file's record.
+   * `deletedCollections` answer their `ifAbsent` insert as a deleted row.
+   */
+  function stubLoad(deletedCollections: readonly string[] = []): void {
     stub((s) => {
       if (s.method === "GET") return { records: [] };
       if (s.url.pathname.endsWith("/data/files"))
         return { key: "k", contentHash: "h", sizeBytes: 1 };
-      if (s.url.pathname.endsWith("/data/records")) return { record: { id: `r${next++}` } };
+      if (s.url.pathname.endsWith("/data/records")) {
+        return { record: { id: `id:${(s.body as { fileName: string }).fileName}` } };
+      }
+      const row = (s.body as { row?: { id?: string } }).row;
+      if (
+        s.url.pathname.endsWith("/app-data/db/collections") &&
+        deletedCollections.includes(row?.id ?? "")
+      ) {
+        return { ok: true, changes: 0, skipped: "deleted" };
+      }
       return { ok: true, changes: 1 };
     });
+  }
+
+  const posts = (table: string) =>
+    sent.filter((s) => s.method === "POST" && s.url.pathname.endsWith(`/app-data/db/${table}`));
+  const rowsOf = (table: string) =>
+    posts(table).map((s) => (s.body as { row: Record<string, unknown> }).row);
+  const pairs = (rows: Record<string, unknown>[]) =>
+    rows.map((r) => `${String(r["collection_id"])} ${String(r["record_id"])}`).sort();
+
+  it("writes every file, a derived copy, and the rows with ifAbsent", async () => {
+    stubLoad();
 
     expect(await api.loadSampleData()).toEqual({ loaded: true, files: SAMPLE_FILES.length + 1 });
 
-    const posts = (table: string) =>
-      sent.filter((s) => s.url.pathname.endsWith(`/app-data/db/${table}`));
     const records = sent.filter(
       (s) => s.method === "POST" && s.url.pathname.endsWith("/data/records"),
     );
@@ -283,16 +305,43 @@ describe("loadSampleData", () => {
         value: "",
       });
     }
-    expect(records.filter((r) => (r.body as { parentId?: string }).parentId)).toHaveLength(1);
+    const derived = records.filter((r) => (r.body as { parentId?: string }).parentId);
+    expect(derived.map((r) => (r.body as { parentId: string }).parentId)).toEqual([
+      "id:poem.skexample",
+    ]);
 
-    expect(posts("collections")).toHaveLength(SAMPLE_COLLECTIONS.length);
-    expect(posts("notes")).toHaveLength(SAMPLE_FILES.filter((f) => f.note).length);
-    expect(posts("collection_items")).toHaveLength(
-      SAMPLE_FILES.reduce((n, f) => n + f.collections.length, 0),
+    expect(rowsOf("collections").map((r) => r["id"])).toEqual(SAMPLE_COLLECTIONS.map((c) => c.id));
+    // Each note and membership names its own file's record.
+    expect(
+      rowsOf("notes")
+        .map((r) => `${String(r["record_id"])} ${String(r["note"])}`)
+        .sort(),
+    ).toEqual(
+      SAMPLE_FILES.filter((f) => f.note)
+        .map((f) => `id:${f.name} ${f.note!.text}`)
+        .sort(),
+    );
+    expect(pairs(rowsOf("collection_items"))).toEqual(
+      SAMPLE_FILES.flatMap((f) => f.collections.map((c) => `${c} id:${f.name}`)).sort(),
     );
     for (const s of [...posts("collections"), ...posts("notes"), ...posts("collection_items")]) {
       expect((s.body as { ifAbsent?: boolean }).ifAbsent).toBe(true);
     }
+  });
+
+  it("puts no file in a sample collection the person deleted", async () => {
+    // The delete left a tombstone, so the ifAbsent insert skips the row. A
+    // membership in it would count the file as in a collection that no
+    // longer shows.
+    stubLoad(["sample-recipes"]);
+
+    await api.loadSampleData();
+
+    expect(pairs(rowsOf("collection_items"))).toEqual(
+      SAMPLE_FILES.flatMap((f) =>
+        f.collections.filter((c) => c !== "sample-recipes").map((c) => `${c} id:${f.name}`),
+      ).sort(),
+    );
   });
 });
 

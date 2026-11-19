@@ -1110,7 +1110,8 @@ export type SampleLoad = { loaded: true; files: number } | { loaded: false };
  * Records take ids the server assigns, so the load cannot key its files the
  * way it keys rows. Each sample file carries the bare `sample` flag instead,
  * and the load does nothing while a live file carries it. App rows go in with
- * `ifAbsent`, so a collection the person deleted stays deleted.
+ * `ifAbsent`, so a collection the person deleted stays deleted, and the load
+ * puts no file in it.
  */
 export async function loadSampleData(): Promise<SampleLoad> {
   const existing = expectOk(
@@ -1121,6 +1122,8 @@ export async function loadSampleData(): Promise<SampleLoad> {
   );
   if (existing.records.length > 0) return { loaded: false };
 
+  // A sample collection the person deleted stays deleted, so no file joins it.
+  const deletedCollections = new Set<string>();
   for (const c of SAMPLE_COLLECTIONS) {
     const row: CollectionRow = {
       id: c.id,
@@ -1128,7 +1131,10 @@ export async function loadSampleData(): Promise<SampleLoad> {
       archived: c.archived,
       created_on: new Date().toISOString(),
     };
-    expectOk(await data("POST", COLLECTIONS, { json: { row, ifAbsent: true } }));
+    const written = expectOk(
+      await data<{ skipped?: string }>("POST", COLLECTIONS, { json: { row, ifAbsent: true } }),
+    );
+    if (written.skipped === "deleted") deletedCollections.add(c.id);
   }
 
   const sampleLabel = { key: LABEL_KEYS.sample, value: "" };
@@ -1176,18 +1182,20 @@ export async function loadSampleData(): Promise<SampleLoad> {
             }).then(expectOk),
           ]
         : []),
-      ...file.collections.map((collectionId) =>
-        data("POST", ITEMS, {
-          json: {
-            row: {
-              collection_id: collectionId,
-              record_id: record.id,
-              added_on: new Date().toISOString(),
-            } satisfies CollectionItemRow,
-            ifAbsent: true,
-          },
-        }).then(expectOk),
-      ),
+      ...file.collections
+        .filter((collectionId) => !deletedCollections.has(collectionId))
+        .map((collectionId) =>
+          data("POST", ITEMS, {
+            json: {
+              row: {
+                collection_id: collectionId,
+                record_id: record.id,
+                added_on: new Date().toISOString(),
+              } satisfies CollectionItemRow,
+              ifAbsent: true,
+            },
+          }).then(expectOk),
+        ),
     ]),
   );
   return { loaded: true, files: made.length + 1 };
