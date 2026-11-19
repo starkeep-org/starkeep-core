@@ -1,5 +1,19 @@
 # @starkeep/storage-aurora-dsql
 
+## 0.10.0
+
+### Minor Changes
+
+- 00a78b5: The app row query gains a `join` parameter, column operands (`{"eq":{"col":"<table>.<column>"}}`), `exists` and `not_exists` subqueries, `in` and `not_in` with a subquery, an explicit `eq` and a literal `not_in`. Joined columns come back under qualified keys such as `"tasks.title"`, and a query with `join` must name its columns in `select`. `order` gains a JSON spelling, `[{"col":"tasks.due","dir":"desc","nulls":"first"}]`, which can name a joined column. The flat spelling, `due.desc`, still parses for columns of the queried table, but it is deprecated: both data servers answer it with a `Deprecation` header and log one line per app. `flatOrderDeprecation` and `isFlatOrder` are new exports of `@starkeep/shared-space-api`. The manifest validator refuses the column names `exists` and `not_exists`, two tables with one name, and two columns with one name in one table. `parseQuery` takes an optional `{ tables }` argument that enables the multi-table forms; without it, they are refused.
+
+### Patch Changes
+
+- Updated dependencies [941c6fc]
+- Updated dependencies [00a78b5]
+  - @starkeep/sync-engine@0.13.0
+  - @starkeep/storage-adapter@0.11.0
+  - @starkeep/shared-space-api@0.10.0
+
 ## 0.9.0
 
 ### Minor Changes

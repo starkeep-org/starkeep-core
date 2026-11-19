@@ -1,5 +1,16 @@
 # @starkeep/sync-engine
 
+## 0.13.0
+
+### Minor Changes
+
+- 941c6fc: The local schema gains `retained_app_data`, which records an app's syncable tables and files once an uninstall keeps them. `deleteSqliteUploadQueueChannel` deletes one channel's upload-queue rows, for deleting an app's data on a node.
+
+### Patch Changes
+
+- Updated dependencies [00a78b5]
+  - @starkeep/storage-adapter@0.11.0
+
 ## 0.12.0
 
 ### Minor Changes
