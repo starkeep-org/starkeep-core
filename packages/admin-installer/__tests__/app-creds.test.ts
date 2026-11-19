@@ -1,18 +1,22 @@
 /**
  * An app's HMAC secret in SSM: created once at cloud install, never rotated by
  * a reinstall. And the CloudFront signing config, which the broker reads to
- * keep a visit's sign-in and signed URLs on the host the visit used.
+ * keep a visit's sign-in and signed URLs on the host the visit used. And the
+ * uninstall's sweep of an app's credential vault.
  */
 import { beforeEach, describe, expect, it } from "vitest";
 import { mockClient } from "aws-sdk-client-mock";
 import {
   SSMClient,
   DeleteParameterCommand,
+  DescribeParametersCommand,
+  GetParameterCommand,
   ParameterAlreadyExists,
   ParameterNotFound,
   PutParameterCommand,
 } from "@aws-sdk/client-ssm";
 import {
+  deleteAppVault,
   deleteSigningParameters,
   ensureAppCredsParameter,
   putCloudFrontSigningParameter,
@@ -133,5 +137,52 @@ describe("deleteSigningParameters", () => {
       .resolves({});
     await deleteSigningParameters(opts);
     expect(ssm.commandCalls(DeleteParameterCommand)).toHaveLength(2);
+  });
+});
+
+describe("deleteAppVault", () => {
+  const opts = { stackPrefix: "sk", appId: "exercise", region: "us-east-2", awsCreds };
+
+  it("lists the app's vault by path, names only, and deletes each secret across pages", async () => {
+    ssm
+      .on(DescribeParametersCommand)
+      .resolvesOnce({
+        Parameters: [
+          { Name: "/sk/app-creds/_vault/exercise/u1/peloton" },
+          { Name: "/sk/app-creds/_vault/exercise/u2/garmin" },
+        ],
+        NextToken: "n",
+      })
+      .resolvesOnce({
+        Parameters: [
+          { Name: "/sk/app-creds/_vault/exercise/u3/peloton" },
+          // Never another app's, whatever the filter answers.
+          { Name: "/sk/app-creds/_vault/exercise-two/u1/peloton" },
+        ],
+      });
+    ssm.on(DeleteParameterCommand).resolves({});
+    expect(await deleteAppVault(opts)).toBe(3);
+    const describe = ssm.commandCalls(DescribeParametersCommand);
+    expect(describe[0]!.args[0].input.ParameterFilters).toEqual([
+      { Key: "Path", Option: "Recursive", Values: ["/sk/app-creds/_vault/exercise"] },
+    ]);
+    expect(describe[1]!.args[0].input.NextToken).toBe("n");
+    expect(ssm.commandCalls(DeleteParameterCommand).map((c) => c.args[0].input.Name)).toEqual([
+      "/sk/app-creds/_vault/exercise/u1/peloton",
+      "/sk/app-creds/_vault/exercise/u2/garmin",
+      "/sk/app-creds/_vault/exercise/u3/peloton",
+    ]);
+    // Manager never reads a value.
+    expect(ssm.commandCalls(GetParameterCommand)).toHaveLength(0);
+  });
+
+  it("finishes a sweep that an earlier run started", async () => {
+    ssm.on(DescribeParametersCommand).resolves({
+      Parameters: [{ Name: "/sk/app-creds/_vault/exercise/u1/peloton" }],
+    });
+    ssm
+      .on(DeleteParameterCommand)
+      .rejects(new ParameterNotFound({ message: "gone", $metadata: {} }));
+    expect(await deleteAppVault(opts)).toBe(0);
   });
 });

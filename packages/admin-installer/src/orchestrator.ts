@@ -40,6 +40,7 @@ import {
 import {
   appCredsParameterName,
   deleteAppCredsParameter,
+  deleteAppVault,
   ensureAppCredsParameter,
 } from "./app-creds";
 import { runAppInstallDdl, runAppUninstallDdl, type DsqlDdlOptions } from "./dsql-ddl";
@@ -730,6 +731,19 @@ async function uninstallAppInner(input: UninstallInput, registry: Registry): Pro
       awsCreds: managerCreds,
     }),
   );
+
+  // Unlike its rows and files, an app's users' vault secrets do not outlive
+  // it: they are credentials for the app's own third-party services, and a
+  // reinstall starts without them. Its own step, so a rerun finishes the
+  // sweep.
+  await runStep(registry, appId, "uninstall", "delete_app_vault", done, async () => {
+    await deleteAppVault({
+      stackPrefix: config.stackPrefix,
+      appId,
+      region: config.region,
+      awsCreds: managerCreds,
+    });
+  });
 
   // delete_app_registry already forgot the ledger, but every step after it
   // recorded itself again. Left in place, those records would make the next
