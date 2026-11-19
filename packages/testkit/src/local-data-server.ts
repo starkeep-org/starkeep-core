@@ -22,6 +22,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, rm, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
+import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,8 +39,18 @@ export interface LocalDataServerOptions {
    * did not create.
    */
   starkeepDir?: string;
-  /** Fixed port; defaults to an ephemeral free port. */
+  /**
+   * Fixed port; defaults to an ephemeral free port. A fixed port gets one
+   * attempt. An ephemeral port is retried on a fresh port when another process
+   * takes it before the server binds it.
+   */
   port?: number;
+  /**
+   * Picks the port for each ephemeral attempt; defaults to {@link getFreePort}.
+   * Exists so the harness's own tests can hand it a taken port first.
+   * @internal
+   */
+  pickPort?: () => Promise<number>;
   /**
    * Written to `<dir>/config.json` before boot (merged over the defaults the
    * server would generate). Use `apiGatewayUrl` to point the server at a fake
@@ -106,19 +117,96 @@ export async function getFreePort(): Promise<number> {
   });
 }
 
+interface Boot {
+  port: number;
+  url: string;
+  child: ChildProcess;
+  exited: Promise<number | null>;
+  successors: number[];
+  output(): string;
+  healthy: boolean;
+  /** The child died before it became healthy (as opposed to timing out). */
+  exitedEarly: boolean;
+}
+
+// Printed by server.ts from its own listen callback, so seeing it proves this
+// child holds the port. /health alone cannot: when another test's server holds
+// the port, it answers /health for a child that is about to die of EADDRINUSE.
+const LISTENING_LINE = "Starkeep data server listening on";
+
+/** Spawns one server on `port` and waits until it is healthy, dies, or times out. */
+async function bootOnce(
+  command: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  port: number,
+  startTimeoutMs: number,
+): Promise<Boot> {
+  const url = `http://127.0.0.1:${port}`;
+  const child = spawn(command, args, { env, stdio: ["ignore", "pipe", "pipe"] });
+  // A PATCH /config restart replaces the server with a *detached* process that
+  // is not our child, so `child` stops naming the thing that has to be killed.
+  // The outgoing server prints its replacement's pid on the way out; collect
+  // those so stop() reaps whoever is actually serving. Only the first
+  // replacement announces itself here — later ones log to a file under
+  // STARKEEP_DIR, not to this pipe — which is why STARKEEP_EXIT_WITH_PID
+  // still has to be the general answer.
+  let output = "";
+  const successors: number[] = [];
+  let partialLine = "";
+  const collect = (chunk: Buffer) => {
+    const text = chunk.toString();
+    output += text;
+    const lines = (partialLine + text).split("\n");
+    partialLine = lines.pop() ?? "";
+    for (const line of lines) {
+      const match = /\[server\] Restarted as pid (\d+)/.exec(line);
+      if (match) successors.push(Number(match[1]));
+    }
+  };
+  child.stdout!.on("data", collect);
+  child.stderr!.on("data", collect);
+
+  const exited = new Promise<number | null>((resolveExit) => {
+    child.once("exit", (code) => resolveExit(code));
+  });
+  // "close" fires once the child has exited *and* its pipes are drained, so the
+  // crash text (EADDRINUSE included) is in `output` by then.
+  const closed = new Promise<void>((resolveClose) => child.once("close", () => resolveClose()));
+  const hasExited = () => child.exitCode !== null || child.signalCode !== null;
+
+  const deadline = Date.now() + startTimeoutMs;
+  let healthy = false;
+  while (Date.now() < deadline && !hasExited()) {
+    if (output.includes(LISTENING_LINE)) {
+      try {
+        const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(1_000) });
+        if (res.ok) {
+          healthy = true;
+          break;
+        }
+      } catch {
+        // not up yet
+      }
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const exitedEarly = !healthy && hasExited();
+  // Bounded: a grandchild (tsx runs the server in one) could hold the pipes open.
+  if (exitedEarly) await Promise.race([closed, new Promise((r) => setTimeout(r, 2_000))]);
+  return { port, url, child, exited, successors, output: () => output, healthy, exitedEarly };
+}
+
 export async function startLocalDataServer(
   options: LocalDataServerOptions = {},
 ): Promise<LocalDataServer> {
   const ownsDir = options.starkeepDir === undefined;
   const starkeepDir = options.starkeepDir ?? (await mkdtemp(join(tmpdir(), "starkeep-lds-")));
-  const port = options.port ?? (await getFreePort());
-  const url = `http://127.0.0.1:${port}`;
-
   if (options.config) {
     await mkdir(starkeepDir, { recursive: true });
     // nodeId must be unique per replica; provide one so the server doesn't
     // need its first-boot generation path when a partial config is given.
-    const config = { nodeId: `test-${port}-${Date.now()}`, ...options.config };
+    const config = { nodeId: `test-${randomUUID()}`, ...options.config };
     await writeFile(join(starkeepDir, "config.json"), JSON.stringify(config, null, 2));
   }
 
@@ -139,10 +227,8 @@ export async function startLocalDataServer(
   }
   const signIn = typeof cloudUrl === "string" && options.signIn !== false;
 
-  let output = "";
   const childEnv: NodeJS.ProcessEnv = {
     ...process.env,
-    STARKEEP_PORT: String(port),
     // The fake cloud plays the pool at a fixed path under its own address. Set
     // only when the harness signs in, which is only against a fake cloud: a
     // real cloud's pool is Cognito itself, and a test that signs in on its own
@@ -172,60 +258,39 @@ export async function startLocalDataServer(
   const [command, args] = bundledEntry
     ? [process.execPath, [bundledEntry]]
     : [TSX_BIN, [SERVER_ENTRY]];
-  const child = spawn(command, args, {
-    env: childEnv,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  // A PATCH /config restart replaces the server with a *detached* process that
-  // is not our child, so `child` stops naming the thing that has to be killed.
-  // The outgoing server prints its replacement's pid on the way out; collect
-  // those so stop() reaps whoever is actually serving. Only the first
-  // replacement announces itself here — later ones log to a file under
-  // STARKEEP_DIR, not to this pipe — which is why STARKEEP_EXIT_WITH_PID above
-  // still has to be the general answer.
-  const successors: number[] = [];
-  let partialLine = "";
-  const collect = (chunk: Buffer) => {
-    const text = chunk.toString();
-    output += text;
-    const lines = (partialLine + text).split("\n");
-    partialLine = lines.pop() ?? "";
-    for (const line of lines) {
-      const match = /\[server\] Restarted as pid (\d+)/.exec(line);
-      if (match) successors.push(Number(match[1]));
-    }
-  };
-  child.stdout!.on("data", collect);
-  child.stderr!.on("data", collect);
-
-  const exited = new Promise<number | null>((resolveExit) => {
-    child.once("exit", (code) => resolveExit(code));
-  });
-
-  // Wait for /health (or early exit).
   const startTimeoutMs = options.startTimeoutMs ?? 30_000;
-  const deadline = Date.now() + startTimeoutMs;
-  let healthy = false;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) break;
-    try {
-      const res = await fetch(`${url}/health`, { signal: AbortSignal.timeout(1_000) });
-      if (res.ok) {
-        healthy = true;
-        break;
-      }
-    } catch {
-      // not up yet
-    }
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  if (!healthy) {
-    child.kill("SIGKILL");
+
+  // An ephemeral port can be lost between getFreePort() releasing it and the
+  // child binding it: another server in the parallel test run takes it, and the
+  // child dies with EADDRINUSE. Retry those on a fresh port. A fixed port is the
+  // caller's choice, so a clash with it is the caller's failure to see.
+  const pickPort = options.pickPort ?? getFreePort;
+  const maxAttempts = options.port === undefined ? 3 : 1;
+  let attempt = 0;
+  let boot: Boot;
+  for (;;) {
+    attempt++;
+    const port = options.port ?? (await pickPort());
+    boot = await bootOnce(
+      command,
+      args,
+      { ...childEnv, STARKEEP_PORT: String(port) },
+      port,
+      startTimeoutMs,
+    );
+    if (boot.healthy) break;
+    boot.child.kill("SIGKILL");
+    if (boot.exitedEarly && /EADDRINUSE/.test(boot.output()) && attempt < maxAttempts) continue;
     if (ownsDir) await rm(starkeepDir, { recursive: true, force: true });
+    const why = boot.exitedEarly
+      ? `exited (code ${String(boot.child.exitCode)}, signal ${String(boot.child.signalCode)}) before becoming healthy`
+      : `did not become healthy within ${startTimeoutMs}ms`;
     throw new Error(
-      `local-data-server did not become healthy on ${url} within ${startTimeoutMs}ms.\n--- output ---\n${output}`,
+      `local-data-server on ${boot.url} ${why} (attempt ${attempt} of ${maxAttempts}).\n--- output ---\n${boot.output()}`,
     );
   }
+  const { port, url, child, exited, successors } = boot;
+  const output = boot.output;
 
   if (signIn) {
     const status = (await (await fetch(`${url}/auth/status`)).json()) as { state?: string };
@@ -240,7 +305,7 @@ export async function startLocalDataServer(
         if (ownsDir) await rm(starkeepDir, { recursive: true, force: true });
         throw new Error(
           `local-data-server could not sign in to ${String(cloudUrl)}: ${res.status} ${await res.text()}\n` +
-            `--- output ---\n${output}`,
+            `--- output ---\n${output()}`,
         );
       }
     }
@@ -292,7 +357,7 @@ export async function startLocalDataServer(
     port,
     starkeepDir,
     child,
-    logs: () => output,
+    logs: output,
     successorPids: () => [...successors],
     async waitForExit(timeoutMs = 10_000) {
       const timeout = new Promise<never>((_, rejectExit) =>
