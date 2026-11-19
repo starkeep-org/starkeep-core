@@ -112,10 +112,10 @@ function matchesArn(pattern: string, arn: string): boolean {
   return new RegExp(`^${escaped}$`).test(arn);
 }
 
-/** Resource patterns of every Allow statement granting `action`. */
+/** Resource patterns of every Allow statement granting `action`, wildcards included. */
 function resourcesFor(statements: Statement[], action: string): string[] {
   return statements
-    .filter((s) => s.Effect === "Allow" && toArray(s.Action).includes(action))
+    .filter((s) => s.Effect === "Allow" && toArray(s.Action).some((a) => matchesArn(a, action)))
     .flatMap((s) => toArray(s.Resource));
 }
 
