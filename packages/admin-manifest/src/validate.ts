@@ -6,7 +6,12 @@ import {
   SIGN_IN_PATH,
 } from "./schema.js";
 import { z } from "zod";
-import { isKnownType, typeCategory, isGrantableCategory } from "@starkeep/protocol-primitives";
+import {
+  isKnownType,
+  typeCategory,
+  isGrantableCategory,
+  protocolSatisfies,
+} from "@starkeep/protocol-primitives";
 import { declaredHandlerRoutes, publicPathRoutePath } from "./routes.js";
 
 export interface ValidationResult {
@@ -228,6 +233,47 @@ export function validateManifest(raw: unknown): ValidationResult {
       'infraRequirements.publicSharing is true but targets omits "cloud" — public links ' +
         "are served by the cloud",
     );
+  }
+
+  // --- Scheduled jobs --------------------------------------------------
+  //
+  // The cloud's dispatcher runs a job by invoking one of the app's compute
+  // handlers, so a job needs the cloud, compute and a handler it can name.
+  // Jobs arrived in protocol 1.1.0, so an app that declares one must require
+  // a platform that runs it; an older platform would install the app and
+  // never run the job.
+  const jobs = manifest.infraRequirements.jobs;
+  if (jobs.length > 0) {
+    const handlerNames = new Set(manifest.infraRequirements.compute.handlers.map((h) => h.name));
+    const seenJobs = new Set<string>();
+    for (const job of jobs) {
+      const where = `infraRequirements.jobs["${job.name}"]`;
+      if (seenJobs.has(job.name)) {
+        errors.push(`infraRequirements.jobs: duplicate job "${job.name}"`);
+      }
+      seenJobs.add(job.name);
+      if (!handlerNames.has(job.handler)) {
+        errors.push(`${where}.handler: "${job.handler}" is not a declared compute handler`);
+      }
+    }
+    if (!manifest.infraRequirements.compute.enabled) {
+      errors.push(
+        "infraRequirements.jobs is declared but compute.enabled is false — a job runs on " +
+          "one of the app's compute handlers",
+      );
+    }
+    if (!manifest.targets.includes("cloud")) {
+      errors.push(
+        'infraRequirements.jobs is declared but targets omits "cloud" — jobs run in the cloud only',
+      );
+    }
+    if (!protocolSatisfies("1.1.0", manifest.protocolMinVersion)) {
+      errors.push(
+        `infraRequirements.jobs needs protocolMinVersion "1.1.0" or later (got ` +
+          `"${manifest.protocolMinVersion}"), so an older platform refuses the app instead ` +
+          `of installing it and never running its jobs`,
+      );
+    }
   }
 
   // Label keys are the app's published schema, so a duplicate is a manifest

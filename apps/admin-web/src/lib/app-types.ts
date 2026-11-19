@@ -8,6 +8,7 @@ export {
   dependencyConsent,
   grantPermissions,
   publicSharingConsent,
+  jobsConsent,
 } from "@starkeep/admin-installer/consent-text";
 
 export type AppTarget = "local" | "cloud";
@@ -96,6 +97,8 @@ export interface ManifestSummary {
     compute?: { enabled: boolean };
     /** The app asks to publish records to public links. */
     publicSharing?: boolean;
+    /** The app's scheduled jobs. */
+    jobs?: { name: string; mode: "read" | "readwrite"; description: string }[];
   };
   /** The mobile builds the app ships; see the manifest's `mobile` field. */
   mobile?: {

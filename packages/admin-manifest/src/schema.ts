@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { LOGICAL_COLUMN_TYPES, parseProtocolVersion } from "@starkeep/protocol-primitives";
+import {
+  JOB_NAME_PATTERN,
+  LOGICAL_COLUMN_TYPES,
+  parseProtocolVersion,
+} from "@starkeep/protocol-primitives";
 
 export const appTierSchema = z.enum(["official", "verified", "community"]);
 
@@ -472,6 +476,36 @@ export const appSpecificSyncableSchema = z.strictObject({
   files: z.boolean().default(false),
 });
 
+/**
+ * One scheduled job. The platform's dispatcher runs it once per enrolled
+ * user: at the user's chosen time of day, or only when the user asks. Each
+ * user turns a job on separately, on the platform's consent page, so the
+ * install approves the job's existence and the user approves each run's
+ * authority.
+ *
+ * The dispatcher invokes `handler` with `POST /apps/<appId>/_starkeep/jobs/<name>`
+ * and a `job` token for that user, and the app verifies it with `verifyJob`
+ * from `@starkeep/app-client`. `mode` bounds what the run may do with the
+ * user's data, as a delegation's mode does. `defaultTime` is the time of day
+ * the consent page offers first, as `HH:MM` in the user's zone, or null to
+ * offer "only when I ask".
+ */
+export const appJobSchema = z.strictObject({
+  name: z.string().regex(JOB_NAME_PATTERN, {
+    message: "a job name is a lowercase letter, then up to 31 lowercase letters, digits or -",
+  }),
+  /** The compute handler's `name`. */
+  handler: z.string().min(1),
+  mode: z.enum(["read", "readwrite"]),
+  defaultTime: z
+    .string()
+    .regex(/^([01]\d|2[0-3]):[0-5]\d$/, { message: "defaultTime is HH:MM, from 00:00 to 23:59" })
+    .nullable()
+    .default(null),
+  /** One sentence the consent page shows. */
+  description: z.string().min(1).max(200),
+});
+
 export const infraRequirementsSchema = z.strictObject({
   fileAccess: z.array(fileAccessSchema).default([]),
   // All-access over every type + the `other` catch-all. Only the
@@ -507,6 +541,11 @@ export const infraRequirementsSchema = z.strictObject({
    * cloud's.
    */
   publicSharing: z.boolean().default(false),
+  /**
+   * Scheduled jobs, run in the cloud once per enrolled user. See
+   * {@link appJobSchema}. Cloud only, and each job names a compute handler.
+   */
+  jobs: z.array(appJobSchema).max(8).default([]),
 });
 
 export const permissionEntrySchema = z.strictObject({
@@ -617,6 +656,7 @@ export type LabelKey = z.infer<typeof labelKeySchema>;
 export type SharedResourceRequirement = z.infer<typeof sharedResourceRequirementSchema>;
 export type AppComputeRoute = z.infer<typeof appComputeRouteSchema>;
 export type AppComputeHandler = z.infer<typeof appComputeHandlerSchema>;
+export type AppJob = z.infer<typeof appJobSchema>;
 export type SyncableTableColumn = z.infer<typeof syncableTableColumnSchema>;
 export type SyncableTable = z.infer<typeof syncableTableSchema>;
 export type AppSpecificSyncable = z.infer<typeof appSpecificSyncableSchema>;

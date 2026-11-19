@@ -13,6 +13,7 @@ import { ConsentDialog } from "../src/components/ConsentDialog";
 import {
   accessLead,
   dependencyConsent,
+  jobsConsent,
   publicSharingConsent,
   type DependencyPlan,
   type LocalAppEntry,
@@ -63,6 +64,16 @@ describe("the consent dialog and the terminal install say the same words", () =>
       { kind: "run", display: "pnpm install --frozen-lockfile", cwd: "/apps/notes" },
     ],
     [
+      "background jobs",
+      {
+        jobs: [
+          { name: "sync", mode: "readwrite", description: "Pulls new workouts." },
+          { name: "digest", mode: "read", description: "Mails a weekly summary." },
+        ],
+      },
+      { kind: "skip", reason: "none" },
+    ],
+    [
       "the User-Data-Owner and a refused dependency install",
       { fileAccessAll: true },
       {
@@ -78,6 +89,7 @@ describe("the consent dialog and the terminal install say the same words", () =>
     expect(text).toContain(accessLead(app.manifest));
     const links = publicSharingConsent(app.manifest);
     if (links) expect(text).toContain(links);
+    for (const line of jobsConsent(app.manifest)) expect(text).toContain(line);
     const dependencies = dependencyConsent(plan);
     if (dependencies) expect(text).toContain(dependencies);
   });

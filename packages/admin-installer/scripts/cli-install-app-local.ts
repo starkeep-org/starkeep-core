@@ -36,6 +36,7 @@ import {
   dependencyConsent,
   grantPermissions,
   publicSharingConsent,
+  jobsConsent,
 } from "../src/consent-text";
 import { installLocalApp } from "../src/local-app-install";
 import { prompt } from "../src/cli-prompt";
@@ -88,6 +89,11 @@ if (!manifest.infraRequirements?.fileAccessAll) {
 }
 const publicLinks = publicSharingConsent(manifest);
 if (publicLinks) console.log(`\nPublic links: ${publicLinks}`);
+const jobLines = jobsConsent(manifest);
+if (jobLines.length > 0) {
+  console.log("\nBackground jobs:");
+  for (const line of jobLines) console.log(`  - ${line}`);
+}
 
 const install = resolveInstallCommand(appDir, folder.raw as CommandSource);
 const dependencies = dependencyConsent(install);

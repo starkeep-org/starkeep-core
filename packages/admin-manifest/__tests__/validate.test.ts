@@ -1158,3 +1158,94 @@ describe("mobile builds", () => {
     expect(result.errors.join("\n")).toMatch(/callbackScheme may not be "https"/);
   });
 });
+
+describe("infraRequirements.jobs", () => {
+  const job = {
+    name: "sync",
+    handler: "api",
+    mode: "readwrite",
+    defaultTime: "06:30",
+    description: "Pulls yesterday's workouts from the provider.",
+  };
+  function withJobs(jobs: unknown[], over: Record<string, unknown> = {}) {
+    return minimal({
+      protocolMinVersion: "1.1.0",
+      targets: ["cloud"],
+      infraRequirements: {
+        compute: { enabled: true, handlers: [{ name: "api", handler: "index.handler" }] },
+        jobs,
+      },
+      ...over,
+    });
+  }
+
+  it("accepts a job on a cloud app with compute", () => {
+    const result = validateManifest(withJobs([job]));
+    expect(result.errors).toEqual([]);
+    expect(result.manifest?.infraRequirements.jobs[0]).toEqual(job);
+  });
+
+  it("defaults defaultTime to null, which offers only manual runs", () => {
+    const { defaultTime: _omit, ...rest } = job;
+    const result = validateManifest(withJobs([rest]));
+    expect(result.manifest?.infraRequirements.jobs[0]?.defaultTime).toBeNull();
+  });
+
+  it("defaults to no jobs", () => {
+    expect(validateManifest(minimal()).manifest?.infraRequirements.jobs).toEqual([]);
+  });
+
+  it("refuses a malformed name, time or mode", () => {
+    for (const bad of [
+      { ...job, name: "Sync" },
+      { ...job, name: "-sync" },
+      { ...job, name: "s".repeat(33) },
+      { ...job, defaultTime: "24:00" },
+      { ...job, defaultTime: "6:30" },
+      { ...job, mode: "write" },
+      { ...job, description: "" },
+      { ...job, description: "x".repeat(201) },
+    ]) {
+      expect(validateManifest(withJobs([bad])).valid).toBe(false);
+    }
+  });
+
+  it("refuses more than eight jobs", () => {
+    const jobs = Array.from({ length: 9 }, (_, i) => ({ ...job, name: `job-${i}` }));
+    expect(validateManifest(withJobs(jobs)).valid).toBe(false);
+  });
+
+  it("refuses a duplicate name", () => {
+    const result = validateManifest(withJobs([job, job]));
+    expect(result.errors).toContain('infraRequirements.jobs: duplicate job "sync"');
+  });
+
+  it("refuses a handler the manifest does not declare", () => {
+    const result = validateManifest(withJobs([{ ...job, handler: "worker" }]));
+    expect(result.errors.some((e) => e.includes('"worker" is not a declared'))).toBe(true);
+  });
+
+  it("refuses jobs without compute", () => {
+    const result = validateManifest(
+      minimal({
+        protocolMinVersion: "1.1.0",
+        targets: ["cloud"],
+        infraRequirements: {
+          compute: { enabled: false, handlers: [{ name: "api", handler: "index.handler" }] },
+          jobs: [job],
+        },
+      }),
+    );
+    expect(result.errors.some((e) => e.includes("compute.enabled is false"))).toBe(true);
+  });
+
+  it("refuses jobs on a local-only app", () => {
+    const result = validateManifest(withJobs([job], { targets: ["local"] }));
+    expect(result.errors.some((e) => e.includes("jobs run in the cloud only"))).toBe(true);
+  });
+
+  it("refuses jobs under a protocolMinVersion below 1.1.0", () => {
+    const result = validateManifest(withJobs([job], { protocolMinVersion: "1.0.0" }));
+    expect(result.errors.some((e) => e.includes('protocolMinVersion "1.1.0"'))).toBe(true);
+  });
+});
