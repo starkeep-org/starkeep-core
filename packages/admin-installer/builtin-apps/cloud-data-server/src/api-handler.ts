@@ -22,6 +22,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 import { SSMClient, GetParameterCommand, ParameterNotFound } from "@aws-sdk/client-ssm";
+import { InvokeCommand, LambdaClient, TooManyRequestsException } from "@aws-sdk/client-lambda";
 import { getSignedUrl as getCloudFrontSignedUrl } from "@aws-sdk/cloudfront-signer";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import pg from "pg";
@@ -193,6 +194,7 @@ import { handleOAuthMetadata, isOAuthMetadataPath } from "./oauth-metadata.js";
 import { delegatedMayCall, isDelegatedWrite, jobMayCall } from "./delegation-policy.js";
 import { findEnrollment, leaseIsLive, stopEnrollment, type JobRow } from "./job-store.js";
 import { SIGNED_OUT_MESSAGE } from "./job-messages.js";
+import type { DispatcherDeps, InvokeResult, ManualRunEvent } from "./dispatcher.js";
 import {
   findDelegation,
   isLive,
@@ -1668,6 +1670,116 @@ async function platformClient(
   return client;
 }
 
+// ---------------------------------------------------------------------------
+// Scheduled jobs: what the dispatcher needs from the data server
+// ---------------------------------------------------------------------------
+
+let lambdaClientSingleton: LambdaClient | null = null;
+
+/**
+ * One Lambda client for every invoke on this container. A run may last its
+ * handler's full timeout, so each invoke sets its own request timeout past it.
+ */
+function getLambdaClient(): LambdaClient {
+  lambdaClientSingleton ??= new LambdaClient({
+    region: process.env.AWS_REGION ?? "us-east-1",
+    // A throttle is recorded as "deferred" and retried on the next tick, so
+    // the SDK must not spend the run's time retrying it.
+    maxAttempts: 1,
+  });
+  return lambdaClientSingleton;
+}
+
+/** Test seam. */
+export function __setLambdaClientForTests(client: LambdaClient | null): void {
+  lambdaClientSingleton = client;
+}
+
+/** Invoke a function synchronously and read its answer as a job run's outcome. */
+async function invokeForJob(
+  functionName: string,
+  event: unknown,
+  timeoutMs: number,
+): Promise<InvokeResult> {
+  try {
+    const result = await getLambdaClient().send(
+      new InvokeCommand({
+        FunctionName: functionName,
+        InvocationType: "RequestResponse",
+        Payload: Buffer.from(JSON.stringify(event)),
+      }),
+      { requestTimeout: timeoutMs },
+    );
+    const text = result.Payload ? Buffer.from(result.Payload).toString("utf8") : "";
+    if (result.FunctionError) {
+      let message = result.FunctionError;
+      try {
+        const parsed = JSON.parse(text) as { errorMessage?: unknown };
+        if (typeof parsed.errorMessage === "string") message = parsed.errorMessage;
+      } catch {
+        // Keep the error kind alone.
+      }
+      return { kind: "function-error", message };
+    }
+    const answer = JSON.parse(text || "null") as { statusCode?: unknown; body?: unknown } | null;
+    if (!answer || typeof answer.statusCode !== "number") {
+      return { kind: "function-error", message: "the function returned no HTTP response" };
+    }
+    return {
+      kind: "answered",
+      statusCode: answer.statusCode,
+      body: typeof answer.body === "string" ? answer.body : "",
+    };
+  } catch (err) {
+    if (err instanceof TooManyRequestsException) return { kind: "throttled" };
+    return { kind: "invoke-error", message: (err as Error)?.message ?? String(err) };
+  }
+}
+
+/**
+ * The dispatcher's dependencies on this container, for one event. The
+ * platform database client closes through `toClose`.
+ */
+export function dispatcherDeps(
+  context: LambdaContext,
+  toClose: Array<() => Promise<void>>,
+): DispatcherDeps {
+  const accountId = getAccountId(context.invokedFunctionArn);
+  return {
+    db: () => platformClient(accountId, toClose),
+    signingKey: loadDelegationSigningKey,
+    async checkUser(enrollmentId, userId, refreshToken) {
+      const pool = connectorsPoolConfig();
+      const cognitoDomain = process.env.STARKEEP_COGNITO_DOMAIN;
+      if (!pool || !cognitoDomain) return { ok: false, reason: "unavailable" };
+      return await checkDelegationUser(enrollmentId, userId, refreshToken, {
+        pool,
+        cognitoDomain,
+        groupsMayUseData,
+      });
+    },
+    invoke: invokeForJob,
+    stackPrefix: process.env.STACK_PREFIX ?? "starkeep",
+    publicHost: async () => (await loadCloudFrontSigningConfig()).domain,
+  };
+}
+
+/**
+ * Hand a claimed manual run to the dispatcher and return at once. The
+ * dispatcher function's own invoke config sets no retries.
+ */
+async function startManualRun(event: ManualRunEvent): Promise<void> {
+  const functionName = process.env.STARKEEP_DISPATCHER_FUNCTION;
+  if (!functionName) throw new Error("STARKEEP_DISPATCHER_FUNCTION env var is required");
+  await getLambdaClient().send(
+    new InvokeCommand({
+      FunctionName: functionName,
+      InvocationType: "Event",
+      Payload: Buffer.from(JSON.stringify(event)),
+    }),
+  );
+}
+
 async function loadCloudFrontSigningConfig(): Promise<CloudFrontSigningConfig> {
   if (cloudFrontConfigCache && Date.now() - cloudFrontConfigCache.fetchedAt < HMAC_CACHE_TTL_MS) {
     return cloudFrontConfigCache.config;
@@ -3034,7 +3146,9 @@ async function admitDelegation(req: {
       !row ||
       row.user_id !== claims.sub ||
       row.app_id !== req.appId ||
-      row.mode !== claims.sk_mode ||
+      // A run may hold a narrower mode than the user approved, when the app
+      // narrowed the job since; never a wider one.
+      (row.mode !== claims.sk_mode && claims.sk_mode !== "read") ||
       row.job !== claims.sk_job ||
       row.revoked_at_ms !== null ||
       row.lease_id !== claims.sk_run ||

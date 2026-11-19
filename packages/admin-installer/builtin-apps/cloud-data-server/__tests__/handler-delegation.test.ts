@@ -563,8 +563,14 @@ describe("the job channel", () => {
     expect((await read(jobToken())).statusCode).toBe(401);
     enrolled({ user_id: "someone-else" });
     expect((await read(jobToken())).statusCode).toBe(401);
+    enrolled({ mode: "read" });
+    expect((await read(jobToken({ mode: "readwrite" }))).statusCode).toBe(401);
+  });
+
+  it("admits a run at a narrower mode than the enrollment's", async () => {
     enrolled({ mode: "readwrite" });
-    expect((await read(jobToken())).statusCode).toBe(401);
+    const res = await read(jobToken());
+    expect(passedGate(res), res.body).toBe(true);
   });
 
   it("holds a read job to the read allowlist", async () => {
