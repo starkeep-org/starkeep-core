@@ -121,7 +121,7 @@ function shellPage(base: string, cloud: boolean): string {
 <p id="status" role="status"></p>
 <div id="grid"></div>
 <h2>Background jobs</h2>
-<p id="jobs" role="status"></p>
+<p id="jobs" aria-live="polite"></p>
 <p><a id="job-consent" hidden>Turn on probe-tick</a>
 <button id="job-run" type="button" hidden>Run probe-tick now</button></p>
 <script>window.__PROBE__ = ${JSON.stringify({ base, cloud })};</script>
