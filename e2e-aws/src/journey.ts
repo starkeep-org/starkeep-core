@@ -2470,7 +2470,19 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // A reinstall now starts from an empty schema.
         await runInstallCli("cli-install-app", [app.appId], paths, session);
         await loadCloudSecret(app.appId);
-        const query = await cloudApp(appUnderTest).fetch(`/app-data/db/${app.appTable.name}`);
+        // The deletion dropped the app's PG role, and the reinstall created it
+        // again with a new IAM mapping. DSQL refuses the new role, or answers
+        // its queries with errors, until the change propagates, which took
+        // over a minute on 2026-11-19. The kept-data reinstall above keeps the
+        // role, so it needs no wait.
+        let query: Response | undefined;
+        const deadline = Date.now() + 5 * 60_000;
+        for (;;) {
+          query = await cloudApp(appUnderTest).fetch(`/app-data/db/${app.appTable.name}`);
+          if (query.status === 200 || Date.now() > deadline) break;
+          await query.arrayBuffer();
+          await new Promise((r) => setTimeout(r, 10_000));
+        }
         expect(query.status).toBe(200);
         expect(await query.text()).not.toContain(app.appTable.expectInBody);
 
