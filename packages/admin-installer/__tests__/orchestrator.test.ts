@@ -81,6 +81,7 @@ vi.mock("../src/app-creds", () => ({
   appCredsParameterName: (p: string, a: string) => `/${p}/app-creds/${a}`,
   ensureAppCredsParameter: vi.fn(async () => true),
   deleteAppCredsParameter: vi.fn(async () => {}),
+  deleteAppVault: vi.fn(async () => 0),
 }));
 
 vi.mock("../src/dsql-ddl", () => ({
@@ -125,7 +126,7 @@ import {
   attachTempInstallDdlPolicy,
   detachTempInstallDdlPolicy,
 } from "../src/iam";
-import { deleteAppCredsParameter, ensureAppCredsParameter } from "../src/app-creds";
+import { deleteAppCredsParameter, deleteAppVault, ensureAppCredsParameter } from "../src/app-creds";
 import { runAppInstallDdl, runAppUninstallDdl } from "../src/dsql-ddl";
 import { deleteAppFilesObjects, putAppKeepFile, uploadAppBundle } from "../src/s3";
 import { installComputeStack, uninstallComputeStack } from "../src/compute-stack";
@@ -664,8 +665,12 @@ describe("uninstall", () => {
       "delete_iam_role",
       "delete_iam_exec_role",
       "delete_app_creds_parameter",
+      "delete_app_vault",
     ]);
     expect(fakeRegistry.deleteAppRegistryEntry).toHaveBeenCalledWith("photos");
+    expect(deleteAppVault).toHaveBeenCalledWith(
+      expect.objectContaining({ stackPrefix: config.stackPrefix, appId: "photos" }),
+    );
   });
 
   it("install steps don't shadow uninstall steps (separate ledgers per operation)", async () => {
@@ -683,7 +688,7 @@ describe("uninstall", () => {
       registryCredentials,
     });
     // Uninstall ran fully even though install's ledger was complete.
-    expect(doneSteps("uninstall")).toHaveLength(12);
+    expect(doneSteps("uninstall")).toHaveLength(13);
   });
 
   it("forgets both ledgers once it completes", async () => {

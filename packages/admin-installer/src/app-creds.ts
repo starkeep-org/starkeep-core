@@ -24,6 +24,7 @@ import {
   ParameterAlreadyExists,
   PutParameterCommand,
   DeleteParameterCommand,
+  DescribeParametersCommand,
 } from "@aws-sdk/client-ssm";
 import {
   checkDeploymentSettings,
@@ -387,4 +388,48 @@ export async function deleteAppCredsParameter(opts: {
     if (err instanceof ParameterNotFound) return;
     throw err;
   }
+}
+
+/** The path that holds every user's vault secrets for one app, with no trailing slash. */
+export function appVaultPath(stackPrefix: string, appId: string): string {
+  return `/${stackPrefix}/app-creds/_vault/${appId}`;
+}
+
+/**
+ * Delete every user's vault secrets for one app, as Manager. Manager may list
+ * parameter names and delete under `app-creds/`, but never read a value, so
+ * the sweep learns names alone. Idempotent: a rerun finds whatever an earlier
+ * run left. Returns how many secrets it deleted.
+ */
+export async function deleteAppVault(opts: {
+  stackPrefix: string;
+  appId: string;
+  region: string;
+  awsCreds: AwsCredentials;
+}): Promise<number> {
+  const ssm = makeSsmClient(opts.region, opts.awsCreds);
+  const path = appVaultPath(opts.stackPrefix, opts.appId);
+  let deleted = 0;
+  let nextToken: string | undefined;
+  do {
+    const page = await ssm.send(
+      new DescribeParametersCommand({
+        ParameterFilters: [{ Key: "Path", Option: "Recursive", Values: [path] }],
+        MaxResults: 50,
+        ...(nextToken ? { NextToken: nextToken } : {}),
+      }),
+    );
+    for (const p of page.Parameters ?? []) {
+      // Only this app's vault, whatever the filter answered.
+      if (!p.Name?.startsWith(`${path}/`)) continue;
+      try {
+        await ssm.send(new DeleteParameterCommand({ Name: p.Name }));
+        deleted += 1;
+      } catch (err) {
+        if (!(err instanceof ParameterNotFound)) throw err;
+      }
+    }
+    nextToken = page.NextToken;
+  } while (nextToken);
+  return deleted;
 }

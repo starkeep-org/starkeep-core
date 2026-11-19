@@ -587,9 +587,11 @@ fi
 # ── Step 2a: Delete per-app HMAC credential parameters ───────────────────────
 # Each cloud-installed app has a /${STACK_PREFIX}/app-creds/${appId}
 # SecureString written by the installer (see admin-installer/src/app-creds.ts).
-# Normal uninstall removes these per-app; the sweep here catches any left
-# behind by an interrupted run so a re-bootstrap starts clean. The names were
-# selected before the confirmation.
+# The same prefix holds the credential vault, one SecureString per user's
+# third-party secret under app-creds/_vault/<appId>/<userId>/<name>, and the
+# signing keys. Normal uninstall removes an app's credential and its vault;
+# the sweep here catches any left behind by an interrupted run so a
+# re-bootstrap starts clean. The names were selected before the confirmation.
 step "Deleting per-app SSM credential parameters under $APP_CREDS_PREFIX"
 if [[ -n "$APP_CREDS_NAMES" ]]; then
   for name in $APP_CREDS_NAMES; do
