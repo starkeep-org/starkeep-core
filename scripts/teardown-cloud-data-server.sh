@@ -3,7 +3,7 @@
 #
 # Order of operations:
 #   1. Per-app installs (teardown-cloud-apps.sh)
-#   2. cloud-data-server: Lambda, log group, API Gateway, DSQL cluster,
+#   2. cloud-data-server: Lambdas, log groups, the jobs tick rule, API Gateway, DSQL cluster,
 #      files bucket, billing bucket, CUR report, IAM role
 #
 # --prefix and --region are both required: they scope the teardown to one
@@ -151,6 +151,8 @@ CUR_REPORT="${STACK_PREFIX}-billing"
 CDS_LAMBDA_PREFIX="${STACK_PREFIX}-app-cloud-data-server-"
 CDS_ROLE="${STACK_PREFIX}-app-cloud-data-server-role"
 GATEWAY_NAME="${STACK_PREFIX}-gateway"
+# The EventBridge rule that wakes the job dispatcher every five minutes.
+JOBS_TICK_RULE="${STACK_PREFIX}-jobs-tick"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -306,6 +308,9 @@ CDS_LOG_GROUPS=$(aws_call logs describe-log-groups \
   --log-group-name-prefix "/aws/lambda/${CDS_LAMBDA_PREFIX}" \
   --query "logGroups[].logGroupName" --output text) || true
 
+JOBS_TICK_RULES=$(aws_call events list-rules --name-prefix "$JOBS_TICK_RULE" \
+  --query "Rules[?Name=='${JOBS_TICK_RULE}'].Name" --output text) || true
+
 # A DSQL cluster's identifier is assigned by AWS, so unlike every other resource
 # here it cannot be selected by a prefixed name — the `starkeep:stackPrefix` tag
 # is the only thing that says which deployment a cluster belongs to. Clusters
@@ -428,6 +433,7 @@ echo "  Stack prefix : $STACK_PREFIX  (region: $REGION, account: $ACCOUNT_ID)"
 echo "  API Gateway  : $GATEWAY_NAME ($(list_or_none "$API_IDS"))"
 echo "  Lambdas      : $(list_or_none "$CDS_LAMBDAS")"
 echo "  Log groups   : $(list_or_none "$CDS_LOG_GROUPS")"
+echo "  Jobs tick    : $(list_or_none "$JOBS_TICK_RULES")"
 if [[ -z "$CLUSTERS" ]]; then
   echo "  DSQL cluster : <none>"
 else
@@ -519,6 +525,23 @@ step "Deleting log groups under: /aws/lambda/${CDS_LAMBDA_PREFIX}"
 if [[ -n "$CDS_LOG_GROUPS" ]]; then
   for lg in $CDS_LOG_GROUPS; do
     try_delete "$lg" logs delete-log-group --log-group-name "$lg"
+  done
+else
+  skip
+fi
+
+# The job dispatcher's tick. A rule with targets cannot be deleted, so its
+# targets go first.
+step "Deleting EventBridge rule: $JOBS_TICK_RULE"
+if [[ -n "$JOBS_TICK_RULES" ]]; then
+  for rule in $JOBS_TICK_RULES; do
+    TARGET_IDS=$(aws_call events list-targets-by-rule --rule "$rule" \
+      --query "Targets[].Id" --output text) || true
+    if [[ -n "$TARGET_IDS" ]]; then
+      # shellcheck disable=SC2086 # one --ids argument per target id
+      try_delete "targets of $rule" events remove-targets --rule "$rule" --ids $TARGET_IDS
+    fi
+    try_delete "$rule" events delete-rule --name "$rule"
   done
 else
   skip

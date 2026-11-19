@@ -359,6 +359,18 @@ describe("a run's token", () => {
   });
 });
 
+describe("the platform's job path", () => {
+  it("answers 404 at the broker for every caller, so the gateway route reveals nothing", async () => {
+    await enroll(A, "tick");
+    for (const auth of [{ user: userToken }, { sign: false }]) {
+      for (const method of ["GET", "POST"]) {
+        const res = await call(method, "/_starkeep/jobs/tick", auth);
+        expect(res.status, `${method} ${JSON.stringify(auth)}`).toBe(404);
+      }
+    }
+  });
+});
+
 describe("other callers", () => {
   it("a signed-in device cannot reach the job routes", async () => {
     await enroll(A, "tick");

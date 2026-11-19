@@ -432,6 +432,7 @@ describe("the origin split between CloudFront and the execute-api hostname", () 
         "GET /connect/authorize",
         "POST /connect/authorize/approve",
         "POST /connect/token",
+        "POST /connect/job/approve",
       ].map((routeKey) => ({ routeKey, throttlingRateLimit: 5, throttlingBurstLimit: 10 })),
     );
   });

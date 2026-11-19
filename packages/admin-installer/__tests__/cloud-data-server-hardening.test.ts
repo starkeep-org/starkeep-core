@@ -548,7 +548,8 @@ describe("device sign-in wiring", () => {
         ?.variables;
       return env?.STARKEEP_DEVICE_USER_POOL_CLIENT_ID === "deviceclient456";
     });
-    expect(withDeviceClient.map((f) => f.name)).toHaveLength(1);
+    // The broker, and the job dispatcher, which shares its environment.
+    expect(withDeviceClient.map((f) => f.name).sort()).toEqual(["api", "dispatcher"]);
   });
 
   it("verifies cloud app tokens against the cloud-apps client, never the admin client", async () => {
@@ -561,8 +562,8 @@ describe("device sign-in wiring", () => {
             ?.STARKEEP_USER_POOL_CLIENT_ID,
       )
       .filter((id): id is string => id !== undefined);
-    // The broker and the session authorizer.
-    expect(clientIds).toEqual(["client123", "client123"]);
+    // The broker, the job dispatcher and the session authorizer.
+    expect(clientIds).toEqual(["client123", "client123", "client123"]);
   });
 
   it("hands the broker the mobile-apps client and the sign-in page's domain", async () => {
@@ -604,5 +605,76 @@ describe("device sign-in wiring", () => {
     expect(routes).toHaveLength(1);
     expect(routes[0]!.inputs.authorizationType ?? "NONE").toBe("NONE");
     expect(routes[0]!.inputs.authorizerId).toBeUndefined();
+  });
+});
+
+describe("scheduled jobs", () => {
+  const fnNamed = (name: string) =>
+    byTypeSuffix("lambda/function:Function").find((r) => r.inputs.name === name)!;
+
+  it("runs the dispatcher on the broker's role and bundle, with room for a full run", async () => {
+    await buildProgram(false);
+    const api = fnNamed("starkeep-app-cloud-data-server-api");
+    const dispatcher = fnNamed("starkeep-app-cloud-data-server-dispatcher");
+    expect(dispatcher.inputs).toMatchObject({
+      handler: "dispatcher.handler",
+      role: api.inputs.role,
+      timeout: 900,
+      runtime: "nodejs24.x",
+    });
+    // Same database, keys and pools as the broker.
+    const env = (r: CreatedResource) =>
+      (r.inputs.environment as { variables: Record<string, unknown> }).variables;
+    const { STARKEEP_DISPATCHER_FUNCTION, ...brokerEnv } = env(api);
+    expect(STARKEEP_DISPATCHER_FUNCTION).toBe("starkeep-app-cloud-data-server-dispatcher");
+    expect(env(dispatcher)).toEqual(brokerEnv);
+  });
+
+  it("never retries a dispatcher event", async () => {
+    await buildProgram(false);
+    const configs = byTypeSuffix("functionEventInvokeConfig:FunctionEventInvokeConfig");
+    expect(configs).toHaveLength(1);
+    expect(configs[0]!.inputs).toMatchObject({
+      functionName: "starkeep-app-cloud-data-server-dispatcher",
+      maximumRetryAttempts: 0,
+    });
+  });
+
+  it("wakes the dispatcher every five minutes from one rule it alone may invoke from", async () => {
+    await buildProgram(false);
+    const rules = byTypeSuffix("cloudwatch/eventRule:EventRule");
+    expect(rules).toHaveLength(1);
+    expect(rules[0]!.inputs).toMatchObject({
+      name: "starkeep-jobs-tick",
+      scheduleExpression: "rate(5 minutes)",
+    });
+    const targets = byTypeSuffix("cloudwatch/eventTarget:EventTarget");
+    expect(targets.map((t) => t.inputs.arn)).toEqual(["arn:fake:dispatcher"]);
+    const permission = lambdaPermissions().find(
+      (p) => p.inputs.principal === "events.amazonaws.com",
+    )!;
+    expect(permission.inputs).toMatchObject({
+      function: "starkeep-app-cloud-data-server-dispatcher",
+      sourceArn: "arn:fake:jobs-tick",
+    });
+  });
+
+  it("routes the platform's job path, the job routes and the job consent pages to the broker", async () => {
+    await buildProgram(false);
+    const keys = byTypeSuffix("apigatewayv2/route:Route").map((r) => r.inputs.routeKey);
+    for (const key of [
+      "ANY /apps/{appId}/_starkeep/{proxy+}",
+      "GET /apps/{appId}/jobs",
+      "POST /apps/{appId}/jobs/{name}/run",
+      "GET /connect/job",
+      "POST /connect/job/approve",
+      "POST /connections/jobs/{id}/schedule",
+      "POST /connections/jobs/{id}/revoke",
+    ]) {
+      expect(keys).toContain(key);
+    }
+    const stage = byTypeSuffix("apigatewayv2/stage:Stage")[0]!;
+    const throttled = (stage.inputs.routeSettings as { routeKey: string }[]).map((r) => r.routeKey);
+    expect(throttled).toContain("POST /connect/job/approve");
   });
 });
