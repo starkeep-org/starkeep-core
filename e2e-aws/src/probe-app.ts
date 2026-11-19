@@ -23,6 +23,7 @@ export const probeApp: JourneyApp = {
   labelKeys: { flag: "flag", valued: "tag" },
   publicSharing: true,
   job: "probe-tick",
+  vault: true,
   appTable: {
     name: "probe_notes",
     row: (recordId) => ({ record_id: recordId, note: "tier-3 note" }),

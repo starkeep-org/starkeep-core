@@ -24,7 +24,8 @@
 import { createHash, createPrivateKey, createPublicKey, sign } from "node:crypto";
 import { afterAll, expect, it } from "vitest";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
-import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
+import { GetParameterCommand, GetParametersByPathCommand, SSMClient } from "@aws-sdk/client-ssm";
+import { signedFetch, type AppCredentials } from "@starkeep/app-client";
 import { chromium, type Browser } from "./browser.js";
 import { signInIfAsked } from "./delegation-steps.js";
 import { REGION } from "./env.js";
@@ -42,6 +43,14 @@ export interface JobStepsContext {
   readonly cookie: () => Promise<string>;
   /** An app-private table the job writes, and the column its notes land in. */
   readonly table: string;
+  /**
+   * The vault secret the job rotates, when the app has one: the app stores it
+   * at `PUT /api/vault/<name>`, and each run reads it, writes `<value>+1`, and
+   * names the value it read in its note, as Probe's `probe-tick` does.
+   */
+  readonly vaultSecret?: string;
+  /** The app's cloud credentials, to sign a call as the app's server does. */
+  readonly appCreds: () => AppCredentials;
 }
 
 interface JobState {
@@ -68,6 +77,18 @@ function utcTimeAhead(minutes: number): { time: string; at: number } {
   return { time: `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`, at };
 }
 
+/** The deployment's delegation signing key, as the installer stored it. */
+async function signingKeyPem(stackPrefix: string): Promise<string> {
+  const ssm = new SSMClient({ region: REGION });
+  const param = await ssm.send(
+    new GetParameterCommand({
+      Name: `/${stackPrefix}/app-creds/_delegation-signing`,
+      WithDecryption: true,
+    }),
+  );
+  return (JSON.parse(param.Parameter!.Value!) as { privateKeyPem: string }).privateKeyPem;
+}
+
 /** A token signed with the deployment's delegation key, as the platform signs one. */
 function signToken(privateKeyPem: string, claims: Record<string, unknown>): string {
   const privateKey = createPrivateKey(privateKeyPem);
@@ -87,6 +108,8 @@ export function defineJobSteps(d: JobStepsContext): void {
   /** When the job is due by its time of day, set by the consent step. */
   let dueAt = 0;
   let manualRunId = "";
+  /** This run's first secret value, so a kept stack's older values never match. */
+  const secretValue = `tier3-${Date.now()}`;
 
   afterAll(async () => {
     await browser?.close();
@@ -166,6 +189,28 @@ export function defineJobSteps(d: JobStepsContext): void {
     expect(state.nextRunAt).toBe(due.at);
   });
 
+  if (d.vaultSecret) {
+    it("stores a vault secret the browser can list but never read back", async () => {
+      const cookie = await d.cookie();
+      const save = await fetch(`${appBase()}/api/vault/${d.vaultSecret}`, {
+        method: "PUT",
+        headers: { cookie, "Content-Type": "application/json" },
+        body: JSON.stringify({ value: secretValue }),
+      });
+      expect(save.status, await save.clone().text()).toBe(200);
+      const listed = await fetch(`${appBase()}/api/vault`, { headers: { cookie } });
+      const text = await listed.text();
+      expect(text).toContain(d.vaultSecret);
+      expect(text).not.toContain(secretValue);
+      // The browser's own read, through the app's signing proxy.
+      const read = await fetch(`${appBase()}/api/local-data/vault/${d.vaultSecret}`, {
+        headers: { cookie },
+      });
+      expect(read.status).toBe(403);
+      expect(await read.text()).not.toContain(secretValue);
+    });
+  }
+
   it(`runs ${d.job} on request, and the run writes the app's row as the user`, async () => {
     const started = Date.now() - 5_000;
     const answer = await runNow();
@@ -176,6 +221,7 @@ export function defineJobSteps(d: JobStepsContext): void {
     const state = await settledRunSince(started);
     expect(state.lastRun?.status, state.lastRun?.message ?? "").toBe("ok");
     expect(await notes()).toContain(`tick-${manualRunId}`);
+    if (d.vaultSecret) expect(await notes()).toContain(`read ${secretValue}`);
     // A manual run leaves the schedule alone.
     expect(state.nextRunAt).toBe(dueAt);
   });
@@ -204,6 +250,8 @@ export function defineJobSteps(d: JobStepsContext): void {
     expect(scheduled).toBeDefined();
     expect(scheduled).not.toBe(manualRunId);
     expect(await notes()).toContain(`tick-${scheduled}`);
+    // The second run read the value the first run rotated.
+    if (d.vaultSecret) expect(await notes()).toContain(`read ${secretValue}+1`);
   });
 
   it("answers 404 for the platform's job path, through CloudFront and on the gateway", async () => {
@@ -218,14 +266,7 @@ export function defineJobSteps(d: JobStepsContext): void {
 
   if (d.mcpPath) {
     it("a job token opens no route declared auth: delegated", async () => {
-      const ssm = new SSMClient({ region: REGION });
-      const param = await ssm.send(
-        new GetParameterCommand({
-          Name: `/${d.config().stackPrefix}/app-creds/_delegation-signing`,
-          WithDecryption: true,
-        }),
-      );
-      const { privateKeyPem } = JSON.parse(param.Parameter!.Value!) as { privateKeyPem: string };
+      const privateKeyPem = await signingKeyPem(d.config().stackPrefix);
       const now = Math.floor(Date.now() / 1000);
       const token = signToken(privateKeyPem, {
         sub: "any-user",
@@ -244,6 +285,36 @@ export function defineJobSteps(d: JobStepsContext): void {
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
       });
       expect(res.status).toBe(401);
+    });
+  }
+
+  if (d.vaultSecret) {
+    it("refuses an outside client's delegation on every vault route", async () => {
+      const now = Math.floor(Date.now() / 1000);
+      const token = signToken(await signingKeyPem(d.config().stackPrefix), {
+        sub: "any-user",
+        aud: d.appId,
+        sk_dlg: "any-delegation",
+        sk_mode: "readwrite",
+        sk_channel: "app",
+        iat: now,
+        exp: now + 300,
+      });
+      for (const [method, path] of [
+        ["GET", "/vault"],
+        ["GET", `/vault/${d.vaultSecret}`],
+        ["PUT", `/vault/${d.vaultSecret}`],
+        ["DELETE", `/vault/${d.vaultSecret}`],
+      ] as const) {
+        const res = await signedFetch(d.appCreds(), path, {
+          method,
+          delegation: token,
+          ...(method === "PUT"
+            ? { headers: { "Content-Type": "application/json" }, body: '{"value":"x"}' }
+            : {}),
+        });
+        expect(res.status, `${method} ${path}`).toBe(403);
+      }
     });
   }
 
@@ -280,4 +351,17 @@ export async function expectNoEnrollment(
   const body = (await res.json()) as { jobs: JobState[] };
   const state = body.jobs.find((j) => j.name === job);
   expect(state).toMatchObject({ enabled: false, lastRun: null });
+}
+
+/** After an uninstall, no secret remains under the app's vault path. */
+export async function expectNoVault(stackPrefix: string, appId: string): Promise<void> {
+  const ssm = new SSMClient({ region: REGION });
+  const page = await ssm.send(
+    new GetParametersByPathCommand({
+      Path: `/${stackPrefix}/app-creds/_vault/${appId}`,
+      Recursive: true,
+      WithDecryption: false,
+    }),
+  );
+  expect((page.Parameters ?? []).map((p) => p.Name)).toEqual([]);
 }

@@ -2,7 +2,9 @@
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
-    "rootDir": ".",
+    // The repository root: the vault rotation case imports the data server's
+    // own vault module, and with noEmit the root only bounds what may be read.
+    "rootDir": "..",
     "types": ["node"]
   },
   "include": ["src", "*.ts"]

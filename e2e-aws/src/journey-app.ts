@@ -121,6 +121,14 @@ export interface JourneyApp {
    * journey turns the job on, runs it and turns it off.
    */
   readonly job?: string;
+  /**
+   * Whether the route sweep covers the credential vault. With `job`, the
+   * journey also stores a secret the job rotates on each run, as Probe's
+   * `probe-tick` does with `probe-secret`.
+   */
+  readonly vault?: boolean;
+  /** The secret the job rotates, when it is not Probe's `probe-secret`. */
+  readonly vaultSecret?: string;
   /** A JWT-gated route of the app's own, for the CloudFront Bearer step. */
   readonly jwtRoute: JourneyJwtRoute;
   /** Present when the app serves a browser UI the journey should drive. */
