@@ -631,6 +631,9 @@ select a NOT NULL column, and a `not_in` list cannot hold `null`. Use
 `exists` and `not_exists` are reserved, so a table cannot declare a column with
 either name.
 
+The example app's collections use every form above on real tables. Its
+README's "Joins and subqueries" section names the function for each one.
+
 **Eight things that surprise people, and are cheaper to read than to discover:**
 
 1. `sum` and `avg` return `null` over zero matching rows, not `0`. A coalesced

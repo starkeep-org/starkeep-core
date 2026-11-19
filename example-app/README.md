@@ -11,11 +11,12 @@ Each heading is one group of operations, with a table of the current state and a
 | Heading       | What it does                                                                                                                                                             |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Connection    | Which surface the page runs on, who is signed in, the 403 a write outside the app's grant gets, and a call to the app's own JWT-gated route.                             |
-| Example files | Create from text, upload through a presigned URL, derive a copy, filter, page, count and delete.                                                                         |
-| Open file     | One file's record, size, dates, content, metadata row, labels and note. The note saves only if nobody changed it since the file was opened.                              |
+| Example files | Load the sample data, create from text, upload through a presigned URL, derive a copy, filter, page, count and delete.                                                   |
+| Open file     | One file's record, size, dates, content, metadata row, labels, note and collections. The note saves only if nobody changed it since the file was opened.                 |
 | Metadata      | The `example` category's metadata table, queried directly, with totals.                                                                                                  |
 | Labels        | Add, set and retract tags and a bare flag; count files per tag; list every app's declared keys.                                                                          |
-| Notes         | The app's own `notes` table: write, pin, delete, and search by text, prefix, edit date or the files on the page.                                                         |
+| Collections   | Named groups of files in two more app tables: create, rename, archive and delete, with each file's note and its other collections.                                       |
+| Notes         | The app's own `notes` table: write, pin, delete, and search by text, prefix, edit date, the files on or off the page, or a collection.                                   |
 | Analysis      | Notes per day, in SQL the app's server runs over a snapshot of the notes table, with its load time and a Refresh button.                                                 |
 | Note exports  | The app's own files: save every note as a private JSON file, then list, open and delete the files.                                                                       |
 | Deleted       | Every example file deleted since an instant, a restore, and the trash retention window.                                                                                  |
@@ -23,7 +24,24 @@ Each heading is one group of operations, with a table of the current state and a
 | Public links  | Web links to your example files, made with a file's Share button. Anyone who has a valid link can view the shared content without signing in. Public links need a cloud. |
 | Activity      | Every request the page made, with method, path, status and duration.                                                                                                     |
 
-`web/src/browser/api.ts` holds one function per operation and names the route each one calls. Every request to the app's own server passes through `web/src/browser/request-gate.ts`, which keeps at most three requests in flight and retries a request that the cloud throttled. A throttled request appears in the Activity table as a 503, followed by the retry.
+`web/src/browser/api.ts` holds one function per operation and names the route each one calls.
+
+### Sample data
+
+The **Load sample data** button in Example files creates nine files with tags and flags, one derived copy, notes from several days, and three collections, one of them archived. The set lives in `common/src/sample-data.ts`. Every sample file carries the bare flag `example-app/sample`, and the button does nothing while a live file carries it. Delete the sample files to load the set again.
+
+### Joins and subqueries
+
+The collections feature exercises every form in "Joins and subqueries" in `docs/authoring-an-app.md`. Each function in `web/src/browser/api.ts` shows one or more:
+
+| Function                                   | Forms                                                                                                                                                                                     |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `listCollections`                          | A left join, and a `count` over the joined key, so an empty collection counts 0.                                                                                                          |
+| `collectionContents`                       | Three left joins: a column operand with `eq` and `ne`, a self-join under `as`, a filter inside `on`, qualified response keys, an `order` on a joined column, and paging over joined rows. |
+| `collectionsHolding`, `collectionsLacking` | `exists` and `not_exists`.                                                                                                                                                                |
+| `searchNotes`                              | `in` and `not_in`, each with a subquery or a list.                                                                                                                                        |
+
+Every `order` the example sends uses the JSON spelling, such as `[{"col":"created_at","dir":"desc"}]`. Every request to the app's own server passes through `web/src/browser/request-gate.ts`, which keeps at most three requests in flight and retries a request that the cloud throttled. A throttled request appears in the Activity table as a 503, followed by the retry.
 
 ### MCP for outside clients
 
@@ -73,7 +91,7 @@ mobile/                  reserved for a React Native flavor
 desktop/                 reserved for a desktop flavor
 ```
 
-Every flavor shares the app id `example-app`, so the platform syncs the app's notes and note exports among them. See "Structuring an app with several flavors" in `docs/authoring-an-app.md`.
+Every flavor shares the app id `example-app`, so the platform syncs the app's notes, collections and note exports among them. See "Structuring an app with several flavors" in `docs/authoring-an-app.md`.
 
 ## Running it
 

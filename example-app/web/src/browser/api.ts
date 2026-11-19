@@ -19,10 +19,17 @@ import {
   EXAMPLE_TYPE,
   LABEL_KEYS,
   EXPORT_PREFIX,
+  SAMPLE_COLLECTIONS,
+  SAMPLE_DERIVED_FROM,
+  SAMPLE_FILES,
   TABLES,
+  decodeCollection,
   decodeNote,
   encodeNote,
   textMetrics,
+  type Collection,
+  type CollectionItemRow,
+  type CollectionRow,
   type Note,
 } from "@example-app/common";
 import { recordActivity } from "./activity.js";
@@ -371,7 +378,7 @@ export async function listRecords(
 ): Promise<{ records: ExampleRecord[]; nextCursor: string | null }> {
   const params: Record<string, string | number | undefined> = {
     include: "metadata,labels",
-    order: "created_at.desc",
+    order: JSON.stringify([{ col: "created_at", dir: "desc" }]),
     limit: 10,
     page_token: pageToken,
   };
@@ -445,19 +452,29 @@ export async function deleteRecord(id: string): Promise<string[]> {
 }
 
 /**
- * Delete a file, then the note of every record the delete took.
+ * Delete a file, then the note and the collection memberships of every record
+ * the delete took.
  *
  * The platform deletes a record's derived copies, but it knows nothing of the
- * app's own rows that point at a record: a note names its file only by
- * `record_id`. The app deletes those rows itself, from the ids the record
- * delete answers. The record goes first, so a failed delete leaves the note in
- * place. Restoring the file does not bring its note back. Answers the ids of
- * every record the delete took.
+ * app's own rows that point at a record: a note and a `collection_items` row
+ * name their file only by `record_id`. The app deletes those rows itself, from
+ * the ids the record delete answers. The record goes first, so a failed delete
+ * leaves the rows in place. Restoring the file does not bring them back.
+ * Answers the ids of every record the delete took.
  */
 export async function deleteFile(id: string): Promise<string[]> {
   const ids = await deleteRecord(id);
-  // The table delete matches one value per column, so one request per note.
-  for (const recordId of ids) await deleteNote(recordId);
+  // A table delete names the whole primary key, so one request per row.
+  for (const recordId of ids) {
+    await deleteNote(recordId);
+    const items = await allRows(ITEMS, {
+      where: JSON.stringify({ record_id: recordId }),
+      select: "collection_id",
+      order: JSON.stringify([{ col: "collection_id" }]),
+      limit: 500,
+    });
+    for (const item of items) await removeFromCollection(String(item["collection_id"]), recordId);
+  }
   return ids;
 }
 
@@ -480,7 +497,10 @@ export async function queryMetadata(): Promise<Record<string, unknown>[]> {
   return expectOk(
     await data<{ rows: Record<string, unknown>[] }>(
       "GET",
-      `/data/metadata/${EXAMPLE_CATEGORY}${q({ order: "word_count.desc.nullslast", limit: 10 })}`,
+      `/data/metadata/${EXAMPLE_CATEGORY}${q({
+        order: JSON.stringify([{ col: "word_count", dir: "desc", nulls: "last" }]),
+        limit: 10,
+      })}`,
     ),
   ).rows;
 }
@@ -548,7 +568,7 @@ export async function tagCounts(): Promise<{ value: string; n: number }[]> {
         where: JSON.stringify({ app_id: APP_ID, key: LABEL_KEYS.tag }),
         select: "value",
         aggregate: JSON.stringify({ n: { fn: "count" } }),
-        order: "n.desc",
+        order: JSON.stringify([{ col: "n", dir: "desc" }]),
       })}`,
     ),
   );
@@ -695,6 +715,23 @@ export async function deleteNote(recordId: string): Promise<void> {
   expectOk(result);
 }
 
+/**
+ * Which files a note search covers. Each kind is a different form of the
+ * `record_id` filter, and one `where` holds one filter per column, so a
+ * search picks one.
+ */
+export type NoteFiles =
+  /** Every file. */
+  | { kind: "all" }
+  /** These files only: `in` with a list. */
+  | { kind: "page"; ids: readonly string[] }
+  /** Every file but these: `not_in` with a list. */
+  | { kind: "notPage"; ids: readonly string[] }
+  /** The files in one collection: `in` with a subquery. */
+  | { kind: "collection"; collectionId: string }
+  /** The files in no collection: `not_in` with a subquery. */
+  | { kind: "noCollection" };
+
 /** Which notes a search asks for. Every field narrows the result. */
 export interface NoteQuery {
   /** Text the note holds. */
@@ -703,33 +740,79 @@ export interface NoteQuery {
   readonly match?: "contains" | "starts";
   /** Notes edited at or after this ISO 8601 instant, with `gte`. */
   readonly since?: string;
-  /** Notes on these records only, with `in`. */
-  readonly recordIds?: readonly string[];
+  /** Which files' notes; every file when omitted. */
+  readonly files?: NoteFiles;
 }
 
 /** Rows per request when reading notes; `page_token` fetches the rest. */
 export const NOTES_PAGE = 25;
 
-/** Every row a `where` matches, newest first, one page at a time. */
-async function allNotes(where: Record<string, unknown>): Promise<Note[]> {
-  const notes: Note[] = [];
+/**
+ * Every row a `GET /app-data/db/<table>` query matches, one page at a time.
+ * The page token holds every joined table's key, so a joined query pages
+ * without skipping or repeating a row.
+ */
+async function allRows(
+  path: string,
+  params: Record<string, string | number | undefined>,
+): Promise<Record<string, unknown>[]> {
+  const rows: Record<string, unknown>[] = [];
   let pageToken: string | undefined;
   do {
     const page = expectOk(
       await data<{ rows: Record<string, unknown>[]; truncated: boolean; page_token?: string }>(
         "GET",
-        `${NOTES}${q({
-          where: JSON.stringify(where),
-          order: "updated_on.desc.nullslast,record_id.asc",
-          limit: NOTES_PAGE,
-          page_token: pageToken,
-        })}`,
+        `${path}${q({ ...params, page_token: pageToken })}`,
       ),
     );
-    notes.push(...page.rows.map(decodeNote));
+    rows.push(...page.rows);
     pageToken = page.truncated && page.page_token ? page.page_token : undefined;
   } while (pageToken !== undefined);
-  return notes;
+  return rows;
+}
+
+/** Every note a `where` matches, newest first. */
+async function allNotes(where: Record<string, unknown>): Promise<Note[]> {
+  const rows = await allRows(NOTES, {
+    where: JSON.stringify(where),
+    order: JSON.stringify([
+      { col: "updated_on", dir: "desc", nulls: "last" },
+      { col: "record_id" },
+    ]),
+    limit: NOTES_PAGE,
+  });
+  return rows.map(decodeNote);
+}
+
+/** The `record_id` filter for one {@link NoteFiles} choice, or none. */
+function recordIdFilter(files: NoteFiles): unknown {
+  switch (files.kind) {
+    case "all":
+      return undefined;
+    case "page":
+      return { in: files.ids };
+    case "notPage":
+      // An empty `not_in` list excludes nothing, so it is left out.
+      return files.ids.length > 0 ? { not_in: files.ids } : undefined;
+    case "collection":
+      // The subquery selects one column, whose type matches `record_id`.
+      return {
+        in: {
+          table: TABLES.collectionItems,
+          select: `${TABLES.collectionItems}.record_id`,
+          where: { [`${TABLES.collectionItems}.collection_id`]: files.collectionId },
+        },
+      };
+    case "noCollection":
+      // A `not_in` subquery must select a NOT NULL column, which
+      // `collection_items.record_id` is, as part of the primary key.
+      return {
+        not_in: {
+          table: TABLES.collectionItems,
+          select: `${TABLES.collectionItems}.record_id`,
+        },
+      };
+  }
 }
 
 /**
@@ -740,7 +823,8 @@ async function allNotes(where: Record<string, unknown>): Promise<Note[]> {
  * each read to its last page.
  */
 export async function searchNotes(query: NoteQuery = {}): Promise<Note[]> {
-  if (query.recordIds?.length === 0) return [];
+  const files = query.files ?? { kind: "all" };
+  if (files.kind === "page" && files.ids.length === 0) return [];
   const where: Record<string, unknown> = {};
   if (query.text) {
     where["note"] =
@@ -749,7 +833,8 @@ export async function searchNotes(query: NoteQuery = {}): Promise<Note[]> {
         : { like: `%${query.text.replace(/[\\%_]/g, (c) => `\\${c}`)}%` };
   }
   if (query.since) where["updated_on"] = { gte: query.since };
-  if (query.recordIds) where["record_id"] = { in: query.recordIds };
+  const recordIds = recordIdFilter(files);
+  if (recordIds !== undefined) where["record_id"] = recordIds;
   const [pinned, rest] = await Promise.all([
     allNotes({ ...where, pinned: { is: true } }),
     allNotes({ ...where, pinned: { is: false } }),
@@ -769,6 +854,343 @@ export async function pinnedCount(): Promise<number> {
     ),
   );
   return Number(body.groups[0]?.n ?? 0);
+}
+
+// ---------------------------------------------------------------------------
+// Collections: two more app tables, read with joins and subqueries
+// ---------------------------------------------------------------------------
+
+const COLLECTIONS = `/app-data/db/${TABLES.collections}`;
+const ITEMS = `/app-data/db/${TABLES.collectionItems}`;
+/** The two tables' names, as qualified column names spell them. */
+const C = TABLES.collections;
+const I = TABLES.collectionItems;
+
+/** The join condition from `collection_items` to the collection it names. */
+const itemOfCollection = { [`${I}.collection_id`]: { eq: { col: `${C}.id` } } };
+
+/** A collection with the number of files in it. */
+export interface CollectionSummary extends Collection {
+  readonly files: number;
+}
+
+/**
+ * `GET /app-data/db/collections` left-joined to `collection_items`, with a
+ * count per collection.
+ *
+ * A left join keeps a collection with no files as one row whose joined
+ * columns are null. Counting the joined `record_id`, rather than rows, counts
+ * that row as 0. With `aggregate`, `select` is the grouping list.
+ */
+export async function listCollections(): Promise<CollectionSummary[]> {
+  const body = expectOk(
+    await data<{ groups: Record<string, unknown>[] }>(
+      "GET",
+      `${COLLECTIONS}${q({
+        join: JSON.stringify([{ table: I, kind: "left", on: itemOfCollection }]),
+        select: "id,name,archived",
+        aggregate: JSON.stringify({ files: { fn: "count", col: `${I}.record_id` } }),
+        order: JSON.stringify([{ col: "name" }, { col: "id" }]),
+        limit: 500,
+      })}`,
+    ),
+  );
+  return body.groups.map((g) => ({ ...decodeCollection(g), files: Number(g["files"] ?? 0) }));
+}
+
+/** `POST /app-data/db/collections`: a new, empty collection. */
+export async function createCollection(name: string): Promise<string> {
+  const row: CollectionRow = {
+    id: crypto.randomUUID(),
+    name,
+    archived: false,
+    created_on: new Date().toISOString(),
+  };
+  expectOk(await data("POST", COLLECTIONS, { json: { row } }));
+  return row.id;
+}
+
+/** `PATCH /app-data/db/collections`: rename, archive or unarchive one collection. */
+export async function patchCollection(
+  id: string,
+  patch: { name?: string; archived?: boolean },
+): Promise<void> {
+  expectOk(await data("PATCH", COLLECTIONS, { json: { where: { id }, patch } }));
+}
+
+/**
+ * Delete a collection: each of its `collection_items` rows, then the
+ * collection row. A table delete names the whole primary key, so one request
+ * per item.
+ */
+export async function deleteCollection(id: string): Promise<void> {
+  const items = await allRows(ITEMS, {
+    where: JSON.stringify({ collection_id: id }),
+    select: "record_id",
+    order: JSON.stringify([{ col: "record_id" }]),
+    limit: 500,
+  });
+  for (const item of items) await removeFromCollection(id, String(item["record_id"]));
+  expectOk(await data("DELETE", COLLECTIONS, { json: { where: { id } } }));
+}
+
+/**
+ * `POST /app-data/db/collection_items`: put a file in a collection. A plain
+ * upsert, so adding a file again, or after it was removed, writes one row.
+ */
+export async function addToCollection(collectionId: string, recordId: string): Promise<void> {
+  const row: CollectionItemRow = {
+    collection_id: collectionId,
+    record_id: recordId,
+    added_on: new Date().toISOString(),
+  };
+  expectOk(await data("POST", ITEMS, { json: { row } }));
+}
+
+/**
+ * `DELETE /app-data/db/collection_items` by both key columns. A pair that is
+ * already gone counts as done, as a note does in {@link deleteNote}.
+ */
+export async function removeFromCollection(collectionId: string, recordId: string): Promise<void> {
+  const result = await data<{ skipped?: string }>("DELETE", ITEMS, {
+    json: { where: { collection_id: collectionId, record_id: recordId } },
+  });
+  if (result.status === 404 && result.body?.skipped === "missing") return;
+  expectOk(result);
+}
+
+/** The subquery "the open file sits in this collection", for `exists` and `not_exists`. */
+function holdsFile(recordId: string) {
+  return [{ table: I, where: { ...itemOfCollection, [`${I}.record_id`]: recordId } }];
+}
+
+/**
+ * `GET /app-data/db/collections` with `exists`: the collections a file sits
+ * in. `exists` tests the related rows without returning them, so each
+ * collection comes back once however the file got there.
+ */
+export async function collectionsHolding(recordId: string): Promise<Collection[]> {
+  const rows = await allRows(COLLECTIONS, {
+    where: JSON.stringify({ exists: holdsFile(recordId) }),
+    select: "id,name,archived",
+    order: JSON.stringify([{ col: "name" }, { col: "id" }]),
+    limit: 100,
+  });
+  return rows.map(decodeCollection);
+}
+
+/**
+ * `GET /app-data/db/collections` with `not_exists`: the unarchived
+ * collections a file is not in yet, which the Open file panel offers to add
+ * it to.
+ */
+export async function collectionsLacking(recordId: string): Promise<Collection[]> {
+  const rows = await allRows(COLLECTIONS, {
+    where: JSON.stringify({ archived: { is: false }, not_exists: holdsFile(recordId) }),
+    select: "id,name,archived",
+    order: JSON.stringify([{ col: "name" }, { col: "id" }]),
+    limit: 100,
+  });
+  return rows.map(decodeCollection);
+}
+
+/** One file in a collection, with its note and the other collections it sits in. */
+export interface CollectionEntry {
+  readonly recordId: string;
+  readonly addedOn: string;
+  /** The file's note, or null when it has none. */
+  readonly note: string | null;
+  /** The names of the other unarchived collections that hold the file. */
+  readonly alsoIn: readonly string[];
+}
+
+/**
+ * `GET /app-data/db/collection_items` with three left joins: one collection's
+ * files, each file's note, and the other collections the file sits in.
+ *
+ * - `notes` joins on `record_id`. A file with no note gets null `notes.*`
+ *   columns, and the joined key, `notes.record_id`, tells "no note" from a
+ *   note whose text is null.
+ * - `collection_items` joins again, under `as: "other"`, because the table is
+ *   already in the query. `ne` keeps this collection's own row out.
+ * - `collections` joins to `other` with `archived: false` inside `on`. A file
+ *   whose other collection is archived keeps its row with null
+ *   `collections.*` columns. The same filter in `where` would drop the file
+ *   from the list.
+ *
+ * `other` is to-many, so each file comes back once per other collection, and
+ * `limit` counts those joined rows. The query orders by the file first and
+ * reads every page, then folds each file's rows into one entry.
+ */
+export async function collectionContents(collectionId: string): Promise<CollectionEntry[]> {
+  const rows = await allRows(ITEMS, {
+    where: JSON.stringify({ collection_id: { eq: collectionId } }),
+    join: JSON.stringify([
+      {
+        table: TABLES.notes,
+        kind: "left",
+        on: { [`${TABLES.notes}.record_id`]: { eq: { col: `${I}.record_id` } } },
+      },
+      {
+        table: I,
+        as: "other",
+        kind: "left",
+        on: {
+          "other.record_id": { eq: { col: `${I}.record_id` } },
+          "other.collection_id": { ne: { col: `${I}.collection_id` } },
+        },
+      },
+      {
+        table: C,
+        kind: "left",
+        on: { [`${C}.id`]: { eq: { col: "other.collection_id" } }, [`${C}.archived`]: false },
+      },
+    ]),
+    select: `record_id,added_on,${TABLES.notes}.record_id,${TABLES.notes}.note,${C}.id,${C}.name`,
+    order: JSON.stringify([
+      { col: "added_on", dir: "desc", nulls: "last" },
+      { col: "record_id" },
+      { col: `${C}.name`, nulls: "last" },
+    ]),
+    limit: 100,
+  });
+  const entries = new Map<
+    string,
+    { recordId: string; addedOn: string; note: string | null; alsoIn: string[] }
+  >();
+  for (const row of rows) {
+    const recordId = String(row["record_id"]);
+    let entry = entries.get(recordId);
+    if (!entry) {
+      const hasNote = row[`${TABLES.notes}.record_id`] != null;
+      entry = {
+        recordId,
+        addedOn: typeof row["added_on"] === "string" ? row["added_on"] : "",
+        note: hasNote ? String(row[`${TABLES.notes}.note`] ?? "") : null,
+        alsoIn: [],
+      };
+      entries.set(recordId, entry);
+    }
+    if (row[`${C}.id`] != null) entry.alsoIn.push(String(row[`${C}.name`]));
+  }
+  return [...entries.values()];
+}
+
+/**
+ * `GET /data/records?where={"id":{"in":[…]}}`: file names for record ids, in
+ * batches of 100. A row query cannot join shared records, so the page reads
+ * the names of the files a collection holds this way.
+ */
+export async function recordNames(ids: readonly string[]): Promise<Map<string, string>> {
+  const names = new Map<string, string>();
+  for (let i = 0; i < ids.length; i += 100) {
+    const batch = ids.slice(i, i + 100);
+    const body = expectOk(
+      await data<{ records: ExampleRecord[] }>(
+        "GET",
+        `/data/records${q({ where: JSON.stringify({ id: { in: batch } }), limit: batch.length })}`,
+      ),
+    );
+    for (const r of body.records) names.set(r.id, r.original_filename ?? r.id);
+  }
+  return names;
+}
+
+// ---------------------------------------------------------------------------
+// Sample data
+// ---------------------------------------------------------------------------
+
+/** What a sample load did. */
+export type SampleLoad = { loaded: true; files: number } | { loaded: false };
+
+/**
+ * Create the sample files, labels, notes and collections in
+ * `common/src/sample-data.ts`.
+ *
+ * Records take ids the server assigns, so the load cannot key its files the
+ * way it keys rows. Each sample file carries the bare `sample` flag instead,
+ * and the load does nothing while a live file carries it. App rows go in with
+ * `ifAbsent`, so a collection the person deleted stays deleted.
+ */
+export async function loadSampleData(): Promise<SampleLoad> {
+  const existing = expectOk(
+    await data<{ records: ExampleRecord[] }>(
+      "GET",
+      `/data/records${q({ label: `${APP_ID}/${LABEL_KEYS.sample}`, limit: 1 })}`,
+    ),
+  );
+  if (existing.records.length > 0) return { loaded: false };
+
+  for (const c of SAMPLE_COLLECTIONS) {
+    const row: CollectionRow = {
+      id: c.id,
+      name: c.name,
+      archived: c.archived,
+      created_on: new Date().toISOString(),
+    };
+    expectOk(await data("POST", COLLECTIONS, { json: { row, ifAbsent: true } }));
+  }
+
+  const sampleLabel = { key: LABEL_KEYS.sample, value: "" };
+  const made = await Promise.all(
+    SAMPLE_FILES.map(async (file) => {
+      const record = await registerRecord({
+        fileName: file.name,
+        text: file.text,
+        stored: await storeBytes(file.text),
+        labels: [
+          ...file.tags.map((value) => ({ key: LABEL_KEYS.tag, value })),
+          ...(file.reviewed ? [{ key: LABEL_KEYS.reviewed, value: "" }] : []),
+          sampleLabel,
+        ],
+      });
+      return { file, record };
+    }),
+  );
+
+  const source = made.find((m) => m.file.name === SAMPLE_DERIVED_FROM)!;
+  const upper = source.file.text.toUpperCase();
+  await registerRecord({
+    fileName: SAMPLE_DERIVED_FROM.replace(/\.skexample$/, "-upper.skexample"),
+    text: upper,
+    stored: await storeBytes(upper),
+    parentId: source.record.id,
+    labels: [{ key: LABEL_KEYS.derived, value: "uppercase" }, sampleLabel],
+  });
+
+  const day = 24 * 60 * 60 * 1000;
+  await Promise.all(
+    made.flatMap(({ file, record }) => [
+      ...(file.note
+        ? [
+            data("POST", NOTES, {
+              json: {
+                row: encodeNote({
+                  recordId: record.id,
+                  text: file.note.text,
+                  pinned: file.note.pinned ?? false,
+                  updatedOn: new Date(Date.now() - file.note.daysAgo * day).toISOString(),
+                }),
+                ifAbsent: true,
+              },
+            }).then(expectOk),
+          ]
+        : []),
+      ...file.collections.map((collectionId) =>
+        data("POST", ITEMS, {
+          json: {
+            row: {
+              collection_id: collectionId,
+              record_id: record.id,
+              added_on: new Date().toISOString(),
+            } satisfies CollectionItemRow,
+            ifAbsent: true,
+          },
+        }).then(expectOk),
+      ),
+    ]),
+  );
+  return { loaded: true, files: made.length + 1 };
 }
 
 // ---------------------------------------------------------------------------

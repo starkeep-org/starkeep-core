@@ -29,11 +29,17 @@ export const LABEL_KEYS = {
   reviewed: "reviewed",
   /** Marks a derived copy, valued with how it was made. */
   derived: "derived",
+  /** A bare flag on every file the Load sample data button made. */
+  sample: "sample",
 } as const;
 
 /** The app's own tables, as the manifest declares them. */
 export const TABLES = {
   notes: "notes",
+  /** Named groups of example files. */
+  collections: "collections",
+  /** Which file sits in which collection, one row per pair. */
+  collectionItems: "collection_items",
 } as const;
 
 /** Where the app keeps its private note-export files. */

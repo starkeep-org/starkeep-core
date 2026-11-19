@@ -136,7 +136,7 @@ const TOOLS: Record<string, Tool> = {
     async run(ctx, args) {
       const params = new URLSearchParams({
         include: "metadata,labels",
-        order: "created_at.desc",
+        order: JSON.stringify([{ col: "created_at", dir: "desc" }]),
         limit: "50",
       });
       if (typeof args.tag === "string" && args.tag) {

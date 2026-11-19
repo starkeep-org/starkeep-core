@@ -200,7 +200,20 @@ const countOut = named(el("output", {}, "?"), "File count");
 const urlsOut = named(el("output", {}, ""), "URLs fetched");
 const urlsList = named(el("ul"), "Fetched URLs");
 
+const sampleOut = named(el("output", {}, ""), "Sample data");
+
 files.controls.append(
+  button("Load sample data", () =>
+    run("Load sample data", async () => {
+      const result = await api.loadSampleData();
+      sampleOut.value = result.loaded
+        ? `${result.files} sample files, their notes and three collections.`
+        : "Sample files already exist; delete them to load the set again.";
+      await refreshAll();
+    }),
+  ),
+  sampleOut,
+  el("br"),
   labelled("File name", nameInput),
   labelled("Content", textInput),
   button("Create file", () =>
@@ -377,7 +390,13 @@ async function renderOpen(): Promise<void> {
   // The four reads run at once, but only the record read decides whether the
   // file is gone. A live file whose bytes this computer lacks answers 404 from
   // its content read too, and that is an error to report.
-  const rest = Promise.all([api.readContent(id), api.getMetadata(id), api.getNote(id)]);
+  const rest = Promise.all([
+    api.readContent(id),
+    api.getMetadata(id),
+    api.getNote(id),
+    api.collectionsHolding(id),
+    api.collectionsLacking(id),
+  ]);
   // Awaited below, unless a missing record ends the render first.
   rest.catch(() => {});
   let record: api.ExampleRecord;
@@ -389,7 +408,7 @@ async function renderOpen(): Promise<void> {
     selectedId = null;
     return renderOpen();
   }
-  const [content, metadata, noteState] = await rest;
+  const [content, metadata, noteState, holding, lacking] = await rest;
   const note = noteState?.note ?? null;
   noteInput.value = note?.text ?? "";
   pinnedInput.checked = note?.pinned ?? false;
@@ -405,6 +424,12 @@ async function renderOpen(): Promise<void> {
     ["Labels", labelsText(record)],
     ["Metadata", metadata ? JSON.stringify(metadata) : "none"],
     ["Note", note ? `${note.text}${note.pinned ? " (pinned)" : ""}` : "none"],
+    [
+      "Collections",
+      holding.length
+        ? holding.map((c) => (c.archived ? `${c.name} (archived)` : c.name)).join(", ")
+        : "none",
+    ],
   ];
   open.body.replaceChildren(
     renderTable<[string, string]>(
@@ -445,15 +470,32 @@ async function renderOpen(): Promise<void> {
           };
           await api.addNote(next);
         }
-        await Promise.all([renderOpen(), renderNotes()]);
+        await Promise.all([renderOpen(), renderNotes(), renderCollections()]);
       }),
     ),
     button("Delete note", () =>
       run("Delete note", async () => {
         if (!noteState) throw new Error("the file has no note");
         await api.deleteNoteIfUnchanged(id, noteState.stamp);
-        await Promise.all([renderOpen(), renderNotes()]);
+        await Promise.all([renderOpen(), renderNotes(), renderCollections()]);
       }),
+    ),
+    el("br"),
+    ...lacking.map((c) =>
+      button(`Add to ${c.name}`, () =>
+        run("Add to collection", async () => {
+          await api.addToCollection(c.id, id);
+          await Promise.all([renderOpen(), renderCollections()]);
+        }),
+      ),
+    ),
+    ...holding.map((c) =>
+      button(`Remove from ${c.name}`, () =>
+        run("Remove from collection", async () => {
+          await api.removeFromCollection(c.id, id);
+          await Promise.all([renderOpen(), renderCollections()]);
+        }),
+      ),
     ),
   );
 }
@@ -574,6 +616,117 @@ async function renderLabels(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Collections
+// ---------------------------------------------------------------------------
+
+const collectionsSection = section(
+  "Collections",
+  "Named groups of example files, in two more of the app's own tables. The list joins each collection to its files to count them. " +
+    'A collection\'s contents join each file to its note and to the other collections that hold it. Archived collections stay out of "Also in", but their files stay in the list.',
+);
+const collectionNameInput = el("input", { placeholder: "Reading list", size: 16 });
+collectionsSection.controls.append(
+  labelled("Collection name", collectionNameInput),
+  button("Create collection", () =>
+    run("Create collection", async () => {
+      const name = collectionNameInput.value.trim();
+      if (!name) throw new Error("name the collection first");
+      shownCollectionId = await api.createCollection(name);
+      collectionNameInput.value = "";
+      await Promise.all([renderCollections(), renderOpen()]);
+    }),
+  ),
+);
+/** The collection whose contents the section shows. */
+let shownCollectionId: string | null = null;
+/** The collections the last render read, for the Notes filter's choices. */
+let knownCollections: api.CollectionSummary[] = [];
+
+async function renderCollections(): Promise<void> {
+  const list = await api.listCollections();
+  knownCollections = list;
+  updateNoteFileChoices();
+  if (shownCollectionId && !list.some((c) => c.id === shownCollectionId)) shownCollectionId = null;
+  const shown = list.find((c) => c.id === shownCollectionId) ?? null;
+  const listTable = renderTable<api.CollectionSummary>(
+    "Collections",
+    [
+      { heading: "Name", cell: (c) => (c.id === shownCollectionId ? `▶ ${c.name}` : c.name) },
+      { heading: "Files", cell: (c) => c.files },
+      { heading: "Archived", cell: (c) => (c.archived ? "yes" : "") },
+      {
+        heading: "Actions",
+        cell: (c) =>
+          group(
+            button(`Show ${c.name}`, () =>
+              run("Show collection", async () => {
+                shownCollectionId = c.id;
+                await renderCollections();
+              }),
+            ),
+            button(`Rename ${c.name}`, () =>
+              run("Rename collection", async () => {
+                const name = collectionNameInput.value.trim();
+                if (!name) throw new Error("type the new name in Collection name");
+                await api.patchCollection(c.id, { name });
+                collectionNameInput.value = "";
+                await Promise.all([renderCollections(), renderOpen()]);
+              }),
+            ),
+            button(c.archived ? `Unarchive ${c.name}` : `Archive ${c.name}`, () =>
+              run(c.archived ? "Unarchive collection" : "Archive collection", async () => {
+                await api.patchCollection(c.id, { archived: !c.archived });
+                await Promise.all([renderCollections(), renderOpen()]);
+              }),
+            ),
+            button(`Delete collection ${c.name}`, () =>
+              run("Delete collection", async () => {
+                await api.deleteCollection(c.id);
+                await Promise.all([renderCollections(), renderOpen()]);
+              }),
+            ),
+          ),
+      },
+    ],
+    list,
+    "No collections. Create one above, or load the sample data.",
+  );
+  if (!shown) {
+    collectionsSection.body.replaceChildren(
+      listTable,
+      el("p", {}, "Show a collection to list its files."),
+    );
+    return;
+  }
+  const entries = await api.collectionContents(shown.id);
+  const names = await api.recordNames(entries.map((e) => e.recordId));
+  collectionsSection.body.replaceChildren(
+    listTable,
+    renderTable<api.CollectionEntry>(
+      "Collection contents",
+      [
+        { heading: "File", cell: (e) => names.get(e.recordId) ?? `${e.recordId} (deleted)` },
+        { heading: "Note", cell: (e) => e.note ?? "none" },
+        { heading: "Also in", cell: (e) => e.alsoIn.join(", ") },
+        { heading: "Added", cell: (e) => e.addedOn },
+        {
+          heading: "Actions",
+          cell: (e) =>
+            button(`Remove ${names.get(e.recordId) ?? e.recordId} from ${shown.name}`, () =>
+              run("Remove from collection", async () => {
+                await api.removeFromCollection(shown.id, e.recordId);
+                await Promise.all([renderCollections(), renderOpen()]);
+              }),
+            ),
+        },
+      ],
+      entries,
+      `${shown.name} holds no files. Open a file and add it.`,
+    ),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Notes
 // ---------------------------------------------------------------------------
 
@@ -590,13 +743,44 @@ for (const [value, text] of [
   matchSelect.append(el("option", { value: value!, textContent: text! }));
 }
 const sinceNotesInput = el("input", { placeholder: "2026-01-01T00:00:00Z", size: 22 });
-const thisPageInput = el("input", { type: "checkbox" });
+// Named directly: a label around a select also reads out the chosen option.
+const noteFilesSelect = named(el("select"), "Files");
+
+/** The Files choices: four fixed ones, then one per collection. */
+function updateNoteFileChoices(): void {
+  const chosen = noteFilesSelect.value || "all";
+  noteFilesSelect.replaceChildren(
+    ...[
+      ["all", "All files"],
+      ["page", "Files on this page"],
+      ["notPage", "Files not on this page"],
+      ["noCollection", "Files in no collection"],
+      ...knownCollections.map((c) => [`collection:${c.id}`, `Files in ${c.name}`]),
+    ].map(([value, text]) => el("option", { value: value!, textContent: text! })),
+  );
+  noteFilesSelect.value = [...noteFilesSelect.options].some((o) => o.value === chosen)
+    ? chosen
+    : "all";
+}
+updateNoteFileChoices();
+
+function noteFiles(): api.NoteFiles {
+  const value = noteFilesSelect.value;
+  const ids = lastPage.map((r) => r.id);
+  if (value === "page") return { kind: "page", ids };
+  if (value === "notPage") return { kind: "notPage", ids };
+  if (value === "noCollection") return { kind: "noCollection" };
+  if (value.startsWith("collection:")) {
+    return { kind: "collection", collectionId: value.slice("collection:".length) };
+  }
+  return { kind: "all" };
+}
 const pinnedOut = named(el("output", {}, "?"), "Pinned notes");
 notes.controls.append(
   labelled("Search", searchInput),
   labelled("Match", matchSelect),
   labelled("Edited since", sinceNotesInput),
-  labelled("Only files on this page", thisPageInput),
+  labelled("Files", noteFilesSelect),
   button("Search notes", () => run("Search notes", renderNotes)),
   "Pinned notes:",
   pinnedOut,
@@ -607,7 +791,7 @@ async function renderNotes(): Promise<void> {
     text: searchInput.value,
     match: matchSelect.value === "starts" ? "starts" : "contains",
     ...(sinceNotesInput.value.trim() ? { since: sinceNotesInput.value.trim() } : {}),
-    ...(thisPageInput.checked ? { recordIds: lastPage.map((r) => r.id) } : {}),
+    files: noteFiles(),
   };
   const [rows, pinned] = await Promise.all([api.searchNotes(query), api.pinnedCount()]);
   pinnedOut.value = String(pinned);
@@ -627,13 +811,13 @@ async function renderNotes(): Promise<void> {
                 run("Pin", async () => {
                   await api.patchNote(n.recordId, { pinned: !n.pinned });
                   // The Open panel holds the note's stamp, which this write moved.
-                  await Promise.all([renderNotes(), renderOpen()]);
+                  await Promise.all([renderNotes(), renderOpen(), renderCollections()]);
                 }),
               ),
               button(`Delete note ${n.text}`, () =>
                 run("Delete note", async () => {
                   await api.deleteNote(n.recordId);
-                  await Promise.all([renderNotes(), renderOpen()]);
+                  await Promise.all([renderNotes(), renderOpen(), renderCollections()]);
                 }),
               ),
             ),
@@ -910,6 +1094,7 @@ async function refreshAll(): Promise<void> {
     renderOpen(),
     renderMetadata(),
     renderLabels(),
+    renderCollections(),
     renderNotes(),
     renderAnalysis(),
     renderExports(),
