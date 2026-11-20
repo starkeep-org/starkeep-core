@@ -142,7 +142,16 @@ beforeEach(() => {
   );
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // A test may end as soon as the fake daemon records a start, while the
+  // start still waits a second to read the app's status. Let it finish here,
+  // while the fakes still answer: once fetch is real, every status read fails
+  // and the start retries for 20 s, then sets state after the file's window
+  // is gone.
+  await vi.waitFor(
+    () => expect(screen.queryByRole("button", { name: /^(Updating|Starting) Dice…$/ })).toBeNull(),
+    { timeout: 3000 },
+  );
   cleanup();
   vi.unstubAllGlobals();
 });
