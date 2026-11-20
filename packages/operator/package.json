@@ -18,6 +18,7 @@
     "./locks": "./src/locks.ts",
     "./manager-credentials": "./src/manager-credentials.ts",
     "./oauth": "./src/oauth.ts",
+    "./operation-runs": "./src/operation-runs.ts",
     "./repo-root": "./src/repo-root.ts",
     "./runs": "./src/runs.ts",
     "./service-control": "./src/service-control.ts",

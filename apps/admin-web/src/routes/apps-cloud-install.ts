@@ -3,6 +3,7 @@ import { starkeepDir } from "@starkeep/app-client";
 import { appSource, idMismatch, pinnedSourceState } from "@starkeep/operator/apps";
 import { MANIFEST_NOT_APPROVED } from "../lib/app-types";
 import { REPO_ROOT } from "@starkeep/operator/commands";
+import { operationCommand } from "@starkeep/operator/operation-runs";
 import { installStream } from "../lib/install-stream";
 import { installerEnv } from "@starkeep/admin-installer/aws-env";
 import { readFolderManifest } from "@starkeep/admin-installer/app-discovery";
@@ -42,7 +43,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
   const admin = body.reattach === true ? null : await requireAdmin();
   if (admin instanceof Response) return admin;
 
-  // Resolve the folder here and hand it to the CLI, so the install deploys
+  // Resolve the folder here and hand it to the operation, so the install deploys
   // the copy the Dashboard shows: the local pin when the app is installed on
   // this machine, otherwise the scan's find.
   const source = await appSource(appId);
@@ -58,11 +59,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
       { status: 409 },
     );
   }
-  // The CLI deploys the manifest in the folder, so the folder must hold the
-  // manifest the person approved. The route hands the CLI that manifest's
-  // digest, and the CLI refuses a folder that changed after this check. A
+  // The operation deploys the manifest in the folder, so the folder must hold
+  // the manifest the person approved. The route hands the operation that
+  // manifest's digest, and the operation refuses a folder that changed after
+  // this check. A
   // reattach only follows a deploy already running, so it checks nothing.
-  let digestArgs: string[] = [];
+  let digest: string | undefined;
   if (body.reattach !== true) {
     const folder = readFolderManifest(source.appDir);
     if (folder.kind !== "valid") {
@@ -105,7 +107,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
         { status: 409 },
       );
     }
-    digestArgs = ["--manifest-digest", manifestDigest(folder.manifest)];
+    digest = manifestDigest(folder.manifest);
   }
 
   // iam-permission-tests POC capture — gated by PULUMI_VERBOSE_TRACE above:
@@ -136,9 +138,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
       : {}),
   };
 
-  const surfaceFlags = [
-    ...(body.surfaces?.includes("web") ? ["web"] : []),
-    ...(body.surfaces?.includes("mobile") ? ["mobile"] : []),
+  const surfaces = [
+    ...(body.surfaces?.includes("web") ? (["web"] as const) : []),
+    ...(body.surfaces?.includes("mobile") ? (["mobile"] as const) : []),
   ];
 
   return installStream({
@@ -148,23 +150,19 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
     owner: `${appId} (${
       body.surfaces === undefined
         ? "every surface"
-        : surfaceFlags.length > 0
-          ? surfaceFlags.join(", ")
+        : surfaces.length > 0
+          ? surfaces.join(", ")
           : "data side only"
     })`,
     noun: "deploy",
-    command: "pnpm",
-    args: [
-      "--filter",
-      "@starkeep/admin-installer",
-      "cli:install-app",
+    // No surface named installs every surface the manifest offers, as an
+    // unknown one alone does.
+    ...operationCommand("install-cloud-app", {
       appId,
-      "--non-interactive",
-      "--app-dir",
-      source.appDir,
-      ...surfaceFlags.map((surface) => `--${surface}`),
-      ...digestArgs,
-    ],
+      appDir: source.appDir,
+      ...(surfaces.length > 0 ? { surfaces } : {}),
+      ...(digest !== undefined ? { manifestDigest: digest } : {}),
+    }),
     cwd: REPO_ROOT,
     env: spawnEnv,
     reattach: body.reattach === true,
