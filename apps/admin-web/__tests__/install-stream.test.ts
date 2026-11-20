@@ -22,6 +22,7 @@ import { lastChild, resetSpawns, spawnedChildren, type FakeChild } from "./fake-
 import { lines, readSse } from "./sse";
 import { readFolderManifest } from "@starkeep/admin-installer/app-discovery";
 import { manifestDigest } from "@starkeep/admin-installer/manifest-approval";
+import { encodeEventLine, type OperationEvent } from "@starkeep/operator/events";
 import { FAKE_ADMIN, FAKE_ADMIN_CREDENTIALS, signInFake, signOutFake } from "./fake-admin-session";
 vi.mock("@starkeep/operator/admin-session", async (original) =>
   (await import("./fake-admin-session")).fakeAdminSessionModule(await original()),
@@ -59,9 +60,24 @@ function validManifest(dir: string) {
   return folder.kind === "valid" ? folder.manifest : undefined;
 }
 
-/** The digest arguments the route passes for the manifest in `dir`. */
-function digestArgs(dir: string): string[] {
-  return ["--manifest-digest", manifestDigest(validManifest(dir)!)];
+/** The digest the route passes for the manifest in `dir`. */
+function digestOf(dir: string): string {
+  return manifestDigest(validManifest(dir)!);
+}
+
+/** The operation a spawned child runs, and its input. */
+function operationOf(child: FakeChild): { name: string; input: Record<string, unknown> } {
+  const at = child.args.indexOf("run-operation");
+  expect(at, `run-operation in ${child.args.join(" ")}`).toBeGreaterThan(-1);
+  return {
+    name: child.args[at + 1]!,
+    input: JSON.parse(child.args[at + 2]!) as Record<string, unknown>,
+  };
+}
+
+/** The line an operation writes for its result. */
+function resultLine(result: Omit<Extract<OperationEvent, { type: "result" }>, "type">): string {
+  return `${encodeEventLine({ type: "result", ...result })}\n`;
 }
 
 /** Everything the two later passes require of the earlier one. */
@@ -192,12 +208,12 @@ describe("the cloud-data-server pass", () => {
     expect(((await res.json()) as { error: string }).error).toContain("Stack outputs");
   });
 
-  it("runs the installer CLI non-interactively, in the region the pool id implies", async () => {
+  it("runs the installer operation, in the region the pool id implies", async () => {
     const res = await cloudDataServer();
     const child = lastChild();
     expect(child.command).toBe("pnpm");
-    expect(child.args).toContain("cli:install-cloud-data-server");
-    expect(child.args).toContain("--non-interactive");
+    // A real install is never ephemeral: nothing in the input can ask for it.
+    expect(operationOf(child)).toEqual({ name: "install-cloud-data-server", input: {} });
     expect(child.options.env).toMatchObject({
       AWS_ACCESS_KEY_ID: "AKIAFAKEADMIN",
       AWS_REGION: "us-east-2",
@@ -254,7 +270,7 @@ describe("the Drive pass", () => {
   it("runs the Drive installer and ends with a bare done", async () => {
     const res = await drive();
     const child = lastChild();
-    expect(child.args).toContain("cli:install-drive");
+    expect(operationOf(child)).toEqual({ name: "install-drive", input: {} });
     const events = await finish(res, child);
     expect(events.at(-1)).toEqual({ event: "done", data: "{}" });
   });
@@ -266,16 +282,10 @@ describe("an app install", () => {
     // reshapes that argument, and nothing else would catch a mis-wire.
     const res = await appInstall({ appId: "dice" });
     const child = lastChild();
-    expect(child.args).toEqual([
-      "--filter",
-      "@starkeep/admin-installer",
-      "cli:install-app",
-      "dice",
-      "--non-interactive",
-      "--app-dir",
-      diceDir,
-      ...digestArgs(diceDir),
-    ]);
+    expect(operationOf(child)).toEqual({
+      name: "install-cloud-app",
+      input: { appId: "dice", appDir: diceDir, manifestDigest: digestOf(diceDir) },
+    });
     await finish(res, child);
   });
 
@@ -289,7 +299,7 @@ describe("an app install", () => {
   it("passes the folder the scan found, so the installer deploys the copy the Dashboard shows", async () => {
     const res = await appInstall({ appId: "photos" });
     const child = lastChild();
-    expect(child.args.slice(5, 7)).toEqual(["--app-dir", photosDir]);
+    expect(operationOf(child).input.appDir).toBe(photosDir);
     await finish(res, child);
   });
 
@@ -298,7 +308,7 @@ describe("an app install", () => {
   it("passes the digest of the folder's manifest it checked", async () => {
     const res = await appInstall({ appId: "photos" });
     const child = lastChild();
-    expect(child.args.slice(-2)).toEqual(digestArgs(photosDir));
+    expect(operationOf(child).input.manifestDigest).toBe(digestOf(photosDir));
     await finish(res, child);
   });
 
@@ -333,40 +343,31 @@ describe("an app install", () => {
   });
 
   it.each([
-    [["web"], ["--web"]],
-    [["mobile"], ["--mobile"]],
+    [["web"], ["web"]],
+    [["mobile"], ["mobile"]],
     [
       ["web", "mobile"],
-      ["--web", "--mobile"],
+      ["web", "mobile"],
     ],
-    [[], []],
-  ])("passes surfaces %j to the installer as %j", async (surfaces, flags) => {
+    [[], undefined],
+  ])("passes surfaces %j to the installer as %j", async (surfaces, passed) => {
     const res = await appInstall({ appId: "photos", surfaces });
     const child = lastChild();
-    expect(child.args.slice(7, -2)).toEqual(flags);
+    expect(operationOf(child).input.surfaces).toEqual(passed);
     await finish(res, child);
   });
 
-  it("passes no surface flag when the body names none, so the installer installs every surface", async () => {
+  it("passes no surfaces when the body names none, so the installer installs every surface", async () => {
     const res = await appInstall({ appId: "photos" });
     const child = lastChild();
-    expect(
-      child.args.filter(
-        (a) =>
-          a.startsWith("--") &&
-          a !== "--filter" &&
-          a !== "--non-interactive" &&
-          a !== "--app-dir" &&
-          a !== "--manifest-digest",
-      ),
-    ).toEqual([]);
+    expect(operationOf(child).input).not.toHaveProperty("surfaces");
     await finish(res, child);
   });
 
   it("ignores a surface it does not know rather than passing it on", async () => {
     const res = await appInstall({ appId: "photos", surfaces: ["desktop", "mobile"] });
     const child = lastChild();
-    expect(child.args.slice(7, -2)).toEqual(["--mobile"]);
+    expect(operationOf(child).input.surfaces).toEqual(["mobile"]);
     await finish(res, child);
   });
 
@@ -411,7 +412,7 @@ describe("an app installed on this machine", () => {
     registryAnswers([pinnedRow("photos", pinned)]);
     const res = await appInstall({ appId: "photos" });
     const child = lastChild();
-    expect(child.args.slice(5, 7)).toEqual(["--app-dir", pinned]);
+    expect(operationOf(child).input.appDir).toBe(pinned);
     await finish(res, child);
   });
 
@@ -455,8 +456,10 @@ describe("an app installed on this machine", () => {
       approvedManifest: testAppManifest({ id: "dice", name: "Dice", version: "2.0.0" }),
     });
     const child = lastChild();
-    expect(child.args.slice(5, 7)).toEqual(["--app-dir", pinned]);
-    expect(child.args.slice(-2)).toEqual(digestArgs(pinned));
+    expect(operationOf(child).input).toMatchObject({
+      appDir: pinned,
+      manifestDigest: digestOf(pinned),
+    });
     await finish(res, child);
   });
 
@@ -593,7 +596,7 @@ describe("the one run slot every cloud app install shares", () => {
     const second = await appInstall({ appId: "photos", surfaces: ["mobile"] });
     expect(second.status).toBe(200);
     expect(spawnedChildren()).toHaveLength(2);
-    expect(lastChild().args.slice(7, -2)).toEqual(["--mobile"]);
+    expect(operationOf(lastChild()).input.surfaces).toEqual(["mobile"]);
     await finish(second, lastChild());
   });
 });
@@ -632,21 +635,85 @@ describe("line framing, which is where a long Pulumi log goes wrong", () => {
   });
 });
 
-describe("a rejected AWS session", () => {
-  it.each([
-    ["an expired STS token", "ExpiredTokenException: The security token is expired"],
-    ["a DSQL refusal, which carries no SDK error", "unable to accept connection, access denied"],
-  ])("ends with EXPIRED_TOKEN after %s", async (_label, line) => {
-    // The wizard reads this code to send the operator back to the sign-in step
-    // rather than showing a stack trace with no remedy in it.
+describe("an operation's result", () => {
+  it.each(["CREDENTIALS_EXPIRED", "NOT_SIGNED_IN"])(
+    "ends with EXPIRED_TOKEN for a result coded %s",
+    async (code) => {
+      // The wizard reads this code to send the operator back to the sign-in
+      // step rather than showing a stack trace with no remedy in it. The
+      // installer sorts the failure where it happens; the route reads the code.
+      const res = await drive();
+      const child = lastChild();
+      const stream = readSse(res);
+      child.sayErr("ExpiredTokenException: The security token is expired\n");
+      child.say(resultLine({ ok: false, error: { message: "AWS rejected it", code } }));
+      child.exit(1);
+      const events = await stream.rest();
+      expect(events.at(-1)!.event).toBe("error");
+      expect(JSON.parse(events.at(-1)!.data)).toMatchObject({ code: "EXPIRED_TOKEN" });
+    },
+  );
+
+  it("passes another code through with the operation's own message", async () => {
+    const res = await appInstall({ appId: "photos" });
+    const child = lastChild();
+    const stream = readSse(res);
+    child.say(
+      resultLine({
+        ok: false,
+        error: { message: "The folder changed after approval.", code: "MANIFEST_NOT_APPROVED" },
+      }),
+    );
+    child.exit(1);
+    const events = await stream.rest();
+    expect(JSON.parse(events.at(-1)!.data)).toEqual({
+      message: "The folder changed after approval.",
+      code: "MANIFEST_NOT_APPROVED",
+    });
+  });
+
+  it("shows progress as lines, never the event lines themselves", async () => {
     const res = await drive();
     const child = lastChild();
     const stream = readSse(res);
-    child.sayErr(`${line}\n`);
-    child.exit(1);
+    child.say(
+      `${encodeEventLine({ type: "progress", message: "Starkeep Drive install\n  Region : us-east-2" })}\n`,
+    );
+    child.say("pulumi: updating\n");
+    child.say(resultLine({ ok: true, data: { installed: true } }));
+    child.exit(0);
+    const events = await stream.rest();
+    expect(lines(events)).toEqual([
+      "Starkeep Drive install",
+      "  Region : us-east-2",
+      "pulumi: updating",
+    ]);
+    expect(events.at(-1)).toEqual({ event: "done", data: "{}" });
+  });
+
+  it("trusts the result over the exit code", async () => {
+    const res = await drive();
+    const child = lastChild();
+    const stream = readSse(res);
+    child.say(
+      resultLine({ ok: false, error: { message: "Install failed: boom", code: "INSTALL_FAILED" } }),
+    );
+    child.exit(0);
     const events = await stream.rest();
     expect(events.at(-1)!.event).toBe("error");
-    expect(JSON.parse(events.at(-1)!.data)).toMatchObject({ code: "EXPIRED_TOKEN" });
+    expect(JSON.parse(events.at(-1)!.data).message).toBe("Install failed: boom");
+  });
+
+  it("no longer reads an expired session from a log line alone", async () => {
+    // A run that wrote no result, such as one killed mid-way, falls back to
+    // its exit code. The text of its log decides nothing.
+    const res = await drive();
+    const child = lastChild();
+    const stream = readSse(res);
+    child.sayErr("ExpiredTokenException: The security token is expired\n");
+    child.exit(1);
+    const events = await stream.rest();
+    expect(JSON.parse(events.at(-1)!.data).code).toBeUndefined();
   });
 
   it("reports an ordinary failure with no code, so the wizard offers a retry", async () => {
@@ -865,7 +932,9 @@ describe("a run that outlives admin-web", () => {
     const first = await drive();
     const child = lastChild();
     const firstStream = readSse(first);
-    child.sayErr("ExpiredTokenException: The security token is expired\n");
+    child.say(
+      resultLine({ ok: false, error: { message: "expired", code: "CREDENTIALS_EXPIRED" } }),
+    );
     child.exit(1);
     await firstStream.rest();
 
