@@ -1265,21 +1265,75 @@ test("Vault: delete the provider token, and the next run finds none", async () =
   );
 });
 
-test("Background jobs: turning digest off on the Connections page stops Run now", async () => {
+test("Background jobs: the read-mode keywords job offers Only when I ask first", async () => {
+  test.skip(SURFACE !== "cloud", "No job runs on the local surface");
+  await expect(await cell("Background jobs", "keywords", "State")).toHaveText("off");
+  await page.getByRole("link", { name: "Turn on keywords", exact: true }).click();
+  // The manifest gives keywords no default time, and the read mode in words.
+  await expect(page.locator('input[name="when"][value="manual"]')).toBeChecked();
+  await expect(page.locator("body")).toContainText("Each run may read your data in");
+  await page.getByRole("button", { name: "Sign in and turn the job on" }).click();
+  await signInIfAsked();
+  await page.getByRole("heading", { name: "Background job on" }).waitFor({ timeout: 60_000 });
+  await page.getByRole("link", { name: /^Back to / }).click();
+  await expect(statusLine()).toHaveText("Load: done.");
+  await expect(await cell("Background jobs", "keywords", "State")).toHaveText("on");
+  await expect(await cell("Background jobs", "keywords", "Schedule")).toHaveText(
+    "only when you ask",
+  );
+});
+
+test("Background jobs: keywords reads each new file once and labels it", async () => {
+  test.skip(SURFACE !== "cloud", "No job runs on the local surface");
+  const name = `keywords-${Date.now()}.skexample`;
+  await page.getByLabel("File name").fill(name);
+  await page
+    .getByLabel("Content", { exact: true })
+    .fill("Lanterns and harbors.\nThe lanterns guide ships; the harbors shelter them.\nLanterns.");
+  await click("Create file", "Create file");
+
+  // A run reads at most 25 files, oldest first, so the earlier steps' files
+  // may take more than one run. Each run reads only files it has not read.
+  const lastRun = async () => cell("Background jobs", "keywords", "Last run");
+  for (let runs = 0; ; runs++) {
+    expect(runs, "keywords runs before none left").toBeLessThan(6);
+    await click("Run keywords now", "Run keywords", RUN_TIMEOUT_MS);
+    const message = (await (await lastRun()).textContent()) ?? "";
+    expect(message).toMatch(/^ok: Read \d+ files?; (more remain for the next run|none left)$/);
+    if (message.endsWith("none left")) break;
+  }
+  await expectLogged("POST", /^\/api\/jobs\/keywords\/run$/, 202);
+  // The run labelled the file with the run's read token: its most frequent
+  // words, and the flag that keeps the next run from reading it again.
+  const row = table("Example files").locator("tbody tr").filter({ hasText: name });
+  await expect(row).toContainText(`${APP_ID}/keyword=lanterns`);
+  await expect(row).toContainText(`${APP_ID}/keyword=harbors`);
+  await expect(row).toContainText(`${APP_ID}/indexed`);
+
+  await click("Run keywords now", "Run keywords", RUN_TIMEOUT_MS);
+  await expect(await lastRun()).toHaveText("ok: No new files");
+});
+
+test("Background jobs: turning both jobs off on the Connections page stops Run now", async () => {
   test.skip(SURFACE !== "cloud", "No job runs on the local surface");
   await (await cell("Connection", "Connections page", "Value")).getByRole("link").click();
   await signInIfAsked();
-  const row = page
-    .getByRole("row")
-    .filter({ has: page.getByRole("cell", { name: "digest", exact: true }) })
-    .filter({ has: page.getByRole("cell", { name: APP_ID, exact: true }) });
-  await row.getByRole("button", { name: "Turn off" }).click();
-  await page.waitForURL(/\/connections$/);
+  for (const job of ["digest", "keywords"]) {
+    const row = page
+      .getByRole("row")
+      .filter({ has: page.getByRole("cell", { name: job, exact: true }) })
+      .filter({ has: page.getByRole("cell", { name: APP_ID, exact: true }) });
+    await row.getByRole("button", { name: "Turn off" }).click();
+    // The page reloads without the job's row.
+    await expect(row).toHaveCount(0, { timeout: 30_000 });
+  }
 
   await reopenApp();
-  await expect(await cell("Background jobs", "digest", "State")).toHaveText("off");
-  await page.getByRole("button", { name: "Run digest now", exact: true }).click();
-  await expect(statusLine()).toHaveText("Run digest failed: not-enabled");
+  for (const job of ["digest", "keywords"]) {
+    await expect(await cell("Background jobs", job, "State")).toHaveText("off");
+    await page.getByRole("button", { name: `Run ${job} now`, exact: true }).click();
+    await expect(statusLine()).toHaveText(`Run ${job} failed: not-enabled`);
+  }
 });
 
 test("Connection: refresh the session, then sign out", async () => {

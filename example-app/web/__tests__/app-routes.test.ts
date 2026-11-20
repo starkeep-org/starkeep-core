@@ -34,16 +34,19 @@ describe("on the cloud surface, with no session", () => {
     expect(await res.json()).toEqual({ error: "A valid delegation token is required" });
   });
 
-  it("sends the job route to the job check, not the gate", async () => {
-    const res = await app.request("/_starkeep/jobs/digest", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Sec-Fetch-Dest": "empty" },
-      body: JSON.stringify({ job: "digest", runId: "r1", trigger: "manual" }),
-    });
-    // The job refusal is a bare 404, so a probe learns nothing; the gate's is a 401.
-    expect(res.status).toBe(404);
-    expect(await res.json()).toEqual({ error: "Not found" });
-  });
+  it.each(["digest", "keywords"])(
+    "sends the %s job's route to the job check, not the gate",
+    async (job) => {
+      const res = await app.request(`/_starkeep/jobs/${job}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Sec-Fetch-Dest": "empty" },
+        body: JSON.stringify({ job, runId: "r1", trigger: "manual" }),
+      });
+      // The job refusal is a bare 404, so a probe learns nothing; the gate's is a 401.
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "Not found" });
+    },
+  );
 
   it("gates the signing proxy: a page load goes to sign-in", async () => {
     const res = await app.request("/api/local-data/data/types");

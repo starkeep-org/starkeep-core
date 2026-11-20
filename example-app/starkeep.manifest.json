@@ -37,6 +37,14 @@
       {
         "key": "sample",
         "description": "A bare flag: the example app's Load sample data button made this file."
+      },
+      {
+        "key": "keyword",
+        "description": "A set-valued keyword the example app's keywords job found in an example file's text, such as flour."
+      },
+      {
+        "key": "indexed",
+        "description": "A bare flag: the example app's keywords job has read this example file."
       }
     ],
     "appSpecificSyncable": {
@@ -80,6 +88,13 @@
         "mode": "readwrite",
         "defaultTime": "07:00",
         "description": "Writes a digest of your example files and notes as a new example file, and rotates the provider token you stored in the vault."
+      },
+      {
+        "name": "keywords",
+        "handler": "static",
+        "mode": "read",
+        "defaultTime": null,
+        "description": "Reads each new example file and labels it with up to three keywords from its text. It writes labels only."
       }
     ],
     "compute": {

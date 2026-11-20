@@ -36,6 +36,7 @@ import {
   deleteSecretRoute,
   digestRoute,
   jobsRoute,
+  keywordsRoute,
   listSecretsRoute,
   putSecretRoute,
   runJobRoute,
@@ -70,11 +71,12 @@ export const app = new Hono();
 // first. See `mcp.ts`.
 app.post("/mcp", (c) => handleMcp(c.req.raw));
 
-// The background job's route, ahead of the gate for the same reason: the
-// platform's dispatcher holds a `job` token, never a session cookie. The route
+// The background jobs' routes, ahead of the gate for the same reason: the
+// platform's dispatcher holds a `job` token, never a session cookie. Each route
 // checks the token itself, and the gateway answers 404 to any outside request
 // for `/_starkeep/`, so only the platform reaches it. See `jobs.ts`.
 app.post(`/_starkeep/jobs/${JOBS.digest}`, (c) => digestRoute(c.req.raw));
+app.post(`/_starkeep/jobs/${JOBS.keywords}`, (c) => keywordsRoute(c.req.raw));
 
 // Deny by default, over the manifest's own `publicPaths`. Inert on the local
 // surface; in the cloud the gateway's session authorizer refuses an anonymous

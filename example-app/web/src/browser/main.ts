@@ -945,7 +945,8 @@ const jobsSection = section(
   "Background jobs",
   "Jobs the platform runs for you in the cloud, with no page open. Turn a job on at the platform's consent page, " +
     "where you pick a time of day or only when you ask, and turn it off on the Connections page. " +
-    "The digest job writes a new example file and rotates the provider token in the Vault.",
+    "The digest job writes a new example file and rotates the provider token in the Vault. " +
+    "The keywords job reads each new example file and labels it with the keywords in its text.",
 );
 jobsSection.controls.append(button("Refresh jobs", () => run("Refresh jobs", renderJobs)));
 
