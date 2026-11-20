@@ -1,8 +1,8 @@
-import { configDefaults, defineConfig } from "vitest/config";
+import { defineConfig } from "vitest/config";
 
 /**
- * Unit tests run in `test` (tier 1, required in CI). Tests that boot a process
- * or a socket live in `__tests__/integration/` and run in `test:integration`.
+ * Unit tests only. The daemon and run tests that boot processes stay in
+ * admin-web's integration suite, which drives this package through its routes.
  */
 export default defineConfig({
   test: {
@@ -11,15 +11,7 @@ export default defineConfig({
     projects: [
       {
         extends: true,
-        test: {
-          name: "unit",
-          include: ["__tests__/**/*.test.ts"],
-          exclude: [...configDefaults.exclude, "__tests__/integration/**"],
-        },
-      },
-      {
-        extends: true,
-        test: { name: "integration", include: ["__tests__/integration/**/*.test.ts"] },
+        test: { name: "unit", include: ["__tests__/**/*.test.ts"] },
       },
     ],
   },
