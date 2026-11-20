@@ -1,324 +1,37 @@
 #!/usr/bin/env tsx
 /**
- * Install (or re-install / update) the cloud-data-server built-in app.
+ * Install (or reinstall, or update) the cloud data server.
  *
- * Replaces the old `sst deploy` flow entirely — there is no SST anymore.
- * cloud-data-server is provisioned via the standard admin-installer pipeline:
- * Manager attaches a wide temp policy, the cloud-data-server app role runs
- * Pulumi up to create DSQL/S3/Lambda/APIGw, the shared-schema DDL is
- * applied, and the temp policy is detached.
- *
- * Reads ~/.starkeep/config.json (or $STARKEEP_DIR/config.json). The
- * admin-web wizard writes this file server-side via /api/config as it advances
- * through setup steps, so it must already exist (with at least userPoolId /
- * userPoolClientId / identityPoolId from the Stack outputs step) before this
- * script runs.
- *
- * Region is NOT stored in the file — it is derived from `userPoolId` (AWS
- * encodes the region into the pool ID, e.g. `us-east-2_Xxxxx`).
+ * A thin wrapper over the `install-cloud-data-server` operation
+ * (`src/operations/install-cloud-data-server.ts`), kept for the e2e harness
+ * and the IAM trace capture. People run `starkeep setup --cloud`, and admin-web
+ * runs the operation through `run-operation`.
  *
  * Usage:
- *   pnpm tsx scripts/cli-install-cloud-data-server.ts
- *   pnpm tsx scripts/cli-install-cloud-data-server.ts --non-interactive
+ *   pnpm --filter @starkeep/admin-installer cli:install-cloud-data-server [--non-interactive] [--ephemeral]
+ *
+ * `--non-interactive` takes the admin's credentials from the environment only.
+ * Otherwise they come from the environment or the admin session
+ * (`starkeep login --admin`). `--ephemeral` provisions disposable
+ * infrastructure for the e2e harness (see `isEphemeralInstall`).
  */
 
 // First import: load repo-root .env / .env.local so STARKEEP_DIR is populated.
 import "@starkeep/app-client/load-env";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { starkeepDir } from "@starkeep/app-client";
 
-// TEMP (iam-permission-tests POC): if IAM_SDK_TRACE_PATH is set, record
-// every AWS SDK call this process makes to that file. Must run before any
-// AWS SDK client below is constructed. Imported by relative path so
-// admin-installer doesn't take a package-level dep on the POC. Remove
-// when the POC graduates or is dropped.
+// TEMP (iam-permission-tests POC): record every AWS SDK call this process makes
+// when IAM_SDK_TRACE_PATH is set. Must run before any AWS SDK client exists.
 if (process.env.IAM_SDK_TRACE_PATH) {
   const { installSdkTrace } = await import("../../iam-permission-tests/src/sdk-trace");
   installSdkTrace(process.env.IAM_SDK_TRACE_PATH);
 }
-import { execSync } from "node:child_process";
-import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-import { installCloudDataServer, isEphemeralInstall } from "../src/builtin-installs";
-import { exitOnInstallFailure } from "../src/cli-exit";
-import { ensurePulumiPassphrase } from "../src/pulumi-passphrase";
-import { regionFromUserPoolId } from "../src/cognito-auth";
-import { useOnlyAwsCredentials } from "../src/aws-env";
-import { isDeploymentName } from "@starkeep/aws-bootstrap";
-import {
-  customDomainInstallInput,
-  nextCustomDomainConfig,
-  type CustomDomainConfigFields,
-} from "../src/custom-domain";
-import { adminScriptCredentialsOrExit } from "./admin-credentials";
 
-interface StarkeepConfig extends CustomDomainConfigFields {
-  stackPrefix: string;
-  accountId?: string;
-  userPoolId: string;
-  userPoolClientId: string;
-  /** The bootstrap's DeviceUserPoolClientId output. */
-  deviceUserPoolClientId?: string;
-  /** The bootstrap's CognitoDomain output: the managed login page's host name. */
-  cognitoDomain?: string;
-  /** Step 1 of admin-web's cloud setup: the name under the sign-in page's star. */
-  deploymentName?: string;
-  /** Written by this script: the client cloud app sessions sign in with. */
-  cloudAppsUserPoolClientId?: string;
-  /** Written by this script: the client mobile apps sign in with. */
-  mobileAppsUserPoolClientId?: string;
-  identityPoolId: string;
-  permissionsBoundaryArn?: string;
-  foundationalPermissionsBoundaryArn?: string;
-  userDataOwnerPermissionsBoundaryArn?: string;
-  managerRoleArn?: string;
-  pulumiStateBucket?: string;
-  // populated by this script after a successful install:
-  apiGatewayUrl?: string;
-  publicBaseUrl?: string;
-  apiGatewayId?: string;
-  apiGatewayExecutionArn?: string;
-  authorizerId?: string;
-  sessionAuthorizerId?: string;
-  originAuthorizerId?: string;
-  delegatedAuthorizerId?: string;
-  s3Bucket?: string;
-  auroraEndpoint?: string;
-  /** The deployment's settings this machine held with no cloud; seeds SSM once. */
-  deploymentSettings?: unknown;
-  /** Written by this script: the distribution's own cloudfront.net name. */
-  cloudfrontDomain?: string;
-}
-
-const STARKEEP_DIR = starkeepDir();
-const CONFIG_PATH = join(STARKEEP_DIR, "config.json");
-
-function loadConfig(): StarkeepConfig {
-  let raw: string;
-  try {
-    raw = readFileSync(CONFIG_PATH, "utf-8");
-  } catch {
-    console.error(`Error: ~/.starkeep/config.json not found at ${CONFIG_PATH}`);
-    console.error("Generate it from admin-web after the bootstrap stack is deployed.");
-    process.exit(1);
-  }
-  try {
-    return JSON.parse(raw) as StarkeepConfig;
-  } catch {
-    console.error("Error: ~/.starkeep/config.json is not valid JSON");
-    process.exit(1);
-  }
-}
+const { isEphemeralInstall } = await import("../src/builtin-installs");
+const { runForTerminal } = await import("../src/operations/human");
 
 const flags = process.argv.slice(2);
-const nonInteractive = flags.includes("--non-interactive");
-
-const config = loadConfig();
-const region = regionFromUserPoolId(config.userPoolId);
-const stackPrefix = config.stackPrefix;
-// Desktops sign in through the bootstrap's device client, and the
-// broker accepts their tokens only with its id. admin-web's wizard looks it up
-// from the pool after sign-in, so a config without it needs a sign-in there.
-const deviceUserPoolClientId = config.deviceUserPoolClientId;
-if (!deviceUserPoolClientId) {
-  console.error("Error: ~/.starkeep/config.json has no deviceUserPoolClientId.");
-  console.error(
-    "Sign in on admin-web's cloud setup, which looks it up. If the lookup fails, update the bootstrap stack first.",
-  );
-  process.exit(1);
-}
-
-// Cloud apps and mobile apps sign in on the managed login page, at the
-// bootstrap's Cognito domain. admin-web's wizard looks it up after sign-in, like
-// the device client.
-const cognitoDomain = config.cognitoDomain;
-if (!cognitoDomain) {
-  console.error("Error: ~/.starkeep/config.json has no cognitoDomain.");
-  console.error(
-    "Sign in on admin-web's cloud setup, which looks it up. If the lookup fails, update the bootstrap stack first.",
-  );
-  process.exit(1);
-}
-
-// The sign-in page shows the deployment's name under the star.
-const deploymentName = config.deploymentName;
-if (!deploymentName || !isDeploymentName(deploymentName)) {
-  console.error("Error: ~/.starkeep/config.json has no valid deploymentName.");
-  console.error("Name the deployment on step 1 of admin-web's cloud setup.");
-  process.exit(1);
-}
-
-// Credentials from the environment, as admin-web and the e2e harness pass
-// them, else from the admin session `starkeep login --admin` keeps.
-useOnlyAwsCredentials(
-  await adminScriptCredentialsOrExit(nonInteractive),
-  process.env.AWS_REGION ?? region,
+await runForTerminal(
+  "install-cloud-data-server",
+  { ephemeral: isEphemeralInstall(flags) },
+  { environmentOnly: flags.includes("--non-interactive") },
 );
-
-// Derive account ID from STS if not already in config.
-let accountId: string;
-if (config.accountId) {
-  accountId = config.accountId;
-} else {
-  const sts = new STSClient({ region });
-  const identity = await sts.send(new GetCallerIdentityCommand({}));
-  if (!identity.Account) {
-    console.error("Error: could not determine AWS account ID from credentials");
-    process.exit(1);
-  }
-  accountId = identity.Account;
-}
-
-const managerRoleArn =
-  config.managerRoleArn ?? `arn:aws:iam::${accountId}:role/${stackPrefix}-manager-role`;
-const permissionsBoundaryArn =
-  config.permissionsBoundaryArn ??
-  `arn:aws:iam::${accountId}:policy/${stackPrefix}-app-permissions-boundary`;
-const foundationalPermissionsBoundaryArn =
-  config.foundationalPermissionsBoundaryArn ??
-  `arn:aws:iam::${accountId}:policy/${stackPrefix}-foundational-permissions-boundary`;
-const userDataOwnerPermissionsBoundaryArn =
-  config.userDataOwnerPermissionsBoundaryArn ??
-  `arn:aws:iam::${accountId}:policy/${stackPrefix}-user-data-owner-permissions-boundary`;
-const pulumiStateBucket =
-  config.pulumiStateBucket ?? `${stackPrefix}-pulumi-state-${accountId}-${region}`;
-
-console.log("\nStarkeep cloud-data-server install");
-console.log(`  Region : ${region}`);
-console.log(`  Prefix : ${stackPrefix}`);
-console.log(`  Account: ${accountId}`);
-console.log("");
-
-// Rebuild dist.zip before installing. Without this, the install pipeline
-// uploads whatever zip was last built locally — and if its hash matches what
-// Lambda already has, Pulumi silently skips the code update, shipping stale
-// code with no warning. Build is idempotent and fast on incremental runs.
-console.log("\nBuilding cloud-data-server bundle…\n");
-execSync("pnpm --filter @starkeep/builtin-cloud-data-server build", {
-  stdio: "inherit",
-});
-
-// Create the Pulumi state passphrase if missing. CloudFormation can't
-// create SecureString SSM parameters, so bootstrap leaves this to the
-// installer. Idempotent: subsequent installs see the existing value and
-// leave it alone — the passphrase must stay stable once any Pulumi state
-// exists or every later up/destroy breaks.
-console.log("\nChecking Pulumi state passphrase…");
-const ensureOutcome = await ensurePulumiPassphrase({
-  stackPrefix,
-  region,
-});
-console.log(
-  ensureOutcome === "created"
-    ? "  Created SecureString with fresh random value."
-    : "  Already present; leaving as-is.",
-);
-
-// Record the domain this run attaches before anything touches AWS. A run that
-// fails part-way can leave the domain's certificate and records behind, and the
-// next run's grants must still cover them.
-let starting: StarkeepConfig;
-try {
-  starting = nextCustomDomainConfig(config, { stage: "starting" });
-} catch (err) {
-  // A failed attempt at another domain still waits for its cleanup.
-  console.error(`\nError: ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-}
-mkdirSync(STARKEEP_DIR, { recursive: true });
-writeFileSync(CONFIG_PATH, JSON.stringify(starting, null, 2), "utf-8");
-
-console.log("\nInstalling cloud-data-server…\n");
-const outputs = await installCloudDataServer({
-  stackPrefix,
-  region,
-  accountId,
-  permissionsBoundaryArn,
-  foundationalPermissionsBoundaryArn,
-  userDataOwnerPermissionsBoundaryArn,
-  managerRoleArn,
-  pulumiStateBucket,
-  userPoolId: config.userPoolId,
-  adminUserPoolClientId: config.userPoolClientId,
-  deviceUserPoolClientId,
-  cognitoDomain,
-  deploymentName,
-  // The cloud e2e harness passes --ephemeral to provision disposable infra and
-  // skip the production data-protection hardening (versioning/SSE/PAB/deletion-
-  // protect). A CLI flag — not an env var — so it can't leak in via the
-  // inherited process.env of admin-web's real-install spawn. See
-  // isEphemeralInstall.
-  ephemeral: isEphemeralInstall(flags),
-  ...(config.deploymentSettings !== undefined
-    ? { deploymentSettings: config.deploymentSettings }
-    : {}),
-  // The domain to attach, and the earlier ones whose records and certificate
-  // this run may need to delete after a removal, a change, or a failed attempt.
-  ...customDomainInstallInput(config),
-}).catch(exitOnInstallFailure);
-
-// There is no separate cloud sync identity to install here: shared-record sync
-// (including watcher-originated records, origin_app_id = "local-watcher") flows
-// through the Starkeep Drive channel under Drive's role.
-// Drive is installed as its own pass — `pnpm cli:install-drive` (or the admin
-// wizard's second deploy pass) — after this cloud-data-server install completes.
-
-const updated: StarkeepConfig = {
-  ...nextCustomDomainConfig(config, {
-    stage: "succeeded",
-    status: outputs.customDomain,
-    kept: outputs.keptCertificate,
-  }),
-  accountId,
-  permissionsBoundaryArn,
-  foundationalPermissionsBoundaryArn,
-  userDataOwnerPermissionsBoundaryArn,
-  managerRoleArn,
-  pulumiStateBucket,
-  apiGatewayUrl: outputs.apiGatewayUrl,
-  publicBaseUrl: outputs.publicBaseUrl,
-  cloudfrontDomain: outputs.cloudfrontDomain,
-  apiGatewayId: outputs.apiGatewayId,
-  apiGatewayExecutionArn: outputs.apiGatewayExecutionArn,
-  authorizerId: outputs.authorizerId,
-  sessionAuthorizerId: outputs.sessionAuthorizerId,
-  originAuthorizerId: outputs.originAuthorizerId,
-  delegatedAuthorizerId: outputs.delegatedAuthorizerId,
-  s3Bucket: outputs.bucketName,
-  auroraEndpoint: outputs.auroraHostname,
-  cloudAppsUserPoolClientId: outputs.cloudAppsUserPoolClientId,
-  mobileAppsUserPoolClientId: outputs.mobileAppsUserPoolClientId,
-};
-mkdirSync(STARKEEP_DIR, { recursive: true });
-writeFileSync(CONFIG_PATH, JSON.stringify(updated, null, 2), "utf-8");
-
-console.log("\nInstall complete. Updated ~/.starkeep/config.json:");
-console.log(`  apiGatewayUrl  : ${outputs.apiGatewayUrl}`);
-console.log(`  publicBaseUrl  : ${outputs.publicBaseUrl}`);
-if (outputs.customDomain?.status === "pending-validation") {
-  const record = outputs.customDomain.validationRecord;
-  console.log(`  customDomain   : ${outputs.customDomain.name} awaits certificate validation.`);
-  if (record)
-    console.log(`    Add ${record.type} ${record.name} -> ${record.value}, then install again.`);
-} else if (outputs.customDomain?.status === "awaiting-dns") {
-  console.log(
-    `  customDomain   : ${outputs.customDomain.name} attached, but does not point at the cloud yet.`,
-  );
-  console.log(
-    `    Point a CNAME at ${outputs.cloudfrontDomain}, then install again to make it canonical.`,
-  );
-} else if (outputs.customDomain?.mode === "external") {
-  console.log(
-    `  customDomain   : ${outputs.customDomain.name} attached. Point a CNAME at ${outputs.cloudfrontDomain}.`,
-  );
-} else if (outputs.customDomain) {
-  console.log(`  customDomain   : ${outputs.customDomain.name} attached.`);
-}
-if (outputs.keptCertificate) {
-  console.log(
-    `  customDomain   : the certificate for ${outputs.keptCertificate.name} stays on the ` +
-      "distribution, with no alias, until another domain replaces it.",
-  );
-}
-console.log(`  s3Bucket       : ${outputs.bucketName}`);
-console.log(`  auroraEndpoint : ${outputs.auroraHostname}`);
