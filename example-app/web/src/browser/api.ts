@@ -33,6 +33,7 @@ import {
   type CollectionRow,
   type Note,
 } from "@example-app/common";
+import type { JobState, RunNowResult, SecretEntry } from "@starkeep/app-client";
 import { recordActivity } from "./activity.js";
 import { MAX_IN_FLIGHT, RETRY_DELAYS_MS, createRequestGate } from "./request-gate.js";
 
@@ -1292,6 +1293,66 @@ export async function exportUrls(subKeys: string[]): Promise<Record<string, stri
 /** `DELETE /app-data/files/<subKey>`. */
 export async function deleteExport(subKey: string): Promise<void> {
   expectOk(await data("DELETE", `/app-data/files/${subKey}`));
+}
+
+// ---------------------------------------------------------------------------
+// Background jobs and the vault: the app's own routes (`web/src/server/jobs.ts`)
+// ---------------------------------------------------------------------------
+
+/** One of the app's jobs, with the user's enrollment and the consent page's link. */
+export interface Job extends JobState {
+  /** The consent page, with this browser's time zone and a return to this page. */
+  consentLink: string;
+}
+
+/**
+ * `GET /api/jobs?tz=…`, which calls the platform's `GET /jobs` with the user's
+ * token. `cloudRequired` is true on the local surface, where no job runs.
+ */
+export async function listJobs(): Promise<{ cloudRequired: boolean; jobs: Job[] }> {
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return expectOk(
+    await call<{ cloudRequired: boolean; jobs: Job[] }>("GET", `${BASE}api/jobs${q({ tz })}`),
+  );
+}
+
+/**
+ * `POST /api/jobs/<name>/run`, which calls the platform's `POST /jobs/<name>/run`:
+ * queue one run now. Answers the run's id. A refusal names its code, such as
+ * `not-enabled` before the user turns the job on, or `running` during a run.
+ */
+export async function runJobNow(name: string): Promise<string> {
+  const result = await call<RunNowResult>(
+    "POST",
+    `${BASE}api/jobs/${encodeURIComponent(name)}/run`,
+  );
+  const body = result.body;
+  if (body?.ok) return body.runId;
+  // A refusal from this server, such as a 401, has only `error`.
+  const refusal = body as { cloudRequired?: boolean; code?: string | null; error?: string } | null;
+  const reason = refusal?.cloudRequired ? "needs a cloud" : (refusal?.code ?? refusal?.error);
+  throw new ApiError(result.status, reason || `HTTP ${result.status}`);
+}
+
+/**
+ * `GET /api/vault`, which calls the platform's `GET /vault`: the user's
+ * secrets by name and update time. No call answers a secret's value to the
+ * browser.
+ */
+export async function listSecrets(): Promise<{ cloudRequired: boolean; secrets: SecretEntry[] }> {
+  return expectOk(
+    await call<{ cloudRequired: boolean; secrets: SecretEntry[] }>("GET", `${BASE}api/vault`),
+  );
+}
+
+/** `PUT /api/vault/<name>`, which calls the platform's `PUT /vault/<name>`. */
+export async function saveSecret(name: string, value: string): Promise<void> {
+  expectOk(await call("PUT", `${BASE}api/vault/${encodeURIComponent(name)}`, { json: { value } }));
+}
+
+/** `DELETE /api/vault/<name>`, which calls the platform's `DELETE /vault/<name>`. */
+export async function deleteSecret(name: string): Promise<void> {
+  expectOk(await call("DELETE", `${BASE}api/vault/${encodeURIComponent(name)}`));
 }
 
 // ---------------------------------------------------------------------------

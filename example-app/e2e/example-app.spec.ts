@@ -57,9 +57,9 @@ test.afterAll(async () => {
 });
 
 /** Click a button and wait for the page to report the operation done. */
-async function click(name: string, what: string): Promise<void> {
+async function click(name: string, what: string, timeout?: number): Promise<void> {
   await page.getByRole("button", { name, exact: true }).click();
-  await expect(statusLine()).toHaveText(`${what}: done.`);
+  await expect(statusLine()).toHaveText(`${what}: done.`, timeout ? { timeout } : {});
 }
 
 const table = (name: string) => page.getByRole("table", { name, exact: true });
@@ -1129,6 +1129,157 @@ test("Collections: a deleted file keeps its collections, and a restore returns i
   await click("Restore bread.skexample", "Restore");
   await expect(await cell("Collection contents", "bread.skexample", "Note")).toHaveText("none");
   await expect(table("Collection contents")).not.toContainText("(deleted)");
+});
+
+/**
+ * Sign in on the managed login page, when the platform's page sends the
+ * browser there. A live managed login session returns with no form.
+ */
+async function signInIfAsked(): Promise<void> {
+  const { email, password } = enabledCloudRun().user;
+  const onLogin = await page
+    .waitForURL(/\.amazoncognito\.com\//, { timeout: 15_000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!onLogin) return;
+  const emailField = page.locator('input[name="username"], input[type="email"]').first();
+  const passwordField = page.locator('input[type="password"]').first();
+  const submit = page.locator('button[type="submit"], input[type="submit"]').first();
+  const asked = await emailField
+    .waitFor({ state: "visible", timeout: 15_000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!asked) return;
+  await emailField.fill(email);
+  if (!(await passwordField.isVisible())) {
+    await submit.click();
+    await passwordField.waitFor({ state: "visible", timeout: 30_000 });
+  }
+  await passwordField.fill(password);
+  await submit.click();
+}
+
+/**
+ * How long a step waits for a job run: the page watches a run for up to two
+ * minutes, and a cold Lambda adds to that.
+ */
+const RUN_TIMEOUT_MS = 150_000;
+
+/** Reopen the app's page and wait for it to load. */
+async function reopenApp(): Promise<void> {
+  await page.goto(enabledCloudRun().appUrl);
+  await expect(statusLine()).toHaveText("Load: done.");
+}
+
+test("Background jobs and Vault: both need a cloud", async () => {
+  test.skip(SURFACE !== "local", "The cloud steps turn a job on and store a secret instead");
+  await expect(page.getByText("Background jobs need a cloud.")).toBeVisible();
+  await expect(page.getByText("The vault needs a cloud.")).toBeVisible();
+  await expectLoggedAny("GET", /^\/api\/jobs\?tz=/, 200);
+  await expectLoggedAny("GET", /^\/api\/vault$/, 200);
+  await page.getByLabel("Provider token").fill("local-token");
+  await page.getByRole("button", { name: "Save provider token", exact: true }).click();
+  await expect(statusLine()).toHaveText("Save provider token failed: The vault needs a cloud");
+  await expectLogged("PUT", /^\/api\/vault\/provider-token$/, 501);
+});
+
+test("Background jobs: Run now is refused until the user turns digest on", async () => {
+  test.skip(SURFACE !== "cloud", "No job runs on the local surface");
+  await expect(await cell("Background jobs", "digest", "State")).toHaveText("off");
+  await page.getByRole("button", { name: "Run digest now", exact: true }).click();
+  await expect(statusLine()).toHaveText("Run digest failed: not-enabled");
+  await expectLogged("POST", /^\/api\/jobs\/digest\/run$/, 409);
+});
+
+test("Background jobs: turn digest on at the platform's consent page, and return", async () => {
+  test.skip(SURFACE !== "cloud", "No job runs on the local surface");
+  const run = enabledCloudRun();
+  const link = page.getByRole("link", { name: "Turn on digest", exact: true });
+  // The link names the consent page on the gateway's host, the browser's time
+  // zone, and this page to return to.
+  const href = new URL((await link.getAttribute("href"))!);
+  expect(`${href.origin}${href.pathname}`).toBe(
+    `${run.gatewayUrl.replace(/\/+$/, "")}/connect/job`,
+  );
+  expect(href.searchParams.get("app")).toBe(APP_ID);
+  expect(href.searchParams.get("job")).toBe("digest");
+  expect(href.searchParams.get("tz")).toBeTruthy();
+  expect(href.searchParams.get("return")).toBe(`/apps/${APP_ID}/`);
+
+  await link.click();
+  await page.locator('input[name="when"][value="manual"]').check();
+  await page.getByRole("button", { name: "Sign in and turn the job on" }).click();
+  await signInIfAsked();
+  await page.getByRole("heading", { name: "Background job on" }).waitFor({ timeout: 60_000 });
+  await page.getByRole("link", { name: /^Back to / }).click();
+  await expect(statusLine()).toHaveText("Load: done.");
+  await expect(await cell("Background jobs", "digest", "State")).toHaveText("on");
+  await expect(await cell("Background jobs", "digest", "Schedule")).toHaveText("only when you ask");
+  await expect(page.getByRole("link", { name: "Change digest", exact: true })).toBeVisible();
+});
+
+test("Vault: store the provider token; the page lists its name and never its value", async () => {
+  test.skip(SURFACE !== "cloud", "The vault lives only in the cloud");
+  await expect(table("Vault")).toContainText("No secrets stored.");
+  const token = `e2e-provider-${Date.now()}`;
+  await page.getByLabel("Provider token").fill(token);
+  await click("Save provider token", "Save provider token");
+  await expectLogged("PUT", /^\/api\/vault\/provider-token$/, 200);
+  await expect(await cell("Vault", "provider-token", "Name")).toHaveText("provider-token");
+  await expect(page.locator("body")).not.toContainText(token);
+  // The listing answers names and update times only.
+  const listed = await page.evaluate(async () => await (await fetch("api/vault")).text());
+  expect(listed).toContain("provider-token");
+  expect(listed).not.toContain(token);
+});
+
+test("Background jobs: each run writes a digest file and rotates the provider token", async () => {
+  test.skip(SURFACE !== "cloud", "No job runs on the local surface");
+  const lastRun = async () => cell("Background jobs", "digest", "Last run");
+  const digestName = /digest-\d{4}-\d{2}-\d{2}\.skexample/;
+
+  await click("Run digest now", "Run digest", RUN_TIMEOUT_MS);
+  await expectLogged("POST", /^\/api\/jobs\/digest\/run$/, 202);
+  await expect(await lastRun()).toHaveText(
+    new RegExp(`^ok: Wrote ${digestName.source}; provider token rotation 1$`),
+  );
+  // The run wrote the file with the run's token, and tagged it.
+  const digestRow = table("Example files").locator("tbody tr").filter({ hasText: digestName });
+  await expect(digestRow.first()).toContainText(`${APP_ID}/tag=digest`);
+
+  // The second run read the value the first run stored.
+  await click("Run digest now", "Run digest", RUN_TIMEOUT_MS);
+  await expect(await lastRun()).toHaveText(/; provider token rotation 2$/);
+  await expect(digestRow).toHaveCount(2);
+});
+
+test("Vault: delete the provider token, and the next run finds none", async () => {
+  test.skip(SURFACE !== "cloud", "The vault lives only in the cloud");
+  await click("Delete provider-token", "Delete secret");
+  await expectLogged("DELETE", /^\/api\/vault\/provider-token$/, 200);
+  await expect(table("Vault")).toContainText("No secrets stored.");
+
+  await click("Run digest now", "Run digest", RUN_TIMEOUT_MS);
+  await expect(await cell("Background jobs", "digest", "Last run")).toHaveText(
+    /; no provider token stored$/,
+  );
+});
+
+test("Background jobs: turning digest off on the Connections page stops Run now", async () => {
+  test.skip(SURFACE !== "cloud", "No job runs on the local surface");
+  await (await cell("Connection", "Connections page", "Value")).getByRole("link").click();
+  await signInIfAsked();
+  const row = page
+    .getByRole("row")
+    .filter({ has: page.getByRole("cell", { name: "digest", exact: true }) })
+    .filter({ has: page.getByRole("cell", { name: APP_ID, exact: true }) });
+  await row.getByRole("button", { name: "Turn off" }).click();
+  await page.waitForURL(/\/connections$/);
+
+  await reopenApp();
+  await expect(await cell("Background jobs", "digest", "State")).toHaveText("off");
+  await page.getByRole("button", { name: "Run digest now", exact: true }).click();
+  await expect(statusLine()).toHaveText("Run digest failed: not-enabled");
 });
 
 test("Connection: refresh the session, then sign out", async () => {

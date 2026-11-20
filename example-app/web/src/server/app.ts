@@ -29,9 +29,17 @@ import {
   starkeepDir,
 } from "@starkeep/app-client";
 import { appBasePath, honoOriginGate } from "@starkeep/app-client/hono";
-import { APP_ID } from "@example-app/common";
+import { APP_ID, JOBS } from "@example-app/common";
 import { notesByDay } from "./analysis.js";
 import { echo } from "./echo.js";
+import {
+  deleteSecretRoute,
+  digestRoute,
+  jobsRoute,
+  listSecretsRoute,
+  putSecretRoute,
+  runJobRoute,
+} from "./jobs.js";
 import { handleMcp } from "./mcp.js";
 import manifest from "../../../starkeep.manifest.json" with { type: "json" };
 
@@ -61,6 +69,12 @@ export const app = new Hono();
 // in the cloud the gateway's delegated authorizer has checked the token
 // first. See `mcp.ts`.
 app.post("/mcp", (c) => handleMcp(c.req.raw));
+
+// The background job's route, ahead of the gate for the same reason: the
+// platform's dispatcher holds a `job` token, never a session cookie. The route
+// checks the token itself, and the gateway answers 404 to any outside request
+// for `/_starkeep/`, so only the platform reaches it. See `jobs.ts`.
+app.post(`/_starkeep/jobs/${JOBS.digest}`, (c) => digestRoute(c.req.raw));
 
 // Deny by default, over the manifest's own `publicPaths`. Inert on the local
 // surface; in the cloud the gateway's session authorizer refuses an anonymous
@@ -109,6 +123,15 @@ app.all("/api/local-data/*", (c) => {
 // `POST /api/echo` to the manifest's `api` handler instead, so this line never
 // runs there. See `echo.ts`.
 app.post("/api/echo", (c) => echo(c.req.raw));
+
+// Background jobs and the credential vault, for the signed-in user. Each
+// route carries the user's token to the platform; locally the platform
+// answers `cloudRequired`. See `jobs.ts`.
+app.get("/api/jobs", (c) => jobsRoute(c.req.raw));
+app.post("/api/jobs/:name/run", (c) => runJobRoute(c.req.raw, c.req.param("name")));
+app.get("/api/vault", (c) => listSecretsRoute(c.req.raw));
+app.put("/api/vault/:name", (c) => putSecretRoute(c.req.raw, c.req.param("name")));
+app.delete("/api/vault/:name", (c) => deleteSecretRoute(c.req.raw, c.req.param("name")));
 
 // An analysis read in SQL, over a snapshot of the app's own notes. See
 // `analysis.ts`.

@@ -2,7 +2,7 @@
   "id": "example-app",
   "name": "Example App",
   "version": "0.1.0",
-  "protocolMinVersion": "1.0.0",
+  "protocolMinVersion": "1.1.0",
   "description": "Performs every app-facing data operation on invented plaintext files, and shows each request and its result. Safe to run on a real deployment: it reads and writes only its own example type.",
   "tier": "official",
   "targets": ["local", "cloud"],
@@ -73,6 +73,15 @@
       ]
     },
     "publicSharing": true,
+    "jobs": [
+      {
+        "name": "digest",
+        "handler": "static",
+        "mode": "readwrite",
+        "defaultTime": "07:00",
+        "description": "Writes a digest of your example files and notes as a new example file, and rotates the provider token you stored in the vault."
+      }
+    ],
     "compute": {
       "enabled": true,
       "handlers": [

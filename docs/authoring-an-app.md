@@ -1310,8 +1310,10 @@ What the platform guarantees:
 
 On the local surface no job runs. `verifyJob` refuses every request, and
 `listJobs` and `runJobNow` answer `cloudRequired: true`, so your app can tell
-the user that background jobs need a cloud. Probe's `test-apps/probe` declares
-the job `probe-tick` as a complete example.
+the user that background jobs need a cloud. The example app's `digest` job is
+the one to copy: `example-app/web/src/server/jobs.ts` holds its route and the
+routes its page calls to list, turn on and run it. Probe's `probe-tick` is the
+fixture the platform's own suites run.
 
 ### 7d. Third-party credentials (cloud target only)
 
@@ -1350,6 +1352,8 @@ if (current.ok && current.value) {
 A name is lowercase letters, digits, `_` and `-`, at most 64 characters, and a
 value holds at most 4,096 bytes. Uninstalling your app deletes every user's
 secrets for it. On the local surface every call answers `cloudRequired: true`.
+The example app's `digest` job stores, rotates and deletes a provider token
+this way.
 
 ### 8. Sign-in (cloud target only)
 

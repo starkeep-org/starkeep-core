@@ -51,6 +51,11 @@ const EVERYTHING = {
   accessToken: "token",
   retention_days: 30,
   loadedAt: 1,
+  cloudRequired: false,
+  jobs: [],
+  secrets: [],
+  ok: true,
+  runId: "RUN1",
 };
 
 /** Every exported function, called once with ordinary arguments. */
@@ -124,6 +129,11 @@ const CALLS: Record<string, () => Promise<unknown>> = {
   createShare: () => api.createShare("REC1", "a/b title"),
   revokeShare: () => api.revokeShare("S1"),
   cloudAddress: () => api.cloudAddress(),
+  listJobs: () => api.listJobs(),
+  runJobNow: () => api.runJobNow("digest"),
+  listSecrets: () => api.listSecrets(),
+  saveSecret: () => api.saveSecret("provider-token", "a/b"),
+  deleteSecret: () => api.deleteSecret("provider-token"),
 };
 
 let requested: string[] = [];

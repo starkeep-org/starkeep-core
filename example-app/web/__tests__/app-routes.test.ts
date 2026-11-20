@@ -34,6 +34,17 @@ describe("on the cloud surface, with no session", () => {
     expect(await res.json()).toEqual({ error: "A valid delegation token is required" });
   });
 
+  it("sends the job route to the job check, not the gate", async () => {
+    const res = await app.request("/_starkeep/jobs/digest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Sec-Fetch-Dest": "empty" },
+      body: JSON.stringify({ job: "digest", runId: "r1", trigger: "manual" }),
+    });
+    // The job refusal is a bare 404, so a probe learns nothing; the gate's is a 401.
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "Not found" });
+  });
+
   it("gates the signing proxy: a page load goes to sign-in", async () => {
     const res = await app.request("/api/local-data/data/types");
     expect(res.status).toBe(302);
@@ -51,9 +62,31 @@ describe("on the cloud surface, with no session", () => {
   });
 
   it("gates the app's own routes", async () => {
-    for (const path of ["/api/notes-by-day", "/api/cloud-address"]) {
+    for (const path of ["/api/notes-by-day", "/api/cloud-address", "/api/jobs", "/api/vault"]) {
       const res = await app.request(path, { headers: { "Sec-Fetch-Dest": "empty" } });
       expect(res.status, path).toBe(401);
+    }
+    for (const [method, path] of [
+      ["POST", "/api/jobs/digest/run"],
+      ["PUT", "/api/vault/provider-token"],
+      ["DELETE", "/api/vault/provider-token"],
+    ] as const) {
+      const res = await app.request(path, { method, headers: { "Sec-Fetch-Dest": "empty" } });
+      expect(res.status, `${method} ${path}`).toBe(401);
+    }
+  });
+
+  it("answers a job or vault route 401 when the cookie holds no live session", async () => {
+    for (const [method, path] of [
+      ["GET", "/api/jobs"],
+      ["POST", "/api/jobs/digest/run"],
+      ["GET", "/api/vault"],
+      ["PUT", "/api/vault/provider-token"],
+      ["DELETE", "/api/vault/provider-token"],
+    ] as const) {
+      const res = await app.request(path, { method, headers: { Cookie: "sk_session=x" } });
+      expect(res.status, `${method} ${path}`).toBe(401);
+      expect(await res.json()).toEqual({ error: "Sign in first" });
     }
   });
 

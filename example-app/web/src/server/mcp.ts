@@ -27,21 +27,12 @@
 import {
   delegationRefusal,
   loadAppCredentials,
-  signedFetch,
   verifyDelegation,
   type AppCredentials,
   type DelegatedPrincipal,
 } from "@starkeep/app-client";
-import {
-  APP_ID,
-  EXAMPLE_TYPE,
-  LABEL_KEYS,
-  TABLES,
-  decodeNote,
-  encodeNote,
-  textMetrics,
-  trashFile,
-} from "@example-app/common";
+import { APP_ID, LABEL_KEYS, TABLES, decodeNote, encodeNote, trashFile } from "@example-app/common";
+import { DataCallError, createExampleFile, dataCaller, type RecordRow } from "./data-call.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
 
@@ -55,36 +46,13 @@ interface Ctx {
 }
 
 /** One data call, with the delegation's token when there is one. */
-async function data(
+function data(
   ctx: Ctx,
   method: string,
   path: string,
   body?: { json?: unknown; text?: string },
 ): Promise<unknown> {
-  const res = await signedFetch(ctx.creds, path, {
-    method,
-    delegation: ctx.who.token,
-    ...(body?.json !== undefined
-      ? { body: JSON.stringify(body.json), headers: { "Content-Type": "application/json" } }
-      : body?.text !== undefined
-        ? { body: body.text, headers: { "Content-Type": "text/plain" } }
-        : {}),
-  });
-  const text = await res.text();
-  let parsed: unknown = text;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    // Keep the text.
-  }
-  if (!res.ok) {
-    const reason =
-      typeof parsed === "object" && parsed !== null && "error" in parsed
-        ? String((parsed as { error: unknown }).error)
-        : text.slice(0, 300);
-    throw new ToolError(`The data server answered ${res.status}: ${reason}`);
-  }
-  return parsed;
+  return dataCaller(ctx.creds, ctx.who.token)(method, path, body);
 }
 
 function str(args: Args, name: string): string {
@@ -93,15 +61,6 @@ function str(args: Args, name: string): string {
     throw new ToolError(`"${name}" is required`);
   }
   return value;
-}
-
-interface RecordRow {
-  id: string;
-  original_filename?: string | null;
-  created_at?: string;
-  /** As both data servers send it: `key` bare, `label` namespaced as `<app_id>/<key>`. */
-  labels?: { app_id: string; key: string; value?: string | null }[];
-  metadata?: Record<string, unknown>;
 }
 
 function summarize(r: RecordRow) {
@@ -223,25 +182,8 @@ const TOOLS: Record<string, Tool> = {
     description: "Create a new example file from text. Needs read and write access.",
     inputSchema: object({ name: { type: "string" }, text: { type: "string" } }, ["name", "text"]),
     async run(ctx, args) {
-      const text = str(args, "text");
-      const raw = str(args, "name").replace(/\.skexample$/, "");
-      const stored = (await data(
-        ctx,
-        "POST",
-        `/data/files?type=${encodeURIComponent(EXAMPLE_TYPE)}`,
-        { text },
-      )) as { contentHash: string; sizeBytes: number };
-      const body = (await data(ctx, "POST", "/data/records", {
-        json: {
-          type: EXAMPLE_TYPE,
-          fileName: `${raw}.skexample`,
-          contentType: "text/plain",
-          contentHash: stored.contentHash,
-          sizeBytes: stored.sizeBytes,
-          metadata: textMetrics(text),
-        },
-      })) as { record: RecordRow };
-      return summarize(body.record);
+      const call = dataCaller(ctx.creds, ctx.who.token);
+      return summarize(await createExampleFile(call, str(args, "name"), str(args, "text")));
     },
   },
   trash_file: {
@@ -313,7 +255,7 @@ export async function handleMcp(req: Request): Promise<Response> {
         const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
         return result(id, { content: [{ type: "text", text }], isError: false });
       } catch (err) {
-        if (!(err instanceof ToolError)) throw err;
+        if (!(err instanceof ToolError) && !(err instanceof DataCallError)) throw err;
         return result(id, { content: [{ type: "text", text: err.message }], isError: true });
       }
     }
