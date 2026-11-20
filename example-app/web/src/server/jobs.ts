@@ -1,20 +1,27 @@
 /**
- * The example's background job, `digest`, and the page's job and vault routes.
+ * The example's background jobs, `digest` and `keywords`, and the page's job
+ * and vault routes.
  *
- * **The job.** The manifest declares `digest`, which the platform runs in the
- * cloud for each user who turns it on, at the user's time of day or when the
- * user clicks Run now. The platform's dispatcher calls
- * `POST /_starkeep/jobs/digest` with a `job` token and no session cookie, so
- * `app.ts` mounts the route ahead of the origin gate. `verifyJob` checks the
+ * **The jobs.** The manifest declares both jobs, which the platform runs in
+ * the cloud for each user who turns them on, at the user's time of day or when
+ * the user clicks Run now. The platform's dispatcher calls
+ * `POST /_starkeep/jobs/<name>` with a `job` token and no session cookie, so
+ * `app.ts` mounts the routes ahead of the origin gate. `verifyJob` checks the
  * token, and every call the run makes forwards it, so the platform applies
  * the job's mode and the user's grant to each one.
  *
- * Each run plays a sync from a third-party service. It reads the user's
+ * Each `digest` run plays a sync from a third-party service. It reads the user's
  * provider token from the vault, rotates it as such a provider would, and
  * writes the next value back before the run ends. It then counts the user's
  * example files and notes, and saves the counts as a new example file tagged
  * `digest`. The run's message names the file and the rotation, never the
  * token. See `rotateProviderToken` in `@example-app/common`.
+ *
+ * Each `keywords` run processes the user's files one by one, as an OCR or
+ * classification job would. It reads the text of each example file it has not
+ * read before and labels the file with the keywords in it. The job runs in
+ * `read` mode, which reads everything and writes labels only. See
+ * `runKeywords` below.
  *
  * **The page's routes.** The page lists the user's jobs, starts a run, and
  * stores, lists and deletes the user's secrets, each through this server
@@ -43,6 +50,7 @@ import {
   DIGEST_TAG,
   JOBS,
   LABEL_KEYS,
+  keywordsOf,
   SECRETS,
   TABLES,
   digestFileName,
@@ -50,7 +58,13 @@ import {
   rotateProviderToken,
   type DigestCounts,
 } from "@example-app/common";
-import { DataCallError, createExampleFile, dataCaller, type DataCall } from "./data-call.js";
+import {
+  DataCallError,
+  createExampleFile,
+  dataCaller,
+  type DataCall,
+  type RecordRow,
+} from "./data-call.js";
 
 // ---------------------------------------------------------------------------
 // The job
@@ -64,13 +78,13 @@ export interface DigestDeps {
   now(): Date;
 }
 
-/** How a run ended: 2xx for success, and the message the platform records. */
-export interface DigestOutcome {
+/** How a run of either job ended: 2xx for success, and the message the platform records. */
+export interface JobOutcome {
   status: number;
   message: string;
 }
 
-function vaultFailure(what: string, result: VaultResult<unknown>): DigestOutcome {
+function vaultFailure(what: string, result: VaultResult<unknown>): JobOutcome {
   const detail = result.ok ? "" : result.cloudRequired ? "the vault needs a cloud" : result.error;
   return { status: 502, message: `${what} failed: ${detail}` };
 }
@@ -100,7 +114,7 @@ async function digestCounts(data: DataCall): Promise<DigestCounts> {
 }
 
 /** One digest run. Exported for the unit test, which passes fakes. */
-export async function runDigest(runId: string, deps: DigestDeps): Promise<DigestOutcome> {
+export async function runDigest(runId: string, deps: DigestDeps): Promise<JobOutcome> {
   // Rotate first. A provider that rotates on every use expires the old
   // token as soon as it answers, so the new one must reach the vault before
   // anything else can fail.
@@ -151,6 +165,110 @@ export async function digestRoute(req: Request): Promise<Response> {
   });
   // The platform records `message` beside the run, on the connections page
   // and in `listJobs`. Any status outside 2xx marks the run failed.
+  return Response.json({ message: outcome.message }, { status: outcome.status });
+}
+
+/** What one keywords run reaches: its data calls, and a fetch of a file's text. */
+export interface KeywordsDeps {
+  data: DataCall;
+  /** The text at a signed file URL. Throws a {@link DataCallError} when the fetch fails. */
+  fetchText(url: string): Promise<string>;
+}
+
+/** The most files one run reads, so a run stays within the handler's timeout. */
+export const KEYWORDS_BATCH = 25;
+
+/** How many file texts a run fetches at once. */
+const FETCH_AT_ONCE = 10;
+
+/**
+ * One keywords run. Exported for the unit test, which passes fakes.
+ *
+ * The run picks up only files without the `indexed` flag, oldest first, and
+ * flags each file it reads. A user with many files therefore gets them all
+ * labelled over several runs, and a run never reads a file twice. The flag,
+ * not the keywords, marks a file as read, because a file may have no
+ * keywords.
+ *
+ * A file whose text cannot be fetched keeps no flag. The run reports it, and
+ * the next run tries it again.
+ */
+export async function runKeywords(deps: KeywordsDeps): Promise<JobOutcome> {
+  try {
+    const search = new URLSearchParams({
+      notLabel: `${APP_ID}/${LABEL_KEYS.indexed}`,
+      order: JSON.stringify([{ col: "created_at", dir: "asc" }]),
+      limit: String(KEYWORDS_BATCH),
+    });
+    const listed = (await deps.data("GET", `/data/records?${search}`)) as {
+      records: RecordRow[];
+      nextCursor?: string | null;
+    };
+    const ids = listed.records.map((r) => r.id);
+    if (ids.length === 0) return { status: 200, message: "No new files" };
+
+    const { urls } = (await deps.data("POST", "/data/records/file-urls", {
+      json: { ids },
+    })) as { urls: Record<string, { url: string } | undefined> };
+    const found = new Map<string, string[]>();
+    for (let i = 0; i < ids.length; i += FETCH_AT_ONCE) {
+      await Promise.all(
+        ids.slice(i, i + FETCH_AT_ONCE).map(async (id) => {
+          const url = urls[id]?.url;
+          if (!url) return;
+          try {
+            found.set(id, keywordsOf(await deps.fetchText(url)));
+          } catch (err) {
+            if (!(err instanceof DataCallError)) throw err;
+          }
+        }),
+      );
+    }
+
+    const read = ids.filter((id) => found.has(id));
+    if (read.length > 0) {
+      // `/data/labels/values` makes the key hold exactly these keywords, so a
+      // second labelling replaces the first rather than adding to it.
+      await deps.data("POST", "/data/labels/values", {
+        json: {
+          labels: read.map((recordId) => ({
+            recordId,
+            key: LABEL_KEYS.keyword,
+            values: found.get(recordId),
+          })),
+        },
+      });
+      await deps.data("POST", "/data/labels", {
+        json: { labels: read.map((recordId) => ({ recordId, key: LABEL_KEYS.indexed })) },
+      });
+    }
+
+    const parts = [`Read ${read.length} ${read.length === 1 ? "file" : "files"}`];
+    const unread = ids.length - read.length;
+    if (unread > 0) parts.push(`${unread} could not be read`);
+    parts.push(listed.nextCursor ? "more remain for the next run" : "none left");
+    return { status: 200, message: parts.join("; ") };
+  } catch (err) {
+    if (err instanceof DataCallError) return { status: 502, message: err.message };
+    throw err;
+  }
+}
+
+/** A file's text at a signed URL. */
+async function fetchText(url: string): Promise<string> {
+  const res = await fetch(url);
+  if (!res.ok) throw new DataCallError(res.status, `A file's text answered ${res.status}`);
+  return await res.text();
+}
+
+/** `POST /_starkeep/jobs/keywords`: the platform's dispatcher runs the job. */
+export async function keywordsRoute(req: Request): Promise<Response> {
+  const run = await verifyJob(req, JOBS.keywords);
+  if (!run) return jobRefusal();
+  const creds = await loadAppCredentials(APP_ID);
+  if (!creds)
+    return Response.json({ message: `${APP_ID} has no credentials here` }, { status: 503 });
+  const outcome = await runKeywords({ data: dataCaller(creds, run.token), fetchText });
   return Response.json({ message: outcome.message }, { status: outcome.status });
 }
 

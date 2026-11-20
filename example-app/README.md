@@ -19,7 +19,7 @@ Each heading is one group of operations, with a table of the current state and a
 | Notes           | The app's own `notes` table: write, pin, delete, and search by text, prefix, edit date, the files on or off the page, or a collection.                                   |
 | Analysis        | Notes per day, in SQL the app's server runs over a snapshot of the notes table, with its load time and a Refresh button.                                                 |
 | Note exports    | The app's own files: save every note as a private JSON file, then list, open and delete the files.                                                                       |
-| Background jobs | The app's `digest` job: a link to the platform's page that turns it on, a Run now button, and each run's outcome. Jobs need a cloud.                                     |
+| Background jobs | The app's `digest` and `keywords` jobs: a link to the platform's page that turns each on, a Run now button, and each run's outcome. Jobs need a cloud.                   |
 | Vault           | Store and delete the provider token that the digest job rotates. The page lists names and update times, and never reads a value back.                                    |
 | Deleted         | Every example file deleted since an instant, a restore, and the trash retention window. A deleted file keeps its note and collections, so a restore returns them.        |
 | Types           | Record counts for every type the app may read.                                                                                                                           |
@@ -47,9 +47,13 @@ Every `order` the example sends uses the JSON spelling, such as `[{"col":"create
 
 ### Background jobs and the vault
 
-The manifest declares one job, `digest`, which the platform runs in the cloud for each user who turns it on. A user turns it on with the Background jobs heading's **Turn on digest** link, which opens the platform's consent page. There the user picks a time of day or "Only when I ask". The user turns it off on the Connections page that the Connection table links.
+The manifest declares two jobs, `digest` and `keywords`. The platform runs each job in the cloud for each user who turns it on. A user turns a job on with its link under the Background jobs heading, such as **Turn on digest**, which opens the platform's consent page. There the user picks a time of day or "Only when I ask". The user turns a job off on the Connections page that the Connection table links.
 
-Each run plays a sync from another service. The run reads the user's `provider-token` secret from the vault, rotates it the way a service that issues a new token on every use would, and stores the new value. It then saves a digest of the user's example files and notes as a new example file tagged `digest`. The run's message names the file and the rotation number, never the token. `web/src/server/jobs.ts` holds the job's route, which the platform calls with a token for that one run, and the page's routes, which call the platform with the signed-in user's token.
+Each `digest` run plays a sync from another service. The run reads the user's `provider-token` secret from the vault, rotates it the way a service that issues a new token on every use would, and stores the new value. It then saves a digest of the user's example files and notes as a new example file tagged `digest`. The run's message names the file and the rotation number, never the token. The job runs in `readwrite` mode, because it writes a file.
+
+Each `keywords` run processes the user's existing files one by one, as an OCR or classification job would. The run picks up to 25 example files that lack the `example-app/indexed` flag, oldest first. It reads each file's text, sets the file's `keyword` label to up to three of the file's most frequent words, and flags the file `indexed`. A user with more files gets them all labelled over several runs, and no run reads a file twice. The job runs in `read` mode, which reads everything and writes labels only, and its consent page offers "Only when I ask" first.
+
+`web/src/server/jobs.ts` holds both jobs' routes, which the platform calls with a token for that one run, and the page's routes, which call the platform with the signed-in user's token.
 
 On the local surface no job runs and no vault exists. Both headings say they need a cloud.
 
@@ -65,11 +69,14 @@ The **Connections page** link in the same table lists both kinds of connection, 
 
 ### How labels read
 
-The page shows each label as `<app>/<key>=<value>`, such as `example-app/tag=spoon`. The `example-app/` prefix names the app that made the assertion. Every label has a key, and the app declares its keys in `starkeep.manifest.json`. The example app declares three:
+The page shows each label as `<app>/<key>=<value>`, such as `example-app/tag=spoon`. The `example-app/` prefix names the app that made the assertion. Every label has a key, and the app declares its keys in `starkeep.manifest.json`. The example app declares six:
 
 - `tag` holds a tag you add, such as `example-app/tag=spoon`.
 - `derived` marks a copy and names how the copy was made, such as `example-app/derived=uppercase`.
+- `keyword` holds a keyword the `keywords` job found in the file's text, such as `example-app/keyword=flour`.
 - `reviewed` is a bare flag. A bare flag has an empty value, so the page shows `example-app/reviewed` with no `=`.
+- `sample` is a bare flag on each file that the Load sample data button made.
+- `indexed` is a bare flag on each file that the `keywords` job has read.
 
 ### How dates read
 
@@ -94,7 +101,7 @@ web/                     @example-app/web: the local web and cloud web flavors
   src/server/echo.ts     POST /api/echo, the JWT-gated route
   src/server/mcp.ts      POST /mcp, the MCP endpoint for outside clients
   src/server/analysis.ts GET /api/notes-by-day, SQL over a snapshot of the notes
-  src/server/jobs.ts     the digest job, and the page's job and vault routes
+  src/server/jobs.ts     the digest and keywords jobs, and the page's job and vault routes
   src/server/data-call.ts data calls with a delegation or a job run's token
   src/browser/           the page
   scripts/bundle.mjs     the cloud bundle
@@ -124,7 +131,7 @@ pnpm exec playwright install chromium   # once, in e2e/
 pnpm test:e2e
 ```
 
-`pnpm test` runs the unit suites. They cover the MCP endpoint, the digest job's run, the order of the server's routes, every page operation's URL shape, and the request gate.
+`pnpm test` runs the unit suites. They cover the MCP endpoint, a run of each job, the order of the server's routes, every page operation's URL shape, and the request gate.
 
 To check the cloud bundle loads before you install it, build it and send it a few requests:
 

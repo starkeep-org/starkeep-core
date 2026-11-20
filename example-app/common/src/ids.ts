@@ -31,6 +31,10 @@ export const LABEL_KEYS = {
   derived: "derived",
   /** A bare flag on every file the Load sample data button made. */
   sample: "sample",
+  /** A set-valued keyword the keywords job found in a file's text. */
+  keyword: "keyword",
+  /** A bare flag: the keywords job has read this file. */
+  indexed: "indexed",
 } as const;
 
 /** The app's own tables, as the manifest declares them. */
@@ -49,6 +53,8 @@ export const EXPORT_PREFIX = "exports/";
 export const JOBS = {
   /** Writes a digest of the user's example files and notes as a new file. */
   digest: "digest",
+  /** Labels each new example file with the keywords in its text. */
+  keywords: "keywords",
 } as const;
 
 /** The credential vault secrets the app keeps for each user. */

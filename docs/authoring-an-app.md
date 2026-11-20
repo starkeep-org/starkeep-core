@@ -1310,9 +1310,12 @@ What the platform guarantees:
 
 On the local surface no job runs. `verifyJob` refuses every request, and
 `listJobs` and `runJobNow` answer `cloudRequired: true`, so your app can tell
-the user that background jobs need a cloud. The example app's `digest` job is
-the one to copy: `example-app/web/src/server/jobs.ts` holds its route and the
-routes its page calls to list, turn on and run it. Probe's `probe-tick` is the
+the user that background jobs need a cloud. The example app's two jobs are the
+ones to copy. `digest` runs in `readwrite` mode and writes a new file.
+`keywords` runs in `read` mode, reads each new file's text, labels the file,
+and leaves a flag so that the next run picks up where this one stopped.
+`example-app/web/src/server/jobs.ts` holds both routes and the routes the page
+calls to list, turn on and run each job. Probe's `probe-tick` is the
 fixture the platform's own suites run.
 
 ### 7d. Third-party credentials (cloud target only)

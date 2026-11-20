@@ -1,5 +1,5 @@
 /**
- * One digest run, against fakes for the vault and the data server.
+ * One run of each job, against fakes for the vault and the data server.
  *
  * The run's real calls carry the run's token to the platform, which the cloud
  * e2e suite drives. These tests hold what the run itself decides: it rotates
@@ -9,7 +9,13 @@
 import { describe, expect, it } from "vitest";
 import type { VaultResult } from "@starkeep/app-client";
 import { DataCallError, type DataCall } from "../src/server/data-call.js";
-import { runDigest, type DigestDeps } from "../src/server/jobs.js";
+import {
+  KEYWORDS_BATCH,
+  runDigest,
+  runKeywords,
+  type DigestDeps,
+  type KeywordsDeps,
+} from "../src/server/jobs.js";
 
 const SECRET = "s3cret-token";
 const AT = new Date("2026-11-20T07:00:12.000Z");
@@ -115,5 +121,127 @@ describe("a digest run", () => {
     const outcome = await runDigest("run-1", deps);
     expect(puts).toEqual([["provider-token", `${SECRET}#1`]]);
     expect(outcome).toEqual({ status: 502, message: "The data server answered 403: refused" });
+  });
+});
+
+/** Files the keywords fakes serve, by record id: text, or null when the fetch fails. */
+type Texts = Record<string, string | null>;
+
+function keywordFakes(opts: { texts: Texts; more?: boolean; unsigned?: string[] }): {
+  deps: KeywordsDeps;
+  sent: Sent[];
+} {
+  const sent: Sent[] = [];
+  const ids = Object.keys(opts.texts);
+  const deps: KeywordsDeps = {
+    data: async (method, path, body) => {
+      sent.push({ method, path, body });
+      if (path.startsWith("/data/records?")) {
+        return { records: ids.map((id) => ({ id })), nextCursor: opts.more ? "c2" : null };
+      }
+      if (path === "/data/records/file-urls") {
+        const urls: Record<string, { url: string }> = {};
+        for (const id of ids) {
+          if (!opts.unsigned?.includes(id)) urls[id] = { url: `https://bytes/${id}` };
+        }
+        return { urls };
+      }
+      return {};
+    },
+    fetchText: async (url) => {
+      const text = opts.texts[url.slice("https://bytes/".length)];
+      if (text === null || text === undefined) {
+        throw new DataCallError(404, "A file's text answered 404");
+      }
+      return text;
+    },
+  };
+  return { deps, sent };
+}
+
+describe("a keywords run", () => {
+  it("lists only unread files, oldest first, one batch at a time", async () => {
+    const { deps, sent } = keywordFakes({ texts: {} });
+    expect(await runKeywords(deps)).toEqual({ status: 200, message: "No new files" });
+    const query = new URL(`https://x${sent[0]!.path}`).searchParams;
+    expect(query.get("notLabel")).toBe("example-app/indexed");
+    expect(JSON.parse(query.get("order")!)).toEqual([{ col: "created_at", dir: "asc" }]);
+    expect(query.get("limit")).toBe(String(KEYWORDS_BATCH));
+    expect(sent).toHaveLength(1);
+  });
+
+  it("sets each file's keywords exactly, then flags every file it read", async () => {
+    const { deps, sent } = keywordFakes({
+      texts: { R1: "Flour, flour and water. Salt.", R2: "a b c" },
+    });
+    const outcome = await runKeywords(deps);
+    expect(outcome).toEqual({ status: 200, message: "Read 2 files; none left" });
+    expect(sent[1]).toEqual({
+      method: "POST",
+      path: "/data/records/file-urls",
+      body: { json: { ids: ["R1", "R2"] } },
+    });
+    expect(sent[2]).toEqual({
+      method: "POST",
+      path: "/data/labels/values",
+      body: {
+        json: {
+          labels: [
+            { recordId: "R1", key: "keyword", values: ["flour", "water", "salt"] },
+            // A file with no keywords is still read, and its key holds nothing.
+            { recordId: "R2", key: "keyword", values: [] },
+          ],
+        },
+      },
+    });
+    expect(sent[3]).toEqual({
+      method: "POST",
+      path: "/data/labels",
+      body: {
+        json: {
+          labels: [
+            { recordId: "R1", key: "indexed" },
+            { recordId: "R2", key: "indexed" },
+          ],
+        },
+      },
+    });
+  });
+
+  it("says more files remain when the listing has another page", async () => {
+    const { deps } = keywordFakes({ texts: { R1: "Kettle" }, more: true });
+    expect((await runKeywords(deps)).message).toBe("Read 1 file; more remain for the next run");
+  });
+
+  it("leaves a file it could not read unflagged, for the next run", async () => {
+    const { deps, sent } = keywordFakes({
+      texts: { R1: "Kettle", R2: null, R3: "Moon" },
+      unsigned: ["R3"],
+    });
+    const outcome = await runKeywords(deps);
+    expect(outcome).toEqual({
+      status: 200,
+      message: "Read 1 file; 2 could not be read; none left",
+    });
+    expect(sent.at(-1)?.body?.json).toEqual({ labels: [{ recordId: "R1", key: "indexed" }] });
+  });
+
+  it("writes no labels when it reads no file", async () => {
+    const { deps, sent } = keywordFakes({ texts: { R1: null } });
+    expect((await runKeywords(deps)).message).toBe("Read 0 files; 1 could not be read; none left");
+    expect(sent.map((s) => s.path)).not.toContain("/data/labels");
+  });
+
+  it("fails with the data server's reason when a call is refused", async () => {
+    const deps: KeywordsDeps = {
+      data: async () => {
+        throw new DataCallError(403, "The data server answered 403: refused");
+      },
+      fetchText: async () => "",
+    };
+    expect(await runKeywords(deps)).toEqual({
+      status: 502,
+      message: "The data server answered 403: refused",
+    });
   });
 });
