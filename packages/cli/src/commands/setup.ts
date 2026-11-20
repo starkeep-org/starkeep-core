@@ -3,8 +3,8 @@
  *
  * Setup on this computer: the wrapper has already run `pnpm install`, so setup
  * seeds the config, offers the bare `starkeep` command, and starts the data
- * server and Drive. Cloud setup and joining an existing cloud run from
- * admin-web until the cloud CLI arrives.
+ * server and Drive. `--cloud` then deploys a new cloud and `--join` joins one
+ * that exists (`../setup/cloud.ts`).
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, readlinkSync, symlinkSync } from "node:fs";
@@ -16,11 +16,19 @@ import { readConfigSeeded } from "@starkeep/operator/config";
 import { stopById } from "@starkeep/operator/daemons";
 import { repoRoot } from "@starkeep/operator/repo-root";
 import { serviceStatus } from "@starkeep/operator/service-control";
+import { adminSessionStatus } from "@starkeep/operator/admin-session";
+import { localDataServerUrlFromEnv } from "@starkeep/operator/urls";
 import { flag, type Command } from "../command";
-import { CliError, EXIT_USAGE } from "../errors";
+import { CliError, usageError } from "../errors";
 import type { Io } from "../io";
 import { PLATFORM_SERVICES } from "../names";
 import { startOne } from "./services";
+import { loginAdmin, loginSync } from "./account";
+import { approveCloudInstall, installInCloud } from "./apps";
+import { readCloudApps, runCloud } from "../cloud";
+import { resolveAppReference } from "../app-steps";
+import { setupCloud, setupJoin, type CloudSetupDeps } from "../setup/cloud";
+import { stringFlag } from "../command";
 
 function wrapperPath(): string {
   return join(repoRoot(), "scripts", "starkeep.mjs");
@@ -60,38 +68,151 @@ async function offerLink(io: Io, yes: boolean): Promise<void> {
   }
 }
 
+/** Restart the data server so it reads the cloud's address, or start it, and start Drive. */
+async function startLocalServices(io: Io, restartDataServer: boolean): Promise<void> {
+  const running = (await serviceStatus("local-data-server")).running;
+  if (running && restartDataServer) {
+    io.event({
+      type: "progress",
+      message: "Restarting the data server so it reads the new cloud…",
+    });
+    await stopById("local-data-server");
+  }
+  for (const id of PLATFORM_SERVICES) {
+    if ((await serviceStatus(id)).running) continue;
+    if (!(await startOne(io, id))) {
+      throw new CliError(`${id} did not start. Run \`starkeep logs ${id}\`.`);
+    }
+  }
+}
+
+async function syncState(): Promise<string | null> {
+  try {
+    const res = await fetch(`${localDataServerUrlFromEnv()}/auth/status`);
+    return res.ok ? (((await res.json()) as { state?: string }).state ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
+const CLOUD_SETUP_DEPS: CloudSetupDeps = {
+  owner: {},
+  adminSignedIn: () => adminSessionStatus().signedIn,
+  loginAdmin,
+  loginSync,
+  runCloud,
+  cloudAppIds: async (io) =>
+    (await readCloudApps(io, { signIn: true }))?.map((a) => a.appId) ?? null,
+  syncState,
+  startLocalServices,
+  installApps: async (io, refs, yes) => {
+    for (const ref of refs) {
+      const app = await resolveAppReference(io, ref);
+      if (await approveCloudInstall(io, app, yes)) await installInCloud(io, app, "all");
+    }
+  },
+};
+
+/** Setup on this computer: the config, the link, and the data server and Drive. */
+async function setupLocal(io: Io, yes: boolean, offer: boolean): Promise<string> {
+  readConfigSeeded();
+  io.event({ type: "progress", message: `Starkeep keeps its data in ${starkeepDir()}.` });
+  if (offer) await offerLink(io, yes);
+  let failed = 0;
+  for (const id of PLATFORM_SERVICES) if (!(await startOne(io, id))) failed++;
+  if (failed > 0)
+    throw new CliError("Setup could not start every service. See the messages above.");
+  return `http://localhost:${daemonPort("STARKEEP_ADMIN_PORT", 3000)}`;
+}
+
 export const setupCommand: Command = {
   name: "setup",
-  summary: "Set Starkeep up on this computer",
-  usage: "[--local] [--yes] [--no-link]",
-  lane: "none",
+  summary: "Set Starkeep up on this computer, deploy a cloud, or join one",
+  usage:
+    "[--local] [--cloud --region <r> --name <n> --admin-email <e> [--prefix <p>] [--domain <d>] [--apps <a,b>]] [--join <address>] [--yes]",
+  lane: "setup",
   flags: {
     local: { type: "boolean", description: "Set up the local services (the default)." },
-    cloud: { type: "boolean", description: "Deploy a new cloud. Runs from admin-web for now." },
-    join: { type: "string", description: "Join an existing cloud. Runs from admin-web for now." },
+    cloud: { type: "boolean", description: "Deploy a new cloud, or resume a setup that stopped." },
+    join: { type: "string", description: "Join the cloud at this https address." },
+    region: { type: "string", description: "The AWS region for a new cloud, such as us-east-2." },
+    prefix: {
+      type: "string",
+      description: "The stack prefix every resource name starts with (default starkeep).",
+    },
+    name: {
+      type: "string",
+      description: "The deployment's name, under the star on the sign-in page.",
+    },
+    "admin-email": {
+      type: "string",
+      description: "The first admin's email. Cognito sends it a temporary password.",
+    },
+    domain: {
+      type: "string",
+      description: "A custom domain for the cloud, such as photos.example.com.",
+    },
+    apps: { type: "string", description: "Install these apps in the cloud too, comma-separated." },
     yes: { type: "boolean", short: "y", description: "Answer yes to every question." },
     "no-link": { type: "boolean", description: "Do not offer the ~/.local/bin/starkeep link." },
+    "no-browser": {
+      type: "boolean",
+      description: "Print the sign-in addresses without opening a browser.",
+    },
   },
   details:
     "Installs the workspace (the wrapper runs pnpm install first), starts the data server and Drive,\n" +
-    "and offers a ~/.local/bin/starkeep link so the command works from any folder.",
+    "and offers a ~/.local/bin/starkeep link so the command works from any folder.\n\n" +
+    "--cloud creates the bootstrap stack, signs the first admin in on the managed login page,\n" +
+    "installs the cloud data server and Drive, and signs this computer in to sync. Each phase\n" +
+    "checks whether it is done first, so running the command again resumes after a failure.\n\n" +
+    "--join records an existing cloud's address and signs this computer in to sync.",
   async run(io, args) {
-    if (flag(args, "cloud") || args.flags.join !== undefined) {
-      throw new CliError(
-        "Cloud setup and joining a cloud run from admin-web for now. Run `starkeep setup --local`, then `starkeep admin`, and open Cloud setup.",
-        EXIT_USAGE,
-        "USAGE",
-      );
-    }
+    const cloud = flag(args, "cloud");
+    const join = stringFlag(args, "join");
+    if (cloud && join !== undefined) throw usageError("Choose --cloud or --join, not both.");
     const yes = flag(args, "yes");
-    readConfigSeeded();
-    io.event({ type: "progress", message: `Starkeep keeps its data in ${starkeepDir()}.` });
-    if (!flag(args, "no-link")) await offerLink(io, yes);
-    let failed = 0;
-    for (const id of PLATFORM_SERVICES) if (!(await startOne(io, id))) failed++;
-    if (failed > 0)
-      throw new CliError("Setup could not start every service. See the messages above.");
-    const adminUrl = `http://localhost:${daemonPort("STARKEEP_ADMIN_PORT", 3000)}`;
+    const noBrowser = flag(args, "no-browser");
+    const local = flag(args, "local") || (!cloud && join === undefined);
+    let adminUrl: string | undefined;
+    if (local) adminUrl = await setupLocal(io, yes, !flag(args, "no-link"));
+    if (cloud) {
+      const apps = (stringFlag(args, "apps") ?? "")
+        .split(",")
+        .map((a) => a.trim())
+        .filter(Boolean);
+      const result = await setupCloud(
+        io,
+        {
+          ...(stringFlag(args, "region") ? { region: stringFlag(args, "region")! } : {}),
+          ...(stringFlag(args, "prefix") ? { prefix: stringFlag(args, "prefix")! } : {}),
+          ...(stringFlag(args, "name") ? { name: stringFlag(args, "name")! } : {}),
+          ...(stringFlag(args, "admin-email")
+            ? { adminEmail: stringFlag(args, "admin-email")! }
+            : {}),
+          ...(stringFlag(args, "domain") !== undefined
+            ? { domain: stringFlag(args, "domain")! }
+            : {}),
+          apps,
+          yes,
+          noBrowser,
+        },
+        CLOUD_SETUP_DEPS,
+      );
+      io.print();
+      io.print("The cloud is set up, and this computer syncs with it.");
+      io.print("  starkeep install <app> --cloud   installs an app in the cloud");
+      io.print("  starkeep status                  shows what runs");
+      io.event({ type: "result", ok: true, data: result });
+      return;
+    }
+    if (join !== undefined) {
+      const result = await setupJoin(io, join, CLOUD_SETUP_DEPS, { noBrowser });
+      io.print();
+      io.print(`This computer syncs with ${result.cloudUrl}.`);
+      io.event({ type: "result", ok: true, data: result });
+      return;
+    }
     io.print();
     io.print("Starkeep runs on this computer.");
     io.print(`  starkeep admin     opens admin-web at ${adminUrl}`);

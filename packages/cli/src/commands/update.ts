@@ -1,12 +1,21 @@
 /**
- * `starkeep update`: get new code for installed apps, then apply it here.
+ * `starkeep update`: get new code for installed apps, then apply it, to the
+ * cloud first and then to this computer.
  *
  * Getting new code runs `git pull --ff-only` on each app's repository, under
- * the rules in `git.ts`. Applying it stops a running app, runs the approved
- * dependency install, reinstalls a changed manifest (asking again when the
- * grants grew, as admin-web's update dialog does) and starts the app again.
+ * the rules in `git.ts`.
  *
- * The platform checkout and the cloud targets join this command later.
+ * Applying it to the cloud redeploys the surfaces the app has there, unless
+ * the deployed manifest and web code already match the folder. Applying it
+ * here stops a running app, runs the approved dependency install, reinstalls a
+ * changed manifest and starts the app again. Either asks again when the
+ * access grew, as admin-web's update dialog does.
+ *
+ * The cloud goes first because a device that runs a newer version than the
+ * cloud can stall its uploads until the cloud catches up
+ * (findings-app-table-version-skew-2026-11-13).
+ *
+ * The platform checkout joins this command later.
  */
 import { sameManifest, readRegistry, type RegistryApp } from "@starkeep/operator/apps";
 import { consentDiffers, consentLines } from "@starkeep/admin-installer/consent-text";
@@ -14,8 +23,12 @@ import { readFolderManifest } from "@starkeep/admin-installer/app-discovery";
 import { stopById } from "@starkeep/operator/daemons";
 import { acquireLock } from "@starkeep/operator/locks";
 import { serviceStatus } from "@starkeep/operator/service-control";
+import type { CloudApp } from "@starkeep/operator/cloud-registry";
+import { manifestDigest } from "@starkeep/admin-installer/manifest-approval";
+import type { AppSurface } from "@starkeep/admin-installer/operations";
+import { cloudInstalled, readCloudApps, runCloud } from "../cloud";
 import { flag, type Command } from "../command";
-import { CliError, EXIT_USAGE, usageError } from "../errors";
+import { CliError, usageError } from "../errors";
 import type { Io } from "../io";
 import {
   installCommandFor,
@@ -40,34 +53,79 @@ import {
 import { startOne } from "./services";
 
 export interface Target {
-  row: RegistryApp & { sourceDir: string };
+  appId: string;
+  /** The folder the update pulls and applies. */
+  dir: string;
   repo: string | null;
+  /** The install on this computer, or null when the update leaves this computer alone. */
+  local: (RegistryApp & { sourceDir: string }) | null;
+  /** The cloud install, or null when the update leaves the cloud alone. */
+  cloud: CloudApp | null;
 }
 
-async function installedTargets(names: string[]): Promise<Target[]> {
-  const registry = await readRegistry();
-  if (registry === null) {
-    throw new CliError(
-      "The local data server is not answering. Run `starkeep start data-server` first.",
-    );
+interface Scope {
+  local: boolean;
+  cloud: boolean;
+}
+
+async function installedTargets(io: Io, names: string[], scope: Scope): Promise<Target[]> {
+  const byId = new Map<string, Target>();
+  const builtIn = new Set<string>();
+  if (scope.local) {
+    const registry = await readRegistry();
+    if (registry === null) {
+      throw new CliError(
+        "The local data server is not answering. Run `starkeep start data-server` first, or pass --cloud.",
+      );
+    }
+    for (const row of registry) {
+      if (row.sourceDir === null) {
+        builtIn.add(row.appId);
+        continue;
+      }
+      const local = row as RegistryApp & { sourceDir: string };
+      byId.set(row.appId, {
+        appId: row.appId,
+        dir: local.sourceDir,
+        repo: null,
+        local,
+        cloud: null,
+      });
+    }
   }
-  const withSource = registry.filter(
-    (r): r is RegistryApp & { sourceDir: string } => r.sourceDir !== null,
-  );
+  if (scope.cloud && cloudInstalled()) {
+    for (const app of (await readCloudApps(io, { signIn: true })) ?? []) {
+      const existing = byId.get(app.appId);
+      if (existing) existing.cloud = app;
+      else if (app.folder) {
+        byId.set(app.appId, {
+          appId: app.appId,
+          dir: app.folder,
+          repo: null,
+          local: null,
+          cloud: app,
+        });
+      } else if (names.includes(app.appId)) {
+        throw new CliError(
+          `${app.appId} is installed in the cloud, but no discovery folder holds it. Add its folder with \`starkeep source add <dir>\`.`,
+        );
+      }
+    }
+  }
   const chosen = names.length
     ? names.map((n) => {
-        const row = withSource.find((r) => r.appId === n);
-        if (!row) {
+        const target = byId.get(n);
+        if (!target) {
           throw new CliError(
-            registry.some((r) => r.appId === n)
+            builtIn.has(n)
               ? `${n} is built in and updates with the platform.`
-              : `${n} is not installed on this computer.`,
+              : `${n} is not installed ${scope.cloud && !scope.local ? "in the cloud" : scope.local && !scope.cloud ? "on this computer" : "here or in the cloud"}.`,
           );
         }
-        return row;
+        return target;
       })
-    : withSource;
-  return chosen.map((row) => ({ row, repo: repoRootOf(row.sourceDir) }));
+    : [...byId.values()];
+  return chosen.map((t) => ({ ...t, repo: repoRootOf(t.dir) }));
 }
 
 /**
@@ -80,7 +138,7 @@ export function fetchAll(io: Io, targets: Target[]): RepoUpdate[] {
     if (t.repo === null) {
       io.event({
         type: "progress",
-        message: `${t.row.appId}: ${t.row.sourceDir} is not in a git repository, so there is nothing to fetch.`,
+        message: `${t.appId}: ${t.dir} is not in a git repository, so there is nothing to fetch.`,
       });
     }
   }
@@ -126,13 +184,76 @@ export function fetchAll(io: Io, targets: Target[]): RepoUpdate[] {
   return moved;
 }
 
+/** The surfaces a cloud install has, which a redeploy keeps and never adds to. */
+function installedSurfaces(app: CloudApp): AppSurface[] {
+  return [
+    ...(app.webApp ? (["web"] as const) : []),
+    ...(app.mobileApp ? (["mobile"] as const) : []),
+  ];
+}
+
+/** Apply one app's current folder to the cloud. */
+async function applyToCloud(
+  io: Io,
+  target: Target & { cloud: CloudApp },
+  yes: boolean,
+): Promise<"updated" | "declined" | "skipped" | "up to date"> {
+  const { appId, cloud } = target;
+  const folder = readFolderManifest(target.dir);
+  if (folder.kind !== "valid" || folder.manifest.id !== appId) {
+    io.warn(`${appId}: ${target.dir} holds no valid manifest for ${appId}. Cloud skipped.`);
+    return "skipped";
+  }
+  // `codeBehind` is null when the folder has no fingerprint: redeploy then,
+  // since nothing says the cloud runs the folder's code.
+  if (cloud.behind === false && cloud.codeBehind === false) {
+    io.event({ type: "progress", message: `${appId}: the cloud already runs this folder.` });
+    return "up to date";
+  }
+  const install = installCommandFor({ appId, appDir: target.dir, folder });
+  if (
+    cloud.behind &&
+    (cloud.manifest === null || consentDiffers(cloud.manifest, folder.manifest))
+  ) {
+    if (!io.json) {
+      io.print();
+      io.print(`${appId}'s new version asks the cloud for different access:`);
+      for (const line of consentLines(folder.manifest, install)) io.print(line);
+      io.print();
+    } else {
+      io.event({
+        type: "prompt-needed",
+        reason: "consent",
+        detail: consentLines(folder.manifest, install).join("\n"),
+      });
+    }
+    if (!(await io.confirm(`Approve ${appId}'s new access and update the cloud?`, { yes }))) {
+      io.print(`Not updated in the cloud: ${appId}.`);
+      return "declined";
+    }
+  }
+  const surfaces = installedSurfaces(cloud);
+  io.event({
+    type: "progress",
+    message: `Updating ${appId} in the cloud (${surfaces.length > 0 ? surfaces.join(", ") : "data side"})…`,
+  });
+  await runCloud(io, {
+    name: "install-cloud-app",
+    input: { appId, appDir: target.dir, surfaces, manifestDigest: manifestDigest(folder.manifest) },
+    owner: `${appId} (${surfaces.length > 0 ? surfaces.join(", ") : "data side only"})`,
+    lock: `app-${appId}`,
+    command: `starkeep update ${appId}`,
+  });
+  return "updated";
+}
+
 /** Apply one app's current folder to this computer. */
 async function applyLocally(
   io: Io,
-  target: Target,
+  target: Target & { local: RegistryApp & { sourceDir: string } },
   yes: boolean,
 ): Promise<"updated" | "declined" | "skipped"> {
-  const { row } = target;
+  const row = target.local;
   const folder = readFolderManifest(row.sourceDir);
   if (folder.kind !== "valid") {
     io.warn(
@@ -185,17 +306,26 @@ async function applyLocally(
   return "updated";
 }
 
-async function applyAll(io: Io, targets: Target[], yes: boolean): Promise<Record<string, string>> {
-  const outcome: Record<string, string> = {};
+type Outcome = { cloud?: string; local?: string };
+
+async function applyAll(io: Io, targets: Target[], yes: boolean): Promise<Record<string, Outcome>> {
+  const outcome: Record<string, Outcome> = {};
   for (const t of targets) {
-    const lock = acquireLock(`app-${t.row.appId}`, `starkeep update ${t.row.appId}`);
+    const lock = acquireLock(`app-${t.appId}`, `starkeep update ${t.appId}`);
     if (!lock.ok) {
       throw new CliError(
-        `Another operation on ${t.row.appId} is running (pid ${lock.holder.pid}: ${lock.holder.command}).`,
+        `Another operation on ${t.appId} is running (pid ${lock.holder.pid}: ${lock.holder.command}).`,
       );
     }
     try {
-      outcome[t.row.appId] = await applyLocally(io, t, yes);
+      const result: Outcome = {};
+      if (t.cloud) result.cloud = await applyToCloud(io, { ...t, cloud: t.cloud }, yes);
+      // A cloud update the person declined leaves this computer alone too, so
+      // the device never runs ahead of the cloud.
+      if (t.local && result.cloud !== "declined") {
+        result.local = await applyLocally(io, { ...t, local: t.local }, yes);
+      }
+      outcome[t.appId] = result;
     } finally {
       lock.release();
     }
@@ -221,27 +351,29 @@ async function undo(io: Io, yes: boolean): Promise<void> {
   writeUpdates(updates.slice(0, -1));
   await requireDataServer();
   const roots = new Set(last.repos.map((r) => r.root));
-  const targets = (await installedTargets([])).filter((t) => t.repo !== null && roots.has(t.repo));
+  const targets = (await installedTargets(io, [], { local: true, cloud: true })).filter(
+    (t) => t.repo !== null && roots.has(t.repo),
+  );
   const outcome = await applyAll(io, targets, yes);
   io.event({ type: "result", ok: true, data: { undone: last, apps: outcome } });
 }
 
-function manifestChanged(row: RegistryApp & { sourceDir: string }): boolean {
-  const folder = readFolderManifest(row.sourceDir);
-  return folder.kind !== "valid" || !sameManifest(row.manifest, folder.manifest);
+/** Whether the folder holds something a target's installs do not run yet. */
+function needsApply(t: Target): boolean {
+  if (t.cloud && (t.cloud.behind !== false || t.cloud.codeBehind !== false)) return true;
+  if (!t.local) return false;
+  const folder = readFolderManifest(t.local.sourceDir);
+  return folder.kind !== "valid" || !sameManifest(t.local.manifest, folder.manifest);
 }
 
 export const updateCommand: Command = {
   name: "update",
   summary: "Pull new code for installed apps and apply it",
-  usage: "[<app>...] [--local] [--no-fetch] [--yes] | --undo",
-  lane: "none",
+  usage: "[<app>...] [--local | --cloud] [--no-fetch] [--yes] | --undo",
+  lane: "target",
   flags: {
-    local: {
-      type: "boolean",
-      description: "Update the install on this computer (the only target so far).",
-    },
-    cloud: { type: "boolean", description: "Not available from the CLI yet." },
+    local: { type: "boolean", description: "Update only the installs on this computer." },
+    cloud: { type: "boolean", description: "Update only the cloud installs." },
     "no-fetch": {
       type: "boolean",
       description: "Apply the folders as they are, without git pull.",
@@ -253,27 +385,24 @@ export const updateCommand: Command = {
     },
   },
   details:
-    "With no apps, updates every app installed on this computer. A repository with uncommitted\n" +
+    "With no apps, updates every app installed here or in the cloud, the cloud first. An update\n" +
+    "never adds a target: it redeploys the surfaces an app already has. A cloud install whose\n" +
+    "manifest and web code match the folder is skipped. A repository with uncommitted\n" +
     "changes to tracked files, or a branch that has diverged from its upstream, refuses the update.\n" +
     "Each pull records the commit before it, which `starkeep update --undo` returns to.",
   async run(io, args) {
-    if (flag(args, "cloud")) {
-      throw new CliError(
-        "Cloud updates do not run from the CLI yet. Run `starkeep admin` and use the update dialog.",
-        EXIT_USAGE,
-        "USAGE",
-      );
-    }
+    const only = { local: flag(args, "local"), cloud: flag(args, "cloud") };
+    const scope: Scope = only.local || only.cloud ? only : { local: true, cloud: true };
     const yes = flag(args, "yes");
     if (flag(args, "undo")) {
       if (args.positionals.length > 0) throw usageError("--undo takes no app names.");
       await undo(io, yes);
       return;
     }
-    await requireDataServer();
-    const targets = await installedTargets(args.positionals);
+    if (scope.local) await requireDataServer();
+    const targets = await installedTargets(io, args.positionals, scope);
     if (targets.length === 0) {
-      io.print("No apps installed from a folder on this computer.");
+      io.print("No apps installed from a folder, here or in the cloud.");
       io.event({ type: "result", ok: true, data: { apps: {} } });
       return;
     }
@@ -293,11 +422,11 @@ export const updateCommand: Command = {
         t.repo === null ||
         movedRoots.has(t.repo) ||
         upstreamOf(t.repo) === null ||
-        manifestChanged(t.row),
+        needsApply(t),
     );
     for (const t of targets) {
       if (!toApply.includes(t))
-        io.event({ type: "progress", message: `${t.row.appId} is up to date.` });
+        io.event({ type: "progress", message: `${t.appId} is up to date.` });
     }
     const outcome = await applyAll(io, toApply, yes);
     io.event({ type: "result", ok: true, data: { pulled: moved, apps: outcome } });

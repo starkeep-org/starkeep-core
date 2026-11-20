@@ -21,7 +21,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
 import { REPO_ROOT } from "@starkeep/operator/commands";
-import { operationCommand } from "@starkeep/operator/operation-runs";
+import { operationCommand, PLATFORM_RUN_OWNERS } from "@starkeep/operator/operation-runs";
 import { getRegion } from "../lib/cloud-config";
 import { installStream } from "../lib/install-stream";
 import { installerEnv } from "@starkeep/admin-installer/aws-env";
@@ -98,6 +98,8 @@ export async function POST(req: Request) {
 
   return installStream({
     key: "drive",
+    // The CLI names the same owner, so either tool follows the other's run.
+    owner: PLATFORM_RUN_OWNERS.installDrive,
     noun: "Drive install",
     ...operationCommand("install-drive", {}),
     cwd: REPO_ROOT,
