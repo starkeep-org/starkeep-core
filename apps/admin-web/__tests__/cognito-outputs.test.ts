@@ -6,7 +6,7 @@
  * these tests pin that name, a match on a later page, and the answer when the
  * pool lacks either resource.
  */
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { mockClient } from "aws-sdk-client-mock";
@@ -17,19 +17,17 @@ import {
 } from "@aws-sdk/client-cognito-identity-provider";
 import { generateBootstrapTemplate } from "@starkeep/aws-bootstrap";
 import { jsonRequest, makeDataDir } from "./helpers";
+import { signInFake, signOutFake } from "./fake-admin-session";
+vi.mock("@starkeep/operator/admin-session", async (original) =>
+  (await import("./fake-admin-session")).fakeAdminSessionModule(await original()),
+);
+
 
 const cognito = mockClient(CognitoIdentityProviderClient);
 let route: typeof import("../src/routes/cognito-outputs");
 
-const SESSION = {
-  credentials: {
-    accessKeyId: "AKIA-ADMIN",
-    secretAccessKey: "s",
-    sessionToken: "t",
-    expiration: "x",
-  },
-  region: "us-east-2",
-};
+// The route acts as the signed-in admin (`fake-admin-session.ts`).
+const SESSION = {};
 
 beforeAll(async () => {
   const dir = makeDataDir("adminweb-cognito-outputs-");
@@ -118,5 +116,19 @@ describe("POST /api/cognito-outputs", () => {
     const res = await lookUp();
     expect(res.status).toBe(500);
     expect(((await res.json()) as { error: string }).error).toBe("AccessDeniedException");
+  });
+});
+
+describe("without an admin session", () => {
+  it("answers 401 NOT_SIGNED_IN and asks the pool nothing", async () => {
+    signOutFake();
+    try {
+      const res = await lookUp();
+      expect(res.status).toBe(401);
+      expect(await res.json()).toMatchObject({ code: "NOT_SIGNED_IN" });
+      expect(cognito.calls()).toHaveLength(0);
+    } finally {
+      signInFake();
+    }
   });
 });

@@ -2,11 +2,10 @@
  * This machine's connection to a cloud: the cloud it joined, and its sign-in.
  *
  * A machine syncs once someone signs it in with their Starkeep account. The
- * local data server signs in through the pool's device client and keeps the
- * session; this page collects the email and password and passes them through
- * admin-web's server, and never stores either. An account an admin just
- * created answers its first sign-in with a request for a new password, which
- * this form asks for in place.
+ * person signs in on the managed login page, which also sets a permanent
+ * password at an account's first sign-in. The page returns to admin-web's
+ * `/auth/callback`, and the local data server redeems the code and keeps the
+ * session. No page here ever handles a password.
  *
  * A machine that does not run the cloud joins one first, by its address. The
  * owner's second computer joins this way too: only the machine that deployed
@@ -20,10 +19,11 @@
  * address, which is not the address other devices sign in with.
  */
 
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { readAdminSession, syncSignInUrl } from "@/lib/admin-session-client";
 
 interface MachineView {
   cloudUrl: string | null;
@@ -59,11 +59,8 @@ export function ThisMachineSection({
 } = {}) {
   const [load, setLoad] = useState<Load>({ kind: "loading" });
   const [cloudUrl, setCloudUrl] = useState("");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [needsNewPassword, setNeedsNewPassword] = useState(false);
+  // Why this admin-web cannot receive the sign-in page's redirect, if it cannot.
+  const [signInUnavailable, setSignInUnavailable] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [restarting, setRestarting] = useState(false);
@@ -80,6 +77,9 @@ export function ThisMachineSection({
 
   useEffect(() => {
     void refresh();
+    void readAdminSession().then((s) =>
+      setSignInUnavailable(s.browserSignIn.available ? null : (s.browserSignIn.reason ?? null)),
+    );
   }, [refresh]);
 
   const view = load.kind === "ready" ? load.view : null;
@@ -113,30 +113,6 @@ export function ThisMachineSection({
         void refresh();
       }, 3_000);
     });
-
-  const signIn = (event: FormEvent) => {
-    event.preventDefault();
-    if (needsNewPassword && newPassword !== confirmPassword) {
-      setError("The two new passwords do not match.");
-      return;
-    }
-    void run(async () => {
-      const answer = await post("/api/this-machine/sign-in", {
-        email: email.trim(),
-        password,
-        ...(needsNewPassword ? { newPassword } : {}),
-      });
-      if (answer["challenge"] === "NEW_PASSWORD_REQUIRED") {
-        setNeedsNewPassword(true);
-        return;
-      }
-      setPassword("");
-      setNewPassword("");
-      setConfirmPassword("");
-      setNeedsNewPassword(false);
-      await refresh();
-    });
-  };
 
   const signOut = () =>
     run(async () => {
@@ -227,68 +203,19 @@ export function ThisMachineSection({
           {signOutLink}
         </p>
       ) : (
-        <form className="space-y-2" onSubmit={signIn} aria-label="Sign in to sync">
+        <div className="space-y-2" aria-label="Sign in to sync">
           <p className="text-sm text-muted-foreground">
-            {needsNewPassword
-              ? "This is the account's first sign-in. Choose a new password to replace the temporary one."
-              : `Sign in with your Starkeep account to sync local apps with ${cloudName}.`}
+            Sign in with your Starkeep account to sync local apps with {cloudName}. The sign-in
+            opens in this browser.
           </p>
-          <Input
-            type="email"
-            autoComplete="username"
-            placeholder="Email"
-            aria-label="Email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            disabled={busy || needsNewPassword}
-          />
-          <Input
-            type="password"
-            autoComplete="current-password"
-            placeholder={needsNewPassword ? "Temporary password" : "Password"}
-            aria-label="Password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            disabled={busy || needsNewPassword}
-          />
-          {needsNewPassword && (
-            <>
-              <Input
-                type="password"
-                autoComplete="new-password"
-                placeholder="New password, at least 8 characters"
-                aria-label="New password"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                disabled={busy}
-              />
-              <Input
-                type="password"
-                autoComplete="new-password"
-                placeholder="New password again"
-                aria-label="Confirm new password"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                disabled={busy}
-              />
-            </>
+          {signInUnavailable ? (
+            <p className="text-sm text-muted-foreground">{signInUnavailable}</p>
+          ) : (
+            <Button asChild>
+              <a href={syncSignInUrl()}>Sign in to sync</a>
+            </Button>
           )}
-          <Button
-            type="submit"
-            disabled={
-              busy ||
-              email.trim() === "" ||
-              password === "" ||
-              (needsNewPassword && newPassword.length < 8)
-            }
-          >
-            {busy
-              ? "Signing in…"
-              : needsNewPassword
-                ? "Set password and sign in"
-                : "Sign in to sync"}
-          </Button>
-        </form>
+        </div>
       )}
 
       {error && (

@@ -52,8 +52,9 @@ vi.mock("../src/routes/cognito-outputs", () => spy("cognito-outputs", ["POST"]))
 vi.mock("../src/routes/config", () => spy("config", ["GET", "PATCH"]));
 vi.mock("../src/routes/costs", () => spy("costs", ["POST"]));
 vi.mock("../src/routes/custom-domain", () => spy("custom-domain", ["PUT", "CHECK", "ZONE"]));
+vi.mock("../src/routes/auth", () => spy("auth", ["SESSION", "SIGN_OUT", "START", "CALLBACK"]));
 vi.mock("../src/routes/this-machine", () =>
-  spy("this-machine", ["GET", "POST_SIGN_IN", "POST_SIGN_OUT", "POST_CLOUD"]),
+  spy("this-machine", ["GET", "POST_SIGN_OUT", "POST_CLOUD"]),
 );
 vi.mock("../src/routes/users", () =>
   spy("users", [
@@ -125,7 +126,8 @@ const ROUTES: Array<[string, string, string, string]> = [
   ["POST", "/api/users/enabled", "users", "SET_ENABLED"],
   ["POST", "/api/users/password", "users", "RESET_PASSWORD"],
   ["POST", "/api/users/sign-out", "users", "SIGN_OUT_EVERYWHERE"],
-  ["POST", "/api/this-machine/sign-in", "this-machine", "POST_SIGN_IN"],
+  ["GET", "/api/admin-session", "auth", "SESSION"],
+  ["POST", "/api/admin-session/sign-out", "auth", "SIGN_OUT"],
   ["POST", "/api/this-machine/sign-out", "this-machine", "POST_SIGN_OUT"],
   ["POST", "/api/this-machine/cloud", "this-machine", "POST_CLOUD"],
   ["POST", "/api/drive/install", "drive-install", "POST"],
@@ -222,5 +224,17 @@ describe("what is not a route", () => {
     const res = await api.request(new Request(`${ORIGIN}/storage`));
     expect(res.status).toBe(404);
     expect(seen).toHaveLength(0);
+  });
+});
+
+describe("the sign-in pages outside /api", () => {
+  it.each([
+    ["/auth/start?client=admin", "START"],
+    ["/auth/callback?code=c&state=s", "CALLBACK"],
+  ])("GET %s → auth.%s", async (path, exportName) => {
+    const { authPages } = await import("../src/api");
+    const res = await authPages.request(new Request(`${ORIGIN}${path}`));
+    expect(res.status).toBe(200);
+    expect(seen).toEqual([expect.objectContaining({ module: "auth", export: exportName })]);
   });
 });

@@ -34,7 +34,7 @@ import { dirname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getRequestListener } from "@hono/node-server";
 import { Hono } from "hono";
-import { api } from "./api";
+import { api, authPages } from "./api";
 import { serverRefusal } from "./lib/same-origin";
 
 const PKG_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -112,10 +112,12 @@ async function main(): Promise<void> {
 
   const app = new Hono();
   app.route("/", api);
+  app.route("/", authPages);
 
   let handleRest: (req: IncomingMessage, res: ServerResponse) => void = () => {};
 
-  // `/api/*` always goes to Hono; everything else is the client's. Splitting
+  // `/api/*` and the sign-in pages under `/auth/*` always go to Hono;
+  // everything else is the client's. Splitting
   // here rather than inside the Hono app is what lets Vite own the client in
   // development without Hono having to know Vite exists.
   const apiListener = getRequestListener(app.fetch);
@@ -132,7 +134,7 @@ async function main(): Promise<void> {
       res.end(JSON.stringify({ error: refusal }));
       return;
     }
-    if (req.url?.startsWith("/api/")) apiListener(req, res);
+    if (req.url?.startsWith("/api/") || req.url?.startsWith("/auth/")) apiListener(req, res);
     else handleRest(req, res);
   });
 

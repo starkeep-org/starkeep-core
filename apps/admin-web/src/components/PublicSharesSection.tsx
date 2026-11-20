@@ -15,6 +15,8 @@ import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { operatorSession } from "@/lib/operator-session";
+import { NotSignedInError, throwIfNotSignedIn } from "@/lib/admin-session-client";
+import { AdminSignInButton } from "./AdminSignInButton";
 
 interface PublicShareView {
   readonly id: string;
@@ -32,24 +34,20 @@ interface PublicShareView {
 type ListState =
   | { kind: "loading" }
   | { kind: "ready"; shares: readonly PublicShareView[] }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string; signIn?: boolean };
 
-/** POSTs to an admin-web route with the signed-in operator's credentials. */
+/** POSTs to an admin-web route that acts as the signed-in admin. */
 export async function postAsOperator(
   path: string,
   extra: Record<string, unknown> = {},
 ): Promise<unknown> {
-  const { credentials } = await operatorSession();
+  await operatorSession();
   const res = await fetch(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      accessKeyId: credentials.accessKeyId,
-      secretAccessKey: credentials.secretAccessKey,
-      sessionToken: credentials.sessionToken,
-      ...extra,
-    }),
+    body: JSON.stringify(extra),
   });
+  await throwIfNotSignedIn(res);
   const body = (await res.json()) as { error?: string };
   if (!res.ok) throw new Error(body.error ?? `${path} failed: ${res.status}`);
   return body;
@@ -84,7 +82,11 @@ export function PublicSharesSection() {
       };
       setList({ kind: "ready", shares: body.publicShares });
     } catch (err) {
-      setList({ kind: "error", message: err instanceof Error ? err.message : String(err) });
+      setList({
+        kind: "error",
+        message: err instanceof Error ? err.message : String(err),
+        signIn: err instanceof NotSignedInError,
+      });
     }
   }, []);
 
@@ -131,7 +133,10 @@ export function PublicSharesSection() {
         ) : list.kind === "error" ? (
           <Alert variant="destructive">
             <AlertTitle>Could not load public links</AlertTitle>
-            <AlertDescription>{list.message}</AlertDescription>
+            <AlertDescription className="flex flex-col items-start gap-3">
+              {list.message}
+              {list.signIn && <AdminSignInButton variant="outline" />}
+            </AlertDescription>
           </Alert>
         ) : list.shares.length === 0 ? (
           <p className="text-sm">No public links.</p>

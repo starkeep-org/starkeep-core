@@ -23,6 +23,7 @@ import {
   PostgresQueryCompiler,
 } from "kysely";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
+import { requireAdmin } from "./admin-auth";
 
 // Compile-only Kysely instance (DummyDriver never executes); the compiled
 // `$1`-style SQL runs through the pg pool below.
@@ -63,11 +64,12 @@ function installerPgUser(stackPrefix: string): string {
 }
 
 /**
- * A pool on the cloud cluster as `<stackPrefix>_installer`, from the operator's
- * STS credentials in the request body, or the response that says why not.
+ * A pool on the cloud cluster as `<stackPrefix>_installer`, as the signed-in
+ * admin, or the response that says why not.
  *
  * The guards run in a fixed order — the config file, then its contents, then
- * the credentials — and the dashboard's cloud column branches on each answer.
+ * the admin session (401 `NOT_SIGNED_IN`) — and the dashboard's cloud column
+ * branches on each answer.
  * The caller ends the pool.
  */
 export async function openInstallerPool(
@@ -99,25 +101,17 @@ export async function openInstallerPool(
     );
   }
 
-  const body = (await req.json()) as {
-    accessKeyId?: string;
-    secretAccessKey?: string;
-    sessionToken?: string;
-  } & Record<string, unknown>;
-  if (!body.accessKeyId || !body.secretAccessKey || !body.sessionToken) {
-    return Response.json(
-      { error: "accessKeyId, secretAccessKey, sessionToken required" },
-      { status: 400 },
-    );
-  }
+  const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const admin = await requireAdmin();
+  if (admin instanceof Response) return admin;
 
   const signer = new DsqlSigner({
     hostname,
     region,
     credentials: {
-      accessKeyId: body.accessKeyId,
-      secretAccessKey: body.secretAccessKey,
-      sessionToken: body.sessionToken,
+      accessKeyId: admin.stsCredentials.accessKeyId,
+      secretAccessKey: admin.stsCredentials.secretAccessKey,
+      sessionToken: admin.stsCredentials.sessionToken,
     },
   });
   let token: string;

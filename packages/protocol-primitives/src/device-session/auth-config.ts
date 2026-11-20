@@ -33,6 +33,36 @@ export interface DeviceAuthConfig {
   readonly region: string;
   readonly userPoolId: string;
   readonly deviceClientId: string;
+  /**
+   * The managed login page's host name, where a desktop signs in. Absent from
+   * a cloud that predates browser sign-in; the local data server then falls
+   * back to the `cognitoDomain` in its own config.
+   */
+  readonly cognitoDomain?: string;
+}
+
+/**
+ * Where the browser returns after a sign-in on the managed login page.
+ * Cognito matches callback URLs exactly, port included, so the bootstrap
+ * template lists both: admin-web's own route on its default port, and the
+ * CLI's one-shot listener on a fixed port from the unassigned range.
+ */
+export const ADMIN_WEB_DEFAULT_PORT = 3000;
+export const ADMIN_WEB_CALLBACK_PATH = "/auth/callback";
+export const CLI_CALLBACK_PORT = 47615;
+export const CLI_CALLBACK_PATH = "/callback";
+
+/** The callback URLs the admin and device clients accept, in template order. */
+export function localCallbackUrls(): string[] {
+  return [
+    `http://localhost:${ADMIN_WEB_DEFAULT_PORT}${ADMIN_WEB_CALLBACK_PATH}`,
+    `http://localhost:${CLI_CALLBACK_PORT}${CLI_CALLBACK_PATH}`,
+  ];
+}
+
+/** A bare host name: the page's address is built from it, so no scheme, path or port. */
+export function isCognitoDomain(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z0-9.-]+\.[a-z]{2,}$/.test(value);
 }
 
 /**
@@ -61,8 +91,7 @@ export function parseMobileAuthConfig(value: unknown): MobileAuthConfig | null {
     return null;
   // A bare host name: the page's address is built from it, so a scheme, a
   // path or a port here would send the sign-in somewhere else.
-  if (typeof cognitoDomain !== "string" || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(cognitoDomain))
-    return null;
+  if (!isCognitoDomain(cognitoDomain)) return null;
   return { region, userPoolId, mobileClientId, cognitoDomain };
 }
 
@@ -70,12 +99,16 @@ export function parseMobileAuthConfig(value: unknown): MobileAuthConfig | null {
 export function parseDeviceAuthConfig(value: unknown): DeviceAuthConfig | null {
   if (typeof value !== "object" || value === null) return null;
   const v = value as Record<string, unknown>;
-  const { region, userPoolId, deviceClientId } = v;
+  const { region, userPoolId, deviceClientId, cognitoDomain } = v;
   if (typeof region !== "string" || !/^[a-z]{2}(-[a-z]+)+-\d$/.test(region)) return null;
   if (typeof userPoolId !== "string" || !userPoolId.startsWith(`${region}_`)) return null;
   if (typeof deviceClientId !== "string" || !/^[A-Za-z0-9]{1,128}$/.test(deviceClientId))
     return null;
-  return { region, userPoolId, deviceClientId };
+  // A malformed domain is dropped rather than failing the whole answer: the
+  // device can still refresh a session it holds without the page.
+  return isCognitoDomain(cognitoDomain)
+    ? { region, userPoolId, deviceClientId, cognitoDomain }
+    : { region, userPoolId, deviceClientId };
 }
 
 /** Ask a cloud how its mobile apps sign in. Throws when the cloud cannot answer. */

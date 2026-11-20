@@ -204,6 +204,77 @@ export function createCognitoClient(options: CognitoClientOptions): CognitoClien
   };
 }
 
+export interface RedeemCodeOptions {
+  /** The managed login page's host name, such as `prefix-123.auth.us-east-2.amazoncognito.com`. */
+  readonly domain: string;
+  readonly clientId: string;
+  /** The one-time code the page sent to the callback. */
+  readonly code: string;
+  /** The PKCE secret whose hash started the sign-in. */
+  readonly codeVerifier: string;
+  /** The callback URL the sign-in started with; Cognito checks it matches. */
+  readonly redirectUri: string;
+  readonly fetch?: typeof globalThis.fetch;
+  /** The token endpoint. Defaults to the domain's `/oauth2/token`; a test points it at a fake. */
+  readonly tokenEndpoint?: string;
+}
+
+/**
+ * Redeem a code from the managed login page for tokens: the last step of the
+ * authorization code flow with PKCE. The clients are public, so the request
+ * carries no secret; the verifier proves the redeemer started the sign-in.
+ */
+export async function redeemAuthorizationCode(options: RedeemCodeOptions): Promise<AuthTokens> {
+  const doFetch = options.fetch ?? globalThis.fetch;
+  const endpoint = options.tokenEndpoint ?? `https://${options.domain}/oauth2/token`;
+  const response = await doFetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      client_id: options.clientId,
+      code: options.code,
+      code_verifier: options.codeVerifier,
+      redirect_uri: options.redirectUri,
+    }).toString(),
+  });
+  const text = await response.text();
+  let parsed: Record<string, unknown> = {};
+  try {
+    parsed = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch {
+    throw new CognitoError(
+      "UnreadableResponse",
+      `The token endpoint answered ${response.status} with no JSON`,
+    );
+  }
+  if (!response.ok) {
+    const code = String(parsed["error"] ?? "UnknownError");
+    const message = String(parsed["error_description"] ?? code);
+    throw new CognitoError(code, `The sign-in code was refused: ${message}`, response.status);
+  }
+  const accessToken = parsed["access_token"];
+  const idToken = parsed["id_token"];
+  const refreshToken = parsed["refresh_token"];
+  if (
+    typeof accessToken !== "string" ||
+    typeof idToken !== "string" ||
+    typeof refreshToken !== "string"
+  ) {
+    throw new CognitoError(
+      "IncompleteAuthResult",
+      "The token endpoint returned an incomplete session",
+    );
+  }
+  const expiresIn = parsed["expires_in"];
+  return {
+    accessToken,
+    idToken,
+    refreshToken,
+    expiresIn: typeof expiresIn === "number" ? expiresIn : 3600,
+  };
+}
+
 /** The claims a device reads from its own ID token. */
 export interface IdTokenClaims {
   readonly sub: string | null;

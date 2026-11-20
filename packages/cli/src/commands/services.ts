@@ -12,7 +12,9 @@ import { repoRoot } from "@starkeep/operator/repo-root";
 import { serviceStatus, startService } from "@starkeep/operator/service-control";
 import { recordWanted, wantedServices } from "@starkeep/operator/services";
 import { localDataServerUrlFromEnv } from "@starkeep/operator/urls";
+import { adminSessionStatus } from "@starkeep/operator/admin-session";
 import { flag, type Command } from "../command";
+import { adminStatusLine } from "./account";
 import { CliError, usageError } from "../errors";
 import type { Io } from "../io";
 import { PLATFORM_SERVICES, displayName, serviceId, startOrder } from "../names";
@@ -196,7 +198,7 @@ export const statusCommand: Command = {
       io.event({
         type: "result",
         ok: true,
-        data: { services, adminWeb: admin, sync, cloudUrl },
+        data: { services, adminWeb: admin, sync, cloudUrl, adminSession: adminSessionStatus() },
       });
       return;
     }
@@ -220,6 +222,7 @@ export const statusCommand: Command = {
     else if (sync.state === "bound-elsewhere")
       io.print(`SYNC      this library belongs to another account (${sync.email})`);
     else io.print("SYNC      signed out");
+    if (cloudUrl) io.print(`ADMIN     ${adminStatusLine()}`);
   },
 };
 

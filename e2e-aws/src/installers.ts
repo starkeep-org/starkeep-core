@@ -1,9 +1,11 @@
 /**
  * Drives the real admin-installer CLIs as child processes — the same
- * commands an operator runs. The runner authenticates through Cognito itself
- * (the production auth chain) and hands the resulting temporary AWS
- * credentials to the CLIs via `--non-interactive`, which is exactly what the
- * CLIs' interactive mode does internally after prompting.
+ * commands an operator runs. The runner signs the admin in through Cognito
+ * itself and hands the resulting temporary AWS credentials to the CLIs via
+ * `--non-interactive`, which is how admin-web passes them too. A person's
+ * sign-in happens on the managed login page; the runner uses the admin
+ * password flow instead (`password-sign-in.ts`), then the same identity-pool
+ * exchange.
  *
  * STARKEEP_DIR is always the run-state dir — the single root for this "machine":
  * the CLIs read and rewrite `$STARKEEP_DIR/config.json` and read the local
@@ -16,11 +18,11 @@ import { spawn, spawnSync } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  cognitoPasswordAuthTokens,
   getIdentityPoolCredentials,
   regionFromUserPoolId,
   type IdentityPoolCredentials,
 } from "@starkeep/admin-installer";
+import { passwordSignIn } from "./password-sign-in.js";
 import type { AdminCredentials, RunPaths, TestStackConfig } from "./run-state.js";
 import { HMAC_CACHE_TTL_MS, REGION, STACK_PREFIX } from "./env.js";
 
@@ -28,6 +30,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const INSTALLER_DIR = resolve(REPO_ROOT, "packages/admin-installer");
 
 export interface AdminSession {
+  accessToken: string;
   idToken: string;
   // The refresh token from the same Cognito sign-in. The install CLIs only
   // need the idToken-derived AWS creds; kept for callers that refresh.
@@ -36,18 +39,24 @@ export interface AdminSession {
   region: string;
 }
 
-/** Cognito USER_PASSWORD_AUTH → Identity Pool: the §11 admin-auth leg. */
+/** Admin sign-in on the admin client → Identity Pool: the §11 admin-auth leg. */
 export async function signInAdmin(
   config: TestStackConfig,
   admin: AdminCredentials,
 ): Promise<AdminSession> {
-  const { idToken, refreshToken } = await cognitoPasswordAuthTokens(
+  const { accessToken, idToken, refreshToken } = await passwordSignIn(
     config,
-    admin.email,
-    admin.password,
+    config.userPoolClientId,
+    admin,
   );
   const awsCredentials = await getIdentityPoolCredentials(config, idToken);
-  return { idToken, refreshToken, awsCredentials, region: regionFromUserPoolId(config.userPoolId) };
+  return {
+    accessToken,
+    idToken,
+    refreshToken,
+    awsCredentials,
+    region: regionFromUserPoolId(config.userPoolId),
+  };
 }
 
 /** A CLI run that exited non-zero, with what it printed. */
@@ -150,19 +159,23 @@ export function runTeardownScript(
 }
 
 /**
- * "Sign in to sync", as admin-web's "This machine" section does it: the local
- * data server signs in through the pool's device client with the person's own
- * email and password, binds its library to the token's user and starts sync.
- * Resolves with the daemon's sign-in state.
+ * "Sign in to sync": the person signs in on the device client, and the local
+ * data server takes the session, binds its library to the token's user and
+ * starts sync. admin-web hands the server a code from the managed login page;
+ * the runner signs in with the password flow and hands it the refresh token,
+ * which the server proves by refreshing it at the pool. Resolves with the
+ * daemon's sign-in state.
  */
 export async function signInThisMachine(
   ldsUrl: string,
+  config: TestStackConfig,
   admin: AdminCredentials,
 ): Promise<{ state: string; userId?: string | null }> {
+  const { refreshToken } = await passwordSignIn(config, config.deviceUserPoolClientId, admin);
   const res = await fetch(`${ldsUrl}/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email: admin.email, password: admin.password }),
+    body: JSON.stringify({ refreshToken }),
   });
   if (!res.ok) throw new Error(`sign-in failed: ${res.status} ${await res.text()}`);
   const status = await fetch(`${ldsUrl}/auth/status`);

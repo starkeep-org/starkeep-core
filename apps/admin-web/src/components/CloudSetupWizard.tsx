@@ -30,23 +30,18 @@ import {
 import {
   readCloudConfig,
   patchCloudConfig,
-  writeCloudCredentials,
-  writeCognitoSession,
-  readCognitoSession,
-  clearCloudCredentials,
   regionFromUserPoolId,
   lookupCognitoOutputs,
   type CloudConfig,
 } from "../lib/cloud-config";
+import type { CognitoConfig } from "../lib/cognito-auth";
 import {
-  initiateAuth,
-  respondNewPasswordChallenge,
-  refreshTokens,
-  getIdentityPoolCredentials,
-  extractEmailFromIdToken,
-  type CognitoConfig,
-  type STSCredentials,
-} from "../lib/cognito-auth";
+  adminSignInUrl,
+  readAdminSession,
+  signOutAdmin,
+  startAdminSignIn,
+  type AdminSessionView,
+} from "../lib/admin-session-client";
 
 // ---------------------------------------------------------------------------
 // Types & constants
@@ -89,6 +84,13 @@ function validateUserPoolClientId(v: string) {
 }
 function isEmail(v: string) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+}
+function validateCognitoDomain(v: string) {
+  if (!v) return "Required";
+  if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(v)) {
+    return "A host name, such as starkeep-123456789012.auth.us-east-1.amazoncognito.com";
+  }
+  return null;
 }
 function validateIdentityPoolId(v: string) {
   return /^[a-z]+-[a-z]+-\d+:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(v)
@@ -478,17 +480,23 @@ function Step2Outputs({
   stackPrefix,
   fallbackRegion,
   initialCognitoConfig,
+  initialCognitoDomain,
   onContinue,
   onBack,
 }: {
   stackPrefix: string;
   fallbackRegion: string;
   initialCognitoConfig: Partial<CognitoConfig>;
+  /** The CognitoDomain output this machine already has, if any. */
+  initialCognitoDomain: string;
   onContinue: (
-    config: Pick<CognitoConfig, "userPoolId" | "userPoolClientId" | "identityPoolId">,
+    config: Pick<CognitoConfig, "userPoolId" | "userPoolClientId" | "identityPoolId"> & {
+      cognitoDomain: string;
+    },
   ) => void;
   onBack: () => void;
 }) {
+  const [cognitoDomain, setCognitoDomain] = useState(initialCognitoDomain);
   const [userPoolId, setUserPoolId] = useState(initialCognitoConfig.userPoolId ?? "");
   const [userPoolClientId, setUserPoolClientId] = useState(
     initialCognitoConfig.userPoolClientId ?? "",
@@ -499,6 +507,7 @@ function Step2Outputs({
   const touch = (field: string) => setTouched((t) => ({ ...t, [field]: true }));
 
   const errors = {
+    cognitoDomain: validateCognitoDomain(cognitoDomain),
     userPoolId: validateUserPoolId(userPoolId),
     userPoolClientId: validateUserPoolClientId(userPoolClientId),
     identityPoolId: validateIdentityPoolId(identityPoolId),
@@ -522,7 +531,7 @@ function Step2Outputs({
         ) : (
           "CloudFormation stack"
         )}{" "}
-        <strong>Outputs</strong> tab and copy the three values below. Starkeep looks up the rest
+        <strong>Outputs</strong> tab and copy the four values below. Starkeep looks up the rest
         after you sign in.
       </p>
 
@@ -531,6 +540,24 @@ function Step2Outputs({
       </p>
 
       <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-1.5">
+          <label className="text-sm font-medium" htmlFor="cognitoDomain">
+            CognitoDomain
+          </label>
+          <Input
+            id="cognitoDomain"
+            placeholder="starkeep-123456789012.auth.us-east-1.amazoncognito.com"
+            value={cognitoDomain}
+            onChange={(e) => setCognitoDomain(e.currentTarget.value.trim())}
+            onBlur={() => touch("cognitoDomain")}
+            aria-invalid={touched.cognitoDomain && !!errors.cognitoDomain}
+            className={cn(touched.cognitoDomain && errors.cognitoDomain && "border-destructive")}
+          />
+          {touched.cognitoDomain && errors.cognitoDomain && (
+            <p className="text-xs text-destructive">{errors.cognitoDomain}</p>
+          )}
+        </div>
+
         <div className="flex flex-col gap-1.5">
           <label className="text-sm font-medium" htmlFor="identityPoolId">
             IdentityPoolId
@@ -598,6 +625,7 @@ function Step2Outputs({
               userPoolId,
               userPoolClientId,
               identityPoolId,
+              cognitoDomain,
             })
           }
           disabled={!isValid}
@@ -614,105 +642,45 @@ function Step2Outputs({
 // ---------------------------------------------------------------------------
 
 function Step3SignIn({
-  cognitoConfig,
-  initialEmail,
-  signedIn,
-  onSuccess,
+  session,
   onContinue,
-  onSignOut,
   onBack,
 }: {
-  cognitoConfig: CognitoConfig;
-  /** The address step 1 put in the template, when this session has it. */
-  initialEmail: string | null;
-  /** Whether a live admin session exists, and the email its ID token names. */
-  signedIn: { email: string | null } | null;
-  onSuccess: (
-    tokens: { idToken: string; refreshToken: string },
-    creds: STSCredentials,
-    userEmail: string | null,
-  ) => void;
+  /** The admin session admin-web and the CLI share. */
+  session: AdminSessionView | null;
   onContinue: () => void;
-  onSignOut: () => void;
   onBack: () => void;
 }) {
-  const [email, setEmail] = useState(initialEmail ?? "");
-  const [password, setPassword] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [newPasswordConfirm, setNewPasswordConfirm] = useState("");
-  const [session, setSession] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const handleSignIn = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await initiateAuth(cognitoConfig, email, password);
-      if (result.tokens) {
-        const creds = await getIdentityPoolCredentials(cognitoConfig, result.tokens.idToken);
-        const userEmail = extractEmailFromIdToken(result.tokens.idToken);
-        onSuccess(
-          { idToken: result.tokens.idToken, refreshToken: result.tokens.refreshToken },
-          creds,
-          userEmail,
-        );
-      } else if (result.challengeName === "NEW_PASSWORD_REQUIRED") {
-        setSession(result.session ?? null);
-      } else {
-        setError(`Unexpected challenge: ${result.challengeName}`);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  };
+  const [busy, setBusy] = useState(false);
+  const unavailable = session && !session.browserSignIn.available ? session.browserSignIn.reason : null;
 
-  const handleSetNewPassword = async () => {
-    if (newPassword !== newPasswordConfirm) {
-      setError("Passwords do not match");
-      return;
-    }
-    if (!session) {
-      setError("Session expired — please sign in again");
-      setSession(null);
-      return;
-    }
-    setLoading(true);
-    setError(null);
-    try {
-      const tokens = await respondNewPasswordChallenge(cognitoConfig, session, email, newPassword);
-      const creds = await getIdentityPoolCredentials(cognitoConfig, tokens.idToken);
-      const userEmail = extractEmailFromIdToken(tokens.idToken);
-      onSuccess({ idToken: tokens.idToken, refreshToken: tokens.refreshToken }, creds, userEmail);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const signInDisabled = loading;
-
-  if (signedIn) {
+  if (session?.signedIn) {
     return (
       <div className="flex flex-col gap-5">
         <p className="text-sm text-muted-foreground">
           You are signed in as an admin of this Starkeep deployment
-          {signedIn.email && (
+          {session.email && (
             <>
               {" "}
-              (<strong>{signedIn.email}</strong>)
+              (<strong>{session.email}</strong>)
             </>
           )}
-          .
+          . The <code>starkeep</code> command on this computer uses the same sign-in.
         </p>
         <div className="flex justify-between">
           <Button variant="ghost" onClick={onBack}>
             Back to previous step
           </Button>
           <div className="flex gap-2">
-            <Button variant="outline" onClick={onSignOut}>
+            <Button
+              variant="outline"
+              disabled={busy || !!unavailable}
+              onClick={async () => {
+                setBusy(true);
+                await signOutAdmin();
+                startAdminSignIn("/cloud-setup");
+              }}
+            >
               Sign in with a different account
             </Button>
             <Button onClick={onContinue}>Continue</Button>
@@ -722,124 +690,30 @@ function Step3SignIn({
     );
   }
 
-  if (session) {
-    return (
-      <div className="flex flex-col gap-5">
-        <p className="text-sm text-muted-foreground">
-          Your temporary password has expired. Please set a new permanent password.
-        </p>
-        {error && (
-          <Alert variant="destructive">
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
-        <div className="flex flex-col gap-4">
-          <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium" htmlFor="starkeep-new-password">
-              New password
-            </label>
-            <Input
-              id="starkeep-new-password"
-              name="starkeep-new-password"
-              type="password"
-              autoComplete="new-password"
-              placeholder="At least 8 characters"
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.currentTarget.value)}
-              disabled={loading}
-            />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <label className="text-sm font-medium" htmlFor="starkeep-confirm-password">
-              Confirm new password
-            </label>
-            <Input
-              id="starkeep-confirm-password"
-              name="starkeep-confirm-password"
-              type="password"
-              autoComplete="new-password"
-              value={newPasswordConfirm}
-              onChange={(e) => setNewPasswordConfirm(e.currentTarget.value)}
-              disabled={loading}
-            />
-          </div>
-        </div>
-        <div className="flex justify-between">
-          <Button variant="ghost" onClick={() => setSession(null)} disabled={loading}>
-            Back to sign in
-          </Button>
-          <Button
-            onClick={handleSetNewPassword}
-            disabled={signInDisabled || !newPassword || newPassword.length < 8}
-          >
-            {loading && (
-              <span className="mr-2 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-            )}
-            Set password and sign in
-          </Button>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="flex flex-col gap-5">
       <p className="text-sm text-muted-foreground">
-        Sign in with your Starkeep admin account.
+        Sign in with your Starkeep admin account. The sign-in page opens in this browser.
         <br />
-        <strong>Check your email for your temp password.</strong>
+        <strong>Check your email for your temporary password.</strong> The page asks you to choose
+        a permanent one the first time.
       </p>
-      {error && (
-        <Alert variant="destructive">
-          <AlertDescription>{error}</AlertDescription>
+      {unavailable && (
+        <Alert>
+          <AlertDescription>{unavailable}</AlertDescription>
         </Alert>
       )}
-      <div className="flex flex-col gap-4">
-        <div className="flex flex-col gap-1.5">
-          <label className="text-sm font-medium" htmlFor="starkeep-signin-email">
-            Email
-          </label>
-          <Input
-            id="starkeep-signin-email"
-            name="starkeep-signin-email"
-            type="text"
-            inputMode="email"
-            autoComplete="off"
-            placeholder="you@example.com"
-            value={email}
-            onChange={(e) => setEmail(e.currentTarget.value)}
-            disabled={loading}
-          />
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <label className="text-sm font-medium" htmlFor="starkeep-temp-password">
-            Password
-          </label>
-          <Input
-            id="starkeep-temp-password"
-            name="starkeep-temp-password"
-            type="password"
-            autoComplete="new-password"
-            placeholder="Shown in the email you received, or already set by you"
-            value={password}
-            onChange={(e) => setPassword(e.currentTarget.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") handleSignIn();
-            }}
-            disabled={loading}
-          />
-        </div>
-      </div>
       <div className="flex justify-between">
-        <Button variant="ghost" onClick={onBack} disabled={loading}>
+        <Button variant="ghost" onClick={onBack}>
           Back to previous step
         </Button>
-        <Button onClick={handleSignIn} disabled={signInDisabled || !email || !password}>
-          {loading && (
-            <span className="mr-2 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-          )}
-          Sign in
-        </Button>
+        {unavailable ? (
+          <Button disabled>Open the sign-in page</Button>
+        ) : (
+          <Button asChild>
+            <a href={adminSignInUrl("/cloud-setup")}>Open the sign-in page</a>
+          </Button>
+        )}
       </div>
     </div>
   );
@@ -895,8 +769,6 @@ interface DeployOutputs {
 }
 
 function Step4Deploy({
-  credentials,
-  refreshCredentials,
   cloudConfig,
   refreshCloudConfig,
   cognitoOutputsError,
@@ -906,16 +778,6 @@ function Step4Deploy({
   onBack,
   onTokenExpired,
 }: {
-  credentials: STSCredentials;
-  /**
-   * Mints a fresh Cognito-Identity-Pool STS session right before the install
-   * runs. Cognito's STS creds last ~1 hour from sign-in; if the user paused
-   * between signing in and deploying, refreshing here avoids the common case where
-   * the installer ExpiredTokens partway through. Returns null if no refresh
-   * token is available; throws if the refresh itself fails (caller decides
-   * whether to send the user back to Sign In).
-   */
-  refreshCredentials: () => Promise<STSCredentials | null>;
   cloudConfig: CloudConfig | null;
   refreshCloudConfig: () => Promise<void>;
   /** Why the device client and the managed login domain could not be looked up. */
@@ -924,7 +786,7 @@ function Step4Deploy({
   onRetryCognitoOutputs: () => void;
   onSuccess: (result: DeployOutputs) => void;
   onBack: () => void;
-  /** Called when the installer reports EXPIRED_TOKEN — wizard sends the user back to sign-in. */
+  /** Called when the session expired or ended — the wizard sends the person back to sign-in. */
   onTokenExpired: () => void;
 }) {
   const [installing, setInstalling] = useState(false);
@@ -960,22 +822,14 @@ function Step4Deploy({
     // (cloud-data-server returns its outputs; Drive returns `{}`).
     type PassResult = InstallOutcome;
 
-    async function runPass(
-      url: string,
-      creds: STSCredentials,
-      reattach: boolean,
-    ): Promise<PassResult> {
+    async function runPass(url: string, reattach: boolean): Promise<PassResult> {
       // The installer runs detached on the server, so a dropped stream (an
       // admin-web restart, which the cloud-data-server pass itself causes in
-      // development) reconnects to the run instead of failing the pass.
+      // development) reconnects to the run instead of failing the pass. The
+      // server mints fresh credentials for each pass from the admin session.
       return runInstallStream(
         url,
-        {
-          accessKeyId: creds.accessKeyId,
-          secretAccessKey: creds.secretAccessKey,
-          sessionToken: creds.sessionToken,
-          ...(reattach ? { reattach: true } : {}),
-        },
+        reattach ? { reattach: true } : {},
         { onLine: (line) => setLines((l) => [...l, line]), isAborted: () => aborted },
       );
     }
@@ -986,29 +840,12 @@ function Step4Deploy({
       setStatus("failure");
     }
 
-    // Mint fresh STS creds right before each pass so a long pause (or a slow
-    // cloud-data-server install) doesn't ExpiredToken the next pass.
-    async function freshCreds(): Promise<STSCredentials | null> {
-      try {
-        const fresh = await refreshCredentials();
-        return fresh ?? credentials;
-      } catch {
-        return null;
-      }
-    }
-
     async function run() {
       try {
         // ---- Pass 1: cloud-data-server (foundational infra) ----------------
-        const creds1 = await freshCreds();
-        if (!creds1) {
-          setTokenExpired(true);
-          setStatus("failure");
-          return;
-        }
         setLines((l) => [...l, "── Deploying cloud-data-server ──"]);
         writeDeployMarker("cloud-data-server");
-        const r1 = await runPass("/api/cloud-data-server/install", creds1, resumeAt !== null);
+        const r1 = await runPass("/api/cloud-data-server/install", resumeAt !== null);
         if (aborted) return;
         if (r1.kind !== "done") {
           failPass(r1);
@@ -1035,15 +872,9 @@ function Step4Deploy({
         }
 
         // ---- Pass 2: Starkeep Drive (User-Data-Owner identity) -------------
-        const creds2 = await freshCreds();
-        if (!creds2) {
-          setTokenExpired(true);
-          setStatus("failure");
-          return;
-        }
         setLines((l) => [...l, "", "── Deploying Starkeep Drive ──"]);
         writeDeployMarker("drive");
-        const r2 = await runPass("/api/drive/install", creds2, resumeAt === "drive");
+        const r2 = await runPass("/api/drive/install", resumeAt === "drive");
         if (aborted) return;
         if (r2.kind !== "done") {
           failPass(r2);
@@ -1196,8 +1027,8 @@ function Step4Deploy({
         <>
           <Alert variant="destructive">
             <AlertDescription>
-              Your AWS sign-in session expired. Sign in again to retry the deploy — your progress so
-              far is preserved.
+              Your admin sign-in expired or ended. Sign in again to retry the deploy — your progress
+              so far is preserved.
             </AlertDescription>
           </Alert>
           <Button onClick={onTokenExpired} variant="outline">
@@ -1307,12 +1138,9 @@ export function CloudSetupWizard({ onComplete }: Props) {
       }
     : {};
 
-  // Session state — lives in localStorage, not in the config file.
-  const [signInResult, setSignInResult] = useState<{
-    idToken: string;
-    refreshToken: string;
-  } | null>(null);
-  const [credentials, setCredentials] = useState<STSCredentials | null>(null);
+  // The admin session, which admin-web's server and the CLI share.
+  const [session, setSession] = useState<AdminSessionView | null>(null);
+  const signedIn = session?.signedIn === true;
 
   const refreshCloudConfig = useCallback(async () => {
     const cfg = await readCloudConfig();
@@ -1327,10 +1155,10 @@ export function CloudSetupWizard({ onComplete }: Props) {
   // Step 2 no longer asks for the device client or the managed login domain,
   // so the wizard reads both from the pool after every sign-in. A stack update
   // that adds either then needs no trip back to the console.
-  const lookUpCognitoOutputs = useCallback(async (creds: STSCredentials, cfg: CloudConfig) => {
+  const lookUpCognitoOutputs = useCallback(async (cfg: CloudConfig) => {
     setCognitoOutputsLookingUp(true);
     try {
-      const found = await lookupCognitoOutputs(creds, cfg.region);
+      const found = await lookupCognitoOutputs();
       if (
         found.deviceUserPoolClientId !== cfg.deviceUserPoolClientId ||
         found.cognitoDomain !== cfg.cognitoDomain
@@ -1367,11 +1195,9 @@ export function CloudSetupWizard({ onComplete }: Props) {
     setCurrentStep(targetStep);
   }, []);
 
-  // Drops the in-memory session and reopens the sign-in step, for an expired
-  // session or a switch to another account.
+  // Reopens the sign-in step, for an expired session.
   const requireSignIn = useCallback(() => {
-    setSignInResult(null);
-    setCredentials(null);
+    setSession((s) => (s ? { ...s, signedIn: false } : s));
     setCompletedSteps((prev) => {
       const next = new Set(prev);
       next.delete(3);
@@ -1390,22 +1216,19 @@ export function CloudSetupWizard({ onComplete }: Props) {
       if (cfg?.stackPrefix && isDeploymentName(cfg.deploymentName ?? "")) done.add(1);
       // Step 2 asks only for the IDs sign-in uses. The other outputs are
       // looked up after sign-in.
-      const hasCognito = !!(cfg?.userPoolId && cfg?.userPoolClientId && cfg?.identityPoolId);
+      const hasCognito = !!(
+        cfg?.userPoolId &&
+        cfg?.userPoolClientId &&
+        cfg?.identityPoolId &&
+        cfg?.cognitoDomain
+      );
       if (hasCognito) done.add(2);
 
-      const session = await readCognitoSession();
-      if (cfg && hasCognito && session?.refreshToken) {
-        try {
-          const tokens = await refreshTokens(cfg.cognitoConfig, session.refreshToken);
-          const creds = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
-          setSignInResult({ idToken: tokens.idToken, refreshToken: tokens.refreshToken });
-          setCredentials(creds);
-          await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
-          done.add(3);
-          await lookUpCognitoOutputs(creds, cfg);
-        } catch {
-          // Token expired — user will need to re-sign in.
-        }
+      const current = await readAdminSession();
+      setSession(current);
+      if (cfg && hasCognito && current.signedIn) {
+        done.add(3);
+        await lookUpCognitoOutputs(cfg);
       }
 
       if (cfg?.s3Bucket && cfg?.auroraEndpoint) done.add(4);
@@ -1426,7 +1249,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
   };
 
   const handleComplete = (_result: DeployOutputs) => {
-    if (!signInResult || !credentials) return;
+    if (!signedIn) return;
     // The install route already wrote the deploy outputs to starkeep-config.json.
     // The wizard has nothing else to persist.
     if (onComplete) {
@@ -1525,8 +1348,6 @@ export function CloudSetupWizard({ onComplete }: Props) {
                   authorizerId: null,
                 });
                 setCloudConfig(updated);
-                setSignInResult(null);
-                setCredentials(null);
                 setCompletedSteps(new Set());
               } else {
                 const updated = await patchCloudConfig({
@@ -1546,6 +1367,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
             stackPrefix={stackPrefix}
             fallbackRegion={bootstrapRegion}
             initialCognitoConfig={cognitoConfig}
+            initialCognitoDomain={cloudConfig?.cognitoDomain ?? ""}
             onContinue={async (config) => {
               const isChanging =
                 !!cloudConfig?.userPoolId && cloudConfig.userPoolId !== config.userPoolId;
@@ -1566,8 +1388,8 @@ export function CloudSetupWizard({ onComplete }: Props) {
                   userPoolId: config.userPoolId,
                   userPoolClientId: config.userPoolClientId,
                   identityPoolId: config.identityPoolId,
+                  cognitoDomain: config.cognitoDomain,
                   deviceUserPoolClientId: null,
-                  cognitoDomain: null,
                   cloudAppsUserPoolClientId: null,
                   mobileAppsUserPoolClientId: null,
                   s3Bucket: null,
@@ -1588,16 +1410,17 @@ export function CloudSetupWizard({ onComplete }: Props) {
                   userPoolId: config.userPoolId,
                   userPoolClientId: config.userPoolClientId,
                   identityPoolId: config.identityPoolId,
-                  // The looked-up outputs belong to the old pool. The next
-                  // sign-in looks them up again.
-                  ...(isChanging ? { deviceUserPoolClientId: null, cognitoDomain: null } : {}),
+                  cognitoDomain: config.cognitoDomain,
+                  // The looked-up device client belongs to the old pool. The
+                  // next sign-in looks it up again.
+                  ...(isChanging ? { deviceUserPoolClientId: null } : {}),
                 });
                 setCloudConfig(updated);
               }
-              const keepsSession = !signInChanged && !!credentials && !!signInResult;
+              // The server ignores a session from another pool or client.
+              const keepsSession = !signInChanged && signedIn;
               if (!keepsSession) {
-                setSignInResult(null);
-                setCredentials(null);
+                setSession(await readAdminSession());
                 setCompletedSteps((prev) => {
                   const next = new Set(prev);
                   next.delete(3);
@@ -1613,56 +1436,20 @@ export function CloudSetupWizard({ onComplete }: Props) {
 
         {currentStep === 3 && cogCfg && (
           <Step3SignIn
-            cognitoConfig={cogCfg}
-            initialEmail={bootstrapAdminEmail}
-            signedIn={
-              signInResult && credentials
-                ? { email: extractEmailFromIdToken(signInResult.idToken) }
-                : null
-            }
-            onSuccess={async (tokens, creds, userEmail) => {
-              setSignInResult(tokens);
-              setCredentials(creds);
-              await writeCognitoSession({
-                refreshToken: tokens.refreshToken,
-                userEmail: userEmail ?? undefined,
-              });
-              await writeCloudCredentials(creds);
-              if (cloudConfig) await lookUpCognitoOutputs(creds, cloudConfig);
-              markDone(3);
-            }}
+            session={session}
             onContinue={() => handleNavigate(4)}
-            onSignOut={async () => {
-              await clearCloudCredentials();
-              requireSignIn();
-            }}
             onBack={() => handleNavigate(2)}
           />
         )}
 
-        {currentStep === 4 && credentials && signInResult && cogCfg && (
+        {currentStep === 4 && signedIn && cogCfg && (
           <Step4Deploy
-            credentials={credentials}
-            refreshCredentials={async () => {
-              if (!signInResult.refreshToken) return null;
-              const tokens = await refreshTokens(cogCfg, signInResult.refreshToken);
-              const fresh = await getIdentityPoolCredentials(cogCfg, tokens.idToken);
-              setSignInResult({ idToken: tokens.idToken, refreshToken: tokens.refreshToken });
-              setCredentials(fresh);
-              const userEmail = extractEmailFromIdToken(tokens.idToken);
-              await writeCognitoSession({
-                refreshToken: tokens.refreshToken,
-                userEmail: userEmail ?? undefined,
-              });
-              await writeCloudCredentials(fresh);
-              return fresh;
-            }}
             cloudConfig={cloudConfig}
             refreshCloudConfig={refreshCloudConfig}
             cognitoOutputsError={cognitoOutputsError}
             cognitoOutputsLookingUp={cognitoOutputsLookingUp}
             onRetryCognitoOutputs={() => {
-              if (cloudConfig) void lookUpCognitoOutputs(credentials, cloudConfig);
+              if (cloudConfig) void lookUpCognitoOutputs(cloudConfig);
             }}
             onSuccess={handleComplete}
             onBack={() => handleNavigate(3)}
@@ -1670,7 +1457,7 @@ export function CloudSetupWizard({ onComplete }: Props) {
           />
         )}
 
-        {currentStep === 4 && (!credentials || !signInResult) && (
+        {currentStep === 4 && !signedIn && (
           <div className="flex flex-col gap-4">
             <Alert variant="destructive">
               <AlertDescription>
