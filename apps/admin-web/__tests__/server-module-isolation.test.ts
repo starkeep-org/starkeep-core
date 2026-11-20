@@ -2,13 +2,13 @@
  * Nothing the browser loads may reach the modules that spawn processes and read
  * the filesystem.
  *
- * `src/lib/app-scan.ts`, `src/lib/daemon-control.ts` and
- * `src/lib/exec-commands.ts` are the three modules that touch
- * `node:child_process` and `node:fs`. The line used to be held by a
+ * `@starkeep/operator` holds the code that touches `node:child_process` and
+ * `node:fs`: daemon control, detached runs, app discovery and the config file.
+ * Every import of the package counts as reaching it. The line used to be held by a
  * `server-only` import — a marker package the previous bundler resolved and
  * refused in a client graph. There is no such package in this tree, and the
  * bundler that ships the browser half now would not know the convention if
- * there were: an SPA entry that imported `exec-commands.ts` would simply bundle
+ * there were: an SPA entry that imported the daemon-control code would simply bundle
  * `node:child_process` for the browser, with no error anywhere.
  *
  * So the marker is replaced by two things that depend on no bundler
@@ -28,14 +28,16 @@ import { fileURLToPath } from "node:url";
 const APP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SOURCE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx"];
 
-/** The modules that must never be reachable from anything the browser runs. */
-const SERVER_ONLY = [
-  join(APP_DIR, "src", "lib", "app-scan.ts"),
-  join(APP_DIR, "src", "lib", "daemon-control.ts"),
-  join(APP_DIR, "src", "lib", "exec-commands.ts"),
-];
+/**
+ * The package that must never be reachable from anything the browser runs. Its
+ * specifiers stand in the graph as pseudo-files under this prefix.
+ */
+const SERVER_ONLY_PACKAGE = "@starkeep/operator";
+const SERVER_ONLY_PREFIX = `package:${SERVER_ONLY_PACKAGE}`;
+const isServerOnly = (node: string) => node.startsWith(SERVER_ONLY_PREFIX);
 
-const rel = (file: string) => relative(APP_DIR, file);
+const rel = (file: string) =>
+  file.startsWith("package:") ? file.slice(8) : relative(APP_DIR, file);
 
 /** Every file in this package reachable from `entry`. */
 function reachableFrom(entry: string): string[] {
@@ -66,6 +68,7 @@ function walk(dir: string): string[] {
 
 /** Every `from "..."` / `import("...")` specifier in a source file. */
 function specifiersIn(file: string): string[] {
+  if (file.startsWith("package:")) return [];
   const source = readFileSync(file, "utf-8");
   const out: string[] = [];
   const patterns = [
@@ -84,7 +87,9 @@ function resolveLocal(fromFile: string, specifier: string): string | null {
   let base: string;
   if (specifier.startsWith("@/")) base = join(APP_DIR, "src", specifier.slice(2));
   else if (specifier.startsWith(".")) base = resolve(dirname(fromFile), specifier);
-  else return null; // a package — not part of this graph
+  else if (specifier === SERVER_ONLY_PACKAGE || specifier.startsWith(`${SERVER_ONLY_PACKAGE}/`)) {
+    return `package:${specifier}`;
+  } else return null; // another package — not part of this graph
 
   for (const candidate of [
     base,
@@ -104,13 +109,13 @@ function resolveLocal(fromFile: string, specifier: string): string | null {
  * Breadth-first over the import graph. Returns the first chain that reaches one
  * of the targets, so a failure names the path rather than only the fact.
  */
-function chainTo(entry: string, targets: string[]): string[] | null {
+function chainTo(entry: string): string[] | null {
   const queue: string[][] = [[entry]];
   const seen = new Set<string>([entry]);
   while (queue.length > 0) {
     const chain = queue.shift()!;
     const file = chain[chain.length - 1]!;
-    if (chain.length > 1 && targets.includes(file)) return chain;
+    if (chain.length > 1 && isServerOnly(file)) return chain;
     for (const specifier of specifiersIn(file)) {
       const resolved = resolveLocal(file, specifier);
       if (!resolved || seen.has(resolved)) continue;
@@ -160,19 +165,20 @@ describe("the traversal itself", () => {
   it("finds a chain when there is one", () => {
     // The complement: a route module does reach these, on purpose, so the
     // assertions below are failing to find something that is findable.
-    expect(chainTo(join(APP_DIR, "src", "routes", "exec-daemon.ts"), SERVER_ONLY)).not.toBeNull();
+    expect(chainTo(join(APP_DIR, "src", "routes", "exec-daemon.ts"))).not.toBeNull();
   });
 
-  it("names each server-only module as a file that exists", () => {
-    for (const file of SERVER_ONLY) {
-      expect(statSync(file).isFile(), `${rel(file)} is no longer where this test looks`).toBe(true);
-    }
+  it("names a package admin-web depends on", () => {
+    const pkg = JSON.parse(readFileSync(join(APP_DIR, "package.json"), "utf-8")) as {
+      dependencies: Record<string, string>;
+    };
+    expect(pkg.dependencies[SERVER_ONLY_PACKAGE]).toBeDefined();
   });
 });
 
 describe("the browser bundle reaches no server-only module", () => {
   it("src/main.tsx — the whole of what ships to the browser", () => {
-    const chain = chainTo(BROWSER_ENTRY, SERVER_ONLY);
+    const chain = chainTo(BROWSER_ENTRY);
     expect(
       chain === null,
       chain
@@ -182,7 +188,7 @@ describe("the browser bundle reaches no server-only module", () => {
   });
 
   it.each(clientModules.map((file) => [rel(file), file] as const))("%s", (_name, file) => {
-    const chain = chainTo(file, SERVER_ONLY);
+    const chain = chainTo(file);
     expect(
       chain === null,
       chain
@@ -198,7 +204,7 @@ describe("the marker it replaced", () => {
     // resolved it is gone. Left in the source it would read as a guard while
     // being an unresolvable import, so the graph walk above is the whole
     // statement now and the marker must not come back. The *words* still appear
-    // in comments here and in `exec-commands.ts`, which is why this looks for
+    // in comments here, which is why this looks for
     // the import rather than the text.
     const marked = walk(join(APP_DIR, "src")).filter((file) =>
       /(?:^|\s)import\s*["']server-only["']/.test(readFileSync(file, "utf-8")),

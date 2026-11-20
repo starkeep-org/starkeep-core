@@ -21,12 +21,9 @@ import {
   changeDeploymentSettingsParameter,
   type AwsCredentials,
 } from "@starkeep/admin-installer/app-creds";
-import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
-import {
-  managerCredentials,
-  readStarkeepConfig,
-  type StarkeepConfig,
-} from "../lib/manager-credentials";
+import { localDataServerUrlFromEnv } from "@starkeep/operator/urls";
+import { readStarkeepConfig, type StarkeepConfig } from "@starkeep/operator/config";
+import { managerCredentials } from "@starkeep/operator/manager-credentials";
 import type { STSCredentials } from "../lib/cognito-auth";
 
 interface ChangeBody {

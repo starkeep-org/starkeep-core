@@ -25,7 +25,25 @@ The breadth and ambition of Starkeep is what makes this different from tradition
 
 ## Installing Starkeep
 
-- [Install Starkeep on your computer](#run-starkeep-on-your-computer)
+One command clones Starkeep into `~/.starkeep/platform`, installs it and starts the local services:
+
+```sh
+curl -fsSL https://starkeep.app/install.sh | sh
+```
+
+To read the script first, run `curl -fsSL https://starkeep.app/install.sh | less`. Its source is `scripts/install.sh` in this repository.
+
+To keep the checkout somewhere you choose, run the same steps by hand:
+
+```sh
+git clone https://github.com/starkeep-org/starkeep-core.git
+cd starkeep-core
+pnpm starkeep setup
+```
+
+Either way, setup offers a `~/.local/bin/starkeep` link so that `starkeep` works from any folder. Then:
+
+- [Run Starkeep on your computer](#run-starkeep-on-your-computer) walks through Admin, the local web app.
 - [Deploy Starkeep Cloud](#deploy-starkeep-to-your-aws-account)
 
 ## After Installing
@@ -53,10 +71,10 @@ The cloud setup also needs an AWS account. The setup wizard explains how to crea
 Run the following command at the root of `starkeep-core`:
 
 ```sh
-pnpm install
+pnpm starkeep setup
 ```
 
-The install also builds the workspace packages. To rebuild later without reinstalling, run `pnpm build`.
+Setup runs `pnpm install`, which also builds the workspace packages, and starts the local data server and Drive. To rebuild later without reinstalling, run `pnpm build`.
 
 Admin installs each app's dependencies when you install the app, so apps such as Photos and the Example App need no separate install step.
 
@@ -64,13 +82,9 @@ Admin installs each app's dependencies when you install the app, so apps such as
 
 Starkeep Admin is a local web app for starting Starkeep's services, installing apps, and setting up the cloud.
 
-1. Start the local Admin web app. From the root of `starkeep-core`:
+1. Run `starkeep admin`. The command starts Admin and opens `http://localhost:3000` in your browser.
 
-   ```sh
-   pnpm --filter admin-web dev
-   ```
-
-2. Open `http://localhost:3000` in your browser.
+   To work on Admin itself, run `pnpm --filter admin-web dev` instead, which reloads on every change.
 
 Admin listens on `127.0.0.1` and refuses any request addressed to a name other than `localhost`, `127.0.0.1` or `[::1]`. To reach Admin under another address, add its IP address or hostname (as a comma-separated list) to `STARKEEP_ADMIN_DEV_ORIGINS` in `.env.local` at the root of `starkeep-core`. Caution, setting this key makes Admin listen on all network interfaces instead of only 127.0.0.1.
 
@@ -78,7 +92,7 @@ Admin listens on `127.0.0.1` and refuses any request addressed to a name other t
 
 The local data server stores and indexes the files in folders you choose to watch and the data that Starkeep apps save. Every Starkeep app on this computer reads and writes through the data server. The data server runs sync once you set up the cloud.
 
-In the **Local** section, find the **Data Server** card and click **Start Data Server**. The data server listens on port 9820.
+`starkeep setup` starts the data server. Otherwise, in the **Local** section, find the **Data Server** card and click **Start Data Server**, or run `starkeep start data-server`. The data server listens on port 9820.
 
 On first start, the data server creates `~/.starkeep/` to hold its database, object storage for files and configuration. To keep that state somewhere else, set `STARKEEP_DIR` to an absolute path in `.env.local` at the root of `starkeep-core`. The file `.env.example` lists the supported settings.
 
@@ -297,21 +311,29 @@ Upgrading Starkeep will not affect your data.
 
 ### 3. Upgrade the apps
 
-1. Pull the latest code.
+1. Pull the latest code, or run `starkeep update`, which pulls each app's repository and applies the new code on this computer.
 2. Restart each local app from Admin. If the app's manifest changed, you'll be shown a consent dialog before updating.
 3. To upgrade cloud apps, click **Redeploy <app name>** from the triple-dot menu to deploy the new code.
 
 ## From the terminal
 
-Admin's web page covers every step in this guide. The commands below perform the same installs from a terminal, such as on a computer you reach over SSH. Run each command at the root of `starkeep-core`. A relative folder path resolves against the folder you run the command in.
-
-### Install an app on this computer
-
-The local data server must be running. Start it from Admin, or run `pnpm --filter @starkeep/local-data-server start`.
+The `starkeep` command performs Admin's local tasks from a terminal, such as on a computer you reach over SSH. Run `pnpm starkeep <command>` at the root of `starkeep-core`, or `starkeep <command>` anywhere once setup has linked it. A relative folder path resolves against the folder you run the command in. `starkeep help <command>` describes each command.
 
 ```sh
-pnpm --filter @starkeep/admin-installer cli:install-app-local ../starkeep-apps/photos
+starkeep status                                  # what runs, and this computer's sync sign-in
+starkeep start                                   # the data server, Drive and every app marked to run
+starkeep stop photos                             # stop an app and clear its mark to run
+starkeep logs data-server -f                     # follow a service's log
+starkeep source add ~/starkeep-apps              # add a folder to app discovery
+starkeep list                                    # the apps discovery finds, and what is installed
+starkeep install photos --local                  # show the consent text, then install
+starkeep uninstall photos --local                # uninstall; the app's data stays
+starkeep update                                  # pull each app's repository and apply it here
+starkeep update --undo                           # return to the commits before the last update
+starkeep reset-local                             # list the local data reset-local --apply deletes
 ```
+
+`install` and `uninstall` always take a target. `--local` is the only target the command runs so far; cloud installs run from Admin or the scripts below. Every command accepts `--json`, which prints one JSON event per line and a final result. A command that needs an answer and has no terminal to ask exits with code 3; pass `--yes` to approve.
 
 ### Deploy the cloud
 

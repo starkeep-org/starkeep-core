@@ -30,14 +30,7 @@ import {
   unattendedArgs,
   type CommandSource,
 } from "../src/approved-commands";
-import {
-  accessLead,
-  categoriesOf,
-  dependencyConsent,
-  grantPermissions,
-  publicSharingConsent,
-  jobsConsent,
-} from "../src/consent-text";
+import { consentLines } from "../src/consent-text";
 import { installLocalApp } from "../src/local-app-install";
 import { prompt } from "../src/cli-prompt";
 
@@ -77,27 +70,9 @@ if (!health?.ok) {
 }
 
 // The consent words, in the order Admin's dialog shows them.
-const grants = manifest.infraRequirements?.fileAccess ?? [];
-console.log(`\nInstall ${name}?\n`);
-console.log(accessLead(manifest));
-if (!manifest.infraRequirements?.fileAccessAll) {
-  for (const g of grants) {
-    const { files, metadata } = grantPermissions(g);
-    console.log(`  - ${categoriesOf(g.types)}: files ${files}, metadata ${metadata}`);
-    console.log(`    ${g.types.map((t) => t.split("/")[1] ?? t).join(", ")}`);
-  }
-}
-const publicLinks = publicSharingConsent(manifest);
-if (publicLinks) console.log(`\nPublic links: ${publicLinks}`);
-const jobLines = jobsConsent(manifest);
-if (jobLines.length > 0) {
-  console.log("\nBackground jobs:");
-  for (const line of jobLines) console.log(`  - ${line}`);
-}
-
 const install = resolveInstallCommand(appDir, folder.raw as CommandSource);
-const dependencies = dependencyConsent(install);
-if (dependencies) console.log(`\n${dependencies}`);
+console.log(`\nInstall ${name}?\n`);
+for (const line of consentLines(manifest, install)) console.log(line);
 
 if (!yes) {
   if (!process.stdin.isTTY) {

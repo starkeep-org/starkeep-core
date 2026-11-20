@@ -1,6 +1,12 @@
 import { resolve } from "node:path";
 import { DEFAULT_APPS_DIR, expandHome } from "@starkeep/admin-installer/app-discovery";
-import { pinnedSourceState, pinsOf, readKeptData, readRegistry, scanApps } from "../lib/app-scan";
+import {
+  pinnedSourceState,
+  pinsOf,
+  readKeptData,
+  readRegistry,
+  scanApps,
+} from "@starkeep/operator/apps";
 import type { LocalAppEntry, ManifestSummary } from "../lib/app-types";
 
 /**

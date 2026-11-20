@@ -5,6 +5,7 @@
   "scripts": {
     "preinstall": "node scripts/check-pnpm-on-path.mjs",
     "postinstall": "turbo run build",
+    "starkeep": "node scripts/starkeep.mjs",
     "build": "turbo run build",
     "test": "turbo run test --concurrency=2",
     "test:integration": "turbo run test:integration --concurrency=2",

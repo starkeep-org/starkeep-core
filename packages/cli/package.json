@@ -1,0 +1,23 @@
+{
+  "name": "@starkeep/cli",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "The starkeep command. Run it as `pnpm starkeep` in the checkout; scripts/starkeep.mjs starts it.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/",
+    "test": "vitest run --project unit",
+    "test:integration": "vitest run --project integration"
+  },
+  "dependencies": {
+    "@starkeep/admin-installer": "workspace:*",
+    "@starkeep/app-client": "workspace:*",
+    "@starkeep/operator": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^5.7.0",
+    "vitest": "^5.0.5"
+  }
+}

@@ -1,10 +1,10 @@
-import { stopById } from "../lib/daemon-control";
+import { stopById } from "@starkeep/operator/daemons";
 import { readFolderManifest } from "@starkeep/admin-installer/app-discovery";
 import { installLocalApp } from "@starkeep/admin-installer/local-app-install";
 import { approvesManifest } from "@starkeep/admin-installer/manifest-approval";
-import { appSource, idMismatch } from "../lib/app-scan";
+import { appSource, idMismatch } from "@starkeep/operator/apps";
 import { MANIFEST_NOT_APPROVED } from "../lib/app-types";
-import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
+import { localDataServerUrlFromEnv } from "@starkeep/operator/urls";
 
 /**
  * Install an app locally. Body: `{ appId, approvedManifest }`.

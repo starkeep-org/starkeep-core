@@ -1,11 +1,4 @@
-import { existsSync, unlinkSync } from "node:fs";
-import { starkeepDir } from "@starkeep/app-client";
-import { join } from "node:path";
-import { stopById } from "../lib/daemon-control";
-import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
-
-const STARKEEP_DIR = starkeepDir();
-const APP_CREDS_DIR = join(STARKEEP_DIR, "app-creds");
+import { uninstallLocalApp } from "@starkeep/operator/local-apps";
 
 export async function POST(req: Request) {
   const body = (await req.json()) as { appId?: string };
@@ -13,40 +6,14 @@ export async function POST(req: Request) {
   if (!appId) {
     return Response.json({ error: "appId is required" }, { status: 400 });
   }
-
-  // Stop the app's dev server before tearing down its registry row. Otherwise
-  // the running process keeps calling the data-server with a secret that no
-  // longer authenticates, and the operator sees a stream of 401s. Best-effort:
-  // a "not running" result is fine; we only care that nothing keeps signing in
-  // as this app after uninstall.
-  await stopById(appId);
-
-  let resp: Response;
-  try {
-    resp = await fetch(`${localDataServerUrlFromEnv()}/admin/apps/${encodeURIComponent(appId)}`, {
-      method: "DELETE",
-    });
-  } catch (err) {
+  const result = await uninstallLocalApp(appId);
+  if (!result.ok) {
     return Response.json(
-      {
-        error: "Could not reach local-data-server",
-        detail: err instanceof Error ? err.message : String(err),
-      },
-      { status: 502 },
+      result.status === 502
+        ? { error: result.error, detail: result.detail }
+        : { error: result.error, status: result.status, body: result.detail },
+      { status: result.status },
     );
   }
-  if (!resp.ok) {
-    const text = await resp.text();
-    return Response.json(
-      { error: "Uninstall failed", status: resp.status, body: text },
-      { status: resp.status },
-    );
-  }
-
-  const secretPath = join(APP_CREDS_DIR, `${appId}.json`);
-  if (existsSync(secretPath)) {
-    unlinkSync(secretPath);
-  }
-
   return Response.json({ appId, ok: true });
 }

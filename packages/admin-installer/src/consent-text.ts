@@ -155,3 +155,49 @@ function categoryNamesOf(types: readonly string[]): string[] {
   const prefixes = [...new Set(types.map((t) => t.split("/")[0] ?? t))];
   return prefixes.map((p) => CATEGORY_NAMES[p] ?? p);
 }
+
+/**
+ * Whether `next` asks for anything the consent dialog shows that `current`
+ * does not — different file access, or public links — so updating an
+ * installed app to it needs the user's approval again.
+ */
+export function consentDiffers(current: ConsentManifest, next: ConsentManifest): boolean {
+  const grants = (m: ConsentManifest) => ({
+    all: m.infraRequirements?.fileAccessAll === true,
+    publicSharing: m.infraRequirements?.publicSharing === true,
+    fileAccess: (m.infraRequirements?.fileAccess ?? [])
+      .map((f) => ({
+        types: [...f.types].sort(),
+        access: f.access,
+        metadataWrite: f.metadataWrite === true,
+      }))
+      .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+  });
+  return JSON.stringify(grants(current)) !== JSON.stringify(grants(next));
+}
+
+/**
+ * The consent words as lines of text, in the order Admin's dialog shows them:
+ * the file access, public links, then the dependency install. The terminal
+ * installs print these lines before they ask.
+ */
+export function consentLines(
+  manifest: ConsentManifest & { infraRequirements?: { fileAccess?: ReadonlyArray<ConsentGrant> } },
+  install: DependencyConsent,
+): string[] {
+  const lines = [accessLead(manifest)];
+  if (!manifest.infraRequirements?.fileAccessAll) {
+    for (const g of manifest.infraRequirements?.fileAccess ?? []) {
+      const { files, metadata } = grantPermissions(g);
+      lines.push(`  - ${categoriesOf(g.types)}: files ${files}, metadata ${metadata}`);
+      lines.push(`    ${g.types.map((t) => t.split("/")[1] ?? t).join(", ")}`);
+    }
+  }
+  const publicLinks = publicSharingConsent(manifest);
+  if (publicLinks) lines.push("", `Public links: ${publicLinks}`);
+  const jobLines = jobsConsent(manifest);
+  if (jobLines.length > 0) lines.push("", "Background jobs:", ...jobLines.map((l) => `  - ${l}`));
+  const dependencies = dependencyConsent(install);
+  if (dependencies) lines.push("", dependencies);
+  return lines;
+}

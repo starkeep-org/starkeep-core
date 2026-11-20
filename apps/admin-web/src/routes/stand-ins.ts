@@ -1,4 +1,4 @@
-import { localDataServerUrlFromEnv } from "../lib/local-daemon-urls";
+import { localDataServerUrlFromEnv } from "@starkeep/operator/urls";
 
 /**
  * Proxies for the daemon's stand-in routes: this node's sync-down ceilings,

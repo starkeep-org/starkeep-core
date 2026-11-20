@@ -5,7 +5,7 @@
  *
  * They share one design and it is the interesting part. Each runs its
  * installer **detached**, with the run's output and exit code on disk under
- * `~/.starkeep/installs/` (see `src/lib/detached-run.ts`). A browser which
+ * `~/.starkeep/installs/` (see `@starkeep/operator/runs`). A browser which
  * suspends — a closed laptop during a ten-minute deploy — reattaches to the run
  * in progress instead of starting a second one on top of it, and so does a
  * browser whose admin-web restarted mid-run. A second concurrent Pulumi run
