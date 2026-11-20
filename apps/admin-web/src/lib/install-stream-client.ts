@@ -94,7 +94,14 @@ function errorFrom(data: string): InstallOutcome {
   } catch {
     // Not JSON: keep the text as it came.
   }
-  return { kind: "error", message, tokenExpired: code === "EXPIRED_TOKEN" };
+  return {
+    kind: "error",
+    message,
+    tokenExpired: code === "EXPIRED_TOKEN",
+    // An operation's own code, such as MANIFEST_NOT_APPROVED for a folder that
+    // changed between the route's check and the run's.
+    ...(code !== undefined && code !== "EXPIRED_TOKEN" ? { code } : {}),
+  };
 }
 
 async function errorFromResponse(resp: Response): Promise<InstallOutcome> {

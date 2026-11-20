@@ -2,11 +2,10 @@
  * Install (or re-install / update) the Starkeep Drive built-in app — the
  * User-Data-Owner identity for all shared-record sync.
  *
- * Mirrors the cloud-data-server install route: runs
- * `packages/admin-installer/scripts/cli-install-drive.ts` as a detached
- * process and streams its output to the browser via SSE (see
- * `lib/install-stream.ts`). Must run AFTER the
- * cloud-data-server install (which writes the foundational outputs this CLI
+ * Mirrors the cloud-data-server install route: runs the installer's
+ * `install-drive` operation as a detached process and streams its output to
+ * the browser via SSE (see `lib/install-stream.ts`). Must run AFTER the
+ * cloud-data-server install (which writes the foundational outputs this operation
  * reads from ~/.starkeep/config.json) — the wizard sequences the two passes.
  *
  * Request body: { reattach?, resumeFrom? }. The route mints the signed-in admin's
@@ -22,6 +21,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
 import { REPO_ROOT } from "@starkeep/operator/commands";
+import { operationCommand } from "@starkeep/operator/operation-runs";
 import { getRegion } from "../lib/cloud-config";
 import { installStream } from "../lib/install-stream";
 import { installerEnv } from "@starkeep/admin-installer/aws-env";
@@ -99,8 +99,7 @@ export async function POST(req: Request) {
   return installStream({
     key: "drive",
     noun: "Drive install",
-    command: "pnpm",
-    args: ["--filter", "@starkeep/admin-installer", "cli:install-drive", "--non-interactive"],
+    ...operationCommand("install-drive", {}),
     cwd: REPO_ROOT,
     env: spawnEnv,
     reattach: body.reattach === true,
