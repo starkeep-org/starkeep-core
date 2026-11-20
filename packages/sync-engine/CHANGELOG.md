@@ -1,5 +1,13 @@
 # @starkeep/sync-engine
 
+## 0.13.1
+
+### Patch Changes
+
+- Updated dependencies [1a883ca]
+  - @starkeep/protocol-primitives@0.13.0
+  - @starkeep/storage-adapter@0.11.1
+
 ## 0.13.0
 
 ### Minor Changes
