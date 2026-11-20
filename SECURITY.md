@@ -316,7 +316,7 @@ None of these contradict the project's stated stance, and several are explicit d
   - the bootstrap: `packages/aws-bootstrap/src/bootstrap/bootstrap-template.ts`;
   - the cut between people: `packages/storage-aurora-dsql/src/owner-scope.ts`;
   - object keys: `packages/protocol-primitives/src/storage/object-keys.ts`.
-- The ephemeral carve-out (T9): `isEphemeralInstall` in `packages/admin-installer/src/builtin-installs.ts`, the CLI flag in `packages/admin-installer/scripts/cli-install-cloud-data-server.ts`, and the tests in `packages/admin-installer/__tests__/cloud-data-server-hardening.test.ts`.
+- The ephemeral carve-out (T9): `isEphemeralInstall` in `packages/admin-installer/src/builtin-installs.ts`, the `ephemeral` input of the `install-cloud-data-server` operation (`packages/admin-installer/src/operations/install-cloud-data-server.ts`), which only the e2e harness's `--ephemeral` flag sets, and the tests in `packages/admin-installer/__tests__/cloud-data-server-hardening.test.ts`.
 - Related open todos: 6, 7, 13, 44, 45, 72 and 73.
 - AWS shared-responsibility references:
   - Lambda runtime management: https://docs.aws.amazon.com/lambda/latest/dg/runtime-management-shared.html

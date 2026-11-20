@@ -39,7 +39,14 @@ afterEach(() => sandbox.cleanup());
 const REPO_ROOT = join(__dirname, "..", "..", "..");
 const script = readFileSync(join(REPO_ROOT, "scripts", "teardown-cloud-data-server.sh"), "utf8");
 const installCli = readFileSync(
-  join(REPO_ROOT, "packages", "admin-installer", "scripts", "cli-install-cloud-data-server.ts"),
+  join(
+    REPO_ROOT,
+    "packages",
+    "admin-installer",
+    "src",
+    "operations",
+    "install-cloud-data-server.ts",
+  ),
   "utf8",
 );
 

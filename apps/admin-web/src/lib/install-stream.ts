@@ -10,7 +10,16 @@
  *   id:    <run id>:<byte offset past the line>   (on installer lines only)
  *   data:  <a line of the installer's output>
  *   event: done   data: <the route's own payload>
- *   event: error  data: { message: string, code?: "EXPIRED_TOKEN" }
+ *   event: error  data: { message: string, code?: string }
+ *
+ * The routes start installer operations through `run-operation`
+ * (`@starkeep/admin-installer/operations`), whose output carries structured
+ * events. A `progress` or `prompt-needed` event reaches the browser as an
+ * ordinary line, a `log` event as the line it carried, and the `result` event
+ * decides the terminal event: its error code names the remedy. An operation
+ * that failed on the admin's credentials ends with `code: "EXPIRED_TOKEN"`,
+ * which sends the person back to sign in. A run that wrote no result, such as
+ * the dependency install or a crashed operation, falls back to its exit code.
  *
  * A POST mid-run follows the run instead of starting a second installer on the
  * same stack. When that run then fails, the POST starts a fresh one with its
@@ -30,7 +39,7 @@
  */
 
 import { copyFileSync, readFileSync } from "node:fs";
-import { isCredentialFailureLine } from "./credential-errors";
+import { parseEventLine, type OperationEvent } from "@starkeep/operator/events";
 import { followRun, runLogPath, runStatus, startRun } from "@starkeep/operator/runs";
 
 export interface InstallStreamOptions {
@@ -78,6 +87,29 @@ const EXPIRED = {
   code: "EXPIRED_TOKEN",
 };
 
+type ResultEvent = Extract<OperationEvent, { type: "result" }>;
+
+/** The last `result` event in a run's log, for a run that ended while no one followed it. */
+function lastResult(key: string): ResultEvent | null {
+  let result: ResultEvent | null = null;
+  for (const line of logLines(key)) {
+    const event = parseEventLine(line);
+    if (event.type === "result") result = event;
+  }
+  return result;
+}
+
+/** The terminal error for a failed operation's result. */
+function errorForResult(result: ResultEvent): { message: string; code?: string } {
+  const code = result.error?.code;
+  // A sign-in that ended mid-run has the same remedy as an expired one.
+  if (code === "CREDENTIALS_EXPIRED" || code === "NOT_SIGNED_IN") return EXPIRED;
+  return {
+    message: result.error?.message ?? "The operation failed.",
+    ...(code ? { code } : {}),
+  };
+}
+
 export function installStream(options: InstallStreamOptions): Response {
   if (options.owner !== undefined) {
     const current = runStatus(options.key);
@@ -96,7 +128,7 @@ export function installStream(options: InstallStreamOptions): Response {
 
   const stream = new ReadableStream({
     start(controller) {
-      let sawExpiredToken = false;
+      let result: ResultEvent | null = null;
       let closed = false;
 
       const send = (text: string) => {
@@ -123,8 +155,23 @@ export function installStream(options: InstallStreamOptions): Response {
       };
 
       const lineSender = (runId: string) => (line: string, offset: number) => {
-        if (!sawExpiredToken && isCredentialFailureLine(line)) sawExpiredToken = true;
-        emit(line, runId ? `${runId}:${offset}` : undefined);
+        const id = runId ? `${runId}:${offset}` : undefined;
+        const event = parseEventLine(line);
+        switch (event.type) {
+          case "log":
+            emit(event.line, id);
+            return;
+          case "progress":
+          case "prompt-needed": {
+            const text = event.type === "progress" ? event.message : event.detail;
+            const parts = text.split("\n");
+            parts.forEach((part, i) => emit(part, i === parts.length - 1 ? id : undefined));
+            return;
+          }
+          case "result":
+            result = event;
+            return;
+        }
       };
 
       const finish = (code: number | null) => {
@@ -135,11 +182,11 @@ export function installStream(options: InstallStreamOptions): Response {
             console.warn(`[install] could not copy the log to ${options.copyLogTo}: ${err}`);
           }
         }
-        if (code === 0) {
+        if (result ? result.ok : code === 0) {
           const terminal = options.onSuccess();
           emitEvent(terminal.event, terminal.data);
-        } else if (sawExpiredToken) {
-          emitEvent("error", EXPIRED);
+        } else if (result) {
+          emitEvent("error", errorForResult(result));
         } else {
           emitEvent("error", { message: options.failureMessage(code) });
         }
@@ -179,9 +226,9 @@ export function installStream(options: InstallStreamOptions): Response {
             : `[The ${options.noun} ended while disconnected]`,
         );
         // The lines before the resume point went to the browser on the
-        // dropped stream. They are scanned, not replayed, for the marker that
-        // makes a failure an expired session.
-        sawExpiredToken = logLines(options.key).some(isCredentialFailureLine);
+        // dropped stream. They are read, not replayed, for a result the run
+        // already wrote.
+        result = lastResult(options.key);
         follow(resumeOffset(options.resumeFrom, status.runId), finish);
         return;
       }
@@ -189,12 +236,12 @@ export function installStream(options: InstallStreamOptions): Response {
       if (status.state === "running") {
         emit(`[Reconnected to in-progress ${options.noun}]`);
         follow("end", (code) => {
-          if (code === 0) {
+          if (result ? result.ok : code === 0) {
             finish(code);
             return;
           }
           emit(`[Previous run ended — starting fresh ${options.noun}...]`);
-          sawExpiredToken = false;
+          result = null;
           // Another connection that followed the same run may have started
           // the fresh one already. Follow that one rather than start a second.
           if (runStatus(options.key).state === "running") follow(0, finish);

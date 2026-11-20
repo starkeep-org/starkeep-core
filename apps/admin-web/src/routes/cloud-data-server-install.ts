@@ -1,9 +1,9 @@
 /**
  * Install (or re-install / update) the cloud-data-server built-in app.
  *
- * Runs `packages/admin-installer/scripts/cli-install-cloud-data-server.ts`
- * as a detached process and streams its output to the browser via SSE (see
- * `lib/install-stream.ts`). Running Pulumi out-of-process keeps `@pulumi/*`
+ * Runs the installer's `install-cloud-data-server` operation as a detached
+ * process (`run-operation`) and streams its output to the browser via SSE
+ * (see `lib/install-stream.ts`). Running Pulumi out-of-process keeps `@pulumi/*`
  * (and the rest of the installer source tree) out of admin-web's dev bundle —
  * the dev server was OOMing because the bundler kept those module graphs hot.
  * Running it detached keeps it alive through admin-web restarts, which this
@@ -30,6 +30,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
 import { REPO_ROOT } from "@starkeep/operator/commands";
+import { operationCommand, PLATFORM_RUN_OWNERS } from "@starkeep/operator/operation-runs";
 import { getRegion } from "../lib/cloud-config";
 import { installStream } from "../lib/install-stream";
 import { installerEnv } from "@starkeep/admin-installer/aws-env";
@@ -125,14 +126,10 @@ export async function POST(req: Request) {
 
   return installStream({
     key: "cloud-data-server",
+    // The CLI names the same owner, so either tool follows the other's run.
+    owner: PLATFORM_RUN_OWNERS.installCloudDataServer,
     noun: "install",
-    command: "pnpm",
-    args: [
-      "--filter",
-      "@starkeep/admin-installer",
-      "cli:install-cloud-data-server",
-      "--non-interactive",
-    ],
+    ...operationCommand("install-cloud-data-server", {}),
     cwd: REPO_ROOT,
     env: spawnEnv,
     reattach: body.reattach === true,

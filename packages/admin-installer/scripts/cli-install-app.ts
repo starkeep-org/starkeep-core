@@ -1,264 +1,51 @@
 #!/usr/bin/env tsx
 /**
- * Install (or re-install / update) a Starkeep app in the cloud.
+ * Install (or reinstall, or update) an app in the cloud.
  *
- * Generic across cloud apps: this script owns the platform-side orchestration
- * (Cognito auth, config load, ARN derivation, manifest validation, the
- * installApp state machine). The app-specific bundle build lives in the app
- * itself. For a web app, this script first installs the app's dependencies,
- * then runs its bundle command: the manifest's `installDependencies` and
- * `bundle`, or the commands its lockfile implies (`<manager> run bundle`),
- * each checked against the approved list in src/approved-commands.ts:
- *
- *   <manager> run bundle   (run in the app's source dir)
- *     env in:  STARKEEP_APP_BASE_PATH   = /apps/<appId>
- *              STARKEEP_BUNDLE_OUT      = <abs path to write dist.zip>
- *              STARKEEP_PUBLIC_BASE_URL = the deployment's browser-facing base URL,
- *                                         when the config holds one
- *     out:     app writes dist.zip to STARKEEP_BUNDLE_OUT
- *
- * `--manifest-digest <hex>` names the digest of the manifest the person
- * approved (see src/manifest-approval.ts). admin-web passes it, and the
- * script refuses a folder whose manifest no longer matches.
- *
- * `--app-dir <folder>` names the app's source folder; admin-web passes the
- * folder it resolved. Without it, the app is located by scanning the
- * configured app folders (`scanApps` in src/app-discovery.ts, the scan
- * admin-web's /api/apps/list uses) for the manifest whose id matches.
- *
- * Reads ~/.starkeep/config.json. Requires apiGatewayUrl, apiGatewayId,
- * authorizerId, s3Bucket, and auroraEndpoint to be present (written by
- * cli-install-cloud-data-server after the core infrastructure is installed).
+ * A thin wrapper over the `install-cloud-app` operation
+ * (`src/operations/install-cloud-app.ts`), which documents the bundle
+ * contract. Kept for the e2e harness and the IAM trace capture; people run
+ * `starkeep install <app> --cloud`.
  *
  * Usage:
  *   pnpm --filter @starkeep/admin-installer cli:install-app <appId>
- *   pnpm --filter @starkeep/admin-installer cli:install-app <appId> --non-interactive
- *   pnpm --filter @starkeep/admin-installer cli:install-app <appId> --mobile
- *   pnpm --filter @starkeep/admin-installer cli:install-app <appId> --web
- *   pnpm --filter @starkeep/admin-installer cli:install-app <appId> --app-dir <folder>
- *   pnpm --filter @starkeep/admin-installer cli:install-app <appId> --manifest-digest <hex>
+ *     [--non-interactive] [--web] [--mobile] [--app-dir <folder>] [--manifest-digest <hex>]
  *
- * Every install creates the app's data side: its role, schema, tables, grants
- * and namespace. `--web` adds the cloud web app (its compute), and `--mobile`
- * adds the mobile app (its Android identity and sign-in callback). With
- * neither flag, the install adds every surface the manifest offers. A surface
- * already installed stays installed.
+ * `--web` adds the cloud web app, and `--mobile` the mobile app. With neither,
+ * the install adds every surface the manifest offers.
  */
 
-// TEMP (iam-permission-tests POC): if IAM_SDK_TRACE_PATH is set, record
-// every AWS SDK call this process makes to that file. Must run before any
-// AWS SDK client below is constructed. Imported by relative path so
-// admin-installer doesn't take a package-level dep on the POC. Remove
-// when the POC graduates or is dropped.
+// TEMP (iam-permission-tests POC): record every AWS SDK call this process makes
+// when IAM_SDK_TRACE_PATH is set. Must run before any AWS SDK client exists.
 if (process.env.IAM_SDK_TRACE_PATH) {
   const { installSdkTrace } = await import("../../iam-permission-tests/src/sdk-trace");
   installSdkTrace(process.env.IAM_SDK_TRACE_PATH);
 }
 // First import: load repo-root .env / .env.local so STARKEEP_DIR is populated.
 import "@starkeep/app-client/load-env";
-import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
-import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-import { validateManifest } from "@starkeep/admin-manifest";
-import { installApp, manifestSurfaces, type AppSurface } from "../src/orchestrator";
-import { formatAnonymousRouteReport } from "../src/anonymous-route-report";
-import { formatProbeReport, probeAnonymousSurface } from "../src/post-install-probe";
-import { exitOnInstallFailure } from "../src/cli-exit";
-import { regionFromUserPoolId } from "../src/cognito-auth";
-import { unattendedArgs, type CommandResolution } from "../src/approved-commands";
-import { useOnlyAwsCredentials, withoutAwsVariables } from "../src/aws-env";
-import { protocolRefusal } from "../src/protocol-check";
-import {
-  loadStarkeepCliConfig,
-  appDirFor,
-  cloudBuildCommands,
-  cloudInstallInput,
-  takeAppDirFlag,
-  takeFlagValue,
-  starkeepConfigPath,
-} from "../src/app-cli-config";
-import { manifestDigest } from "../src/manifest-approval";
-import { adminScriptCredentialsOrExit } from "./admin-credentials";
-
-function installAppDependencies(install: CommandResolution): void {
-  if (install.kind === "skip") return;
-  if (install.kind === "refused") {
-    console.warn(
-      `\nWarning: not running the manifest's install command \`${install.display}\`: ${install.reason} ` +
-        `Run it yourself in ${install.cwd} if the bundle build needs it.`,
-    );
-    return;
-  }
-  console.log(`\nInstalling dependencies (${install.display} in ${install.cwd})…`);
-  // Admin runs this script with no terminal; see `unattendedArgs`.
-  const result = spawnSync(install.command, unattendedArgs(install.command, install.args), {
-    cwd: install.cwd,
-    stdio: "inherit",
-    // Hygiene, not isolation: see the module comment in src/aws-env.ts.
-    env: withoutAwsVariables(process.env),
-  });
-  if (result.status !== 0) {
-    console.error(`Dependency install failed (${install.display} exited ${result.status}).`);
-    process.exit(result.status ?? 1);
-  }
-}
-
-/**
- * The protocol version the cloud data server reports on `GET /health`, or
- * null for one that reports none. An unreachable cloud stops the install.
- */
-async function cloudProtocolVersion(apiGatewayUrl: string | undefined): Promise<string | null> {
-  if (!apiGatewayUrl) {
-    console.error(
-      `Error: ${starkeepConfigPath()} has no apiGatewayUrl. Install the cloud data server first.`,
-    );
-    process.exit(1);
-  }
-  let body: { protocolVersion?: unknown };
-  try {
-    const res = await fetch(`${apiGatewayUrl}/health`, { signal: AbortSignal.timeout(15_000) });
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-    body = (await res.json()) as { protocolVersion?: unknown };
-  } catch (err) {
-    console.error(
-      `Error: could not read the cloud data server's protocol version from ${apiGatewayUrl}/health: ` +
-        (err instanceof Error ? err.message : String(err)),
-    );
-    process.exit(1);
-  }
-  return typeof body.protocolVersion === "string" ? body.protocolVersion : null;
-}
-
-function buildAppBundle(
-  bundle: Extract<CommandResolution, { kind: "run" }>,
-  appBasePath: string,
-  publicBaseUrl: string | undefined,
-): Buffer {
-  const stagingDir = join(tmpdir(), `starkeep-app-bundle-${Date.now()}`);
-  const distZip = join(stagingDir, "dist.zip");
-  try {
-    mkdirSync(stagingDir, { recursive: true });
-    console.log(`\nBuilding app bundle (${bundle.display} in ${bundle.cwd})…`);
-    const result = spawnSync(bundle.command, bundle.args, {
-      cwd: bundle.cwd,
-      stdio: "inherit",
-      // Hygiene, not isolation: see the module comment in src/aws-env.ts.
-      env: {
-        ...withoutAwsVariables(process.env),
-        STARKEEP_APP_BASE_PATH: appBasePath,
-        STARKEEP_BUNDLE_OUT: distZip,
-        // A file the build writes into its static assets is served from the
-        // assets bucket, never by the app's Lambda, so a file that must name
-        // the deployment's own URL needs it here.
-        ...(publicBaseUrl ? { STARKEEP_PUBLIC_BASE_URL: publicBaseUrl } : {}),
-      },
-    });
-    if (result.status !== 0) {
-      console.error(
-        `App bundle build failed (${bundle.display} exited ${result.status}). ` +
-          `Cloud-installable apps must provide a "bundle" script that writes ` +
-          `dist.zip to STARKEEP_BUNDLE_OUT.`,
-      );
-      process.exit(result.status ?? 1);
-    }
-    if (!existsSync(distZip)) {
-      console.error(`App bundle build did not produce a dist.zip at ${distZip}.`);
-      process.exit(1);
-    }
-    return readFileSync(distZip);
-  } finally {
-    rmSync(stagingDir, { recursive: true, force: true });
-  }
-}
-
-function prepareWebApp(build: {
-  install: CommandResolution;
-  bundle: Extract<CommandResolution, { kind: "run" }>;
-}): Buffer {
-  // Print the anonymous surface before doing any work, so it is visible whether
-  // or not the install goes on to succeed. `validateManifest` has already
-  // refused an undeclared anonymous catch-all, so anything printed here is
-  // something the manifest author declared on purpose.
-  const anonymousReport = formatAnonymousRouteReport(manifest);
-  if (anonymousReport) {
-    console.log(anonymousReport);
-    console.log("");
-  }
-
-  // Cloud app sessions sign in on the managed login page through the cloud-apps
-  // client, which the cloud data server install creates.
-  const cloudAppsUserPoolClientId = config.cloudAppsUserPoolClientId;
-  if (!cloudAppsUserPoolClientId) {
-    console.error(
-      `Error: ${starkeepConfigPath()} has no cloudAppsUserPoolClientId. ` +
-        "Reinstall the cloud data server first; it creates the client cloud apps sign in with.",
-    );
-    process.exit(1);
-  }
-
-  // Patch handler env with live platform config. Handlers declare the keys they
-  // want by listing them (placeholder-empty) in the manifest; the installer fills
-  // any empty value whose key it recognizes. App-agnostic: no handler-name or
-  // app-name coupling.
-  const platformEnv: Record<string, string> = {
-    // Browser-facing base URL points at the CloudFront distribution (publicBaseUrl)
-    // so the whole browser fan-out — runtime-config → SPA data-client / cloud-config
-    // / admin-web, all of which derive their origin from this env value — routes
-    // through the edge cache. Server-to-server HMAC calls keep using apiGatewayUrl
-    // directly (STARKEEP_CLOUD_DATA_BASE in pulumi-program.ts). Falls back to the
-    // raw gateway URL for pre-CloudFront configs.
-    STARKEEP_API_GATEWAY_URL: config.publicBaseUrl ?? config.apiGatewayUrl ?? "",
-    STARKEEP_USER_POOL_ID: config.userPoolId,
-    // The cloud-apps client, never the admin client: the broker and both
-    // gateway authorizers accept only its tokens.
-    STARKEEP_USER_POOL_CLIENT_ID: cloudAppsUserPoolClientId,
-    STARKEEP_IDENTITY_POOL_ID: config.identityPoolId,
-    // The account's invocation ceiling, so an app that fans out on a user's
-    // behalf can size that fan-out against the real number rather than a literal
-    // somebody guessed once. Ten is the unraised account limit.
-    STARKEEP_LAMBDA_CONCURRENCY: String(config.lambdaConcurrency ?? 10),
-  };
-  for (const handler of manifest.infraRequirements.compute.handlers) {
-    for (const key of Object.keys(handler.env)) {
-      if (handler.env[key] === "" && key in platformEnv) {
-        handler.env[key] = platformEnv[key];
-      }
-    }
-  }
-
-  // Install the app's dependencies, then build the bundle with its own
-  // script. The base path /apps/<appId> is the platform's routing convention
-  // (the shared API Gateway forwards requests under it; see pulumi-program).
-  installAppDependencies(build.install);
-  const zip = buildAppBundle(build.bundle, `/apps/${appId}`, config.publicBaseUrl);
-  console.log(`\nBundle size: ${(zip.length / 1024 / 1024).toFixed(1)} MB`);
-  return zip;
-}
-
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
+import { takeAppDirFlag, takeFlagValue } from "../src/app-cli-config";
+import type { AppSurface } from "../src/orchestrator";
 
 let flags: string[];
-let appDirFlag: string | undefined;
-let approvedDigest: string | undefined;
+let appDir: string | undefined;
+let manifestDigest: string | undefined;
 try {
-  const { appDir, rest } = takeAppDirFlag(process.argv.slice(2));
-  appDirFlag = appDir;
-  ({ value: approvedDigest, rest: flags } = takeFlagValue(rest, "--manifest-digest", "a digest"));
+  const taken = takeAppDirFlag(process.argv.slice(2));
+  appDir = taken.appDir;
+  ({ value: manifestDigest, rest: flags } = takeFlagValue(
+    taken.rest,
+    "--manifest-digest",
+    "a digest",
+  ));
 } catch (err) {
   console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);
 }
-const nonInteractive = flags.includes("--non-interactive");
-const requestedSurfaces: AppSurface[] = [
+const surfaces: AppSurface[] = [
   ...(flags.includes("--web") ? (["web"] as const) : []),
   ...(flags.includes("--mobile") ? (["mobile"] as const) : []),
 ];
 const appId = flags.find((f) => !f.startsWith("--"));
-
 if (!appId) {
   console.error(
     "Usage: cli:install-app <appId> [--non-interactive] [--web] [--mobile] [--app-dir <folder>] [--manifest-digest <hex>]",
@@ -266,238 +53,14 @@ if (!appId) {
   process.exit(1);
 }
 
-let config: ReturnType<typeof loadStarkeepCliConfig>;
-try {
-  config = loadStarkeepCliConfig();
-} catch (err) {
-  console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-}
-const region = regionFromUserPoolId(config.userPoolId);
-const stackPrefix = config.stackPrefix;
-
-if (!config.apiGatewayId || !config.authorizerId || !config.s3Bucket || !config.auroraEndpoint) {
-  console.error(
-    `Error: ${starkeepConfigPath()} is missing required fields: ` +
-      "apiGatewayId, authorizerId, s3Bucket, auroraEndpoint.\n" +
-      "Install the cloud-data-server first.",
-  );
-  process.exit(1);
-}
-
-// Credentials from the environment, as admin-web and the e2e harness pass
-// them, else from the admin session `starkeep login --admin` keeps.
-useOnlyAwsCredentials(
-  await adminScriptCredentialsOrExit(nonInteractive),
-  process.env.AWS_REGION ?? region,
-);
-
-// Derive account ID from STS if not already in config.
-let accountId: string;
-if (config.accountId) {
-  accountId = config.accountId;
-} else {
-  const sts = new STSClient({ region });
-  const identity = await sts.send(new GetCallerIdentityCommand({}));
-  if (!identity.Account) {
-    console.error("Error: could not determine AWS account ID from credentials");
-    process.exit(1);
-  }
-  accountId = identity.Account;
-}
-
-// Locate the app and load its manifest.
-let appDir: string;
-try {
-  appDir = appDirFor(config, appId, appDirFlag);
-} catch (err) {
-  console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-}
-const manifestPath = resolve(appDir, "starkeep.manifest.json");
-const rawManifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
-// The protocol check runs before validation and before any build: an app
-// written for a newer platform usually fails the older validator too, and the
-// version mismatch is the message that says to redeploy.
-const protocolProblem = protocolRefusal({
-  appId,
-  rawManifest,
-  platformVersion: await cloudProtocolVersion(config.apiGatewayUrl),
-  target: "cloud",
-});
-if (protocolProblem) {
-  console.error(`Error: ${protocolProblem}`);
-  process.exit(1);
-}
-// Full validation, not a bare schema parse: the cross-field rules are where
-// the "an anonymous catch-all must declare its publicPaths" gate lives, and a
-// cloud install is the only place that gate matters.
-const validation = validateManifest(rawManifest);
-for (const warning of validation.warnings) console.warn(`Warning: ${warning}`);
-if (!validation.manifest) {
-  console.error(`Error: ${manifestPath} is not a valid app manifest:`);
-  for (const error of validation.errors) console.error(`  - ${error}`);
-  process.exit(1);
-}
-const manifest = validation.manifest;
-// Admin's route checked the folder against the manifest the person approved
-// and passed its digest. A folder that changed since then deploys nothing.
-if (approvedDigest !== undefined && manifestDigest(manifest) !== approvedDigest) {
-  console.error(
-    `Error: ${manifestPath} changed after the manifest was approved. Review the new manifest and deploy again.`,
-  );
-  process.exit(1);
-}
-
-const offered = manifestSurfaces(manifest);
-const surfaces = requestedSurfaces.length > 0 ? requestedSurfaces : offered;
-for (const surface of surfaces) {
-  if (!offered.includes(surface)) {
-    console.error(
-      surface === "web"
-        ? `Error: ${appId}'s manifest declares no compute, so it has no web app.`
-        : `Error: ${appId}'s manifest declares no mobile build (mobile.android).`,
-    );
-    process.exit(1);
-  }
-}
-const installsWeb = surfaces.includes("web");
-// Checked before anything deploys: a web app without an approved bundle
-// command has nothing to deploy.
-const resolvedBuild = installsWeb ? cloudBuildCommands(appDir, manifest) : null;
-if (resolvedBuild && !resolvedBuild.ok) {
-  console.error(`Error: ${resolvedBuild.message}`);
-  process.exit(1);
-}
-const buildCommands = resolvedBuild?.ok ? resolvedBuild : null;
-if (surfaces.includes("mobile") && !config.mobileAppsUserPoolClientId) {
-  console.error(
-    `Error: ${starkeepConfigPath()} has no mobileAppsUserPoolClientId. ` +
-      "Reinstall the cloud data server first; it creates the client mobile apps sign in with.",
-  );
-  process.exit(1);
-}
-
-console.log(`\nStarkeep ${appId} cloud install`);
-console.log(`  Region : ${region}`);
-console.log(`  Stage  : ${stackPrefix}`);
-console.log(`  Account: ${accountId}`);
-console.log(`  App dir: ${appDir}`);
-console.log(`  Adds   : ${surfaces.length > 0 ? surfaces.join(", ") : "the data side only"}`);
-console.log("");
-
-// The web app's preparation: its anonymous surface, its handlers' platform
-// env and its bundle. A data-side or mobile install needs none of it.
-const zipBuffer = buildCommands ? prepareWebApp(buildCommands) : undefined;
-
-console.log(`\nInstalling ${appId} app…\n`);
-// Registry writes authenticate to DSQL as the admin-app IAM role (mapped to
-// `${stackPrefix}_installer` PG role at schema-init time). The ambient
-// AWS_* env vars are that role's session credentials, set above either
-// from getSTSCredentials (interactive) or by the caller (--non-interactive).
-const registryCredentials = {
-  accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
-  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
-  sessionToken: process.env.AWS_SESSION_TOKEN!,
-};
-
-await installApp(
-  cloudInstallInput({
+const { runForTerminal } = await import("../src/operations/human");
+await runForTerminal(
+  "install-cloud-app",
+  {
     appId,
-    appDir,
-    manifest,
-    surfaces,
-    ...(zipBuffer ? { zipBuffer } : {}),
-    config,
-    region,
-    accountId,
-    registryCredentials,
-  }),
-).catch(exitOnInstallFailure);
-
-if (!installsWeb) {
-  console.log(
-    `\n${appId} is installed${surfaces.length > 0 ? ` with its ${surfaces.join(" and ")} app` : ""}.`,
-  );
-  const android = surfaces.includes("mobile") ? manifest.mobile?.android : undefined;
-  if (android) {
-    console.log(
-      `Registered ${android.package}, signing in at ${android.callbackScheme}://auth/callback.`,
-    );
-  }
-  process.exit(0);
-}
-
-const browserBaseForProbe = config.publicBaseUrl ?? config.apiGatewayUrl;
-
-// Ask the deployment what is actually anonymous, rather than trusting what the
-// manifest declares. The two can disagree, and the August exposure is what that
-// disagreement looks like — it would have been caught here on the day it was
-// created.
-if (browserBaseForProbe) {
-  const probeReport = await probeAnonymousSurface(manifest, browserBaseForProbe);
-  console.log("");
-  console.log(formatProbeReport(probeReport));
-  for (const r of probeReport.unreachablePublicPaths) {
-    console.warn(`  WARNING: ${r.url} is declared public but answered ${r.status}.`);
-  }
-  // Half the timeout is a warning: the deployment works, and the number is
-  // here so a regression is visible the day it ships rather than weeks later
-  // in a latency investigation.
-  if (probeReport.coldStart?.level === "warn") {
-    console.warn(
-      `  WARNING: the "${probeReport.coldStart.handlerName}" handler's first request took ` +
-        `${(probeReport.coldStart.elapsedMs / 1000).toFixed(1)}s of its ` +
-        `${probeReport.coldStart.timeoutMs / 1000}s timeout.`,
-    );
-  }
-  if (probeReport.exposed) {
-    console.error(
-      `\n${appId} is installed but EXPOSED. Take it down before doing anything else:\n` +
-        `  pnpm --filter @starkeep/admin-installer cli:uninstall-app -- --app ${appId}`,
-    );
-    process.exit(1);
-  }
-  // Four fifths of the timeout fails the install. Warn-only until every app
-  // built its entry with @starkeep/app-client/lambda; Probe, Photos and Memo
-  // all do, so a number this high now means a new app put its module graph
-  // inside the handler rather than at module scope, and the next cold start on
-  // a slower container is the one that times out.
-  //
-  // Checked after the exposure verdict so the takedown instruction stays the
-  // last thing an operator reads when both fire.
-  if (probeReport.coldStart?.level === "fail") {
-    console.error(
-      `\n${appId} is installed but its "${probeReport.coldStart.handlerName}" handler spent ` +
-        `${(probeReport.coldStart.elapsedMs / 1000).toFixed(1)}s of its ` +
-        `${probeReport.coldStart.timeoutMs / 1000}s timeout on the first request.\n` +
-        `Load the app's module graph at module scope — build the entry with ` +
-        `createLambdaEntry or createWebAppHandler from @starkeep/app-client, whose ` +
-        `\`upstream\` takes a promise so a top-level \`await\` is the only way to ` +
-        `satisfy it. See docs/authoring-an-app.md §7.`,
-    );
-    process.exit(1);
-  }
-} else {
-  console.warn(
-    "\nSkipping the post-install probe: no publicBaseUrl or apiGatewayUrl in config, " +
-      "so there is no live URL to ask.",
-  );
-}
-
-console.log(`\nInstall complete. ${appId} app available at:`);
-// Surface the browser-facing origin (CloudFront distribution) so the app is
-// loaded same-origin with the shared image bytes it fetches; fall back to the
-// raw gateway URL for pre-CloudFront configs.
-//
-// No trailing slash. The app root is registered as `ANY /apps/<appId>`, and the
-// trailing-slash spelling cannot be registered beside it — API Gateway v2
-// rejects a route key with an empty path segment, which is the same limit that
-// makes the manifest's `GET /` collapse to the bare prefix (pulumi-program.ts).
-// The `signed-out-redirect` CloudFront function rewrites `/apps/<appId>/` back
-// to this spelling, so both reach the app through the distribution, but a
-// deployment with no distribution has only the gateway and only one of them
-// works. Printing the spelling that behaves the same everywhere costs nothing.
-console.log(
-  `  ${browserBaseForProbe ?? ""}${browserBaseForProbe ? `/apps/${appId}` : "(publicBaseUrl/apiGatewayUrl not in config)"}`,
+    ...(appDir !== undefined ? { appDir } : {}),
+    ...(surfaces.length > 0 ? { surfaces } : {}),
+    ...(manifestDigest !== undefined ? { manifestDigest } : {}),
+  },
+  { environmentOnly: flags.includes("--non-interactive") },
 );

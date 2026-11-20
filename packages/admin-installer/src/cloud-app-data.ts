@@ -31,7 +31,7 @@ import type { InstallerConfig } from "./orchestrator";
 export class AppStillInstalledError extends Error {
   constructor(appId: string) {
     super(
-      `${appId} is installed in the cloud. Uninstall it (cli:uninstall-app ${appId}) before ` +
+      `${appId} is installed in the cloud. Uninstall it (starkeep uninstall ${appId} --cloud) before ` +
         "deleting its data.",
     );
     this.name = "AppStillInstalledError";
