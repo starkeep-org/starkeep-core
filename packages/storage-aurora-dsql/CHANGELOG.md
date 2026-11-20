@@ -1,5 +1,15 @@
 # @starkeep/storage-aurora-dsql
 
+## 0.10.1
+
+### Patch Changes
+
+- Updated dependencies [1a883ca]
+  - @starkeep/protocol-primitives@0.13.0
+  - @starkeep/shared-space-api@0.10.1
+  - @starkeep/storage-adapter@0.11.1
+  - @starkeep/sync-engine@0.13.1
+
 ## 0.10.0
 
 ### Minor Changes

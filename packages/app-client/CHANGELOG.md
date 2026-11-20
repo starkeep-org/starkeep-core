@@ -1,5 +1,12 @@
 # @starkeep/app-client
 
+## 0.15.0
+
+### Minor Changes
+
+- 84b9b1e: The credential vault. `listSecrets`, `putSecret` and `deleteSecret` store a user's secrets for the app's third-party services, with the user's token, through the app's server. A run of one of the app's scheduled jobs reads its user's secret with `readSecret` and writes a rotated value with `putSecret`, with the run's token. The browser never reads a secret back. On the local surface every call answers `cloudRequired: true`.
+- 1a883ca: Scheduled jobs. A manifest may declare `infraRequirements.jobs`, up to eight jobs of `{ name, handler, mode, defaultTime, description }`, which the platform runs in the cloud once per user who turns each one on. An app with jobs needs `protocolMinVersion` `1.1.0`, compute and the `cloud` target, and `PROTOCOL_VERSION` is now `1.1.0`. `@starkeep/app-client` adds `verifyJob` and `jobRefusal` for the job route at `/_starkeep/jobs/<name>`, and `listJobs`, `runJobNow` and `jobConsentUrl` for the app's server. `verifyDelegation` now refuses any token that is not on the `app` channel, so a job's token never opens a route meant for outside clients. `verifyDelegationToken` returns the token's `channel` and, for a job token, its `job`. `@starkeep/protocol-primitives` adds the `job` delegation channel, the `sk_job` and `sk_run` claims, and the job routes and constants.
+
 ## 0.14.0
 
 ### Minor Changes
