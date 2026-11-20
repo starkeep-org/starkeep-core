@@ -139,6 +139,8 @@ Only the accounts you create can sign in to your deployment and reach its data. 
 
 Everything below is a one-time setup. Deploy from one computer only. To add a second computer, follow [Sync another computer with your cloud](#sync-another-computer-with-your-cloud) instead. A second deployment creates a separate cloud that does not share your data.
 
+The steps below use Admin's setup wizard. `starkeep setup --cloud` runs the same setup from a terminal in one command; see [Deploy the cloud](#deploy-the-cloud).
+
 ### Prerequisite
 
 Starkeep Cloud runs on your AWS account (support for more providers will come later). If you don't have an AWS account, you can create one for free.
@@ -283,6 +285,8 @@ A second computer joins the cloud you already deployed. The second computer sync
 5. Click **Sign in to sync**, and sign in with your Starkeep account on the page that opens. A person whose account an admin just created uses the temporary password from their invitation email, and the page asks them to choose a permanent one.
 6. Wait for the section to change from "Signed in as `<email>`. Connecting to `<address>`…" to "Local apps sync with `<address>` as `<email>`."
 
+From a terminal, `starkeep setup --join <address>` does steps 3 to 5.
+
 The second computer now syncs your library with the cloud in the background. A person you add under [Add users to your Starkeep deployment](#add-users-to-your-starkeep-deployment-optional) joins from their own computer the same way.
 
 ## Add users to your Starkeep deployment (optional)
@@ -315,13 +319,13 @@ Upgrading Starkeep will not affect your data.
 
 ### 3. Upgrade the apps
 
-1. Pull the latest code, or run `starkeep update`, which pulls each app's repository and applies the new code on this computer.
+1. Pull the latest code, or run `starkeep update`, which pulls each app's repository and applies the new code to the cloud and then to this computer.
 2. Restart each local app from Admin. If the app's manifest changed, you'll be shown a consent dialog before updating.
-3. To upgrade cloud apps, click **Redeploy <app name>** from the triple-dot menu to deploy the new code.
+3. To upgrade cloud apps from Admin, click **Redeploy <app name>** from the triple-dot menu to deploy the new code.
 
 ## From the terminal
 
-The `starkeep` command performs Admin's local tasks from a terminal, such as on a computer you reach over SSH. Run `pnpm starkeep <command>` at the root of `starkeep-core`, or `starkeep <command>` anywhere once setup has linked it. A relative folder path resolves against the folder you run the command in. `starkeep help <command>` describes each command.
+The `starkeep` command performs Admin's tasks from a terminal, such as on a computer you reach over SSH. Run `pnpm starkeep <command>` at the root of `starkeep-core`, or `starkeep <command>` anywhere once setup has linked it. A relative folder path resolves against the folder you run the command in. `starkeep help <command>` describes each command and names the credentials it uses.
 
 ```sh
 starkeep status                                  # what runs, and this computer's sync sign-in
@@ -329,10 +333,13 @@ starkeep start                                   # the data server, Drive and ev
 starkeep stop photos                             # stop an app and clear its mark to run
 starkeep logs data-server -f                     # follow a service's log
 starkeep source add ~/starkeep-apps              # add a folder to app discovery
-starkeep list                                    # the apps discovery finds, and what is installed
-starkeep install photos --local                  # show the consent text, then install
+starkeep list                                    # the apps discovery finds, and what is installed here and in the cloud
+starkeep install photos --local                  # show the consent text, then install on this computer
+starkeep install photos --cloud                  # install in the cloud: the data side and every surface
+starkeep install photos --web                    # install only the cloud web app
 starkeep uninstall photos --local                # uninstall; the app's data stays
-starkeep update                                  # pull each app's repository and apply it here
+starkeep uninstall photos --cloud --delete-data  # uninstall from the cloud and delete the data it kept
+starkeep update                                  # pull each app's repository and apply it, cloud first
 starkeep update --undo                           # return to the commits before the last update
 starkeep reset-local                             # list the local data reset-local --apply deletes
 starkeep login --admin                           # sign in as the cloud's admin, in the browser
@@ -340,24 +347,31 @@ starkeep login --sync                            # sign this computer in to sync
 starkeep logout --admin                          # end the admin sign-in that Admin shares
 ```
 
-`install` and `uninstall` always take a target. `--local` is the only target the command runs so far; cloud installs run from Admin or the scripts below. Every command accepts `--json`, which prints one JSON event per line and a final result. A command that needs an answer and has no terminal to ask exits with code 3; pass `--yes` to approve.
+`install` and `uninstall` always take a target: `--local`, `--cloud`, `--web` or `--mobile`, and the flags combine. Every command accepts `--json`, which prints one JSON event per line and a final result. A command that needs an answer and has no terminal to ask exits with code 3; pass `--yes` to approve.
+
+A cloud command signs in as the admin, with the same sign-in Admin uses, and opens the sign-in page in your browser when no sign-in is open. Only the bootstrap stack uses your terminal's AWS credentials. The cloud work runs in the background: a closed terminal leaves it running, and running the same command again, or opening Admin, follows it. The whole log of each cloud run is in `~/.starkeep/installs/`.
 
 ### Deploy the cloud
 
-Deploy the bootstrap stack first, through steps 1 to 3 of [Deploy Starkeep to your AWS account](#deploy-starkeep-to-your-aws-account). Those steps write the cloud settings that the commands below read from `~/.starkeep/config.json`. Sign in once with `pnpm starkeep login --admin`, which opens the sign-in page in your browser. Each command below then uses that sign-in, the same one Admin uses.
-
 ```sh
-pnpm --filter @starkeep/admin-installer cli:install-cloud-data-server
-pnpm --filter @starkeep/admin-installer cli:install-drive
+starkeep setup --cloud --region us-east-2 --name "Home" --admin-email you@example.com
 ```
+
+The command signs in to AWS with your terminal's credentials, such as `aws sso login` or an `AWS_PROFILE`, and shows the account and the region before it creates the bootstrap stack. Cognito then emails the admin address a temporary password. The command opens the sign-in page in your browser, where you sign in with that password and choose a permanent one. It then installs the cloud data server and Drive, which takes 10 to 20 minutes, and signs this computer in to sync. The sync sign-in opens the browser again, and the sign-in page usually remembers you.
+
+Each step checks first whether it is done, so after a failure you fix the cause and run the same command again. `--prefix` names the stack prefix (`starkeep` by default), `--domain` attaches a custom domain, and `--apps photos,example-app` installs apps in the cloud at the end.
+
+To join a cloud that already exists, run `starkeep setup --join <address>`.
 
 ### Install an app in the cloud
 
 ```sh
-pnpm --filter @starkeep/admin-installer cli:install-app photos --app-dir ../starkeep-apps/photos
+starkeep install photos --cloud
 ```
 
-The command installs the app's data side and every surface the manifest offers. Pass `--web` or `--mobile` to install one surface only. Without `--app-dir`, the command finds the app in the folders Admin scans. The same command upgrades an installed app.
+The command builds the app's bundle from its folder on this computer and installs the app's data side and every surface the manifest offers. `--web` or `--mobile` installs one surface only. A cloud install needs no local install. The same command upgrades an installed app, and `starkeep update` upgrades every app.
+
+The scripts in `packages/admin-installer/scripts` that these commands replaced stay for the end-to-end tests. Use the `starkeep` command instead.
 
 ## Removing Starkeep Cloud
 
