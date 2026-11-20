@@ -64,7 +64,8 @@ vi.mock("pg", () => {
       return this;
     }
   }
-  return { default: { Pool: FakePool }, Pool: FakePool };
+  // createDsqlPool subclasses pg.Client; FakePool never constructs one.
+  return { default: { Pool: FakePool, Client: class {} }, Pool: FakePool };
 });
 
 import { initializeSharedSchema } from "../../src/dsql-schema-init";
