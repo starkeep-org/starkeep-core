@@ -188,6 +188,59 @@ describe("whether a row is behind its app's folder", () => {
     ).toMatchObject({ behind: true });
   });
 
+  // The install fills each platform variable a handler lists empty, and records
+  // the filled-in manifest. That is the folder's own manifest, deployed.
+  describe("with handlers whose platform variables the install filled", () => {
+    const withEnv = (env: Record<string, string>) => ({
+      ...deployed,
+      infraRequirements: {
+        publicSharing: true,
+        compute: { handlers: [{ name: "web", env }] },
+      },
+    });
+    const folderManifest = withEnv({
+      STARKEEP_USER_POOL_ID: "",
+      STARKEEP_API_GATEWAY_URL: "",
+      APP_MODE: "cloud",
+    });
+    const filled = withEnv({
+      STARKEEP_USER_POOL_ID: "us-west-2_abc",
+      STARKEEP_API_GATEWAY_URL: "https://d1.cloudfront.net",
+      APP_MODE: "cloud",
+    });
+
+    it("is current, since the filled values are the deployment's own", async () => {
+      expect(
+        await behind(
+          { manifest: JSON.stringify(filled) },
+          { manifest: folderManifest, source: "abc" },
+        ),
+      ).toEqual({ behind: false, codeBehind: false });
+    });
+
+    it("is behind when the folder sets a platform variable itself", async () => {
+      const pinned = withEnv({
+        STARKEEP_USER_POOL_ID: "us-east-1_other",
+        STARKEEP_API_GATEWAY_URL: "",
+        APP_MODE: "cloud",
+      });
+      expect(
+        await behind({ manifest: JSON.stringify(filled) }, { manifest: pinned, source: "abc" }),
+      ).toMatchObject({ behind: true });
+    });
+
+    it("is behind when another variable changed", async () => {
+      const changed = withEnv({
+        STARKEEP_USER_POOL_ID: "",
+        STARKEEP_API_GATEWAY_URL: "",
+        APP_MODE: "local",
+      });
+      expect(
+        await behind({ manifest: JSON.stringify(filled) }, { manifest: changed, source: "abc" }),
+      ).toMatchObject({ behind: true });
+    });
+  });
+
   it("is behind when the row predates the recorded manifest, since a redeploy records one", async () => {
     expect(await behind({ manifest: null }, { manifest: deployed, source: "abc" })).toMatchObject({
       behind: true,

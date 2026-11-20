@@ -251,7 +251,7 @@ function cloudCell(row: ListRow): string {
   return `${surfaces.length > 0 ? surfaces.join("+") : "data"}${behind}`;
 }
 
-async function listRows(): Promise<ListRow[]> {
+async function listRows(): Promise<{ rows: ListRow[]; localKnown: boolean }> {
   readConfigSeeded();
   const registry = await readRegistry();
   const pins = pinsOf(registry);
@@ -285,11 +285,14 @@ async function listRows(): Promise<ListRow[]> {
       rows.get(k.appId)!.local = "kept data";
     }
   }
-  return [...rows.values()].sort((a, b) => a.appId.localeCompare(b.appId));
+  return {
+    rows: [...rows.values()].sort((a, b) => a.appId.localeCompare(b.appId)),
+    localKnown: registry !== null,
+  };
 }
 
 /** Add the cloud column to `rows`, and rows for apps only the cloud has. */
-function addCloud(rows: ListRow[], cloud: CloudApp[] | null): ListRow[] {
+function addCloud(rows: ListRow[], cloud: CloudApp[] | null, localKnown: boolean): ListRow[] {
   if (cloud === null) return rows.map((r) => ({ ...r, cloud: null }));
   const byId = new Map(rows.map((r) => [r.appId, r]));
   for (const c of cloud) {
@@ -301,7 +304,8 @@ function addCloud(rows: ListRow[], cloud: CloudApp[] | null): ListRow[] {
         appId: c.appId,
         name: c.name ?? c.appId,
         source: c.folder,
-        local: "not installed",
+        // Unknown, not "not installed", while the data server is not answering.
+        local: localKnown ? "not installed" : "unknown",
         cloud: cell,
       });
   }
@@ -324,7 +328,7 @@ export const listCommand: Command = {
     "The CLOUD column needs an open admin session (starkeep login --admin); without one it shows ?.\n" +
     "(behind) marks a cloud install whose manifest or web code differs from the folder here.",
   async run(io) {
-    let rows = await listRows();
+    let { rows, localKnown } = await listRows();
     if (cloudInstalled()) {
       let cloud: CloudApp[] | null = null;
       try {
@@ -334,7 +338,7 @@ export const listCommand: Command = {
           `Could not read the cloud's apps: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
-      rows = addCloud(rows, cloud);
+      rows = addCloud(rows, cloud, localKnown);
       if (cloud === null && !io.json)
         io.warn("Sign in with `starkeep login --admin` to see the CLOUD column.");
     }
