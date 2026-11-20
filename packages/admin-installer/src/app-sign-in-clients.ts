@@ -418,7 +418,9 @@ export function mobileAppsClientSettings(
 /**
  * Bring every client to its full settings once the CloudFront domain is
  * known, and give each its branding style. The mobile-apps client keeps the
- * callbacks that app installs registered.
+ * callbacks that app installs registered. The bootstrap's admin and device
+ * clients keep their settings, which the template owns, and get Starkeep's
+ * style in place of the Cognito style the template gave them.
  */
 export async function configureAppSignInClients(
   pool: PoolRef & {
@@ -426,6 +428,8 @@ export async function configureAppSignInClients(
     /** The gateway's own execute-api URL, where the consent pages answer. */
     gatewayBaseUrl: string;
     clients: AppSignInClientIds;
+    /** The bootstrap's admin and device clients. */
+    platformClientIds: readonly string[];
     deploymentName: string;
   },
 ): Promise<void> {
@@ -468,6 +472,10 @@ export async function configureAppSignInClients(
     pool.clients.connectorsClientId,
     pool.deploymentName,
   );
+
+  for (const clientId of pool.platformClientIds) {
+    await ensureBranding(client, pool.userPoolId, clientId, pool.deploymentName);
+  }
 }
 
 /**

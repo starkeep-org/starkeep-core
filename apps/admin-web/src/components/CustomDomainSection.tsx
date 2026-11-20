@@ -153,15 +153,10 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
     setCheck(null);
     writeRunMarker(true);
     try {
-      const { credentials } = await operatorSession();
+      if (!reattach) await operatorSession();
       const outcome = await runInstallStream(
         "/api/cloud-data-server/install",
-        {
-          accessKeyId: credentials.accessKeyId,
-          secretAccessKey: credentials.secretAccessKey,
-          sessionToken: credentials.sessionToken,
-          ...(reattach ? { reattach: true } : {}),
-        },
+        reattach ? { reattach: true } : {},
         {
           onLine: (line) => setRun((r) => (r ? { ...r, lines: [...r.lines, line] } : r)),
         },
@@ -237,11 +232,11 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
     setError(null);
     let found: { domain: string; zone: string | null };
     try {
-      const { credentials } = await operatorSession();
+      await operatorSession();
       const res = await fetch("/api/custom-domain/zone", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ domain: raw, credentials }),
+        body: JSON.stringify({ domain: raw }),
       });
       const body = (await res.json()) as {
         domain: string;
@@ -264,11 +259,11 @@ export function CustomDomainSection({ onChanged }: { onChanged: () => void }) {
     setBusy(true);
     setError(null);
     try {
-      const { credentials } = await operatorSession();
+      await operatorSession();
       const res = await fetch("/api/custom-domain/check", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ credentials }),
+        body: JSON.stringify({}),
       });
       const body = (await res.json()) as Check & { error?: string };
       if (!res.ok) throw new Error(body.error ?? `The check failed (${res.status}).`);

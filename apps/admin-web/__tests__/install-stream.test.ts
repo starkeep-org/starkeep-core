@@ -22,6 +22,16 @@ import { lastChild, resetSpawns, spawnedChildren, type FakeChild } from "./fake-
 import { lines, readSse } from "./sse";
 import { readFolderManifest } from "@starkeep/admin-installer/app-discovery";
 import { manifestDigest } from "@starkeep/admin-installer/manifest-approval";
+import {
+  FAKE_ADMIN,
+  FAKE_ADMIN_CREDENTIALS,
+  signInFake,
+  signOutFake,
+} from "./fake-admin-session";
+vi.mock("@starkeep/operator/admin-session", async (original) =>
+  (await import("./fake-admin-session")).fakeAdminSessionModule(await original()),
+);
+
 
 vi.mock("node:child_process", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:child_process")>()),
@@ -81,7 +91,8 @@ function writeConfig(config: unknown): void {
 
 type Call = (body?: Record<string, unknown>) => Promise<Response>;
 
-const CREDS = { accessKeyId: "AKIA", secretAccessKey: "secret", sessionToken: "token" };
+// The routes mint the signed-in admin's credentials (`fake-admin-session.ts`).
+const CREDS = {};
 
 let cloudDataServer: Call;
 let drive: Call;
@@ -125,7 +136,6 @@ beforeAll(async () => {
     )(
       jsonRequest(`/api/apps/${appId}/cloud-install`, {
         ...CREDS,
-        region: "us-east-2",
         ...body,
         approvedManifest,
       }),
@@ -154,23 +164,22 @@ async function finish(res: Response, child: FakeChild, code = 0) {
   return stream.rest();
 }
 
-describe("credentials are required before anything spawns", () => {
+describe("an admin session is required before anything spawns", () => {
   it.each([
-    ["cloud-data-server", () => cloudDataServer({ sessionToken: "" })],
-    ["drive", () => drive({ sessionToken: "" })],
-    ["an app", () => appInstall({ sessionToken: "" })],
-  ])("%s answers 400 JSON, not an event stream", async (_label, call) => {
-    const res = await call();
-    expect(res.status).toBe(400);
-    expect(res.headers.get("content-type")).toBe("application/json");
-    expect(((await res.json()) as { error: string }).error).toContain("sessionToken");
-    expect(spawnedChildren()).toHaveLength(0);
-  });
-
-  it("an app install also requires the region, which names the stack", async () => {
-    const res = await appInstall({ region: "" });
-    expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toContain("region");
+    ["cloud-data-server", () => cloudDataServer()],
+    ["drive", () => drive()],
+    ["an app", () => appInstall()],
+  ])("%s answers 401 JSON, not an event stream", async (_label, call) => {
+    signOutFake();
+    try {
+      const res = await call();
+      expect(res.status).toBe(401);
+      expect(res.headers.get("content-type")).toContain("application/json");
+      expect(((await res.json()) as { code: string }).code).toBe("NOT_SIGNED_IN");
+      expect(spawnedChildren()).toHaveLength(0);
+    } finally {
+      signInFake();
+    }
   });
 });
 
@@ -196,7 +205,7 @@ describe("the cloud-data-server pass", () => {
     expect(child.args).toContain("cli:install-cloud-data-server");
     expect(child.args).toContain("--non-interactive");
     expect(child.options.env).toMatchObject({
-      AWS_ACCESS_KEY_ID: "AKIA",
+      AWS_ACCESS_KEY_ID: "AKIAFAKEADMIN",
       AWS_REGION: "us-east-2",
     });
     await finish(res, child);
@@ -367,10 +376,10 @@ describe("an app install", () => {
     await finish(res, child);
   });
 
-  it("uses the region from the body rather than deriving one", async () => {
+  it("uses the admin session's region, whatever the body says", async () => {
     const res = await appInstall({ region: "eu-west-1" });
     const child = lastChild();
-    expect(child.options.env).toMatchObject({ AWS_REGION: "eu-west-1" });
+    expect(child.options.env).toMatchObject({ AWS_REGION: "us-east-2" });
     await finish(res, child);
   });
 });
@@ -715,13 +724,17 @@ describe("reattaching to a run in progress", () => {
   });
 
   it("starts a fresh run with the new credentials when the one it reattached to fails", async () => {
-    // The reconnecting POST carries fresh credentials. If the run it joined was
+    // The reconnecting POST mints fresh credentials. If the run it joined was
     // the one that failed on stale ones, retrying is the point of reconnecting.
     const first = await drive();
     const firstChild = lastChild();
     readSse(first);
 
-    const second = await drive({ accessKeyId: "AKIA-FRESH" });
+    // The second POST mints fresh credentials from the session.
+    FAKE_ADMIN.stsCredentials = { ...FAKE_ADMIN_CREDENTIALS, accessKeyId: "AKIA-FRESH" };
+    const second = await drive().finally(() => {
+      FAKE_ADMIN.stsCredentials = FAKE_ADMIN_CREDENTIALS;
+    });
     const secondStream = readSse(second);
     expect(await secondStream.next()).toMatchObject({ event: "message" });
 
@@ -888,8 +901,8 @@ describe("a run that outlives admin-web", () => {
     const dir = join(dataDir, "installs", "cloud-data-server");
     for (const name of readdirSync(dir)) {
       const text = readFileSync(join(dir, name), "utf8");
-      expect(text, name).not.toContain(CREDS.secretAccessKey);
-      expect(text, name).not.toContain(CREDS.sessionToken);
+      expect(text, name).not.toContain(FAKE_ADMIN_CREDENTIALS.secretAccessKey);
+      expect(text, name).not.toContain(FAKE_ADMIN_CREDENTIALS.sessionToken);
     }
   });
 });

@@ -168,26 +168,6 @@ describe("the shell around all three", () => {
     const header = (await screen.findByText("Starkeep Admin")).closest("a");
     expect(header?.getAttribute("href")).toBe("/");
   });
-
-  it("shows a loading state until it has read the cloud config", async () => {
-    // The gate starts credential refresh before rendering anything, so a page
-    // is never painted against a session it has not resolved yet.
-    let resolveConfig: (r: Response) => void = () => {};
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(
-        (input: RequestInfo | URL) =>
-          new Promise<Response>((resolve) => {
-            const url = typeof input === "string" ? input : (input as Request).url;
-            if (url.includes("/api/config")) resolveConfig = resolve;
-          }),
-      ),
-    );
-    renderAt("/storage");
-    expect(screen.queryByRole("heading", { name: "Storage" })).toBeNull();
-    resolveConfig(Response.json({ config: null }));
-    await waitFor(() => expect(screen.getByRole("heading", { name: "Storage" })).toBeTruthy());
-  });
 });
 
 describe("navigating between the three pages", () => {

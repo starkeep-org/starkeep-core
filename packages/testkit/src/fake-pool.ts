@@ -1,22 +1,30 @@
 /**
  * A fake Cognito user pool for the device client, served by the fake cloud.
  *
- * Speaks the four calls a device makes — `InitiateAuth` with
- * `USER_PASSWORD_AUTH` and `REFRESH_TOKEN_AUTH`, `RespondToAuthChallenge` for
- * `NEW_PASSWORD_REQUIRED`, and `RevokeToken` — in Cognito's JSON wire format, so
- * the shared Cognito client in protocol-primitives talks to it unchanged. A
- * local data server reaches it through `STARKEEP_COGNITO_ENDPOINT`.
+ * Speaks the calls the real device client allows, in Cognito's JSON wire
+ * format, so the shared Cognito client in protocol-primitives talks to it
+ * unchanged: `InitiateAuth` with `REFRESH_TOKEN_AUTH`, `RevokeToken`, and the
+ * harness's password sign-in, `AdminInitiateAuth` with
+ * `ADMIN_USER_PASSWORD_AUTH` and `AdminRespondToAuthChallenge` for
+ * `NEW_PASSWORD_REQUIRED`. `USER_PASSWORD_AUTH` is refused, as the client
+ * refuses it. A person's sign-in on the managed login page is
+ * {@link FakePool.issueCode} followed by the token endpoint,
+ * {@link FakePool.redeemCode}. A local data server reaches the pool through
+ * `STARKEEP_COGNITO_ENDPOINT` and the token endpoint through
+ * `STARKEEP_COGNITO_TOKEN_ENDPOINT`.
  *
  * ID tokens are HMAC-signed with a per-pool secret rather than RS256, because
  * nothing outside this process verifies them: the fake cloud checks the ones it
  * issued, and the devices read their claims without verifying.
  */
 
-import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
 export const FAKE_POOL_REGION = "us-east-1";
 export const FAKE_POOL_ID = "us-east-1_FakePool1";
 export const FAKE_DEVICE_CLIENT_ID = "fakedeviceclient0000000001";
+/** The managed login page's host name the fake cloud names in `/auth/config`. */
+export const FAKE_COGNITO_DOMAIN = "fake-pool.auth.us-east-1.amazoncognito.com";
 
 /** Fifteen minutes, as the real device client issues. */
 const ID_TOKEN_LIFETIME_SECONDS = 15 * 60;
@@ -55,6 +63,14 @@ export interface FakePool {
   verify(idToken: string): { sub: string; email: string; groups: string[] } | null;
   /** Answer one Cognito API call. */
   handle(target: string, body: Record<string, unknown>): { status: number; body: unknown };
+  /**
+   * What the managed login page does once a person signs in: a one-time code
+   * for the callback, bound to the PKCE challenge and the callback URL.
+   * Throws for an unknown user.
+   */
+  issueCode(email: string, options: { codeChallenge: string; redirectUri: string }): string;
+  /** Answer the token endpoint's `authorization_code` grant. */
+  redeemCode(form: URLSearchParams): { status: number; body: unknown };
 }
 
 export function createFakePool(): FakePool {
@@ -64,6 +80,7 @@ export function createFakePool(): FakePool {
   const revoked = new Set<string>();
   const signInCounts = new Map<string, number>();
   const sessions = new Map<string, string>();
+  const codes = new Map<string, { email: string; codeChallenge: string; redirectUri: string }>();
 
   const b64url = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
   const sign = (data: string) => createHmac("sha256", secret).update(data).digest("base64url");
@@ -161,6 +178,26 @@ export function createFakePool(): FakePool {
         };
       }
       if (target === "InitiateAuth" && body["AuthFlow"] === "USER_PASSWORD_AUTH") {
+        return {
+          status: 400,
+          body: {
+            __type: "InvalidParameterException",
+            message: "USER_PASSWORD_AUTH flow not enabled for this client",
+          },
+        };
+      }
+      // The harness's password sign-in, which needs AWS credentials in the
+      // real pool. The fake checks the pool id instead of a signature.
+      if (
+        (target === "AdminInitiateAuth" || target === "AdminRespondToAuthChallenge") &&
+        body["UserPoolId"] !== FAKE_POOL_ID
+      ) {
+        return {
+          status: 400,
+          body: { __type: "ResourceNotFoundException", message: "User pool does not exist." },
+        };
+      }
+      if (target === "AdminInitiateAuth" && body["AuthFlow"] === "ADMIN_USER_PASSWORD_AUTH") {
         const params = body["AuthParameters"] as { USERNAME?: string; PASSWORD?: string };
         const email = params.USERNAME ?? "";
         const user = users.get(email);
@@ -178,7 +215,7 @@ export function createFakePool(): FakePool {
         return { status: 200, body: issue(email, user) };
       }
       if (
-        target === "RespondToAuthChallenge" &&
+        target === "AdminRespondToAuthChallenge" &&
         body["ChallengeName"] === "NEW_PASSWORD_REQUIRED"
       ) {
         const session = String(body["Session"] ?? "");
@@ -222,5 +259,102 @@ export function createFakePool(): FakePool {
         body: { __type: "InvalidParameterException", message: `fake pool cannot answer ${target}` },
       };
     },
+
+    issueCode(email, options) {
+      const user = users.get(email);
+      if (!user) throw new Error(`The fake pool has no user ${email}`);
+      // The page has the person set a permanent password at a first sign-in.
+      user.temporary = false;
+      const code = `code-${randomUUID()}`;
+      codes.set(code, { email, ...options });
+      return code;
+    },
+
+    redeemCode(form) {
+      if (!this.reachable) return { status: 503, body: { error: "temporarily_unavailable" } };
+      const invalid = (description: string) => ({
+        status: 400,
+        body: { error: "invalid_grant", error_description: description },
+      });
+      if (form.get("grant_type") !== "authorization_code") {
+        return { status: 400, body: { error: "unsupported_grant_type" } };
+      }
+      if (form.get("client_id") !== FAKE_DEVICE_CLIENT_ID) {
+        return { status: 400, body: { error: "invalid_client" } };
+      }
+      const code = form.get("code") ?? "";
+      const issuedCode = codes.get(code);
+      // A code is good once, whatever the outcome.
+      codes.delete(code);
+      if (!issuedCode) return invalid("unknown or used code");
+      if (form.get("redirect_uri") !== issuedCode.redirectUri) return invalid("redirect mismatch");
+      const challenge = createHash("sha256")
+        .update(form.get("code_verifier") ?? "")
+        .digest("base64url");
+      if (challenge !== issuedCode.codeChallenge) return invalid("PKCE check failed");
+      const user = users.get(issuedCode.email);
+      if (!user) return invalid("unknown user");
+      signInCounts.set(issuedCode.email, (signInCounts.get(issuedCode.email) ?? 0) + 1);
+      const result = issue(issuedCode.email, user).AuthenticationResult;
+      return {
+        status: 200,
+        body: {
+          id_token: result.IdToken,
+          access_token: result.AccessToken,
+          refresh_token: result.RefreshToken,
+          expires_in: result.ExpiresIn,
+          token_type: "Bearer",
+        },
+      };
+    },
   };
+}
+
+/**
+ * Sign a user in at a pool the way the e2e harness does, with
+ * `ADMIN_USER_PASSWORD_AUTH`, answering a first sign-in's new-password
+ * challenge with `newPassword`. Returns the refresh token, which a local data
+ * server's `/auth/login` accepts as `{ refreshToken }`.
+ */
+export async function adminPasswordSignIn(
+  cognitoEndpoint: string,
+  account: { email: string; password: string; newPassword?: string },
+  pool: { userPoolId: string; clientId: string } = {
+    userPoolId: FAKE_POOL_ID,
+    clientId: FAKE_DEVICE_CLIENT_ID,
+  },
+): Promise<string> {
+  async function call(target: string, body: unknown): Promise<Record<string, unknown>> {
+    const res = await fetch(cognitoEndpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-amz-json-1.1",
+        "X-Amz-Target": `AWSCognitoIdentityProviderService.${target}`,
+      },
+      body: JSON.stringify(body),
+    });
+    const parsed = (await res.json()) as Record<string, unknown>;
+    if (!res.ok) throw new Error(`${target} failed: ${res.status} ${JSON.stringify(parsed)}`);
+    return parsed;
+  }
+  let answer = await call("AdminInitiateAuth", {
+    UserPoolId: pool.userPoolId,
+    ClientId: pool.clientId,
+    AuthFlow: "ADMIN_USER_PASSWORD_AUTH",
+    AuthParameters: { USERNAME: account.email, PASSWORD: account.password },
+  });
+  if (answer["ChallengeName"] === "NEW_PASSWORD_REQUIRED") {
+    if (!account.newPassword) throw new Error(`${account.email} must choose a new password`);
+    answer = await call("AdminRespondToAuthChallenge", {
+      UserPoolId: pool.userPoolId,
+      ClientId: pool.clientId,
+      ChallengeName: "NEW_PASSWORD_REQUIRED",
+      Session: answer["Session"],
+      ChallengeResponses: { USERNAME: account.email, NEW_PASSWORD: account.newPassword },
+    });
+  }
+  const refresh = (answer["AuthenticationResult"] as { RefreshToken?: string } | undefined)
+    ?.RefreshToken;
+  if (!refresh) throw new Error("The pool answered without a refresh token");
+  return refresh;
 }

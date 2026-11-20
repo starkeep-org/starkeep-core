@@ -6,24 +6,14 @@
  * it. With a cloud-only install, the local card goes and the cloud tile stays.
  * With no install, both go.
  *
- * The app list and the cloud registry are stubbed at fetch. The Cognito
- * exchange is mocked; the pages and sections are real.
+ * The app list, the cloud registry and the admin session are stubbed at
+ * fetch; the pages and sections are real.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import type { LocalAppEntry } from "../src/lib/app-types";
-
-vi.mock("@/lib/cognito-auth", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../src/lib/cognito-auth")>()),
-  refreshTokens: async () => ({ idToken: "id", refreshToken: "refresh" }),
-  getIdentityPoolCredentials: async () => ({
-    accessKeyId: "AKIA",
-    secretAccessKey: "secret",
-    sessionToken: "token",
-  }),
-}));
 
 const { App } = await import("../src/App");
 
@@ -53,7 +43,6 @@ beforeEach(() => {
   folderListed = true;
   cloudRows = [];
   localStorage.clear();
-  localStorage.setItem("starkeep:cognito-session", JSON.stringify({ refreshToken: "refresh" }));
   vi.spyOn(window, "confirm").mockReturnValue(true);
   vi.stubGlobal(
     "fetch",
@@ -77,6 +66,16 @@ beforeEach(() => {
         return Response.json({ apps: folderListed ? [example] : [], problems: [], dirs: [] });
       }
       if (url.startsWith("/api/apps/cloud/list")) return Response.json({ apps: cloudRows });
+      // An admin is signed in; the server holds the session.
+      if (url.startsWith("/api/admin-session")) {
+        return Response.json({
+          signedIn: true,
+          email: "admin@example.com",
+          sub: "sub-admin",
+          expiresAt: null,
+          browserSignIn: { available: true },
+        });
+      }
       // Everything else, the local data server among it, is not running.
       throw new TypeError("fetch failed");
     }),

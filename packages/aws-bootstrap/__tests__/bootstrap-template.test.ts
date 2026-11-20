@@ -9,7 +9,10 @@ import {
   normalizeDeploymentName,
   MAX_INLINE_TEMPLATE_BYTES,
   MAX_STACK_PREFIX_LENGTH,
+  inlineTemplateBody,
+  LOCAL_CALLBACK_URLS,
 } from "../src/bootstrap/index.js";
+import { localCallbackUrls } from "@starkeep/protocol-primitives";
 
 // CFN short-form intrinsics (!Sub / !Ref / !GetAtt) parsed into plain objects
 // so the template is assertable as data.
@@ -149,7 +152,7 @@ describe("bootstrap template structure", () => {
 });
 
 describe("template size", () => {
-  it("fits CloudFormation's inline cap, as the tier-3 suite sends it", () => {
+  it("fits CloudFormation's inline cap, as code sends it without its comments", () => {
     // `e2e-aws` creates and updates the stack with `TemplateBody`, which
     // CloudFormation refuses past 51,200 bytes before creating anything. The
     // worst case: every `${stackPrefix}` at the longest prefix allowed, the
@@ -159,7 +162,50 @@ describe("template size", () => {
       deploymentName: "x".repeat(MAX_DEPLOYMENT_NAME_LENGTH),
       adminEmail: `${"a".repeat(64)}@${"b".repeat(185)}.com`,
     });
-    expect(Buffer.byteLength(raw, "utf8")).toBeLessThanOrEqual(MAX_INLINE_TEMPLATE_BYTES);
+    expect(Buffer.byteLength(inlineTemplateBody(raw), "utf8")).toBeLessThanOrEqual(
+      MAX_INLINE_TEMPLATE_BYTES,
+    );
+  });
+
+  it("loses nothing but comments when stripped for sending", () => {
+    const raw = generateBootstrapTemplate({ deploymentName: "Test Library", adminEmail: "a@b.co" });
+    const stripped = inlineTemplateBody(raw);
+    expect(stripped).not.toMatch(/^\s*#/m);
+    expect(parse(stripped, { customTags: cfnTags })).toEqual(parse(raw, { customTags: cfnTags }));
+  });
+});
+
+describe("the admin and device clients' browser sign-in", () => {
+  for (const name of ["UserPoolClient", "DeviceUserPoolClient"]) {
+    it(`${name} runs the code flow with PKCE back to this computer only`, () => {
+      const props = resources[name]!.Properties as Record<string, unknown>;
+      expect(props.AllowedOAuthFlowsUserPoolClient).toBe(true);
+      expect(props.AllowedOAuthFlows).toEqual(["code"]);
+      expect(props.AllowedOAuthScopes).toEqual(["openid", "email"]);
+      expect(props.SupportedIdentityProviders).toEqual(["COGNITO"]);
+      expect(props.CallbackURLs).toEqual([...LOCAL_CALLBACK_URLS]);
+      for (const url of props.CallbackURLs as string[]) {
+        expect(new URL(url).hostname).toBe("localhost");
+      }
+      expect(props.ExplicitAuthFlows).not.toContain("ALLOW_USER_PASSWORD_AUTH");
+      expect(props.ExplicitAuthFlows).toContain("ALLOW_ADMIN_USER_PASSWORD_AUTH");
+    });
+  }
+
+  it("names the same callbacks the CLI and admin-web listen on", () => {
+    expect([...LOCAL_CALLBACK_URLS]).toEqual(localCallbackUrls());
+  });
+
+  it("gives both clients a branding style, so the managed login page shows", () => {
+    const branded = resourcesOfType("AWS::Cognito::ManagedLoginBranding").map(
+      (name) => (resources[name]!.Properties as { ClientId: unknown }).ClientId,
+    );
+    expect(branded).toEqual(
+      expect.arrayContaining([{ Ref: "UserPoolClient" }, { Ref: "DeviceUserPoolClient" }]),
+    );
+    for (const name of resourcesOfType("AWS::Cognito::ManagedLoginBranding")) {
+      expect(resources[name]!.Properties.UseCognitoProvidedValues).toBe(true);
+    }
   });
 });
 
@@ -419,14 +465,14 @@ describe("the managed login page", () => {
 describe("the device client", () => {
   const props = () => resources.DeviceUserPoolClient!.Properties as Record<string, unknown>;
 
-  it("signs devices in with a password and refreshes, and offers no other flow", () => {
+  it("signs people in on the managed login page, and takes a password only with AWS credentials", () => {
     expect((props().ExplicitAuthFlows as string[]).sort()).toEqual([
+      "ALLOW_ADMIN_USER_PASSWORD_AUTH",
       "ALLOW_REFRESH_TOKEN_AUTH",
-      "ALLOW_USER_PASSWORD_AUTH",
     ]);
     expect(props().GenerateSecret).toBe(false);
-    expect(props().AllowedOAuthFlows).toBeUndefined();
-    expect(props().CallbackURLs).toBeUndefined();
+    expect(props().AllowedOAuthFlows).toEqual(["code"]);
+    expect(props().CallbackURLs).toEqual([...LOCAL_CALLBACK_URLS]);
   });
 
   it("issues fifteen-minute ID tokens and ten-year refresh tokens, revocable one at a time", () => {

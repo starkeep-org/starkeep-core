@@ -115,11 +115,12 @@ echo "Building @starkeep/aws-bootstrap..."
 
 STACK_PREFIX="$STACK_PREFIX" DEPLOYMENT_NAME="$DEPLOYMENT_NAME" BOOTSTRAP_DIST="$REPO_DIR/packages/aws-bootstrap/dist/index.js" \
   node --input-type=module -e '
-    const { generateBootstrapTemplate } = await import(process.env.BOOTSTRAP_DIST);
-    process.stdout.write(generateBootstrapTemplate({
+    const { generateBootstrapTemplate, inlineTemplateBody } = await import(process.env.BOOTSTRAP_DIST);
+    // Without its comments, which count toward the inline cap.
+    process.stdout.write(inlineTemplateBody(generateBootstrapTemplate({
       stackPrefix: process.env.STACK_PREFIX,
       deploymentName: process.env.DEPLOYMENT_NAME,
-    }));
+    })));
   ' >"$TEMPLATE"
 
 TEMPLATE_BYTES=$(wc -c <"$TEMPLATE" | tr -d ' ')

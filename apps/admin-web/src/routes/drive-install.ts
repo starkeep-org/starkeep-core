@@ -9,7 +9,8 @@
  * cloud-data-server install (which writes the foundational outputs this CLI
  * reads from ~/.starkeep/config.json) — the wizard sequences the two passes.
  *
- * Request body: { accessKeyId, secretAccessKey, sessionToken, reattach?, resumeFrom? }
+ * Request body: { reattach?, resumeFrom? }. The route mints the signed-in admin's
+ * credentials itself (`lib/admin-auth.ts`).
  *
  * Response: text/event-stream
  *   data:  <stdout/stderr line>
@@ -24,6 +25,7 @@ import { REPO_ROOT } from "@starkeep/operator/commands";
 import { getRegion } from "../lib/cloud-config";
 import { installStream } from "../lib/install-stream";
 import { installerEnv } from "@starkeep/admin-installer/aws-env";
+import { requireAdmin } from "../lib/admin-auth";
 
 const STARKEEP_DIR = starkeepDir();
 const CONFIG_PATH = join(STARKEEP_DIR, "config.json");
@@ -38,19 +40,14 @@ interface StarkeepConfig {
 
 export async function POST(req: Request) {
   const body = (await req.json()) as {
-    accessKeyId: string;
-    secretAccessKey: string;
-    sessionToken: string;
     reattach?: boolean;
     resumeFrom?: string;
   };
 
-  if (!body.accessKeyId || !body.secretAccessKey || !body.sessionToken) {
-    return new Response(
-      JSON.stringify({ error: "accessKeyId, secretAccessKey, sessionToken required" }),
-      { status: 400, headers: { "Content-Type": "application/json" } },
-    );
-  }
+  // A reconnect only follows a run, so it needs no sign-in. Anything that may
+  // start a run mints the admin's credentials here, on the server.
+  const admin = body.reattach === true ? null : await requireAdmin();
+  if (admin instanceof Response) return admin;
 
   if (!existsSync(CONFIG_PATH)) {
     return new Response(JSON.stringify({ error: `~/.starkeep/config.json not found` }), {
@@ -87,14 +84,16 @@ export async function POST(req: Request) {
   const region = getRegion(preConfig);
 
   const spawnEnv = {
-    ...installerEnv(
-      {
-        accessKeyId: body.accessKeyId,
-        secretAccessKey: body.secretAccessKey,
-        sessionToken: body.sessionToken,
-      },
-      region,
-    ),
+    ...(admin
+      ? installerEnv(
+          {
+            accessKeyId: admin.stsCredentials.accessKeyId,
+            secretAccessKey: admin.stsCredentials.secretAccessKey,
+            sessionToken: admin.stsCredentials.sessionToken,
+          },
+          region,
+        )
+      : {}),
   };
 
   return installStream({

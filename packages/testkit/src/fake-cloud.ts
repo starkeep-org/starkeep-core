@@ -42,6 +42,7 @@ import {
 import { sha256HexToBase64 } from "@starkeep/storage-adapter";
 import {
   createFakePool,
+  FAKE_COGNITO_DOMAIN,
   FAKE_DEVICE_CLIENT_ID,
   FAKE_POOL_ID,
   FAKE_POOL_REGION,
@@ -178,6 +179,8 @@ export interface FakeCloud {
   pool: FakePool;
   /** The fake pool's API endpoint. */
   cognitoEndpoint: string;
+  /** The fake managed login page's token endpoint. */
+  cognitoTokenEndpoint: string;
   /** Shared records currently in the cloud DB. */
   sharedRecords(): Promise<AnyRecord[]>;
   /** Rows in a cloud-side app-syncable table (empty if table absent). */
@@ -412,7 +415,16 @@ export async function startFakeCloud(): Promise<FakeCloud> {
         region: FAKE_POOL_REGION,
         userPoolId: FAKE_POOL_ID,
         deviceClientId: FAKE_DEVICE_CLIENT_ID,
+        cognitoDomain: FAKE_COGNITO_DOMAIN,
       });
+      return;
+    }
+    // The managed login page's token endpoint. A device reaches it through
+    // `STARKEEP_COGNITO_TOKEN_ENDPOINT`, as it reaches the pool's API through
+    // `STARKEEP_COGNITO_ENDPOINT`.
+    if (pathname === "/oauth2/token" && req.method === "POST") {
+      const answer = pool.redeemCode(new URLSearchParams((await readBody(req)).toString("utf8")));
+      sendJson(res, answer.status, answer.body);
       return;
     }
     if (pathname === "/cognito/" && req.method === "POST") {
@@ -818,6 +830,7 @@ export async function startFakeCloud(): Promise<FakeCloud> {
     peakConcurrentExchanges: (appId) => peakExchanges.get(appId) ?? 0,
     pool,
     cognitoEndpoint: `${url}/cognito/`,
+    cognitoTokenEndpoint: `${url}/oauth2/token`,
     setDeploymentSettings: (settings) => {
       deploymentSettings = settings;
     },

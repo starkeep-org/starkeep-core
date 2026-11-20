@@ -14,9 +14,7 @@ import type { CustomDomainStatus } from "@starkeep/admin-installer/custom-domain
 let config: Record<string, unknown>;
 vi.mock("@/lib/cloud-config", () => ({ readCloudConfig: async () => config }));
 vi.mock("@/lib/operator-session", () => ({
-  operatorSession: async () => ({
-    credentials: { accessKeyId: "AKIA", secretAccessKey: "s", sessionToken: "t", expiration: "x" },
-  }),
+  operatorSession: async () => ({ stackPrefix: "sk", region: "us-east-2", userSub: "sub-admin" }),
 }));
 const runInstallStream = vi.fn(async () => ({ kind: "done" as const }));
 vi.mock("@/lib/install-stream-client", () => ({ runInstallStream }));
@@ -175,20 +173,12 @@ describe("Set up", () => {
     await userEvent.click(screen.getByRole("button", { name: "Set up" }));
   }
 
-  it("asks for the domain's zone with the operator's credentials", async () => {
+  it("asks for the domain's zone, and sends no credentials: the server acts as the admin", async () => {
     await pressSetUp();
     expect(requests).toContainEqual({
       url: "/api/custom-domain/zone",
       method: "POST",
-      body: {
-        domain: DOMAIN,
-        credentials: {
-          accessKeyId: "AKIA",
-          secretAccessKey: "s",
-          sessionToken: "t",
-          expiration: "x",
-        },
-      },
+      body: { domain: DOMAIN },
     });
   });
 

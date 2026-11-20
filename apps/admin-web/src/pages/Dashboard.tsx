@@ -14,17 +14,13 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { readCloudConfig, type CloudConfig } from "../lib/cloud-config";
 import {
-  readCloudConfig,
-  readCloudCredentials,
-  writeCloudCredentials,
-  readCognitoSession,
-  writeCognitoSession,
-  clearCloudCredentials,
-  credentialsNearExpiry,
-  type CloudConfig,
-  type CognitoSession,
-} from "../lib/cloud-config";
+  readAdminSession,
+  signOutAdmin,
+  startAdminSignIn,
+  type AdminSessionView,
+} from "../lib/admin-session-client";
 import { AppCard } from "../components/AppCard";
 import { CloudDataServerStatus } from "../components/CloudDataServerStatus";
 import { StatusBadge } from "../components/StatusBadge";
@@ -41,15 +37,6 @@ import { CustomDomainSection } from "../components/CustomDomainSection";
 import { LocalFoldersModal, type Watch } from "../components/LocalFoldersModal";
 import { CommandOutputModal } from "../components/CommandOutputModal";
 import { targetsOf, type KeptAppData, type LocalAppEntry } from "../lib/app-types";
-import {
-  initiateAuth,
-  respondNewPasswordChallenge,
-  refreshTokens,
-  getIdentityPoolCredentials,
-  extractEmailFromIdToken,
-  type CognitoConfig,
-  type STSCredentials,
-} from "../lib/cognito-auth";
 import { projectFullMonth, type ServiceCost } from "../lib/cost-projection";
 import { localDataServerUrl } from "../lib/runtime-config";
 import { ACTION_OCCASIONAL, ACTION_OPEN, ACTION_START } from "../lib/action-colors";
@@ -89,7 +76,6 @@ export function DashboardPage() {
 
   // Local data server
   const [localOnline, setLocalOnline] = useState<boolean | null>(null);
-  const [localCognitoConfig, setLocalCognitoConfig] = useState<CognitoConfig | null>(null);
   const [watches, setWatches] = useState<Watch[] | null>(null);
   const [addingBack, setAddingBack] = useState<string | null>(null);
 
@@ -99,7 +85,9 @@ export function DashboardPage() {
   const [joining, setJoining] = useState(false);
   // The no-cloud button under the pointer or focus, whose line of text shows beneath both.
   const [cloudHint, setCloudHint] = useState<"deploy" | "join" | null>(null);
-  const [cognitoSession, setCognitoSession] = useState<CognitoSession | null>(null);
+  // The admin session, which admin-web's server and the CLI share.
+  const [adminSession, setAdminSession] = useState<AdminSessionView | null>(null);
+  const signedInAsAdmin = adminSession?.signedIn === true;
 
   // Costs
   const [costs, setCosts] = useState<
@@ -126,14 +114,6 @@ export function DashboardPage() {
   const [clearOutputOpen, setClearOutputOpen] = useState(false);
 
   // Sign-in modal
-  const [signInOpen, setSignInOpen] = useState(false);
-  const [signInEmail, setSignInEmail] = useState("");
-  const [signInPassword, setSignInPassword] = useState("");
-  const [signInNewPassword, setSignInNewPassword] = useState("");
-  const [signInConfirmPassword, setSignInConfirmPassword] = useState("");
-  const [signInChallenge, setSignInChallenge] = useState<{ session: string } | null>(null);
-  const [signInError, setSignInError] = useState<string | null>(null);
-  const [signInLoading, setSignInLoading] = useState(false);
 
   // Poll every 2s while any daemon is starting
   const anyDaemonLoading = Object.values(daemonLoading).some(Boolean);
@@ -244,19 +224,12 @@ export function DashboardPage() {
         if (!controller.signal.aborted) setLocalOnline(false);
         return;
       }
-      // Server is reachable. /watches and /config are admin endpoints exempt
-      // from app-auth. The per-app /data/* routes require an HMAC identity
+      // Server is reachable. /watches is an admin endpoint exempt from
+      // app-auth. The per-app /data/* routes require an HMAC identity
       // admin-web doesn't have, so we don't probe them from here.
       try {
-        const [watchesResp, configResp] = await Promise.all([
-          fetch(`${base}/watches`, { signal: controller.signal }),
-          fetch(`${base}/config`, { signal: controller.signal }),
-        ]);
+        const watchesResp = await fetch(`${base}/watches`, { signal: controller.signal });
         if (watchesResp.ok) setWatches((await watchesResp.json()).watches);
-        if (configResp.ok) {
-          const cfg = await configResp.json();
-          if (cfg.cognitoConfig) setLocalCognitoConfig(cfg.cognitoConfig as CognitoConfig);
-        }
       } catch {
         /* leave per-section state null */
       }
@@ -266,10 +239,10 @@ export function DashboardPage() {
     return () => controller.abort();
   }, [refreshKey, localRefreshKey]);
 
-  // Read cloud config + cognito session
+  // Read cloud config + the admin session
   useEffect(() => {
     readCloudConfig().then(setCloudConfig);
-    readCognitoSession().then(setCognitoSession);
+    readAdminSession().then(setAdminSession);
   }, [refreshKey]);
 
   // Initial app-list fetch (also re-run by bumpAll via refreshApps).
@@ -312,37 +285,15 @@ export function DashboardPage() {
         setCosts("no-data");
         return;
       }
-      const session = await readCognitoSession();
-      let creds: STSCredentials | null = await readCloudCredentials();
-      if (!creds || credentialsNearExpiry(creds)) {
-        if (!session?.refreshToken) {
-          setCosts("not-signed-in");
-          return;
-        }
-        try {
-          const tokens = await refreshTokens(cfg.cognitoConfig, session.refreshToken);
-          creds = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
-          await writeCloudCredentials(creds);
-          await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
-        } catch {
-          setCosts("not-signed-in");
-          return;
-        }
-      }
       try {
-        const resp = await fetch("/api/costs", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            credentials: creds,
-            stackPrefix: cfg.stackPrefix,
-            region: cfg.region,
-          }),
-        });
+        // The server acts as the signed-in admin; it answers 401 without one.
+        const resp = await fetch("/api/costs", { method: "POST" });
         if (!resp.ok) {
           const body = (await resp.json().catch(() => ({}))) as { error?: string; code?: string };
           const isAuthError =
-            body.code === "InvalidClientTokenId" || body.code === "ExpiredTokenException";
+            resp.status === 401 ||
+            body.code === "InvalidClientTokenId" ||
+            body.code === "ExpiredTokenException";
           setCosts(isAuthError ? "not-signed-in" : "error");
           return;
         }
@@ -360,72 +311,9 @@ export function DashboardPage() {
     fetchCosts();
   }, [refreshKey]);
 
-  // Sign-in handlers
-  async function handleSignIn() {
-    const cognitoConfig = localCognitoConfig ?? cloudConfig?.cognitoConfig;
-    if (!cognitoConfig) return;
-    setSignInLoading(true);
-    setSignInError(null);
-    try {
-      const result = await initiateAuth(cognitoConfig, signInEmail, signInPassword);
-      if (result.tokens) {
-        const email = extractEmailFromIdToken(result.tokens.idToken);
-        await writeCognitoSession({
-          refreshToken: result.tokens.refreshToken,
-          userEmail: email ?? undefined,
-        });
-        setSignInOpen(false);
-        bumpAll();
-      } else if (result.challengeName === "NEW_PASSWORD_REQUIRED" && result.session) {
-        setSignInChallenge({ session: result.session });
-      } else {
-        setSignInError("Unexpected response from Cognito");
-      }
-    } catch (err) {
-      setSignInError(err instanceof Error ? err.message : "Sign in failed");
-    } finally {
-      setSignInLoading(false);
-    }
-  }
-
-  async function handleNewPassword() {
-    const cognitoConfig = localCognitoConfig ?? cloudConfig?.cognitoConfig;
-    if (!cognitoConfig || !signInChallenge) return;
-    if (signInNewPassword !== signInConfirmPassword) {
-      setSignInError("Passwords do not match");
-      return;
-    }
-    setSignInLoading(true);
-    setSignInError(null);
-    try {
-      const tokens = await respondNewPasswordChallenge(
-        cognitoConfig,
-        signInChallenge.session,
-        signInEmail,
-        signInNewPassword,
-      );
-      const email = extractEmailFromIdToken(tokens.idToken);
-      await writeCognitoSession({
-        refreshToken: tokens.refreshToken,
-        userEmail: email ?? undefined,
-      });
-      setSignInOpen(false);
-      bumpAll();
-    } catch (err) {
-      setSignInError(err instanceof Error ? err.message : "Failed to set new password");
-    } finally {
-      setSignInLoading(false);
-    }
-  }
-
+  // The admin signs in on the managed login page, which returns here.
   function openSignIn() {
-    setSignInEmail("");
-    setSignInPassword("");
-    setSignInNewPassword("");
-    setSignInConfirmPassword("");
-    setSignInChallenge(null);
-    setSignInError(null);
-    setSignInOpen(true);
+    startAdminSignIn();
   }
 
   // Watch handlers
@@ -509,8 +397,8 @@ export function DashboardPage() {
   }
 
   async function handleSignOut() {
-    await clearCloudCredentials();
-    setCognitoSession(null);
+    await signOutAdmin();
+    setAdminSession(null);
     bumpAll();
   }
 
@@ -614,7 +502,7 @@ export function DashboardPage() {
                 />
                 <LocalDriveSection
                   cloudDeployed={cloudDeployed}
-                  signedIn={cognitoSession !== null}
+                  signedIn={signedInAsAdmin}
                 />
               </>
             }
@@ -693,7 +581,7 @@ export function DashboardPage() {
                 leading={
                   <CloudDataServerStatus
                     cloudConfig={cloudConfig}
-                    cognitoSession={cognitoSession}
+                    adminSession={adminSession}
                     refreshKey={refreshKey}
                     onSignIn={openSignIn}
                     onSignOut={handleSignOut}
@@ -704,11 +592,11 @@ export function DashboardPage() {
           )}
         </div>
 
-        {cloudAdministered && cognitoSession && <CustomDomainSection onChanged={bumpAll} />}
+        {cloudAdministered && signedInAsAdmin && <CustomDomainSection onChanged={bumpAll} />}
 
-        {cloudAdministered && cognitoSession && <UsersSection />}
+        {cloudAdministered && signedInAsAdmin && <UsersSection />}
 
-        {cloudAdministered && cognitoSession && <PublicSharesSection />}
+        {cloudAdministered && signedInAsAdmin && <PublicSharesSection />}
 
         {/* The cloud Data Server card's View Costs button targets this. */}
         {cloudAdministered && (
@@ -772,94 +660,6 @@ export function DashboardPage() {
           </div>
         )}
       </div>
-
-      {/* Sign-in dialog */}
-      <Dialog
-        open={signInOpen}
-        onOpenChange={(open) => {
-          setSignInOpen(open);
-          if (!open) setSignInChallenge(null);
-        }}
-      >
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Sign in as admin</DialogTitle>
-          </DialogHeader>
-          {!signInChallenge ? (
-            <div className="flex flex-col gap-4">
-              <div className="flex flex-col gap-1.5">
-                <label className="text-sm font-medium">Email</label>
-                <Input
-                  value={signInEmail}
-                  onChange={(e) => setSignInEmail(e.currentTarget.value)}
-                  disabled={signInLoading}
-                />
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <label className="text-sm font-medium">Password</label>
-                <Input
-                  type="password"
-                  value={signInPassword}
-                  onChange={(e) => setSignInPassword(e.currentTarget.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") handleSignIn();
-                  }}
-                  disabled={signInLoading}
-                />
-              </div>
-              {signInError && (
-                <Alert variant="destructive">
-                  <AlertDescription>{signInError}</AlertDescription>
-                </Alert>
-              )}
-              <Button onClick={handleSignIn} disabled={signInLoading} className="w-full">
-                {signInLoading && (
-                  <span className="mr-2 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                )}
-                Sign in
-              </Button>
-            </div>
-          ) : (
-            <div className="flex flex-col gap-4">
-              <p className="text-sm text-muted-foreground">
-                This account requires a new permanent password.
-              </p>
-              <div className="flex flex-col gap-1.5">
-                <label className="text-sm font-medium">New password</label>
-                <Input
-                  type="password"
-                  value={signInNewPassword}
-                  onChange={(e) => setSignInNewPassword(e.currentTarget.value)}
-                  disabled={signInLoading}
-                />
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <label className="text-sm font-medium">Confirm new password</label>
-                <Input
-                  type="password"
-                  value={signInConfirmPassword}
-                  onChange={(e) => setSignInConfirmPassword(e.currentTarget.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") handleNewPassword();
-                  }}
-                  disabled={signInLoading}
-                />
-              </div>
-              {signInError && (
-                <Alert variant="destructive">
-                  <AlertDescription>{signInError}</AlertDescription>
-                </Alert>
-              )}
-              <Button onClick={handleNewPassword} disabled={signInLoading} className="w-full">
-                {signInLoading && (
-                  <span className="mr-2 size-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                )}
-                Set password &amp; sign in
-              </Button>
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
 
       {/* Clear local data — the one destructive action in the console, offered
           only from the stopped Data Server card's menu. */}
@@ -933,7 +733,7 @@ export function DashboardPage() {
   return (
     <AppUpdateProvider
       cloudAdministered={cloudAdministered}
-      signedIn={cognitoSession !== null}
+      signedIn={signedInAsAdmin}
       refreshApps={refreshApps}
     >
       {page}

@@ -4,15 +4,19 @@
  * Everything below the guards is a DSQL connection, which is not something a
  * unit test can or should stand up. What the guards decide is whether the
  * operator sees "finish cloud setup first" or a stack trace, and they run in a
- * particular order: the config file first, then its contents, then the
- * credentials in the body. The dashboard's cloud column branches on each.
+ * particular order: the config file first, then its contents, then the admin
+ * session. The dashboard's cloud column branches on each.
  */
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { jsonRequest, makeDataDir } from "./helpers";
+import { signInFake, signOutFake } from "./fake-admin-session";
+vi.mock("@starkeep/operator/admin-session", async (original) =>
+  (await import("./fake-admin-session")).fakeAdminSessionModule(await original()),
+);
 
 let POST: (req: Request) => Promise<Response>;
 let dataDir: string;
@@ -86,21 +90,28 @@ describe("before cloud setup", () => {
   });
 });
 
-describe("credentials", () => {
-  it.each(["accessKeyId", "secretAccessKey", "sessionToken"] as const)(
-    "answers 400 when %s is absent from the body",
-    async (field) => {
-      writeConfig(COMPLETE_CONFIG);
-      const res = await call({ ...CREDS, [field]: undefined });
-      expect(res.status).toBe(400);
-      expect(((await res.json()) as { error: string }).error).toContain(field);
-    },
-  );
+describe("the admin session", () => {
+  it("answers 401 NOT_SIGNED_IN when no admin is signed in", async () => {
+    writeConfig(COMPLETE_CONFIG);
+    signOutFake();
+    try {
+      const res = await call({});
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { code: string }).code).toBe("NOT_SIGNED_IN");
+    } finally {
+      signInFake();
+    }
+  });
 
-  it("checks the config before the credentials, so the first fix named is the first one needed", async () => {
-    const res = await call({});
-    expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toContain("finish cloud setup");
+  it("checks the config before the session, so the first fix named is the first one needed", async () => {
+    signOutFake();
+    try {
+      const res = await call({});
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain("finish cloud setup");
+    } finally {
+      signInFake();
+    }
   });
 });
 

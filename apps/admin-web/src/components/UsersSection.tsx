@@ -22,6 +22,8 @@ import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { operatorSession } from "@/lib/operator-session";
+import { NotSignedInError, throwIfNotSignedIn } from "@/lib/admin-session-client";
+import { AdminSignInButton } from "./AdminSignInButton";
 
 interface UserView {
   readonly username: string;
@@ -35,25 +37,20 @@ interface UserView {
 type ListState =
   | { kind: "loading" }
   | { kind: "ready"; users: readonly UserView[] }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string; signIn?: boolean };
 
-/** POST one users route with the operator's session. Returns the refreshed list. */
+/** POST one users route, which acts as the signed-in admin. Returns the refreshed list. */
 async function call(
   path: string,
   extra: Record<string, unknown> = {},
 ): Promise<{ users: UserView[]; temporaryPassword?: string }> {
-  const session = await operatorSession();
+  await operatorSession();
   const res = await fetch(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      credentials: session.credentials,
-      stackPrefix: session.stackPrefix,
-      region: session.region,
-      userSub: session.userSub,
-      ...extra,
-    }),
+    body: JSON.stringify(extra),
   });
+  await throwIfNotSignedIn(res);
   const body = (await res.json()) as {
     users?: UserView[];
     temporaryPassword?: string;
@@ -78,7 +75,11 @@ export function UsersSection() {
     try {
       setList({ kind: "ready", users: (await call("/api/users/list")).users });
     } catch (err) {
-      setList({ kind: "error", message: err instanceof Error ? err.message : String(err) });
+      setList({
+        kind: "error",
+        message: err instanceof Error ? err.message : String(err),
+        signIn: err instanceof NotSignedInError,
+      });
     }
   }, []);
 
@@ -213,7 +214,10 @@ export function UsersSection() {
         ) : list.kind === "error" ? (
           <Alert variant="destructive">
             <AlertTitle>Could not load users</AlertTitle>
-            <AlertDescription>{list.message}</AlertDescription>
+            <AlertDescription className="flex flex-col items-start gap-3">
+              {list.message}
+              {list.signIn && <AdminSignInButton variant="outline" />}
+            </AlertDescription>
           </Alert>
         ) : (
           <ul className="divide-y rounded-lg border bg-card" aria-label="Users">

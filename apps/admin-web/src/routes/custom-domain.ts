@@ -9,10 +9,10 @@
  *
  * - PUT  — `{ domain: string | null }` sets or clears the domain. The next
  *          install acts on it.
- * - POST /check — `{ credentials }`, the operator's session. Reads whether ACM
+ * - POST /check — no body; the signed-in admin's session. Reads whether ACM
  *          has issued an external-DNS domain's certificate, as admin-app, and
  *          whether the domain resolves to the distribution yet.
- * - POST /zone — `{ domain, credentials }`. Checks the domain as PUT does, then
+ * - POST /zone — `{ domain }`. Checks the domain as PUT does, then
  *          finds the Route53 zone in this account the install would write to,
  *          as admin-app, so "Set up" can show the records before it saves.
  */
@@ -30,7 +30,7 @@ import {
 import { regionFromUserPoolId } from "../lib/cloud-config";
 import { readStarkeepConfig } from "@starkeep/operator/config";
 import { crossSiteRefusal, fromOwnPage } from "../lib/same-origin";
-import type { STSCredentials } from "../lib/cognito-auth";
+import { requireAdmin } from "../lib/admin-auth";
 import * as config from "./config";
 
 export async function PUT(req: Request): Promise<Response> {
@@ -136,10 +136,11 @@ export interface CustomDomainZone {
 
 export async function ZONE(req: Request): Promise<Response> {
   if (!fromOwnPage(req)) return crossSiteRefusal();
-  const body = await jsonBody<{ domain?: unknown; credentials?: STSCredentials }>(req);
+  const body = await jsonBody<{ domain?: unknown }>(req);
   if (!body) return INVALID_BODY();
-  const { domain: raw, credentials } = body;
-  if (!credentials) return Response.json({ error: "credentials required" }, { status: 400 });
+  const { domain: raw } = body;
+  const admin = await requireAdmin();
+  if (admin instanceof Response) return admin;
   let domain: string;
   try {
     domain = validateCustomDomain(typeof raw === "string" ? raw : "");
@@ -152,10 +153,7 @@ export async function ZONE(req: Request): Promise<Response> {
   const refusal = setRefusal(domain);
   if (refusal) return Response.json({ error: refusal }, { status: 400 });
   try {
-    const zone = await findHostedZone(domain, {
-      ...credentials,
-      expiration: new Date(credentials.expiration),
-    });
+    const zone = await findHostedZone(domain, admin.credentials);
     return Response.json({ domain, zone: zone?.name ?? null } satisfies CustomDomainZone);
   } catch (err) {
     return Response.json(
@@ -176,10 +174,9 @@ export interface CustomDomainCheck {
 
 export async function CHECK(req: Request): Promise<Response> {
   if (!fromOwnPage(req)) return crossSiteRefusal();
-  const body = await jsonBody<{ credentials?: STSCredentials }>(req);
-  if (!body) return INVALID_BODY();
-  const { credentials } = body;
-  if (!credentials) return Response.json({ error: "credentials required" }, { status: 400 });
+  const admin = await requireAdmin();
+  if (admin instanceof Response) return admin;
+  const credentials = admin.stsCredentials;
   const status = (readStarkeepConfig() as CustomDomainConfigFields).customDomainStatus;
   if (!status) {
     return Response.json(

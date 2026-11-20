@@ -2,13 +2,11 @@ import { useEffect, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { CommandOutput } from "./CommandOutput";
-import type { STSCredentials } from "../lib/cognito-auth";
 
 interface Props {
   opened: boolean;
   onClose: () => void;
   commandId: string | null;
-  credentials?: STSCredentials & { region: string };
   title: string;
   onSuccess?: () => void;
 }
@@ -17,7 +15,6 @@ export function CommandOutputModal({
   opened,
   onClose,
   commandId,
-  credentials,
   title,
   onSuccess,
 }: Props) {
@@ -36,7 +33,7 @@ export function CommandOutputModal({
         const resp = await fetch("/api/exec/stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: commandId, credentials }),
+          body: JSON.stringify({ id: commandId }),
         });
 
         if (!resp.ok || !resp.body) {

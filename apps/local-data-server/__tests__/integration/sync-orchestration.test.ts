@@ -10,6 +10,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import {
+  adminPasswordSignIn,
   FAKE_CLOUD_ACCOUNT,
   startLocalDataServer,
   startFakeCloud,
@@ -309,10 +310,11 @@ describe("sign-in gate", () => {
       expect((await syncStatus(drive)).enabled).toBe(false);
       expect(cloud.exchangeLog).toEqual([]);
 
+      const refreshToken = await adminPasswordSignIn(cloud.cognitoEndpoint, FAKE_CLOUD_ACCOUNT);
       const signedIn = await fetch(`${server.url}/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(FAKE_CLOUD_ACCOUNT),
+        body: JSON.stringify({ refreshToken }),
       });
       expect(signedIn.status, await signedIn.clone().text()).toBe(200);
       expect((await syncStatus(drive)).enabled).toBe(true);

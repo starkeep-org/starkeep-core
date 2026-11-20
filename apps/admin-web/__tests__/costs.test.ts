@@ -13,20 +13,18 @@ import { gzipSync } from "node:zlib";
 import { mockClient } from "aws-sdk-client-mock";
 import { GetObjectCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { jsonRequest, makeDataDir } from "./helpers";
+import { signInFake, signOutFake } from "./fake-admin-session";
+
+vi.mock("@starkeep/operator/admin-session", async (original) =>
+  (await import("./fake-admin-session")).fakeAdminSessionModule(await original()),
+);
 
 const s3 = mockClient(S3Client);
 const sts = mockClient(STSClient);
 
 let POST: (req: Request) => Promise<Response>;
-
-const CREDENTIALS = {
-  accessKeyId: "AKIA",
-  secretAccessKey: "secret",
-  sessionToken: "token",
-  expiration: new Date(Date.now() + 3_600_000).toISOString(),
-};
 
 beforeAll(async () => {
   process.env.STARKEEP_DIR = makeDataDir("adminweb-costs-");
@@ -37,16 +35,11 @@ beforeAll(async () => {
 afterEach(() => {
   s3.reset();
   sts.reset();
+  signInFake();
 });
 
-const call = () =>
-  POST(
-    jsonRequest("/api/costs", {
-      credentials: CREDENTIALS,
-      stackPrefix: "sktest",
-      region: "us-east-2",
-    }),
-  );
+// The route acts as the signed-in admin, whose session names the stack and region.
+const call = () => POST(jsonRequest("/api/costs", {}));
 
 /** A CUR chunk as S3 serves it: gzipped CSV with the three columns that matter. */
 function reportChunk(rows: Array<[string, string, string]>): Uint8Array {
@@ -172,5 +165,15 @@ describe("a genuine failure", () => {
   it("answers 500 when the account id cannot be determined", async () => {
     sts.on(GetCallerIdentityCommand).resolves({});
     expect((await call()).status).toBe(500);
+  });
+});
+
+describe("without an admin session", () => {
+  it("answers 401 NOT_SIGNED_IN and calls nothing", async () => {
+    signOutFake();
+    const res = await call();
+    expect(res.status).toBe(401);
+    expect(await res.json()).toMatchObject({ code: "NOT_SIGNED_IN" });
+    expect(s3.calls()).toHaveLength(0);
   });
 });
