@@ -10,6 +10,7 @@
  */
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import { sourceFingerprint } from "@starkeep/admin-installer/app-discovery";
+import { withoutFilledPlatformEnv } from "@starkeep/admin-installer/platform-env";
 import {
   DummyDriver,
   Kysely,
@@ -117,8 +118,10 @@ export interface FolderNow {
  * Whether the cloud install runs something other than what the app's folder
  * holds now.
  *
- * - `behind`: the deployed manifest differs from the folder's. A row without
- *   a recorded manifest counts as behind, because a redeploy records one.
+ * - `behind`: the deployed manifest differs from the folder's, apart from the
+ *   platform variables the install filled in (`platform-env.ts`). A row
+ *   without a recorded manifest counts as behind, because a redeploy records
+ *   one.
  * - `codeBehind`: the web app deployed code other than what the folder holds
  *   now, committed or not. A web app without a recorded fingerprint counts as
  *   behind, because a redeploy records one. False without a web app, whose
@@ -133,7 +136,11 @@ export function behindFolder(
 ): { behind: boolean | null; codeBehind: boolean | null } {
   if (!folder) return { behind: null, codeBehind: null };
   const deployed = parseManifest(r.manifest);
-  const behind = deployed === null || !sameManifest(deployed, folder.manifest);
+  // The install fills the handlers' platform variables before it records the
+  // manifest, so those filled values are not a change.
+  const behind =
+    deployed === null ||
+    !sameManifest(withoutFilledPlatformEnv(deployed, folder.manifest), folder.manifest);
   const codeBehind =
     r.web_app !== true
       ? false
