@@ -8,21 +8,23 @@ The app reads and writes only `example/plaintext`, a type in the `example` categ
 
 Each heading is one group of operations, with a table of the current state and a row of controls:
 
-| Heading       | What it does                                                                                                                                                             |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Connection    | Which surface the page runs on, who is signed in, the 403 a write outside the app's grant gets, and a call to the app's own JWT-gated route.                             |
-| Example files | Load the sample data, create from text, upload through a presigned URL, derive a copy, filter, page, count and delete.                                                   |
-| Open file     | One file's record, size, dates, content, metadata row, labels, note and collections. The note saves only if nobody changed it since the file was opened.                 |
-| Metadata      | The `example` category's metadata table, queried directly, with totals.                                                                                                  |
-| Labels        | Add, set and retract tags and a bare flag; count files per tag; list every app's declared keys.                                                                          |
-| Collections   | Named groups of files in two more app tables: create, rename, archive and delete, with each file's note and its other collections.                                       |
-| Notes         | The app's own `notes` table: write, pin, delete, and search by text, prefix, edit date, the files on or off the page, or a collection.                                   |
-| Analysis      | Notes per day, in SQL the app's server runs over a snapshot of the notes table, with its load time and a Refresh button.                                                 |
-| Note exports  | The app's own files: save every note as a private JSON file, then list, open and delete the files.                                                                       |
-| Deleted       | Every example file deleted since an instant, a restore, and the trash retention window. A deleted file keeps its note and collections, so a restore returns them.        |
-| Types         | Record counts for every type the app may read.                                                                                                                           |
-| Public links  | Web links to your example files, made with a file's Share button. Anyone who has a valid link can view the shared content without signing in. Public links need a cloud. |
-| Activity      | Every request the page made, with method, path, status and duration.                                                                                                     |
+| Heading         | What it does                                                                                                                                                             |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Connection      | Which surface the page runs on, who is signed in, the 403 a write outside the app's grant gets, and a call to the app's own JWT-gated route.                             |
+| Example files   | Load the sample data, create from text, upload through a presigned URL, derive a copy, filter, page, count and delete.                                                   |
+| Open file       | One file's record, size, dates, content, metadata row, labels, note and collections. The note saves only if nobody changed it since the file was opened.                 |
+| Metadata        | The `example` category's metadata table, queried directly, with totals.                                                                                                  |
+| Labels          | Add, set and retract tags and a bare flag; count files per tag; list every app's declared keys.                                                                          |
+| Collections     | Named groups of files in two more app tables: create, rename, archive and delete, with each file's note and its other collections.                                       |
+| Notes           | The app's own `notes` table: write, pin, delete, and search by text, prefix, edit date, the files on or off the page, or a collection.                                   |
+| Analysis        | Notes per day, in SQL the app's server runs over a snapshot of the notes table, with its load time and a Refresh button.                                                 |
+| Note exports    | The app's own files: save every note as a private JSON file, then list, open and delete the files.                                                                       |
+| Background jobs | The app's `digest` job: a link to the platform's page that turns it on, a Run now button, and each run's outcome. Jobs need a cloud.                                     |
+| Vault           | Store and delete the provider token that the digest job rotates. The page lists names and update times, and never reads a value back.                                    |
+| Deleted         | Every example file deleted since an instant, a restore, and the trash retention window. A deleted file keeps its note and collections, so a restore returns them.        |
+| Types           | Record counts for every type the app may read.                                                                                                                           |
+| Public links    | Web links to your example files, made with a file's Share button. Anyone who has a valid link can view the shared content without signing in. Public links need a cloud. |
+| Activity        | Every request the page made, with method, path, status and duration.                                                                                                     |
 
 `web/src/browser/api.ts` holds one function per operation and names the route each one calls.
 
@@ -42,6 +44,14 @@ The collections feature exercises every form in "Joins and subqueries" in `docs/
 | `searchNotes`                              | `in` and `not_in`, each with a subquery or a list.                                                                                                                                        |
 
 Every `order` the example sends uses the JSON spelling, such as `[{"col":"created_at","dir":"desc"}]`. Every request to the app's own server passes through `web/src/browser/request-gate.ts`, which keeps at most three requests in flight and retries a request that the cloud throttled. A throttled request appears in the Activity table as a 503, followed by the retry.
+
+### Background jobs and the vault
+
+The manifest declares one job, `digest`, which the platform runs in the cloud for each user who turns it on. A user turns it on with the Background jobs heading's **Turn on digest** link, which opens the platform's consent page. There the user picks a time of day or "Only when I ask". The user turns it off on the Connections page that the Connection table links.
+
+Each run plays a sync from another service. The run reads the user's `provider-token` secret from the vault, rotates it the way a service that issues a new token on every use would, and stores the new value. It then saves a digest of the user's example files and notes as a new example file tagged `digest`. The run's message names the file and the rotation number, never the token. `web/src/server/jobs.ts` holds the job's route, which the platform calls with a token for that one run, and the page's routes, which call the platform with the signed-in user's token.
+
+On the local surface no job runs and no vault exists. Both headings say they need a cloud.
 
 ### MCP for outside clients
 
@@ -84,6 +94,8 @@ web/                     @example-app/web: the local web and cloud web flavors
   src/server/echo.ts     POST /api/echo, the JWT-gated route
   src/server/mcp.ts      POST /mcp, the MCP endpoint for outside clients
   src/server/analysis.ts GET /api/notes-by-day, SQL over a snapshot of the notes
+  src/server/jobs.ts     the digest job, and the page's job and vault routes
+  src/server/data-call.ts data calls with a delegation or a job run's token
   src/browser/           the page
   scripts/bundle.mjs     the cloud bundle
 e2e/                     @example-app/e2e: the tier-2 suite
@@ -112,7 +124,7 @@ pnpm exec playwright install chromium   # once, in e2e/
 pnpm test:e2e
 ```
 
-`pnpm test` runs the unit suites. They cover the MCP endpoint, the order of the server's routes, every page operation's URL shape, and the request gate.
+`pnpm test` runs the unit suites. They cover the MCP endpoint, the digest job's run, the order of the server's routes, every page operation's URL shape, and the request gate.
 
 To check the cloud bundle loads before you install it, build it and send it a few requests:
 

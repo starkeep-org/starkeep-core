@@ -7,7 +7,8 @@
  * library. Each `render…` function redraws one section from the data plane.
  */
 
-import { LABEL_KEYS, type Note } from "@example-app/common";
+import type { SecretEntry } from "@starkeep/app-client";
+import { LABEL_KEYS, SECRETS, type Note } from "@example-app/common";
 import * as api from "./api.js";
 import { activityEntries, onActivity } from "./activity.js";
 import { button, group, renderTable, type Cell, type Column } from "./table.js";
@@ -937,6 +938,171 @@ async function renderExports(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Background jobs
+// ---------------------------------------------------------------------------
+
+const jobsSection = section(
+  "Background jobs",
+  "Jobs the platform runs for you in the cloud, with no page open. Turn a job on at the platform's consent page, " +
+    "where you pick a time of day or only when you ask, and turn it off on the Connections page. " +
+    "The digest job writes a new example file and rotates the provider token in the Vault.",
+);
+jobsSection.controls.append(button("Refresh jobs", () => run("Refresh jobs", renderJobs)));
+
+/** How long Run now watches a run before it leaves the rest to Refresh jobs. */
+const RUN_WAIT_MS = 120_000;
+const RUN_POLL_MS = 2_000;
+
+/**
+ * Queue one run, then watch the job until a run newer than the last one
+ * finishes. The platform starts a queued run within seconds, and only one run
+ * of a job holds the user's lease at a time.
+ */
+async function runAndWait(job: api.Job): Promise<void> {
+  // Read the last run now, not from the table: a scheduled run may have
+  // finished since the table was drawn.
+  const current = (await api.listJobs()).jobs.find((j) => j.name === job.name);
+  const before = current?.lastRun?.startedAt ?? null;
+  await api.runJobNow(job.name);
+  const deadline = Date.now() + RUN_WAIT_MS;
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, RUN_POLL_MS));
+    const { jobs } = await api.listJobs();
+    showJobs(jobs);
+    const state = jobs.find((j) => j.name === job.name);
+    const last = state?.lastRun;
+    if (state && !state.running && last && last.startedAt !== before) {
+      if (last.status !== "ok")
+        throw new Error(`the run ended ${last.status}: ${last.message ?? ""}`);
+      return;
+    }
+    if (Date.now() > deadline) throw new Error("the run has not finished yet; use Refresh jobs");
+  }
+}
+
+function showJobs(jobs: api.Job[]): void {
+  jobsSection.body.replaceChildren(
+    renderTable<api.Job>(
+      "Background jobs",
+      [
+        { heading: "Job", cell: (j) => j.name },
+        { heading: "Description", cell: (j) => j.description },
+        { heading: "State", cell: (j) => (j.enabled ? (j.running ? "on, running" : "on") : "off") },
+        {
+          heading: "Schedule",
+          cell: (j) =>
+            !j.enabled
+              ? ""
+              : j.timeOfDay
+                ? `every day at ${j.timeOfDay}, ${j.timeZone ?? ""}`
+                : "only when you ask",
+        },
+        {
+          heading: "Next run",
+          cell: (j) => (j.nextRunAt ? new Date(j.nextRunAt).toLocaleString() : ""),
+        },
+        {
+          heading: "Last run",
+          cell: (j) =>
+            j.lastRun
+              ? `${j.lastRun.status}${j.lastRun.message ? `: ${j.lastRun.message}` : ""}`
+              : "never",
+        },
+        { heading: "Attention", cell: (j) => j.attention ?? "" },
+        {
+          heading: "Actions",
+          cell: (j) =>
+            group(
+              // A plain link: the consent page is the platform's, on the
+              // gateway's host, and it returns to this page when done.
+              el(
+                "a",
+                { href: j.consentLink },
+                j.enabled ? `Change ${j.name}` : `Turn on ${j.name}`,
+              ),
+              button(`Run ${j.name} now`, () =>
+                run(`Run ${j.name}`, async () => {
+                  await runAndWait(j);
+                  await Promise.all([renderJobs(), renderFiles(), renderLabels()]);
+                }),
+              ),
+            ),
+        },
+      ],
+      jobs,
+    ),
+  );
+}
+
+async function renderJobs(): Promise<void> {
+  const { cloudRequired, jobs } = await api.listJobs();
+  if (cloudRequired) {
+    jobsSection.body.replaceChildren(
+      el("p", {}, "Background jobs need a cloud. No job runs on this computer."),
+    );
+    return;
+  }
+  showJobs(jobs);
+}
+
+// ---------------------------------------------------------------------------
+// Vault
+// ---------------------------------------------------------------------------
+
+const vaultSection = section(
+  "Vault",
+  "Secrets for other services, kept encrypted in your cloud. This page stores and deletes them, " +
+    "and never reads one back: only a run of one of the app's jobs reads its user's secret. " +
+    "Each digest run rotates the provider token, as a service that issues a new token on every use would.",
+);
+const tokenInput = el("input", { type: "password", autocomplete: "off", size: 24 });
+vaultSection.controls.append(
+  labelled("Provider token", tokenInput),
+  button("Save provider token", () =>
+    run("Save provider token", async () => {
+      if (!tokenInput.value) throw new Error("type a token first");
+      await api.saveSecret(SECRETS.providerToken, tokenInput.value);
+      tokenInput.value = "";
+      await renderVault();
+    }),
+  ),
+);
+
+async function renderVault(): Promise<void> {
+  const { cloudRequired, secrets } = await api.listSecrets();
+  if (cloudRequired) {
+    vaultSection.body.replaceChildren(
+      el("p", {}, "The vault needs a cloud. This computer keeps no secrets."),
+    );
+    return;
+  }
+  vaultSection.body.replaceChildren(
+    renderTable<SecretEntry>(
+      "Vault",
+      [
+        { heading: "Name", cell: (s) => s.name },
+        {
+          heading: "Updated",
+          cell: (s) => (s.updatedAt === null ? "" : new Date(s.updatedAt).toLocaleString()),
+        },
+        {
+          heading: "Actions",
+          cell: (s) =>
+            button(`Delete ${s.name}`, () =>
+              run("Delete secret", async () => {
+                await api.deleteSecret(s.name);
+                await renderVault();
+              }),
+            ),
+        },
+      ],
+      secrets,
+      "No secrets stored.",
+    ),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Deleted
 // ---------------------------------------------------------------------------
 
@@ -1098,6 +1264,8 @@ async function refreshAll(): Promise<void> {
     renderNotes(),
     renderAnalysis(),
     renderExports(),
+    renderJobs(),
+    renderVault(),
     renderDeleted(),
     renderTypes(),
   ]);

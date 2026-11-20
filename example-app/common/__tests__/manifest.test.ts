@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest";
 import manifest from "../../starkeep.manifest.json" with { type: "json" };
-import { APP_ID, EXAMPLE_CATEGORY, EXAMPLE_TYPE, LABEL_KEYS, TABLES } from "../src/ids.js";
+import { APP_ID, EXAMPLE_CATEGORY, EXAMPLE_TYPE, JOBS, LABEL_KEYS, TABLES } from "../src/ids.js";
 
 const infra = manifest.infraRequirements;
 
@@ -21,6 +21,10 @@ describe("ids.ts agrees with the manifest", () => {
 
   it("names exactly the label keys the manifest declares", () => {
     expect(Object.values(LABEL_KEYS).sort()).toEqual(infra.labelKeys.map((k) => k.key).sort());
+  });
+
+  it("names exactly the jobs the manifest declares", () => {
+    expect(Object.values(JOBS).sort()).toEqual(infra.jobs.map((j) => j.name).sort());
   });
 
   it("names exactly the tables the manifest declares", () => {
