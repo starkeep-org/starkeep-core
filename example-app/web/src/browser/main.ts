@@ -12,6 +12,7 @@ import { LABEL_KEYS, SECRETS, type Note } from "@example-app/common";
 import * as api from "./api.js";
 import { activityEntries, onActivity } from "./activity.js";
 import { button, group, renderTable, type Cell, type Column } from "./table.js";
+import { runAndWait } from "./run-wait.js";
 
 // ---------------------------------------------------------------------------
 // Page scaffolding
@@ -950,37 +951,6 @@ const jobsSection = section(
 );
 jobsSection.controls.append(button("Refresh jobs", () => run("Refresh jobs", renderJobs)));
 
-/** How long Run now watches a run before it leaves the rest to Refresh jobs. */
-const RUN_WAIT_MS = 120_000;
-const RUN_POLL_MS = 2_000;
-
-/**
- * Queue one run, then watch the job until a run newer than the last one
- * finishes. The platform starts a queued run within seconds, and only one run
- * of a job holds the user's lease at a time.
- */
-async function runAndWait(job: api.Job): Promise<void> {
-  // Read the last run now, not from the table: a scheduled run may have
-  // finished since the table was drawn.
-  const current = (await api.listJobs()).jobs.find((j) => j.name === job.name);
-  const before = current?.lastRun?.startedAt ?? null;
-  await api.runJobNow(job.name);
-  const deadline = Date.now() + RUN_WAIT_MS;
-  for (;;) {
-    await new Promise((resolve) => setTimeout(resolve, RUN_POLL_MS));
-    const { jobs } = await api.listJobs();
-    showJobs(jobs);
-    const state = jobs.find((j) => j.name === job.name);
-    const last = state?.lastRun;
-    if (state && !state.running && last && last.startedAt !== before) {
-      if (last.status !== "ok")
-        throw new Error(`the run ended ${last.status}: ${last.message ?? ""}`);
-      return;
-    }
-    if (Date.now() > deadline) throw new Error("the run has not finished yet; use Refresh jobs");
-  }
-}
-
 function showJobs(jobs: api.Job[]): void {
   jobsSection.body.replaceChildren(
     renderTable<api.Job>(
@@ -1023,7 +993,13 @@ function showJobs(jobs: api.Job[]): void {
               ),
               button(`Run ${j.name} now`, () =>
                 run(`Run ${j.name}`, async () => {
-                  await runAndWait(j);
+                  await runAndWait(j.name, {
+                    listJobs: async () => (await api.listJobs()).jobs,
+                    runJobNow: api.runJobNow,
+                    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+                    now: Date.now,
+                    onPoll: showJobs,
+                  });
                   await Promise.all([renderJobs(), renderFiles(), renderLabels()]);
                 }),
               ),
