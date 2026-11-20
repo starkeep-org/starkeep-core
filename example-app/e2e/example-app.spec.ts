@@ -1160,10 +1160,17 @@ async function signInIfAsked(): Promise<void> {
 }
 
 /**
- * How long a step waits for a job run: the page watches a run for up to two
- * minutes, and a cold Lambda adds to that.
+ * How long a step waits for a job run. The page watches a run for up to seven
+ * minutes, which covers a run the platform deferred because the cloud was busy
+ * and then ran on its next five-minute tick. A cold Lambda adds to that.
  */
-const RUN_TIMEOUT_MS = 150_000;
+const RUN_TIMEOUT_MS = 450_000;
+
+/**
+ * The timeout of a step that runs a job: one deferred run, plus the step's
+ * ordinary runs and page work. The cloud project's default is ten minutes.
+ */
+const JOB_STEP_TIMEOUT_MS = 900_000;
 
 /** Reopen the app's page and wait for it to load. */
 async function reopenApp(): Promise<void> {
@@ -1234,6 +1241,7 @@ test("Vault: store the provider token; the page lists its name and never its val
 });
 
 test("Background jobs: each run writes a digest file and rotates the provider token", async () => {
+  test.setTimeout(JOB_STEP_TIMEOUT_MS);
   test.skip(SURFACE !== "cloud", "No job runs on the local surface");
   const lastRun = async () => cell("Background jobs", "digest", "Last run");
   const digestName = /digest-\d{4}-\d{2}-\d{2}\.skexample/;
@@ -1254,6 +1262,7 @@ test("Background jobs: each run writes a digest file and rotates the provider to
 });
 
 test("Vault: delete the provider token, and the next run finds none", async () => {
+  test.setTimeout(JOB_STEP_TIMEOUT_MS);
   test.skip(SURFACE !== "cloud", "The vault lives only in the cloud");
   await click("Delete provider-token", "Delete secret");
   await expectLogged("DELETE", /^\/api\/vault\/provider-token$/, 200);
@@ -1284,6 +1293,7 @@ test("Background jobs: the read-mode keywords job offers Only when I ask first",
 });
 
 test("Background jobs: keywords reads each new file once and labels it", async () => {
+  test.setTimeout(JOB_STEP_TIMEOUT_MS);
   test.skip(SURFACE !== "cloud", "No job runs on the local surface");
   const name = `keywords-${Date.now()}.skexample`;
   await page.getByLabel("File name").fill(name);
