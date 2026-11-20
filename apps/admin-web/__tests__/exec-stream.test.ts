@@ -12,6 +12,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { jsonRequest, makeDataDir } from "./helpers";
 import { lastChild, resetSpawns, spawnedChildren } from "./fake-spawn";
 import { lines, readSse } from "./sse";
+import { signInFake, signOutFake } from "./fake-admin-session";
+vi.mock("@starkeep/operator/admin-session", async (original) =>
+  (await import("./fake-admin-session")).fakeAdminSessionModule(await original()),
+);
+
 
 vi.mock("node:child_process", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:child_process")>()),
@@ -23,13 +28,6 @@ process.env.STARKEEP_DIR = makeDataDir("adminweb-exec-stream-");
 const { POST: rawPOST } = await import("../src/routes/exec-stream");
 const { REPO_ROOT, STREAM_COMMANDS } = await import("@starkeep/operator/commands");
 const POST = rawPOST;
-
-const CREDENTIALS = {
-  accessKeyId: "AKIA",
-  secretAccessKey: "secret",
-  sessionToken: "token",
-  region: "us-east-2",
-};
 
 const call = (body: unknown) => POST(jsonRequest("/api/exec/stream", body));
 
@@ -45,11 +43,16 @@ describe("refusals, which happen before anything is spawned", () => {
     expect(spawnedChildren()).toHaveLength(0);
   });
 
-  it("refuses a command that needs credentials when none were sent", async () => {
-    const res = await call({ id: "local-deploy" });
-    expect(res.status).toBe(400);
-    expect(((await res.json()) as { error: string }).error).toBe("Credentials required");
-    expect(spawnedChildren()).toHaveLength(0);
+  it("refuses a command that needs credentials when no admin is signed in", async () => {
+    signOutFake();
+    try {
+      const res = await call({ id: "local-deploy" });
+      expect(res.status).toBe(401);
+      expect(((await res.json()) as { code: string }).code).toBe("NOT_SIGNED_IN");
+      expect(spawnedChildren()).toHaveLength(0);
+    } finally {
+      signInFake();
+    }
   });
 });
 
@@ -63,17 +66,17 @@ describe("what gets spawned", () => {
     expect(child.options.cwd).toBe(REPO_ROOT);
   });
 
-  it("puts the caller's credentials in the child's environment, not on its argv", async () => {
+  it("puts the signed-in admin's credentials in the child's environment, not on its argv", async () => {
     // They are secrets, and argv is world-readable in `ps`.
-    await call({ id: "local-deploy", credentials: CREDENTIALS });
+    await call({ id: "local-deploy" });
     const child = lastChild();
     expect(child.options.env).toMatchObject({
-      AWS_ACCESS_KEY_ID: "AKIA",
-      AWS_SECRET_ACCESS_KEY: "secret",
-      AWS_SESSION_TOKEN: "token",
+      AWS_ACCESS_KEY_ID: "AKIAFAKEADMIN",
+      AWS_SECRET_ACCESS_KEY: "fake-secret",
+      AWS_SESSION_TOKEN: "fake-session-token",
       AWS_REGION: "us-east-2",
     });
-    expect(child.args.join(" ")).not.toContain("secret");
+    expect(child.args.join(" ")).not.toContain("fake-secret");
   });
 
   it("leaves the environment alone for a command that needs no credentials", async () => {

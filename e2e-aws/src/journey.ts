@@ -981,11 +981,11 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
       });
 
       it("signs this machine in, which is what starts sync", async () => {
-        // The local data server signs in through the pool's device client with
-        // the admin's own password — real Cognito — and every cloud call then
-        // carries the device token alone, on the broker's device-token branch.
+        // The admin signs in on the pool's device client — real Cognito — and the
+        // local data server takes the session. Every cloud call then carries the
+        // device token alone, on the broker's device-token branch.
         // After Drive's cloud install, so the first exchange finds the channel.
-        const signedIn = await signInThisMachine(lds!.url, admin);
+        const signedIn = await signInThisMachine(lds!.url, config, admin);
         expect(signedIn.state).toBe("signed-in");
       });
 
@@ -1052,7 +1052,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
       });
 
       it(`signing back in starts ${app.appId}'s channel, which pulls the row the cloud app wrote`, async () => {
-        const signedIn = await signInThisMachine(lds!.url, admin);
+        const signedIn = await signInThisMachine(lds!.url, config, admin);
         expect(signedIn.state).toBe("signed-in");
 
         await eventually(

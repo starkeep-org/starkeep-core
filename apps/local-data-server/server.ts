@@ -107,6 +107,7 @@ import type { RecordAvailability } from "@starkeep/protocol-primitives";
 import {
   createCloudTokenSource,
   createCognitoClient,
+  redeemAuthorizationCode,
   DATA_GROUP,
   fetchDeviceAuthConfig,
   idTokenClaims,
@@ -380,6 +381,11 @@ function validateAppHmac(
 const STARKEEP_CONFIG_PATH = join(STARKEEP_DIR, "config.json");
 
 interface StarkeepConfig {
+  /**
+   * The managed login page's host name, from the bootstrap stack. The fallback
+   * for a cloud whose `/auth/config` predates naming it.
+   */
+  cognitoDomain?: string;
   // Generated once at first boot, persisted forever. Feeds the HLC clock, so
   // it must be unique per replica — never read this from env or default it.
   nodeId: string;
@@ -1512,32 +1518,45 @@ async function main() {
       }
 
       // POST /auth/login — sign this machine in through the pool's device
-      // client. Body: { email, password, newPassword? }. An account an admin
-      // created answers its first sign-in with `NEW_PASSWORD_REQUIRED`; the
-      // form then sends the same request again with `newPassword`.
+      // client, after a sign-in that happened elsewhere. Two bodies:
+      //
+      // - `{ code, codeVerifier, redirectUri }`: a code from the managed login
+      //   page, which admin-web or the CLI received at its loopback callback.
+      //   The server redeems it, so the tokens never pass through the tool.
+      // - `{ refreshToken }`: a device-client refresh token, which the e2e
+      //   harness gets with ADMIN_USER_PASSWORD_AUTH. Refreshing it at the pool
+      //   proves it, and the refresh works only for this pool's device client.
+      //
+      // No body carries a password: people sign in on the managed login page.
       if (path === "/auth/login" && req.method === "POST") {
         if (!CLOUD_URL) {
           res.writeHead(503);
           json(res, { error: "Join a cloud first" });
           return;
         }
-        let body: { email?: unknown; password?: unknown; newPassword?: unknown };
+        let body: Record<string, unknown>;
         try {
-          body = JSON.parse(await readBody(req)) as typeof body;
+          body = JSON.parse(await readBody(req)) as Record<string, unknown>;
         } catch {
           res.writeHead(400);
           json(res, { error: "Body is not valid JSON" });
           return;
         }
-        const { email, password, newPassword } = body;
-        if (typeof email !== "string" || !email || typeof password !== "string" || !password) {
+        const { code, codeVerifier, redirectUri, refreshToken } = body;
+        const byCode =
+          typeof code === "string" &&
+          code.length > 0 &&
+          typeof codeVerifier === "string" &&
+          codeVerifier.length > 0 &&
+          typeof redirectUri === "string" &&
+          redirectUri.length > 0;
+        const byRefresh = typeof refreshToken === "string" && refreshToken.length > 0;
+        if (byCode === byRefresh) {
           res.writeHead(400);
-          json(res, { error: "Email and password are required" });
-          return;
-        }
-        if (newPassword !== undefined && typeof newPassword !== "string") {
-          res.writeHead(400);
-          json(res, { error: "newPassword must be a string" });
+          json(res, {
+            error:
+              "Send either { code, codeVerifier, redirectUri } from the sign-in page or { refreshToken }",
+          });
           return;
         }
 
@@ -1556,15 +1575,26 @@ async function main() {
         const client = cognitoClientFor(auth);
         let tokens: AuthTokens;
         try {
-          const result = await client.signIn(email, password);
-          if (result.kind === "new-password-required") {
-            if (!newPassword) {
-              json(res, { challenge: "NEW_PASSWORD_REQUIRED" });
+          if (byRefresh) {
+            tokens = await client.refresh(refreshToken as string);
+          } else {
+            const domain = auth.cognitoDomain ?? starkeepConfig.cognitoDomain;
+            if (!domain) {
+              res.writeHead(503);
+              json(res, { error: "This cloud names no sign-in page (cognitoDomain)" });
               return;
             }
-            tokens = await client.setNewPassword(email, result.session, newPassword);
-          } else {
-            tokens = result.tokens;
+            tokens = await redeemAuthorizationCode({
+              domain,
+              clientId: auth.deviceClientId,
+              code: code as string,
+              codeVerifier: codeVerifier as string,
+              redirectUri: redirectUri as string,
+              // Test seam: the tier-2 suite's fake cloud plays the token endpoint.
+              ...(process.env.STARKEEP_COGNITO_TOKEN_ENDPOINT
+                ? { tokenEndpoint: process.env.STARKEEP_COGNITO_TOKEN_ENDPOINT }
+                : {}),
+            });
           }
         } catch (err) {
           res.writeHead(isRejection(err) ? 401 : 502);
@@ -1606,7 +1636,7 @@ async function main() {
         // A sign-out still waiting on its pool finishes now, and a previous
         // session on this machine is replaced and ended at its own pool.
         await endReplacedSession(cognitoClientFor, deviceSession.store, deviceSession.auth());
-        const signedInEmail = claims.email ?? email;
+        const signedInEmail = claims.email ?? "";
         deviceSession.writeSignIn(auth, userId, {
           refreshToken: tokens.refreshToken,
           email: signedInEmail,

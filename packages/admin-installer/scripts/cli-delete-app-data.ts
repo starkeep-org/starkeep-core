@@ -24,11 +24,7 @@ import "@starkeep/app-client/load-env";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { deleteAppDataCloud } from "../src/cloud-app-data";
 import { createDsqlRegistry } from "../src/registry";
-import {
-  regionFromUserPoolId,
-  cognitoPasswordAuth,
-  getIdentityPoolCredentials,
-} from "../src/cognito-auth";
+import { regionFromUserPoolId } from "../src/cognito-auth";
 import { prompt } from "../src/cli-prompt";
 import { useOnlyAwsCredentials } from "../src/aws-env";
 import {
@@ -37,6 +33,7 @@ import {
   starkeepConfigPath,
   takeFlagValue,
 } from "../src/app-cli-config";
+import { adminScriptCredentialsOrExit } from "./admin-credentials";
 
 let flags: string[];
 let confirmFlag: string | undefined;
@@ -83,40 +80,12 @@ if (!config.apiGatewayId || !config.authorizerId || !config.s3Bucket || !config.
   process.exit(1);
 }
 
-if (nonInteractive) {
-  const { AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN } = process.env;
-  if (!AWS_ACCESS_KEY_ID || !AWS_SECRET_ACCESS_KEY || !AWS_SESSION_TOKEN) {
-    console.error(
-      "--non-interactive requires AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN env vars",
-    );
-    process.exit(1);
-  }
-  useOnlyAwsCredentials(
-    {
-      accessKeyId: AWS_ACCESS_KEY_ID,
-      secretAccessKey: AWS_SECRET_ACCESS_KEY,
-      sessionToken: AWS_SESSION_TOKEN,
-    },
-    process.env.AWS_REGION ?? region,
-  );
-} else {
-  const email = await prompt("Email: ");
-  const password = await prompt("Password: ", true);
-  console.log("\nAuthenticating with Cognito…");
-  const idToken = await cognitoPasswordAuth(config, email, password, async () => {
-    console.log("\nThis account requires a new password (first login).");
-    const newPw = await prompt("New password: ", true);
-    const confirmPw = await prompt("Confirm new password: ", true);
-    if (newPw !== confirmPw) {
-      console.error("Passwords do not match.");
-      process.exit(1);
-    }
-    return newPw;
-  });
-  console.log("Fetching temporary AWS credentials…");
-  const creds = await getIdentityPoolCredentials(config, idToken);
-  useOnlyAwsCredentials(creds, region);
-}
+// Credentials from the environment, as admin-web and the e2e harness pass
+// them, else from the admin session `starkeep login --admin` keeps.
+useOnlyAwsCredentials(
+  await adminScriptCredentialsOrExit(nonInteractive),
+  process.env.AWS_REGION ?? region,
+);
 
 let accountId: string;
 if (config.accountId) {

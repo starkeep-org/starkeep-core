@@ -159,7 +159,8 @@ The first step deploys your bootstrap stack. The stack creates the sign-in servi
 ### 2. Copy the stack outputs
 
 1. Open the stack's **Outputs** tab through the **CloudFormation stack** link in the wizard.
-2. Copy each of the three values into the wizard field with the same name, then click **Continue**:
+2. Copy each of the four values into the wizard field with the same name, then click **Continue**:
+   - **CognitoDomain**
    - **IdentityPoolId**
    - **UserPoolClientId**
    - **UserPoolId**
@@ -168,9 +169,12 @@ Please note that none of these values are credentials and none are sensitive.
 
 ### 3. Sign in to your admin account
 
-1. Check the email you entered in Step 1 for your temp password.
-2. Enter the email address and the temporary password, and click **Sign in**.
-3. Cognito then asks for a permanent password. Choose a password of at least eight characters and click **Set password and sign in**.
+1. Check the email you entered in Step 1 for your temporary password.
+2. Click **Open the sign-in page**. The Starkeep sign-in page opens in the same browser tab.
+3. Enter the email address and the temporary password. The page then asks you to choose a permanent password of at least eight characters.
+4. The page returns you to the wizard. Click **Continue**.
+
+The `starkeep` command on this computer uses the same sign-in. A sign-in that goes unused for twelve hours ends. Sign in again in Admin, or with `starkeep login --admin`.
 
 ### 4. Deploy the Starkeep cloud
 
@@ -179,9 +183,9 @@ Please note that none of these values are credentials and none are sensitive.
 
 ### 5. Sign this computer in to sync
 
-This computer syncs only after you sign it in. A sign-in form now sits under the dashboard's **Local** heading.
+This computer syncs only after you sign it in. A **Sign in to sync** button now sits under the dashboard's **Local** heading.
 
-1. Enter the email address and password of your Starkeep account and click **Sign in to sync**.
+1. Click **Sign in to sync**. The sign-in page opens, or returns at once while it still remembers your admin sign-in.
 2. Wait for the line under the heading to change from "Signed in as `<email>`. Connecting to this cloud…" to "Local apps sync with this cloud as `<email>`." A **Sign out** link follows the sentence.
 3. Open Drive to see the sync state of your files.
 
@@ -276,8 +280,8 @@ A second computer joins the cloud you already deployed. The second computer sync
 2. On the computer that deployed the cloud, copy the address from the **Cloud address** line under the dashboard's **Cloud** heading.
 3. On the second computer, click **Join Existing Cloud** under the dashboard's **Cloud** heading. Do not click **Deploy Starkeep Cloud**.
 4. Paste the address into the form that opens and click **Join**. The local data server restarts.
-5. Enter the email address and password of your Starkeep account and click **Sign in to sync**.
-6. Wait for the form to change from "Signed in as `<email>`. Connecting to `<address>`…" to "Local apps sync with `<address>` as `<email>`."
+5. Click **Sign in to sync**, and sign in with your Starkeep account on the page that opens. A person whose account an admin just created uses the temporary password from their invitation email, and the page asks them to choose a permanent one.
+6. Wait for the section to change from "Signed in as `<email>`. Connecting to `<address>`…" to "Local apps sync with `<address>` as `<email>`."
 
 The second computer now syncs your library with the cloud in the background. A person you add under [Add users to your Starkeep deployment](#add-users-to-your-starkeep-deployment-optional) joins from their own computer the same way.
 
@@ -331,13 +335,16 @@ starkeep uninstall photos --local                # uninstall; the app's data sta
 starkeep update                                  # pull each app's repository and apply it here
 starkeep update --undo                           # return to the commits before the last update
 starkeep reset-local                             # list the local data reset-local --apply deletes
+starkeep login --admin                           # sign in as the cloud's admin, in the browser
+starkeep login --sync                            # sign this computer in to sync, in the browser
+starkeep logout --admin                          # end the admin sign-in that Admin shares
 ```
 
 `install` and `uninstall` always take a target. `--local` is the only target the command runs so far; cloud installs run from Admin or the scripts below. Every command accepts `--json`, which prints one JSON event per line and a final result. A command that needs an answer and has no terminal to ask exits with code 3; pass `--yes` to approve.
 
 ### Deploy the cloud
 
-Deploy the bootstrap stack first, through steps 1 to 3 of [Deploy Starkeep to your AWS account](#deploy-starkeep-to-your-aws-account). Those steps write the cloud settings that the commands below read from `~/.starkeep/config.json`. Each command asks for the email address and password of your Starkeep admin account.
+Deploy the bootstrap stack first, through steps 1 to 3 of [Deploy Starkeep to your AWS account](#deploy-starkeep-to-your-aws-account). Those steps write the cloud settings that the commands below read from `~/.starkeep/config.json`. Sign in once with `pnpm starkeep login --admin`, which opens the sign-in page in your browser. Each command below then uses that sign-in, the same one Admin uses.
 
 ```sh
 pnpm --filter @starkeep/admin-installer cli:install-cloud-data-server

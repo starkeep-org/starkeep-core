@@ -44,6 +44,7 @@ import * as execStream from "./routes/exec-stream";
 import * as runtimeConfig from "./routes/runtime-config";
 import * as standIns from "./routes/stand-ins";
 import * as publicShares from "./routes/public-shares";
+import * as auth from "./routes/auth";
 
 export const api = new Hono().basePath("/api");
 
@@ -103,8 +104,10 @@ api.post("/users/group", (c) => users.SET_GROUP(c.req.raw));
 api.post("/users/enabled", (c) => users.SET_ENABLED(c.req.raw));
 api.post("/users/password", (c) => users.RESET_PASSWORD(c.req.raw));
 api.post("/users/sign-out", (c) => users.SIGN_OUT_EVERYWHERE(c.req.raw));
+// The admin session both admin-web and the CLI share.
+api.get("/admin-session", (c) => auth.SESSION(c.req.raw));
+api.post("/admin-session/sign-out", (c) => auth.SIGN_OUT(c.req.raw));
 api.get("/this-machine", () => thisMachine.GET());
-api.post("/this-machine/sign-in", (c) => thisMachine.POST_SIGN_IN(c.req.raw));
 api.post("/this-machine/sign-out", (c) => thisMachine.POST_SIGN_OUT(c.req.raw));
 api.post("/this-machine/cloud", (c) => thisMachine.POST_CLOUD(c.req.raw));
 
@@ -130,3 +133,11 @@ api.get("/runtime-config", () => runtimeConfig.GET());
 // JSON keeps it from being parsed as the SPA shell — which is what a fallback
 // to the client router would hand it.
 api.all("*", (c) => c.json({ error: `No API route for ${c.req.method} ${c.req.path}` }, 404));
+
+/**
+ * The managed login page's way in and back, outside `/api` because the
+ * browser navigates to both rather than fetching them. See `routes/auth.ts`.
+ */
+export const authPages = new Hono().basePath("/auth");
+authPages.get("/start", (c) => auth.START(c.req.raw));
+authPages.get("/callback", (c) => auth.CALLBACK(c.req.raw));

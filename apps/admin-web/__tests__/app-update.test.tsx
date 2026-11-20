@@ -31,17 +31,16 @@ vi.mock("@/lib/cloud-config", () => ({
     publicBaseUrl: "https://d1.cloudfront.net",
     cognitoConfig: {},
   }),
-  readCognitoSession: async () => (state.signedIn ? { refreshToken: "refresh" } : null),
-  writeCloudCredentials: async () => {},
-  writeCognitoSession: async () => {},
 }));
 
-vi.mock("@/lib/cognito-auth", () => ({
-  refreshTokens: async () => ({ idToken: "id", refreshToken: "refresh" }),
-  getIdentityPoolCredentials: async () => ({
-    accessKeyId: "AKIA",
-    secretAccessKey: "secret",
-    sessionToken: "token",
+vi.mock("@/lib/admin-session-client", async (original) => ({
+  ...(await original<typeof import("../src/lib/admin-session-client")>()),
+  readAdminSession: async () => ({
+    signedIn: state.signedIn,
+    email: "admin@example.com",
+    sub: "sub-admin",
+    expiresAt: null,
+    browserSignIn: { available: true },
   }),
 }));
 

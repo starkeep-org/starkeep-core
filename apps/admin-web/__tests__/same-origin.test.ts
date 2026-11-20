@@ -14,16 +14,17 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { fromOwnPage, hostAllowed, serverRefusal } from "../src/lib/same-origin";
-import { POST_SIGN_IN } from "../src/routes/this-machine";
+import { POST_SIGN_OUT } from "../src/routes/this-machine";
+import { SIGN_OUT } from "../src/routes/auth";
 
 const REBIND = "rebind.attacker.example:3000";
 
 /** A POST as the server sees it: the URL is built from the `Host` header. */
 function post(host: string, origin: string | null): Request {
-  return new Request(`http://${host}/api/this-machine/sign-in`, {
+  return new Request(`http://${host}/api/this-machine/sign-out`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...(origin === null ? {} : { Origin: origin }) },
-    body: JSON.stringify({ email: "a@example.com", password: "pw" }),
+    body: "{}",
   });
 }
 
@@ -47,9 +48,23 @@ describe("the cross-site guard", () => {
     expect(fromOwnPage(post(REBIND, `http://${REBIND}`))).toBe(false);
   });
 
-  it("keeps a DNS-rebinding page from driving this machine's sign-in", async () => {
-    const res = await POST_SIGN_IN(post(REBIND, `http://${REBIND}`));
-    expect(res.status).toBe(403);
+  it("keeps a DNS-rebinding page from signing this machine or the admin out", async () => {
+    expect((await POST_SIGN_OUT(post(REBIND, `http://${REBIND}`))).status).toBe(403);
+    expect((await SIGN_OUT(post(REBIND, `http://${REBIND}`))).status).toBe(403);
+  });
+
+  it("refuses another site's POST to a route that mints the admin's credentials", () => {
+    // The server-wide check runs before any route, so it covers every route
+    // that acts as the admin, such as /api/costs and the installs.
+    for (const path of ["/api/costs", "/api/cloud-data-server/install", "/api/users/list"]) {
+      expect(
+        serverRefusal({ method: "POST", host: "localhost:3000", origin: "https://evil.example" }),
+        path,
+      ).not.toBeNull();
+    }
+    expect(
+      serverRefusal({ method: "POST", host: "localhost:3000", origin: "http://localhost:3000" }),
+    ).toBeNull();
   });
 
   it("passes a LAN name the operator listed, from that name's own page", () => {

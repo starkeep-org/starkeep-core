@@ -17,5 +17,8 @@ export {
   FAKE_POOL_ID,
   FAKE_POOL_REGION,
   FAKE_DEVICE_CLIENT_ID,
+  FAKE_COGNITO_DOMAIN,
+  adminPasswordSignIn,
+  createFakePool,
   type FakePool,
 } from "./fake-pool.js";

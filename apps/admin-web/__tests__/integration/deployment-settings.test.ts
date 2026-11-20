@@ -5,11 +5,14 @@
  * Manager, after which this machine's daemon reads it again; without one, to
  * the daemon, which keeps it in its own config. A machine with a cloud never
  * writes the daemon's copy, and never writes without a signed-in operator.
+ * The operator's credentials come from the server-held admin session, faked
+ * here, never from the request body.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { jsonRequest, makeDataDir, startStubServer, type StubServer } from "../helpers";
+import { signInFake, signOutFake } from "../fake-admin-session";
 
 const changeDeploymentSettingsParameter = vi.fn();
 const roleChain = vi.fn();
@@ -18,6 +21,9 @@ vi.mock("@starkeep/admin-installer/app-creds", () => ({
   changeDeploymentSettingsParameter: (...args: unknown[]) =>
     changeDeploymentSettingsParameter(...args),
 }));
+vi.mock("@starkeep/operator/admin-session", async (original) =>
+  (await import("../fake-admin-session")).fakeAdminSessionModule(await original()),
+);
 vi.mock("@starkeep/admin-installer/session", () => ({
   roleChain: (...args: unknown[]) => roleChain(...args),
 }));
@@ -26,13 +32,6 @@ let daemon: StubServer;
 let reply: { status: number; body: string } = { status: 200, body: "{}" };
 let route: typeof import("../../src/routes/deployment-settings");
 let configPath: string;
-
-const CREDENTIALS = {
-  accessKeyId: "AKIA",
-  secretAccessKey: "secret",
-  sessionToken: "token",
-  expiration: "2026-10-17T12:00:00.000Z",
-};
 
 const CLOUD_CONFIG = {
   stackPrefix: "sktest",
@@ -58,6 +57,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   reply = { status: 200, body: "{}" };
+  signInFake();
   daemon.seen.length = 0;
   rmSync(configPath, { force: true });
   changeDeploymentSettingsParameter
@@ -106,12 +106,7 @@ describe("a machine with a cloud", () => {
 
   it("writes the parameter as Manager, then has the daemon read it again", async () => {
     const change = { trash: { retentionDays: 90 } };
-    const res = await put({
-      change,
-      credentials: CREDENTIALS,
-      stackPrefix: "sktest",
-      region: "us-east-2",
-    });
+    const res = await put({ change });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, settings: change });
 
@@ -130,6 +125,7 @@ describe("a machine with a cloud", () => {
   });
 
   it("refuses without a signed-in operator, and writes nothing anywhere", async () => {
+    signOutFake();
     const res = await put({ change: { trash: { retentionDays: 90 } } });
     expect(res.status).toBe(401);
     expect(changeDeploymentSettingsParameter).not.toHaveBeenCalled();
@@ -138,12 +134,7 @@ describe("a machine with a cloud", () => {
 
   it("answers 422 with the problems when the result does not check out", async () => {
     changeDeploymentSettingsParameter.mockResolvedValue({ ok: false, problems: ["out of range"] });
-    const res = await put({
-      change: {},
-      credentials: CREDENTIALS,
-      stackPrefix: "sktest",
-      region: "us-east-2",
-    });
+    const res = await put({ change: {} });
     expect(res.status).toBe(422);
     expect(((await res.json()) as { problems: string[] }).problems).toEqual(["out of range"]);
     expect(daemon.seen).toEqual([]);
@@ -151,12 +142,7 @@ describe("a machine with a cloud", () => {
 
   it("answers 500 naming the reason when Manager cannot be assumed", async () => {
     roleChain.mockRejectedValue(new Error("ExpiredToken"));
-    const res = await put({
-      change: {},
-      credentials: CREDENTIALS,
-      stackPrefix: "sktest",
-      region: "us-east-2",
-    });
+    const res = await put({ change: {} });
     expect(res.status).toBe(500);
     expect(((await res.json()) as { error: string }).error).toBe("ExpiredToken");
   });

@@ -162,6 +162,7 @@ describe("configureAppSignInClients", () => {
         mobileAppsClientId: "mobile1",
         connectorsClientId: "conn1",
       },
+      platformClientIds: [],
       gatewayBaseUrl: "https://abc123.execute-api.us-east-2.amazonaws.com",
       deploymentName: "Koller Family",
     });
@@ -194,6 +195,7 @@ describe("configureAppSignInClients", () => {
         mobileAppsClientId: "mobile1",
         connectorsClientId: "conn1",
       },
+      platformClientIds: [],
       gatewayBaseUrl: "https://abc123.execute-api.us-east-2.amazonaws.com/",
       deploymentName: "Koller Family",
     });
@@ -221,6 +223,7 @@ describe("configureAppSignInClients", () => {
         mobileAppsClientId: "mobile1",
         connectorsClientId: "conn1",
       },
+      platformClientIds: [],
       gatewayBaseUrl: "https://abc123.execute-api.us-east-2.amazonaws.com",
       deploymentName: "Koller Family",
     });
@@ -248,6 +251,7 @@ describe("configureAppSignInClients", () => {
         mobileAppsClientId: "mobile1",
         connectorsClientId: "conn1",
       },
+      platformClientIds: [],
       gatewayBaseUrl: "https://abc123.execute-api.us-east-2.amazonaws.com",
       deploymentName: "Koller Family",
     });
@@ -271,6 +275,7 @@ describe("configureAppSignInClients", () => {
         mobileAppsClientId: "mobile1",
         connectorsClientId: "conn1",
       },
+      platformClientIds: [],
       gatewayBaseUrl: "https://abc123.execute-api.us-east-2.amazonaws.com",
       deploymentName: "Koller Family",
     });
@@ -304,6 +309,7 @@ describe("configureAppSignInClients", () => {
         mobileAppsClientId: "mobile1",
         connectorsClientId: "conn1",
       },
+      platformClientIds: [],
       gatewayBaseUrl: "https://abc123.execute-api.us-east-2.amazonaws.com",
       deploymentName: "Koller Family",
     });
@@ -318,6 +324,43 @@ describe("configureAppSignInClients", () => {
       { UserPoolId: POOL.userPoolId, ManagedLoginBrandingId: "brand-conn", ...style },
     ]);
     expect(cognito.commandCalls(CreateManagedLoginBrandingCommand)).toHaveLength(0);
+  });
+
+  it("restyles the bootstrap's admin and device clients without changing their settings", async () => {
+    cognito.on(DescribeUserPoolClientCommand).resolves({ UserPoolClient: MOBILE });
+    cognito
+      .on(DescribeManagedLoginBrandingByClientCommand)
+      .resolves({})
+      .on(DescribeManagedLoginBrandingByClientCommand, { ClientId: "admin1" })
+      .resolves({ ManagedLoginBranding: { ManagedLoginBrandingId: "brand-admin" } })
+      .on(DescribeManagedLoginBrandingByClientCommand, { ClientId: "device1" })
+      .resolves({ ManagedLoginBranding: { ManagedLoginBrandingId: "brand-device" } });
+
+    await configureAppSignInClients({
+      ...POOL,
+      publicBaseUrls: ["https://d1.cloudfront.net"],
+      clients: {
+        cloudAppsClientId: "cloud1",
+        mobileAppsClientId: "mobile1",
+        connectorsClientId: "conn1",
+      },
+      platformClientIds: ["admin1", "device1"],
+      gatewayBaseUrl: "https://abc123.execute-api.us-east-2.amazonaws.com",
+      deploymentName: "Koller Family",
+    });
+
+    // The template owns the two clients' settings, so only the three app clients update.
+    expect(cognito.commandCalls(UpdateUserPoolClientCommand)).toHaveLength(3);
+    expect(
+      cognito.commandCalls(DescribeUserPoolClientCommand).map((c) => c.args[0].input.ClientId),
+    ).toEqual(["cloud1", "mobile1", "conn1"]);
+    const style = { UseCognitoProvidedValues: false, ...brandingStyle("Koller Family") };
+    expect(
+      cognito.commandCalls(UpdateManagedLoginBrandingCommand).map((c) => c.args[0].input),
+    ).toEqual([
+      { UserPoolId: POOL.userPoolId, ManagedLoginBrandingId: "brand-admin", ...style },
+      { UserPoolId: POOL.userPoolId, ManagedLoginBrandingId: "brand-device", ...style },
+    ]);
   });
 
   it("puts the star above the form and in the tab, in both color modes", () => {

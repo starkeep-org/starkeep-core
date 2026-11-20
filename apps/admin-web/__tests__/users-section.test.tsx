@@ -9,7 +9,6 @@ import userEvent from "@testing-library/user-event";
 
 vi.mock("@/lib/operator-session", () => ({
   operatorSession: async () => ({
-    credentials: { accessKeyId: "AKIA", secretAccessKey: "s", sessionToken: "t", expiration: "x" },
     stackPrefix: "sktest",
     region: "us-east-2",
     userSub: "sub-admin",
@@ -139,8 +138,9 @@ describe("the users section", () => {
     expect(calls.find((c) => c.url === "/api/users/enabled")!.body).toMatchObject({
       username: "sub-sam",
       enabled: false,
-      userSub: "sub-admin",
     });
+    // The server knows who is signed in; the page sends no identity of its own.
+    expect(calls.find((c) => c.url === "/api/users/enabled")!.body).not.toHaveProperty("userSub");
   });
 
   it("signs a user out of every device without disabling them", async () => {

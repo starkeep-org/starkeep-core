@@ -1,25 +1,24 @@
 import { fetchMtdCostsByService } from "@starkeep/operator/costs";
-import type { STSCredentials } from "../lib/cognito-auth";
+import { withAdmin } from "../lib/admin-auth";
 
-export async function POST(req: Request) {
-  const body = (await req.json()) as {
-    credentials: STSCredentials;
-    stackPrefix: string;
-    region: string;
-  };
-  const { credentials, stackPrefix, region } = body;
-
-  try {
-    const costs = await fetchMtdCostsByService(credentials, stackPrefix, region);
-    return Response.json({ costs });
-  } catch (err) {
-    const name = err instanceof Error ? err.name : "unknown";
-    const message = err instanceof Error ? err.message : String(err);
-    const code = (err as Record<string, unknown>)?.Code ?? (err as Record<string, unknown>)?.code;
-    if (code === "NoSuchBucket") {
-      return Response.json({ costs: null });
+/** Month-to-date cost by service, as the signed-in admin. */
+export async function POST(_req: Request) {
+  return withAdmin(async (admin) => {
+    if (!admin.stackPrefix) {
+      return Response.json({ error: "~/.starkeep/config.json names no stack" }, { status: 409 });
     }
-    console.error("[api/costs] error", { name, code, message });
-    return Response.json({ error: `${name}: ${message}`, code }, { status: 500 });
-  }
+    try {
+      const costs = await fetchMtdCostsByService(admin.stsCredentials, admin.stackPrefix, admin.region);
+      return Response.json({ costs });
+    } catch (err) {
+      const name = err instanceof Error ? err.name : "unknown";
+      const message = err instanceof Error ? err.message : String(err);
+      const code = (err as Record<string, unknown>)?.Code ?? (err as Record<string, unknown>)?.code;
+      if (code === "NoSuchBucket") {
+        return Response.json({ costs: null });
+      }
+      console.error("[api/costs] error", { name, code, message });
+      return Response.json({ error: `${name}: ${message}`, code }, { status: 500 });
+    }
+  });
 }

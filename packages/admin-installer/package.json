@@ -14,7 +14,8 @@
     "./app-creds": "./src/app-creds.ts",
     "./aws-env": "./src/aws-env.ts",
     "./custom-domain": "./src/custom-domain.ts",
-    "./session": "./src/session.ts"
+    "./session": "./src/session.ts",
+    "./admin-session": "./src/admin-session.ts"
   },
   "scripts": {
     "cli:install-cloud-data-server": "tsx scripts/cli-install-cloud-data-server.ts",

@@ -1,27 +1,23 @@
 import { spawn } from "node:child_process";
 import { REPO_ROOT, STREAM_COMMANDS, type StreamCommandId } from "@starkeep/operator/commands";
-import type { STSCredentials } from "../lib/cognito-auth";
+import { requireAdmin } from "../lib/admin-auth";
 import { installerEnv, withoutAwsVariables } from "@starkeep/admin-installer/aws-env";
 
 export async function POST(req: Request) {
-  const body = (await req.json()) as {
-    id: StreamCommandId;
-    credentials?: STSCredentials & { region: string };
-  };
-  const { id, credentials } = body;
+  const body = (await req.json()) as { id: StreamCommandId };
+  const { id } = body;
 
   const cmd = STREAM_COMMANDS[id];
   if (!cmd) {
     return Response.json({ error: "Unknown command ID" }, { status: 400 });
   }
-  if (cmd.requiresCreds && !credentials) {
-    return Response.json({ error: "Credentials required" }, { status: 400 });
-  }
+  const admin = cmd.requiresCreds ? await requireAdmin() : null;
+  if (admin instanceof Response) return admin;
 
-  // Never the shell's AWS variables: a command runs with the wizard's
-  // credentials or with none.
-  const env = credentials
-    ? installerEnv(credentials, credentials.region)
+  // Never the shell's AWS variables: a command runs with the signed-in
+  // admin's credentials or with none.
+  const env = admin
+    ? installerEnv(admin.stsCredentials, admin.region)
     : withoutAwsVariables(process.env);
 
   const [executable, ...args] = cmd.args;
