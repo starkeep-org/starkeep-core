@@ -6,11 +6,12 @@
  * the provider token before anything else, it writes a tagged digest file,
  * and nothing it writes or reports holds the token.
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { VaultResult } from "@starkeep/app-client";
 import { DataCallError, type DataCall } from "../src/server/data-call.js";
 import {
   KEYWORDS_BATCH,
+  fetchText,
   runDigest,
   runKeywords,
   type DigestDeps,
@@ -160,6 +161,8 @@ function keywordFakes(opts: { texts: Texts; more?: boolean; unsigned?: string[] 
 }
 
 describe("a keywords run", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
   it("lists only unread files, oldest first, one batch at a time", async () => {
     const { deps, sent } = keywordFakes({ texts: {} });
     expect(await runKeywords(deps)).toEqual({ status: 200, message: "No new files" });
@@ -222,6 +225,20 @@ describe("a keywords run", () => {
     expect(outcome).toEqual({
       status: 200,
       message: "Read 1 file; 2 could not be read; none left",
+    });
+    expect(sent.at(-1)?.body?.json).toEqual({ labels: [{ recordId: "R1", key: "indexed" }] });
+  });
+
+  it("leaves a file unflagged when the network fails its fetch, and reads the rest", async () => {
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (url.endsWith("/R2")) throw new TypeError("fetch failed");
+      return new Response("Kettle");
+    });
+    const { deps, sent } = keywordFakes({ texts: { R1: "", R2: "" } });
+    const outcome = await runKeywords({ ...deps, fetchText });
+    expect(outcome).toEqual({
+      status: 200,
+      message: "Read 1 file; 1 could not be read; none left",
     });
     expect(sent.at(-1)?.body?.json).toEqual({ labels: [{ recordId: "R1", key: "indexed" }] });
   });

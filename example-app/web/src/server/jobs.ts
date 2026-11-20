@@ -254,9 +254,18 @@ export async function runKeywords(deps: KeywordsDeps): Promise<JobOutcome> {
   }
 }
 
-/** A file's text at a signed URL. */
-async function fetchText(url: string): Promise<string> {
-  const res = await fetch(url);
+/**
+ * A file's text at a signed URL. Every failure, a refusal or a network
+ * error, throws a {@link DataCallError}, so the run skips only that file.
+ * Exported for the unit test.
+ */
+export async function fetchText(url: string): Promise<string> {
+  let res: Response;
+  try {
+    res = await fetch(url);
+  } catch (err) {
+    throw new DataCallError(0, `A file's text could not be fetched: ${(err as Error).message}`);
+  }
   if (!res.ok) throw new DataCallError(res.status, `A file's text answered ${res.status}`);
   return await res.text();
 }
