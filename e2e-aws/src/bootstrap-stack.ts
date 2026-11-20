@@ -19,7 +19,7 @@ import {
   waitUntilStackUpdateComplete,
   type Stack,
 } from "@aws-sdk/client-cloudformation";
-import { generateBootstrapTemplate } from "@starkeep/aws-bootstrap";
+import { generateBootstrapTemplate, inlineTemplateBody } from "@starkeep/aws-bootstrap";
 import type { TestStackConfig } from "./run-state.js";
 
 export interface BootstrapOutputs {
@@ -85,10 +85,13 @@ export async function ensureBootstrapStack(options: {
   const stackName = `${stackPrefix}-bootstrap`;
   const client = new CloudFormationClient({ region });
 
-  const template = generateBootstrapTemplate({
-    stackPrefix,
-    deploymentName: E2E_DEPLOYMENT_NAME,
-  });
+  // Sent inline, so without its comments: they count toward the 51,200-byte cap.
+  const template = inlineTemplateBody(
+    generateBootstrapTemplate({
+      stackPrefix,
+      deploymentName: E2E_DEPLOYMENT_NAME,
+    }),
+  );
 
   const existing = await describeStack(client, stackName);
   if (existing) {

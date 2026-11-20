@@ -13,6 +13,11 @@ import { mockClient } from "aws-sdk-client-mock";
 import { ACMClient, DescribeCertificateCommand } from "@aws-sdk/client-acm";
 import { MAX_STACK_PREFIX_LENGTH } from "@starkeep/aws-bootstrap";
 import { jsonRequest, makeDataDir, writeAdminConfig } from "./helpers";
+import { signInFake, signOutFake } from "./fake-admin-session";
+vi.mock("@starkeep/operator/admin-session", async (original) =>
+  (await import("./fake-admin-session")).fakeAdminSessionModule(await original()),
+);
+
 
 const dnsMock = {
   resolveCname: vi.fn<(name: string) => Promise<string[]>>(),
@@ -28,7 +33,6 @@ vi.mock("@starkeep/admin-installer/custom-domain", async (importOriginal) => ({
 }));
 
 const acm = mockClient(ACMClient);
-const CREDENTIALS = { accessKeyId: "a", secretAccessKey: "s", sessionToken: "t" };
 
 let route: typeof import("../src/routes/custom-domain");
 let dataDir: string;
@@ -180,7 +184,7 @@ describe("POST /check", () => {
     dnsMock.resolve4.mockRejectedValue(new Error("ENOTFOUND"));
 
     const res = await route.CHECK(
-      jsonRequest("/api/custom-domain/check", { credentials: CREDENTIALS }),
+      jsonRequest("/api/custom-domain/check", {}),
     );
 
     expect(await res.json()).toEqual({ certificateStatus: "ISSUED", pointsAtDistribution: false });
@@ -198,7 +202,7 @@ describe("POST /check", () => {
     dnsMock.resolveCname.mockResolvedValue(["D1.cloudfront.net."]);
 
     const res = await route.CHECK(
-      jsonRequest("/api/custom-domain/check", { credentials: CREDENTIALS }),
+      jsonRequest("/api/custom-domain/check", {}),
     );
     expect(((await res.json()) as { pointsAtDistribution: boolean }).pointsAtDistribution).toBe(
       true,
@@ -216,21 +220,18 @@ describe("POST /check", () => {
     dnsMock.reverse.mockResolvedValue(["server-13-32-164-46.ord58.r.cloudfront.net."]);
 
     const res = await route.CHECK(
-      jsonRequest("/api/custom-domain/check", { credentials: CREDENTIALS }),
+      jsonRequest("/api/custom-domain/check", {}),
     );
     expect(((await res.json()) as { pointsAtDistribution: boolean }).pointsAtDistribution).toBe(
       true,
     );
   });
 
-  it("refuses a malformed body and another site's page", async () => {
-    const malformed = await route.CHECK(jsonRequest("/api/custom-domain/check", "{"));
-    expect(malformed.status).toBe(400);
-    expect(await malformed.json()).toEqual({ error: "Invalid JSON body" });
+  it("refuses another site's page", async () => {
     const crossSite = await route.CHECK(
       jsonRequest(
         "/api/custom-domain/check",
-        { credentials: CREDENTIALS },
+        {},
         "POST",
         "https://evil.example",
       ),
@@ -240,7 +241,7 @@ describe("POST /check", () => {
 
   it("says so when no install has acted on a domain", async () => {
     const res = await route.CHECK(
-      jsonRequest("/api/custom-domain/check", { credentials: CREDENTIALS }),
+      jsonRequest("/api/custom-domain/check", {}),
     );
     expect(res.status).toBe(400);
   });
@@ -249,10 +250,7 @@ describe("POST /check", () => {
 describe("POST /zone", () => {
   const zone = (domain: unknown) =>
     route.ZONE(
-      jsonRequest("/api/custom-domain/zone", {
-        domain,
-        credentials: { ...CREDENTIALS, expiration: "2026-11-07T00:00:00Z" },
-      }),
+      jsonRequest("/api/custom-domain/zone", { domain }),
     );
 
   it("names the account's zone for the domain, found with the operator's credentials", async () => {
@@ -261,7 +259,7 @@ describe("POST /zone", () => {
     expect(await res.json()).toEqual({ domain: "photos.example.com", zone: "example.com" });
     expect(findHostedZone).toHaveBeenCalledWith(
       "photos.example.com",
-      expect.objectContaining({ accessKeyId: "a", sessionToken: "t" }),
+      expect.objectContaining({ accessKeyId: "AKIAFAKEADMIN", sessionToken: "fake-session-token" }),
     );
   });
 
@@ -297,7 +295,7 @@ describe("POST /zone", () => {
     const crossSite = await route.ZONE(
       jsonRequest(
         "/api/custom-domain/zone",
-        { domain: "photos.example.com", credentials: CREDENTIALS },
+        { domain: "photos.example.com" },
         "POST",
         "https://evil.example",
       ),
@@ -311,5 +309,22 @@ describe("POST /zone", () => {
     const res = await zone("photos.example.com");
     expect(res.status).toBe(502);
     expect(((await res.json()) as { error: string }).error).toMatch(/AccessDenied/);
+  });
+});
+
+describe("without an admin session", () => {
+  it("answers 401 NOT_SIGNED_IN to a check and a zone lookup", async () => {
+    signOutFake();
+    try {
+      const check = await route.CHECK(jsonRequest("/api/custom-domain/check", {}));
+      expect(check.status).toBe(401);
+      expect(await check.json()).toMatchObject({ code: "NOT_SIGNED_IN" });
+      const zone = await route.ZONE(
+        jsonRequest("/api/custom-domain/zone", { domain: "photos.example.com" }),
+      );
+      expect(zone.status).toBe(401);
+    } finally {
+      signInFake();
+    }
   });
 });

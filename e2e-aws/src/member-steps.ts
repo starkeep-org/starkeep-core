@@ -8,8 +8,8 @@
  *
  * 1. An admin creates the account with admin-web's own Users routes.
  * 2. The member's machine knows only the cloud's address. It learns how to
- *    sign in from `/auth/config`, answers the first sign-in's new-password
- *    challenge, and binds its library to the member.
+ *    sign in from `/auth/config`. The member's first sign-in answers the
+ *    new-password challenge, and the machine binds its library to the member.
  * 3. The member's data reaches the cloud in the member's slice, and neither
  *    account's machine or cloud view sees the other's.
  * 4. The admin resets the password, takes the member out of the data group and
@@ -47,9 +47,9 @@ import {
 } from "@starkeep/e2e";
 import type { AppCredentials } from "@starkeep/app-client";
 import { getIdentityPoolCredentials, regionFromUserPoolId } from "@starkeep/admin-installer";
-import { createCognitoClient, USER_TOKEN_HEADER } from "@starkeep/protocol-primitives";
-import { REGION } from "./env.js";
+import { USER_TOKEN_HEADER } from "@starkeep/protocol-primitives";
 import { cloudAppTokens } from "./cloud-app-session.js";
+import { NewPasswordRequired, passwordSignIn } from "./password-sign-in.js";
 import type { AdminSession } from "./installers.js";
 import type { RunPaths, TestStackConfig } from "./run-state.js";
 
@@ -105,41 +105,19 @@ export function defineMemberSteps(m: MemberStepsContext): void {
     return (await cloudAppTokens(m.config(), MEMBER_EMAIL, chosenPassword)).idToken;
   }
 
-  /** A sign-in through the pool's device client, as a desktop or phone makes it. */
-  function deviceClient() {
-    return createCognitoClient({
-      region: REGION,
-      userPoolClientId: m.config().deviceUserPoolClientId,
-    });
-  }
-
   /** Call one of admin-web's Users routes as the signed-in admin. */
   async function callUsers(
     route: keyof UsersRoutes,
     body: Record<string, unknown>,
   ): Promise<{ status: number; body: Record<string, unknown> }> {
-    const session = m.session();
-    const adminSub = (
-      JSON.parse(Buffer.from(session.idToken.split(".")[1]!, "base64url").toString("utf8")) as {
-        sub: string;
-      }
-    ).sub;
     const req = new Request("http://localhost/api/users", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        credentials: {
-          ...session.awsCredentials,
-          expiration: new Date(Date.now() + 3_600_000).toISOString(),
-        },
-        stackPrefix: m.config().stackPrefix,
-        region: session.region,
-        userSub: adminSub,
-        ...body,
-      }),
+      body: JSON.stringify(body),
     });
-    // The routes read the user pool from `$STARKEEP_DIR/config.json`, as
-    // admin-web does on the operator's machine.
+    // The routes read the user pool from `$STARKEEP_DIR/config.json` and mint
+    // the admin's credentials from `$STARKEEP_DIR/admin-session.json`, as
+    // admin-web does on the operator's machine (`signInTestAdmin` wrote it).
     const saved = process.env.STARKEEP_DIR;
     process.env.STARKEEP_DIR = m.paths.dataDir;
     try {
@@ -258,21 +236,24 @@ export function defineMemberSteps(m: MemberStepsContext): void {
     memberDrive = await driveCreds(memberLds.url);
     expect(await memberStatus()).toMatchObject({ state: "signed-out", libraryUserId: null });
 
-    const login = (body: Record<string, unknown>) =>
-      fetch(`${memberLds!.url}/auth/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-
-    const first = await login({ email: MEMBER_EMAIL, password: temporaryPassword });
-    expect(await first.json()).toEqual({ challenge: "NEW_PASSWORD_REQUIRED" });
+    // The member's first sign-in happens on the device client, where the
+    // temporary password asks for a new one. The local data server then takes
+    // the session, as it takes a code from the managed login page.
+    const deviceClientId = m.config().deviceUserPoolClientId;
+    await expect(
+      passwordSignIn(m.config(), deviceClientId, { email: MEMBER_EMAIL, password: temporaryPassword }),
+    ).rejects.toBeInstanceOf(NewPasswordRequired);
 
     chosenPassword = `Member-${randomBytes(9).toString("base64url")}`;
-    const second = await login({
+    const { refreshToken } = await passwordSignIn(m.config(), deviceClientId, {
       email: MEMBER_EMAIL,
       password: temporaryPassword,
       newPassword: chosenPassword,
+    });
+    const second = await fetch(`${memberLds!.url}/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken }),
     });
     const body = (await second.json()) as Record<string, unknown>;
     expect(second.status, JSON.stringify(body)).toBe(200);
@@ -350,21 +331,28 @@ export function defineMemberSteps(m: MemberStepsContext): void {
 
     expect(await memberStatus()).toMatchObject({ state: "signed-in", userId: memberSub });
 
-    const client = deviceClient();
-    const first = await client.signIn(MEMBER_EMAIL, temporary);
-    expect(first.kind).toBe("new-password-required");
+    await expect(
+      passwordSignIn(m.config(), m.config().deviceUserPoolClientId, {
+        email: MEMBER_EMAIL,
+        password: temporary,
+      }),
+    ).rejects.toBeInstanceOf(NewPasswordRequired);
     chosenPassword = `Member-${randomBytes(9).toString("base64url")}`;
-    if (first.kind === "new-password-required") {
-      await client.setNewPassword(MEMBER_EMAIL, first.session, chosenPassword);
-    }
+    await passwordSignIn(m.config(), m.config().deviceUserPoolClientId, {
+      email: MEMBER_EMAIL,
+      password: temporary,
+      newPassword: chosenPassword,
+    });
   });
 
   it("taking the member out of the data group refuses a fresh device token, and adding them back restores it", async () => {
     const settingsAsDevice = async () => {
-      const result = await deviceClient().signIn(MEMBER_EMAIL, chosenPassword);
-      if (result.kind !== "tokens") throw new Error(`unexpected challenge: ${result.kind}`);
+      const { idToken } = await passwordSignIn(m.config(), m.config().deviceUserPoolClientId, {
+        email: MEMBER_EMAIL,
+        password: chosenPassword,
+      });
       return fetch(`${m.config().apiGatewayUrl}/apps/starkeep-drive/deployment/settings`, {
-        headers: { [USER_TOKEN_HEADER]: result.tokens.idToken },
+        headers: { [USER_TOKEN_HEADER]: idToken },
       });
     };
 

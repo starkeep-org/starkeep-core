@@ -1,5 +1,6 @@
-import type { CognitoConfig, STSCredentials } from "./cognito-auth";
+import type { CognitoConfig } from "./cognito-auth";
 import type { CustomDomainStatus } from "@starkeep/admin-installer/custom-domain";
+import { throwIfNotSignedIn } from "./admin-session-client";
 
 /**
  * starkeep-config.json — the single source of truth for cloud setup.
@@ -9,8 +10,9 @@ import type { CustomDomainStatus } from "@starkeep/admin-installer/custom-domain
  * `getRegion(config)` so we never drift between a stored region and the actual
  * resource home.
  *
- * Tokens (Cognito refresh token, user email) and STS credentials live in
- * localStorage — the file holds only configuration, not session state.
+ * The admin session lives in its own file, which admin-web's server and the
+ * CLI share (`lib/admin-session-client.ts`); this file holds only
+ * configuration.
  */
 export interface StarkeepConfig {
   stackPrefix: string;
@@ -25,12 +27,12 @@ export interface StarkeepConfig {
   userPoolClientId: string;
   /**
    * The bootstrap's device client, which desktops sign in with to sync. The
-   * wizard looks it up after sign-in (`routes/cognito-outputs.ts`).
+   * wizard looks it up after the admin signs in (`routes/cognito-outputs.ts`).
    */
   deviceUserPoolClientId?: string;
   /**
    * The bootstrap's CognitoDomain output: the managed login page's host name.
-   * The wizard looks it up after sign-in, like the device client.
+   * The Stack outputs step asks for it, because the admin signs in there.
    */
   cognitoDomain?: string;
   /** Written by the cloud data server install: the client cloud apps sign in with. */
@@ -116,20 +118,6 @@ function hydrate(config: Partial<StarkeepConfig>): CloudConfig {
   };
 }
 
-export interface CloudSetupState {
-  state: "unconfigured" | "configured";
-  has_credentials: boolean;
-}
-
-export async function getCloudSetupState(): Promise<CloudSetupState> {
-  const config = await readCloudConfig();
-  const creds = await readCloudCredentials();
-  return {
-    state: config?.apiGatewayUrl ? "configured" : "unconfigured",
-    has_credentials: !!creds,
-  };
-}
-
 export async function readCloudConfig(): Promise<CloudConfig | null> {
   if (typeof window === "undefined") return null;
   try {
@@ -157,18 +145,15 @@ export async function patchCloudConfig(patch: {
 
 /**
  * Ask the server to read the device client and the managed login domain from
- * the pool, with the signed-in operator's credentials. Throws the route's
- * message when the pool lacks either.
+ * the pool, as the signed-in admin. Throws the route's message when the pool
+ * lacks either, and `NotSignedInError` without a session.
  */
-export async function lookupCognitoOutputs(
-  credentials: STSCredentials,
-  region: string,
-): Promise<{ deviceUserPoolClientId: string; cognitoDomain: string }> {
-  const res = await fetch("/api/cognito-outputs", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ credentials, region }),
-  });
+export async function lookupCognitoOutputs(): Promise<{
+  deviceUserPoolClientId: string;
+  cognitoDomain: string;
+}> {
+  const res = await fetch("/api/cognito-outputs", { method: "POST" });
+  await throwIfNotSignedIn(res);
   const body = (await res.json().catch(() => ({}))) as {
     deviceUserPoolClientId?: string;
     cognitoDomain?: string;
@@ -178,42 +163,4 @@ export async function lookupCognitoOutputs(
     throw new Error(body.error ?? `Looking up the stack outputs failed (${res.status})`);
   }
   return { deviceUserPoolClientId: body.deviceUserPoolClientId, cognitoDomain: body.cognitoDomain };
-}
-
-const CLOUD_CREDENTIALS_KEY = "starkeep:cloud-credentials";
-const COGNITO_SESSION_KEY = "starkeep:cognito-session";
-
-export async function readCloudCredentials(): Promise<STSCredentials | null> {
-  if (typeof window === "undefined") return null;
-  const raw = localStorage.getItem(CLOUD_CREDENTIALS_KEY);
-  return raw ? (JSON.parse(raw) as STSCredentials) : null;
-}
-
-export async function writeCloudCredentials(creds: STSCredentials): Promise<void> {
-  localStorage.setItem(CLOUD_CREDENTIALS_KEY, JSON.stringify(creds));
-}
-
-export interface CognitoSession {
-  refreshToken: string;
-  userEmail?: string;
-}
-
-export async function readCognitoSession(): Promise<CognitoSession | null> {
-  if (typeof window === "undefined") return null;
-  const raw = localStorage.getItem(COGNITO_SESSION_KEY);
-  return raw ? (JSON.parse(raw) as CognitoSession) : null;
-}
-
-export async function writeCognitoSession(session: CognitoSession): Promise<void> {
-  localStorage.setItem(COGNITO_SESSION_KEY, JSON.stringify(session));
-}
-
-export async function clearCloudCredentials(): Promise<void> {
-  localStorage.removeItem(CLOUD_CREDENTIALS_KEY);
-  localStorage.removeItem(COGNITO_SESSION_KEY);
-}
-
-export function credentialsNearExpiry(creds: STSCredentials): boolean {
-  const expiry = new Date(creds.expiration).getTime();
-  return Date.now() > expiry - 5 * 60 * 1000;
 }

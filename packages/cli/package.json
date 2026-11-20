@@ -13,9 +13,11 @@
   "dependencies": {
     "@starkeep/admin-installer": "workspace:*",
     "@starkeep/app-client": "workspace:*",
-    "@starkeep/operator": "workspace:*"
+    "@starkeep/operator": "workspace:*",
+    "@starkeep/protocol-primitives": "workspace:*"
   },
   "devDependencies": {
+    "@starkeep/testkit": "workspace:*",
     "@types/node": "^24.19.2",
     "typescript": "^5.7.0",
     "vitest": "^5.0.5"

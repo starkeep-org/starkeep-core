@@ -24,13 +24,10 @@ import {
 import { localDataServerUrlFromEnv } from "@starkeep/operator/urls";
 import { readStarkeepConfig, type StarkeepConfig } from "@starkeep/operator/config";
 import { managerCredentials } from "@starkeep/operator/manager-credentials";
-import type { STSCredentials } from "../lib/cognito-auth";
+import { requireAdmin } from "../lib/admin-auth";
 
 interface ChangeBody {
   change?: unknown;
-  credentials?: STSCredentials;
-  stackPrefix?: string;
-  region?: string;
 }
 
 async function forward(path: string, init: RequestInit): Promise<Response> {
@@ -52,7 +49,10 @@ export async function GET(): Promise<Response> {
   return forward("/library/deployment-settings", {});
 }
 
-/** Change the deployment's settings. Body: `{ change, credentials?, stackPrefix?, region? }`. */
+/**
+ * Change the deployment's settings. Body: `{ change }`. With a cloud, the
+ * change goes to the SSM parameter as the signed-in admin, through Manager.
+ */
 export async function PUT(req: Request): Promise<Response> {
   let body: ChangeBody;
   try {
@@ -76,19 +76,19 @@ export async function PUT(req: Request): Promise<Response> {
     });
   }
 
-  const { credentials, stackPrefix, region } = body;
-  if (!credentials || !stackPrefix || !region) {
-    return Response.json(
-      { error: "This machine syncs with a cloud. Sign in to change the deployment's settings." },
-      { status: 401 },
-    );
+  const admin = await requireAdmin();
+  if (admin instanceof Response) return admin;
+  const stackPrefix = config.stackPrefix;
+  const region = admin.region;
+  if (!stackPrefix) {
+    return Response.json({ error: "~/.starkeep/config.json names no stack" }, { status: 409 });
   }
 
   let awsCreds: AwsCredentials;
   try {
     awsCreds = await managerCredentials(
       config,
-      credentials,
+      admin.stsCredentials,
       region,
       "starkeep-deployment-settings",
     );

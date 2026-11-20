@@ -9,7 +9,6 @@ import userEvent from "@testing-library/user-event";
 
 vi.mock("@/lib/operator-session", () => ({
   operatorSession: async () => ({
-    credentials: { accessKeyId: "AKIA", secretAccessKey: "s", sessionToken: "t", expiration: "x" },
     stackPrefix: "sktest",
     region: "us-east-2",
     userSub: "sub-admin",

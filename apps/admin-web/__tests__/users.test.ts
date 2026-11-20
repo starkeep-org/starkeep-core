@@ -22,6 +22,11 @@ import {
   ListUsersInGroupCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { jsonRequest, makeDataDir } from "./helpers";
+import { FAKE_ADMIN, signInFake, signOutFake } from "./fake-admin-session";
+vi.mock("@starkeep/operator/admin-session", async (original) =>
+  (await import("./fake-admin-session")).fakeAdminSessionModule(await original()),
+);
+
 
 const roleChain = vi.fn();
 
@@ -32,17 +37,8 @@ vi.mock("@starkeep/admin-installer/session", () => ({
 const cognito = mockClient(CognitoIdentityProviderClient);
 let route: typeof import("../src/routes/users");
 
-const SESSION = {
-  credentials: {
-    accessKeyId: "AKIA-ADMIN",
-    secretAccessKey: "s",
-    sessionToken: "t",
-    expiration: "x",
-  },
-  stackPrefix: "sktest",
-  region: "us-east-2",
-  userSub: "sub-admin",
-};
+// The routes act as the signed-in admin, `sub-admin` (`fake-admin-session.ts`).
+const SESSION = {};
 
 /** The pool's users and group memberships, as Cognito would hold them. */
 let users: Array<{ Username: string; email: string; Enabled?: boolean }>;
@@ -255,13 +251,16 @@ describe("disabling an account", () => {
   });
 
   it("refuses to disable the last enabled admin", async () => {
-    // An operator without a recorded sub skips the self-check; the count
+    // Signed in as another account, so the self-check passes; the count
     // still stops the deployment from losing its only admin.
+    const signedInAs = FAKE_ADMIN.sub;
+    FAKE_ADMIN.sub = "sub-other-operator";
     const res = await post(route.SET_ENABLED, {
       ...SESSION,
-      userSub: undefined,
       username: "sub-admin",
       enabled: false,
+    }).finally(() => {
+      FAKE_ADMIN.sub = signedInAs;
     });
     expect(res.status).toBe(409);
     expect(cognito.commandCalls(AdminDisableUserCommand)).toHaveLength(0);
@@ -359,5 +358,19 @@ describe("resetting a password", () => {
   it("refuses a request that names no account", async () => {
     const res = await route.RESET_PASSWORD(jsonRequest("/api/users/password", { ...SESSION }));
     expect(res.status).toBe(400);
+  });
+});
+
+describe("without an admin session", () => {
+  it("answers 401 NOT_SIGNED_IN and asks the pool nothing", async () => {
+    signOutFake();
+    try {
+      const res = await post(route.LIST, {});
+      expect(res.status).toBe(401);
+      expect(await res.json()).toMatchObject({ code: "NOT_SIGNED_IN" });
+      expect(cognito.calls()).toHaveLength(0);
+    } finally {
+      signInFake();
+    }
   });
 });

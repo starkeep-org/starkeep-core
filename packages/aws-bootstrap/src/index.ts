@@ -14,6 +14,8 @@ export {
   isDeploymentName,
   normalizeDeploymentName,
   MAX_INLINE_TEMPLATE_BYTES,
+  inlineTemplateBody,
+  LOCAL_CALLBACK_URLS,
   type GenerateBootstrapTemplateInput,
 } from "./bootstrap/index.js";
 

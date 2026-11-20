@@ -27,6 +27,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FAKE_CLOUD_ACCOUNT } from "./fake-cloud.js";
+import { adminPasswordSignIn } from "./fake-pool.js";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const SERVER_ENTRY = join(REPO_ROOT, "apps/local-data-server/server.ts");
@@ -234,7 +235,10 @@ export async function startLocalDataServer(
     // real cloud's pool is Cognito itself, and a test that signs in on its own
     // passes the endpoint it means in `env`.
     ...(signIn && typeof cloudUrl === "string"
-      ? { STARKEEP_COGNITO_ENDPOINT: `${cloudUrl.replace(/\/+$/, "")}/cognito/` }
+      ? {
+          STARKEEP_COGNITO_ENDPOINT: `${cloudUrl.replace(/\/+$/, "")}/cognito/`,
+          STARKEEP_COGNITO_TOKEN_ENDPOINT: `${cloudUrl.replace(/\/+$/, "")}/oauth2/token`,
+        }
       : {}),
     // Backstop against orphans. Teardown is not guaranteed to run — a killed
     // runner, a hung spec, a failure before the `finally` — and the server the
@@ -295,10 +299,16 @@ export async function startLocalDataServer(
   if (signIn) {
     const status = (await (await fetch(`${url}/auth/status`)).json()) as { state?: string };
     if (status.state !== "signed-in") {
+      // The harness's sign-in: a password at the pool, as the e2e harness
+      // signs in with AWS credentials, then the refresh token to the server.
+      const refreshToken = await adminPasswordSignIn(
+        `${String(cloudUrl).replace(/\/+$/, "")}/cognito/`,
+        FAKE_CLOUD_ACCOUNT,
+      );
       const res = await fetch(`${url}/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(FAKE_CLOUD_ACCOUNT),
+        body: JSON.stringify({ refreshToken }),
       });
       if (!res.ok) {
         child.kill("SIGKILL");

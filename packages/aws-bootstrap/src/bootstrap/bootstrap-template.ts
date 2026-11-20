@@ -36,6 +36,18 @@ export interface GenerateBootstrapTemplateInput {
  */
 export const MAX_STACK_PREFIX_LENGTH = 16;
 
+/**
+ * Where the managed login page returns a person who signs in as the admin or
+ * to sync: admin-web's callback route on its default port, and the CLI's
+ * one-shot listener. Cognito matches callbacks exactly, port included.
+ * `@starkeep/protocol-primitives` names the same two (`localCallbackUrls`),
+ * and a test holds them equal.
+ */
+export const LOCAL_CALLBACK_URLS = [
+  "http://localhost:3000/auth/callback",
+  "http://localhost:47615/callback",
+] as const;
+
 /** The cap on a deployment name, so it fits under the star on the sign-in page. */
 export const MAX_DEPLOYMENT_NAME_LENGTH = 32;
 
@@ -98,6 +110,18 @@ export function generateBootstrapTemplate(input: GenerateBootstrapTemplateInput)
     installInfraBoundaryStatements(stackPrefix),
     10,
   );
+  const oauthYaml = [
+    "      AllowedOAuthFlowsUserPoolClient: true",
+    "      AllowedOAuthFlows:",
+    "        - code",
+    "      AllowedOAuthScopes:",
+    "        - openid",
+    "        - email",
+    "      SupportedIdentityProviders:",
+    "        - COGNITO",
+    "      CallbackURLs:",
+    ...LOCAL_CALLBACK_URLS.map((url) => `        - '${url}'`),
+  ].join("\n");
   return `AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   Starkeep Bootstrap — creates Cognito auth, IAM roles (admin-app, manager),
@@ -168,6 +192,10 @@ Resources:
         starkeep:managed: 'true'
         StackPrefix: !Ref StackPrefix
 
+  # The admin client. People sign in on the managed login page, through the
+  # code flow with PKCE, and the page returns to admin-web or the CLI on this
+  # computer. Password sign-in needs AWS credentials (ADMIN_USER_PASSWORD_AUTH),
+  # which only the e2e harness uses.
   UserPoolClient:
     Type: AWS::Cognito::UserPoolClient
     Properties:
@@ -175,21 +203,24 @@ Resources:
       UserPoolId: !Ref UserPool
       GenerateSecret: false
       ExplicitAuthFlows:
-        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH
         - ALLOW_REFRESH_TOKEN_AUTH
+${oauthYaml}
       TokenValidityUnits:
         RefreshToken: days
       RefreshTokenValidity: 30
+      EnableTokenRevocation: true
       PreventUserExistenceErrors: ENABLED
 
-  # The device client. Desktops sign in here through the local data server and
-  # sync with the ID token alone; phones use the mobile-apps client that the
-  # cloud data server install creates. No OAuth flow, so no app gets a device
-  # token without the password, and the identity pool does NOT trust this
-  # client, so a device token reaches no AWS role. Ten-year refresh tokens,
-  # since an expired one stops background sync silently; fifteen-minute ID
-  # tokens bound how long a disabled or ungrouped user keeps syncing. Public
-  # (no secret) with revocation on, so a device can revoke its own sign-in.
+  # The device client. Desktops sign in here on the managed login page and
+  # sync with the ID token alone; phones use the mobile-apps client. The
+  # callbacks name localhost only, so no remote site receives a code. A local
+  # program on a callback port could receive a device token while the page's
+  # session cookie lasts, but it could already read device-session.json. The
+  # identity pool does NOT trust this client, so a device token reaches no AWS
+  # role. Ten-year refresh tokens, since an expired one stops background sync
+  # silently; fifteen-minute ID tokens bound how long a disabled or ungrouped
+  # user keeps syncing. Public, with revocation on.
   DeviceUserPoolClient:
     Type: AWS::Cognito::UserPoolClient
     Properties:
@@ -197,8 +228,9 @@ Resources:
       UserPoolId: !Ref UserPool
       GenerateSecret: false
       ExplicitAuthFlows:
-        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH
         - ALLOW_REFRESH_TOKEN_AUTH
+${oauthYaml}
       TokenValidityUnits:
         IdToken: minutes
         AccessToken: minutes
@@ -221,6 +253,25 @@ Resources:
       Domain: !Sub '\${StackPrefix}-\${AWS::AccountId}'
       UserPoolId: !Ref UserPool
       ManagedLoginVersion: 2
+
+  # Managed login shows a page only for a client with a branding style. The
+  # first admin signs in before the cloud data server install, so both clients
+  # get Cognito's style here; that install replaces it with Starkeep's.
+  AdminLoginBranding:
+    Type: AWS::Cognito::ManagedLoginBranding
+    DependsOn: UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientId: !Ref UserPoolClient
+      UseCognitoProvidedValues: true
+
+  DeviceLoginBranding:
+    Type: AWS::Cognito::ManagedLoginBranding
+    DependsOn: UserPoolDomain
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientId: !Ref DeviceUserPoolClient
+      UseCognitoProvidedValues: true
 
   # Cognito Identity Pool — exchanges Cognito ID tokens for STS credentials
   IdentityPool:
@@ -654,6 +705,20 @@ Outputs:
  * concise. `bootstrap-template.test.ts` checks the template fits.
  */
 export const MAX_INLINE_TEMPLATE_BYTES = 51_200;
+
+/**
+ * The template as code sends it to CloudFormation inline: without its
+ * full-line comments, which count toward the inline cap and which
+ * CloudFormation discards anyway. The template a person downloads keeps them.
+ * Only lines whose first non-space character is `#` go; no YAML value in the
+ * template starts a line that way.
+ */
+export function inlineTemplateBody(template: string): string {
+  return template
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+}
 
 export function getCloudFormationCreateStackUrl(
   region: string,

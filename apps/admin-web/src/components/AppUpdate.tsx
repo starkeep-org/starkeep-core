@@ -37,11 +37,8 @@ import { CommandOutput } from "@/components/CommandOutput";
 import { ConsentDialog } from "@/components/ConsentDialog";
 import {
   readCloudConfig,
-  readCognitoSession,
-  writeCloudCredentials,
-  writeCognitoSession,
 } from "@/lib/cloud-config";
-import { refreshTokens, getIdentityPoolCredentials, type STSCredentials } from "@/lib/cognito-auth";
+import { readAdminSession, throwIfNotSignedIn, NotSignedInError } from "@/lib/admin-session-client";
 import {
   consentDiffers,
   MANIFEST_NOT_APPROVED,
@@ -234,7 +231,7 @@ export function AppUpdateProvider({
     cloudAdministered ? { kind: "loading" } : { kind: "none" },
   );
   const [installing, setInstalling] = useState<
-    (CloudInstallRequest & { credentials: STSCredentials & { region: string } }) | null
+    CloudInstallRequest | null
   >(null);
   const [cloudRunning, setCloudRunning] = useState(false);
   const installDone = useRef<((result: CloudInstallResult) => void) | null>(null);
@@ -247,7 +244,7 @@ export function AppUpdateProvider({
   const [updatingAppId, setUpdatingAppId] = useState<string | null>(null);
   const [updateError, setUpdateError] = useState<{ name: string; error: string } | null>(null);
 
-  // Requires signed-in Cognito credentials. A failed read leaves the cloud
+  // Requires the admin session. A failed read leaves the cloud
   // tiles without "Installed" badges and the update dialog without a cloud
   // choice, so it is not a section-level error.
   const refreshRegistry = useCallback(async () => {
@@ -261,23 +258,24 @@ export function AppUpdateProvider({
         setRegistry({ kind: "none" });
         return;
       }
-      const session = await readCognitoSession();
-      if (!session?.refreshToken) {
+      if (!(await readAdminSession()).signedIn) {
         setRegistry({ kind: "signed-out" });
         return;
       }
-      const tokens = await refreshTokens(cfg.cognitoConfig, session.refreshToken);
-      const creds = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
-      await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
       const res = await fetch("/api/apps/cloud/list", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          accessKeyId: creds.accessKeyId,
-          secretAccessKey: creds.secretAccessKey,
-          sessionToken: creds.sessionToken,
-        }),
+        body: JSON.stringify({}),
       });
+      try {
+        await throwIfNotSignedIn(res);
+      } catch (err) {
+        if (err instanceof NotSignedInError) {
+          setRegistry({ kind: "signed-out" });
+          return;
+        }
+        throw err;
+      }
       if (!res.ok) {
         const body = (await res.json().catch(() => null)) as { error?: string } | null;
         throw new Error(body?.error ?? `cloud registry list failed: ${res.status}`);
@@ -299,25 +297,12 @@ export function AppUpdateProvider({
       const cfg = await readCloudConfig();
       if (!cfg)
         return { ok: false, error: "Cloud is not configured. Complete the cloud setup first." };
-      const session = await readCognitoSession();
-      if (!session?.refreshToken) {
-        return { ok: false, error: "Not signed in. Sign in from the dashboard first." };
-      }
-      let creds: STSCredentials;
-      try {
-        const tokens = await refreshTokens(cfg.cognitoConfig, session.refreshToken);
-        creds = await getIdentityPoolCredentials(cfg.cognitoConfig, tokens.idToken);
-        await writeCloudCredentials(creds);
-        await writeCognitoSession({ ...session, refreshToken: tokens.refreshToken });
-      } catch (err) {
-        return {
-          ok: false,
-          error: err instanceof Error ? err.message : "Failed to get AWS credentials",
-        };
+      if (!(await readAdminSession()).signedIn) {
+        return { ok: false, error: "Not signed in. Sign in as the admin from the dashboard first." };
       }
       return new Promise<CloudInstallResult>((resolve) => {
         installDone.current = resolve;
-        setInstalling({ ...request, credentials: { ...creds, region: cfg.region ?? "" } });
+        setInstalling(request);
       });
     },
     [],
@@ -576,7 +561,7 @@ function CloudAppInstallModal({
   onRunningChange,
   onRefused,
 }: {
-  request: (CloudInstallRequest & { credentials: STSCredentials & { region: string } }) | null;
+  request: CloudInstallRequest | null;
   /** `succeeded` is true when the run that the panel shows succeeded. */
   onClose: (succeeded: boolean) => void;
   onSuccess: () => void;
@@ -599,7 +584,7 @@ function CloudAppInstallModal({
 
   useEffect(() => {
     if (!request) return;
-    const { appId, credentials, surfaces, approvedManifest } = request;
+    const { appId, surfaces, approvedManifest } = request;
 
     setLines([]);
     setStatus("running");
@@ -611,14 +596,7 @@ function CloudAppInstallModal({
       // to it rather than leaving the dialog spinning.
       const outcome = await runInstallStream(
         `/api/apps/${appId}/cloud-install`,
-        {
-          accessKeyId: credentials.accessKeyId,
-          secretAccessKey: credentials.secretAccessKey,
-          sessionToken: credentials.sessionToken,
-          region: credentials.region,
-          surfaces,
-          approvedManifest,
-        },
+        { surfaces, approvedManifest },
         { onLine: (line) => setLines((l) => [...l, line]), isAborted: () => aborted },
       );
       if (aborted) return;

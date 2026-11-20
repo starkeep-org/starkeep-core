@@ -115,6 +115,8 @@ export interface CloudDataServerInstallConfig {
   pulumiStateBucket: string;
   /** Cognito user-pool resources from the bootstrap CFN stack. */
   userPoolId: string;
+  /** The bootstrap's admin client, which admin-web and the CLI sign in with. */
+  adminUserPoolClientId: string;
   /** The bootstrap's device client, which desktops sign in with. */
   deviceUserPoolClientId: string;
   /** Host name of the managed login page, the bootstrap's CognitoDomain output. */
@@ -638,6 +640,7 @@ export async function installCloudDataServer(
       publicBaseUrls: hosts.map((h) => `https://${h}`),
       gatewayBaseUrl: apiGatewayUrl,
       clients: signInClients,
+      platformClientIds: [config.adminUserPoolClientId, config.deviceUserPoolClientId],
       deploymentName: config.deploymentName,
     });
 

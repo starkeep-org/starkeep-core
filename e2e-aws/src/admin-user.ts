@@ -21,6 +21,7 @@ import {
   AdminSetUserPasswordCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { regionFromUserPoolId } from "@starkeep/admin-installer";
+import { saveAdminSignIn } from "@starkeep/admin-installer/admin-session";
 import { signInAdmin, type AdminSession } from "./installers.js";
 import {
   generatePassword,
@@ -108,18 +109,43 @@ export async function ensureAdminUser(
  * identity pool. Another checkout's run against the same stack may have set a
  * new password since this run's was saved; the account is then taken back with
  * a fresh one, once.
+ *
+ * The sign-in is also kept as the run's admin session
+ * (`$STARKEEP_DIR/admin-session.json`), as a managed-login sign-in in admin-web
+ * or `starkeep login --admin` keeps it. admin-web's routes, which the member
+ * steps call in this process, and the CLI read their credentials from it.
  */
 export async function signInTestAdmin(
   paths: RunPaths,
   config: TestStackConfig,
 ): Promise<{ admin: AdminCredentials; session: AdminSession }> {
   let admin = await ensureAdminUser(paths, config.userPoolId);
+  let session: AdminSession;
   try {
-    return { admin, session: await signInAdmin(config, admin) };
+    session = await signInAdmin(config, admin);
   } catch (err) {
     if ((err as { name?: string }).name !== "NotAuthorizedException") throw err;
     admin = await ensureAdminUser(paths, config.userPoolId, { resetPassword: true });
-    return { admin, session: await signInAdmin(config, admin) };
+    session = await signInAdmin(config, admin);
+  }
+  await keepAdminSession(paths, session);
+  return { admin, session };
+}
+
+/** Write the run's admin session file, with this run's state dir as STARKEEP_DIR. */
+async function keepAdminSession(paths: RunPaths, session: AdminSession): Promise<void> {
+  const saved = process.env.STARKEEP_DIR;
+  process.env.STARKEEP_DIR = paths.dataDir;
+  try {
+    await saveAdminSignIn({
+      accessToken: session.accessToken,
+      idToken: session.idToken,
+      refreshToken: session.refreshToken,
+      expiresIn: 3600,
+    });
+  } finally {
+    if (saved === undefined) delete process.env.STARKEEP_DIR;
+    else process.env.STARKEEP_DIR = saved;
   }
 }
 
