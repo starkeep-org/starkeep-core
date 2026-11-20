@@ -13,6 +13,7 @@ import {
   adminPool,
   adminSessionStatus,
   hasAdminSessionFile,
+  type AdminSessionStatus,
   saveAdminSignIn,
   signOutAdmin,
 } from "@starkeep/operator/admin-session";
@@ -74,7 +75,8 @@ async function browserSignIn(
   }
 }
 
-async function loginAdmin(io: Io, noBrowser: boolean): Promise<void> {
+/** Sign in as the admin in the browser. Emits progress, not the result. */
+export async function loginAdmin(io: Io, noBrowser: boolean): Promise<AdminSessionStatus> {
   const pool = adminPool();
   if (!pool || !pool.cognitoDomain) {
     throw new CliError(
@@ -115,10 +117,11 @@ async function loginAdmin(io: Io, noBrowser: boolean): Promise<void> {
       message: `This replaces ${before.email}'s admin session on this computer.`,
     });
   }
-  io.event({ type: "result", ok: true, data: status });
+  return status;
 }
 
-async function loginSync(io: Io, noBrowser: boolean): Promise<void> {
+/** Sign this computer in to sync. Emits progress, not the result. */
+export async function loginSync(io: Io, noBrowser: boolean): Promise<{ email: string | null }> {
   const config = readConfig() ?? {};
   const cloudUrl = typeof config.apiGatewayUrl === "string" ? config.apiGatewayUrl : null;
   if (!cloudUrl)
@@ -158,7 +161,7 @@ async function loginSync(io: Io, noBrowser: boolean): Promise<void> {
     );
   }
   io.event({ type: "progress", message: `This computer syncs as ${body.email ?? "you"}.` });
-  io.event({ type: "result", ok: true, data: { email: body.email ?? null } });
+  return { email: body.email ?? null };
 }
 
 /** The data server's sync state, or a refusal naming the fix when it does not answer. */
@@ -193,8 +196,11 @@ export const loginCommand: Command = {
     "first sign-in. The admin session ends after 12 hours without use.",
   async run(io, args) {
     const noBrowser = flag(args, "no-browser");
-    if (which(args, "sign in to") === "admin") await loginAdmin(io, noBrowser);
-    else await loginSync(io, noBrowser);
+    const data =
+      which(args, "sign in to") === "admin"
+        ? await loginAdmin(io, noBrowser)
+        : await loginSync(io, noBrowser);
+    io.event({ type: "result", ok: true, data });
   },
 };
 

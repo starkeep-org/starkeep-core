@@ -82,7 +82,8 @@ describe("the command table", () => {
     const { code, out } = await run(["help", "install"]);
     expect(code).toBe(0);
     expect(out).toContain("Usage: starkeep install");
-    expect(out).toContain("Credentials: This computer only.");
+    expect(out).toContain("Credentials: --local needs no cloud credentials.");
+    expect(out).toContain("sign in as the Starkeep admin");
   });
 });
 
@@ -129,10 +130,18 @@ describe("bad usage exits 2", () => {
     expect((await run(["uninstall", "example-app"])).code).toBe(2);
   });
 
-  it("a cloud target, which the CLI does not run yet", async () => {
-    const { code, err } = await run(["install", "example-app", "--cloud"]);
+  it("--delete-data with a single cloud surface, which keeps the data side", async () => {
+    const { code, err } = await run(["uninstall", "example-app", "--web", "--delete-data"]);
     expect(code).toBe(2);
-    expect(err).toContain("starkeep admin");
+    expect(err).toContain("--delete-data in the cloud needs --cloud");
+  });
+});
+
+describe("a cloud target before cloud setup", () => {
+  it("fails and names the setup command, before any sign-in", async () => {
+    const { code, err } = await run(["install", "example-app", "--cloud"]);
+    expect(code).toBe(1);
+    expect(err).toContain("starkeep setup --cloud");
   });
 
   it("--json reports the failure as a result event", async () => {

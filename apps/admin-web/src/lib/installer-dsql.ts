@@ -7,34 +7,19 @@
  * `${stackPrefix}_installer` PG role via the IAM-to-PG mapping set up by
  * initializeSharedSchema (see admin-installer's dsql-schema-init.ts).
  *
- * Inlined rather than imported from @starkeep/admin-installer because that
- * package transitively pulls Pulumi, which OOMs the dev bundle.
+ * The pool itself comes from `@starkeep/operator/cloud-registry`, which the CLI
+ * uses too, rather than from @starkeep/admin-installer, because that package
+ * transitively pulls Pulumi, which OOMs the dev bundle.
  */
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
-import pg from "pg";
-import {
-  DummyDriver,
-  Kysely,
-  PostgresAdapter,
-  PostgresIntrospector,
-  PostgresQueryCompiler,
-} from "kysely";
-import { DsqlSigner } from "@aws-sdk/dsql-signer";
+import type pg from "pg";
+import { installerPool } from "@starkeep/operator/cloud-registry";
 import { requireAdmin } from "./admin-auth";
 
-// Compile-only Kysely instance (DummyDriver never executes); the compiled
-// `$1`-style SQL runs through the pg pool below.
-export const compiler = new Kysely<Record<string, Record<string, unknown>>>({
-  dialect: {
-    createAdapter: () => new PostgresAdapter(),
-    createDriver: () => new DummyDriver(),
-    createIntrospector: (db) => new PostgresIntrospector(db),
-    createQueryCompiler: () => new PostgresQueryCompiler(),
-  },
-});
+export { compiler } from "@starkeep/operator/cloud-registry";
 
 const STARKEEP_DIR = starkeepDir();
 const CONFIG_PATH = join(STARKEEP_DIR, "config.json");
@@ -57,10 +42,6 @@ interface StarkeepConfig {
 function regionFromUserPoolId(userPoolId: string): string | null {
   const parts = userPoolId.split("_");
   return parts.length > 1 ? parts[0] || null : null;
-}
-
-function installerPgUser(stackPrefix: string): string {
-  return `${stackPrefix}_installer`.toLowerCase().replace(/-/g, "_");
 }
 
 /**
@@ -105,33 +86,23 @@ export async function openInstallerPool(
   const admin = await requireAdmin();
   if (admin instanceof Response) return admin;
 
-  const signer = new DsqlSigner({
-    hostname,
-    region,
-    credentials: {
-      accessKeyId: admin.stsCredentials.accessKeyId,
-      secretAccessKey: admin.stsCredentials.secretAccessKey,
-      sessionToken: admin.stsCredentials.sessionToken,
-    },
-  });
-  let token: string;
+  let pool: pg.Pool;
   try {
-    token = await signer.getDbConnectAuthToken();
+    pool = await installerPool({
+      hostname,
+      region,
+      stackPrefix,
+      credentials: {
+        accessKeyId: admin.stsCredentials.accessKeyId,
+        secretAccessKey: admin.stsCredentials.secretAccessKey,
+        sessionToken: admin.stsCredentials.sessionToken,
+      },
+    });
   } catch (err) {
     return Response.json(
       { error: `Failed to sign DSQL token: ${err instanceof Error ? err.message : String(err)}` },
       { status: 500 },
     );
   }
-
-  const pool = new pg.Pool({
-    host: hostname,
-    port: 5432,
-    database: "postgres",
-    user: installerPgUser(stackPrefix),
-    password: token,
-    ssl: { rejectUnauthorized: true },
-    max: 1,
-  });
   return { pool, body };
 }

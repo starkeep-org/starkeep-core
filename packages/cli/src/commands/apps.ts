@@ -1,11 +1,15 @@
 /**
- * App commands on this computer: `source`, `list`, `info`, `install --local`
- * and `uninstall --local`. The cloud targets arrive with the cloud CLI; until
- * then the commands name admin-web for them.
+ * App commands: `source`, `list`, `info`, `install` and `uninstall`.
+ *
+ * `--local` acts on this computer, through the local data server. `--cloud`,
+ * `--web` and `--mobile` act on the cloud, through the installer's operations
+ * in a detached run as the signed-in admin (`../cloud.ts`).
  */
 import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { expandHome } from "@starkeep/admin-installer/app-discovery";
+import { manifestDigest } from "@starkeep/admin-installer/manifest-approval";
+import type { AppSurface } from "@starkeep/admin-installer/operations";
 import { consentLines } from "@starkeep/admin-installer/consent-text";
 import {
   appParentDirs,
@@ -21,7 +25,7 @@ import { acquireLock } from "@starkeep/operator/locks";
 import { deleteKeptAppData, uninstallLocalApp } from "@starkeep/operator/local-apps";
 import { serviceStatus } from "@starkeep/operator/service-control";
 import { flag, type Command, type ParsedArgs } from "../command";
-import { CliError, EXIT_USAGE, usageError } from "../errors";
+import { CliError, usageError } from "../errors";
 import { requireTerminal, type Io } from "../io";
 import {
   installCommandFor,
@@ -29,8 +33,11 @@ import {
   requireDataServer,
   resolveAppReference,
   runDependencyInstall,
+  type ResolvedApp,
 } from "../app-steps";
 import { startOne } from "./services";
+import { cloudInstalled, readCloudApps, runCloud } from "../cloud";
+import type { CloudApp } from "@starkeep/operator/cloud-registry";
 
 const TARGET_FLAGS = {
   local: { type: "boolean", description: "This computer." },
@@ -42,22 +49,40 @@ const TARGET_FLAGS = {
   mobile: { type: "boolean", description: "The mobile app only." },
 } as const;
 
-/**
- * The explicit target `install` and `uninstall` require. Only `--local` runs
- * from the CLI so far.
- */
-function requireLocalTarget(args: ParsedArgs, verb: string): void {
-  const cloud = ["cloud", "web", "mobile"].filter((f) => flag(args, f));
-  if (cloud.length > 0) {
-    throw new CliError(
-      `Cloud ${verb}s do not run from the CLI yet. Run \`starkeep admin\` and use the Cloud apps section, or drop --${cloud.join(" --")}.`,
-      EXIT_USAGE,
-      "USAGE",
+export interface Targets {
+  local: boolean;
+  /**
+   * The cloud surfaces: `all` for `--cloud` (the data side and every surface
+   * the manifest offers), the named ones for `--web` and `--mobile`, or null
+   * for no cloud target.
+   */
+  cloud: "all" | AppSurface[] | null;
+}
+
+/** The explicit target `install` and `uninstall` require (decision 2 of the design). */
+export function targetsOf(args: ParsedArgs, verb: string): Targets {
+  const surfaces = (["web", "mobile"] as const).filter((f) => flag(args, f));
+  const targets: Targets = {
+    local: flag(args, "local"),
+    cloud: flag(args, "cloud") ? "all" : surfaces.length > 0 ? [...surfaces] : null,
+  };
+  if (!targets.local && targets.cloud === null) {
+    throw usageError(
+      `Name where to ${verb}: --local (this computer), --cloud (the cloud, every surface), --web or --mobile. Flags combine.`,
     );
   }
-  if (!flag(args, "local")) {
-    throw usageError(
-      `Name where to ${verb}: --local (this computer). --cloud, --web and --mobile come later.`,
+  return targets;
+}
+
+/** How a run's owner names the cloud surfaces, the words admin-web uses too. */
+function surfaceOwner(appId: string, cloud: "all" | AppSurface[]): string {
+  return `${appId} (${cloud === "all" ? "every surface" : cloud.join(", ")})`;
+}
+
+function requireCloud(): void {
+  if (!cloudInstalled()) {
+    throw new CliError(
+      "This computer has no cloud with a data server yet. Run `starkeep setup --cloud` first.",
     );
   }
 }
@@ -134,6 +159,78 @@ export const sourceCommand: Command = {
   },
 };
 
+/**
+ * Ask for `appId` typed back before an uninstall that deletes data changes
+ * anything. A preview of what the cloud deletion removes comes first when the
+ * app is already gone from the cloud; the cloud cannot count an installed
+ * app's data.
+ */
+async function confirmDeletion(
+  io: Io,
+  appId: string,
+  targets: Targets,
+  installedHere: boolean,
+): Promise<void> {
+  const where = [
+    ...(targets.local ? ["on this computer"] : []),
+    ...(targets.cloud ? ["in the cloud"] : []),
+  ].join(" and ");
+  let inCloud = false;
+  if (targets.cloud) {
+    inCloud = (await readCloudApps(io, { signIn: true }))?.some((a) => a.appId === appId) ?? false;
+    if (!inCloud) {
+      await runCloud(io, {
+        name: "delete-app-data",
+        input: { appId, preview: true },
+        owner: `${appId} (preview data deletion)`,
+        lock: `app-${appId}`,
+        command: `starkeep uninstall ${appId} --cloud --delete-data`,
+      });
+    }
+  }
+  const typed = await io.ask(`Type ${appId} to delete its data ${where}:`, {
+    flagHint: TYPE_BACK_HINT,
+  });
+  if (typed !== appId) {
+    throw new CliError(
+      `Nothing changed: the typed id did not match, so ${appId} ${installedHere || inCloud ? "stays installed with its data" : "keeps its data"}.`,
+    );
+  }
+}
+
+/** Remove `appId`'s cloud surfaces, or the whole app, and with `deleteData` its cloud data. */
+async function uninstallFromCloud(
+  io: Io,
+  appId: string,
+  cloud: "all" | AppSurface[],
+  deleteData: boolean,
+): Promise<void> {
+  const installed = await readCloudApps(io, { signIn: true });
+  const row = installed?.find((a) => a.appId === appId);
+  if (!row && !deleteData) throw new CliError(`${appId} is not installed in the cloud.`);
+  if (row) {
+    await runCloud(io, {
+      name: "uninstall-cloud-app",
+      input: {
+        appId,
+        ...(row.folder ? { appDir: row.folder } : {}),
+        ...(cloud === "all" ? {} : { surfaces: cloud }),
+      },
+      owner: `${appId} (uninstall ${cloud === "all" ? "every surface" : cloud.join(", ")})`,
+      lock: `app-${appId}`,
+      command: `starkeep uninstall ${appId} --cloud`,
+    });
+  }
+  if (!deleteData) return;
+  await runCloud(io, {
+    name: "delete-app-data",
+    input: { appId, confirm: appId },
+    owner: `${appId} (delete data)`,
+    lock: `app-${appId}`,
+    command: `starkeep uninstall ${appId} --cloud --delete-data`,
+  });
+}
+
 function printScannedDir(
   io: Io,
   d: {
@@ -154,6 +251,24 @@ interface ListRow {
   source: string | null;
   local: "running" | "installed" | "not installed" | "unknown" | "kept data";
   sourceState?: string;
+  /** The cloud surfaces, or null when the cloud was not read. */
+  cloud?: {
+    web: boolean;
+    mobile: boolean;
+    behind: boolean | null;
+    codeBehind: boolean | null;
+  } | null;
+}
+
+/** The cloud column: the data side and the surfaces, and whether a redeploy would change them. */
+function cloudCell(row: ListRow): string {
+  if (row.cloud === undefined) return "—";
+  if (row.cloud === null) return "?";
+  const surfaces = [row.cloud.web ? "web" : null, row.cloud.mobile ? "mobile" : null].filter(
+    Boolean,
+  );
+  const behind = row.cloud.behind || row.cloud.codeBehind ? "  (behind)" : "";
+  return `${surfaces.length > 0 ? surfaces.join("+") : "data"}${behind}`;
 }
 
 async function listRows(): Promise<ListRow[]> {
@@ -195,6 +310,26 @@ async function listRows(): Promise<ListRow[]> {
   return [...rows.values()].sort((a, b) => a.appId.localeCompare(b.appId));
 }
 
+/** Add the cloud column to `rows`, and rows for apps only the cloud has. */
+function addCloud(rows: ListRow[], cloud: CloudApp[] | null): ListRow[] {
+  if (cloud === null) return rows.map((r) => ({ ...r, cloud: null }));
+  const byId = new Map(rows.map((r) => [r.appId, r]));
+  for (const c of cloud) {
+    const cell = { web: c.webApp, mobile: c.mobileApp, behind: c.behind, codeBehind: c.codeBehind };
+    const row = byId.get(c.appId);
+    if (row) row.cloud = cell;
+    else
+      byId.set(c.appId, {
+        appId: c.appId,
+        name: c.name ?? c.appId,
+        source: c.folder,
+        local: "not installed",
+        cloud: cell,
+      });
+  }
+  return [...byId.values()].sort((a, b) => a.appId.localeCompare(b.appId));
+}
+
 function tildePath(path: string | null): string {
   if (!path) return "—";
   const home = process.env.HOME;
@@ -207,8 +342,24 @@ export const listCommand: Command = {
   usage: "",
   lane: "none",
   flags: {},
+  details:
+    "The CLOUD column needs an open admin session (starkeep login --admin); without one it shows ?.\n" +
+    "(behind) marks a cloud install whose manifest or web code differs from the folder here.",
   async run(io) {
-    const rows = await listRows();
+    let rows = await listRows();
+    if (cloudInstalled()) {
+      let cloud: CloudApp[] | null = null;
+      try {
+        cloud = await readCloudApps(io, { signIn: false });
+      } catch (err) {
+        io.warn(
+          `Could not read the cloud's apps: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      rows = addCloud(rows, cloud);
+      if (cloud === null && !io.json)
+        io.warn("Sign in with `starkeep login --admin` to see the CLOUD column.");
+    }
     if (io.json) {
       io.event({ type: "result", ok: true, data: { apps: rows } });
       return;
@@ -219,12 +370,15 @@ export const listCommand: Command = {
     }
     const idWidth = Math.max(4, ...rows.map((r) => r.appId.length)) + 2;
     const srcWidth = Math.max(7, ...rows.map((r) => tildePath(r.source).length)) + 2;
-    io.print(`${"APP".padEnd(idWidth)}${"SOURCE".padEnd(srcWidth)}LOCAL`);
+    const withCloud = rows.some((r) => r.cloud !== undefined);
+    const localWidth = Math.max(5, ...rows.map((r) => r.local.length)) + 2;
+    io.print(
+      `${"APP".padEnd(idWidth)}${"SOURCE".padEnd(srcWidth)}${withCloud ? "LOCAL".padEnd(localWidth) + "CLOUD" : "LOCAL"}`,
+    );
     for (const r of rows) {
       const note = r.sourceState ? `  (folder ${r.sourceState})` : "";
-      io.print(
-        `${r.appId.padEnd(idWidth)}${tildePath(r.source).padEnd(srcWidth)}${r.local}${note}`,
-      );
+      const local = withCloud ? r.local.padEnd(localWidth) + cloudCell(r) : r.local;
+      io.print(`${r.appId.padEnd(idWidth)}${tildePath(r.source).padEnd(srcWidth)}${local}${note}`);
     }
   },
 };
@@ -276,9 +430,9 @@ export const infoCommand: Command = {
 
 export const installCommand: Command = {
   name: "install",
-  summary: "Install apps",
-  usage: "<app>... --local [--yes] [--start]",
-  lane: "none",
+  summary: "Install apps on this computer or in the cloud",
+  usage: "<app>... (--local | --cloud | --web | --mobile)... [--yes] [--start]",
+  lane: "target",
   flags: {
     ...TARGET_FLAGS,
     yes: { type: "boolean", short: "y", description: "Approve the consent text without asking." },
@@ -286,19 +440,23 @@ export const installCommand: Command = {
   },
   details:
     "An app is an id from the discovery folders or a path to an app folder. Installing by path\n" +
-    "adds the folder to discovery. A target flag is required. A run without a terminal needs --yes.",
+    "adds the folder to discovery. A target flag is required, and flags combine: --local --cloud\n" +
+    "installs on this computer, then in the cloud. A cloud install builds the bundle from the\n" +
+    "folder here and needs no local install. Only cloud targets sign in as the admin.\n" +
+    "A run without a terminal needs --yes.",
   async run(io, args) {
-    requireLocalTarget(args, "install");
+    const targets = targetsOf(args, "install");
     if (args.positionals.length === 0) throw usageError("Name at least one app to install.");
     if (!flag(args, "yes")) requireTerminal(io, "Approve and install?", "--yes to approve");
-    await requireDataServer();
+    if (targets.local) await requireDataServer();
+    if (targets.cloud) requireCloud();
     const installed: string[] = [];
     const declined: string[] = [];
     const at = { ref: "", appId: "" };
     try {
       for (const ref of args.positionals) {
         at.ref = at.appId = ref;
-        await installOne(io, args, at, installed, declined);
+        await installOne(io, args, targets, at, installed, declined);
       }
     } catch (err) {
       if (args.positionals.length === 1) throw err;
@@ -327,9 +485,18 @@ export const installCommand: Command = {
   },
 };
 
+/** The target flags as one command line shows them, for the lock's holder record. */
+function targetWords(targets: Targets): string {
+  return [
+    ...(targets.local ? ["--local"] : []),
+    ...(targets.cloud === "all" ? ["--cloud"] : (targets.cloud ?? []).map((t) => `--${t}`)),
+  ].join(" ");
+}
+
 async function installOne(
   io: Io,
   args: ParsedArgs,
+  targets: Targets,
   at: { ref: string; appId: string },
   installed: string[],
   declined: string[],
@@ -337,7 +504,16 @@ async function installOne(
   const ref = at.ref;
   const app = await resolveAppReference(io, ref);
   at.appId = app.appId;
-  await withAppLock(app.appId, `starkeep install ${ref} --local`, async () => {
+  if (!targets.local) {
+    if (await approveCloudInstall(io, app, flag(args, "yes"))) {
+      await installInCloud(io, app, targets.cloud!);
+      installed.push(app.appId);
+    } else {
+      declined.push(app.appId);
+    }
+    return;
+  }
+  await withAppLock(app.appId, `starkeep install ${ref} ${targetWords(targets)}`, async () => {
     const manifest = app.folder.manifest;
     const name = manifest.name ?? app.appId;
     const install = installCommandFor(app);
@@ -360,6 +536,10 @@ async function installOne(
       return;
     }
     await runDependencyInstall(io, app.appId, install);
+    // The cloud goes first, so this computer never runs a version the cloud
+    // lacks, and a failed cloud step leaves this computer as it was.
+    if (targets.cloud) await installInCloud(io, app, targets.cloud);
+    io.event({ type: "progress", message: `Installing ${name} on this computer…` });
     const secretPath = await registerLocally(app);
     // A running app keeps the old manifest's behavior until it restarts.
     const wasRunning = (await serviceStatus(app.appId)).running;
@@ -384,16 +564,66 @@ async function installOne(
   });
 }
 
+/** Show the consent words once for a cloud-only install, and ask. */
+export async function approveCloudInstall(
+  io: Io,
+  app: ResolvedApp,
+  yes: boolean,
+): Promise<boolean> {
+  const manifest = app.folder.manifest;
+  const name = manifest.name ?? app.appId;
+  const lines = consentLines(manifest, installCommandFor(app));
+  if (!io.json) {
+    io.print();
+    io.print(`Install ${name} in the cloud?`);
+    io.print();
+    for (const line of lines) io.print(line);
+    io.print();
+  } else {
+    io.event({ type: "prompt-needed", reason: "consent", detail: lines.join("\n") });
+  }
+  if (!(await io.confirm("Approve and install?", { yes }))) {
+    io.print(`Not installed: ${name}.`);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Install `app`'s cloud surfaces. The operation deploys only the manifest the
+ * person approved, so it receives that manifest's digest and refuses a folder
+ * that changed since.
+ */
+export async function installInCloud(
+  io: Io,
+  app: ResolvedApp,
+  cloud: "all" | AppSurface[],
+): Promise<void> {
+  await runCloud(io, {
+    name: "install-cloud-app",
+    input: {
+      appId: app.appId,
+      appDir: app.appDir,
+      ...(cloud === "all" ? {} : { surfaces: cloud }),
+      manifestDigest: manifestDigest(app.folder.manifest),
+    },
+    owner: surfaceOwner(app.appId, cloud),
+    lock: `app-${app.appId}`,
+    command: `starkeep install ${app.appId} --cloud`,
+  });
+}
+
 export const uninstallCommand: Command = {
   name: "uninstall",
   summary: "Uninstall apps, keeping their data unless --delete-data",
-  usage: "<app>... --local [--delete-data] [--yes]",
-  lane: "none",
+  usage: "<app>... (--local | --cloud | --web | --mobile)... [--delete-data] [--yes]",
+  lane: "target",
   flags: {
     ...TARGET_FLAGS,
     "delete-data": {
       type: "boolean",
-      description: "Also delete the app's data on this computer. Asks for the app id typed back.",
+      description:
+        "Also delete the app's data (here with --local, in the cloud with --cloud). Asks for the app id typed back.",
     },
     yes: {
       type: "boolean",
@@ -401,31 +631,46 @@ export const uninstallCommand: Command = {
       description: "Skip the typed-back app id. Needed without a terminal.",
     },
   },
+  details:
+    "--cloud removes the app from the cloud entirely; --web or --mobile removes one surface and\n" +
+    "keeps the data side. Uninstalling keeps the app's data, and a reinstall gets it back.\n" +
+    "--delete-data deletes it too, after the app id is typed back (or --yes). In the cloud it\n" +
+    "needs --cloud: the data side stays while any surface does.",
   async run(io, args) {
-    requireLocalTarget(args, "uninstall");
+    const targets = targetsOf(args, "uninstall");
     if (args.positionals.length === 0) throw usageError("Name at least one app to uninstall.");
     const deleteData = flag(args, "delete-data");
     const typeBack = deleteData && !flag(args, "yes");
+    if (deleteData && targets.cloud !== null && targets.cloud !== "all") {
+      throw usageError(
+        "--delete-data in the cloud needs --cloud: --web and --mobile keep the data side.",
+      );
+    }
     // The typed id guards the whole command, so a run that cannot ask stops
     // before the first change.
     if (typeBack) requireTerminal(io, "Type the app id to delete its data.", TYPE_BACK_HINT);
-    await requireDataServer();
-    const registry = await readRegistry();
+    if (targets.cloud) requireCloud();
+    if (targets.local) await requireDataServer();
+    const registry = targets.local ? await readRegistry() : null;
+    for (const appId of args.positionals) {
+      if (targets.local && registry && !deleteData && !registry.some((r) => r.appId === appId))
+        throw new CliError(`${appId} is not installed on this computer.`);
+      if (typeBack) {
+        const here = targets.local && (!registry || registry.some((r) => r.appId === appId));
+        await confirmDeletion(io, appId, targets, here);
+      }
+    }
+    if (targets.cloud) {
+      for (const appId of args.positionals)
+        await uninstallFromCloud(io, appId, targets.cloud, deleteData);
+    }
+    if (!targets.local) {
+      io.event({ type: "result", ok: true, data: { uninstalled: args.positionals } });
+      return;
+    }
     for (const appId of args.positionals) {
       await withAppLock(appId, `starkeep uninstall ${appId} --local`, async () => {
         const installed = !registry || registry.some((r) => r.appId === appId);
-        if (!installed && !deleteData)
-          throw new CliError(`${appId} is not installed on this computer.`);
-        if (typeBack) {
-          const typed = await io.ask(`Type ${appId} to delete its data on this computer:`, {
-            flagHint: TYPE_BACK_HINT,
-          });
-          if (typed !== appId) {
-            throw new CliError(
-              `Nothing changed: the typed id did not match, so ${appId} ${installed ? "stays installed with its data" : "keeps its data"}.`,
-            );
-          }
-        }
         if (installed) {
           io.event({ type: "progress", message: `Uninstalling ${appId}…` });
           const result = await uninstallLocalApp(appId);
