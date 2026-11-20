@@ -70,7 +70,6 @@
  * as `IF NOT EXISTS ... DO`.
  */
 
-import pg from "pg";
 import { Kysely, PostgresDialect, sql } from "kysely";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import {
@@ -86,6 +85,7 @@ import {
   backfillNodeWatermarks,
   createNodeWatermarkTable,
 } from "./node-watermark-ddl";
+import { createDsqlPool } from "./dsql-pool";
 import { retryOnTransientDbError } from "./retry-on-access-denied";
 
 export interface SchemaInitOptions {
@@ -115,15 +115,18 @@ async function makeDb(opts: SchemaInitOptions): Promise<Kysely<Record<string, ne
     credentials: opts.credentials,
   });
   const token = await signer.getDbConnectAdminAuthToken();
-  const pgPool = new pg.Pool({
-    host: opts.hostname,
-    port: 5432,
-    database: "postgres",
-    user: "admin",
-    password: token,
-    ssl: { rejectUnauthorized: true },
-    max: 1,
-  });
+  const pgPool = createDsqlPool(
+    {
+      host: opts.hostname,
+      port: 5432,
+      database: "postgres",
+      user: "admin",
+      password: token,
+      ssl: { rejectUnauthorized: true },
+      max: 1,
+    },
+    { label: opts.hostname },
+  );
   return new Kysely({ dialect: new PostgresDialect({ pool: pgPool }) });
 }
 

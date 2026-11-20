@@ -16,7 +16,6 @@
  * to createDsqlRegistry; no manager role-chain is involved here.
  */
 
-import pg from "pg";
 import { Kysely, PostgresDialect, sql } from "kysely";
 
 // Row types are validated by the live DSQL schema at runtime; the dynamic
@@ -24,6 +23,7 @@ import { Kysely, PostgresDialect, sql } from "kysely";
 type RegistryDb = Record<string, Record<string, unknown>>;
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import type { AppManifest } from "@starkeep/admin-manifest";
+import { createDsqlPool } from "./dsql-pool";
 import { installerPgUser } from "./dsql-schema-init";
 import { isRetryableDsqlConflict, isTransientConnectionError } from "./retry-on-access-denied";
 
@@ -156,15 +156,18 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
       credentials: opts.credentials,
     });
     const token = await signer.getDbConnectAuthToken();
-    const pool = new pg.Pool({
-      host: opts.hostname,
-      port: 5432,
-      database: "postgres",
-      user: pgUser,
-      password: token,
-      ssl: { rejectUnauthorized: true },
-      max: 1,
-    });
+    const pool = createDsqlPool(
+      {
+        host: opts.hostname,
+        port: 5432,
+        database: "postgres",
+        user: pgUser,
+        password: token,
+        ssl: { rejectUnauthorized: true },
+        max: 1,
+      },
+      { label: opts.hostname },
+    );
     return new Kysely({ dialect: new PostgresDialect({ pool }) });
   }
 

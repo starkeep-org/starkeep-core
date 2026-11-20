@@ -69,7 +69,8 @@ vi.mock("pg", () => {
     }
     return { rows: [], rowCount: 0 };
   }
-  return { default: { Pool: FakePool }, Pool: FakePool };
+  // createDsqlPool subclasses pg.Client; FakePool never constructs one.
+  return { default: { Pool: FakePool, Client: class {} }, Pool: FakePool };
 });
 
 import {

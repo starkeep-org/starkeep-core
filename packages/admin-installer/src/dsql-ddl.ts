@@ -15,7 +15,6 @@
  */
 
 import { Kysely, PostgresDialect, sql } from "kysely";
-import pg from "pg";
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import type { FileAccess, LabelKey, SyncableTable } from "@starkeep/admin-manifest";
 import {
@@ -36,6 +35,7 @@ import {
   syncableIndexName,
 } from "@starkeep/shared-space-api";
 import type { AppSyncableTableInfo } from "@starkeep/shared-space-api";
+import { createDsqlPool } from "./dsql-pool";
 import { retryOnAccessDenied, retryOnTransientDbError } from "./retry-on-access-denied";
 import {
   NODE_WATERMARKS_TABLE,
@@ -136,29 +136,18 @@ async function makeDb(opts: DsqlDdlOptions): Promise<Kysely<DdlDb>> {
         credentials: opts.credentials,
       });
       const token = await signer.getDbConnectAdminAuthToken();
-      const pgPool = new pg.Pool({
-        host: opts.hostname,
-        port: 5432,
-        database: "postgres",
-        user: "admin",
-        password: token,
-        ssl: { rejectUnauthorized: true },
-        max: 1,
-      });
-      // pg.Pool emits 'error' on an *idle* client whose connection dies (e.g. a
-      // DSQL socket that times out between DDL statements). With no listener,
-      // Node treats it as an unhandled 'error' event and crashes the process
-      // (observed: `read ETIMEDOUT` aborting an uninstall mid-DDL). Swallow it
-      // to a warning: the pool discards the dead client and the next statement
-      // acquires a fresh one; a genuinely failed statement still rejects and is
-      // handled by the retryOnTransientDbError wrapper around the DDL body.
-      pgPool.on("error", (err) => {
-        console.warn(
-          `[diag] idle DSQL connection error (${opts.hostname}): ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      });
+      const pgPool = createDsqlPool(
+        {
+          host: opts.hostname,
+          port: 5432,
+          database: "postgres",
+          user: "admin",
+          password: token,
+          ssl: { rejectUnauthorized: true },
+          max: 1,
+        },
+        { label: opts.hostname },
+      );
       try {
         // Force an actual connection + round-trip. pg.Pool is lazy; without
         // this the propagation check would only fire on the first real query.
