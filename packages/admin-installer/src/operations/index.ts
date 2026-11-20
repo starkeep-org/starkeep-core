@@ -34,6 +34,7 @@ export function isOperationName(name: string): name is OperationName {
 export * from "./events";
 export * from "./errors";
 export type { Operation, OperationContext, OperationOverrides } from "./context";
+export type { AppSurface } from "../orchestrator";
 export type { InstallCloudAppInput, InstallCloudAppResult } from "./install-cloud-app";
 export type {
   InstallCloudDataServerInput,

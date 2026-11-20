@@ -20,7 +20,8 @@
     "./operations/events": "./src/operations/events.ts",
     "./operations/run": "./src/operations/run.ts",
     "./operations/delete-app-data": "./src/operations/delete-app-data.ts",
-    "./operations/install-local-app": "./src/operations/install-local-app.ts"
+    "./operations/install-local-app": "./src/operations/install-local-app.ts",
+    "./operations/errors": "./src/operations/errors.ts"
   },
   "scripts": {
     "cli:install-cloud-data-server": "tsx scripts/cli-install-cloud-data-server.ts",

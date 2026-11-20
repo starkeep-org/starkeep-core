@@ -13,6 +13,7 @@ import {
   adminPool,
   adminSessionStatus,
   hasAdminSessionFile,
+  type AdminSessionStatus,
   saveAdminSignIn,
   signOutAdmin,
 } from "@starkeep/operator/admin-session";
@@ -64,7 +65,8 @@ async function browserSignIn(
   }
 }
 
-async function loginAdmin(io: Io, noBrowser: boolean): Promise<void> {
+/** Sign in as the admin in the browser. Emits progress, not the result. */
+export async function loginAdmin(io: Io, noBrowser: boolean): Promise<AdminSessionStatus> {
   const pool = adminPool();
   if (!pool || !pool.cognitoDomain) {
     throw new CliError(
@@ -96,13 +98,15 @@ async function loginAdmin(io: Io, noBrowser: boolean): Promise<void> {
     type: "progress",
     message: `Signed in as the admin${status.email ? ` (${status.email})` : ""}. admin-web uses the same sign-in.`,
   });
-  io.event({ type: "result", ok: true, data: status });
+  return status;
 }
 
-async function loginSync(io: Io, noBrowser: boolean): Promise<void> {
+/** Sign this computer in to sync. Emits progress, not the result. */
+export async function loginSync(io: Io, noBrowser: boolean): Promise<{ email: string | null }> {
   const config = readConfig() ?? {};
   const cloudUrl = typeof config.apiGatewayUrl === "string" ? config.apiGatewayUrl : null;
-  if (!cloudUrl) throw new CliError("This computer has joined no cloud. Join one in admin-web first.");
+  if (!cloudUrl)
+    throw new CliError("This computer has joined no cloud. Join one in admin-web first.");
   let auth;
   try {
     auth = await fetchDeviceAuthConfig(cloudUrl);
@@ -111,7 +115,8 @@ async function loginSync(io: Io, noBrowser: boolean): Promise<void> {
   }
   const domain =
     auth.cognitoDomain ?? (typeof config.cognitoDomain === "string" ? config.cognitoDomain : null);
-  if (!domain) throw new CliError("This cloud names no sign-in page yet. Redeploy the cloud data server.");
+  if (!domain)
+    throw new CliError("This cloud names no sign-in page yet. Redeploy the cloud data server.");
   const signIn = await browserSignIn(io, { domain, clientId: auth.deviceClientId }, noBrowser);
   // The local data server redeems the code and keeps the sync session.
   let res: Response;
@@ -122,12 +127,14 @@ async function loginSync(io: Io, noBrowser: boolean): Promise<void> {
       body: JSON.stringify(signIn),
     });
   } catch {
-    throw new CliError("The local data server is not answering. Run `starkeep start data-server` first.");
+    throw new CliError(
+      "The local data server is not answering. Run `starkeep start data-server` first.",
+    );
   }
   const body = (await res.json().catch(() => ({}))) as { error?: string; email?: string };
   if (!res.ok) throw new CliError(`The sign-in did not finish: ${body.error ?? res.status}`);
   io.event({ type: "progress", message: `This computer syncs as ${body.email ?? "you"}.` });
-  io.event({ type: "result", ok: true, data: { email: body.email ?? null } });
+  return { email: body.email ?? null };
 }
 
 export const loginCommand: Command = {
@@ -136,7 +143,10 @@ export const loginCommand: Command = {
   usage: "--admin | --sync [--no-browser]",
   lane: "none",
   flags: {
-    admin: { type: "boolean", description: "Sign in as the Starkeep admin, for admin-web and the CLI." },
+    admin: {
+      type: "boolean",
+      description: "Sign in as the Starkeep admin, for admin-web and the CLI.",
+    },
     sync: { type: "boolean", description: "Sign this computer in to sync, as a data user." },
     "no-browser": { type: "boolean", description: "Print the sign-in address without opening it." },
   },
@@ -145,8 +155,11 @@ export const loginCommand: Command = {
     "first sign-in. The admin session ends after 12 hours without use.",
   async run(io, args) {
     const noBrowser = flag(args, "no-browser");
-    if (which(args, "sign in to") === "admin") await loginAdmin(io, noBrowser);
-    else await loginSync(io, noBrowser);
+    const data =
+      which(args, "sign in to") === "admin"
+        ? await loginAdmin(io, noBrowser)
+        : await loginSync(io, noBrowser);
+    io.event({ type: "result", ok: true, data });
   },
 };
 
@@ -156,7 +169,10 @@ export const logoutCommand: Command = {
   usage: "--admin | --sync",
   lane: "none",
   flags: {
-    admin: { type: "boolean", description: "End the admin session, for admin-web and the CLI alike." },
+    admin: {
+      type: "boolean",
+      description: "End the admin session, for admin-web and the CLI alike.",
+    },
     sync: { type: "boolean", description: "Sign this computer out of sync." },
   },
   async run(io, args) {
@@ -180,7 +196,9 @@ export const logoutCommand: Command = {
     try {
       res = await fetch(`${localDataServerUrlFromEnv()}/auth/sign-out`, { method: "POST" });
     } catch {
-      throw new CliError("The local data server is not answering. Run `starkeep start data-server` first.");
+      throw new CliError(
+        "The local data server is not answering. Run `starkeep start data-server` first.",
+      );
     }
     if (!res.ok) throw new CliError(`Sign-out failed (${res.status}).`);
     io.event({ type: "progress", message: "This computer no longer syncs." });
