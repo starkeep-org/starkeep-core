@@ -7,6 +7,7 @@ import { installStream } from "../lib/install-stream";
 import { installerEnv } from "@starkeep/admin-installer/aws-env";
 import { readFolderManifest } from "@starkeep/admin-installer/app-discovery";
 import { approvesManifest, manifestDigest } from "@starkeep/admin-installer/manifest-approval";
+import { requireAdmin } from "../lib/admin-auth";
 
 const STARKEEP_DIR = starkeepDir();
 
@@ -20,10 +21,6 @@ const PULUMI_VERBOSE_TRACE = false;
 export async function POST(req: Request, { params }: { params: Promise<{ appId: string }> }) {
   const { appId } = await params;
   const body = (await req.json()) as {
-    accessKeyId: string;
-    secretAccessKey: string;
-    sessionToken: string;
-    region: string;
     reattach?: boolean;
     resumeFrom?: string;
     /**
@@ -40,12 +37,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
     approvedManifest?: unknown;
   };
 
-  if (!body.accessKeyId || !body.secretAccessKey || !body.sessionToken || !body.region) {
-    return new Response(
-      JSON.stringify({ error: "accessKeyId, secretAccessKey, sessionToken, region required" }),
-      { status: 400, headers: { "Content-Type": "application/json" } },
-    );
-  }
+  // A reconnect only follows a run, so it needs no sign-in. Anything that may
+  // start a run mints the admin's credentials here, on the server.
+  const admin = body.reattach === true ? null : await requireAdmin();
+  if (admin instanceof Response) return admin;
 
   // Resolve the folder here and hand it to the CLI, so the install deploys
   // the copy the Dashboard shows: the local pin when the app is installed on
@@ -120,14 +115,16 @@ export async function POST(req: Request, { params }: { params: Promise<{ appId: 
   const sdkTraceFilePath = join(STARKEEP_DIR, `${appId}-install.sdk.trace`);
 
   const spawnEnv = {
-    ...installerEnv(
-      {
-        accessKeyId: body.accessKeyId,
-        secretAccessKey: body.secretAccessKey,
-        sessionToken: body.sessionToken,
-      },
-      body.region,
-    ),
+    ...(admin
+      ? installerEnv(
+          {
+            accessKeyId: admin.stsCredentials.accessKeyId,
+            secretAccessKey: admin.stsCredentials.secretAccessKey,
+            sessionToken: admin.stsCredentials.sessionToken,
+          },
+          admin.region,
+        )
+      : {}),
     ...(PULUMI_VERBOSE_TRACE
       ? {
           TF_LOG: "DEBUG",

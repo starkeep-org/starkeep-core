@@ -4,7 +4,8 @@ import { Button } from "@/components/ui/button";
 import { AppCard, type AppCardAction } from "@/components/AppCard";
 import { ACTION_OCCASIONAL, ACTION_OPEN } from "@/lib/action-colors";
 import { StatusBadge } from "./StatusBadge";
-import type { CloudConfig, CognitoSession } from "../lib/cloud-config";
+import type { CloudConfig } from "../lib/cloud-config";
+import type { AdminSessionView } from "../lib/admin-session-client";
 
 export type CloudHealth =
   | { status: "checking" }
@@ -70,7 +71,8 @@ export function healthToOnline(health: CloudHealth): boolean | null {
 
 interface Props {
   cloudConfig: CloudConfig | null;
-  cognitoSession: CognitoSession | null;
+  /** The admin session admin-web and the CLI share. */
+  adminSession: AdminSessionView | null;
   /** Bump to retrigger the online check. */
   refreshKey?: number;
   /** When provided, the card offers "Sign in as admin" / "Sign out of admin". */
@@ -80,7 +82,7 @@ interface Props {
 
 export function CloudDataServerStatus({
   cloudConfig,
-  cognitoSession,
+  adminSession,
   refreshKey = 0,
   onSignIn,
   onSignOut,
@@ -89,7 +91,7 @@ export function CloudDataServerStatus({
   const online = healthToOnline(state);
 
   const configured = !!cloudConfig?.apiGatewayUrl;
-  const signedIn = !!cognitoSession?.refreshToken;
+  const signedIn = adminSession?.signedIn === true;
 
   const signInButton = onSignIn && (
     <Button size="sm" className={ACTION_OPEN} onClick={onSignIn}>
@@ -130,7 +132,7 @@ export function CloudDataServerStatus({
           {configured ? (
             <>
               <StatusBadge online={online} />
-              {/* The operator's admin sign-in, held by this browser. The
+              {/* The operator's admin sign-in, which the CLI shares. The
                   machine's own sync sign-in is the This Machine section's, so
                   the badge names the admin to keep the two apart. */}
               {signedIn ? (
@@ -159,7 +161,7 @@ export function CloudDataServerStatus({
           : state.status === "offline"
             ? `Could not reach the cloud data server: ${state.reason}`
             : signedIn
-              ? cognitoSession?.userEmail
+              ? (adminSession?.email ?? undefined)
               : undefined
       }
       primary={primary}

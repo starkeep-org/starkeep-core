@@ -12,6 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  adminPasswordSignIn,
   FAKE_CLOUD_USER_ID,
   startFakeCloud,
   startLocalDataServer,
@@ -35,6 +36,18 @@ async function post(server: LocalDataServer, path: string, body: unknown) {
     body: JSON.stringify(body),
   });
   return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+}
+
+/**
+ * Sign the machine in as the harness does: a password at the pool with AWS
+ * credentials, then the refresh token to `/auth/login`.
+ */
+async function login(server: LocalDataServer, cloud: FakeCloud, email = EMAIL) {
+  const refreshToken = await adminPasswordSignIn(cloud.cognitoEndpoint, {
+    email,
+    password: PASSWORD,
+  });
+  return post(server, "/auth/login", { refreshToken });
 }
 
 async function status(server: LocalDataServer): Promise<Record<string, unknown>> {
@@ -81,7 +94,7 @@ describe("a machine that has not joined a cloud", () => {
   afterAll(async () => server?.stop());
 
   it("says to join a cloud first, rather than failing somewhere later", async () => {
-    const res = await post(server, "/auth/login", { email: EMAIL, password: PASSWORD });
+    const res = await post(server, "/auth/login", { refreshToken: "never-checked" });
     expect(res.status).toBe(503);
     expect(res.body["error"]).toMatch(/Join a cloud first/);
   });
@@ -121,7 +134,7 @@ describe("one machine's sign-in, from first sign-in to a session the pool ends",
       await settle(drive);
       expect(await cloudIds(cloud)).not.toContain(record.id);
 
-      const res = await post(server, "/auth/login", { email: EMAIL, password: PASSWORD });
+      const res = await login(server, cloud);
       expect(res.status, JSON.stringify(res.body)).toBe(200);
 
       await eventually(
@@ -144,7 +157,7 @@ describe("one machine's sign-in, from first sign-in to a session the pool ends",
     const before = await storedRefreshToken(server);
     expect(before).toBeTruthy();
 
-    const res = await post(server, "/auth/login", { email: EMAIL, password: PASSWORD });
+    const res = await login(server, cloud);
     expect(res.status, JSON.stringify(res.body)).toBe(200);
 
     const after = await storedRefreshToken(server);
@@ -174,7 +187,7 @@ describe("one machine's sign-in, from first sign-in to a session the pool ends",
     "resumes sync on the next sign-in, and carries what was written meanwhile",
     { timeout: 30_000 },
     async () => {
-      const res = await post(server, "/auth/login", { email: EMAIL, password: PASSWORD });
+      const res = await login(server, cloud);
       expect(res.status, JSON.stringify(res.body)).toBe(200);
 
       await eventually(
@@ -231,7 +244,7 @@ describe("a signed-in machine that starts while the pool is out of reach", () =>
     cloud.pool.addUser(EMAIL, PASSWORD, { sub: FAKE_CLOUD_USER_ID });
     server = await joinedMachine(cloud);
     await builtinAppCreds(server, "starkeep-drive");
-    const res = await post(server, "/auth/login", { email: EMAIL, password: PASSWORD });
+    const res = await login(server, cloud);
     expect(res.status, JSON.stringify(res.body)).toBe(200);
   }, 60_000);
 
@@ -289,7 +302,7 @@ describe("a machine that joined a different cloud than the one its config names"
 
   it("signs in to the pool of the cloud it joined", async () => {
     // The joined cloud's `/auth/config` names the pool, not the config file.
-    const res = await post(server, "/auth/login", { email: EMAIL, password: PASSWORD });
+    const res = await login(server, cloud);
     expect(res.status, JSON.stringify(res.body)).toBe(200);
   });
 });
@@ -315,7 +328,7 @@ describe("an account with no data library", () => {
     // The cloud refuses every sync call for an account outside
     // `starkeep-users`. Bound to such an account, the library could never
     // sync and would refuse every other account.
-    const res = await post(server, "/auth/login", { email: EMAIL, password: PASSWORD });
+    const res = await login(server, cloud);
     expect(res.status).toBe(403);
     expect(String(res.body["error"])).toMatch(/no library to sync/);
     expect(await status(server)).toMatchObject({ state: "signed-out", libraryUserId: null });
@@ -350,7 +363,7 @@ describe("a sign-out the pool did not hear", () => {
   }
 
   it("is finished by the next sign-in, so a second offline sign-out cannot overwrite it", async () => {
-    expect((await post(server, "/auth/login", { email: EMAIL, password: PASSWORD })).status).toBe(
+    expect((await login(server, cloud)).status).toBe(
       200,
     );
     const first = await storedRefreshToken(server);
@@ -369,7 +382,7 @@ describe("a sign-out the pool did not hear", () => {
     });
 
     cloud.pool.reachable = true;
-    expect((await post(server, "/auth/login", { email: EMAIL, password: PASSWORD })).status).toBe(
+    expect((await login(server, cloud)).status).toBe(
       200,
     );
     expect(cloud.pool.revoked.has(first!)).toBe(true);

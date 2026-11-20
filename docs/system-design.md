@@ -34,7 +34,7 @@ A platform component that the human user logs into. Its job is to drive **deploy
 - Installs and uninstalls apps by orchestrating Manager's chain of role assumptions through install-ddl (for per-app PG roles, schemas, and grants) and install-infra (for per-app Lambdas, log groups, API Gateway routes).
 - Surfaces install state, grant state, and configuration to the user.
 - Creates and manages the deployment's accounts: who administers it (`starkeep-admins`) and who has a library that syncs (`starkeep-users`).
-- Collects the email and password that sign this computer in to sync, and hands them to the local-data-server, which keeps the session. The admin app itself holds no data credential.
+- Starts the sync sign-in for this computer on Cognito's managed login page and hands the returned code to the local-data-server, which keeps the session. The admin app never sees the password and holds no data credential.
 
 Only accounts in `starkeep-admins` can sign in to the admin app. The admin app **cannot read or write user data in the cloud**. It has no standing data-plane permissions, and the temporary install-time policies it triggers are attached to dedicated install-time roles, never to the admin role itself. If a user wants to view their photos, they do that through the photos app, not through admin.
 
@@ -72,7 +72,7 @@ Install grants the app-specific schema, the app's filespace prefix, and the decl
 A platform component that runs **outside the cloud**, on the user's machine. It is the local analog of the cloud-data-server: it mediates access to local SQLite and the local filesystem, built from the same shared data-plane primitives the cloud uses (the type/category registry, the sync engine, the app-specific data plane, and the access-grant predicate).
 
 - It holds no AWS credentials and never talks to S3 or DSQL directly.
-- It syncs only after a person signs the computer in, with the email and password of an account in `starkeep-users`. Its library then belongs to that account.
+- It syncs only after a person signs the computer in on Cognito's managed login page, with an account in `starkeep-users`. Its library then belongs to that account.
 - It is the sole local writer/reader of the local data plane.
 - It runs the **sync engine**, which replicates the local data plane to and from the cloud-data-server. Because it carries data for _every_ installed app on the device, it ultimately needs broader data-type capability than any single app does — but, mirroring the cloud-data-server's role on the cloud side, it does not expose that breadth to apps; apps talk to it over its local HTTP API and are filtered to their declared grants.
 

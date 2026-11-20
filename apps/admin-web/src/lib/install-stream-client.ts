@@ -110,7 +110,9 @@ async function errorFromResponse(resp: Response): Promise<InstallOutcome> {
   return {
     kind: "error",
     message,
-    tokenExpired: false,
+    // The route needed the admin session and found none: the same remedy as
+    // an expired one, which is to sign in again.
+    tokenExpired: code === "NOT_SIGNED_IN",
     status: resp.status,
     ...(code !== undefined ? { code } : {}),
   };

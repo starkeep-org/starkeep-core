@@ -20,12 +20,7 @@ import {
   ListUserPoolClientsCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { readStarkeepConfig } from "@starkeep/operator/config";
-import type { STSCredentials } from "../lib/cognito-auth";
-
-interface SessionBody {
-  credentials: STSCredentials;
-  region: string;
-}
+import { withAdmin } from "../lib/admin-auth";
 
 export interface CognitoOutputs {
   deviceUserPoolClientId: string;
@@ -54,9 +49,15 @@ async function findDeviceClientId(
   return null;
 }
 
-/** Look up the device client and the managed login domain. Body: `{ credentials, region }`. */
-export async function POST(req: Request): Promise<Response> {
-  const body = (await req.json()) as SessionBody;
+/** Look up the device client and the managed login domain, as the signed-in admin. */
+export async function POST(_req: Request): Promise<Response> {
+  return withAdmin((admin) => lookUp(admin.region, admin.stsCredentials));
+}
+
+async function lookUp(
+  region: string,
+  credentials: { accessKeyId: string; secretAccessKey: string; sessionToken: string },
+): Promise<Response> {
   const config = readStarkeepConfig() as { userPoolId?: string; stackPrefix?: string };
   if (!config.userPoolId || !config.stackPrefix) {
     return Response.json(
@@ -65,11 +66,11 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
   const client = new CognitoIdentityProviderClient({
-    region: body.region,
+    region,
     credentials: {
-      accessKeyId: body.credentials.accessKeyId,
-      secretAccessKey: body.credentials.secretAccessKey,
-      sessionToken: body.credentials.sessionToken,
+      accessKeyId: credentials.accessKeyId,
+      secretAccessKey: credentials.secretAccessKey,
+      sessionToken: credentials.sessionToken,
     },
   });
   try {
@@ -100,7 +101,7 @@ export async function POST(req: Request): Promise<Response> {
     }
     const outputs: CognitoOutputs = {
       deviceUserPoolClientId,
-      cognitoDomain: `${domain}.auth.${body.region}.amazoncognito.com`,
+      cognitoDomain: `${domain}.auth.${region}.amazoncognito.com`,
     };
     return Response.json(outputs);
   } catch (err) {

@@ -42,20 +42,13 @@ import {
 } from "@aws-sdk/client-cognito-identity-provider";
 import { randomBytes } from "node:crypto";
 import { readStarkeepConfig } from "@starkeep/operator/config";
-import type { STSCredentials } from "../lib/cognito-auth";
+import { requireAdmin, type AdminCredentials } from "../lib/admin-auth";
 
 export const ADMINS_GROUP = "starkeep-admins";
 export const DATA_GROUP = "starkeep-users";
 const GROUPS = [ADMINS_GROUP, DATA_GROUP] as const;
 type Group = (typeof GROUPS)[number];
 
-interface SessionBody {
-  credentials: STSCredentials;
-  stackPrefix: string;
-  region: string;
-  /** The signed-in operator's `sub`, so the route can refuse acts on oneself. */
-  userSub?: string;
-}
 
 export interface UserView {
   /** The Cognito username, which is the user's `sub` in a pool keyed by email. */
@@ -68,13 +61,13 @@ export interface UserView {
   readonly data: boolean;
 }
 
-function cognito(body: SessionBody): CognitoIdentityProviderClient {
+function cognito(admin: AdminCredentials): CognitoIdentityProviderClient {
   return new CognitoIdentityProviderClient({
-    region: body.region,
+    region: admin.region,
     credentials: {
-      accessKeyId: body.credentials.accessKeyId,
-      secretAccessKey: body.credentials.secretAccessKey,
-      sessionToken: body.credentials.sessionToken,
+      accessKeyId: admin.stsCredentials.accessKeyId,
+      secretAccessKey: admin.stsCredentials.secretAccessKey,
+      sessionToken: admin.stsCredentials.sessionToken,
     },
   });
 }
@@ -165,10 +158,11 @@ function failed(err: unknown, act: string): Response {
 }
 
 /** Every account, with its two group memberships. */
-export async function LIST(req: Request): Promise<Response> {
-  const body = (await req.json()) as SessionBody;
+export async function LIST(_req: Request): Promise<Response> {
+  const admin = await requireAdmin();
+  if (admin instanceof Response) return admin;
   try {
-    return Response.json({ users: await listUsers(cognito(body), userPoolId()) });
+    return Response.json({ users: await listUsers(cognito(admin), userPoolId()) });
   } catch (err) {
     return failed(err, "list");
   }
@@ -176,7 +170,9 @@ export async function LIST(req: Request): Promise<Response> {
 
 /** Create an account. Body: session plus `{ email, admin?, data? }`. Cognito emails the invitation. */
 export async function CREATE(req: Request): Promise<Response> {
-  const body = (await req.json()) as SessionBody & {
+  const admin = await requireAdmin();
+  if (admin instanceof Response) return admin;
+  const body = (await req.json()) as {
     email?: string;
     admin?: boolean;
     data?: boolean;
@@ -186,7 +182,7 @@ export async function CREATE(req: Request): Promise<Response> {
     return Response.json({ error: "Enter the person's email address." }, { status: 400 });
   }
   try {
-    const client = cognito(body);
+    const client = cognito(admin);
     const poolId = userPoolId();
     const created = await client.send(
       new AdminCreateUserCommand({
@@ -222,7 +218,9 @@ export async function CREATE(req: Request): Promise<Response> {
 
 /** Add an account to a group or take it out. Body: session plus `{ username, group, member }`. */
 export async function SET_GROUP(req: Request): Promise<Response> {
-  const body = (await req.json()) as SessionBody & {
+  const admin = await requireAdmin();
+  if (admin instanceof Response) return admin;
+  const body = (await req.json()) as {
     username?: string;
     group?: string;
     member?: boolean;
@@ -232,7 +230,7 @@ export async function SET_GROUP(req: Request): Promise<Response> {
     return Response.json({ error: "username, group and member are required" }, { status: 400 });
   }
   try {
-    const client = cognito(body);
+    const client = cognito(admin);
     const poolId = userPoolId();
     if (member) {
       await client.send(
@@ -270,12 +268,14 @@ export async function SET_GROUP(req: Request): Promise<Response> {
  * device's session.
  */
 export async function SIGN_OUT_EVERYWHERE(req: Request): Promise<Response> {
-  const body = (await req.json()) as SessionBody & { username?: string };
+  const admin = await requireAdmin();
+  if (admin instanceof Response) return admin;
+  const body = (await req.json()) as { username?: string };
   if (!body.username) {
     return Response.json({ error: "username is required" }, { status: 400 });
   }
   try {
-    const client = cognito(body);
+    const client = cognito(admin);
     const poolId = userPoolId();
     await client.send(
       new AdminUserGlobalSignOutCommand({ UserPoolId: poolId, Username: body.username }),
@@ -295,16 +295,18 @@ export async function SIGN_OUT_EVERYWHERE(req: Request): Promise<Response> {
  * Enabling restores sign-in only; each device asks for a new sign-in.
  */
 export async function SET_ENABLED(req: Request): Promise<Response> {
-  const body = (await req.json()) as SessionBody & { username?: string; enabled?: boolean };
+  const admin = await requireAdmin();
+  if (admin instanceof Response) return admin;
+  const body = (await req.json()) as { username?: string; enabled?: boolean };
   const { username, enabled } = body;
   if (!username || typeof enabled !== "boolean") {
     return Response.json({ error: "username and enabled are required" }, { status: 400 });
   }
-  if (!enabled && body.userSub && username === body.userSub) {
+  if (!enabled && username === admin.sub) {
     return Response.json({ error: "You cannot disable your own account." }, { status: 409 });
   }
   try {
-    const client = cognito(body);
+    const client = cognito(admin);
     const poolId = userPoolId();
     if (enabled) {
       await client.send(new AdminEnableUserCommand({ UserPoolId: poolId, Username: username }));
@@ -352,12 +354,14 @@ export function temporaryPassword(): string {
  * still signed in. Self-service reset waits for the managed sign-in page.
  */
 export async function RESET_PASSWORD(req: Request): Promise<Response> {
-  const body = (await req.json()) as SessionBody & { username?: string };
+  const admin = await requireAdmin();
+  if (admin instanceof Response) return admin;
+  const body = (await req.json()) as { username?: string };
   if (!body.username) {
     return Response.json({ error: "username is required" }, { status: 400 });
   }
   try {
-    const client = cognito(body);
+    const client = cognito(admin);
     const poolId = userPoolId();
     const password = temporaryPassword();
     await client.send(

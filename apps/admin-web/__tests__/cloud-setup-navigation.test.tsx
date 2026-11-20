@@ -23,30 +23,30 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router";
 import { App } from "../src/App";
 import { CloudSetupWizard } from "../src/components/CloudSetupWizard";
-import { NOT_AN_ADMIN } from "../src/lib/cognito-auth";
 
-// Cognito is a network call to AWS. What the wizard needs from it is a session
-// that resumes and credentials that mint, so those are what the stub supplies.
-const refreshTokens = vi.fn(async () => ({ idToken: "id-token", refreshToken: "refresh-token" }));
-const getIdentityPoolCredentials = vi.fn(async () => ({
-  accessKeyId: "ASIA",
-  secretAccessKey: "secret",
-  sessionToken: "token",
-  expiration: new Date(Date.now() + 3_600_000).toISOString(),
-}));
-// Signing in with a password goes through these two, which each test that
-// signs in primes with the answer Cognito would give.
-const initiateAuth = vi.fn();
-const respondNewPasswordChallenge = vi.fn();
-vi.mock("../src/lib/cognito-auth", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../src/lib/cognito-auth")>()),
-  initiateAuth: (...args: unknown[]) => initiateAuth(...args),
-  respondNewPasswordChallenge: (...args: unknown[]) => respondNewPasswordChallenge(...args),
-  refreshTokens: (...args: unknown[]) => refreshTokens(...(args as [])),
-  getIdentityPoolCredentials: (...args: unknown[]) => getIdentityPoolCredentials(...(args as [])),
-  extractEmailFromIdToken: () => "operator@example.com",
-  startCredentialRefreshTimer: () => () => {},
-}));
+/**
+ * The admin session as admin-web's server reports it. The server holds the
+ * session in a file and ignores one from another pool or client, so the stub
+ * answers signed in only while the config still names the pool and client
+ * the session came from.
+ */
+const admin = { signedIn: true, email: "operator@example.com" };
+const SESSION_POOL = { userPoolId: "us-east-2_abc123", userPoolClientId: "client" };
+let currentConfig: Record<string, unknown> | null = null;
+
+function adminSessionAnswer(): Response {
+  const matches =
+    currentConfig?.userPoolId === SESSION_POOL.userPoolId &&
+    currentConfig?.userPoolClientId === SESSION_POOL.userPoolClientId;
+  const signedIn = admin.signedIn && matches;
+  return Response.json({
+    signedIn,
+    email: signedIn ? admin.email : null,
+    sub: signedIn ? "sub-admin" : null,
+    expiresAt: null,
+    browserSignIn: { available: true },
+  });
+}
 
 // The template generator is real; the spy records what step 1 asked it for.
 type TemplateInput = { stackPrefix?: string; deploymentName: string; adminEmail?: string };
@@ -76,7 +76,7 @@ const DEPLOYED_CONFIG = {
   apiGatewayUrl: "https://gw.execute-api.us-east-2.amazonaws.com",
 };
 
-/** A config that holds the three IDs step 2 asks for, and nothing deployed yet. */
+/** A config that holds the four outputs step 2 asks for, and nothing deployed yet. */
 const SIGN_IN_ONLY_CONFIG = {
   stackPrefix: DEPLOYED_CONFIG.stackPrefix,
   stage: DEPLOYED_CONFIG.stage,
@@ -84,6 +84,7 @@ const SIGN_IN_ONLY_CONFIG = {
   userPoolId: DEPLOYED_CONFIG.userPoolId,
   userPoolClientId: DEPLOYED_CONFIG.userPoolClientId,
   identityPoolId: DEPLOYED_CONFIG.identityPoolId,
+  cognitoDomain: DEPLOYED_CONFIG.cognitoDomain,
 };
 
 /** What the pool answers for the two outputs the wizard looks up after sign-in. */
@@ -123,7 +124,15 @@ function stubFetch(over: Partial<Record<string, () => Response>> = {}) {
     for (const [match, make] of Object.entries(over)) {
       if (url.includes(match)) return make!();
     }
-    if (url.includes("/api/config")) return Response.json({ config: DEPLOYED_CONFIG });
+    if (url.includes("/api/admin-session/sign-out")) {
+      admin.signedIn = false;
+      return Response.json({ revoked: true });
+    }
+    if (url.includes("/api/admin-session")) return adminSessionAnswer();
+    if (url.includes("/api/config")) {
+      currentConfig = DEPLOYED_CONFIG;
+      return Response.json({ config: DEPLOYED_CONFIG });
+    }
     if (url.includes("/api/runtime-config")) {
       return Response.json({
         localDataServerUrl: "http://127.0.0.1:9820",
@@ -151,13 +160,21 @@ function statefulConfig(
   over: Partial<Record<string, () => Response>> = {},
 ): Array<Record<string, unknown>> {
   let saved = initial;
+  currentConfig = saved;
   const patches: Array<Record<string, unknown>> = [];
-  const base = stubFetch({ "/api/config": () => Response.json({ config: saved }), ...over });
+  const base = stubFetch({
+    "/api/config": () => {
+      currentConfig = saved;
+      return Response.json({ config: saved });
+    },
+    ...over,
+  });
   vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
     if (init?.method === "PATCH" && String(input).includes("/api/config")) {
       const patch = JSON.parse(String(init.body)) as Record<string, unknown>;
       patches.push(patch);
       saved = { ...saved, ...patch };
+      currentConfig = saved;
       return Promise.resolve(Response.json({ config: saved }));
     }
     return base(input);
@@ -172,17 +189,18 @@ function supportRadixSelect(): void {
   Element.prototype.scrollIntoView = () => {};
 }
 
-const SESSION_KEY = "starkeep:cognito-session";
-
 beforeEach(() => {
   calls = [];
   localStorage.clear();
-  localStorage.setItem(
-    "starkeep:cognito-session",
-    JSON.stringify({ refreshToken: "refresh-token", userEmail: "operator@example.com" }),
-  );
+  admin.signedIn = true;
+  currentConfig = DEPLOYED_CONFIG;
   vi.stubGlobal("fetch", stubFetch());
 });
+
+/** The sign-in step's way to the managed login page, for a signed-out admin. */
+function signInLink(): HTMLAnchorElement {
+  return screen.getByRole("link", { name: "Open the sign-in page" }) as HTMLAnchorElement;
+}
 
 afterEach(() => {
   cleanup();
@@ -228,7 +246,7 @@ describe("resuming onto the last step", () => {
     expect(screen.queryByRole("heading", { name: "Bootstrap Stack" })).toBeNull();
   });
 
-  it("asks for only the three IDs sign-in uses", async () => {
+  it("asks for the four outputs sign-in uses", async () => {
     const user = userEvent.setup();
     await renderAtDeployStep();
     await user.click(screen.getByRole("button", { name: "Stack outputs" }));
@@ -236,20 +254,20 @@ describe("resuming onto the last step", () => {
     expect(await screen.findByLabelText("UserPoolId")).toBeTruthy();
     expect(screen.getByLabelText("UserPoolClientId")).toBeTruthy();
     expect(screen.getByLabelText("IdentityPoolId")).toBeTruthy();
+    // The admin signs in on the managed login page, which lives on this domain.
+    expect(screen.getByLabelText("CognitoDomain")).toBeTruthy();
     expect(screen.queryByLabelText("DeviceUserPoolClientId")).toBeNull();
-    expect(screen.queryByLabelText("CognitoDomain")).toBeNull();
   });
 });
 
 /**
- * Step 2 asks for the three IDs sign-in uses. The wizard reads the device
- * client and the managed login domain from the pool after every sign-in, so a
- * config without them, such as one from before a stack update added them,
- * fills itself in instead of reopening step 2.
+ * Step 2 asks for the four outputs sign-in uses. The wizard reads the device
+ * client from the pool after every sign-in, so a config without it fills
+ * itself in instead of reopening step 2.
  */
 describe("the outputs the wizard looks up", () => {
   it("fills in missing outputs once the session resumes, and lands on the deploy step", async () => {
-    const { deviceUserPoolClientId: _d, cognitoDomain: _c, ...older } = DEPLOYED_CONFIG;
+    const { deviceUserPoolClientId: _d, ...older } = DEPLOYED_CONFIG;
     const patches = statefulConfig(older);
     render(
       <MemoryRouter initialEntries={["/cloud-setup"]}>
@@ -275,7 +293,7 @@ describe("the outputs the wizard looks up", () => {
   });
 
   it("blocks the deploy and says why when the lookup fails, then retries", async () => {
-    const { deviceUserPoolClientId: _d, cognitoDomain: _c, ...older } = DEPLOYED_CONFIG;
+    const { deviceUserPoolClientId: _d, ...older } = DEPLOYED_CONFIG;
     let fail = true;
     let saved: Record<string, unknown> = older;
     const base = stubFetch({
@@ -400,7 +418,6 @@ describe("the outputs the wizard looks up", () => {
     expect(patches.at(-1)).toMatchObject({
       userPoolId: "us-east-2_other1",
       deviceUserPoolClientId: null,
-      cognitoDomain: null,
     });
   });
 
@@ -525,8 +542,8 @@ describe("a deploy that fails", () => {
 
     await user.click(await screen.findByRole("button", { name: /Sign in again/ }));
     expect(await screen.findByRole("heading", { name: "Sign In" })).toBeTruthy();
-    // The form, not the signed-in view, which carries the same heading.
-    expect(screen.getByLabelText("Email")).toBeTruthy();
+    // The way to the sign-in page, not the signed-in view, which carries the same heading.
+    expect(signInLink()).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Cloud Setup" })).toBeTruthy();
   });
 });
@@ -549,6 +566,7 @@ describe("the session across steps", () => {
   });
 
   it("asks for sign-in again when the app client changes", async () => {
+    statefulConfig(DEPLOYED_CONFIG);
     const user = userEvent.setup();
     await renderAtDeployStep();
 
@@ -559,7 +577,8 @@ describe("the session across steps", () => {
     await user.click(screen.getByRole("button", { name: "Continue" }));
 
     expect(await screen.findByRole("heading", { name: "Sign In" })).toBeTruthy();
-    expect(screen.getByLabelText("Email")).toBeTruthy();
+    // The session belongs to the old client, so the server reports none.
+    expect(await screen.findByRole("link", { name: "Open the sign-in page" })).toBeTruthy();
   });
 
   it("shows the signed-in admin on the sign-in step and lets the admin switch accounts", async () => {
@@ -570,8 +589,10 @@ describe("the session across steps", () => {
     expect(await screen.findByText("operator@example.com")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Sign in with a different account" }));
-    expect(await screen.findByLabelText("Email")).toBeTruthy();
-    expect(localStorage.getItem("starkeep:cognito-session")).toBeNull();
+    // The session ends for admin-web and the CLI alike, then the page opens.
+    await waitFor(() =>
+      expect(calls.some((u) => u.includes("/api/admin-session/sign-out"))).toBe(true),
+    );
   });
 });
 
@@ -590,7 +611,7 @@ describe("the admin email on step 1", () => {
     supportRadixSelect();
   });
 
-  it("requires a valid email before a new deployment's download, then carries it to sign-in", async () => {
+  it("requires a valid email before a new deployment's download", async () => {
     statefulConfig(null);
     const user = userEvent.setup();
     render(
@@ -622,10 +643,10 @@ describe("the admin email on step 1", () => {
     await user.type(await screen.findByLabelText("IdentityPoolId"), DEPLOYED_CONFIG.identityPoolId);
     await user.type(screen.getByLabelText("UserPoolClientId"), DEPLOYED_CONFIG.userPoolClientId);
     await user.type(screen.getByLabelText("UserPoolId"), DEPLOYED_CONFIG.userPoolId);
+    await user.type(screen.getByLabelText("CognitoDomain"), DEPLOYED_CONFIG.cognitoDomain);
     await user.click(screen.getByRole("button", { name: "Continue" }));
 
     expect(await screen.findByRole("heading", { name: "Sign In" })).toBeTruthy();
-    expect((screen.getByLabelText("Email") as HTMLInputElement).value).toBe("operator@example.com");
   });
 
   it("asks for no email when the config already holds a deployment, and bakes none in", async () => {
@@ -852,36 +873,16 @@ describe("an operator with an existing deployment and no local config", () => {
 });
 
 /**
- * The first-setup path: the stack emailed a temporary password, Cognito asks
- * for a permanent one, and the wizard moves on with the session stored. An
- * account outside `starkeep-admins` signs in to Cognito but gets no AWS
- * credentials, so the wizard stops there.
+ * The first-setup path: the admin signs in on the managed login page, which
+ * also has the person replace the emailed temporary password, and returns to
+ * the wizard. The server keeps the session; the wizard reads it and moves on.
  */
-/** What Cognito answers an admin's password sign-in with, when no challenge follows. */
-const ADMIN_TOKENS = {
-  idToken: "admin-id-token",
-  accessToken: "admin-access-token",
-  refreshToken: "admin-refresh-token",
-  expiresIn: 3600,
-};
-
 describe("signing in on the wizard", () => {
   beforeEach(() => {
-    localStorage.removeItem(SESSION_KEY);
+    admin.signedIn = false;
   });
 
-  it("takes the temporary password, sets a permanent one, and stores the session", async () => {
-    initiateAuth.mockResolvedValueOnce({
-      challengeName: "NEW_PASSWORD_REQUIRED",
-      session: "challenge-session",
-    });
-    respondNewPasswordChallenge.mockResolvedValueOnce({
-      idToken: "new-id-token",
-      accessToken: "new-access-token",
-      refreshToken: "new-refresh-token",
-      expiresIn: 3600,
-    });
-    const user = userEvent.setup();
+  it("sends the admin to the managed login page, to return to the wizard", async () => {
     render(
       <MemoryRouter initialEntries={["/cloud-setup"]}>
         <App />
@@ -891,47 +892,25 @@ describe("signing in on the wizard", () => {
     expect(
       await screen.findByRole("heading", { name: "Sign In" }, { timeout: 5_000 }),
     ).toBeTruthy();
-    await user.type(screen.getByLabelText("Email"), "operator@example.com");
-    await user.type(screen.getByLabelText("Password"), "Temp-pass1{Enter}");
-
-    await user.type(await screen.findByLabelText("New password"), "Perm-pass1");
-    await user.type(screen.getByLabelText("Confirm new password"), "Perm-pass1");
-    await user.click(screen.getByRole("button", { name: "Set password and sign in" }));
-
-    expect(await screen.findByRole("heading", { name: "Deploy Starkeep cloud" })).toBeTruthy();
-    expect(initiateAuth).toHaveBeenLastCalledWith(
-      expect.anything(),
-      "operator@example.com",
-      "Temp-pass1",
+    expect(signInLink().getAttribute("href")).toBe(
+      "/auth/start?client=admin&returnTo=%2Fcloud-setup",
     );
-    expect(respondNewPasswordChallenge).toHaveBeenLastCalledWith(
-      expect.anything(),
-      "challenge-session",
-      "operator@example.com",
-      "Perm-pass1",
-    );
-    expect(JSON.parse(localStorage.getItem(SESSION_KEY)!)).toMatchObject({
-      refreshToken: "new-refresh-token",
-    });
-    // The sign-in looks up the outputs step 2 no longer asks for.
-    expect(calls.filter((u) => u.includes("/api/cognito-outputs"))).toHaveLength(1);
+    // No page here takes a password.
+    expect(document.querySelector('input[type="password"]')).toBeNull();
   });
 
-  it("saves the outputs it looks up after the sign-in", async () => {
-    initiateAuth.mockResolvedValueOnce({ tokens: ADMIN_TOKENS });
+  it("saves the outputs it looks up once the admin is back from the sign-in page", async () => {
     const patches = statefulConfig(SIGN_IN_ONLY_CONFIG);
-    const user = userEvent.setup();
+    admin.signedIn = true;
     render(
       <MemoryRouter initialEntries={["/cloud-setup"]}>
         <App />
       </MemoryRouter>,
     );
 
-    await screen.findByRole("heading", { name: "Sign In" }, { timeout: 5_000 });
-    await user.type(screen.getByLabelText("Email"), "operator@example.com");
-    await user.type(screen.getByLabelText("Password"), "Perm-pass1{Enter}");
-
-    expect(await screen.findByRole("heading", { name: "Deploy Starkeep cloud" })).toBeTruthy();
+    expect(
+      await screen.findByRole("heading", { name: "Deploy Starkeep cloud" }, { timeout: 5_000 }),
+    ).toBeTruthy();
     expect(patches).toEqual([LOOKED_UP]);
     expect(
       (screen.getByRole("button", { name: "Deploy Starkeep cloud" }) as HTMLButtonElement).disabled,
@@ -939,26 +918,20 @@ describe("signing in on the wizard", () => {
   });
 
   it("completes the sign-in when the lookup fails, and says why on the deploy step", async () => {
-    initiateAuth.mockResolvedValueOnce({ tokens: ADMIN_TOKENS });
     const patches = statefulConfig(SIGN_IN_ONLY_CONFIG, {
       "/api/cognito-outputs": () =>
         Response.json({ error: "AccessDeniedException" }, { status: 500 }),
     });
-    const user = userEvent.setup();
+    admin.signedIn = true;
     render(
       <MemoryRouter initialEntries={["/cloud-setup"]}>
         <App />
       </MemoryRouter>,
     );
 
-    await screen.findByRole("heading", { name: "Sign In" }, { timeout: 5_000 });
-    await user.type(screen.getByLabelText("Email"), "operator@example.com");
-    await user.type(screen.getByLabelText("Password"), "Perm-pass1{Enter}");
-
-    expect(await screen.findByRole("heading", { name: "Deploy Starkeep cloud" })).toBeTruthy();
-    expect(JSON.parse(localStorage.getItem(SESSION_KEY)!)).toMatchObject({
-      refreshToken: "admin-refresh-token",
-    });
+    expect(
+      await screen.findByRole("heading", { name: "Deploy Starkeep cloud" }, { timeout: 5_000 }),
+    ).toBeTruthy();
     expect(patches).toEqual([]);
     expect(screen.getByText("AccessDeniedException")).toBeTruthy();
     expect(
@@ -966,41 +939,39 @@ describe("signing in on the wizard", () => {
     ).toBe(true);
   });
 
-  it("stops an account outside starkeep-admins on the sign-in step", async () => {
-    initiateAuth.mockResolvedValueOnce({
-      tokens: {
-        idToken: "member-id-token",
-        accessToken: "member-access-token",
-        refreshToken: "member-refresh-token",
-        expiresIn: 3600,
-      },
-    });
-    getIdentityPoolCredentials.mockRejectedValueOnce(new Error(NOT_AN_ADMIN));
-    const user = userEvent.setup();
+  it("shows why a sign-in did not finish, such as an account outside starkeep-admins", async () => {
+    const reason = "This account has no admin rights on this cloud. Ask an admin to make you one.";
+    render(
+      <MemoryRouter initialEntries={["/cloud-setup"]}>
+        <App />
+      </MemoryRouter>,
+    );
+    window.history.replaceState(null, "", `/cloud-setup?signInError=${encodeURIComponent(reason)}`);
+    cleanup();
     render(
       <MemoryRouter initialEntries={["/cloud-setup"]}>
         <App />
       </MemoryRouter>,
     );
 
-    await screen.findByRole("heading", { name: "Sign In" }, { timeout: 5_000 });
-    await user.type(screen.getByLabelText("Email"), "member@example.com");
-    await user.type(screen.getByLabelText("Password"), "Member-pass1{Enter}");
-
-    expect(await screen.findByText(NOT_AN_ADMIN)).toBeTruthy();
+    expect(await screen.findByText(new RegExp(reason))).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Deploy Starkeep cloud" })).toBeNull();
-    expect(localStorage.getItem(SESSION_KEY)).toBeNull();
+    // The notice is read once, so a reload does not show it again.
+    expect(window.location.search).toBe("");
   });
 });
 
 /**
- * An admin whose stored session no longer refreshes looks, to the wizard, like
- * no admin at all. The wizard must offer the sign-in form, not the signed-in
- * view and not a step that needs credentials.
+ * An admin whose session ended looks, to the wizard, like no admin at all. The
+ * wizard must offer the sign-in page, not the signed-in view and not a step
+ * that needs credentials.
  */
-describe("a stored session that no longer refreshes", () => {
-  it("lands on the sign-in form", async () => {
-    refreshTokens.mockRejectedValueOnce(new Error("Refresh Token has expired"));
+describe("a session that ended", () => {
+  beforeEach(() => {
+    admin.signedIn = false;
+  });
+
+  it("lands on the sign-in step", async () => {
     render(
       <MemoryRouter initialEntries={["/cloud-setup"]}>
         <App />
@@ -1010,12 +981,11 @@ describe("a stored session that no longer refreshes", () => {
     expect(
       await screen.findByRole("heading", { name: "Sign In" }, { timeout: 5_000 }),
     ).toBeTruthy();
-    expect(screen.getByLabelText("Email")).toBeTruthy();
+    expect(signInLink()).toBeTruthy();
     expect(screen.queryByText(/signed in as an admin/)).toBeNull();
   });
 
-  it("sends the operator from the deploy step to the sign-in form", async () => {
-    refreshTokens.mockRejectedValueOnce(new Error("Refresh Token has expired"));
+  it("sends the operator from the deploy step to the sign-in step", async () => {
     const user = userEvent.setup();
     render(
       <MemoryRouter initialEntries={["/cloud-setup"]}>
@@ -1029,7 +999,7 @@ describe("a stored session that no longer refreshes", () => {
     await user.click(await screen.findByRole("button", { name: "Go to Sign In" }));
 
     expect(await screen.findByRole("heading", { name: "Sign In" })).toBeTruthy();
-    expect(screen.getByLabelText("Email")).toBeTruthy();
+    expect(signInLink()).toBeTruthy();
   });
 });
 
@@ -1057,7 +1027,7 @@ describe("changing the user pool after a deploy", () => {
     await changeUserPool(user);
 
     expect(await screen.findByRole("heading", { name: "Sign In" })).toBeTruthy();
-    expect(screen.getByLabelText("Email")).toBeTruthy();
+    expect(await screen.findByRole("link", { name: "Open the sign-in page" })).toBeTruthy();
     expect(confirm).toHaveBeenCalledOnce();
     expect(patches.at(-1)).toMatchObject({
       userPoolId: "us-east-2_other1",
