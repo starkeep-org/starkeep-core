@@ -8,9 +8,11 @@ import type { Io } from "./io";
 /**
  * Whose credentials a command uses. `none` touches only this computer.
  * `admin` uses the signed-in Starkeep admin's session. `owner` uses the
- * terminal's AWS credentials, which only the bootstrap stack needs.
+ * terminal's AWS credentials, which only the bootstrap stack needs. `target`
+ * depends on the target flags: none for `--local`, the admin for the cloud.
+ * `setup` names both lanes its cloud phases use.
  */
-export type Lane = "none" | "admin" | "owner";
+export type Lane = "none" | "admin" | "owner" | "target" | "setup";
 
 export interface FlagSpec {
   type: "boolean" | "string";
@@ -53,6 +55,11 @@ export const LANE_TEXT: Record<Lane, string> = {
   none: "This computer only. Needs no cloud credentials.",
   admin: "Signs in as the Starkeep admin (starkeep login --admin).",
   owner: "Uses this terminal's AWS credentials, for the bootstrap stack only.",
+  target:
+    "--local needs no cloud credentials. --cloud, --web and --mobile sign in as the Starkeep admin.",
+  setup:
+    "--local needs no cloud credentials. --cloud creates the bootstrap stack with this terminal's\n" +
+    "AWS credentials, and does everything else as the Starkeep admin.",
 };
 
 export function flag(args: ParsedArgs, name: string): boolean {

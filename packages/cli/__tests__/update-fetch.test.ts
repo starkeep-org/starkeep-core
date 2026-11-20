@@ -12,6 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 const scratch = mkdtempSync(join(tmpdir(), "cli-update-"));
 process.env.STARKEEP_DIR = join(scratch, "dot-starkeep");
 
+type Target = import("../src/commands/update").Target;
 let fetchAll: typeof import("../src/commands/update").fetchAll;
 let createIo: typeof import("../src/io").createIo;
 let readUpdates: typeof import("../src/git").readUpdates;
@@ -62,9 +63,12 @@ function pushUpstream(work: string, text: string): void {
   git(work, "push", "-q", "origin", "main");
 }
 
-function target(dir: string) {
+function target(dir: string): Target {
   return {
-    row: { appId: "notes", status: "active", manifest: {}, sourceDir: dir },
+    appId: "notes",
+    dir,
+    local: { appId: "notes", status: "active", manifest: {}, sourceDir: dir } as Target["local"],
+    cloud: null,
     repo: dir,
   };
 }

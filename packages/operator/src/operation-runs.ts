@@ -48,6 +48,16 @@ export const RUN_SLOTS = {
 
 export type SlotOperation = keyof typeof RUN_SLOTS;
 
+/**
+ * The owners of the platform runs, as admin-web's routes and the CLI both
+ * name them, so each tool follows the other's run instead of refusing it.
+ */
+export const PLATFORM_RUN_OWNERS = {
+  installCloudDataServer: "cloud data server install",
+  uninstallCloudDataServer: "cloud data server uninstall",
+  installDrive: "Drive install",
+} as const;
+
 export type ResultEvent = Extract<OperationEvent, { type: "result" }>;
 
 export interface OperationRunOutcome {
