@@ -28,6 +28,7 @@ import { manifestDigest } from "../manifest-approval";
 import { installApp, manifestSurfaces, type AppSurface } from "../orchestrator";
 import { formatProbeReport, probeAnonymousSurface } from "../post-install-probe";
 import { protocolRefusal } from "../protocol-check";
+import type { PLATFORM_ENV_KEYS } from "../platform-env";
 import type { Operation, OperationContext } from "./context";
 import {
   CLOUD_DATA_SERVER_FIELDS,
@@ -191,7 +192,9 @@ function fillPlatformEnv(
   config: InstallerFileConfig,
   cloudAppsUserPoolClientId: string,
 ): void {
-  const platformEnv: Record<string, string> = {
+  // `platform-env.ts` names these keys for readers that compare the recorded
+  // manifest with the folder's; keep the two lists in step.
+  const platformEnv: Record<(typeof PLATFORM_ENV_KEYS)[number], string> = {
     // The browser-facing base URL is the CloudFront distribution, so the
     // browser's whole fan-out goes through the edge cache. Server-to-server
     // calls keep the gateway (STARKEEP_CLOUD_DATA_BASE in pulumi-program.ts).
@@ -207,7 +210,9 @@ function fillPlatformEnv(
   };
   for (const handler of manifest.infraRequirements.compute.handlers) {
     for (const key of Object.keys(handler.env)) {
-      if (handler.env[key] === "" && key in platformEnv) handler.env[key] = platformEnv[key]!;
+      if (handler.env[key] === "" && key in platformEnv) {
+        handler.env[key] = platformEnv[key as keyof typeof platformEnv];
+      }
     }
   }
 }
