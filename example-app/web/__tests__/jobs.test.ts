@@ -128,7 +128,14 @@ describe("a digest run", () => {
 /** Files the keywords fakes serve, by record id: text, or null when the fetch fails. */
 type Texts = Record<string, string | null>;
 
-function keywordFakes(opts: { texts: Texts; more?: boolean; unsigned?: string[] }): {
+function keywordFakes(opts: {
+  texts: Texts;
+  more?: boolean;
+  /** Ids the data server does not sign. */
+  unsigned?: string[];
+  /** Of those, the ids it names in `awaitingUpload`: bytes the cloud does not hold yet. */
+  awaiting?: string[];
+}): {
   deps: KeywordsDeps;
   sent: Sent[];
 } {
@@ -145,7 +152,7 @@ function keywordFakes(opts: { texts: Texts; more?: boolean; unsigned?: string[] 
         for (const id of ids) {
           if (!opts.unsigned?.includes(id)) urls[id] = { url: `https://bytes/${id}` };
         }
-        return { urls };
+        return opts.awaiting?.length ? { urls, awaitingUpload: opts.awaiting } : { urls };
       }
       return {};
     },
@@ -216,10 +223,11 @@ describe("a keywords run", () => {
     expect((await runKeywords(deps)).message).toBe("Read 1 file; more remain for the next run");
   });
 
-  it("leaves a file it could not read unflagged, for the next run", async () => {
+  it("leaves a file it could not fetch, or whose bytes are still uploading, unflagged", async () => {
     const { deps, sent } = keywordFakes({
       texts: { R1: "Kettle", R2: null, R3: "Moon" },
       unsigned: ["R3"],
+      awaiting: ["R3"],
     });
     const outcome = await runKeywords(deps);
     expect(outcome).toEqual({
@@ -227,6 +235,30 @@ describe("a keywords run", () => {
       message: "Read 1 file; 2 could not be read; none left",
     });
     expect(sent.at(-1)?.body?.json).toEqual({ labels: [{ recordId: "R1", key: "indexed" }] });
+  });
+
+  it("flags a file the cloud will never sign, with no keywords, so it never blocks newer files", async () => {
+    const { deps, sent } = keywordFakes({
+      texts: { R1: "Kettle", R2: "Moon" },
+      unsigned: ["R2"],
+    });
+    const outcome = await runKeywords(deps);
+    expect(outcome).toEqual({
+      status: 200,
+      message: "Read 1 file; 1 has no bytes to read; none left",
+    });
+    expect(sent.find((s) => s.path === "/data/labels/values")?.body?.json).toEqual({
+      labels: [
+        { recordId: "R1", key: "keyword", values: ["kettle"] },
+        { recordId: "R2", key: "keyword", values: [] },
+      ],
+    });
+    expect(sent.at(-1)?.body?.json).toEqual({
+      labels: [
+        { recordId: "R1", key: "indexed" },
+        { recordId: "R2", key: "indexed" },
+      ],
+    });
   });
 
   it("leaves a file unflagged when the network fails its fetch, and reads the rest", async () => {

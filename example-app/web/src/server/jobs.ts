@@ -190,8 +190,10 @@ const FETCH_AT_ONCE = 10;
  * not the keywords, marks a file as read, because a file may have no
  * keywords.
  *
- * A file whose text cannot be fetched keeps no flag. The run reports it, and
- * the next run tries it again.
+ * A file whose bytes are still uploading, or whose text cannot be fetched,
+ * keeps no flag. The run reports it, and the next run tries it again. A file
+ * the cloud will never serve bytes for gets the flag and no keywords, so it
+ * never holds a place in the oldest-first batch.
  */
 export async function runKeywords(deps: KeywordsDeps): Promise<JobOutcome> {
   try {
@@ -207,10 +209,15 @@ export async function runKeywords(deps: KeywordsDeps): Promise<JobOutcome> {
     const ids = listed.records.map((r) => r.id);
     if (ids.length === 0) return { status: 200, message: "No new files" };
 
-    const { urls } = (await deps.data("POST", "/data/records/file-urls", {
+    const { urls, awaitingUpload } = (await deps.data("POST", "/data/records/file-urls", {
       json: { ids },
-    })) as { urls: Record<string, { url: string } | undefined> };
-    const found = new Map<string, string[]>();
+    })) as { urls: Record<string, { url: string } | undefined>; awaitingUpload?: string[] };
+    // An id the data server neither signed nor named in `awaitingUpload` has
+    // no bytes the cloud will ever serve, so the run counts it as read with
+    // no keywords. An id in `awaitingUpload` waits for its upload.
+    const later = new Set(awaitingUpload ?? []);
+    const noBytes = ids.filter((id) => !urls[id] && !later.has(id));
+    const found = new Map<string, string[]>(noBytes.map((id) => [id, []]));
     for (let i = 0; i < ids.length; i += FETCH_AT_ONCE) {
       await Promise.all(
         ids.slice(i, i + FETCH_AT_ONCE).map(async (id) => {
@@ -243,7 +250,11 @@ export async function runKeywords(deps: KeywordsDeps): Promise<JobOutcome> {
       });
     }
 
-    const parts = [`Read ${read.length} ${read.length === 1 ? "file" : "files"}`];
+    const fetched = read.length - noBytes.length;
+    const parts = [`Read ${fetched} ${fetched === 1 ? "file" : "files"}`];
+    if (noBytes.length > 0) {
+      parts.push(`${noBytes.length} ${noBytes.length === 1 ? "has" : "have"} no bytes to read`);
+    }
     const unread = ids.length - read.length;
     if (unread > 0) parts.push(`${unread} could not be read`);
     parts.push(listed.nextCursor ? "more remain for the next run" : "none left");
