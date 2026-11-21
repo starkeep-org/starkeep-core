@@ -2,7 +2,7 @@
   "id": "example-app",
   "name": "Example App",
   "version": "0.1.0",
-  "protocolMinVersion": "1.0.0",
+  "protocolMinVersion": "1.1.0",
   "description": "Performs every app-facing data operation on invented plaintext files, and shows each request and its result. Safe to run on a real deployment: it reads and writes only its own example type.",
   "tier": "official",
   "targets": ["local", "cloud"],
@@ -37,6 +37,14 @@
       {
         "key": "sample",
         "description": "A bare flag: the example app's Load sample data button made this file."
+      },
+      {
+        "key": "keyword",
+        "description": "A set-valued keyword the example app's keywords job found in an example file's text, such as flour."
+      },
+      {
+        "key": "indexed",
+        "description": "A bare flag: the example app's keywords job has read this example file."
       }
     ],
     "appSpecificSyncable": {
@@ -73,6 +81,22 @@
       ]
     },
     "publicSharing": true,
+    "jobs": [
+      {
+        "name": "digest",
+        "handler": "static",
+        "mode": "readwrite",
+        "defaultTime": "07:00",
+        "description": "Writes a digest of your example files and notes as a new example file, and rotates the provider token you stored in the vault."
+      },
+      {
+        "name": "keywords",
+        "handler": "static",
+        "mode": "read",
+        "defaultTime": null,
+        "description": "Reads each new example file and labels it with up to three keywords from its text. It writes labels only."
+      }
+    ],
     "compute": {
       "enabled": true,
       "handlers": [

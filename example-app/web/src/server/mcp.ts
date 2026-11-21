@@ -24,24 +24,15 @@
  * `tools/list`, `tools/call` and `ping`.
  */
 
+import { delegationRefusal, loadAppCredentials, verifyDelegation } from "@starkeep/app-client";
+import { APP_ID, LABEL_KEYS, TABLES, decodeNote, encodeNote, trashFile } from "@example-app/common";
 import {
-  delegationRefusal,
-  loadAppCredentials,
-  signedFetch,
-  verifyDelegation,
-  type AppCredentials,
-  type DelegatedPrincipal,
-} from "@starkeep/app-client";
-import {
-  APP_ID,
-  EXAMPLE_TYPE,
-  LABEL_KEYS,
-  TABLES,
-  decodeNote,
-  encodeNote,
-  textMetrics,
-  trashFile,
-} from "@example-app/common";
+  DataCallError,
+  createExampleFile,
+  dataCaller,
+  type DataCall,
+  type RecordRow,
+} from "./data-call.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
 
@@ -50,41 +41,8 @@ type Args = Record<string, unknown>;
 class ToolError extends Error {}
 
 interface Ctx {
-  creds: AppCredentials;
-  who: DelegatedPrincipal;
-}
-
-/** One data call, with the delegation's token when there is one. */
-async function data(
-  ctx: Ctx,
-  method: string,
-  path: string,
-  body?: { json?: unknown; text?: string },
-): Promise<unknown> {
-  const res = await signedFetch(ctx.creds, path, {
-    method,
-    delegation: ctx.who.token,
-    ...(body?.json !== undefined
-      ? { body: JSON.stringify(body.json), headers: { "Content-Type": "application/json" } }
-      : body?.text !== undefined
-        ? { body: body.text, headers: { "Content-Type": "text/plain" } }
-        : {}),
-  });
-  const text = await res.text();
-  let parsed: unknown = text;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    // Keep the text.
-  }
-  if (!res.ok) {
-    const reason =
-      typeof parsed === "object" && parsed !== null && "error" in parsed
-        ? String((parsed as { error: unknown }).error)
-        : text.slice(0, 300);
-    throw new ToolError(`The data server answered ${res.status}: ${reason}`);
-  }
-  return parsed;
+  /** One data call, with the delegation's token when there is one. */
+  data: DataCall;
 }
 
 function str(args: Args, name: string): string {
@@ -93,15 +51,6 @@ function str(args: Args, name: string): string {
     throw new ToolError(`"${name}" is required`);
   }
   return value;
-}
-
-interface RecordRow {
-  id: string;
-  original_filename?: string | null;
-  created_at?: string;
-  /** As both data servers send it: `key` bare, `label` namespaced as `<app_id>/<key>`. */
-  labels?: { app_id: string; key: string; value?: string | null }[];
-  metadata?: Record<string, unknown>;
 }
 
 function summarize(r: RecordRow) {
@@ -144,7 +93,7 @@ const TOOLS: Record<string, Tool> = {
         params.set("label", `${APP_ID}/${LABEL_KEYS.tag}`);
         params.set("labelValue", args.tag);
       }
-      const body = (await data(ctx, "GET", `/data/records?${params}`)) as {
+      const body = (await ctx.data("GET", `/data/records?${params}`)) as {
         records: RecordRow[];
       };
       return body.records.map(summarize);
@@ -155,7 +104,7 @@ const TOOLS: Record<string, Tool> = {
     inputSchema: object({ recordId: { type: "string" } }, ["recordId"]),
     async run(ctx, args) {
       const id = encodeURIComponent(str(args, "recordId"));
-      const { url } = (await data(ctx, "GET", `/data/records/${id}/file-url`)) as { url: string };
+      const { url } = (await ctx.data("GET", `/data/records/${id}/file-url`)) as { url: string };
       const res = await fetch(url);
       if (!res.ok) throw new ToolError(`The file's content answered ${res.status}`);
       return await res.text();
@@ -168,7 +117,7 @@ const TOOLS: Record<string, Tool> = {
       "tag",
     ]),
     async run(ctx, args) {
-      await data(ctx, "POST", "/data/labels", {
+      await ctx.data("POST", "/data/labels", {
         json: {
           labels: [
             { recordId: str(args, "recordId"), key: LABEL_KEYS.tag, value: str(args, "tag") },
@@ -182,7 +131,7 @@ const TOOLS: Record<string, Tool> = {
     description: "List the user's notes about example files.",
     inputSchema: object({}),
     async run(ctx) {
-      const body = (await data(ctx, "GET", `/app-data/db/${TABLES.notes}`)) as {
+      const body = (await ctx.data("GET", `/app-data/db/${TABLES.notes}`)) as {
         rows: Record<string, unknown>[];
       };
       return body.rows.map(decodeNote);
@@ -205,7 +154,7 @@ const TOOLS: Record<string, Tool> = {
         pinned: args.pinned === true,
         updatedOn: new Date().toISOString(),
       });
-      await data(ctx, "POST", `/app-data/db/${TABLES.notes}`, { json: { row } });
+      await ctx.data("POST", `/app-data/db/${TABLES.notes}`, { json: { row } });
       return "Saved.";
     },
   },
@@ -213,7 +162,7 @@ const TOOLS: Record<string, Tool> = {
     description: "Delete the note about an example file. Needs read and write access.",
     inputSchema: object({ recordId: { type: "string" } }, ["recordId"]),
     async run(ctx, args) {
-      await data(ctx, "DELETE", `/app-data/db/${TABLES.notes}`, {
+      await ctx.data("DELETE", `/app-data/db/${TABLES.notes}`, {
         json: { where: { record_id: str(args, "recordId") } },
       });
       return "Deleted.";
@@ -223,25 +172,7 @@ const TOOLS: Record<string, Tool> = {
     description: "Create a new example file from text. Needs read and write access.",
     inputSchema: object({ name: { type: "string" }, text: { type: "string" } }, ["name", "text"]),
     async run(ctx, args) {
-      const text = str(args, "text");
-      const raw = str(args, "name").replace(/\.skexample$/, "");
-      const stored = (await data(
-        ctx,
-        "POST",
-        `/data/files?type=${encodeURIComponent(EXAMPLE_TYPE)}`,
-        { text },
-      )) as { contentHash: string; sizeBytes: number };
-      const body = (await data(ctx, "POST", "/data/records", {
-        json: {
-          type: EXAMPLE_TYPE,
-          fileName: `${raw}.skexample`,
-          contentType: "text/plain",
-          contentHash: stored.contentHash,
-          sizeBytes: stored.sizeBytes,
-          metadata: textMetrics(text),
-        },
-      })) as { record: RecordRow };
-      return summarize(body.record);
+      return summarize(await createExampleFile(ctx.data, str(args, "name"), str(args, "text")));
     },
   },
   trash_file: {
@@ -249,7 +180,7 @@ const TOOLS: Record<string, Tool> = {
       "Move an example file to the Trash, where the user can still recover it. Needs read and write access.",
     inputSchema: object({ recordId: { type: "string" } }, ["recordId"]),
     async run(ctx, args) {
-      await trashFile((method, path) => data(ctx, method, path), str(args, "recordId"));
+      await trashFile(ctx.data, str(args, "recordId"));
       return "Moved to the Trash.";
     },
   },
@@ -309,11 +240,14 @@ export async function handleMcp(req: Request): Promise<Response> {
       const creds = await loadAppCredentials(APP_ID);
       if (!creds) return failure(id, -32603, `${APP_ID} has no credentials on this surface`);
       try {
-        const value = await tool.run({ creds, who }, (params?.arguments ?? {}) as Args);
+        const value = await tool.run(
+          { data: dataCaller(creds, who.token) },
+          (params?.arguments ?? {}) as Args,
+        );
         const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
         return result(id, { content: [{ type: "text", text }], isError: false });
       } catch (err) {
-        if (!(err instanceof ToolError)) throw err;
+        if (!(err instanceof ToolError) && !(err instanceof DataCallError)) throw err;
         return result(id, { content: [{ type: "text", text: err.message }], isError: true });
       }
     }
