@@ -410,8 +410,7 @@ function Step1Bootstrap({
               </li>
               <li>
                 When the next page loads, verify <strong>Stack name</strong> is set to{" "}
-                <code>starkeep-bootstrap</code> (or <code>{"<stack-prefix>"}-bootstrap</code> if you
-                are using a custom stack prefix).
+                <code>{`${stackPrefix}-bootstrap`}</code>
               </li>
               <li>
                 Scroll to the bottom and click <strong>Next</strong>
