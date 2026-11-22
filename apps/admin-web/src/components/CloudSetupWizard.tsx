@@ -409,10 +409,15 @@ function Step1Bootstrap({
                 Click <strong>Next</strong>
               </li>
               <li>
-                When the next page loads, scroll to the bottom and click <strong>Next</strong>
+                When the next page loads, verify <strong>Stack name</strong> is set to{" "}
+                <code>starkeep-bootstrap</code> (or <code>{"<stack-prefix>"}-bootstrap</code> if you
+                are using a custom stack prefix).
               </li>
               <li>
                 Scroll to the bottom and click <strong>Next</strong>
+              </li>
+              <li>
+                When the next page loads, scroll to the bottom and click <strong>Next</strong>
               </li>
               <li>
                 When the next page loads, scroll to the bottom and check the checkbox “
