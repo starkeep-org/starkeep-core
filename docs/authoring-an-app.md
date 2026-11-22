@@ -1315,8 +1315,9 @@ ones to copy. `digest` runs in `readwrite` mode and writes a new file.
 `keywords` runs in `read` mode, reads each new file's text, labels the file,
 and leaves a flag so that the next run picks up where this one stopped.
 `example-app/web/src/server/jobs.ts` holds both routes and the routes the page
-calls to list, turn on and run each job. Probe's `probe-tick` is the
-fixture the platform's own suites run.
+calls to list each job with its consent link and to run it. The user turns a
+job on at the platform's consent page, not through the app. Probe's
+`probe-tick` is the fixture the platform's own suites run.
 
 ### 7d. Third-party credentials (cloud target only)
 
