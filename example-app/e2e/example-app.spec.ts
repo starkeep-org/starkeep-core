@@ -1304,13 +1304,17 @@ test("Background jobs: keywords reads each new file once and labels it", async (
 
   // A run reads at most 25 files, oldest first, so the earlier steps' files
   // may take more than one run. Each run reads only files it has not read.
+  // A fetch that fails leaves its file for the next run, so the loop runs
+  // again until a run reads every file it picked up.
   const lastRun = async () => cell("Background jobs", "keywords", "Last run");
   for (let runs = 0; ; runs++) {
     expect(runs, "keywords runs before none left").toBeLessThan(6);
     await click("Run keywords now", "Run keywords", RUN_TIMEOUT_MS);
     const message = (await (await lastRun()).textContent()) ?? "";
-    expect(message).toMatch(/^ok: Read \d+ files?; (more remain for the next run|none left)$/);
-    if (message.endsWith("none left")) break;
+    expect(message).toMatch(
+      /^ok: Read \d+ files?(; \d+ (has|have) no bytes to read)?(; \d+ could not be read)?; (more remain for the next run|none left)$/,
+    );
+    if (message.endsWith("none left") && !message.includes("could not be read")) break;
   }
   await expectLogged("POST", /^\/api\/jobs\/keywords\/run$/, 202);
   // The run labelled the file with the run's read token: its most frequent
