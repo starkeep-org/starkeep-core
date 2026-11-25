@@ -14,3 +14,5 @@ Always write plans, designs, and other long-form output to a file. Never leave s
 
 Use the Typescript LSP proactively as needed.
 Use Kysely when writing new SQL or modifying existing SQL.
+
+The Gherkin scenarios in `scenarios/` specify Starkeep's intended behavior from the user's point of view. These scenarios must be maintained as changes are made.
