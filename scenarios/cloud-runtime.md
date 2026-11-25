@@ -709,7 +709,7 @@ Scenario Outline: [CLOUD-RUN-050] An app's files are cached forever only on the 
     | []             | /assets/app.3f2a.js   | public, max-age=0, must-revalidate  |
 ```
 
-- **Notes:** Locally, an app passes the platform's reserved "/_immutable/*" here, and the same headers apply. In the cloud the edge serves that prefix from storage with the same headers, which [app-lifecycle.md](app-lifecycle.md) owns (APP-LIFE-125).
+- **Notes:** Locally, an app passes the platform's reserved "/\_immutable/\*" here, and the same headers apply. In the cloud the edge serves that prefix from storage with the same headers, which [app-lifecycle.md](app-lifecycle.md) owns (APP-LIFE-125).
 
 ```gherkin
 @local @cloud

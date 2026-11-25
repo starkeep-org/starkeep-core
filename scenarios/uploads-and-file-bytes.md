@@ -237,6 +237,7 @@ Scenario: [BYTES-019] A member's other devices never receive a large video whose
 ```
 
 - **Suboptimal:** Only the phone checks a video uploaded in parts against its content hash before sending. The cloud checks each part, but nothing in the cloud checks the assembled video against its content hash, so an uploader with a hashing defect could store wrong bytes under the video's key until someone deletes them. An optional cloud check after each large upload would close the gap.
+
 ## Freeing space after a large upload
 
 The cloud's storage cannot report a whole-file hash for a file uploaded in parts. Before "Free up space" lets such a file go, the computer hashes its own copy whole and in parts and compares the result with what the cloud's storage reports.

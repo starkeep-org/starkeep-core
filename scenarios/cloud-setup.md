@@ -868,7 +868,7 @@ Scenario: [CLOUD-SETUP-062] A cloud operator who installs with an AWS profile se
   And the cloud operator finds nothing changed in an account the shell's profile names
 ```
 
-- **Coverage:** `packages/admin-installer/__tests__/aws-env.test.ts` › "withoutAwsVariables removes every AWS_ variable and keeps the rest", "installerEnv hands the child only the wizard's credentials and region", and "useOnlyAwsCredentials replaces this process's AWS environment" (unit). No test runs an install with a profile set.
+- **Coverage:** `packages/admin-installer/__tests__/aws-env.test.ts` › "withoutAwsVariables removes every AWS\_ variable and keeps the rest", "installerEnv hands the child only the wizard's credentials and region", and "useOnlyAwsCredentials replaces this process's AWS environment" (unit). No test runs an install with a profile set.
 - **Notes:** An app's build step during an install finds no AWS variables in its own environment, but the same design notes (section "What removing the variables does") record that a build script can still read the installer's environment. That limit belongs to the app-credential question in [users-and-access.md](users-and-access.md).
 
 ```gherkin
