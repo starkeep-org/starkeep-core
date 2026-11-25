@@ -21,20 +21,20 @@ A behavior change starts here.
 
 ## Files
 
-| File | ID prefix | Covers |
-|---|---|---|
-| [cloud-setup.md](cloud-setup.md) | `CLOUD-SETUP-` | Bootstrapping a deployment in AWS, the cloud setup wizard, the first cloud operator account, custom domains, and teardown |
-| [app-lifecycle.md](app-lifecycle.md) | `APP-LIFE-` | Finding, installing, starting, stopping, upgrading, and uninstalling apps, locally and in the cloud |
-| [users-and-access.md](users-and-access.md) | `ACCESS-` | Roles, invitations, sign-in on every surface, device pairing, user-sharing, delegated access, and OAuth clients |
-| [local-data-server.md](local-data-server.md) | `LDS-` | The local data server on a computer: starting, stopping, watched folders, and running several instances |
-| [shared-data.md](shared-data.md) | `SHARED-` | Shared records, types, labels, deletion and trash, and public links |
-| [residency-and-stand-ins.md](residency-and-stand-ins.md) | `RESIDENCY-` | Which file bytes each device keeps, stand-ins, and freeing up space |
-| [app-data.md](app-data.md) | `APP-DATA-` | App tables, rows, queries and joins, snapshots, scheduled jobs, and the credential vault |
-| [sync.md](sync.md) | `SYNC-` | Keeping records and rows the same across a member's devices and the cloud |
-| [uploads-and-file-bytes.md](uploads-and-file-bytes.md) | `BYTES-` | Moving file bytes between devices and the cloud: upload order, large files, and files awaiting upload |
-| [cloud-runtime.md](cloud-runtime.md) | `CLOUD-RUN-` | What a cloud operator sees of the running cloud: app hosting, load, errors, and cost |
-| [drive.md](drive.md) | `DRIVE-` | The Drive app |
-| [app-development.md](app-development.md) | `APP-DEV-` | Building a Starkeep app: the app client, the SDK, the test kit, and the example app |
+| File                                                     | ID prefix      | Covers                                                                                                                    |
+| -------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| [cloud-setup.md](cloud-setup.md)                         | `CLOUD-SETUP-` | Bootstrapping a deployment in AWS, the cloud setup wizard, the first cloud operator account, custom domains, and teardown |
+| [app-lifecycle.md](app-lifecycle.md)                     | `APP-LIFE-`    | Finding, installing, starting, stopping, upgrading, and uninstalling apps, locally and in the cloud                       |
+| [users-and-access.md](users-and-access.md)               | `ACCESS-`      | Roles, invitations, sign-in on every surface, device pairing, user-sharing, delegated access, and OAuth clients           |
+| [local-data-server.md](local-data-server.md)             | `LDS-`         | The local data server on a computer: starting, stopping, watched folders, and running several instances                   |
+| [shared-data.md](shared-data.md)                         | `SHARED-`      | Shared records, types, labels, deletion and trash, and public links                                                       |
+| [residency-and-stand-ins.md](residency-and-stand-ins.md) | `RESIDENCY-`   | Which file bytes each device keeps, stand-ins, and freeing up space                                                       |
+| [app-data.md](app-data.md)                               | `APP-DATA-`    | App tables, rows, queries and joins, snapshots, scheduled jobs, and the credential vault                                  |
+| [sync.md](sync.md)                                       | `SYNC-`        | Keeping records and rows the same across a member's devices and the cloud                                                 |
+| [uploads-and-file-bytes.md](uploads-and-file-bytes.md)   | `BYTES-`       | Moving file bytes between devices and the cloud: upload order, large files, and files awaiting upload                     |
+| [cloud-runtime.md](cloud-runtime.md)                     | `CLOUD-RUN-`   | What a cloud operator sees of the running cloud: app hosting, load, errors, and cost                                      |
+| [drive.md](drive.md)                                     | `DRIVE-`       | The Drive app                                                                                                             |
+| [app-development.md](app-development.md)                 | `APP-DEV-`     | Building a Starkeep app: the app client, the SDK, the test kit, and the example app                                       |
 
 ## Scenario shape
 
@@ -70,16 +70,16 @@ Annotation lines cite only paths inside the repositories. Private notes outside 
 
 ## Tags
 
-| Tag | Meaning |
-|---|---|
-| `@local`, `@cloud`, `@mobile` | The environments where the behavior applies: a member's computer, the cloud deployment, or a phone |
-| `@intent:confirmed` | The author and the reviewer, or the maintainer, judge that the scenario states the intended correct behavior |
-| `@intent:unclear` | Someone doubts that the scenario states the correct behavior, and the maintainer has not yet decided |
-| `@coverage:full` | A passing test drives the scenario's path at a fitting tier and asserts every `Then` clause |
-| `@coverage:partial` | Tests cover only some `Then` clauses, only some environments, or only isolated parts of a multi-step flow |
-| `@coverage:none` | No passing test exercises the behavior |
-| `@suboptimal` | The maintainer accepts the behavior for now and wants to revisit it |
-| `@manual-review` | The maintainer wants to review the behavior by hand later, beyond its intent decision |
+| Tag                           | Meaning                                                                                                      |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `@local`, `@cloud`, `@mobile` | The environments where the behavior applies: a member's computer, the cloud deployment, or a phone           |
+| `@intent:confirmed`           | The author and the reviewer, or the maintainer, judge that the scenario states the intended correct behavior |
+| `@intent:unclear`             | Someone doubts that the scenario states the correct behavior, and the maintainer has not yet decided         |
+| `@coverage:full`              | A passing test drives the scenario's path at a fitting tier and asserts every `Then` clause                  |
+| `@coverage:partial`           | Tests cover only some `Then` clauses, only some environments, or only isolated parts of a multi-step flow    |
+| `@coverage:none`              | No passing test exercises the behavior                                                                       |
+| `@suboptimal`                 | The maintainer accepts the behavior for now and wants to revisit it                                          |
+| `@manual-review`              | The maintainer wants to review the behavior by hand later, beyond its intent decision                        |
 
 The coverage tags are optional. A scenario carries at most one.
 
@@ -98,12 +98,12 @@ Every scenario reads from the point of view of one user: a member, a cloud opera
 
 What the actor observes depends on the role:
 
-| Actor | Observes |
-|---|---|
-| member, visitor | what appears on screen, in a browser, on a phone, or later in their files |
-| cloud operator | admin-web's cloud sections, command output, the AWS console, and the running deployment |
-| local operator | admin-web's local sections, command output, and the computer's files |
-| app developer | what the app receives from the platform or shows its own user |
+| Actor           | Observes                                                                                |
+| --------------- | --------------------------------------------------------------------------------------- |
+| member, visitor | what appears on screen, in a browser, on a phone, or later in their files               |
+| cloud operator  | admin-web's cloud sections, command output, the AWS console, and the running deployment |
+| local operator  | admin-web's local sections, command output, and the computer's files                    |
+| app developer   | what the app receives from the platform or shows its own user                           |
 
 Only app developer scenarios state what an app receives. A scenario whose actor is a member or an operator never ends in "the app receives a forbidden answer". The scenario states what the member sees instead, such as an empty library or the app's error message. A behavior that matters to both roles gets one scenario per role.
 

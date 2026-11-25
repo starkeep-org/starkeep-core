@@ -1228,7 +1228,7 @@ Scenario: [SHARED-088] An app gets a time-limited URL for a record's file and th
   And the app's page loads the photo's bytes from the URL without further sign-in
 ```
 
-- **Coverage:** local: `apps/local-data-server/__tests__/integration/auth.test.ts` › "token-in-URL exemptions serves file bytes to an unauthenticated GET with a valid token" (integration) loads the bytes. Cloud: `journey.test.ts` › "tier-3 cloud journey: probe (prefix sk112) Part B: shared bytes via CloudFront signed URL — edge hit, tamper rejected, apps/* isolated" (tier-3). Both: `example-app.spec.ts` › "Example files: a derived copy, the copies and originals filters, and file URLs" (end to end, both projects) loads batch URLs. No test asserts the lifetime, the content type, or the size in a single file-URL answer.
+- **Coverage:** local: `apps/local-data-server/__tests__/integration/auth.test.ts` › "token-in-URL exemptions serves file bytes to an unauthenticated GET with a valid token" (integration) loads the bytes. Cloud: `journey.test.ts` › "tier-3 cloud journey: probe (prefix sk112) Part B: shared bytes via CloudFront signed URL — edge hit, tamper rejected, apps/\* isolated" (tier-3). Both: `example-app.spec.ts` › "Example files: a derived copy, the copies and originals filters, and file URLs" (end to end, both projects) loads batch URLs. No test asserts the lifetime, the content type, or the size in a single file-URL answer.
 
 - A file URL for a type the app cannot read is forbidden: see ACCESS-120 in [users-and-access.md](users-and-access.md) (formerly SHARED-089).
 
@@ -1360,7 +1360,7 @@ Scenario: [SHARED-099] An app's page that loads an invalid, forged, or expired f
   Then the page receives a forbidden answer and no bytes
 ```
 
-- **Coverage:** local: `auth.test.ts` › "token-in-URL exemptions rejects garbage and forged tokens" (integration). Cloud: `journey.test.ts` › "tier-3 cloud journey: probe (prefix sk112) Part B: shared bytes via CloudFront signed URL — edge hit, tamper rejected, apps/* isolated" (tier-3; a tampered URL). No test loads an expired URL in either environment.
+- **Coverage:** local: `auth.test.ts` › "token-in-URL exemptions rejects garbage and forged tokens" (integration). Cloud: `journey.test.ts` › "tier-3 cloud journey: probe (prefix sk112) Part B: shared bytes via CloudFront signed URL — edge hit, tamper rejected, apps/\* isolated" (tier-3; a tampered URL). No test loads an expired URL in either environment.
 - **Notes:** [users-and-access.md](users-and-access.md) links here for the local file link refusal.
 
 ```gherkin
@@ -1388,7 +1388,7 @@ Scenario: [SHARED-100] An app's page cannot load a tampered cloud file URL or re
   And the untampered URL loads from the edge cache on a second visit
 ```
 
-- **Coverage:** `journey.test.ts` › "tier-3 cloud journey: probe (prefix sk112) Part B: shared bytes via CloudFront signed URL — edge hit, tamper rejected, apps/* isolated" (tier-3, cloud).
+- **Coverage:** `journey.test.ts` › "tier-3 cloud journey: probe (prefix sk112) Part B: shared bytes via CloudFront signed URL — edge hit, tamper rejected, apps/\* isolated" (tier-3, cloud).
 
 ### Range serving
 
@@ -2585,7 +2585,7 @@ Scenario: [SHARED-177] A visitor may still see a stopped link's album for up to 
   And the visitor sees nothing on a visit after those limits
 ```
 
-- **Coverage:** `packages/admin-installer/__tests__/cloudfront-distribution.test.ts` › "/public-shares/* — anonymous public-share items pages caches for a minute, keyed by path and query string" (unit) covers the first clause. No test checks the URL lifetime after a stop.
+- **Coverage:** `packages/admin-installer/__tests__/cloudfront-distribution.test.ts` › "/public-shares/\* — anonymous public-share items pages caches for a minute, keyed by path and query string" (unit) covers the first clause. No test checks the URL lifetime after a stop.
 
 ### Public Links in admin-web
 
