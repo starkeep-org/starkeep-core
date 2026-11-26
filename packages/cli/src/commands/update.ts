@@ -72,7 +72,7 @@ async function installedTargets(names: string[]): Promise<Target[]> {
 
 /**
  * Check every repository first, then pull, so one refusal leaves every
- * repository as it was. Returns the repositories that moved.
+ * repository as it was. Records and returns the repositories that moved.
  */
 export function fetchAll(io: Io, targets: Target[]): RepoUpdate[] {
   const repos = [...new Set(targets.map((t) => t.repo).filter((r): r is string => r !== null))];
@@ -113,15 +113,29 @@ export function fetchAll(io: Io, targets: Target[]): RepoUpdate[] {
     else toPull.push(root);
   }
   const moved: RepoUpdate[] = [];
-  for (const root of toPull) {
-    const before = headCommit(root);
-    pullFastForward(root);
-    const after = headCommit(root);
-    moved.push({ root, before, after });
-    io.event({
-      type: "progress",
-      message: `Pulled ${root}: ${before.slice(0, 8)} → ${after.slice(0, 8)}.`,
-    });
+  try {
+    for (const root of toPull) {
+      const before = headCommit(root);
+      pullFastForward(root);
+      const after = headCommit(root);
+      moved.push({ root, before, after });
+      io.event({
+        type: "progress",
+        message: `Pulled ${root}: ${before.slice(0, 8)} → ${after.slice(0, 8)}.`,
+      });
+    }
+  } catch (err) {
+    // git can still refuse a pull that the checks passed, such as one that
+    // would overwrite an untracked file. The repositories pulled before it
+    // stay recorded, so `--undo` can return them.
+    if (moved.length === 0) throw err;
+    writeUpdates([...readUpdates(), { at: new Date().toISOString(), repos: moved }]);
+    throw new CliError(
+      `${(err as Error).message}\nThe repositories pulled before it are recorded. Run \`starkeep update --undo\` to return them, or fix the error and run the update again.`,
+    );
+  }
+  if (moved.length > 0) {
+    writeUpdates([...readUpdates(), { at: new Date().toISOString(), repos: moved }]);
   }
   return moved;
 }
@@ -280,7 +294,6 @@ export const updateCommand: Command = {
     const noFetch = flag(args, "no-fetch");
     const moved = noFetch ? [] : fetchAll(io, targets);
     if (moved.length > 0) {
-      writeUpdates([...readUpdates(), { at: new Date().toISOString(), repos: moved }]);
       io.event({
         type: "progress",
         message: "Run `starkeep update --undo` to return to the commits before this pull.",
