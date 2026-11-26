@@ -4,6 +4,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { readRegistry } from "@starkeep/operator/apps";
 import { daemonPort } from "@starkeep/operator/commands";
 import { readConfig } from "@starkeep/operator/config";
 import { PIDS_DIR, spawnDaemon, stopById } from "@starkeep/operator/daemons";
@@ -34,8 +35,25 @@ function recordedIds(options: { includeAdmin: boolean }): string[] {
     .filter((id) => options.includeAdmin || id !== "admin-web");
 }
 
+/** Why an app cannot start because this computer has not installed it, or null. */
+async function notInstalled(id: string): Promise<string | null> {
+  if ((PLATFORM_SERVICES as readonly string[]).includes(id)) return null;
+  const registry = await readRegistry();
+  if (registry === null) {
+    return `The local data server is not answering, so ${id} cannot start. Run \`starkeep start data-server\` first.`;
+  }
+  return registry.some((r) => r.appId === id)
+    ? null
+    : `${id} is not installed on this computer. Run \`starkeep install ${id} --local\`.`;
+}
+
 export async function startOne(io: Io, id: string): Promise<boolean> {
   const name = displayName(id);
+  const missing = await notInstalled(id);
+  if (missing) {
+    io.warn(missing);
+    return false;
+  }
   io.event({ type: "progress", message: `Starting ${name}…` });
   const outcome = await startService(id);
   if (outcome.ok) {
@@ -223,6 +241,9 @@ export const logsCommand: Command = {
       throw usageError("Name one service or app: starkeep logs <name>");
     const id = serviceId(args.positionals[0]!);
     const path = join(PIDS_DIR, `${id}.log`);
+    if (io.json) {
+      throw usageError(`starkeep logs prints text only. A script can read the log file: ${path}`);
+    }
     if (!existsSync(path)) {
       throw new CliError(`No log for ${displayName(id)} at ${path}. It has not been started here.`);
     }
