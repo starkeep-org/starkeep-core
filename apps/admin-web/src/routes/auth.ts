@@ -16,8 +16,16 @@
  * only for an admin-web on its default port; `GET /api/admin-session` says so.
  */
 import { readConfig } from "@starkeep/operator/config";
-import { saveAdminSignIn, signOutAdmin, adminSessionStatus } from "@starkeep/operator/admin-session";
-import { startAuthorization } from "@starkeep/operator/oauth";
+import {
+  saveAdminSignIn,
+  signOutAdmin,
+  adminSessionStatus,
+} from "@starkeep/operator/admin-session";
+import {
+  authorizationRefusal,
+  refusedSignInMessage,
+  startAuthorization,
+} from "@starkeep/operator/oauth";
 import { localDataServerUrlFromEnv } from "@starkeep/operator/urls";
 import {
   ADMIN_WEB_CALLBACK_PATH,
@@ -47,7 +55,8 @@ const REDIRECT_URI = `http://localhost:${ADMIN_WEB_DEFAULT_PORT}${ADMIN_WEB_CALL
 
 /** A path on admin-web itself, never another site. */
 function safeReturnTo(value: string | null): string {
-  if (!value || !value.startsWith("/") || value.startsWith("//") || value.includes("\\")) return "/";
+  if (!value || !value.startsWith("/") || value.startsWith("//") || value.includes("\\"))
+    return "/";
   return value;
 }
 
@@ -70,13 +79,15 @@ export function browserSignInUnavailable(requestUrl: string): string | null {
   return null;
 }
 
-async function signInTarget(client: Client): Promise<{ domain: string; clientId: string } | string> {
+async function signInTarget(
+  client: Client,
+): Promise<{ domain: string; clientId: string } | string> {
   const config = readConfig() ?? {};
   const configDomain = typeof config.cognitoDomain === "string" ? config.cognitoDomain : null;
   if (client === "admin") {
     const clientId = typeof config.userPoolClientId === "string" ? config.userPoolClientId : null;
     if (!clientId || !configDomain) {
-      return "Finish the cloud setup's Stack outputs step first: the admin sign-in needs the user pool client and the CognitoDomain output.";
+      return "Finish the cloud setup's Stack outputs step first: the admin sign-in needs the user pool client and the CognitoDomain output. A bootstrap stack from before the managed sign-in page has no CognitoDomain output: update it first with `scripts/update-bootstrap.sh --apply`.";
     }
     return { domain: configDomain, clientId };
   }
@@ -126,7 +137,13 @@ export async function START(req: Request): Promise<Response> {
 
   const now = Date.now();
   for (const [state, p] of pending) if (now - p.createdAt > PENDING_TTL_MS) pending.delete(state);
-  const start = startAuthorization({ ...target, redirectUri: REDIRECT_URI });
+  const start = startAuthorization({
+    ...target,
+    redirectUri: REDIRECT_URI,
+    askPassword: client === "admin",
+  });
+  const refusal = await authorizationRefusal(start.url);
+  if (refusal) return back(returnTo, { signInError: refusedSignInMessage(refusal) });
   pending.set(start.state, {
     client,
     ...target,
@@ -144,7 +161,9 @@ export async function CALLBACK(req: Request): Promise<Response> {
   const p = pending.get(state);
   pending.delete(state);
   if (!p || Date.now() - p.createdAt > PENDING_TTL_MS) {
-    return back("/", { signInError: "This sign-in did not start here, or it expired. Start it again." });
+    return back("/", {
+      signInError: "This sign-in did not start here, or it expired. Start it again.",
+    });
   }
   const error = url.searchParams.get("error");
   if (error) {
