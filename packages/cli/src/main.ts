@@ -163,7 +163,7 @@ export async function main(argv: string[], options: MainOptions): Promise<number
       io.event({
         type: "result",
         ok: false,
-        ...(cli?.data ? { data: cli.data } : {}),
+        ...(cli?.data !== undefined ? { data: cli.data } : {}),
         error: {
           message,
           ...(cli?.code ? { code: cli.code } : {}),

@@ -1,19 +1,15 @@
-import { fetchMtdCostsByService } from "@starkeep/operator/costs";
+import { fetchMtdCostsByService, projectFullMonth } from "@starkeep/operator/costs";
 import { withAdmin } from "../lib/admin-auth";
 
-/** Month-to-date cost by service, as the signed-in admin. */
+/** Month-to-date cost by service and its month-end projection, as the signed-in admin. */
 export async function POST(_req: Request) {
   return withAdmin(async (admin) => {
     if (!admin.stackPrefix) {
       return Response.json({ error: "~/.starkeep/config.json names no stack" }, { status: 409 });
     }
     try {
-      const costs = await fetchMtdCostsByService(
-        admin.stsCredentials,
-        admin.stackPrefix,
-        admin.region,
-      );
-      return Response.json({ costs });
+      const costs = await fetchMtdCostsByService(admin.stsCredentials, admin.stackPrefix, admin.region);
+      return Response.json({ costs, projection: costs ? projectFullMonth(costs) : null });
     } catch (err) {
       const name = err instanceof Error ? err.name : "unknown";
       const message = err instanceof Error ? err.message : String(err);

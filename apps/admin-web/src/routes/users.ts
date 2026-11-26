@@ -1,75 +1,30 @@
 /**
- * Managing the deployment's accounts: listing them, creating one, moving one
- * in and out of the two groups, resetting a password, signing one out of every
- * device, and disabling one.
+ * Managing the deployment's accounts from admin-web's Users section. The
+ * logic, the two groups and the refusals live in `@starkeep/operator/users`,
+ * which `starkeep user` calls too. Each route here reads its body, acts as
+ * the signed-in admin, and answers the account list.
  *
- * ## The two groups
- *
- * - `starkeep-admins` administers the deployment. Only its members get AWS
- *   credentials from the identity pool.
- * - `starkeep-users` has a data library that syncs through the cloud. The
- *   cloud data server checks it on every data call.
- *
- * An admin may be in either or both. Creating an account sends Cognito's
- * invitation email with a temporary password; there is no self-service sign-up.
- *
- * ## Whose credentials
- *
- * Cognito user management is the admin-app role's own grant (see
- * `admin-app-policy.ts`), so these calls run as the signed-in operator. A
- * device's only credential is its owner's sign-in, so every act on devices is
- * an act on the account in the pool, and nothing here reaches SSM.
- *
- * ## What it refuses
- *
- * Removing the last enabled admin, disabling it, and disabling the signed-in
- * operator. Each would leave nobody able to administer the deployment. A
- * disabled admin cannot sign in, so the count leaves disabled admins out.
+ * A refusal (the last enabled admin, the signed-in admin) answers 409, and
+ * bad input answers 400.
  */
-
-import {
-  AdminAddUserToGroupCommand,
-  AdminCreateUserCommand,
-  AdminDisableUserCommand,
-  AdminEnableUserCommand,
-  AdminRemoveUserFromGroupCommand,
-  AdminSetUserPasswordCommand,
-  AdminUserGlobalSignOutCommand,
-  CognitoIdentityProviderClient,
-  ListUsersCommand,
-  ListUsersInGroupCommand,
-  type UserType,
-} from "@aws-sdk/client-cognito-identity-provider";
-import { randomBytes } from "node:crypto";
 import { readStarkeepConfig } from "@starkeep/operator/config";
-import { requireAdmin, type AdminCredentials } from "../lib/admin-auth";
+import {
+  createUser,
+  GROUPS,
+  listUsers,
+  resetPassword,
+  setEnabled,
+  setGroup,
+  signOutEverywhere,
+  userPool,
+  UserInputError,
+  UserRefusal,
+  type Group,
+  type UserPool,
+} from "@starkeep/operator/users";
+import { requireAdmin } from "../lib/admin-auth";
 
-export const ADMINS_GROUP = "starkeep-admins";
-export const DATA_GROUP = "starkeep-users";
-const GROUPS = [ADMINS_GROUP, DATA_GROUP] as const;
-type Group = (typeof GROUPS)[number];
-
-export interface UserView {
-  /** The Cognito username, which is the user's `sub` in a pool keyed by email. */
-  readonly username: string;
-  readonly email: string | null;
-  readonly enabled: boolean;
-  /** Cognito's account status, e.g. FORCE_CHANGE_PASSWORD until first sign-in. */
-  readonly status: string | null;
-  readonly admin: boolean;
-  readonly data: boolean;
-}
-
-function cognito(admin: AdminCredentials): CognitoIdentityProviderClient {
-  return new CognitoIdentityProviderClient({
-    region: admin.region,
-    credentials: {
-      accessKeyId: admin.stsCredentials.accessKeyId,
-      secretAccessKey: admin.stsCredentials.secretAccessKey,
-      sessionToken: admin.stsCredentials.sessionToken,
-    },
-  });
-}
+export { ADMINS_GROUP, DATA_GROUP, temporaryPassword, type UserView } from "@starkeep/operator/users";
 
 function userPoolId(): string {
   const config = readStarkeepConfig() as { userPoolId?: string };
@@ -78,301 +33,84 @@ function userPoolId(): string {
   return config.userPoolId;
 }
 
-async function allUsers(
-  client: CognitoIdentityProviderClient,
-  poolId: string,
-): Promise<UserType[]> {
-  const users: UserType[] = [];
-  let token: string | undefined;
-  do {
-    const page = await client.send(
-      new ListUsersCommand({ UserPoolId: poolId, PaginationToken: token }),
-    );
-    users.push(...(page.Users ?? []));
-    token = page.PaginationToken;
-  } while (token);
-  return users;
-}
-
-async function membersOf(
-  client: CognitoIdentityProviderClient,
-  poolId: string,
-  group: Group,
-  { enabledOnly = false } = {},
-): Promise<Set<string>> {
-  const members = new Set<string>();
-  let token: string | undefined;
-  do {
-    const page = await client.send(
-      new ListUsersInGroupCommand({ UserPoolId: poolId, GroupName: group, NextToken: token }),
-    );
-    for (const user of page.Users ?? [])
-      if (user.Username && !(enabledOnly && user.Enabled === false)) members.add(user.Username);
-    token = page.NextToken;
-  } while (token);
-  return members;
-}
-
-/** Whether taking `username` out of the enabled admins would leave none. */
-async function isLastEnabledAdmin(
-  client: CognitoIdentityProviderClient,
-  poolId: string,
-  username: string,
-): Promise<boolean> {
-  // A disabled admin cannot sign in, so only enabled admins count.
-  const admins = await membersOf(client, poolId, ADMINS_GROUP, { enabledOnly: true });
-  if (!admins.has(username)) return false;
-  admins.delete(username);
-  return admins.size === 0;
-}
-
-const LAST_ADMIN_ERROR = "This is the last admin. Make someone else an admin first.";
-
-async function listUsers(
-  client: CognitoIdentityProviderClient,
-  poolId: string,
-): Promise<UserView[]> {
-  const [users, admins, data] = await Promise.all([
-    allUsers(client, poolId),
-    membersOf(client, poolId, ADMINS_GROUP),
-    membersOf(client, poolId, DATA_GROUP),
-  ]);
-  return users
-    .filter((u): u is UserType & { Username: string } => typeof u.Username === "string")
-    .map((u) => ({
-      username: u.Username,
-      email: u.Attributes?.find((a) => a.Name === "email")?.Value ?? null,
-      enabled: u.Enabled !== false,
-      status: u.UserStatus ?? null,
-      admin: admins.has(u.Username),
-      data: data.has(u.Username),
-    }))
-    .sort((a, b) => (a.email ?? a.username).localeCompare(b.email ?? b.username));
-}
-
-function failed(err: unknown, act: string): Response {
-  const message = err instanceof Error ? err.message : String(err);
-  console.error(`[api/users] ${act} failed`, message);
-  return Response.json({ error: message }, { status: 500 });
+/**
+ * Run `act` as the signed-in admin, then answer the account list. A refusal
+ * answers 409, bad input 400, and any other failure 500.
+ */
+async function acting(
+  label: string,
+  act: (pool: UserPool) => Promise<Record<string, unknown> | void>,
+): Promise<Response> {
+  const admin = await requireAdmin();
+  if (admin instanceof Response) return admin;
+  try {
+    const pool = userPool(admin, userPoolId());
+    const extra = (await act(pool)) ?? {};
+    return Response.json({ users: await listUsers(pool), ...extra });
+  } catch (err) {
+    if (err instanceof UserRefusal) return Response.json({ error: err.message }, { status: 409 });
+    if (err instanceof UserInputError)
+      return Response.json({ error: err.message }, { status: 400 });
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[api/users] ${label} failed`, message);
+    return Response.json({ error: message }, { status: 500 });
+  }
 }
 
 /** Every account, with its two group memberships. */
 export async function LIST(_req: Request): Promise<Response> {
-  const admin = await requireAdmin();
-  if (admin instanceof Response) return admin;
-  try {
-    return Response.json({ users: await listUsers(cognito(admin), userPoolId()) });
-  } catch (err) {
-    return failed(err, "list");
-  }
+  return acting("list", async () => {});
 }
 
-/** Create an account. Body: session plus `{ email, admin?, data? }`. Cognito emails the invitation. */
+/** Create an account. Body: `{ email, admin?, data? }`. Cognito emails the invitation. */
 export async function CREATE(req: Request): Promise<Response> {
-  const admin = await requireAdmin();
-  if (admin instanceof Response) return admin;
-  const body = (await req.json()) as {
-    email?: string;
-    admin?: boolean;
-    data?: boolean;
-  };
-  const email = typeof body.email === "string" ? body.email.trim() : "";
-  if (!/^[^\s@]+@[^\s@]+$/.test(email)) {
-    return Response.json({ error: "Enter the person's email address." }, { status: 400 });
-  }
-  try {
-    const client = cognito(admin);
-    const poolId = userPoolId();
-    const created = await client.send(
-      new AdminCreateUserCommand({
-        UserPoolId: poolId,
-        Username: email,
-        UserAttributes: [
-          { Name: "email", Value: email },
-          { Name: "email_verified", Value: "true" },
-        ],
-        DesiredDeliveryMediums: ["EMAIL"],
-      }),
-    );
-    const username = created.User?.Username ?? email;
-    for (const [group, wanted] of [
-      [ADMINS_GROUP, body.admin],
-      [DATA_GROUP, body.data],
-    ] as const) {
-      if (wanted) {
-        await client.send(
-          new AdminAddUserToGroupCommand({
-            UserPoolId: poolId,
-            Username: username,
-            GroupName: group,
-          }),
-        );
-      }
-    }
-    return Response.json({ users: await listUsers(client, poolId) });
-  } catch (err) {
-    return failed(err, "create");
-  }
+  const body = (await req.json()) as { email?: string; admin?: boolean; data?: boolean };
+  return acting("create", (pool) =>
+    createUser(pool, {
+      email: typeof body.email === "string" ? body.email : "",
+      admin: body.admin === true,
+      data: body.data === true,
+    }),
+  );
 }
 
-/** Add an account to a group or take it out. Body: session plus `{ username, group, member }`. */
+/** Add an account to a group or take it out. Body: `{ username, group, member }`. */
 export async function SET_GROUP(req: Request): Promise<Response> {
-  const admin = await requireAdmin();
-  if (admin instanceof Response) return admin;
-  const body = (await req.json()) as {
+  const { username, group, member } = (await req.json()) as {
     username?: string;
     group?: string;
     member?: boolean;
   };
-  const { username, group, member } = body;
   if (!username || !GROUPS.includes(group as Group) || typeof member !== "boolean") {
     return Response.json({ error: "username, group and member are required" }, { status: 400 });
   }
-  try {
-    const client = cognito(admin);
-    const poolId = userPoolId();
-    if (member) {
-      await client.send(
-        new AdminAddUserToGroupCommand({
-          UserPoolId: poolId,
-          Username: username,
-          GroupName: group,
-        }),
-      );
-    } else {
-      if (group === ADMINS_GROUP && (await isLastEnabledAdmin(client, poolId, username))) {
-        return Response.json({ error: LAST_ADMIN_ERROR }, { status: 409 });
-      }
-      await client.send(
-        new AdminRemoveUserFromGroupCommand({
-          UserPoolId: poolId,
-          Username: username,
-          GroupName: group,
-        }),
-      );
-    }
-    return Response.json({ users: await listUsers(client, poolId) });
-  } catch (err) {
-    return failed(err, "set group");
-  }
+  return acting("set group", (pool) => setGroup(pool, username, group as Group, member));
 }
 
-/**
- * Sign an account out of every device, without disabling it. Body: session
- * plus `{ username }`.
- *
- * Revokes every refresh token the account holds, so each of its devices stops
- * syncing once its 15-minute ID token expires and asks for a new sign-in. A
- * lost phone is cut off this way: per-user, because the pool tracks no single
- * device's session.
- */
+/** Sign an account out of every device, without disabling it. Body: `{ username }`. */
 export async function SIGN_OUT_EVERYWHERE(req: Request): Promise<Response> {
-  const admin = await requireAdmin();
-  if (admin instanceof Response) return admin;
-  const body = (await req.json()) as { username?: string };
-  if (!body.username) {
-    return Response.json({ error: "username is required" }, { status: 400 });
-  }
-  try {
-    const client = cognito(admin);
-    const poolId = userPoolId();
-    await client.send(
-      new AdminUserGlobalSignOutCommand({ UserPoolId: poolId, Username: body.username }),
-    );
-    return Response.json({ users: await listUsers(client, poolId) });
-  } catch (err) {
-    return failed(err, "sign out everywhere");
-  }
+  const { username } = (await req.json()) as { username?: string };
+  if (!username) return Response.json({ error: "username is required" }, { status: 400 });
+  return acting("sign out everywhere", (pool) => signOutEverywhere(pool, username));
 }
 
-/**
- * Disable an account, or enable it again. Body: session plus
- * `{ username, enabled }`.
- *
- * Disabling also signs the user out everywhere, which revokes their refresh
- * tokens, so their devices stop syncing once their 15-minute ID tokens expire.
- * Enabling restores sign-in only; each device asks for a new sign-in.
- */
+/** Disable an account, or enable it again. Body: `{ username, enabled }`. */
 export async function SET_ENABLED(req: Request): Promise<Response> {
-  const admin = await requireAdmin();
-  if (admin instanceof Response) return admin;
-  const body = (await req.json()) as { username?: string; enabled?: boolean };
-  const { username, enabled } = body;
+  const { username, enabled } = (await req.json()) as { username?: string; enabled?: boolean };
   if (!username || typeof enabled !== "boolean") {
     return Response.json({ error: "username and enabled are required" }, { status: 400 });
   }
-  if (!enabled && username === admin.sub) {
-    return Response.json({ error: "You cannot disable your own account." }, { status: 409 });
-  }
-  try {
-    const client = cognito(admin);
-    const poolId = userPoolId();
-    if (enabled) {
-      await client.send(new AdminEnableUserCommand({ UserPoolId: poolId, Username: username }));
-      return Response.json({ users: await listUsers(client, poolId) });
-    }
-    if (await isLastEnabledAdmin(client, poolId, username)) {
-      return Response.json({ error: LAST_ADMIN_ERROR }, { status: 409 });
-    }
-    await client.send(new AdminDisableUserCommand({ UserPoolId: poolId, Username: username }));
-    await client.send(
-      new AdminUserGlobalSignOutCommand({ UserPoolId: poolId, Username: username }),
-    );
-    return Response.json({ users: await listUsers(client, poolId) });
-  } catch (err) {
-    return failed(err, "set enabled");
-  }
+  return acting("set enabled", (pool) => setEnabled(pool, username, enabled));
 }
 
 /**
- * The letters a temporary password is drawn from: no 0/O or 1/l/I, because an
- * admin reads it to the person or types it into a message.
- */
-const TEMPORARY_PASSWORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
-
-/** Sixteen letters from {@link TEMPORARY_PASSWORD_ALPHABET}: about 93 bits. */
-export function temporaryPassword(): string {
-  const bytes = randomBytes(16);
-  let out = "";
-  // 256 is not a multiple of the alphabet's size, so the bias toward early
-  // letters is a fraction of a bit over the whole password. Not worth a
-  // rejection loop for a password the person replaces at once.
-  for (const byte of bytes)
-    out += TEMPORARY_PASSWORD_ALPHABET[byte % TEMPORARY_PASSWORD_ALPHABET.length];
-  return out;
-}
-
-/**
- * Give an account a new temporary password, for a person who forgot theirs.
- * Body: session plus `{ username }`. Answers the password once, for the admin
- * to send; it is stored nowhere.
- *
- * The account returns to `FORCE_CHANGE_PASSWORD`, so the person chooses a new
- * password at their next sign-in, on any device. Existing sessions are left
- * alone: a person who only forgot a password keeps syncing on the devices
- * still signed in. Self-service reset waits for the managed sign-in page.
+ * Give an account a new temporary password. Body: `{ username }`. Answers the
+ * password once, for the admin to send; it is stored nowhere.
  */
 export async function RESET_PASSWORD(req: Request): Promise<Response> {
-  const admin = await requireAdmin();
-  if (admin instanceof Response) return admin;
-  const body = (await req.json()) as { username?: string };
-  if (!body.username) {
-    return Response.json({ error: "username is required" }, { status: 400 });
-  }
-  try {
-    const client = cognito(admin);
-    const poolId = userPoolId();
-    const password = temporaryPassword();
-    await client.send(
-      new AdminSetUserPasswordCommand({
-        UserPoolId: poolId,
-        Username: body.username,
-        Password: password,
-        Permanent: false,
-      }),
-    );
-    return Response.json({ users: await listUsers(client, poolId), temporaryPassword: password });
-  } catch (err) {
-    return failed(err, "reset password");
-  }
+  const { username } = (await req.json()) as { username?: string };
+  if (!username) return Response.json({ error: "username is required" }, { status: 400 });
+  return acting("reset password", async (pool) => ({
+    temporaryPassword: await resetPassword(pool, username),
+  }));
 }

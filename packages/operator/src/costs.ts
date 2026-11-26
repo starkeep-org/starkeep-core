@@ -144,19 +144,40 @@ function parseCsvCosts(csv: string): Record<string, number> {
   return totals;
 }
 
+/**
+ * The month-end projection beside the month-to-date costs: each service's
+ * cost scaled from the days so far to the whole month.
+ */
+export function projectFullMonth(costs: ServiceCost[], today = new Date()): ServiceCost[] {
+  const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
+  // Days elapsed = day-of-month (1-based), minimum 1 to avoid division by zero.
+  const daysElapsed = Math.max(today.getDate(), 1);
+  const factor = daysInMonth / daysElapsed;
+  return costs.map(({ service, amount }) => ({
+    service,
+    amount: amount * factor,
+  }));
+}
+
 // The CUR *service* (ReportDefinition API) is us-east-1-only, but the
 // delivery bucket lives in the stack's deployment region.
+/**
+ * The cost by service for the month that holds `month` (default: this
+ * month), from the deployment's cost and usage report. Null when no report
+ * for the month has arrived.
+ */
 export async function fetchMtdCostsByService(
   creds: STSCredentials,
   stackPrefix: string,
   region: string,
+  month: Date = new Date(),
 ): Promise<ServiceCost[] | null> {
   const accountId = await getAccountId(creds);
   const billingBucket = `${stackPrefix}-billing-${accountId}-${region}`;
   const reportName = `${stackPrefix}-billing`;
 
   const s3 = makeS3Client(creds, region);
-  const prefix = billingPeriodPrefix(reportName);
+  const prefix = billingPeriodPrefix(reportName, month);
 
   const listed = await s3.send(new ListObjectsV2Command({ Bucket: billingBucket, Prefix: prefix }));
   if (!listed.Contents?.length) return null;

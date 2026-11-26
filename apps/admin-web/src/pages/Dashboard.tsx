@@ -37,7 +37,7 @@ import { CustomDomainSection } from "../components/CustomDomainSection";
 import { LocalFoldersModal, type Watch } from "../components/LocalFoldersModal";
 import { CommandOutputModal } from "../components/CommandOutputModal";
 import { targetsOf, type KeptAppData, type LocalAppEntry } from "../lib/app-types";
-import { projectFullMonth, type ServiceCost } from "../lib/cost-projection";
+import type { ServiceCost } from "../lib/cost-projection";
 import { localDataServerUrl } from "../lib/runtime-config";
 import { ACTION_OCCASIONAL, ACTION_OPEN, ACTION_START } from "../lib/action-colors";
 
@@ -297,12 +297,15 @@ export function DashboardPage() {
           setCosts(isAuthError ? "not-signed-in" : "error");
           return;
         }
-        const { costs: mtd } = (await resp.json()) as { costs: ServiceCost[] | null };
+        const { costs: mtd, projection } = (await resp.json()) as {
+          costs: ServiceCost[] | null;
+          projection?: ServiceCost[] | null;
+        };
         if (mtd === null) {
           setCosts("no-data");
         } else {
           setCosts([...mtd].sort((a, b) => b.amount - a.amount));
-          setCostProjection(projectFullMonth(mtd));
+          setCostProjection(projection ?? null);
         }
       } catch {
         setCosts("error");

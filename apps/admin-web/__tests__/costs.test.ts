@@ -90,6 +90,18 @@ describe("a stack with a delivered report", () => {
     ]);
   });
 
+  it("answers each service's month-end projection beside its month-to-date cost", async () => {
+    stubReport([["AWSLambda", "2.00", "Usage"]]);
+    const { projection } = (await (await call()).json()) as {
+      projection: Array<{ service: string; amount: number }>;
+    };
+    const now = new Date();
+    const days = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+    expect(projection).toEqual([
+      { service: "Lambda", amount: expect.closeTo((2 * days) / now.getDate(), 6) },
+    ]);
+  });
+
   it("leaves tax and credits out, which are not what the stack costs to run", async () => {
     stubReport([
       ["AWSLambda", "1.00", "Usage"],
@@ -137,13 +149,13 @@ describe("a stack with no report yet", () => {
   it("answers costs: null when the prefix is empty", async () => {
     sts.on(GetCallerIdentityCommand).resolves({ Account: "123456789012" });
     s3.on(ListObjectsV2Command).resolves({ Contents: [] });
-    expect(await (await call()).json()).toEqual({ costs: null });
+    expect(await (await call()).json()).toEqual({ costs: null, projection: null });
   });
 
   it("answers costs: null when the period holds no manifest", async () => {
     sts.on(GetCallerIdentityCommand).resolves({ Account: "123456789012" });
     s3.on(ListObjectsV2Command).resolves({ Contents: [{ Key: "reports/whatever.csv.gz" }] });
-    expect(await (await call()).json()).toEqual({ costs: null });
+    expect(await (await call()).json()).toEqual({ costs: null, projection: null });
   });
 });
 
