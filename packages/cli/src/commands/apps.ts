@@ -22,7 +22,7 @@ import { deleteKeptAppData, uninstallLocalApp } from "@starkeep/operator/local-a
 import { serviceStatus } from "@starkeep/operator/service-control";
 import { flag, type Command, type ParsedArgs } from "../command";
 import { CliError, EXIT_USAGE, usageError } from "../errors";
-import type { Io } from "../io";
+import { requireTerminal, type Io } from "../io";
 import {
   installCommandFor,
   registerLocally,
@@ -61,6 +61,8 @@ function requireLocalTarget(args: ParsedArgs, verb: string): void {
     );
   }
 }
+
+const TYPE_BACK_HINT = "--yes to delete without typing the app id";
 
 /** Take an app's lock for the length of `body`. */
 async function withAppLock<T>(appId: string, command: string, body: () => Promise<T>): Promise<T> {
@@ -171,6 +173,8 @@ async function listRows(): Promise<ListRow[]> {
   }
   for (const row of registry ?? []) {
     const existing = rows.get(row.appId);
+    // Built-in apps, such as Drive's, install with the platform and have no folder.
+    if (row.sourceDir === null && !existing) continue;
     const status = await serviceStatus(row.appId);
     const state = row.sourceDir ? pinnedSourceState(row.sourceDir, row.manifest) : null;
     rows.set(row.appId, {
@@ -286,58 +290,99 @@ export const installCommand: Command = {
   async run(io, args) {
     requireLocalTarget(args, "install");
     if (args.positionals.length === 0) throw usageError("Name at least one app to install.");
+    if (!flag(args, "yes")) requireTerminal(io, "Approve and install?", "--yes to approve");
     await requireDataServer();
     const installed: string[] = [];
-    for (const ref of args.positionals) {
-      const app = await resolveAppReference(io, ref);
-      await withAppLock(app.appId, `starkeep install ${ref} --local`, async () => {
-        const manifest = app.folder.manifest;
-        const name = manifest.name ?? app.appId;
-        const install = installCommandFor(app);
-        if (!io.json) {
-          io.print();
-          io.print(`Install ${name}?`);
-          io.print();
-          for (const line of consentLines(manifest, install)) io.print(line);
-          io.print();
-        } else {
-          io.event({
-            type: "prompt-needed",
-            reason: "consent",
-            detail: consentLines(manifest, install).join("\n"),
-          });
-        }
-        if (!(await io.confirm("Approve and install?", { yes: flag(args, "yes") }))) {
-          io.print(`Not installed: ${name}.`);
-          return;
-        }
-        await runDependencyInstall(io, app.appId, install);
-        const secretPath = await registerLocally(app);
-        // A running app keeps the old manifest's behavior until it restarts.
-        const wasRunning = (await serviceStatus(app.appId)).running;
-        await stopById(app.appId);
-        io.event({
-          type: "progress",
-          message: `Installed ${name}. Its credentials are in ${secretPath}.`,
-        });
-        installed.push(app.appId);
-        const start =
-          flag(args, "start") ||
-          wasRunning ||
-          (!io.json &&
-            io.interactive() &&
-            !flag(args, "yes") &&
-            (await io.confirm(`Start ${name} now?`, { yes: false })));
-        if (start && !(await startOne(io, app.appId))) {
-          throw new CliError(
-            `${name} installed but did not start. Run \`starkeep logs ${app.appId}\`.`,
-          );
-        }
-      });
+    const declined: string[] = [];
+    const at = { ref: "", appId: "" };
+    try {
+      for (const ref of args.positionals) {
+        at.ref = at.appId = ref;
+        await installOne(io, args, at, installed, declined);
+      }
+    } catch (err) {
+      if (args.positionals.length === 1) throw err;
+      const current = at.appId;
+      const rest = args.positionals.slice(args.positionals.indexOf(at.ref) + 1);
+      const message = err instanceof Error ? err.message : String(err);
+      // An app that installed and then failed to start counts as installed.
+      const notInstalled = [
+        ...declined,
+        ...(installed.includes(current) ? [] : [current]),
+        ...rest,
+      ];
+      throw new CliError(
+        [
+          `${current}: ${message}`,
+          `Installed: ${installed.length ? installed.join(", ") : "none"}.`,
+          `Not installed: ${notInstalled.length ? notInstalled.join(", ") : "none"}.`,
+        ].join("\n"),
+        err instanceof CliError ? err.exitCode : 1,
+        err instanceof CliError ? err.code : undefined,
+        err instanceof CliError ? err.logPath : undefined,
+        { installed, failed: current, notInstalled },
+      );
     }
-    io.event({ type: "result", ok: true, data: { installed } });
+    io.event({ type: "result", ok: true, data: { installed, declined } });
   },
 };
+
+async function installOne(
+  io: Io,
+  args: ParsedArgs,
+  at: { ref: string; appId: string },
+  installed: string[],
+  declined: string[],
+): Promise<void> {
+  const ref = at.ref;
+  const app = await resolveAppReference(io, ref);
+  at.appId = app.appId;
+  await withAppLock(app.appId, `starkeep install ${ref} --local`, async () => {
+    const manifest = app.folder.manifest;
+    const name = manifest.name ?? app.appId;
+    const install = installCommandFor(app);
+    if (!io.json) {
+      io.print();
+      io.print(`Install ${name}?`);
+      io.print();
+      for (const line of consentLines(manifest, install)) io.print(line);
+      io.print();
+    } else {
+      io.event({
+        type: "prompt-needed",
+        reason: "consent",
+        detail: consentLines(manifest, install).join("\n"),
+      });
+    }
+    if (!(await io.confirm("Approve and install?", { yes: flag(args, "yes") }))) {
+      io.print(`Not installed: ${name}.`);
+      declined.push(app.appId);
+      return;
+    }
+    await runDependencyInstall(io, app.appId, install);
+    const secretPath = await registerLocally(app);
+    // A running app keeps the old manifest's behavior until it restarts.
+    const wasRunning = (await serviceStatus(app.appId)).running;
+    await stopById(app.appId);
+    io.event({
+      type: "progress",
+      message: `Installed ${name}. Its credentials are in ${secretPath}.`,
+    });
+    installed.push(app.appId);
+    const start =
+      flag(args, "start") ||
+      wasRunning ||
+      (!io.json &&
+        io.interactive() &&
+        !flag(args, "yes") &&
+        (await io.confirm(`Start ${name} now?`, { yes: false })));
+    if (start && !(await startOne(io, app.appId))) {
+      throw new CliError(
+        `${name} installed but did not start. Run \`starkeep logs ${app.appId}\`.`,
+      );
+    }
+  });
+}
 
 export const uninstallCommand: Command = {
   name: "uninstall",
@@ -359,14 +404,29 @@ export const uninstallCommand: Command = {
   async run(io, args) {
     requireLocalTarget(args, "uninstall");
     if (args.positionals.length === 0) throw usageError("Name at least one app to uninstall.");
+    const deleteData = flag(args, "delete-data");
+    const typeBack = deleteData && !flag(args, "yes");
+    // The typed id guards the whole command, so a run that cannot ask stops
+    // before the first change.
+    if (typeBack) requireTerminal(io, "Type the app id to delete its data.", TYPE_BACK_HINT);
     await requireDataServer();
     const registry = await readRegistry();
     for (const appId of args.positionals) {
       await withAppLock(appId, `starkeep uninstall ${appId} --local`, async () => {
-        if (registry && !registry.some((r) => r.appId === appId)) {
-          if (!flag(args, "delete-data"))
-            throw new CliError(`${appId} is not installed on this computer.`);
-        } else {
+        const installed = !registry || registry.some((r) => r.appId === appId);
+        if (!installed && !deleteData)
+          throw new CliError(`${appId} is not installed on this computer.`);
+        if (typeBack) {
+          const typed = await io.ask(`Type ${appId} to delete its data on this computer:`, {
+            flagHint: TYPE_BACK_HINT,
+          });
+          if (typed !== appId) {
+            throw new CliError(
+              `Nothing changed: the typed id did not match, so ${appId} ${installed ? "stays installed with its data" : "keeps its data"}.`,
+            );
+          }
+        }
+        if (installed) {
           io.event({ type: "progress", message: `Uninstalling ${appId}…` });
           const result = await uninstallLocalApp(appId);
           if (!result.ok) {
@@ -376,21 +436,20 @@ export const uninstallCommand: Command = {
           }
           io.event({
             type: "progress",
-            message: `Uninstalled ${appId}. Its data stays on this computer.`,
+            message: deleteData
+              ? `Uninstalled ${appId}.`
+              : `Uninstalled ${appId}. Its data stays on this computer.`,
           });
         }
-        if (flag(args, "delete-data")) {
-          let confirm = appId;
-          if (!flag(args, "yes")) {
-            confirm = await io.ask(`Type ${appId} to delete its data on this computer:`, {
-              flagHint: "--yes to delete without typing the app id",
-            });
+        if (deleteData) {
+          const deleted = await deleteKeptAppData(appId, appId);
+          if (!deleted.ok && /NoRetainedData/.test(deleted.error)) {
+            io.event({ type: "progress", message: `${appId} kept no data on this computer.` });
+          } else if (!deleted.ok) {
+            throw new CliError(`Could not delete ${appId}'s data: ${deleted.error}`);
+          } else {
+            io.event({ type: "progress", message: `Deleted ${appId}'s data on this computer.` });
           }
-          if (confirm !== appId)
-            throw new CliError(`Kept ${appId}'s data: the typed id did not match.`);
-          const deleted = await deleteKeptAppData(appId, confirm);
-          if (!deleted.ok) throw new CliError(`Could not delete ${appId}'s data: ${deleted.error}`);
-          io.event({ type: "progress", message: `Deleted ${appId}'s data on this computer.` });
         }
       });
     }

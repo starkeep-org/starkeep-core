@@ -148,6 +148,20 @@ export function createIo(options: IoOptions): Io {
 }
 
 /**
+ * Stop with exit status 3 when no person can answer the command's questions,
+ * before the command changes anything.
+ */
+export function requireTerminal(io: Io, question: string, flagHint: string): void {
+  if (!io.interactive()) {
+    throw new CliError(
+      `${question} No terminal is attached to answer. Pass ${flagHint}.`,
+      EXIT_NEEDS_INPUT,
+      "NEEDS_INPUT",
+    );
+  }
+}
+
+/**
  * A log file under `~/.starkeep/logs/` for one long operation. The error
  * summary names it, so a person can read the whole story after a failure.
  */
