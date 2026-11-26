@@ -16,7 +16,13 @@ import {
   saveAdminSignIn,
   signOutAdmin,
 } from "@starkeep/operator/admin-session";
-import { cliRedirectUri, startAuthorization, waitForCallback } from "@starkeep/operator/oauth";
+import {
+  authorizationRefusal,
+  cliRedirectUri,
+  refusedSignInMessage,
+  startAuthorization,
+  waitForCallback,
+} from "@starkeep/operator/oauth";
 import { localDataServerUrlFromEnv } from "@starkeep/operator/urls";
 import { fetchDeviceAuthConfig, redeemAuthorizationCode } from "@starkeep/protocol-primitives";
 import { flag, type Command, type ParsedArgs } from "../command";
@@ -38,11 +44,15 @@ function openInBrowser(url: string): boolean {
 /** Run the browser half of a sign-in and return the code and its verifier. */
 async function browserSignIn(
   io: Io,
-  target: { domain: string; clientId: string },
+  target: { domain: string; clientId: string; askPassword?: boolean },
   noBrowser: boolean,
 ): Promise<{ code: string; codeVerifier: string; redirectUri: string }> {
   const start = startAuthorization({ ...target, redirectUri: cliRedirectUri() });
-  const wait = waitForCallback({ state: start.state });
+  const refusal = await authorizationRefusal(start.url);
+  if (refusal) throw new CliError(refusedSignInMessage(refusal));
+  // Test seam: a shorter wait than the listener's five minutes.
+  const timeoutMs = Number(process.env.STARKEEP_SIGN_IN_TIMEOUT_MS) || undefined;
+  const wait = waitForCallback({ state: start.state, ...(timeoutMs ? { timeoutMs } : {}) });
   try {
     await wait.ready;
   } catch (err) {
@@ -68,12 +78,15 @@ async function loginAdmin(io: Io, noBrowser: boolean): Promise<void> {
   const pool = adminPool();
   if (!pool || !pool.cognitoDomain) {
     throw new CliError(
-      "This computer has no cloud setup with a sign-in page yet. Finish the Stack outputs step in admin-web first.",
+      "The admin sign-in needs the CognitoDomain output, which admin-web's Stack outputs step saves. " +
+        "A bootstrap stack from before the managed sign-in page has no such output: update it first with " +
+        "`scripts/update-bootstrap.sh --apply`.",
     );
   }
+  const before = adminSessionStatus();
   const { code, codeVerifier, redirectUri } = await browserSignIn(
     io,
-    { domain: pool.cognitoDomain, clientId: pool.clientId },
+    { domain: pool.cognitoDomain, clientId: pool.clientId, askPassword: true },
     noBrowser,
   );
   let status;
@@ -96,13 +109,22 @@ async function loginAdmin(io: Io, noBrowser: boolean): Promise<void> {
     type: "progress",
     message: `Signed in as the admin${status.email ? ` (${status.email})` : ""}. admin-web uses the same sign-in.`,
   });
+  if (before.signedIn && before.email && before.email !== status.email) {
+    io.event({
+      type: "progress",
+      message: `This replaces ${before.email}'s admin session on this computer.`,
+    });
+  }
   io.event({ type: "result", ok: true, data: status });
 }
 
 async function loginSync(io: Io, noBrowser: boolean): Promise<void> {
   const config = readConfig() ?? {};
   const cloudUrl = typeof config.apiGatewayUrl === "string" ? config.apiGatewayUrl : null;
-  if (!cloudUrl) throw new CliError("This computer has joined no cloud. Join one in admin-web first.");
+  if (!cloudUrl)
+    throw new CliError("This computer has joined no cloud. Join one in admin-web first.");
+  // The data server keeps the sync session, so check it before the browser opens.
+  await syncState();
   let auth;
   try {
     auth = await fetchDeviceAuthConfig(cloudUrl);
@@ -111,7 +133,8 @@ async function loginSync(io: Io, noBrowser: boolean): Promise<void> {
   }
   const domain =
     auth.cognitoDomain ?? (typeof config.cognitoDomain === "string" ? config.cognitoDomain : null);
-  if (!domain) throw new CliError("This cloud names no sign-in page yet. Redeploy the cloud data server.");
+  if (!domain)
+    throw new CliError("This cloud names no sign-in page yet. Redeploy the cloud data server.");
   const signIn = await browserSignIn(io, { domain, clientId: auth.deviceClientId }, noBrowser);
   // The local data server redeems the code and keeps the sync session.
   let res: Response;
@@ -122,12 +145,34 @@ async function loginSync(io: Io, noBrowser: boolean): Promise<void> {
       body: JSON.stringify(signIn),
     });
   } catch {
-    throw new CliError("The local data server is not answering. Run `starkeep start data-server` first.");
+    throw new CliError(
+      "The local data server is not answering. Run `starkeep start data-server` first.",
+    );
   }
   const body = (await res.json().catch(() => ({}))) as { error?: string; email?: string };
   if (!res.ok) throw new CliError(`The sign-in did not finish: ${body.error ?? res.status}`);
+  const after = await syncState();
+  if (after.state === "bound-elsewhere") {
+    throw new CliError(
+      `Signed in as ${after.email ?? "this account"}, but this computer's library belongs to another account, so it does not sync.${after.message ? ` ${after.message}` : ""}`,
+    );
+  }
   io.event({ type: "progress", message: `This computer syncs as ${body.email ?? "you"}.` });
   io.event({ type: "result", ok: true, data: { email: body.email ?? null } });
+}
+
+/** The data server's sync state, or a refusal naming the fix when it does not answer. */
+async function syncState(): Promise<{ state: string; email: string | null; message?: string }> {
+  try {
+    const res = await fetch(`${localDataServerUrlFromEnv()}/auth/status`);
+    if (res.ok)
+      return (await res.json()) as { state: string; email: string | null; message?: string };
+  } catch {
+    /* reported below */
+  }
+  throw new CliError(
+    "The local data server is not answering. Run `starkeep start data-server` first.",
+  );
 }
 
 export const loginCommand: Command = {
@@ -136,7 +181,10 @@ export const loginCommand: Command = {
   usage: "--admin | --sync [--no-browser]",
   lane: "none",
   flags: {
-    admin: { type: "boolean", description: "Sign in as the Starkeep admin, for admin-web and the CLI." },
+    admin: {
+      type: "boolean",
+      description: "Sign in as the Starkeep admin, for admin-web and the CLI.",
+    },
     sync: { type: "boolean", description: "Sign this computer in to sync, as a data user." },
     "no-browser": { type: "boolean", description: "Print the sign-in address without opening it." },
   },
@@ -156,7 +204,10 @@ export const logoutCommand: Command = {
   usage: "--admin | --sync",
   lane: "none",
   flags: {
-    admin: { type: "boolean", description: "End the admin session, for admin-web and the CLI alike." },
+    admin: {
+      type: "boolean",
+      description: "End the admin session, for admin-web and the CLI alike.",
+    },
     sync: { type: "boolean", description: "Sign this computer out of sync." },
   },
   async run(io, args) {
@@ -176,11 +227,19 @@ export const logoutCommand: Command = {
       io.event({ type: "result", ok: true, data: { revoked } });
       return;
     }
+    const current = await syncState();
+    if (current.state === "signed-out") {
+      io.event({ type: "progress", message: "This computer was not signed in to sync." });
+      io.event({ type: "result", ok: true });
+      return;
+    }
     let res: Response;
     try {
       res = await fetch(`${localDataServerUrlFromEnv()}/auth/sign-out`, { method: "POST" });
     } catch {
-      throw new CliError("The local data server is not answering. Run `starkeep start data-server` first.");
+      throw new CliError(
+        "The local data server is not answering. Run `starkeep start data-server` first.",
+      );
     }
     if (!res.ok) throw new CliError(`Sign-out failed (${res.status}).`);
     io.event({ type: "progress", message: "This computer no longer syncs." });
@@ -192,6 +251,6 @@ export const logoutCommand: Command = {
 export function adminStatusLine(): string {
   const status = adminSessionStatus();
   return status.signedIn
-    ? `signed in${status.email ? ` as ${status.email}` : ""} until ${status.expiresAt} unless used`
+    ? `signed in${status.email ? ` as ${status.email}` : ""} until ${status.expiresAt}`
     : "signed out";
 }
