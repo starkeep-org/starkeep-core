@@ -19,8 +19,10 @@
   },
   "devDependencies": {
     "@aws-sdk/client-cloudformation": "^3.645.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.700.0",
     "@starkeep/testkit": "workspace:*",
     "@types/node": "^24.19.2",
+    "aws-sdk-client-mock": "^4.1.0",
     "typescript": "^5.7.0",
     "vitest": "^5.0.5"
   }

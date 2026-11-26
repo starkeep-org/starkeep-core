@@ -773,12 +773,18 @@ importers:
       '@aws-sdk/client-cloudformation':
         specifier: ^3.645.0
         version: 3.1030.0
+      '@aws-sdk/client-cognito-identity-provider':
+        specifier: ^3.700.0
+        version: 3.1034.0
       '@starkeep/testkit':
         specifier: workspace:*
         version: link:../testkit
       '@types/node':
         specifier: ^24.19.2
         version: 24.19.2
+      aws-sdk-client-mock:
+        specifier: ^4.1.0
+        version: 4.1.0
       typescript:
         specifier: ^5.7.0
         version: 5.9.3
@@ -822,6 +828,9 @@ importers:
       '@aws-sdk/client-cloudformation':
         specifier: ^3.645.0
         version: 3.1030.0
+      '@aws-sdk/client-cognito-identity-provider':
+        specifier: ^3.700.0
+        version: 3.1034.0
       '@aws-sdk/client-s3':
         specifier: ^3.700.0
         version: 3.1009.0
@@ -6817,20 +6826,20 @@ snapshots:
     dependencies:
       '@aws-crypto/sha256-browser': 5.2.0
       '@aws-crypto/sha256-js': 5.2.0
-      '@aws-sdk/core': 3.974.12
-      '@aws-sdk/credential-provider-node': 3.972.43
+      '@aws-sdk/core': 3.980.1
+      '@aws-sdk/credential-provider-node': 3.972.94
       '@aws-sdk/middleware-host-header': 3.972.10
       '@aws-sdk/middleware-logger': 3.972.10
       '@aws-sdk/middleware-recursion-detection': 3.972.11
       '@aws-sdk/middleware-user-agent': 3.972.38
       '@aws-sdk/region-config-resolver': 3.972.13
-      '@aws-sdk/types': 3.973.8
+      '@aws-sdk/types': 3.975.0
       '@aws-sdk/util-endpoints': 3.996.8
       '@aws-sdk/util-user-agent-browser': 3.972.10
       '@aws-sdk/util-user-agent-node': 3.973.24
       '@smithy/config-resolver': 4.4.17
-      '@smithy/core': 3.29.3
-      '@smithy/fetch-http-handler': 5.4.3
+      '@smithy/core': 3.39.0
+      '@smithy/fetch-http-handler': 5.8.1
       '@smithy/hash-node': 4.2.14
       '@smithy/invalid-dependency': 4.2.14
       '@smithy/middleware-content-length': 4.2.14
@@ -6839,7 +6848,7 @@ snapshots:
       '@smithy/middleware-serde': 4.2.20
       '@smithy/middleware-stack': 4.2.14
       '@smithy/node-config-provider': 4.3.14
-      '@smithy/node-http-handler': 4.7.3
+      '@smithy/node-http-handler': 4.14.2
       '@smithy/protocol-http': 5.3.14
       '@smithy/smithy-client': 4.12.12
       '@smithy/types': 4.14.2
@@ -7974,7 +7983,7 @@ snapshots:
       '@aws-crypto/crc32': 5.2.0
       '@aws-crypto/crc32c': 5.2.0
       '@aws-crypto/util': 5.2.0
-      '@aws-sdk/core': 3.980.0
+      '@aws-sdk/core': 3.980.1
       '@aws-sdk/crc64-nvme': 3.972.5
       '@aws-sdk/types': 3.975.0
       '@smithy/is-array-buffer': 4.2.2
@@ -8021,7 +8030,7 @@ snapshots:
 
   '@aws-sdk/middleware-sdk-s3@3.972.37':
     dependencies:
-      '@aws-sdk/core': 3.980.0
+      '@aws-sdk/core': 3.980.1
       '@aws-sdk/types': 3.975.0
       '@aws-sdk/util-arn-parser': 3.972.3
       '@smithy/core': 3.39.0

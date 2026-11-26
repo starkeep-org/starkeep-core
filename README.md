@@ -350,6 +350,13 @@ starkeep reset-local                             # list the local data reset-loc
 starkeep login --admin                           # sign in as the cloud's admin, in the browser
 starkeep login --sync                            # sign this computer in to sync, in the browser
 starkeep logout --admin                          # end the admin sign-in that Admin shares
+starkeep user list                               # the cloud's accounts and their groups
+starkeep user add sam@example.com --data         # invite a person; Cognito emails a temporary password
+starkeep user grant sam@example.com --admin      # give an account cloud operator rights; revoke takes them away
+starkeep user reset-password sam@example.com     # a new temporary password, shown once
+starkeep user disable sam@example.com            # stop an account signing in, on every device
+starkeep cloud cost                              # this month's cost by service, with the month-end projection
+starkeep doctor                                  # check this computer's setup and say how to fix each problem
 ```
 
 `install` and `uninstall` always take a target: `--local`, `--cloud`, `--web` or `--mobile`, and the flags combine. Every command accepts `--json`, which prints one JSON event per line and a final result. A command that needs an answer and has no terminal to ask exits with code 3; pass `--yes` to approve.
