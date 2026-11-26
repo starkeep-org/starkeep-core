@@ -125,6 +125,14 @@ function install() {
         "Fix the error above, then run the command again.",
     );
   }
+}
+
+/**
+ * Record the commit and lockfile the install built. The root `postinstall`
+ * runs this after the build, so every `pnpm install`, by hand or by this
+ * wrapper, refreshes what the stale-build warning compares with.
+ */
+function recordInstall() {
   writeFileSync(
     INSTALL_RECORD,
     JSON.stringify({ commit: checkoutCommit(), lockfile: lockfileHash() }, null, 2) + "\n",
@@ -152,6 +160,11 @@ function tsxLoader() {
 }
 
 function main() {
+  // The root `postinstall` passes `--record-install` once the build is done.
+  if (process.argv.includes("--record-install")) {
+    recordInstall();
+    return;
+  }
   // `--no-install` is the wrapper's own flag: skip the install `setup` runs,
   // for a checkout the caller knows is installed, such as in tests.
   const skipInstall = process.argv.includes("--no-install");

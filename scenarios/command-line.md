@@ -106,6 +106,8 @@ Scenario: [CLI-009] A local operator whose checkout moved since the last install
   Then the output warns "Warning: the checkout changed since the last install, so the built packages may be stale."
   And the warning says to run "pnpm install" in the checkout
   And the command still runs
+  When the local operator runs "pnpm install" in the checkout
+  Then the next starkeep command shows no warning
 ```
 
 - **Notes:** `setup` always runs the install first, so it never shows the warning. A run with `--json` skips the warning, so the output stays parseable.
