@@ -1058,23 +1058,158 @@ Scenario: [CLOUD-SETUP-067] A cloud operator whose Drive uninstall fails is warn
 
 - **Coverage:** none.
 
-## Updating the bootstrap stack
+## Updating the platform from the terminal
 
-The cloud operator runs `scripts/update-bootstrap.sh` from a terminal with AWS credentials for the deployment's account, outside admin-web.
+`starkeep update --platform` brings this checkout, the bootstrap stack, the cloud data server, and Drive up to the checkout's upstream. `starkeep update` with no app names does the same before it updates the apps. Every cloud data server install records the commit it ran, and the next deploy compares the cloud's commits with the checkout's before it changes anything.
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:partial
+Scenario: [CLOUD-SETUP-159] A cloud operator updates the platform in one command, the bootstrap stack and then the cloud data server
+  Given this computer deployed the cloud, and the checkout's upstream holds new platform commits
+  And the cloud operator's terminal holds AWS credentials for the deployment's account
+  When the cloud operator runs "starkeep update --platform"
+  Then the output says "Pulled <checkout>: <old commit> → <new commit>."
+  And the command installs the new dependencies and continues on the new code
+  And the command previews the bootstrap stack's update and asks "Apply this change set to <prefix>-bootstrap? [y/N]"
+  And after the answer, the output says "Redeploying the cloud data server. This takes 10 to 20 minutes."
+  And "starkeep cloud status" then shows the cloud data server as current
+```
+
+- **Coverage:** `packages/cli/__tests__/update-platform.test.ts` › "applyPlatform redeploys a cloud data server behind the checkout, and leaves a current Drive alone" (unit) stubs the bootstrap step and the cloud run. No test pulls and continues in a new process.
 
 ```gherkin
 @cloud
-@intent:confirmed @coverage:none
-Scenario: [CLOUD-SETUP-068] A cloud operator previews the bootstrap change set with update-bootstrap.sh, which applies nothing without --apply
+@intent:confirmed @coverage:full
+Scenario: [CLOUD-SETUP-160] A cloud operator whose cloud data server and Drive already run the checkout's code is spared a redeploy
+  Given the cloud data server and Drive were last deployed from this checkout's code
+  When the cloud operator runs "starkeep update --platform"
+  Then the output says "Cloud data server: current, <commit> (<branch>)."
+  And the command redeploys neither the cloud data server nor Drive
+```
+
+- **Coverage:** `packages/cli/__tests__/update-platform.test.ts` › "applyPlatform redeploys neither when both run this checkout's code" (unit); `packages/operator/__tests__/deployment-state.test.ts` › "comparePlatform is current when the checkout's platform code matches the record" and "stays current after a commit outside the deployed packages" (unit).
+- **Notes:** a change only in the CLI, the operator package, the test kit, the permission tests, or outside `packages/` leaves the cloud data server current.
+
+```gherkin
+@cloud
+@intent:confirmed @coverage:full
+Scenario: [CLOUD-SETUP-161] A cloud operator whose Drive alone differs from the checkout redeploys Drive alone
+  Given the cloud data server runs this checkout's code
+  And the checkout's Drive manifest differs from the one the cloud's Drive was installed with
+  When the cloud operator runs "starkeep update --platform"
+  Then the output says "Redeploying Drive…"
+  And the output shows no redeploy of the cloud data server
+```
+
+- **Coverage:** `packages/cli/__tests__/update-platform.test.ts` › "applyPlatform redeploys Drive alone when only its manifest changed" (unit).
+
+```gherkin
+@local
+@intent:confirmed @coverage:full
+Scenario: [CLOUD-SETUP-162] A cloud operator whose terminal holds no AWS credentials updates the platform without the bootstrap step and is told the command to run
+  Given the cloud operator's terminal holds no AWS credentials
+  When the cloud operator runs "starkeep update --platform"
+  Then the output says "Skipped the bootstrap stack:" with the reason
+  And the output says to run "starkeep cloud bootstrap-update --apply" with the account's AWS credentials
+  And the update goes on to the cloud data server
+```
+
+- **Coverage:** `packages/cli/__tests__/update-platform.test.ts` › "applyPlatform goes on without the bootstrap step when the terminal has no AWS credentials, and says how to run it" (unit).
+
+```gherkin
+@cloud
+@intent:confirmed @coverage:full
+Scenario: [CLOUD-SETUP-163] A cloud operator who declines the bootstrap update stops the platform update before the cloud data server
+  Given the bootstrap stack differs from the checkout's template
+  When the cloud operator runs "starkeep update --platform" and answers no to "Apply this change set to <prefix>-bootstrap?"
+  Then the output says "The bootstrap update was declined, so the update stopped before the cloud data server."
+  And the cloud operator finds the cloud data server and Drive as they were
+  And the command exits with status 1
+```
+
+- **Coverage:** `packages/cli/__tests__/update-platform.test.ts` › "applyPlatform stops before the cloud data server when the bootstrap update is declined" (unit).
+
+```gherkin
+@cloud
+@intent:confirmed @coverage:partial
+Scenario: [CLOUD-SETUP-164] A cloud operator cannot redeploy a cloud data server that runs commits the checkout lacks, and nothing changes
+  Given the cloud data server was last deployed from a feature branch
+  And this checkout is on a branch that lacks the feature branch's commits
+  When the cloud operator redeploys the cloud data server, with "starkeep update --platform" or from admin-web's cloud setup
+  Then the deploy stops with "The cloud data server runs <count> commit(s) that this checkout lacks:" and lists each commit's short id and subject
+  And the message says "Deploying this checkout would remove them." and names "--force"
+  And the cloud operator finds the cloud unchanged, still running the feature branch's code
+```
+
+- **Coverage:** `packages/admin-installer/__tests__/operations/install-cloud-data-server.test.ts` › "installCloudDataServerOp's deployed record and backward-deploy guard reports DEPLOY_BACKWARD before it builds when the cloud runs a commit the checkout lacks" (unit); `packages/admin-installer/__tests__/operations/deploy-guard.test.ts` › "compareWithDeployed refuses a checkout that lacks a commit the cloud runs, and names it" (unit). No test redeploys from admin-web's wizard, which shows the install's error message.
+- **Notes:** the check compares patches, so a checkout whose branch holds the feature's commits under new ids, as a rebase-merge leaves them, passes. A cloud last deployed from uncommitted changes gets a warning that no check can compare them.
+
+```gherkin
+@cloud
+@intent:confirmed @coverage:full
+Scenario: [CLOUD-SETUP-165] A cloud operator who passes --force redeploys anyway and is warned that the cloud's commits go
+  Given the cloud data server runs commits this checkout lacks
+  When the cloud operator runs "starkeep update --platform --force"
+  Then the output says "Warning: the cloud runs changes this checkout lacks, and this deploy removes them (forced)."
+  And "starkeep cloud status" then shows the cloud data server as current
+```
+
+- **Coverage:** `packages/admin-installer/__tests__/operations/install-cloud-data-server.test.ts` › "installCloudDataServerOp's deployed record and backward-deploy guard deploys anyway with allowBackward, says so, and records the new commit" (unit); `packages/cli/__tests__/update-platform.test.ts` › "applyPlatform passes --force on as allowBackward" (unit).
+
+```gherkin
+@cloud
+@intent:confirmed @coverage:full
+Scenario: [CLOUD-SETUP-166] A cloud operator whose cloud runs a commit no remote of the checkout holds is told to fetch it
+  Given the cloud data server was last deployed from a commit this checkout's remotes do not hold
+  When the cloud operator redeploys the cloud data server
+  Then the deploy stops with "The cloud data server runs commit <commit>, which no remote of this checkout holds"
+  And the message says to fetch the branch that holds it, or to deploy anyway with "--force"
+```
+
+- **Coverage:** `packages/admin-installer/__tests__/operations/deploy-guard.test.ts` › "compareWithDeployed fetches a commit it lacks once, then compares" and "refuses a commit no remote holds, and names it" (unit).
+
+```gherkin
+@cloud
+@intent:confirmed @coverage:partial
+Scenario: [CLOUD-SETUP-167] A cloud operator finds each cloud data server deploy's commit recorded for the next deploy
+  Given the cloud operator redeployed the cloud data server from this checkout
+  When another computer with the same checkout's code redeploys it
+  Then that redeploy goes ahead without a refusal
+  And "starkeep cloud status" on either computer names the commit and branch the last deploy ran
+```
+
+- **Coverage:** `packages/admin-installer/__tests__/operations/install-cloud-data-server.test.ts` › "installCloudDataServerOp's deployed record and backward-deploy guard records the checkout's commit and platform fingerprint after a successful install" and "writes no record when the install fails" (unit). No test reads the record from a second computer.
+- **Notes:** a deploy that succeeds but cannot write the record warns "Warning: could not record the deployed commit:" and still succeeds.
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [CLOUD-SETUP-168] A cloud operator who undoes a platform update is told the cloud keeps the newer platform
+  Given the last "starkeep update" pulled the platform checkout and redeployed the cloud data server
+  When the cloud operator runs "starkeep update --undo"
+  Then the output says the platform checkout went back too and to run "pnpm install" in it
+  And the output says the bootstrap stack and the cloud data server keep running the newer platform
+  And the output names "starkeep update --platform --no-fetch --force" to redeploy the older one
+```
+
+## Updating the bootstrap stack
+
+The cloud operator runs `starkeep cloud bootstrap-update` from a terminal with AWS credentials for the deployment's account, outside admin-web. `scripts/update-bootstrap.sh` takes the same flags, rebuilds the template, and runs the command, so its output is the command's.
+
+```gherkin
+@cloud
+@intent:confirmed @coverage:full
+Scenario: [CLOUD-SETUP-068] A cloud operator previews the bootstrap change set with the command, which applies nothing without --apply
   Given the cloud operator pulled a checkout whose bootstrap template differs from the live stack
-  When the cloud operator runs "scripts/update-bootstrap.sh"
-  Then the script prints the stack, the account, the region, and the deployment name
-  And the script prints a table of the resources the update would add, modify, or remove
-  And the script ends with "Preview only: deleted the change set. Nothing was applied." and "Rerun with --apply to apply this update."
+  When the cloud operator runs "starkeep cloud bootstrap-update"
+  Then the output shows the stack, the account, the region, and the deployment name
+  And the output shows a table of the resources the update would add, modify, or remove
+  And the output ends with "Preview only: deleted the change set. Nothing was applied." and "Rerun with --apply to apply this update."
   And the live stack is unchanged
 ```
 
-- **Coverage:** none. The tier-3 step that runs the script previews a stack with no changes (CLOUD-SETUP-069).
+- **Coverage:** `packages/cli/__tests__/bootstrap-update.test.ts` › "cloud bootstrap-update previews the stack, the account, the region and the change table, and applies nothing without --apply" (unit, CloudFormation stubbed).
 
 ```gherkin
 @cloud
@@ -1090,68 +1225,68 @@ Scenario: [CLOUD-SETUP-069] A cloud operator whose stack already matches the che
 
 ```gherkin
 @cloud
-@intent:confirmed @coverage:none
+@intent:confirmed @coverage:full
 Scenario: [CLOUD-SETUP-070] A cloud operator cannot apply a change set that replaces or removes a resource without --allow-replacement
   Given the checkout's template replaces or removes a resource of the live stack
-  When the cloud operator runs "scripts/update-bootstrap.sh" without "--allow-replacement"
-  Then the script says "Error: the change set removes or replaces <count> resource(s). Nothing was applied."
-  And the script says to review the table and rerun with "--allow-replacement" if the change is intended
+  When the cloud operator runs "starkeep cloud bootstrap-update" without "--allow-replacement"
+  Then the output says "Error: the change set removes or replaces <count> resource(s). Nothing was applied."
+  And the output says to review the table and rerun with "--allow-replacement" if the change is intended
   And the live stack is unchanged, even when "--apply" was passed
 ```
 
-- **Coverage:** none.
+- **Coverage:** `packages/cli/__tests__/bootstrap-update.test.ts` › "cloud bootstrap-update refuses a change set that replaces a resource, even with --apply, unless --allow-replacement" (unit, CloudFormation stubbed); `packages/operator/__tests__/bootstrap-update.test.ts` › "previewBootstrapUpdate counts a removal, a replacement and a conditional replacement as risky" (unit).
 
 ```gherkin
 @cloud
-@intent:confirmed @coverage:none
+@intent:confirmed @coverage:full
 Scenario: [CLOUD-SETUP-071] A cloud operator confirms an --apply update unless passing --yes
-  Given the preview shows a change that the script allows
-  When the cloud operator runs "scripts/update-bootstrap.sh --apply"
-  Then the script asks "Apply this change set to <prefix>-bootstrap? [y/N]"
+  Given the preview shows a change that the command allows
+  When the cloud operator runs "starkeep cloud bootstrap-update --apply"
+  Then the command asks "Apply this change set to <prefix>-bootstrap? [y/N]"
   And any answer but "y" prints "Deleted the change set. Nothing was applied."
   And "y", or the flag "--yes", applies the update and ends with "The stack reached UPDATE_COMPLETE."
 ```
 
-- **Coverage:** none.
+- **Coverage:** `packages/cli/__tests__/bootstrap-update.test.ts` › "cloud bootstrap-update asks before it applies, and any answer but y deletes the change set" and "applies after y, or with --yes, and says the stack reached UPDATE_COMPLETE" (unit, CloudFormation stubbed).
 
 ```gherkin
 @cloud
-@intent:confirmed @coverage:none
+@intent:confirmed @coverage:full
 Scenario: [CLOUD-SETUP-072] A cloud operator whose shell credentials belong to another account than the configuration names is refused
   Given this computer's configuration names the deployment's account and stack prefix
   And the shell's AWS credentials belong to another account
-  When the cloud operator runs "scripts/update-bootstrap.sh" for that stack prefix
-  Then the script says the credentials belong to the other account and names the configured one
-  And the script says to set AWS_PROFILE to a profile for the configured account
-  And the script creates no change set
+  When the cloud operator runs "starkeep cloud bootstrap-update" for that stack prefix
+  Then the output says the credentials belong to the other account and names the configured one
+  And the output says to set AWS_PROFILE to a profile for the configured account
+  And the command creates no change set
 ```
 
-- **Coverage:** none.
+- **Coverage:** `packages/cli/__tests__/bootstrap-update.test.ts` › "cloud bootstrap-update refuses credentials for another account than config.json names, before any change set" (unit, STS stubbed).
 
 ```gherkin
 @local
-@intent:confirmed @coverage:none
+@intent:confirmed @coverage:full
 Scenario: [CLOUD-SETUP-073] A cloud operator who supplies no stack prefix, region, or deployment name is told the flags to pass
   Given this computer's configuration does not supply the stack prefix, the region, and the deployment name
-  When the cloud operator runs "scripts/update-bootstrap.sh" without the missing flags
-  Then the script says "Error: need a stack prefix, a region and a deployment name."
-  And the script says to pass "--prefix", "--region" and "--deployment-name"
+  When the cloud operator runs "starkeep cloud bootstrap-update" without the missing flags
+  Then the output says "Error: need a stack prefix, a region and a deployment name."
+  And the output says to pass "--prefix", "--region" and "--deployment-name"
 ```
 
-- **Coverage:** none.
+- **Coverage:** `packages/cli/__tests__/bootstrap-update.test.ts` › "cloud bootstrap-update names the flags to pass when config.json lacks a value" and "takes the stack prefix, the deployment name and the user pool's region from config.json" (unit).
 - **Notes:** The flags default to the configuration, and the region defaults to the region in the configuration's user pool ID.
 
 ```gherkin
 @cloud
-@intent:confirmed @coverage:none
+@intent:confirmed @coverage:partial
 Scenario: [CLOUD-SETUP-074] A cloud operator who applies a bootstrap update keeps every parameter value and the cloud operator's account
   Given the bootstrap stack was created with the cloud operator's email
-  When the cloud operator applies an update with "scripts/update-bootstrap.sh --apply"
+  When the cloud operator applies an update with "starkeep cloud bootstrap-update --apply"
   Then the stack's parameters keep their previous values
   And the cloud operator finds the same account for the cloud operator's email in the stack's user pool, still with cloud operator rights and in the data group
 ```
 
-- **Coverage:** none. CLOUD-SETUP-022 covers the template side of the same guarantee.
+- **Coverage:** `packages/operator/__tests__/bootstrap-update.test.ts` › "previewBootstrapUpdate keeps every existing parameter's previous value and sends the template without comments" (unit) checks the parameters the change set sends. No test checks the account after an applied update.
 - **Notes:** CLOUD-SETUP-143 states what the cloud operator sees at the next sign-in.
 
 ```gherkin
@@ -1159,7 +1294,7 @@ Scenario: [CLOUD-SETUP-074] A cloud operator who applies a bootstrap update keep
 @intent:confirmed @coverage:none
 Scenario: [CLOUD-SETUP-075] A cloud operator who renames the deployment sees a user pool change in the preview
   Given the bootstrap stack was created with the deployment name "Home Library"
-  When the cloud operator runs "scripts/update-bootstrap.sh --deployment-name 'Family Library'"
+  When the cloud operator runs "starkeep cloud bootstrap-update --deployment-name 'Family Library'"
   Then the preview lists a change to the UserPool resource
   When the cloud operator applies the update with "--apply"
   Then the cloud operator finds that the user pool's invitation email names "Family Library"
@@ -1169,41 +1304,65 @@ Scenario: [CLOUD-SETUP-075] A cloud operator who renames the deployment sees a u
 
 ```gherkin
 @cloud
-@intent:confirmed @coverage:none
+@intent:confirmed @coverage:partial
 Scenario: [CLOUD-SETUP-076] A cloud operator sees each changed property's old and new value with --verbose
   Given the preview has changes
-  When the cloud operator runs "scripts/update-bootstrap.sh --verbose"
+  When the cloud operator runs "starkeep cloud bootstrap-update --verbose"
   Then each changed resource lists its changed properties with a diff of the old and the new value
   And a value that CloudFormation resolves only during the update says so instead of showing a diff
   And the output ends with a diff of the deployed template against the new one
 ```
 
-- **Coverage:** none.
+- **Coverage:** `packages/operator/__tests__/bootstrap-update.test.ts` › "previewBootstrapUpdate with verbose, shows each changed property's diff and the template diff" and "verboseDetails says a value CloudFormation resolves during the update has no before or after" (unit). No test runs it against a live change set.
 
 ```gherkin
 @cloud
-@intent:confirmed @coverage:none
+@intent:confirmed @coverage:partial
 Scenario: [CLOUD-SETUP-077] A cloud operator whose bootstrap update fails is told about the rollback and the command that lists the stack's events
   Given the checkout's template holds a change that CloudFormation fails to apply
-  When the cloud operator applies the update with "scripts/update-bootstrap.sh --apply"
-  Then the script says the update ended in the stack's final status and that CloudFormation rolls a failed update back
-  And the script prints the "aws cloudformation describe-stack-events" command for the stack and region
-  And the script exits with an error
+  When the cloud operator applies the update with "starkeep cloud bootstrap-update --apply"
+  Then the output says the update ended in the stack's final status and that CloudFormation rolls a failed update back
+  And the output shows the "aws cloudformation describe-stack-events" command for the stack and region
+  And the command exits with status 1
 ```
 
-- **Coverage:** none.
+- **Coverage:** `packages/operator/__tests__/bootstrap-update.test.ts` › "applyChangeSet names the final status, the rollback and the events command when the update fails" (unit) checks the message. No test checks the exit status.
 
 ```gherkin
 @local
 @intent:confirmed @coverage:partial
 Scenario: [CLOUD-SETUP-078] A cloud operator whose template exceeds CloudFormation's inline size limit is refused before any change set
   Given the template this checkout renders exceeds 51,200 bytes
-  When the cloud operator runs "scripts/update-bootstrap.sh"
-  Then the script says the template is over CloudFormation's 51,200-byte inline limit
-  And the script creates no change set
+  When the cloud operator runs "starkeep cloud bootstrap-update"
+  Then the output says the template is over CloudFormation's 51,200-byte inline limit
+  And the command creates no change set
 ```
 
 - **Coverage:** `packages/aws-bootstrap/__tests__/bootstrap-template.test.ts` › "template size fits CloudFormation's inline cap, as the tier-3 suite sends it" (unit) keeps today's template under the limit. No test checks the refusal.
+
+```gherkin
+@cloud
+@intent:confirmed
+Scenario: [CLOUD-SETUP-157] A cloud operator who runs update-bootstrap.sh gets the command's preview from a freshly built template
+  Given the cloud operator edited the bootstrap template in this checkout without rebuilding it
+  When the cloud operator runs "scripts/update-bootstrap.sh --prefix <prefix> --region <region>"
+  Then the output says "Building @starkeep/aws-bootstrap..."
+  And the preview shows the change the edit makes
+  And every flag the cloud operator passed reaches "starkeep cloud bootstrap-update"
+```
+
+```gherkin
+@local
+@intent:confirmed @coverage:none
+Scenario: [CLOUD-SETUP-158] A cloud operator whose bootstrap template build is older than its source is told to rebuild, and no change set is made
+  Given the cloud operator edited the bootstrap template in this checkout without rebuilding it
+  When the cloud operator runs "starkeep cloud bootstrap-update"
+  Then the output says "The built @starkeep/aws-bootstrap is older than its source, so the preview would use an old template."
+  And the output says to run "pnpm -F @starkeep/aws-bootstrap build"
+  And the command creates no change set
+```
+
+- **Coverage:** none.
 
 ## Permission limits
 

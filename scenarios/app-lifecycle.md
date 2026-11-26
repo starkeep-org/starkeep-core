@@ -1768,6 +1768,48 @@ Scenario: [APP-LIFE-261] A cloud operator updates only the cloud, or only this c
   And "starkeep update dice --local" updates this computer and leaves the cloud alone
 ```
 
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:partial
+Scenario: [APP-LIFE-262] A cloud operator cannot deploy an app folder that lacks commits the cloud install runs, and nothing deploys
+  Given "dice" was last installed in the cloud from a feature branch
+  And the "dice" folder on this computer is on a branch that lacks the feature branch's commits
+  When the cloud operator runs "starkeep install dice --cloud" or "starkeep update dice"
+  Then the install stops before it builds anything, with "dice in the cloud runs <count> commit(s) that this checkout lacks:" and each commit's short id and subject
+  And the message names "starkeep install dice --cloud --force"
+  And the cloud operator finds the cloud's "dice" still running the feature branch's code
+```
+
+- **Coverage:** `packages/admin-installer/__tests__/operations/install-cloud-app.test.ts` › "the backward-deploy guard reports DEPLOY_BACKWARD before it builds when the cloud runs a commit the folder lacks" and "deploys a folder that holds the recorded commit" (unit). No test runs the command against a live cloud.
+- **Notes:** the check compares patches, so a folder whose branch holds the commits under new ids after a rebase-merge passes. CLOUD-SETUP-164 states the same check for the cloud data server.
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:full
+Scenario: [APP-LIFE-263] A cloud operator who passes --force deploys the folder anyway and is warned
+  Given "dice" in the cloud runs commits its folder on this computer lacks
+  When the cloud operator runs "starkeep install dice --cloud --force"
+  Then the output says "Warning: the cloud runs changes to dice that this folder lacks, and this deploy removes them (forced)."
+  And the cloud's "dice" then runs the folder's code
+```
+
+- **Coverage:** `packages/admin-installer/__tests__/operations/install-cloud-app.test.ts` › "the backward-deploy guard deploys anyway with allowBackward, and says so" (unit).
+- **Notes:** "starkeep update --force" passes the same flag to each cloud app it redeploys.
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:partial
+Scenario: [APP-LIFE-264] A cloud operator reads from the terminal which commit an app's cloud install built from
+  Given the cloud operator is signed in as the admin on this computer
+  And "dice" runs in the cloud with a web app, last installed from a folder with uncommitted changes
+  When the cloud operator runs "starkeep info dice"
+  Then the output shows "Cloud" with "web, from <commit> with uncommitted changes"
+  And without an admin session, the line says "unknown (sign in with `starkeep login --admin`)" and no browser opens
+```
+
+- **Coverage:** `packages/admin-installer/__tests__/orchestrator.test.ts` › "records the commit of the folder the install builds from, and whether it had changes" (unit) and `packages/admin-installer/__tests__/integration/registry-pglite.test.ts` › "the recorded source commit records each install's commit and whether it had changes, and reads it back" (integration) cover the record. No test runs "starkeep info" against a cloud.
+- **Notes:** every cloud install records its folder's commit, whatever its surfaces. A folder outside git records none, and the line says "no recorded commit".
+
 ## Installing in the cloud
 
 ### From the dashboard
@@ -2195,7 +2237,7 @@ Scenario: [APP-LIFE-252] A cloud operator sees each app's cloud surfaces in the 
   And "dice" runs in the cloud with a web app and a mobile app, and its folder holds newer web code
   And "notes" is installed in the cloud with its data side only
   When the cloud operator runs "starkeep list"
-  Then the CLOUD column shows "web+mobile  (behind)" for "dice" and "data" for "notes"
+  Then the CLOUD column shows "web+mobile  <commit>  (behind)" for "dice" and "data  <commit>" for "notes", each with the short id of the commit its last cloud install built from
   And an app installed only in the cloud gets a row of its own
 ```
 
