@@ -928,6 +928,17 @@ Scenario: [APP-LIFE-224] A local operator whose earlier command died mid-operati
 
 - **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "takes over a lock whose holder died (APP-LIFE-224)" (integration, local).
 
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-244] A local operator who names no target for an install or an uninstall is told the target flags
+  When the local operator runs "starkeep install dice" with no target flag
+  Then the command says "Name where to install: --local (this computer), --cloud (the cloud, every surface), --web or --mobile. Flags combine."
+  And the command exits with status 2 and installs nothing
+```
+
+- **Notes:** "starkeep uninstall dice" says the same with "uninstall".
+
 ## Installed apps on this computer
 
 ### Install pinning
@@ -1590,6 +1601,7 @@ Scenario: [APP-LIFE-089] A cloud operator sees a pending cloud update only when 
   When the cloud operator opens the dashboard
   Then the cloud tile shows no pending update when the folder holds the deployed manifest in another key order
   And the cloud tile shows no pending update when the folder's uncommitted changes are the ones deployed, or were committed after the deploy
+  And the cloud tile shows no pending update right after a web app's own deploy, although the deploy filled in platform values that the folder's manifest leaves empty
   And the cloud tile shows a pending update when the folder holds another manifest
   And the cloud tile shows a pending update when the cloud install predates the recorded manifest
 ```
@@ -1829,6 +1841,71 @@ Scenario: [APP-LIFE-243] A local operator whose repository moved since the updat
 
 - **Coverage:** `packages/cli/__tests__/update-fetch.test.ts` › "refuses a repository that moved since the update, and leaves it as it is" (unit, local).
 
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [APP-LIFE-256] A cloud operator whose app runs in both places updates the cloud first, then this computer
+  Given "dice" is installed on this computer and in the cloud, and its repository is behind its upstream
+  When the cloud operator runs "starkeep update dice"
+  Then the output says "Updating dice in the cloud (<surfaces>)…" and shows the cloud deploy
+  And only after the cloud deploy ends does the output show this computer's update, ending with "Updated dice."
+```
+
+- **Notes:** a member's device that runs a newer version than the cloud can stall its uploads until the cloud catches up, so the cloud goes first.
+
+```gherkin
+@cloud
+@intent:confirmed
+Scenario: [APP-LIFE-257] A cloud operator whose cloud install already runs the folder's code is spared a redeploy
+  Given the cloud's install of "dice" holds the folder's manifest and web code
+  When the cloud operator runs "starkeep update dice --no-fetch"
+  Then the output says "dice: the cloud already runs this folder."
+  And no cloud deploy starts
+```
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [APP-LIFE-258] A cloud operator who declines an update's new cloud access leaves both places on the old version
+  Given the pull brings a "dice" manifest that asks the cloud for different access
+  When the cloud operator runs "starkeep update dice" in a terminal
+  Then the output says "dice's new version asks the cloud for different access:" with the new consent words
+  And the command asks "Approve dice's new access and update the cloud? [y/N]"
+  When the cloud operator answers anything other than yes
+  Then the output says "Not updated in the cloud: dice."
+  And "dice" keeps running the old version on this computer too
+```
+
+```gherkin
+@cloud @mobile
+@intent:confirmed
+Scenario: [APP-LIFE-259] A cloud operator's update redeploys only the surfaces an app already has in the cloud
+  Given "dice" has a web app in the cloud and no mobile app, and its manifest offers both
+  When the cloud operator runs "starkeep update dice"
+  Then the output says "Updating dice in the cloud (web)…"
+  And the dashboard's Dice Mobile tile still reads Not registered
+```
+
+```gherkin
+@cloud
+@intent:confirmed
+Scenario: [APP-LIFE-260] A cloud operator who updates a cloud app that no discovery folder holds is told to add its folder
+  Given "dice" is installed in the cloud, and no discovery folder on this computer holds it
+  When the cloud operator runs "starkeep update dice --cloud"
+  Then the command says "dice is installed in the cloud, but no discovery folder holds it. Add its folder with `starkeep source add <dir>`."
+  And no cloud deploy starts
+```
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [APP-LIFE-261] A cloud operator updates only the cloud, or only this computer
+  Given "dice" is installed on this computer and in the cloud, and its folder holds new code
+  When the cloud operator runs "starkeep update dice --cloud"
+  Then the cloud runs the new code, and this computer's install stays as it was
+  And "starkeep update dice --local" updates this computer and leaves the cloud alone
+```
+
 ## Installing in the cloud
 
 ### From the dashboard
@@ -2029,14 +2106,14 @@ Scenario: [APP-LIFE-111] A cloud operator cannot register a mobile build on a de
 ```gherkin
 @cloud @mobile
 @intent:confirmed
-Scenario Outline: [APP-LIFE-112] A cloud operator who runs cli:install-app installs the data side and the surfaces asked for
+Scenario Outline: [APP-LIFE-112] A cloud operator who installs from the terminal gets the data side and the surfaces asked for
   Given an app's manifest offers a web app and an Android build
-  When the cloud operator runs "cli:install-app dice <flags>"
+  When the cloud operator runs "starkeep install dice <flags>"
   Then the command installs the app's data side and <surfaces>
 
   Examples:
     | flags      | surfaces                                    |
-    |            | the web app and the mobile registration     |
+    | --cloud    | the web app and the mobile registration     |
     | --web      | the web app only                            |
     | --mobile   | the mobile registration only, with no compute |
 ```
@@ -2044,30 +2121,32 @@ Scenario Outline: [APP-LIFE-112] A cloud operator who runs cli:install-app insta
 ```gherkin
 @cloud
 @intent:confirmed
-Scenario: [APP-LIFE-113] A cloud operator sees the deployment and folder before cli:install-app acts, and the app's address when done
-  When the cloud operator runs "cli:install-app dice"
-  Then before any step the output shows the region, the stage, the account, the app folder, and the surfaces it adds
-  And after a web install the output says "Install complete. dice app available at:" and the address ending in "/apps/dice"
+Scenario: [APP-LIFE-113] A cloud operator sees the deployment and folder before a terminal cloud install acts, and the app's address when done
+  When the cloud operator runs "starkeep install dice --cloud"
+  Then before any step the output shows the region, the stack prefix, the account, the app folder, and the surfaces it adds
+  And after a web install the output says "Install complete. dice is available at:" and the address ending in "/apps/dice"
   And after a mobile-only registration the output names the Android package and its sign-in callback
 ```
 
 ```gherkin
 @cloud
 @intent:confirmed
-Scenario: [APP-LIFE-114] A cloud operator sees every manifest error and warning, and cli:install-app refuses
+Scenario: [APP-LIFE-114] A cloud operator sees every manifest error and warning, and the terminal cloud install refuses
   Given the app's manifest holds several errors and one warning
-  When the cloud operator runs "cli:install-app dice"
+  When the cloud operator runs "starkeep install dice --cloud"
   Then the output says the manifest is not a valid app manifest and lists each error
   And the output prints the warning
   And the command exits with an error before deploying anything
 ```
+
+- **Notes:** Implementation gap: `starkeep install` checks the folder before the consent words and stops at the first error, as "The manifest in <folder> failed validation: <first error>", without the other errors or the warnings (`packages/cli/src/app-steps.ts` › `validFolder`).
 
 ```gherkin
 @cloud
 @intent:confirmed
 Scenario: [APP-LIFE-115] A cloud operator cannot install an app that needs a newer protocol than the cloud data server
   Given the app's manifest needs a newer Starkeep protocol than the deployed cloud data server speaks
-  When the cloud operator runs "cli:install-app dice"
+  When the cloud operator runs "starkeep install dice --cloud"
   Then the command names both versions and exits with an error before deploying anything
 ```
 
@@ -2076,7 +2155,7 @@ Scenario: [APP-LIFE-115] A cloud operator cannot install an app that needs a new
 @intent:confirmed
 Scenario: [APP-LIFE-116] A cloud operator cannot install an app with an unapproved bundle command
   Given the app declares a bundle command off the approved list
-  When the cloud operator runs "cli:install-app dice"
+  When the cloud operator runs "starkeep install dice --cloud"
   Then the command names the refused command and exits with an error
   And the cloud shows no install of "dice"
 ```
@@ -2085,10 +2164,10 @@ Scenario: [APP-LIFE-116] A cloud operator cannot install an app with an unapprov
 @cloud
 @intent:confirmed
 Scenario: [APP-LIFE-117] A cloud operator cannot deploy a folder whose manifest no longer matches the approved digest
-  Given the cloud operator approved a cloud install of "dice" in Admin
-  And the folder's manifest changed after Admin passed the install to "cli:install-app"
-  When the cloud operator watches the install panel
-  Then the panel shows that the manifest "changed after the manifest was approved. Review the new manifest and deploy again."
+  Given the cloud operator approved a cloud install of "dice" in Admin or in the terminal
+  And the folder's manifest changed after the approval, before the deploy began
+  When the cloud operator watches the install's progress
+  Then the install panel or the terminal shows that the manifest "changed after the manifest was approved. Review the new manifest and deploy again."
   And nothing deploys
 ```
 
@@ -2097,7 +2176,7 @@ Scenario: [APP-LIFE-117] A cloud operator cannot deploy a folder whose manifest 
 @intent:confirmed
 Scenario: [APP-LIFE-118] A cloud operator whose bundle build writes no dist.zip sees the install stop
   Given the app's bundle command succeeds but writes no dist.zip
-  When the cloud operator runs "cli:install-app dice"
+  When the cloud operator runs "starkeep install dice --cloud"
   Then the command says the bundle build did not produce a dist.zip, names the path, and exits with an error
 ```
 
@@ -2106,7 +2185,7 @@ Scenario: [APP-LIFE-118] A cloud operator whose bundle build writes no dist.zip 
 @intent:confirmed
 Scenario: [APP-LIFE-119] A cloud operator cannot install an app with a built-in app id or an id the cloud cannot name resources with
   Given an app's manifest uses a built-in app's id, or an id the cloud cannot use in resource names
-  When the cloud operator runs "cli:install-app" for it
+  When the cloud operator runs "starkeep install" for it with "--cloud"
   Then the command refuses before any install step
   And the cloud shows no install of the app
 ```
@@ -2116,7 +2195,7 @@ Scenario: [APP-LIFE-119] A cloud operator cannot install an app with a built-in 
 @intent:confirmed
 Scenario: [APP-LIFE-120] A cloud operator cannot install a surface the manifest does not offer
   Given an app's manifest declares no compute
-  When the cloud operator runs "cli:install-app notes --web"
+  When the cloud operator runs "starkeep install notes --web"
   Then the command says "notes's manifest declares no compute, so it has no web app." and exits with an error
   And "--mobile" on an app with no mobile build says the manifest declares no mobile build
 ```
@@ -2124,10 +2203,11 @@ Scenario: [APP-LIFE-120] A cloud operator cannot install a surface the manifest 
 ```gherkin
 @cloud
 @intent:confirmed
-Scenario: [APP-LIFE-121] A cloud operator without the cloud data server's settings is told to install it first
-  Given the local Starkeep config lacks the cloud data server's settings
-  When the cloud operator runs "cli:install-app dice"
-  Then the command names the missing settings and says "Install the cloud-data-server first."
+Scenario: [APP-LIFE-121] A cloud operator without the cloud data server's settings is told to set up the cloud first
+  Given this computer's configuration lacks the cloud data server's settings
+  When the cloud operator runs "starkeep install dice --cloud"
+  Then the command says "This computer has no cloud with a data server yet. Run `starkeep setup --cloud` first."
+  And the command shows no consent words and deploys nothing
 ```
 
 ```gherkin
@@ -2135,12 +2215,12 @@ Scenario: [APP-LIFE-121] A cloud operator without the cloud data server's settin
 @intent:confirmed
 Scenario: [APP-LIFE-122] A cloud operator reads the consent words and answers yes before a terminal cloud install acts
   Given "dice" was never approved on this computer or in the cloud
-  When the cloud operator runs "cli:install-app dice" in a terminal
-  Then the command prints what "dice" asks for, in the consent dialog's words
+  When the cloud operator runs "starkeep install dice --cloud" in a terminal
+  Then the command prints "Install Dice in the cloud?" and what "dice" asks for, in the consent dialog's words
+  And the command asks "Approve and install? [y/N]"
   And the command deploys only after the cloud operator answers yes, or "--yes" was given
+  And an answer other than yes prints "Not installed: Dice." and deploys nothing
 ```
-
-- **Notes:** Implementation gap: the command deploys without printing the consent words or asking.
 
 ```gherkin
 @cloud
@@ -2164,6 +2244,128 @@ Scenario: [APP-LIFE-124] A member keeps using a cloud app at the same address, w
 ```
 
 - **Notes:** The credential's role in request signing belongs to [users-and-access.md](users-and-access.md).
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [APP-LIFE-245] A cloud operator installs an app on this computer and in the cloud with one command and one consent
+  Given the local data server is running and the cloud is set up
+  When the cloud operator runs "starkeep install dice --local --cloud" in a terminal
+  Then the command shows the consent words once and asks "Approve and install? [y/N]"
+  When the cloud operator answers yes
+  Then the app installs on this computer, then in the cloud
+  And admin-web's dashboard shows "dice" installed on this computer and in the cloud
+```
+
+```gherkin
+@cloud
+@intent:confirmed
+Scenario: [APP-LIFE-246] A cloud operator without an admin session who installs in the cloud from a terminal signs in on the way
+  Given no admin session is open on this computer
+  When the cloud operator runs "starkeep install dice --cloud" in a terminal and approves the consent
+  Then the output says "Signing in as the admin first." and the sign-in page opens
+  When the cloud operator signs in there with an account that has cloud operator rights
+  Then the install goes on, with no second command
+```
+
+```gherkin
+@cloud
+@intent:confirmed
+Scenario: [APP-LIFE-247] A cloud operator's script without an admin session is told to sign in first, with exit status 3
+  Given no admin session is open on this computer
+  And the cloud operator's script runs with no terminal attached
+  When the script runs "starkeep install dice --cloud --yes"
+  Then the command says "Sign in as the Starkeep admin first: run `starkeep login --admin`, or sign in in admin-web."
+  And the command exits with status 3 and deploys nothing
+```
+
+- **Notes:** Implementation gap: the message repeats its instruction as "… or sign in in admin-web. Run `starkeep login --admin` first." (`packages/cli/src/cloud.ts` › `adminCredentialsOrSignIn`).
+
+```gherkin
+@cloud
+@intent:confirmed
+Scenario: [APP-LIFE-248] A cloud operator whose terminal closes during a cloud install finds the install going on, and the next run follows it
+  Given "starkeep install dice --cloud" is deploying
+  When the cloud operator closes the terminal and runs "starkeep install dice --cloud" again before the deploy ends
+  Then the new run shows the deploy's progress from its start, with no second deploy
+  And the output says "Followed a dice (every surface) run that was already going."
+  And the app answers at its address when the deploy ends
+```
+
+```gherkin
+@cloud
+@intent:confirmed
+Scenario: [APP-LIFE-249] A cloud operator who starts a second cloud app operation while one runs is told to wait or follow the first in admin-web
+  Given a cloud install of "notes" is running, started from admin-web or another terminal
+  When the cloud operator runs "starkeep install dice --cloud" and approves the consent
+  Then the command says "Another cloud operation is running (notes (every surface)). Wait for it to end, or follow it in admin-web."
+  And the install of "notes" finishes as if the second command never ran
+```
+
+```gherkin
+@cloud
+@intent:confirmed
+Scenario: [APP-LIFE-250] A cloud operator whose terminal cloud install fails sees the reason and the log that holds the whole run
+  Given AWS refuses a step of a cloud install of "dice"
+  When the cloud operator runs "starkeep install dice --cloud --yes"
+  Then the output shows the refusal and "The whole log: <log path>"
+  And the command exits with status 1
+  And "--verbose" shows the deploy's own output lines as the run goes
+```
+
+```gherkin
+@cloud
+@intent:confirmed
+Scenario: [APP-LIFE-251] A cloud operator whose sign-in expires during a terminal cloud install is told to sign in and run the command again
+  Given the cloud operator's sign-in expires during "starkeep install dice --cloud"
+  When the cloud operator waits for the install to end
+  Then the output ends with the refusal and "Run `starkeep login --admin`, then run the command again."
+  And the output names the log file
+```
+
+- **Notes:** admin-web shows the same failure as APP-LIFE-104.
+
+```gherkin
+@cloud
+@intent:confirmed
+Scenario: [APP-LIFE-252] A cloud operator sees each app's cloud surfaces in the list, and which cloud installs are behind the folder
+  Given the cloud operator is signed in as the admin on this computer
+  And "dice" runs in the cloud with a web app and a mobile app, and its folder holds newer web code
+  And "notes" is installed in the cloud with its data side only
+  When the cloud operator runs "starkeep list"
+  Then the CLOUD column shows "web+mobile  (behind)" for "dice" and "data" for "notes"
+  And an app installed only in the cloud gets a row of its own
+```
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [APP-LIFE-253] A local operator without an admin session sees the cloud column as unknown, and no sign-in starts
+  Given the computer's cloud is set up, and no admin session is open on this computer
+  When the local operator runs "starkeep list"
+  Then the CLOUD column shows "?" for each app
+  And the output warns "Sign in with `starkeep login --admin` to see the CLOUD column."
+  And no browser opens
+```
+
+```gherkin
+@cloud
+@intent:confirmed
+Scenario: [APP-LIFE-254] A cloud operator who uninstalls an app the cloud does not hold is told so
+  Given "dice" is not installed in the cloud
+  When the cloud operator runs "starkeep uninstall dice --cloud"
+  Then the command says "dice is not installed in the cloud."
+  And the command exits with status 1
+```
+
+```gherkin
+@cloud @mobile
+@intent:confirmed
+Scenario: [APP-LIFE-255] A cloud operator cannot delete a cloud app's data while removing only one surface
+  When the cloud operator runs "starkeep uninstall dice --web --delete-data"
+  Then the command says "--delete-data in the cloud needs --cloud: --web and --mobile keep the data side."
+  And the command exits with status 2, and "dice" keeps working in the cloud
+```
 
 ### A web app's served files
 
@@ -2249,7 +2451,7 @@ Scenario: [APP-LIFE-130] A cloud operator sees in the install log every route re
 Scenario: [APP-LIFE-131] A cloud operator whose app's data path answers without sign-in sees the install fail as EXPOSED, with the takedown command
   Given an app's data path would answer a request that carries no sign-in
   When the cloud operator installs the app in the cloud
-  Then the command says "dice is installed but EXPOSED. Take it down before doing anything else:" and prints the "cli:uninstall-app" command
+  Then the command says "dice is installed but EXPOSED. Take it down before doing anything else:" and prints "starkeep uninstall dice --web"
   And the command exits with an error
 ```
 
@@ -2553,11 +2755,11 @@ Scenario: [APP-LIFE-234] A local operator who types a different id changes nothi
 ```gherkin
 @cloud
 @intent:confirmed
-Scenario: [APP-LIFE-153] A cloud operator who runs cli:uninstall-app removes the app, keeps its data, and learns how to delete it
+Scenario: [APP-LIFE-153] A cloud operator who uninstalls from the terminal removes the app, keeps its data, and learns how to delete it
   Given "dice" is installed in the cloud
-  When the cloud operator runs "cli:uninstall-app dice"
-  Then the output names the region, the stage and the account before it acts
-  And the output ends with "dice cloud uninstall complete. Its data stays in the cloud, and reinstalling dice gets it back. To delete it, run cli:delete-app-data dice."
+  When the cloud operator runs "starkeep uninstall dice --cloud"
+  Then the output names the region, the stack prefix and the account before it acts
+  And the output ends with "dice cloud uninstall complete. Its data stays in the cloud, and reinstalling dice gets it back. To delete it: starkeep uninstall dice --cloud --delete-data."
 ```
 
 ```gherkin
@@ -2586,7 +2788,7 @@ Scenario: [APP-LIFE-155] A member finds their rows again after the cloud operato
 @intent:confirmed
 Scenario: [APP-LIFE-156] A cloud operator who removes one surface with --web or --mobile keeps the data side and the other surface
   Given "dice" is installed in the cloud with a web app and a mobile registration
-  When the cloud operator runs "cli:uninstall-app dice --mobile"
+  When the cloud operator runs "starkeep uninstall dice --mobile"
   Then the output says "dice's mobile app removed; its data stays installed."
   And the dashboard's Dice Mobile tile reads Not registered
 ```
@@ -2598,7 +2800,7 @@ Scenario: [APP-LIFE-156] A cloud operator who removes one surface with --web or 
 @intent:confirmed
 Scenario: [APP-LIFE-199] A member keeps using a cloud web app with their data after the cloud operator removes its mobile surface
   Given the member uses "dice" in the cloud on the web
-  And the cloud operator removed the mobile surface of "dice" with "cli:uninstall-app dice --mobile"
+  And the cloud operator removed the mobile surface of "dice" with "starkeep uninstall dice --mobile"
   When the member opens "dice" on the web
   Then the member finds the app with their data
 ```
@@ -2609,7 +2811,7 @@ Scenario: [APP-LIFE-199] A member keeps using a cloud web app with their data af
 Scenario: [APP-LIFE-157] A cloud operator can uninstall a cloud app whose folder is gone, from the manifest the cloud recorded
   Given "dice" is installed in the cloud
   And no folder on this computer holds "dice"
-  When the cloud operator runs "cli:uninstall-app dice"
+  When the cloud operator runs "starkeep uninstall dice --cloud"
   Then the uninstall completes from the manifest the cloud recorded at install
 ```
 
@@ -2620,7 +2822,7 @@ Scenario: [APP-LIFE-157] A cloud operator can uninstall a cloud app whose folder
 @intent:confirmed
 Scenario: [APP-LIFE-158] A cloud operator whose deployment lacks the kept-data table gets a refusal before any uninstall step
   Given the cloud data server was deployed before uninstalls kept data
-  When the cloud operator runs "cli:uninstall-app dice"
+  When the cloud operator runs "starkeep uninstall dice --cloud"
   Then the command says the database has no kept-data table and to redeploy the cloud data server
   And "dice" stays installed and working
 ```
@@ -2642,7 +2844,7 @@ Scenario: [APP-LIFE-159] A cloud operator who uninstalls a reinstalled app remov
 @intent:confirmed
 Scenario: [APP-LIFE-160] A cloud operator deletes a cloud app's kept data only after typing the app id
   Given the cloud keeps the data of an uninstalled "dice"
-  When the cloud operator runs "cli:delete-app-data dice"
+  When the cloud operator runs "starkeep uninstall dice --cloud --delete-data" in a terminal
   Then the output says "The cloud keeps Dice's data from an uninstall:" and lists each table's rows and the files
   And the output says the deletion removes them for every account, and that records shared with other apps stay
   And the command asks "Type dice to delete its cloud data:"
@@ -2650,23 +2852,29 @@ Scenario: [APP-LIFE-160] A cloud operator deletes a cloud app's kept data only a
   Then the output says "dice's cloud data deleted."
 ```
 
+- **Notes:** when "dice" is still installed, the same command uninstalls it first and then shows what the deletion removes.
+
 ```gherkin
 @cloud
 @intent:confirmed
 Scenario: [APP-LIFE-161] A cloud operator who types a non-matching answer cancels the deletion, and nothing changes
-  Given "cli:delete-app-data dice" asks for the app id
+  Given "starkeep uninstall dice --cloud --delete-data" asks for the app id
   When the cloud operator types anything other than "dice"
-  Then the output says "Deletion cancelled. Nothing changed."
-  And the command exits with an error
+  Then the output says "Kept dice's cloud data: the typed id did not match."
+  And the command exits with status 1
+  And the cloud still keeps the data
 ```
 
 ```gherkin
 @cloud
 @intent:confirmed
-Scenario: [APP-LIFE-162] A cloud operator can delete without a question only with --confirm naming the same app id
-  When the cloud operator runs "cli:delete-app-data dice --non-interactive" without "--confirm dice"
-  Then the command says "--non-interactive deletes data only with --confirm dice. Nothing changed." and exits with an error
-  When the cloud operator adds "--confirm dice"
+Scenario: [APP-LIFE-162] A cloud operator can delete without a question only with --yes
+  Given an admin session is open on this computer
+  And the cloud operator's script runs with no terminal attached
+  When the script runs "starkeep uninstall dice --cloud --delete-data" without "--yes"
+  Then the command says "Type dice to delete its cloud data: No terminal is attached to answer. Pass --yes to delete without typing the app id."
+  And the command exits with status 3, and the cloud still keeps the data
+  When the script adds "--yes"
   Then the data is deleted without a question
 ```
 
@@ -2676,7 +2884,7 @@ Scenario: [APP-LIFE-162] A cloud operator can delete without a question only wit
 Scenario: [APP-LIFE-163] A cloud operator cannot delete a cloud app's data while it is installed
   Given "dice" is installed in the cloud
   When the cloud operator runs "cli:delete-app-data dice"
-  Then the command says "dice is installed in the cloud. Uninstall it (cli:uninstall-app dice) before deleting its data."
+  Then the command says "dice is installed in the cloud. Uninstall it (starkeep uninstall dice --cloud) before deleting its data."
   And "dice" keeps working in the cloud with its data
 ```
 
