@@ -12,6 +12,7 @@ import { readConfig } from "@starkeep/operator/config";
 import {
   adminPool,
   adminSessionStatus,
+  hasAdminSessionFile,
   saveAdminSignIn,
   signOutAdmin,
 } from "@starkeep/operator/admin-session";
@@ -160,10 +161,17 @@ export const logoutCommand: Command = {
   },
   async run(io, args) {
     if (which(args, "sign out of") === "admin") {
+      // `revoked` is false both when no session existed and when the pool
+      // could not be reached, so the file decides which one this is.
+      const hadSession = hasAdminSessionFile();
       const { revoked } = await signOutAdmin();
       io.event({
         type: "progress",
-        message: revoked ? "Signed out as the admin." : "No admin session was open here.",
+        message: revoked
+          ? "Signed out as the admin."
+          : hadSession
+            ? "Signed out as the admin on this computer. The pool did not confirm that it revoked the sign-in."
+            : "No admin session was open here.",
       });
       io.event({ type: "result", ok: true, data: { revoked } });
       return;

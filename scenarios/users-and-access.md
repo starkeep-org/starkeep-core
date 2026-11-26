@@ -872,7 +872,7 @@ Scenario: [ACCESS-199] A cloud operator who signs out in the terminal is signed 
   And the old sign-in no longer works anywhere
 ```
 
-- **Notes:** when no admin session is open, the output says "No admin session was open here."
+- **Notes:** when no admin session is open, the output says "No admin session was open here." When the pool cannot be reached, the session still ends on this computer, and the output says "Signed out as the admin on this computer. The pool did not confirm that it revoked the sign-in."
 
 ```gherkin
 @local
