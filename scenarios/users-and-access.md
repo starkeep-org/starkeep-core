@@ -816,7 +816,7 @@ A cloud operator signs in once on a computer, on the managed login page in the b
 
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [ACCESS-195] A cloud operator who signs in from the terminal is signed in to admin-web too, without typing a password into Starkeep
   Given this computer's cloud setup is done through the stack outputs step
   When the cloud operator runs "starkeep login --admin"
@@ -827,11 +827,12 @@ Scenario: [ACCESS-195] A cloud operator who signs in from the terminal is signed
   And admin-web's cloud sections then open without a sign-in
 ```
 
+- **Coverage:** `packages/cli/__tests__/login.test.ts` › "signs in on the page, asking for the password, and keeps the session admin-web shares (ACCESS-204)" (unit, local, fake pool). The test plays the browser, so no test checks the page's closing text in a real browser.
 - **Notes:** the terminal never reads a password. The sign-in page asks for a new password at an account's first sign-in.
 
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:none
 Scenario: [ACCESS-196] A cloud operator who signs in in admin-web can run the installer scripts in the terminal without signing in again
   Given the cloud operator signed in on admin-web's sign-in page
   When the cloud operator runs an installer script on the same computer, such as the cloud data server install
@@ -839,44 +840,52 @@ Scenario: [ACCESS-196] A cloud operator who signs in in admin-web can run the in
   And the command asks for no sign-in
 ```
 
+- **Coverage:** No test runs an installer script after an admin-web sign-in.
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [ACCESS-197] A cloud operator sees in the status who is signed in as the admin and until when
   Given the cloud operator signed in as the admin on this computer
   When the cloud operator runs "starkeep status"
-  Then the output shows "ADMIN     signed in as <email> until <time> unless used"
+  Then the output shows "ADMIN     signed in as <email> until <time>"
 ```
 
-- **Notes:** a computer whose admin session ended shows "ADMIN signed out". A computer that joined no cloud shows no ADMIN line.
+- **Coverage:** `packages/cli/__tests__/login.test.ts` › "shows the admin session and when it ends in the status (ACCESS-197)" (unit, local, fake pool).
+- **Notes:** the time is twelve hours after the last cloud action, and never later than a day after the sign-in (ACCESS-198). A computer whose admin session ended shows "ADMIN signed out". A computer that joined no cloud shows no ADMIN line.
 
 ```gherkin
 @local @cloud
-@intent:unclear
+@intent:confirmed @coverage:full
 Scenario: [ACCESS-198] A cloud operator who leaves the computer's admin session unused for twelve hours must sign in again
   Given the cloud operator signed in as the admin on this computer
   And twelve hours passed with no cloud action in admin-web or the terminal
   When the cloud operator starts a cloud action
   Then the cloud operator is told "The admin session ended after 12 hours without use. Sign in again."
-  And each cloud action within twelve hours of the last one keeps the session going
+  And each cloud action within twelve hours of the last one keeps the session going, up to a day after the sign-in
 ```
+
+- **Coverage:** `packages/operator/__tests__/admin-session.test.ts` › "ends after twelve idle hours, revoking the token", "stays alive while it is used within the idle window" and "ends a day after its sign-in however often it is used, as the pool's one-day refresh token does" (unit, fake pool); `packages/aws-bootstrap/__tests__/bootstrap-template.test.ts` › "issues one-day refresh tokens, revocable one at a time" (unit).
+- **Notes:** the pool limits the admin sign-in to one day as well, so a copy of the session taken from this computer stops working within a day, whatever happens here. A session a day old ends with "The admin session ended a day after its sign-in. Sign in again." The limit reaches a deployment with its next bootstrap update.
 
 ```gherkin
 @local @cloud
-@intent:unclear
+@intent:confirmed @coverage:partial
 Scenario: [ACCESS-199] A cloud operator who signs out in the terminal is signed out of admin-web too
   Given the cloud operator is signed in as the admin on this computer
   When the cloud operator runs "starkeep logout --admin"
   Then the output says "Signed out as the admin."
   And admin-web's cloud sections then ask the cloud operator to sign in
   And the old sign-in no longer works anywhere
+  And the next admin sign-in, in the terminal or in admin-web, asks for the password on the sign-in page, even though the page remembers the account
 ```
 
-- **Notes:** when no admin session is open, the output says "No admin session was open here." When the pool cannot be reached, the session still ends on this computer, and the output says "Signed out as the admin on this computer. The pool did not confirm that it revoked the sign-in."
+- **Coverage:** `packages/cli/__tests__/login.test.ts` › "signs out at the pool and on disk" and "signs in on the page, asking for the password, and keeps the session admin-web shares (ACCESS-204)"; `apps/admin-web/__tests__/auth-routes.test.ts` › "sends the browser to the managed login page for the admin client, with PKCE" (unit, local, fake pool). No test checks that the real managed login page honors the password prompt.
+- **Notes:** when no admin session is open, the output says "No admin session was open here." When the pool cannot be reached, the session still ends on this computer, and the output says "Signed out as the admin on this computer. The pool did not confirm that it revoked the sign-in." The sync sign-in keeps the page's remembered account.
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [ACCESS-200] A local operator whose account lacks cloud operator rights cannot sign in as the admin from the terminal
   Given the local operator holds an account that can use apps but has no cloud operator rights
   When the local operator runs "starkeep login --admin" and signs in on the page with that account
@@ -884,9 +893,11 @@ Scenario: [ACCESS-200] A local operator whose account lacks cloud operator right
   And the command exits with status 1, and no admin session opens on the computer
 ```
 
+- **Coverage:** `packages/cli/__tests__/login.test.ts` › "refuses an account without admin rights, and opens no session (ACCESS-200)" (unit, local, fake pool).
+
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [ACCESS-201] A cloud operator whose admin rights were removed must sign in with an account that still has them
   Given the cloud operator signed in as the admin on this computer
   And another cloud operator then removed the account's cloud operator rights
@@ -895,9 +906,11 @@ Scenario: [ACCESS-201] A cloud operator whose admin rights were removed must sig
   And the action does not run
 ```
 
+- **Coverage:** `packages/operator/__tests__/admin-session.test.ts` › "ends the session when the account lost its admin rights, and mints nothing (ACCESS-201)" (unit, fake pool).
+
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [ACCESS-202] A cloud operator whose account was signed out of all devices must sign in again on the computer
   Given the cloud operator signed in as the admin on this computer
   And another cloud operator signed the account out of all devices
@@ -906,20 +919,24 @@ Scenario: [ACCESS-202] A cloud operator whose account was signed out of all devi
   And the action does not run
 ```
 
+- **Coverage:** `packages/operator/__tests__/admin-session.test.ts` › "asks for a sign-in when the pool ended the session" (unit, fake pool).
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [ACCESS-203] A cloud operator keeps the computer's admin session out of reach of the computer's other accounts
   Given the cloud operator signed in as the admin on a computer
   When the cloud operator looks for the admin session from another account on the same computer
   Then the other account cannot read the admin session file
 ```
 
+- **Coverage:** `packages/operator/__tests__/admin-session.test.ts` › "is written by a sign-in, readable by its owner only" (unit, local).
+
 ### Sign-in problems
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [ACCESS-204] A cloud operator on a computer with no browser signs in through a forwarded port
   Given the cloud operator reaches the computer over SSH
   When the cloud operator runs "starkeep login --admin --no-browser"
@@ -928,20 +945,23 @@ Scenario: [ACCESS-204] A cloud operator on a computer with no browser signs in t
   Then the terminal says "Signed in as the admin (<email>). admin-web uses the same sign-in."
 ```
 
+- **Coverage:** `packages/cli/__tests__/login.test.ts` › "signs in on the page, asking for the password, and keeps the session admin-web shares (ACCESS-204)" (unit, local, fake pool). No test forwards a port.
 - **Notes:** the sign-in page returns to a fixed loopback address, so the browser must reach port 47615 of the computer that ran the command.
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [ACCESS-205] A cloud operator who does not finish the sign-in within five minutes is told the time ran out
   When the cloud operator runs "starkeep login --admin" and does not finish the sign-in within five minutes
   Then the terminal says "No sign-in arrived before the time ran out."
   And the command exits with status 1, and no admin session opens
 ```
 
+- **Coverage:** `packages/cli/__tests__/login.test.ts` › "says the time ran out when no sign-in arrives (ACCESS-205)" (unit, local), with a shortened wait.
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [ACCESS-206] A cloud operator whose sign-in port is taken is told to stop the program that holds it
   Given another program on the computer listens on port 47615
   When the cloud operator runs "starkeep login --admin"
@@ -949,18 +969,22 @@ Scenario: [ACCESS-206] A cloud operator whose sign-in port is taken is told to s
   And no browser opens
 ```
 
+- **Coverage:** `packages/operator/__tests__/admin-session.test.ts` › "names a port another program holds" (unit, local). No test runs "starkeep login --admin" on a held port.
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [ACCESS-207] A cloud operator whose sign-in page reports an error sees it in the terminal
   When the cloud operator runs "starkeep login --admin" and the sign-in page returns an error, such as a cancelled sign-in
   Then the terminal says "The sign-in page answered: <error>"
   And no admin session opens
 ```
 
+- **Coverage:** `packages/operator/__tests__/admin-session.test.ts` › "rejects with the page's error" (unit, local). No test runs the command with an error from the page.
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [ACCESS-208] A cloud operator whose admin-web runs on another port is told to sign in from the terminal
   Given admin-web runs on a port other than 3000
   When the cloud operator opens a sign-in in admin-web
@@ -968,25 +992,57 @@ Scenario: [ACCESS-208] A cloud operator whose admin-web runs on another port is 
   And admin-web offers no sign-in button
 ```
 
+- **Coverage:** `apps/admin-web/__tests__/auth-routes.test.ts` › "refuses on a port Cognito does not return to, and says to use the CLI" (unit, local).
 - **Notes:** the sign-in page returns only to addresses the bootstrap stack lists, which name port 3000.
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [ACCESS-209] A cloud operator whose sign-in in admin-web fails sees why after the browser returns
   When the cloud operator signs in from admin-web and the sign-in fails, such as with an account that lacks cloud operator rights
   Then the browser returns to admin-web, which shows "Sign-in did not finish: <reason>" with a "Dismiss" button
   And a reload of the page does not show the notice again
 ```
 
+- **Coverage:** `apps/admin-web/__tests__/cloud-setup-navigation.test.tsx` › "shows why a sign-in did not finish, such as an account outside starkeep-admins" (unit, local). No test reloads the page.
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [ACCESS-210] A cloud operator who signs in from the terminal before the stack outputs are recorded is told to finish that step
-  Given this computer's configuration holds no stack outputs
+  Given this computer's configuration holds no CognitoDomain stack output
   When the cloud operator runs "starkeep login --admin"
-  Then the terminal says "This computer has no cloud setup with a sign-in page yet. Finish the Stack outputs step in admin-web first."
+  Then the terminal says "The admin sign-in needs the CognitoDomain output, which admin-web's Stack outputs step saves. A bootstrap stack from before the managed sign-in page has no such output: update it first with `scripts/update-bootstrap.sh --apply`."
+  And no browser opens
 ```
+
+- **Coverage:** `packages/cli/__tests__/login.test.ts` › "asks for the stack outputs when the configuration names no sign-in page (ACCESS-210)" (unit, local).
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:partial
+Scenario: [ACCESS-227] A cloud operator whose bootstrap stack predates the browser sign-in is told to update the stack before anyone waits on the page
+  Given the deployment's bootstrap stack was created before the browser sign-in, so its sign-in clients list no callback address
+  When the cloud operator runs "starkeep login --admin", or signs in from admin-web
+  Then the cloud operator is told "The managed login page refused this sign-in (redirect_mismatch). A bootstrap stack from before the browser sign-in lists no callback address for it. Update the stack with `scripts/update-bootstrap.sh --apply`, which needs the AWS account owner's credentials, then sign in again."
+  And no sign-in page waits in the browser
+  And after the stack update the same sign-in works
+```
+
+- **Coverage:** `packages/cli/__tests__/login.test.ts` › "names the old bootstrap stack when the page refuses the sign-in, before anyone waits" and `apps/admin-web/__tests__/auth-routes.test.ts` › "names the old bootstrap stack when the login page refuses the sign-in" (unit, local, fake login page). No test runs against an old stack.
+- **Notes:** the command asks the managed login page about the sign-in before it opens the browser. A page that cannot be reached skips the check, and the browser shows what happened.
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:full
+Scenario: [ACCESS-228] A cloud operator who signs in as the admin with another account is told whose session the sign-in replaced
+  Given "ana@example.com" holds the admin session on this computer
+  When the cloud operator runs "starkeep login --admin" and signs in as "ben@example.com"
+  Then the terminal says "Signed in as the admin (ben@example.com). admin-web uses the same sign-in." and "This replaces ana@example.com's admin session on this computer."
+  And ana@example.com's session no longer works at the pool
+```
+
+- **Coverage:** `packages/cli/__tests__/login.test.ts` › "says whose session a sign-in with another admin account replaces" (unit, local, fake pool).
 
 ## Signing in a computer
 
@@ -996,7 +1052,7 @@ A local operator signs a computer in through admin-web's This Machine section or
 
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [ACCESS-062] A local operator signs a joined computer in on the sign-in page
   Given the local operator's computer has joined the deployment by its address
   When the local operator clicks "Sign in to sync" in admin-web's This Machine section
@@ -1005,6 +1061,8 @@ Scenario: [ACCESS-062] A local operator signs a joined computer in on the sign-i
   And the computer starts syncing the account's library
   And no page of admin-web asked for the password
 ```
+
+- **Coverage:** `apps/admin-web/__tests__/this-machine-section.test.tsx` › "sends the person to the managed login page to sign in, and asks for no password" (unit, local). No test signs in on a real page.
 
 ```gherkin
 @local
@@ -1019,7 +1077,7 @@ Scenario: [ACCESS-063] A local operator must join a cloud before signing a compu
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:none
 Scenario: [ACCESS-064] A local operator who enters a wrong password stays on the sign-in page, and the computer stays signed out
   Given the local operator's computer has joined a cloud
   When the local operator clicks "Sign in to sync" and enters a wrong password on the sign-in page
@@ -1027,9 +1085,11 @@ Scenario: [ACCESS-064] A local operator who enters a wrong password stays on the
   And the This Machine section still shows the computer signed out
 ```
 
+- **Coverage:** The wrong-password answer belongs to the managed login page, which no test drives.
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:none
 Scenario: [ACCESS-065] A local operator who signs in with a temporary password chooses a new password on the sign-in page
   Given a cloud operator created an account, and the local operator holds the emailed temporary password
   When the local operator clicks "Sign in to sync" and signs in on the sign-in page with the temporary password
@@ -1037,6 +1097,8 @@ Scenario: [ACCESS-065] A local operator who signs in with a temporary password c
   When the local operator enters a new password that the pool's policy accepts
   Then the browser returns to admin-web, and the computer signs in
 ```
+
+- **Coverage:** The new-password page belongs to the managed login page, which no test drives.
 
 ```gherkin
 @local @cloud
@@ -1110,7 +1172,7 @@ Scenario: [ACCESS-072] A local operator signs a computer in given only the cloud
 
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [ACCESS-211] A local operator signs a joined computer in to sync from the terminal
   Given the local operator's computer has joined the deployment by its address
   When the local operator runs "starkeep login --sync" and signs in on the sign-in page that opens
@@ -1118,9 +1180,11 @@ Scenario: [ACCESS-211] A local operator signs a joined computer in to sync from 
   And admin-web's This Machine section shows the computer signed in as that email
 ```
 
+- **Coverage:** `packages/cli/__tests__/login.test.ts` › "signs the computer in through the data server (ACCESS-211)" (unit, local), against a stand-in data server. No test checks admin-web's This Machine section.
+
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [ACCESS-212] A local operator signs a computer out of sync from the terminal
   Given the local operator's computer is signed in and syncing
   When the local operator runs "starkeep logout --sync"
@@ -1128,9 +1192,11 @@ Scenario: [ACCESS-212] A local operator signs a computer out of sync from the te
   And admin-web's This Machine section shows the computer signed out
 ```
 
+- **Coverage:** `packages/cli/__tests__/login.test.ts` › "signs a syncing computer out (ACCESS-212)" (unit, local), against a stand-in data server.
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [ACCESS-213] A local operator whose computer joined no cloud is told to join one before a terminal sign-in
   Given the local operator's computer has not joined any cloud
   When the local operator runs "starkeep login --sync"
@@ -1138,18 +1204,59 @@ Scenario: [ACCESS-213] A local operator whose computer joined no cloud is told t
   And no browser opens
 ```
 
+- **Coverage:** `packages/cli/__tests__/login.test.ts` › "says to join a cloud first, and opens no browser (ACCESS-213)" (unit, local).
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
+Scenario: [ACCESS-229] A local operator whose data server is stopped is told so before a terminal sign-in opens the browser
+  Given the local operator's computer has joined a cloud, and its local data server is stopped
+  When the local operator runs "starkeep login --sync"
+  Then the terminal says "The local data server is not answering. Run `starkeep start data-server` first."
+  And no browser opens
+```
+
+- **Coverage:** `packages/cli/__tests__/login.test.ts` › "refuses before the browser opens when the data server is stopped" (unit, local).
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:partial
+Scenario: [ACCESS-230] A local operator who signs in to sync with an account other than the library's owner is told the computer does not sync
+  Given the computer's library belongs to "ana@example.com"
+  When the local operator runs "starkeep login --sync" and signs in as "ben@example.com"
+  Then the terminal says "Signed in as ben@example.com, but this computer's library belongs to another account, so it does not sync." with the data server's reason
+  And the command exits with status 1
+  And "starkeep status" shows "SYNC      this library belongs to another account (ben@example.com)"
+```
+
+- **Coverage:** `packages/cli/__tests__/login.test.ts` › "says when the library belongs to another account" (unit, local), against a stand-in data server.
+
+```gherkin
+@local
+@intent:confirmed @coverage:full
+Scenario: [ACCESS-231] A local operator who signs a computer out of sync that does not sync is told so
+  Given the local operator's computer is not signed in to sync
+  When the local operator runs "starkeep logout --sync"
+  Then the terminal says "This computer was not signed in to sync."
+  And the command exits with status 0
+```
+
+- **Coverage:** `packages/cli/__tests__/login.test.ts` › "says a computer that does not sync was not signed in" (unit, local).
+
+```gherkin
+@local
+@intent:confirmed @coverage:full
 Scenario: [ACCESS-214] A local operator who names neither sign-in is told to pick one
   When the local operator runs "starkeep login" without "--admin" or "--sync"
   Then the terminal says "Name what to sign in to: --admin or --sync."
   And the command exits with status 2
 ```
 
+- **Coverage:** `packages/cli/__tests__/login.test.ts` › "needs one of --admin and --sync (ACCESS-214)" (unit, local).
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [ACCESS-215] A local operator finds that a program holding an account's password cannot sign the computer in with it
   Given the local operator's computer has joined a cloud
   And a program on the computer holds an account's email and password
@@ -1157,6 +1264,8 @@ Scenario: [ACCESS-215] A local operator finds that a program holding an account'
   Then the program receives "Send either { code, codeVerifier, redirectUri } from the sign-in page or { refreshToken }"
   And the This Machine section still shows the computer signed out
 ```
+
+- **Coverage:** `apps/local-data-server/__tests__/integration/device-sign-in.test.ts` › "takes no password" (integration, local).
 
 ### When the pool is out of reach
 
@@ -2331,7 +2440,7 @@ Scenario: [ACCESS-173] A local operator who opens another site's page keeps the 
 
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [ACCESS-216] A cloud operator who opens another site's page while signed in finds admin-web refusing to act as the cloud operator for it
   Given the cloud operator is signed in as the admin on this computer
   When the cloud operator opens a page from another site that sends admin-web a cloud request, such as one that invites a user
@@ -2339,4 +2448,5 @@ Scenario: [ACCESS-216] A cloud operator who opens another site's page while sign
   And nothing changes in the deployment
 ```
 
+- **Coverage:** `apps/admin-web/__tests__/same-origin.test.ts` › "refuses another site's POST to a route that mints the admin's credentials" (unit, local).
 - **Notes:** a page from another site that sends the browser to admin-web's sign-in start gets "Start the sign-in from admin-web's own page.", so it cannot sign the computer's sync or the admin session in through the sign-in page's remembered session.
