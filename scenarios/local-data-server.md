@@ -457,7 +457,7 @@ Scenario: [LDS-023] After joining a cloud, the local operator sees a restart not
   And the local operator opened the join form
   When the local operator enters the cloud's https address and presses "Join"
   Then the section says "Restarting the local data server…"
-  And the section then says "Sign in with your Starkeep account to sync local apps with <address>." above an email and password form
+  And the section then says "Sign in with your Starkeep account to sync local apps with <address>. The sign-in opens in this browser." above a "Sign in to sync" button
 ```
 
 - **Notes:** The section checks the data server once, three seconds after Join. A restart that takes longer leaves the section showing "Start the local data server to join a cloud or sign this machine in." until the local operator reloads the page. ACCESS-062 in [users-and-access.md](users-and-access.md) owns the sign-in itself.

@@ -376,15 +376,15 @@ Scenario: [CLOUD-SETUP-024] A cloud operator deploys the bootstrap stack with th
 
 ```gherkin
 @local
-@intent:confirmed @coverage:partial
-Scenario: [CLOUD-SETUP-025] A cloud operator on the stack outputs step gets a link to the Outputs tab and enters three values
+@intent:confirmed
+Scenario: [CLOUD-SETUP-025] A cloud operator on the stack outputs step gets a link to the Outputs tab and enters four values
   Given the cloud operator completed step 1 with the region "us-west-2" and the stack prefix "starkeep"
   When the cloud operator opens the stack outputs step
   Then the step links "CloudFormation stack" to the starkeep-bootstrap stack's Outputs tab in us-west-2
-  And the step asks for IdentityPoolId, UserPoolClientId, and UserPoolId, and no other value
+  And the step asks for CognitoDomain, IdentityPoolId, UserPoolClientId, and UserPoolId, and no other value
 ```
 
-- **Coverage:** `apps/admin-web/__tests__/cloud-setup-navigation.test.tsx` › "resuming onto the last step asks for only the three IDs sign-in uses" (unit, local); `packages/aws-bootstrap/__tests__/bootstrap-template.test.ts` › "console URL helpers builds the stack-outputs URL filtered to the stack name" (unit). No test checks the link on the page.
+- **Notes:** the sign-in step needs CognitoDomain, because the sign-in happens on the managed login page at that domain.
 
 ```gherkin
 @local
@@ -397,6 +397,7 @@ Scenario Outline: [CLOUD-SETUP-026] A cloud operator who enters a malformed stac
 
   Examples:
     | field            | value          | hint                                                  |
+    | CognitoDomain    | not a host     | A host name, such as starkeep-123456789012.auth.us-east-1.amazoncognito.com |
     | IdentityPoolId   | us-west-2:abc  | Format: us-east-1:xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx |
     | UserPoolClientId | abc-123        | Must be an alphanumeric string                        |
     | UserPoolId       | uswest2abc     | Format: us-east-1_Xxxxxxxxx                           |
@@ -447,7 +448,7 @@ Scenario: [CLOUD-SETUP-029] A cloud operator who revisits the stack outputs with
 Scenario: [CLOUD-SETUP-030] A cloud operator who changes the app client or the identity pool must sign in again
   Given the cloud operator is signed in on the wizard's deploy step
   When the cloud operator changes the UserPoolClientId or the IdentityPoolId on the stack outputs step and continues
-  Then the wizard opens the sign-in form
+  Then the wizard opens the sign-in step and offers "Open the sign-in page"
 ```
 
 - **Coverage:** `apps/admin-web/__tests__/cloud-setup-navigation.test.tsx` › "the session across steps asks for sign-in again when the app client changes" (unit, local). No test changes the identity pool alone.
@@ -458,42 +459,20 @@ Refusing an account without cloud operator rights at this step belongs to [users
 
 ```gherkin
 @cloud
-@intent:confirmed @coverage:partial
-Scenario: [CLOUD-SETUP-031] The cloud operator signs in with the emailed temporary password and sets a permanent one
+@intent:confirmed
+Scenario: [CLOUD-SETUP-031] The cloud operator signs in on the sign-in page with the emailed temporary password and sets a permanent one
   Given the cloud operator received a temporary password in the invitation email
   And the cloud setup wizard's stack outputs step is done
-  When the cloud operator enters the email address and the temporary password and clicks "Sign in"
-  Then the wizard says "Your temporary password has expired. Please set a new permanent password."
-  When the cloud operator enters a new password of at least eight characters twice and clicks "Set password and sign in"
-  Then the wizard opens the deploy step
-  And the dashboard later shows the cloud operator as signed in
+  When the cloud operator opens the sign-in step
+  Then the step says "Sign in with your Starkeep admin account. The sign-in page opens in this browser." and "Check your email for your temporary password."
+  When the cloud operator clicks "Open the sign-in page" and signs in there with the email address and the temporary password
+  Then the sign-in page asks for a new permanent password
+  When the cloud operator sets one
+  Then the browser returns to the wizard, which opens the deploy step
+  And no page of admin-web ever asked for the password
 ```
 
-- **Coverage:** `apps/admin-web/__tests__/cloud-setup-navigation.test.tsx` › "signing in on the wizard takes the temporary password, sets a permanent one, and stores the session" (unit, local) uses a stubbed Cognito. `e2e-aws/src/journey.test.ts` › "admin user exists and signs in through Cognito + Identity Pool" (tier-3 AWS, cloud) passed at baseline but signs in with a permanent password the suite set, not through the wizard.
-
-```gherkin
-@local
-@intent:confirmed @coverage:none
-Scenario: [CLOUD-SETUP-032] A cloud operator whose new password does not match its confirmation is refused
-  Given the cloud operator reached the new-password form on the sign-in step
-  When the cloud operator enters two different passwords and clicks "Set password and sign in"
-  Then the form shows "Passwords do not match"
-  And the wizard stays on the sign-in step
-```
-
-- **Coverage:** none.
-
-```gherkin
-@local
-@intent:confirmed @coverage:full
-Scenario: [CLOUD-SETUP-034] A cloud operator finds the email from step 1 already filled in on the sign-in form
-  Given the cloud operator entered an email address on step 1 in this browser session
-  When the cloud operator reaches the sign-in step
-  Then the Email field already holds that address
-```
-
-- **Coverage:** `apps/admin-web/__tests__/cloud-setup-navigation.test.tsx` › "the admin email on step 1 requires a valid email before a new deployment's download, then carries it to sign-in" (unit, local).
-- **Notes:** A page reload loses the address, and the cloud operator types it again.
+- **Notes:** the sign-in page is Cognito's managed login page in Starkeep's style. Its own checks, such as a new password that does not match its confirmation, belong to that page.
 
 ```gherkin
 @local
@@ -502,17 +481,19 @@ Scenario: [CLOUD-SETUP-035] A signed-in cloud operator sees the account's email 
   Given the cloud operator is signed in on the wizard
   When the cloud operator opens the sign-in step
   Then the step says "You are signed in as an admin of this Starkeep deployment" with the account's email
+  And the step says "The starkeep command on this computer uses the same sign-in."
   When the cloud operator clicks "Sign in with a different account"
-  Then the step shows the sign-in form
+  Then the session ends for admin-web and for the starkeep command alike
+  And the browser opens the sign-in page
 ```
 
-- **Coverage:** `apps/admin-web/__tests__/cloud-setup-navigation.test.tsx` › "the session across steps shows the signed-in admin on the sign-in step and lets the admin switch accounts" (unit, local) checks the account's email and the switch, but not the "You are signed in as an admin" sentence.
+- **Coverage:** `apps/admin-web/__tests__/cloud-setup-navigation.test.tsx` › "the session across steps shows the signed-in admin on the sign-in step and lets the admin switch accounts" (unit, local) checks the account's email and the sign-out, but not the sentences or the sign-in page opening.
 
 ```gherkin
 @cloud
 @intent:confirmed @coverage:partial
-Scenario: [CLOUD-SETUP-036] A cloud operator who entered only the three stack outputs copies no other value from the console
-  Given the cloud operator entered only the three stack outputs on step 2
+Scenario: [CLOUD-SETUP-036] A cloud operator who entered only the four stack outputs copies no other value from the console
+  Given the cloud operator entered only the four stack outputs on step 2
   When the cloud operator signs in on the wizard with an account that has cloud operator rights
   Then the deploy step offers "Deploy Starkeep cloud" with no request to copy another value from the console
 ```
@@ -627,18 +608,16 @@ Scenario: [CLOUD-SETUP-044] A cloud operator whose deploy fails sees the error a
 
 ```gherkin
 @local
-@intent:confirmed @coverage:partial
-Scenario: [CLOUD-SETUP-045] A cloud operator whose AWS session expires mid-deploy signs in again and keeps the progress
+@intent:confirmed
+Scenario: [CLOUD-SETUP-045] A cloud operator whose sign-in expires mid-deploy signs in again and keeps the progress
   Given the cloud operator is signed in on the deploy step
-  And the wizard's AWS session will expire before the deploy finishes
+  And the cloud operator's sign-in will expire before the deploy finishes
   When the cloud operator clicks "Deploy Starkeep cloud"
-  Then the step says "Your AWS sign-in session expired. Sign in again to retry the deploy — your progress so far is preserved."
+  Then the step says "Your admin sign-in expired or ended. Sign in again to retry the deploy — your progress so far is preserved."
   When the cloud operator clicks "Sign in again"
-  Then the wizard opens the sign-in form
+  Then the wizard opens the sign-in step
   And after the sign-in the deploy step offers the deploy again
 ```
-
-- **Coverage:** `apps/admin-web/__tests__/cloud-setup-navigation.test.tsx` › "a deploy that fails sends the operator back to sign-in when the session was the problem" (unit, local) checks "Sign in again" and the sign-in form, but not the message's text; `apps/admin-web/__tests__/install-stream.test.ts` › "a rejected AWS session ends with EXPIRED_TOKEN after an expired STS token" and "after a DSQL refusal, which carries no SDK error" (unit). No test signs in again and redeploys.
 
 ```gherkin
 @local
@@ -763,16 +742,17 @@ Scenario: [CLOUD-SETUP-054] A cloud operator who reaches the deploy step without
 
 ```gherkin
 @cloud
-@intent:confirmed @coverage:none
-Scenario: [CLOUD-SETUP-055] A cloud operator running the install command signs in with the email and password of an account that has cloud operator rights, and sets a new password on a first sign-in
-  Given the cloud operator finished steps 1 to 3 of the cloud setup wizard on this computer
+@intent:confirmed
+Scenario: [CLOUD-SETUP-055] A cloud operator who runs the install command without a sign-in is told to sign in first, and the command asks for no password
+  Given this computer's cloud setup is done through the stack outputs step
+  And no admin session is open on this computer, from admin-web or from "starkeep login --admin"
   When the cloud operator runs "pnpm --filter @starkeep/admin-installer cli:install-cloud-data-server"
-  Then the command asks for "Email:" and "Password:", and the password does not show as it is typed
-  And for an account still on its temporary password, the command says "This account requires a new password (first login)." and asks for the new password twice
-  And two new passwords that differ end the command with "Passwords do not match."
+  Then the command says "Error: Sign in as the Starkeep admin first: run `starkeep login --admin`, or sign in in admin-web."
+  And the command asks for no email or password, and changes nothing in AWS
+  And after "starkeep login --admin" the same command runs as the signed-in cloud operator
 ```
 
-- **Coverage:** none. The tier-3 suite runs the command with `--non-interactive`, so no test drives the prompts.
+- **Notes:** Implementation gap: the message repeats its instruction as "… or sign in in admin-web. Run `starkeep login --admin` first." (`packages/admin-installer/scripts/admin-credentials.ts`).
 
 ```gherkin
 @local
@@ -811,7 +791,7 @@ Scenario: [CLOUD-SETUP-057] A cloud operator who runs a non-interactive install 
 @intent:confirmed @coverage:partial
 Scenario: [CLOUD-SETUP-058] A cloud operator sees the cloud's address, file bucket, and database, and any custom-domain step left to do, when the install finishes
   Given the cloud operator finished steps 1 to 3 of the cloud setup wizard on this computer
-  When the cloud operator runs the install command with the email and password of an account that has cloud operator rights and waits for it to finish
+  When the cloud operator, signed in with an account that has cloud operator rights, runs the install command and waits for it to finish
   Then the command prints "Install complete." with the cloud's gateway address, its public address, its file bucket, and its database endpoint
   And a custom domain that still awaits a step prints the record to add and says to install again
   And the dashboard on this computer then shows the deployed cloud
@@ -902,7 +882,7 @@ Scenario: [CLOUD-SETUP-064] A cloud operator whose bootstrap stack is out of dat
 @intent:confirmed @coverage:none
 Scenario: [CLOUD-SETUP-065] A cloud operator sees what the uninstall destroys, and keeps everything by typing anything but yes
   Given the cloud operator installed the cloud data server
-  When the cloud operator runs the uninstall command and signs in with an account that has cloud operator rights
+  When the cloud operator, signed in with an account that has cloud operator rights, runs the uninstall command
   Then the command shows "WARNING: This will permanently destroy the DSQL cluster, files bucket, billing bucket, Lambda, API Gateway, and the app IAM role."
   When the cloud operator types anything other than "yes"
   Then the command prints "Aborted." and removes nothing
@@ -1154,9 +1134,10 @@ Scenario: [CLOUD-SETUP-084] A cloud operator can read certificates with the sign
 @cloud
 @intent:confirmed @coverage:partial
 Scenario: [CLOUD-SETUP-085] A cloud operator signs in with cloud operator rights to run a maintenance script, and an IAM user's own keys cannot stand in
-  Given the cloud operator's shell holds no credentials from a sign-in with cloud operator rights
+  Given no one signed in as a cloud operator on this computer
+  And the cloud operator's shell holds no credentials from a sign-in with cloud operator rights
   When the cloud operator runs one of the installer package's maintenance scripts
-  Then the script says "Sign in as an admin of this deployment." and asks for the email and password
+  Then the script says to sign in first with "starkeep login --admin", and asks for no password
   When the cloud operator passes an IAM user's own access keys instead
   Then the script's first step, assuming the Manager role, is refused
 ```
