@@ -44,8 +44,17 @@ const CLI_ENTRY = join(ROOT, "packages", "cli", "src", "bin.ts");
 /** Commands that always run the install first, because they set the machine up. */
 const INSTALLING_COMMANDS = new Set(["setup"]);
 
+/**
+ * Stop before the CLI runs. Under `--json`, the output still ends with one
+ * result object, as the CLI's own failures do, so a script that reads it,
+ * such as the process that continues `update --platform`, sees why.
+ */
 function fail(message) {
-  process.stderr.write(`\n${message}\n\n`);
+  if (process.argv.includes("--json")) {
+    process.stdout.write(`${JSON.stringify({ type: "result", ok: false, error: { message } })}\n`);
+  } else {
+    process.stderr.write(`\n${message}\n\n`);
+  }
   process.exit(1);
 }
 
