@@ -30,32 +30,33 @@ function wrapperPath(): string {
 async function offerLink(io: Io, yes: boolean): Promise<void> {
   const binDir = join(homedir(), ".local", "bin");
   const link = join(binDir, "starkeep");
+  const shown = "~/.local/bin/starkeep";
   const target = wrapperPath();
   let current: string | null = null;
   try {
     if (lstatSync(link).isSymbolicLink()) current = readlinkSync(link);
     else {
-      io.warn(`${link} exists and is not a link; leaving it alone.`);
+      io.warn(`${shown} exists and is not a link; leaving it alone.`);
       return;
     }
   } catch {
     current = null;
   }
   if (current === target) {
-    io.event({ type: "progress", message: `${link} already runs this checkout's starkeep.` });
+    io.event({ type: "progress", message: `${shown} already runs this checkout's starkeep.` });
   } else {
     const question = current
-      ? `${link} points at ${current}. Point it at this checkout instead?`
-      : `Link ${link}, so \`starkeep\` works from any folder?`;
+      ? `${shown} points at ${current}. Point it at this checkout instead?`
+      : `Link ${shown}, so \`starkeep\` works from any folder?`;
     if (!(await io.confirm(question, { yes, flagHint: "--yes or --no-link" }))) return;
     mkdirSync(binDir, { recursive: true });
     if (current !== null) spawnSync("rm", ["-f", link]);
     symlinkSync(target, link);
-    io.event({ type: "progress", message: `Linked ${link} → ${target}.` });
+    io.event({ type: "progress", message: `Linked ${shown} → ${target}.` });
   }
   const onPath = (process.env.PATH ?? "").split(delimiter).includes(binDir);
   if (!onPath) {
-    io.print(`${binDir} is not on your PATH. Add this line to your shell profile:`);
+    io.print("~/.local/bin is not on your PATH. Add this line to your shell profile:");
     io.print(`  export PATH="$HOME/.local/bin:$PATH"`);
   }
 }
