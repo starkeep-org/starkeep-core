@@ -139,6 +139,16 @@ describe("each row the dashboard reads", () => {
       webApp: true,
       mobileApp: false,
       manifest: { id: "photos", infraRequirements: { publicSharing: true } },
+      sourceCommit: null,
+      sourceDirty: false,
+    });
+  });
+
+  it("carries the commit the last install recorded", async () => {
+    const { registryApp } = await import("../src/routes/apps-cloud-list");
+    expect(registryApp({ ...row, source_commit: "abc", source_dirty: true })).toMatchObject({
+      sourceCommit: "abc",
+      sourceDirty: true,
     });
   });
 

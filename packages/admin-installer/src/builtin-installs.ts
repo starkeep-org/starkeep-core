@@ -66,6 +66,7 @@ import {
 import { logAppRoleSnapshot, logCallerIdentity } from "./iam-diagnostics";
 import { USER_DATA_OWNER_APP_ID, assertCloudInstallableAppId } from "./iam";
 import { installApp, uninstallApp, type InstallerConfig } from "./orchestrator";
+import { drivePackageDir, loadDriveManifest } from "./drive-manifest";
 import { appManifestSchema } from "@starkeep/admin-manifest";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -892,36 +893,6 @@ export async function uninstallCloudDataServer(
   console.log("cloud-data-server uninstalled.");
 }
 
-/** Path to the Starkeep Drive built-in app directory (manifest only — no compute). */
-function drivePackageDir(): string {
-  // src/ → ../builtin-apps/starkeep-drive/
-  return resolve(__dirname, "..", "builtin-apps", "starkeep-drive");
-}
-
-/**
- * Load and validate the Starkeep Drive manifest. Parsing through
- * `appManifestSchema` fills the schema defaults (compute disabled, no
- * app-specific syncable tables) so `installApp` sees a fully-shaped manifest.
- *
- * Drive's `"compute": { "enabled": false }` is load-bearing and is the ONLY
- * reason it looks exempt from the app-authentication work. It is a full cloud
- * principal — the always-on Drive sync channel ships every shared record the
- * user owns to `/apps/starkeep-drive/*` — and it holds `fileAccessAll` and the
- * User-Data-Owner boundary. It simply has no Lambda, so it has no anonymous
- * surface for anyone to reach.
- *
- * If Drive ever gains compute it becomes structurally identical to Photos and
- * Memo, and worse: an unauthenticated Drive leaks everything the user owns
- * rather than one library. That manifest change is an event requiring the
- * reachability pass in `docs/reachability-review-requirement.md`, not a routine edit.
- * `__tests__/drive-manifest.test.ts` fails the day the flag flips, so this is
- * not left to whoever happens to read the JSON.
- */
-function loadDriveManifest() {
-  const path = join(drivePackageDir(), "manifest.json");
-  return appManifestSchema.parse(JSON.parse(readFileSync(path, "utf8")));
-}
-
 /**
  * Install (or update) the Starkeep Drive built-in app — the User-Data-Owner.
  *
@@ -949,6 +920,7 @@ export async function installDrive(
     config,
     registryCredentials,
     allowReservedAppId: true,
+    sourceDir: drivePackageDir(),
   });
   console.log(`${USER_DATA_OWNER_APP_ID} installed.`);
 }

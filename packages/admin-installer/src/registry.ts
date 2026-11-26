@@ -23,6 +23,7 @@ import { Kysely, PostgresDialect, sql } from "kysely";
 type RegistryDb = Record<string, Record<string, unknown>>;
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import type { AppManifest } from "@starkeep/admin-manifest";
+import type { SourceCommit } from "./deployed-source";
 import { createDsqlPool } from "./dsql-pool";
 import { installerPgUser } from "./dsql-schema-init";
 import { isRetryableDsqlConflict, isTransientConnectionError } from "./retry-on-access-denied";
@@ -82,13 +83,23 @@ export interface Registry {
    * (see `sourceFingerprint`). A web install records it, null when Admin
    * cannot tell; an install without the web app leaves the recorded
    * fingerprint alone.
+   *
+   * `source` is the commit of the repository the install built from
+   * (`deployed-source.ts`). Every install records it, whatever its surfaces,
+   * because the data side deploys the manifest's tables too.
    */
   registerApp(
     manifest: AppManifest,
     appId: string,
     surfaces: readonly AppSurface[],
     webSourceHash?: string | null,
+    source?: SourceCommit | null,
   ): Promise<void>;
+  /**
+   * The commit the app's last install recorded, or null when the app has no
+   * row or its last install recorded none.
+   */
+  deployedSource(appId: string): Promise<SourceCommit | null>;
   /**
    * Clear `surfaces` from the app's row and remove their registry parts: the
    * mobile app's Android identity. The row and the data side stay.
@@ -115,6 +126,22 @@ export interface Registry {
    */
   listRetainedAppData(): Promise<RetainedAppDataEntry[]>;
   close(): Promise<void>;
+}
+
+/**
+ * The cluster's registry has no `source_commit` column, because the cloud
+ * data server was last deployed from older code. Redeploying it adds the
+ * column.
+ */
+export class SourceColumnsMissingError extends Error {
+  constructor() {
+    super(
+      "This cloud's app registry has no source_commit column, because the cloud data server " +
+        "runs older code than this checkout. Redeploy the cloud data server first " +
+        "(`starkeep update --platform`, or Redeploy in admin-web's cloud setup), then install again.",
+    );
+    this.name = "SourceColumnsMissingError";
+  }
 }
 
 /** One app's data that a cloud uninstall kept. */
@@ -248,69 +275,82 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
       });
     },
 
-    async registerApp(manifest, appId, surfaces, webSourceHash = null) {
+    async registerApp(manifest, appId, surfaces, webSourceHash = null, source = null) {
       const web = surfaces.includes("web");
       const android = manifest.mobile?.android;
       const mobile = surfaces.includes("mobile");
       if (mobile && !android) throw new Error(`${appId}'s manifest declares no mobile build`);
-      await withRetry(async (k) => {
-        await k.transaction().execute(async (trx) => {
-          await trx
-            .insertInto("shared.app_registry")
-            .values({
-              app_id: appId,
-              version: manifest.version,
-              name: manifest.name ?? null,
-              web_app: web,
-              mobile_app: mobile,
-              manifest: JSON.stringify(manifest),
-              web_source_hash: web ? webSourceHash : null,
-            })
-            .onConflict((oc) =>
-              oc.column("app_id").doUpdateSet((eb) => ({
-                version: eb.ref("excluded.version"),
-                name: eb.ref("excluded.name"),
-                manifest: eb.ref("excluded.manifest"),
-                updated_at: sql`now()`,
-                // Installing a surface never removes another one. Only a
-                // web install deploys the folder's code.
-                ...(web
-                  ? { web_app: true, web_source_hash: eb.ref("excluded.web_source_hash") }
-                  : {}),
-                // A manifest that no longer ships a mobile build leaves no
-                // mobile app installed.
-                ...(mobile ? { mobile_app: true } : android ? {} : { mobile_app: false }),
-              })),
-            )
-            .execute();
-          // The app's Android build, which a mobile key attests against. A
-          // reinstall whose manifest drops the build drops the row, so no key
-          // can register for a build the app no longer ships.
-          if (mobile && android) {
+      try {
+        await withRetry(async (k) => {
+          await k.transaction().execute(async (trx) => {
             await trx
-              .insertInto("shared.app_mobile_identities")
+              .insertInto("shared.app_registry")
               .values({
                 app_id: appId,
-                android_package: android.package,
-                android_cert_digests: JSON.stringify(android.signingCertSha256),
-                callback_scheme: android.callbackScheme,
+                version: manifest.version,
+                name: manifest.name ?? null,
+                web_app: web,
+                mobile_app: mobile,
+                manifest: JSON.stringify(manifest),
+                web_source_hash: web ? webSourceHash : null,
+                source_commit: source?.commit ?? null,
+                source_dirty: source ? source.dirty : null,
               })
               .onConflict((oc) =>
                 oc.column("app_id").doUpdateSet((eb) => ({
-                  android_package: eb.ref("excluded.android_package"),
-                  android_cert_digests: eb.ref("excluded.android_cert_digests"),
-                  callback_scheme: eb.ref("excluded.callback_scheme"),
+                  version: eb.ref("excluded.version"),
+                  name: eb.ref("excluded.name"),
+                  manifest: eb.ref("excluded.manifest"),
+                  source_commit: eb.ref("excluded.source_commit"),
+                  source_dirty: eb.ref("excluded.source_dirty"),
+                  updated_at: sql`now()`,
+                  // Installing a surface never removes another one. Only a
+                  // web install deploys the folder's code.
+                  ...(web
+                    ? { web_app: true, web_source_hash: eb.ref("excluded.web_source_hash") }
+                    : {}),
+                  // A manifest that no longer ships a mobile build leaves no
+                  // mobile app installed.
+                  ...(mobile ? { mobile_app: true } : android ? {} : { mobile_app: false }),
                 })),
               )
               .execute();
-          } else if (!android) {
-            await trx
-              .deleteFrom("shared.app_mobile_identities")
-              .where("app_id", "=", appId)
-              .execute();
-          }
+            // The app's Android build, which a mobile key attests against. A
+            // reinstall whose manifest drops the build drops the row, so no key
+            // can register for a build the app no longer ships.
+            if (mobile && android) {
+              await trx
+                .insertInto("shared.app_mobile_identities")
+                .values({
+                  app_id: appId,
+                  android_package: android.package,
+                  android_cert_digests: JSON.stringify(android.signingCertSha256),
+                  callback_scheme: android.callbackScheme,
+                })
+                .onConflict((oc) =>
+                  oc.column("app_id").doUpdateSet((eb) => ({
+                    android_package: eb.ref("excluded.android_package"),
+                    android_cert_digests: eb.ref("excluded.android_cert_digests"),
+                    callback_scheme: eb.ref("excluded.callback_scheme"),
+                  })),
+                )
+                .execute();
+            } else if (!android) {
+              await trx
+                .deleteFrom("shared.app_mobile_identities")
+                .where("app_id", "=", appId)
+                .execute();
+            }
+          });
         });
-      });
+      } catch (err) {
+        // A cluster whose shared schema predates the source columns. The
+        // cloud data server install adds them.
+        if ((err as { code?: string }).code === "42703" && /source_/.test(String(err))) {
+          throw new SourceColumnsMissingError();
+        }
+        throw err;
+      }
     },
 
     async removeSurfaces(appId, surfaces) {
@@ -376,6 +416,22 @@ export function createDsqlRegistry(opts: RegistryOptions): Registry {
           webApp: r.web_app === true,
           mobileApp: r.mobile_app === true,
         }));
+      });
+    },
+
+    async deployedSource(appId) {
+      return await withRetry(async (k) => {
+        // Every column, so a cluster whose schema predates the source columns
+        // reads as "no record" rather than failing.
+        const row = (await k
+          .selectFrom("shared.app_registry")
+          .selectAll()
+          .where("app_id", "=", appId)
+          .executeTakeFirst()) as
+          | { source_commit?: string | null; source_dirty?: boolean | null }
+          | undefined;
+        if (!row?.source_commit) return null;
+        return { commit: row.source_commit, dirty: row.source_dirty === true, branch: null };
       });
     },
 

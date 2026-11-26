@@ -234,7 +234,13 @@ describe("install", () => {
       const entries = ledger.filter((e) => e.step === step).map((e) => e.status);
       expect(entries, step).toEqual(["pending", "done"]);
     }
-    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(photosManifest, "photos", ["web"], null);
+    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(
+      photosManifest,
+      "photos",
+      ["web"],
+      null,
+      null,
+    );
     expect(fakeRegistry.close).toHaveBeenCalled();
   });
 
@@ -791,7 +797,37 @@ describe("an app that ships a mobile build", () => {
       "photos",
       ["web"],
       fingerprint,
+      null,
     );
+  });
+
+  // The deploy guard and `starkeep cloud status` read the recorded commit.
+  it("records the commit of the folder the install builds from, and whether it had changes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "orchestrator-commit-"));
+    const git = (...args: string[]) =>
+      execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", ...args], {
+        encoding: "utf8",
+      }).trim();
+    git("init", "-q", "-b", "main");
+    writeFileSync(join(dir, "index.ts"), "one");
+    git("add", ".");
+    git("commit", "-q", "-m", "one");
+    const head = git("rev-parse", "HEAD");
+    writeFileSync(join(dir, "index.ts"), "two");
+    await installApp({
+      appId: "photos",
+      manifest: photosManifest,
+      version: "0.1.0",
+      config,
+      registryCredentials,
+      surfaces: [],
+      sourceDir: dir,
+    });
+    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(photosManifest, "photos", [], null, {
+      commit: head,
+      dirty: true,
+      branch: "main",
+    });
   });
 
   it("installs every surface the manifest offers when none is named", async () => {
@@ -807,6 +843,7 @@ describe("an app that ships a mobile build", () => {
       mobileManifest,
       "photos",
       ["web", "mobile"],
+      null,
       null,
     );
     expect(setMobileAppCallback).toHaveBeenCalledWith(
@@ -854,6 +891,7 @@ describe("an app that ships a mobile build", () => {
       "photos",
       ["mobile"],
       null,
+      null,
     );
   });
 
@@ -892,6 +930,7 @@ describe("an app that ships a mobile build", () => {
       mobileManifest,
       "photos",
       ["web"],
+      null,
       null,
     );
   });
@@ -950,7 +989,13 @@ describe("an app that ships a mobile build", () => {
       surfaces: ["web"],
     });
     expect(setMobileAppCallback).not.toHaveBeenCalled();
-    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(mobileManifest, "photos", ["web"], null);
+    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(
+      mobileManifest,
+      "photos",
+      ["web"],
+      null,
+      null,
+    );
   });
 
   it("removes the web app alone and keeps the data side", async () => {

@@ -26,6 +26,7 @@ import type { probeAnonymousSurface } from "../post-install-probe";
 import type { installLocalApp } from "../local-app-install";
 import type { AppDataCountsDsql } from "../dsql-ddl";
 import type { RunCommand } from "./steps";
+import type { PlatformDeployRecord, SourceCommit } from "../deployed-source";
 
 /**
  * Stand-ins for the AWS clients and library calls an operation makes, which
@@ -47,6 +48,18 @@ export interface OperationOverrides {
   ensurePulumiPassphrase?: typeof ensurePulumiPassphrase;
   probeAnonymousSurface?: typeof probeAnonymousSurface;
   installLocalApp?: typeof installLocalApp;
+  /**
+   * The cloud data server's deployed record, read and written through
+   * Manager. Tests pass an in-memory one.
+   */
+  platformRecord?: {
+    read(): Promise<PlatformDeployRecord | null>;
+    write(record: PlatformDeployRecord): Promise<void>;
+  };
+  /** The commit an app's last cloud install recorded, from the registry. */
+  deployedAppSource?: (appId: string) => Promise<SourceCommit | null>;
+  /** The checkout the platform deploys from. Tests pass a fixture repository. */
+  platformCheckout?: string;
   /**
    * Asks a person at a terminal to approve a deletion after seeing what it
    * removes. Only a caller in the same process can pass it; a run in a child

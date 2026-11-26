@@ -43,6 +43,9 @@ import {
 import type { Emit } from "./events";
 import { OperationError } from "./errors";
 import { runCommand } from "./steps";
+import { createDsqlRegistry } from "../registry";
+import type { SourceCommit } from "../deployed-source";
+import { assertNotBackward, comparisonNote, compareWithDeployed } from "./deploy-guard";
 
 export interface InstallCloudAppInput {
   appId: string;
@@ -55,6 +58,11 @@ export interface InstallCloudAppInput {
    * A folder whose manifest no longer matches deploys nothing.
    */
   manifestDigest?: string;
+  /**
+   * Deploy even when the cloud runs patches the folder's checkout lacks
+   * (`deploy-guard.ts`). The CLI's `--force` sets it.
+   */
+  allowBackward?: boolean;
 }
 
 export interface InstallCloudAppResult {
@@ -217,6 +225,22 @@ function fillPlatformEnv(
   }
 }
 
+/** The commit the app's last cloud install recorded. */
+async function deployedAppSource(
+  ctx: OperationContext,
+  appId: string,
+  registryOptions: Parameters<typeof createDsqlRegistry>[0],
+): Promise<SourceCommit | null> {
+  if (ctx.overrides?.deployedAppSource) return ctx.overrides.deployedAppSource(appId);
+  const create = ctx.overrides?.createDsqlRegistry ?? createDsqlRegistry;
+  const registry = create(registryOptions);
+  try {
+    return await registry.deployedSource(appId);
+  } finally {
+    await registry.close();
+  }
+}
+
 export const installCloudAppOp: Operation<InstallCloudAppInput, InstallCloudAppResult> = async (
   ctx,
   input,
@@ -335,6 +359,29 @@ export const installCloudAppOp: Operation<InstallCloudAppInput, InstallCloudAppR
       `  Adds   : ${surfaces.length > 0 ? surfaces.join(", ") : "the data side only"}`,
     ].join("\n"),
   });
+
+  // Before anything deploys: does the cloud run patches this folder lacks?
+  const deployed = await deployedAppSource(ctx, appId, {
+    hostname: config.auroraEndpoint!,
+    region,
+    stackPrefix: config.stackPrefix,
+    credentials,
+  });
+  const comparison = compareWithDeployed(appDir, deployed);
+  const note = comparisonNote(comparison, `${appId} in the cloud`);
+  if (note) emit({ type: "progress", message: note });
+  if (!input.allowBackward) {
+    assertNotBackward(
+      comparison,
+      `${appId} in the cloud`,
+      `\`starkeep install ${appId} --cloud --force\``,
+    );
+  } else if (comparison.kind === "backward" || comparison.kind === "unknown-commit") {
+    emit({
+      type: "progress",
+      message: `Warning: the cloud runs changes to ${appId} that this folder lacks, and this deploy removes them (forced).`,
+    });
+  }
 
   let zipBuffer: Buffer | undefined;
   if (build?.ok) {

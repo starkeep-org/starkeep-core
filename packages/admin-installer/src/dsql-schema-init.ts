@@ -550,6 +550,12 @@ async function applySharedSchema(opts: SchemaInitOptions): Promise<void> {
       // sourceFingerprint), so Admin can tell when the folder's code moved
       // past it.
       .addColumn("web_source_hash", "text")
+      // The commit of the repository the last install built from, and
+      // whether its tracked files had uncommitted changes then
+      // (deployed-source.ts). The deploy guard and `starkeep cloud status`
+      // compare them with the folder's checkout.
+      .addColumn("source_commit", "text")
+      .addColumn("source_dirty", "boolean")
       .execute();
     await sql
       .raw(`GRANT INSERT, UPDATE, DELETE, SELECT ON shared.app_registry TO "${installer}"`)
@@ -575,6 +581,13 @@ async function applySharedSchema(opts: SchemaInitOptions): Promise<void> {
     // TEMPORARY, as above: adds the web_source_hash column.
     await sql
       .raw(`ALTER TABLE shared.app_registry ADD COLUMN IF NOT EXISTS web_source_hash text`)
+      .execute(db);
+    // TEMPORARY, as above: adds the source columns.
+    await sql
+      .raw(`ALTER TABLE shared.app_registry ADD COLUMN IF NOT EXISTS source_commit text`)
+      .execute(db);
+    await sql
+      .raw(`ALTER TABLE shared.app_registry ADD COLUMN IF NOT EXISTS source_dirty boolean`)
       .execute(db);
     const registry = db as unknown as Kysely<Record<string, Record<string, unknown>>>;
     await registry

@@ -72,6 +72,9 @@ export interface RegistryDbRow {
   mobile_app: boolean | null;
   manifest: string | null;
   web_source_hash: string | null;
+  /** Absent on a cluster whose schema predates the source columns. */
+  source_commit?: string | null;
+  source_dirty?: boolean | null;
 }
 
 function parseManifest(text: string | null): Record<string, unknown> | null {
@@ -104,6 +107,10 @@ export function registryApp(r: RegistryDbRow) {
     webApp: r.web_app === true,
     mobileApp: r.mobile_app === true,
     manifest: parseManifest(r.manifest),
+    /** The commit the last install built from, or null when it recorded none. */
+    sourceCommit: r.source_commit ?? null,
+    /** Whether that folder had uncommitted changes. */
+    sourceDirty: r.source_dirty === true,
   };
 }
 
@@ -161,17 +168,8 @@ export type CloudApp = ReturnType<typeof registryApp> & {
 export async function listCloudApps(pool: pg.Pool): Promise<CloudApp[]> {
   const query = compiler
     .selectFrom("shared.app_registry")
-    .select([
-      "app_id",
-      "version",
-      "name",
-      "installed_at",
-      "updated_at",
-      "web_app",
-      "mobile_app",
-      "manifest",
-      "web_source_hash",
-    ])
+    // Every column, so a cluster whose schema predates a column still lists.
+    .selectAll()
     .orderBy("installed_at", "asc")
     .compile();
   const result = await pool.query<RegistryDbRow>(query.sql, [...query.parameters]);

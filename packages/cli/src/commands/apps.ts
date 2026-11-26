@@ -237,6 +237,9 @@ interface ListRow {
     mobile: boolean;
     behind: boolean | null;
     codeBehind: boolean | null;
+    /** The commit the cloud install recorded, or null when it recorded none. */
+    commit: string | null;
+    dirty: boolean;
   } | null;
 }
 
@@ -248,7 +251,10 @@ function cloudCell(row: ListRow): string {
     Boolean,
   );
   const behind = row.cloud.behind || row.cloud.codeBehind ? "  (behind)" : "";
-  return `${surfaces.length > 0 ? surfaces.join("+") : "data"}${behind}`;
+  const commit = row.cloud.commit
+    ? `  ${row.cloud.commit.slice(0, 7)}${row.cloud.dirty ? "+changes" : ""}`
+    : "";
+  return `${surfaces.length > 0 ? surfaces.join("+") : "data"}${commit}${behind}`;
 }
 
 async function listRows(): Promise<{ rows: ListRow[]; localKnown: boolean }> {
@@ -296,7 +302,14 @@ function addCloud(rows: ListRow[], cloud: CloudApp[] | null, localKnown: boolean
   if (cloud === null) return rows.map((r) => ({ ...r, cloud: null }));
   const byId = new Map(rows.map((r) => [r.appId, r]));
   for (const c of cloud) {
-    const cell = { web: c.webApp, mobile: c.mobileApp, behind: c.behind, codeBehind: c.codeBehind };
+    const cell = {
+      web: c.webApp,
+      mobile: c.mobileApp,
+      behind: c.behind,
+      codeBehind: c.codeBehind,
+      commit: c.sourceCommit,
+      dirty: c.sourceDirty,
+    };
     const row = byId.get(c.appId);
     if (row) row.cloud = cell;
     else
@@ -326,6 +339,7 @@ export const listCommand: Command = {
   flags: {},
   details:
     "The CLOUD column needs an open admin session (starkeep login --admin); without one it shows ?.\n" +
+    "The CLOUD column names the surfaces and the commit the cloud install built from.\n" +
     "(behind) marks a cloud install whose manifest or web code differs from the folder here.",
   async run(io) {
     let { rows, localKnown } = await listRows();
@@ -365,6 +379,63 @@ export const listCommand: Command = {
   },
 };
 
+/**
+ * The app's cloud install, for `info`: undefined when this computer has no
+ * cloud, null when the cloud cannot be read without a sign-in, and
+ * `installed: false` when the cloud has no install.
+ */
+async function cloudInfo(
+  io: Io,
+  appId: string,
+): Promise<
+  | undefined
+  | null
+  | { installed: false }
+  | {
+      installed: true;
+      web: boolean;
+      mobile: boolean;
+      commit: string | null;
+      dirty: boolean;
+      behind: boolean;
+    }
+> {
+  if (!cloudInstalled()) return undefined;
+  let apps: CloudApp[] | null;
+  try {
+    apps = await readCloudApps(io, { signIn: false });
+  } catch (err) {
+    io.warn(`Could not read the cloud's apps: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+  if (apps === null) return null;
+  const app = apps.find((a) => a.appId === appId);
+  if (!app) return { installed: false };
+  return {
+    installed: true,
+    web: app.webApp,
+    mobile: app.mobileApp,
+    commit: app.sourceCommit,
+    dirty: app.sourceDirty,
+    behind: app.behind === true || app.codeBehind === true,
+  };
+}
+
+function cloudInfoLine(cloud: Awaited<ReturnType<typeof cloudInfo>>): string {
+  if (cloud === undefined) return "—";
+  if (cloud === null) return "unknown (sign in with `starkeep login --admin`)";
+  if (!cloud.installed) return "not installed";
+  const surfaces = [cloud.web ? "web" : null, cloud.mobile ? "mobile" : null].filter(Boolean);
+  const parts = [
+    surfaces.length > 0 ? surfaces.join(" and ") : "data side only",
+    cloud.commit
+      ? `from ${cloud.commit.slice(0, 7)}${cloud.dirty ? " with uncommitted changes" : ""}`
+      : "no recorded commit",
+    ...(cloud.behind ? ["behind this folder"] : []),
+  ];
+  return parts.join(", ");
+}
+
 export const infoCommand: Command = {
   name: "info",
   summary: "Show one app's manifest, source and state",
@@ -391,6 +462,7 @@ export const infoCommand: Command = {
       running: status.running,
       port: status.port ?? null,
       sourceState: state?.sourceState ?? null,
+      cloud: await cloudInfo(io, app.appId),
     };
     if (io.json) {
       io.event({ type: "result", ok: true, data });
@@ -403,6 +475,7 @@ export const infoCommand: Command = {
     io.print(
       `Local      ${data.installed === null ? "unknown (the data server is not answering)" : data.installed ? (status.running ? `running${status.port ? ` on http://localhost:${status.port}` : ""}` : "installed") : "not installed"}`,
     );
+    if (data.cloud !== undefined) io.print(`Cloud      ${cloudInfoLine(data.cloud)}`);
     if (state) io.print(`Folder     ${state.sourceState} since the install was approved`);
     io.print();
     for (const line of consentLines(row?.manifest ?? manifest, installCommandFor(app)))
@@ -419,12 +492,17 @@ export const installCommand: Command = {
     ...TARGET_FLAGS,
     yes: { type: "boolean", short: "y", description: "Approve the consent text without asking." },
     start: { type: "boolean", description: "Start each app after it installs." },
+    force: {
+      type: "boolean",
+      description: "Deploy to the cloud even when the cloud runs commits this folder lacks.",
+    },
   },
   details:
     "An app is an id from the discovery folders or a path to an app folder. Installing by path\n" +
     "adds the folder to discovery. A target flag is required, and flags combine: --local --cloud\n" +
     "installs on this computer, then in the cloud. A cloud install builds the bundle from the\n" +
     "folder here and needs no local install. Only cloud targets sign in as the admin.\n" +
+    "A cloud install refuses a folder that lacks commits the cloud already runs; --force deploys anyway.\n" +
     "A run without a terminal needs --yes.",
   async run(io, args) {
     const targets = targetsOf(args, "install");
@@ -436,7 +514,7 @@ export const installCommand: Command = {
       const app = await resolveAppReference(io, ref);
       if (!targets.local) {
         if (await approveCloudInstall(io, app, flag(args, "yes"))) {
-          await installInCloud(io, app, targets.cloud!);
+          await installInCloud(io, app, targets.cloud!, { force: flag(args, "force") });
           installed.push(app.appId);
         }
         continue;
@@ -464,7 +542,8 @@ export const installCommand: Command = {
         }
         await runDependencyInstall(io, app.appId, install);
         const secretPath = await registerLocally(app);
-        if (targets.cloud) await installInCloud(io, app, targets.cloud);
+        if (targets.cloud)
+          await installInCloud(io, app, targets.cloud, { force: flag(args, "force") });
         // A running app keeps the old manifest's behavior until it restarts.
         const wasRunning = (await serviceStatus(app.appId)).running;
         await stopById(app.appId);
@@ -525,6 +604,7 @@ export async function installInCloud(
   io: Io,
   app: ResolvedApp,
   cloud: "all" | AppSurface[],
+  options: { force?: boolean } = {},
 ): Promise<void> {
   await runCloud(io, {
     name: "install-cloud-app",
@@ -533,6 +613,7 @@ export async function installInCloud(
       appDir: app.appDir,
       ...(cloud === "all" ? {} : { surfaces: cloud }),
       manifestDigest: manifestDigest(app.folder.manifest),
+      ...(options.force ? { allowBackward: true } : {}),
     },
     owner: surfaceOwner(app.appId, cloud),
     lock: `app-${app.appId}`,
