@@ -13,6 +13,9 @@ import { serviceStatus, startService } from "@starkeep/operator/service-control"
 import { recordWanted, wantedServices } from "@starkeep/operator/services";
 import { localDataServerUrlFromEnv } from "@starkeep/operator/urls";
 import { adminSessionStatus } from "@starkeep/operator/admin-session";
+import { DRIVE_APP_ID, platformLine } from "@starkeep/operator/deployment-state";
+import { cloudInstalled } from "../cloud";
+import { readCloudState } from "./cloud";
 import { flag, type Command } from "../command";
 import { adminStatusLine } from "./account";
 import { CliError, usageError } from "../errors";
@@ -172,7 +175,7 @@ async function syncStatus(): Promise<SyncStatus | null> {
 
 export const statusCommand: Command = {
   name: "status",
-  summary: "Show what runs on this computer and its sync sign-in",
+  summary: "Show what runs on this computer, its sync sign-in, and the cloud's skew",
   usage: "",
   lane: "none",
   flags: {},
@@ -194,11 +197,19 @@ export const statusCommand: Command = {
     const cloudUrl =
       sync?.cloudUrl ?? (typeof config?.cloudUrl === "string" ? config.cloudUrl : null);
 
+    const skew = await skewSummary(io);
     if (io.json) {
       io.event({
         type: "result",
         ok: true,
-        data: { services, adminWeb: admin, sync, cloudUrl, adminSession: adminSessionStatus() },
+        data: {
+          services,
+          adminWeb: admin,
+          sync,
+          cloudUrl,
+          adminSession: adminSessionStatus(),
+          skew,
+        },
       });
       return;
     }
@@ -223,8 +234,34 @@ export const statusCommand: Command = {
       io.print(`SYNC      this library belongs to another account (${sync.email})`);
     else io.print("SYNC      signed out");
     if (cloudUrl) io.print(`ADMIN     ${adminStatusLine()}`);
+    if (skew) io.print(`SKEW      ${skew}`);
   },
 };
+
+/**
+ * One line on what the cloud runs against this checkout, when an admin
+ * session is open. Null without a cloud or a session: `status` never opens
+ * a browser.
+ */
+async function skewSummary(io: Io): Promise<string | null> {
+  if (!cloudInstalled() || !adminSessionStatus().signedIn) return null;
+  try {
+    const state = await readCloudState(io, { signIn: false });
+    if (!state) return null;
+    const parts = [`cloud data server ${platformLine(state.platform)}`];
+    if (state.drive === false) parts.push("Drive behind this checkout");
+    const behind = state.apps.filter(
+      (a) => a.appId !== DRIVE_APP_ID && (a.behind === true || a.codeBehind === true),
+    );
+    if (behind.length > 0)
+      parts.push(
+        `${behind.length} cloud app(s) behind their folders (${behind.map((a) => a.appId).join(", ")})`,
+      );
+    return parts.join("; ");
+  } catch (err) {
+    return `unknown (${err instanceof Error ? err.message : String(err)})`;
+  }
+}
 
 export const logsCommand: Command = {
   name: "logs",

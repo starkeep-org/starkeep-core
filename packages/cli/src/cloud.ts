@@ -161,6 +161,14 @@ export async function readCloudApps(
   io: Io,
   options: { signIn: boolean },
 ): Promise<CloudApp[] | null> {
+  return (await readCloudAppsAs(io, options))?.apps ?? null;
+}
+
+/** {@link readCloudApps}, with the admin credentials that read them. */
+export async function readCloudAppsAs(
+  io: Io,
+  options: { signIn: boolean },
+): Promise<{ apps: CloudApp[]; admin: AdminCredentials } | null> {
   const config = readConfig() ?? {};
   const hostname = config.auroraEndpoint;
   const stackPrefix = config.stackPrefix;
@@ -179,7 +187,7 @@ export async function readCloudApps(
     credentials: admin.stsCredentials,
   });
   try {
-    return await listCloudApps(pool, config);
+    return { apps: await listCloudApps(pool, config), admin };
   } finally {
     await pool.end().catch(() => {});
   }

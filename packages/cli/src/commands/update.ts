@@ -16,7 +16,9 @@
  * cloud can stall its uploads until the cloud catches up
  * (findings-app-table-version-skew-2026-11-13).
  *
- * The platform checkout joins this command later.
+ * With no app names, the update starts with the platform (`platform.ts`):
+ * the checkout the CLI runs from, the bootstrap stack, the cloud data server
+ * and Drive. `--platform` updates only the platform.
  */
 import { realpathSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -35,7 +37,7 @@ import type { CloudApp } from "@starkeep/operator/cloud-registry";
 import { manifestDigest } from "@starkeep/admin-installer/manifest-approval";
 import type { AppSurface } from "@starkeep/admin-installer/operations";
 import { cloudInstalled, readCloudApps, runCloud } from "../cloud";
-import { flag, type Command } from "../command";
+import { flag, type Command, type ParsedArgs } from "../command";
 import { CliError, usageError } from "../errors";
 import { requireTerminal, type Io } from "../io";
 import {
@@ -60,6 +62,8 @@ import {
   type RepoUpdate,
 } from "../git";
 import { startOne } from "./services";
+import { repoRoot } from "@starkeep/operator/repo-root";
+import { applyPlatform, continueAfterPull, type PlatformOutcome } from "./platform";
 import { PLATFORM_SERVICES, serviceId } from "../names";
 
 type AppManifest = Extract<FolderManifest, { kind: "valid" }>["manifest"];
@@ -159,6 +163,11 @@ export function checkRepos(io: Io, targets: Target[]): string[] {
       });
     }
   }
+  return checkRoots(io, repos);
+}
+
+/** Fetch and check each repository root. Returns the ones that are behind. */
+function checkRoots(io: Io, repos: string[]): string[] {
   const behind: string[] = [];
   for (const root of repos) {
     const upstream = upstreamOf(root);
@@ -209,13 +218,17 @@ export function pullRepos(io: Io, roots: string[]): RepoUpdate[] {
     // would overwrite an untracked file. The repositories pulled before it
     // stay recorded, so `--undo` can return them.
     if (moved.length === 0) throw err;
-    writeUpdates([...readUpdates(), { at: new Date().toISOString(), repos: moved }]);
+    recordPull(moved);
     throw new CliError(
       `${(err as Error).message}\nThe repositories pulled before it are recorded. Run \`starkeep update --undo\` to return them, or fix the error and run the update again.`,
     );
   }
   if (moved.length > 0) {
-    writeUpdates([...readUpdates(), { at: new Date().toISOString(), repos: moved }]);
+    recordPull(moved);
+    io.event({
+      type: "progress",
+      message: "Run `starkeep update --undo` to return to the commits before this pull.",
+    });
   }
   return moved;
 }
@@ -223,6 +236,11 @@ export function pullRepos(io: Io, roots: string[]): RepoUpdate[] {
 /** Check, then pull, every repository the targets live in. */
 export function fetchAll(io: Io, targets: Target[]): RepoUpdate[] {
   return pullRepos(io, checkRepos(io, targets));
+}
+
+/** Check, then pull, each repository root. */
+export function fetchRepos(io: Io, roots: string[]): RepoUpdate[] {
+  return pullRepos(io, checkRoots(io, roots));
 }
 
 /**
@@ -330,6 +348,7 @@ async function applyToCloud(
   yes: boolean,
   approved: AppManifest | undefined,
   moved: boolean,
+  force: boolean,
 ): Promise<"updated" | "declined" | "skipped" | "up to date"> {
   const { appId, cloud } = target;
   const folder = readFolderManifest(target.dir);
@@ -362,7 +381,13 @@ async function applyToCloud(
   });
   await runCloud(io, {
     name: "install-cloud-app",
-    input: { appId, appDir: target.dir, surfaces, manifestDigest: manifestDigest(folder.manifest) },
+    input: {
+      appId,
+      appDir: target.dir,
+      surfaces,
+      manifestDigest: manifestDigest(folder.manifest),
+      ...(force ? { allowBackward: true } : {}),
+    },
     owner: `${appId} (${surfaces.length > 0 ? surfaces.join(", ") : "data side only"})`,
     lock: `app-${appId}`,
     command: `starkeep update ${appId}`,
@@ -452,6 +477,7 @@ async function applyAll(
   yes: boolean,
   approved: Map<string, AppManifest> = new Map(),
   movedRoots: Set<string> = new Set(),
+  force = false,
 ): Promise<Record<string, Outcome>> {
   const outcome: Record<string, Outcome> = {};
   for (const t of targets) {
@@ -467,7 +493,7 @@ async function applyAll(
       const moved = t.repo !== null && movedRoots.has(t.repo);
       if (t.cloud) {
         try {
-          result.cloud = await applyToCloud(io, { ...t, cloud: t.cloud }, yes, ok, moved);
+          result.cloud = await applyToCloud(io, { ...t, cloud: t.cloud }, yes, ok, moved, force);
         } catch (err) {
           if (!t.local) throw err;
           throw stayedLocally(err, t.appId, moved);
@@ -548,6 +574,15 @@ async function undo(io: Io, yes: boolean): Promise<void> {
     io.event({ type: "progress", message: `Returned ${repo.root} to ${repo.before.slice(0, 8)}.` });
   }
   writeUpdates(updates.slice(0, -1));
+  if (last.repos.some((r) => r.root === repoRoot())) {
+    io.event({
+      type: "progress",
+      message:
+        "The platform checkout went back too. Run `pnpm install` in it to rebuild. The bootstrap stack and\n" +
+        "the cloud data server keep running the newer platform; `starkeep update --platform --no-fetch --force`\n" +
+        "redeploys the older one.",
+    });
+  }
   const outcome = await applyAll(io, targets, yes, approved, new Set(before.keys()));
   io.event({ type: "result", ok: true, data: { undone: last, apps: outcome } });
 }
@@ -563,7 +598,7 @@ function needsApply(t: Target): boolean {
 export const updateCommand: Command = {
   name: "update",
   summary: "Pull new code for installed apps and apply it",
-  usage: "[<app>...] [--local | --cloud] [--no-fetch] [--yes] | --undo",
+  usage: "[<app>... | --platform] [--local | --cloud] [--no-fetch] [--yes] [--force] | --undo",
   lane: "target",
   flags: {
     local: { type: "boolean", description: "Update only the installs on this computer." },
@@ -572,14 +607,32 @@ export const updateCommand: Command = {
       type: "boolean",
       description: "Apply the folders as they are, without git pull.",
     },
+    platform: {
+      type: "boolean",
+      description:
+        "Update only the platform: this checkout, the bootstrap stack, the cloud data server and Drive.",
+    },
+    "after-platform-pull": {
+      type: "boolean",
+      description:
+        "(Internal) The platform checkout was pulled by the process that started this one.",
+    },
     yes: { type: "boolean", short: "y", description: "Approve changed access without asking." },
+    force: {
+      type: "boolean",
+      description: "Deploy to the cloud even when the cloud runs commits the checkout lacks.",
+    },
     undo: {
       type: "boolean",
       description: "Return the repositories the last update pulled, and apply them.",
     },
   },
   details:
-    "With no apps, updates every app installed here or in the cloud, the cloud first. An update\n" +
+    "With no apps, updates the platform first: pulls this checkout, installs and rebuilds,\n" +
+    "restarts the data server and Drive, applies the bootstrap stack's update with this terminal's\n" +
+    "AWS credentials after confirmation, and redeploys the cloud data server and Drive when they\n" +
+    "differ from the checkout. A redeploy that would remove commits the cloud runs needs --force.\n" +
+    "Then updates every app installed here or in the cloud, the cloud first. An update\n" +
     "never adds a target: it redeploys the surfaces an app already has. A cloud install whose\n" +
     "manifest and web code match the folder is skipped. A repository with uncommitted\n" +
     "changes to tracked files, or a branch that has diverged from its upstream, refuses the update.\n" +
@@ -589,19 +642,44 @@ export const updateCommand: Command = {
     const only = { local: flag(args, "local"), cloud: flag(args, "cloud") };
     const scope: Scope = only.local || only.cloud ? only : { local: true, cloud: true };
     const yes = flag(args, "yes");
+    const force = flag(args, "force");
     if (flag(args, "undo")) {
       if (args.positionals.length > 0) throw usageError("--undo takes no app names.");
       await undo(io, yes);
       return;
     }
+    const platformOnly = flag(args, "platform");
+    if (platformOnly && args.positionals.length > 0) {
+      throw usageError("--platform takes no app names. Update apps with `starkeep update <app>`.");
+    }
+    const noFetch = flag(args, "no-fetch");
+    let platform: PlatformOutcome | undefined;
+    if (platformOnly || args.positionals.length === 0) {
+      const afterPull = flag(args, "after-platform-pull");
+      if (!afterPull && !noFetch) {
+        const moved = fetchRepos(io, [repoRoot()]);
+        if (moved.length > 0) {
+          // fetchRepos recorded the pull. The continued process joins that record.
+          const at = readUpdates().at(-1)!.at;
+          // The new process prints the rest, and the result.
+          const code = continueAfterPull(io, argvOf(args), at);
+          if (code !== 0) throw new CliError(`The update stopped (exit code ${code}).`, code);
+          return;
+        }
+      }
+      platform = await applyPlatform(io, { scope, yes, force, pulled: afterPull });
+      if (platformOnly) {
+        io.event({ type: "result", ok: true, data: { platform } });
+        return;
+      }
+    }
     if (scope.local) await requireDataServer();
     const targets = await installedTargets(io, args.positionals, scope);
     if (targets.length === 0) {
       io.print("No apps installed from a folder, here or in the cloud.");
-      io.event({ type: "result", ok: true, data: { apps: {} } });
+      io.event({ type: "result", ok: true, data: { platform, apps: {} } });
       return;
     }
-    const noFetch = flag(args, "no-fetch");
     const behind = new Set(noFetch ? [] : checkRepos(io, targets));
     // Every question comes before the first pull, so a "no" leaves the
     // folder, the grant and the running app as they were.
@@ -612,12 +690,6 @@ export const updateCommand: Command = {
     );
     const kept = withoutDeclined(io, [...behind], targets, declined);
     const moved = pullRepos(io, kept.roots);
-    if (moved.length > 0) {
-      io.event({
-        type: "progress",
-        message: "Run `starkeep update --undo` to return to the commits before this pull.",
-      });
-    }
     const movedRoots = new Set(moved.map((m) => m.root));
     const toApply = targets.filter(
       (t) =>
@@ -634,8 +706,29 @@ export const updateCommand: Command = {
     }
     const outcome = {
       ...kept.held,
-      ...(await applyAll(io, toApply, yes, approved, movedRoots)),
+      ...(await applyAll(io, toApply, yes, approved, movedRoots, force)),
     };
-    io.event({ type: "result", ok: true, data: { pulled: moved, apps: outcome } });
+    io.event({ type: "result", ok: true, data: { platform, pulled: moved, apps: outcome } });
   },
 };
+
+/**
+ * Record a pull for `--undo`. A pull in the process that continues a
+ * platform update joins the platform's record, so one undo returns both.
+ */
+function recordPull(moved: RepoUpdate[]): void {
+  const updates = readUpdates();
+  const continues = process.env.STARKEEP_UPDATE_CONTINUES;
+  const last = updates.at(-1);
+  if (continues && last?.at === continues) last.repos.push(...moved);
+  else updates.push({ at: new Date().toISOString(), repos: moved });
+  writeUpdates(updates);
+}
+
+/** The arguments that run this command again. */
+function argvOf(args: ParsedArgs): string[] {
+  const flags = Object.entries(args.flags).flatMap(([name, value]) =>
+    value === true ? [`--${name}`] : typeof value === "string" ? [`--${name}`, value] : [],
+  );
+  return ["update", ...args.positionals, ...flags];
+}

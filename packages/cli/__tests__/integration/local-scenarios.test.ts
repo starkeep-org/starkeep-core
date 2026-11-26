@@ -552,7 +552,9 @@ describe("update", () => {
     const diceHead = dice.head();
     const notesHead = notes.head();
     try {
-      const run = starkeep(["update"]);
+      // The apps are named: with no names, the update starts with the
+      // platform checkout, which here is this worktree.
+      const run = starkeep(["update", "dice", "notes"]);
       expect(run.code).toBe(1);
       expect(run.err).toContain(`${dice.clone} has uncommitted changes to tracked files:`);
       expect(run.err).toContain("Commit or stash them, then run the update again.");
