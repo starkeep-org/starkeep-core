@@ -5,7 +5,7 @@
 import { parseArgs, type ParseArgsConfig } from "node:util";
 import { GLOBAL_FLAGS, LANE_TEXT, type Command, type FlagSpec } from "./command";
 import { COMMANDS } from "./commands";
-import { CliError, EXIT_USAGE } from "./errors";
+import { CliError, EXIT_USAGE, ReportedFailure } from "./errors";
 import { createIo, type Io, type IoOptions } from "./io";
 
 function optionsFor(flags: Record<string, FlagSpec>): ParseArgsConfig["options"] {
@@ -156,6 +156,7 @@ export async function main(argv: string[], options: MainOptions): Promise<number
     });
     return 0;
   } catch (err) {
+    if (err instanceof ReportedFailure) return err.exitCode;
     const cli = err instanceof CliError ? err : null;
     const message = err instanceof Error ? err.message : String(err);
     if (json) {
