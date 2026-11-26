@@ -6,6 +6,7 @@ import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { starkeepDir } from "@starkeep/app-client";
 import { stopById } from "./daemons";
+import { recordWanted } from "./services";
 import { localDataServerUrlFromEnv } from "./urls";
 
 export type LocalAppResult =
@@ -50,6 +51,9 @@ export async function uninstallLocalApp(appId: string): Promise<LocalAppResult> 
 
   const secretPath = join(starkeepDir(), "app-creds", `${appId}.json`);
   if (existsSync(secretPath)) unlinkSync(secretPath);
+  // An uninstalled app is no longer one to run, so `starkeep start` with no
+  // names must not bring it back from the discovery folders.
+  recordWanted(appId, false);
   return { ok: true };
 }
 

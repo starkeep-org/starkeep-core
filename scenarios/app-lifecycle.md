@@ -2284,6 +2284,7 @@ Scenario: [APP-LIFE-231] A local operator who uninstalls from the terminal keeps
   When the local operator runs "starkeep uninstall dice --local"
   Then the output says "Uninstalled dice. Its data stays on this computer."
   And "starkeep list" shows "kept data" for "dice"
+  And a later "starkeep start" with no names leaves "dice" stopped, even when it was marked to run
 ```
 
 - **Notes:** a reinstall brings the kept rows back (APP-LIFE-142).
