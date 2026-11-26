@@ -97,6 +97,21 @@ function processCommand(pid: number): string | null {
   return out ? out : null;
 }
 
+/** The package folder `pnpm --filter` runs each workspace daemon in. */
+const WORKSPACE_DAEMON_DIRS: Record<DaemonId, string> = {
+  "local-data-server": "apps/local-data-server",
+  drive: "apps/drive",
+};
+
+/** A process's working folder, or null when lsof cannot say. */
+function processCwd(pid: number): string | null {
+  const result = spawnSync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], {
+    encoding: "utf-8",
+  });
+  const line = (result.stdout ?? "").split("\n").find((l) => l.startsWith("n"));
+  return line ? line.slice(1) : null;
+}
+
 function looksLikeAppDaemon(cmd: string): boolean {
   return /(?:^|\/)(pnpm|node|next|vite|npm)(?:\b|$)/.test(cmd);
 }
@@ -488,6 +503,9 @@ export function adoptOrphanWorkspaceDaemon(id: DaemonId): { pid: number; port: n
   if (!pid) return null;
   const cmd = processCommand(pid);
   if (!cmd || !looksLikeAppDaemon(cmd)) return null;
+  // Any node program can hold the port. Only one that runs in the daemon's
+  // own package folder is ours: a later Stop signals its whole group.
+  if (processCwd(pid) !== resolve(REPO_ROOT, WORKSPACE_DAEMON_DIRS[id])) return null;
   mkdirSync(PIDS_DIR, { recursive: true });
   const logPath = resolve(PIDS_DIR, `${id}.log`);
   writeFileSync(pidFile(id), String(pid));

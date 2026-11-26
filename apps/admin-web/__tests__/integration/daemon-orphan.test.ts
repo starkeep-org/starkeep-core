@@ -15,6 +15,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DaemonId } from "@starkeep/operator/commands";
+import { repoRoot } from "@starkeep/operator/repo-root";
 import { getFreePort } from "@starkeep/testkit";
 import { eventually, isAlive, jsonRequest, makeDataDir, getRequest } from "../helpers";
 
@@ -25,13 +26,14 @@ let daemonCommands: { drive: { args: string[]; port?: number } };
 let pidsDir: string;
 const strays: number[] = [];
 
-// A node process bound to a port — command line matches the dev-server shape
-// (`node …`), so it's adoptable.
-function spawnNodeServer(port: number): ChildProcess {
+// A node process bound to a port. Its command line matches the dev-server
+// shape (`node …`), and it runs in Drive's package folder, as `pnpm --filter`
+// runs the real one, so it's adoptable. `cwd` moves it elsewhere.
+function spawnNodeServer(port: number, cwd = join(repoRoot(), "apps/drive")): ChildProcess {
   const child = spawn(
     process.execPath,
     ["-e", `require("http").createServer((q,s)=>s.end("ok")).listen(${port},"127.0.0.1")`],
-    { detached: true, stdio: "ignore" },
+    { cwd, detached: true, stdio: "ignore" },
   );
   child.unref();
   strays.push(child.pid!);
@@ -196,5 +198,24 @@ describe("non-daemon process on the fixed port", () => {
     expect(error).toContain("already in use");
     expect(error).toContain(String(daemonCommands.drive.port));
     expect(isAlive(squatter.pid!)).toBe(true);
+  });
+});
+
+describe("a node program outside the daemon's folder on the fixed port", () => {
+  let stranger: ChildProcess;
+
+  beforeAll(async () => {
+    const port = await getFreePort();
+    daemonCommands.drive.port = port;
+    clearRecords("drive");
+    stranger = spawnNodeServer(port, repoRoot());
+    await waitForPort(port);
+  });
+
+  it("status does not adopt it, and it keeps running", async () => {
+    const s = await status("drive");
+    expect(s.running).toBe(false);
+    expect(existsSync(join(pidsDir, "drive.pid"))).toBe(false);
+    expect(isAlive(stranger.pid!)).toBe(true);
   });
 });
