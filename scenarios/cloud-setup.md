@@ -738,7 +738,149 @@ Scenario: [CLOUD-SETUP-054] A cloud operator who reaches the deploy step without
 
 - **Coverage:** `apps/admin-web/__tests__/cloud-setup-navigation.test.tsx` › "a stored session that no longer refreshes sends the operator from the deploy step to the sign-in form" (unit, local) checks "Go to Sign In" and the sign-in form, but not the step's message.
 
+## Setting up the cloud from the terminal
+
+`starkeep setup --cloud` does the wizard's work in one command. Only the bootstrap stack uses the terminal's own AWS credentials. Every later step runs as the cloud operator who signed in on the sign-in page. The command's conventions belong to [command-line.md](command-line.md), and the admin session it opens belongs to [users-and-access.md](users-and-access.md) (ACCESS-195).
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [CLOUD-SETUP-146] A cloud operator deploys a new cloud and syncs this computer with it in one command
+  Given the cloud operator's terminal holds AWS credentials for an account with no Starkeep deployment
+  When the cloud operator runs 'starkeep setup --cloud --region us-east-2 --name "Home" --admin-email <email>' and answers yes
+  Then the output names the account, the caller, and the region the bootstrap stack uses
+  And the output says the stack is being created and that Cognito then emails <email> a temporary password
+  When the cloud operator signs in on the sign-in page that opens, with the temporary password, and sets a permanent one
+  Then the output says it installs the cloud data server, which "takes 10 to 20 minutes", and then Drive
+  And the output says "Sign this computer in to sync, with the same account."
+  And the output ends with "The cloud is set up, and this computer syncs with it."
+  And admin-web's dashboard shows the deployed cloud, and the This Machine section shows the computer signed in
+```
+
+- **Notes:** the second sign-in, for sync, usually needs no password, because the sign-in page remembers the first one.
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [CLOUD-SETUP-147] A cloud operator sees the AWS account and is asked before the bootstrap stack is created
+  Given the cloud operator's terminal holds AWS credentials
+  When the cloud operator runs "starkeep setup --cloud" with a region, a name, and an email
+  Then the output says "The bootstrap stack uses this terminal's AWS credentials:" with the account, the caller's ARN, and the region
+  And the command asks "Create the stack starkeep-bootstrap in account <account>, <region>? [y/N]"
+  When the cloud operator answers anything other than yes
+  Then the output says "Setup stopped before creating the bootstrap stack."
+  And the cloud operator finds no new stack in the AWS account
+```
+
+- **Notes:** "--yes" answers the question. A run with no terminal and no "--yes" stops with status 3 (CLI-024).
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [CLOUD-SETUP-148] A cloud operator who uses the account's root user is warned to use a safer identity
+  Given the cloud operator's terminal holds the AWS account's root user credentials
+  When the cloud operator runs "starkeep setup --cloud" with a region, a name, and an email
+  Then the output warns "Warning: these are the account's root user credentials. An IAM user or SSO role is safer."
+  And setup still asks before creating the stack
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [CLOUD-SETUP-149] A cloud operator whose terminal credentials belong to another account than this computer's cloud is refused
+  Given this computer's configuration names one AWS account
+  And the cloud operator's terminal holds credentials for another account
+  When the cloud operator runs "starkeep setup --cloud --region us-east-2"
+  Then the output says "config.json names account <account>, but these credentials belong to <other account>. Sign in to the right account, then run setup again."
+  And the cloud operator finds nothing created in either account
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario Outline: [CLOUD-SETUP-150] A cloud operator who leaves out a value a new cloud needs is told which flag gives it
+  Given this computer has no cloud setup
+  When the cloud operator runs "starkeep setup --cloud <flags>"
+  Then the output says "<message>"
+  And the command exits with status 2, before any change in AWS
+
+  Examples:
+    | flags                                                    | message                                                                                                                   |
+    | --name Home --admin-email <email>                        | Name the AWS region for the new cloud: --region, such as us-east-2.                                                      |
+    | --region us-east-2 --admin-email <email>                 | Name the deployment: --name "Home". The sign-in page shows it.                                                            |
+    | --region us-east-2 --name Home                           | Name the first admin's email: --admin-email. Cognito sends it a temporary password.                                       |
+    | --region us-east-2 --name "Home!" --admin-email <email>  | --name takes 1 to 32 letters, digits, spaces, hyphens and underscores, with single spaces between words.                  |
+    | --region us-east-2 --prefix Star_Keep                    | --prefix must start with a lowercase letter, hold only lowercase letters, digits and hyphens, and be at most <limit> long. |
+    | --join https://d123.cloudfront.net                       | Choose --cloud or --join, not both.                                                                                       |
+```
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [CLOUD-SETUP-151] A cloud operator whose account already holds the bootstrap stack sets up on it without creating another
+  Given the AWS account holds a usable "starkeep-bootstrap" stack
+  And this computer's configuration holds none of its outputs
+  When the cloud operator runs "starkeep setup --cloud --region us-east-2 --name Home"
+  Then the output says "The stack starkeep-bootstrap exists; setup uses its outputs. If it is out of date, run scripts/update-bootstrap.sh."
+  And setup goes on to the sign-in and the installs
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [CLOUD-SETUP-152] A cloud operator whose bootstrap stack is in a failed state is told to tear it down first
+  Given the AWS account holds a "starkeep-bootstrap" stack that failed to create
+  When the cloud operator runs "starkeep setup --cloud --region us-east-2"
+  Then the output says "The stack starkeep-bootstrap exists but is ROLLBACK_COMPLETE. Preview its teardown with scripts/teardown-bootstrap.sh --dry-run --prefix starkeep --region us-east-2, tear it down, and run setup again."
+  And setup changes nothing in AWS
+```
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [CLOUD-SETUP-153] A cloud operator who runs setup again after a failure resumes after the steps that finished
+  Given a "starkeep setup --cloud" run created the stack, signed the cloud operator in, and installed the cloud data server, and then the Drive install failed
+  When the cloud operator runs "starkeep setup --cloud" again
+  Then the output says "The bootstrap stack's outputs are recorded (starkeep, <region>)." and "The cloud data server is installed (<address>)."
+  And the output says "Installing Drive…", with no second stack, sign-in, or cloud data server install
+  And the run ends with "The cloud is set up, and this computer syncs with it."
+```
+
+- **Notes:** a run whose admin session is still open skips the sign-in. A computer that already syncs says "This computer already syncs."
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [CLOUD-SETUP-154] A cloud operator whose terminal closes during the cloud data server install finds the install going on, and the next run follows it
+  Given a "starkeep setup --cloud" run is installing the cloud data server
+  When the cloud operator closes the terminal and runs "starkeep setup --cloud" again before the install ends
+  Then the new run shows the install's progress from its start, with no second install
+  And the output says "Followed a cloud data server install run that was already going."
+```
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [CLOUD-SETUP-155] A cloud operator sets up the cloud with a custom domain
+  When the cloud operator runs "starkeep setup --cloud" with a region, a name, an email, and "--domain photos.example.com"
+  Then the install's summary names "photos.example.com" after "customDomain"
+  And the summary says which step the domain still awaits, such as the record to add, and to install again
+```
+
+- **Notes:** a later run with "--domain" installs the cloud data server again with the new domain, and an empty "--domain" removes it. The domain's own steps belong to "Custom domain".
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [CLOUD-SETUP-156] A cloud operator installs apps in the new cloud as part of the setup
+  When the cloud operator runs "starkeep setup --cloud" with a region, a name, an email, and "--apps dice,notes"
+  Then after Drive, the output shows the consent words for "dice" and asks "Approve and install? [y/N]", then the same for "notes"
+  And each approved app answers at its address under "/apps/" in the new cloud
+```
+
 ## Installing the cloud data server from the terminal
+
+`starkeep setup --cloud` installs the cloud data server for a person, and admin-web's wizard runs the same install. The scenarios below run the installer package's script, which the end-to-end tests use too.
 
 ```gherkin
 @cloud
@@ -756,20 +898,19 @@ Scenario: [CLOUD-SETUP-055] A cloud operator who runs the install command withou
 
 ```gherkin
 @local
-@intent:confirmed @coverage:none
+@intent:confirmed
 Scenario Outline: [CLOUD-SETUP-056] A cloud operator who runs the install command on an unfinished setup is refused and told the fix
   Given this computer's configuration <state>
   When the cloud operator runs the cloud data server install command
-  Then the command exits with "<error>"
-  And the command adds "<fix>"
+  Then the command exits with "Error: <message>"
   And the command asks for no password and changes nothing in AWS
 
   Examples:
-    | state                              | error                                                    | fix                                                                                                          |
-    | does not exist                     | Error: ~/.starkeep/config.json not found                 | Generate it from admin-web after the bootstrap stack is deployed.                                            |
-    | holds no device client             | Error: ~/.starkeep/config.json has no deviceUserPoolClientId. | Sign in on admin-web's cloud setup, which looks it up. If the lookup fails, update the bootstrap stack first. |
-    | holds no sign-in domain            | Error: ~/.starkeep/config.json has no cognitoDomain.     | Sign in on admin-web's cloud setup, which looks it up. If the lookup fails, update the bootstrap stack first. |
-    | holds no valid deployment name     | Error: ~/.starkeep/config.json has no valid deploymentName. | Name the deployment on step 1 of admin-web's cloud setup.                                                 |
+    | state                          | message                                                                                                                                                                      |
+    | does not exist                 | <config path> not found. Set up the cloud first: `starkeep setup --cloud`, or Cloud setup in admin-web.                                                                      |
+    | holds no device client         | <config path> has no deviceUserPoolClientId. Run `starkeep setup --cloud`, or the Stack outputs step of admin-web's cloud setup. If the field stays missing, update the bootstrap stack first. |
+    | holds no sign-in domain        | <config path> has no cognitoDomain. Run `starkeep setup --cloud`, or the Stack outputs step of admin-web's cloud setup. If the field stays missing, update the bootstrap stack first.          |
+    | holds no valid deployment name | <config path> has no valid deploymentName. Name the deployment with `starkeep setup --cloud --name`, or on step 1 of admin-web's cloud setup.                                |
 ```
 
 - **Coverage:** none.
@@ -831,7 +972,7 @@ Scenario: [CLOUD-SETUP-060] A cloud operator finds a real install's database pro
 Scenario: [CLOUD-SETUP-061] A cloud operator who installs again keeps the stored state passphrase and updates the deployment in place
   Given the cloud operator installed the cloud data server earlier
   When the cloud operator runs the install command again
-  Then the command prints "Already present; leaving as-is." for the state passphrase
+  Then the command prints "The passphrase exists; leaving it as it is." for the state passphrase
   And the cloud keeps its address, its data, and its accounts
 ```
 
