@@ -2,8 +2,8 @@
  * Which local services the person wants running: `~/.starkeep/services.json`.
  *
  * admin-web's Start and Stop buttons and the CLI's `start` and `stop` both
- * write the file, so `starkeep start` with no names brings back what either
- * tool left running.
+ * write the file, and an uninstall clears the app's mark, so `starkeep start`
+ * with no names brings back what either tool left running.
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
