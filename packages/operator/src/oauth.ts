@@ -34,6 +34,11 @@ export function startAuthorization(options: {
   domain: string;
   clientId: string;
   redirectUri: string;
+  /**
+   * Ask for the password even when the page remembers the account, so a
+   * sign-out cannot be undone by a silent sign-in. The admin sign-ins set it.
+   */
+  askPassword?: boolean;
 }): AuthorizationStart {
   const codeVerifier = randomBytes(32).toString("base64url");
   const state = randomBytes(16).toString("base64url");
@@ -45,6 +50,7 @@ export function startAuthorization(options: {
     state,
     code_challenge: pkceChallenge(codeVerifier),
     code_challenge_method: "S256",
+    ...(options.askPassword ? { prompt: "login" } : {}),
   });
   return {
     url: `https://${options.domain}/oauth2/authorize?${query.toString()}`,
@@ -52,6 +58,38 @@ export function startAuthorization(options: {
     codeVerifier,
     redirectUri: options.redirectUri,
   };
+}
+
+/**
+ * Ask the managed login page whether it accepts this sign-in, before a person
+ * waits on it. The page answers a refused request with a redirect to its error
+ * page, such as `redirect_mismatch` when the client lists no such callback.
+ * Returns the reason, or null when the page accepts the request or cannot be
+ * reached (the browser then shows what happened).
+ */
+export async function authorizationRefusal(url: string): Promise<string | null> {
+  const base = process.env.STARKEEP_COGNITO_LOGIN_BASE;
+  const target = base ? `${base}${new URL(url).pathname}${new URL(url).search}` : url;
+  let res: Response;
+  try {
+    res = await fetch(target, { redirect: "manual", signal: AbortSignal.timeout(10_000) });
+  } catch {
+    return null;
+  }
+  const location = res.headers.get("location");
+  if (!location) return null;
+  const next = new URL(location, target);
+  if (!next.pathname.endsWith("/error")) return null;
+  return next.searchParams.get("error") ?? "error";
+}
+
+/** The message for a refused sign-in: an old bootstrap stack is the usual cause. */
+export function refusedSignInMessage(reason: string): string {
+  return (
+    `The managed login page refused this sign-in (${reason}). A bootstrap stack from before the ` +
+    "browser sign-in lists no callback address for it. Update the stack with " +
+    "`scripts/update-bootstrap.sh --apply`, which needs the AWS account owner's credentials, then sign in again."
+  );
 }
 
 /**
@@ -162,9 +200,10 @@ export function waitForCallback(options: {
     try {
       await listen("127.0.0.1");
     } catch (err) {
-      const message = (err as NodeJS.ErrnoException).code === "EADDRINUSE"
-        ? `Port ${port} is in use, so the sign-in cannot return here. Stop the program that holds it and try again.`
-        : `Could not listen for the sign-in on port ${port}: ${(err as Error).message}`;
+      const message =
+        (err as NodeJS.ErrnoException).code === "EADDRINUSE"
+          ? `Port ${port} is in use, so the sign-in cannot return here. Stop the program that holds it and try again.`
+          : `Could not listen for the sign-in on port ${port}: ${(err as Error).message}`;
       finish(new CallbackError(message));
       throw new CallbackError(message);
     }

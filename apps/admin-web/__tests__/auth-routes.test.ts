@@ -30,11 +30,21 @@ let loginStatus = 200;
 let route: typeof import("../src/routes/auth");
 let session: typeof import("@starkeep/operator/admin-session");
 
+/** The error the fake login page answers the authorize request with, or null to accept it. */
+let authorizeRefusal: string | null = null;
+
 beforeAll(async () => {
   endpoint = createServer((req, res) => {
     let body = "";
     req.on("data", (c: Buffer) => (body += c.toString("utf8")));
     req.on("end", () => {
+      if (req.url?.startsWith("/oauth2/authorize")) {
+        res.writeHead(302, {
+          Location: authorizeRefusal ? `/error?error=${authorizeRefusal}` : "/login",
+        });
+        res.end();
+        return;
+      }
       if (req.url === "/oauth2/token") {
         tokenRequests.push(new URLSearchParams(body));
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -66,6 +76,7 @@ beforeAll(async () => {
   await new Promise<void>((r) => endpoint.listen(0, "127.0.0.1", () => r()));
   const base = `http://127.0.0.1:${(endpoint.address() as { port: number }).port}`;
   process.env.STARKEEP_COGNITO_TOKEN_ENDPOINT = `${base}/oauth2/token`;
+  process.env.STARKEEP_COGNITO_LOGIN_BASE = base;
   process.env.STARKEEP_LOCAL_DATA_SERVER_URL = base;
   writeAdminConfig(dataDir, {
     stackPrefix: "sk",
@@ -116,11 +127,27 @@ describe("GET /auth/start", () => {
     expect(page.searchParams.get("redirect_uri")).toBe("http://localhost:3000/auth/callback");
     expect(page.searchParams.get("code_challenge_method")).toBe("S256");
     expect(page.searchParams.get("scope")).toBe("openid email");
+    // An admin sign-in always asks for the password (ACCESS-199).
+    expect(page.searchParams.get("prompt")).toBe("login");
+  });
+
+  it("names the old bootstrap stack when the login page refuses the sign-in", async () => {
+    authorizeRefusal = "redirect_mismatch";
+    try {
+      const res = await start("client=admin&returnTo=%2Fcloud-setup");
+      expect(location(res).pathname).toBe("/cloud-setup");
+      expect(location(res).searchParams.get("signInError")).toContain(
+        "The managed login page refused this sign-in (redirect_mismatch).",
+      );
+    } finally {
+      authorizeRefusal = null;
+    }
   });
 
   it("asks the cloud for the device client, as a machine that only joined knows its address", async () => {
     const { page } = await begin("device");
     expect(page.searchParams.get("client_id")).toBe("deviceclient");
+    expect(page.searchParams.get("prompt")).toBeNull();
   });
 
   it("refuses on a port Cognito does not return to, and says to use the CLI", async () => {
