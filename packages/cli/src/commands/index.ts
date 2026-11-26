@@ -11,6 +11,7 @@ import {
 import { resetLocalCommand, setupCommand } from "./setup";
 import { updateCommand } from "./update";
 import { loginCommand, logoutCommand } from "./account";
+import { cloudBootstrapUpdateCommand, cloudStatusCommand } from "./cloud";
 
 /** Every command, in the order `starkeep help` lists them. */
 export const COMMANDS: Command[] = [
@@ -29,5 +30,7 @@ export const COMMANDS: Command[] = [
   sourceCommand,
   loginCommand,
   logoutCommand,
+  cloudStatusCommand,
+  cloudBootstrapUpdateCommand,
   resetLocalCommand,
 ];

@@ -843,6 +843,9 @@ importers:
       '@starkeep/protocol-primitives':
         specifier: workspace:*
         version: link:../protocol-primitives
+      diff:
+        specifier: ^8.0.4
+        version: 8.0.4
       kysely:
         specifier: ^0.28.17
         version: 0.28.17

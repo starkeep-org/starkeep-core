@@ -54,6 +54,33 @@ export function commandHelp(command: Command): string {
   ].join("\n");
 }
 
+/**
+ * The command the first words name: a two-word command such as `cloud
+ * status` first, then a one-word one.
+ */
+function findCommand(words: string[]): { command: Command } | undefined {
+  const [first, second] = words;
+  if (!first) return undefined;
+  const two = second ? COMMANDS.find((c) => c.name === `${first} ${second}`) : undefined;
+  const command = two ?? COMMANDS.find((c) => c.name === first);
+  return command ? { command } : undefined;
+}
+
+/** The commands of a group such as `cloud`, or null when no group has the name. */
+function groupHelp(group: string): string | null {
+  const members = COMMANDS.filter((c) => c.name.startsWith(`${group} `));
+  if (members.length === 0) return null;
+  const width = Math.max(...members.map((c) => c.name.length)) + 2;
+  return [
+    `Usage: starkeep ${group} <command> [options]`,
+    "",
+    "Commands:",
+    ...members.map((c) => `  ${c.name.padEnd(width)}${c.summary}`),
+    "",
+    `Run \`starkeep help ${group} <command>\` for one command's help.`,
+  ].join("\n");
+}
+
 export type MainOptions = Omit<IoOptions, "json" | "verbose">;
 
 /** Run one invocation. Returns the exit code. */
@@ -64,26 +91,44 @@ export async function main(argv: string[], options: MainOptions): Promise<number
   const json = argv.includes("--json");
 
   if (!name || name === "help") {
-    const topic = name === "help" ? argv[argv.indexOf("help") + 1] : undefined;
-    const command = topic ? COMMANDS.find((c) => c.name === topic) : undefined;
-    if (topic && !command) {
-      stderr(`Unknown command "${topic}".\n\n${generalHelp()}\n`);
+    const words = argv.filter((a) => !a.startsWith("-") && a !== "help");
+    const topic = name === "help" ? findCommand(words) : undefined;
+    if (name === "help" && words.length > 0 && !topic) {
+      const group = groupHelp(words[0]!);
+      if (group) {
+        stdout(`${group}\n`);
+        return 0;
+      }
+      stderr(`Unknown command "${words.join(" ")}".\n\n${generalHelp()}\n`);
       return EXIT_USAGE;
     }
-    stdout(`${command ? commandHelp(command) : generalHelp()}\n`);
+    stdout(`${topic ? commandHelp(topic.command) : generalHelp()}\n`);
     return name || argv.includes("--help") || argv.includes("-h") ? 0 : EXIT_USAGE;
   }
 
-  const command = COMMANDS.find((c) => c.name === name);
-  if (!command) {
+  const words = argv.filter((a) => !a.startsWith("-"));
+  const found = findCommand(words);
+  if (!found) {
+    const group = groupHelp(name);
+    if (group) {
+      stderr(
+        `${words.length > 1 ? `Unknown command "${words.slice(0, 2).join(" ")}".\n\n` : ""}${group}\n`,
+      );
+      return EXIT_USAGE;
+    }
     stderr(`Unknown command "${name}".\n\n${generalHelp()}\n`);
     return EXIT_USAGE;
   }
+  const { command } = found;
+
+  // The arguments after the command's own words.
+  const rest = [...argv];
+  for (const word of command.name.split(" ")) rest.splice(rest.indexOf(word), 1);
 
   let parsed: ReturnType<typeof parseArgs>;
   try {
     parsed = parseArgs({
-      args: argv.slice(argv.indexOf(name) + 1),
+      args: rest,
       options: optionsFor({ ...command.flags, ...GLOBAL_FLAGS }),
       allowPositionals: true,
       strict: true,
