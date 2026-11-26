@@ -846,7 +846,7 @@ Scenario: [CLOUD-SETUP-153] A cloud operator who runs setup again after a failur
   And the run ends with "The cloud is set up, and this computer syncs with it."
 ```
 
-- **Notes:** a run whose admin session is still open skips the sign-in. A computer that already syncs says "This computer already syncs."
+- **Notes:** a run whose admin session is still open skips the sign-in. A computer that already syncs says "This computer already syncs." A data server that started before the cloud existed restarts, even when the run installs nothing, such as after a terminal that closed once the Drive install had finished on its own.
 
 ```gherkin
 @local @cloud

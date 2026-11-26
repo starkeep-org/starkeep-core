@@ -95,6 +95,16 @@ async function syncState(): Promise<string | null> {
   }
 }
 
+async function dataServerCloudUrl(): Promise<string | null | undefined> {
+  try {
+    const res = await fetch(`${localDataServerUrlFromEnv()}/auth/status`);
+    if (!res.ok) return undefined;
+    return ((await res.json()) as { cloudUrl?: string | null }).cloudUrl ?? null;
+  } catch {
+    return undefined;
+  }
+}
+
 const CLOUD_SETUP_DEPS: CloudSetupDeps = {
   owner: {},
   adminSignedIn: () => adminSessionStatus().signedIn,
@@ -104,6 +114,7 @@ const CLOUD_SETUP_DEPS: CloudSetupDeps = {
   cloudAppIds: async (io) =>
     (await readCloudApps(io, { signIn: true }))?.map((a) => a.appId) ?? null,
   syncState,
+  dataServerCloudUrl,
   startLocalServices,
   installApps: async (io, refs, yes) => {
     for (const ref of refs) {
