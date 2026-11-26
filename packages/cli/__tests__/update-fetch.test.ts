@@ -15,7 +15,9 @@ process.env.STARKEEP_DIR = join(scratch, "dot-starkeep");
 let fetchAll: typeof import("../src/commands/update").fetchAll;
 let createIo: typeof import("../src/io").createIo;
 let readUpdates: typeof import("../src/git").readUpdates;
+let main: typeof import("../src/main").main;
 beforeAll(async () => {
+  ({ main } = await import("../src/main"));
   ({ fetchAll } = await import("../src/commands/update"));
   ({ createIo } = await import("../src/io"));
   ({ readUpdates } = await import("../src/git"));
@@ -154,5 +156,36 @@ describe("fetchAll", () => {
       { root: a.clone, before: aBefore, after: aAfter },
     ]);
     expect(readFileSync(join(b.clone, "new.txt"), "utf8")).toBe("mine\n");
+  });
+});
+
+describe("update --undo", () => {
+  async function undo() {
+    let err = "";
+    const code = await main(["update", "--undo"], {
+      cwd: scratch,
+      interactive: false,
+      stdout: () => {},
+      stderr: (t) => (err += t),
+    });
+    return { code, err };
+  }
+
+  it("refuses a repository that moved since the update, and leaves it as it is", async () => {
+    const { clone, work } = repoPair();
+    pushUpstream(work, "two\n");
+    const [pulled] = fetchAll(quietIo().io, [target(clone)]);
+    writeFileSync(join(clone, "later.txt"), "later\n");
+    git(clone, "add", "later.txt");
+    git(clone, "commit", "-q", "-m", "later");
+    const head = git(clone, "rev-parse", "HEAD");
+
+    const { code, err } = await undo();
+    expect(code).toBe(1);
+    expect(err).toContain(
+      `${clone} moved since the update (it is no longer at ${pulled!.after.slice(0, 8)}). Undo it by hand with \`git reset --keep ${pulled!.before}\`.`,
+    );
+    expect(git(clone, "rev-parse", "HEAD")).toBe(head);
+    expect(readUpdates().at(-1)?.repos).toEqual([pulled]);
   });
 });
