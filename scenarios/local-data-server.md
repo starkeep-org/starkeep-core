@@ -1,6 +1,6 @@
 # Local data server
 
-This file specifies the local data server that runs on a member's computer. The local operator drives most scenarios from admin-web's local sections, from the computer's terminal, or in a folder the data server watches. Members appear where they act inside an app or on another device, or where they see the result in an app. The app developer appears where an app reads the data server's events stream or writes a file through it. The scope covers starting and stopping the data server from the Data Server card, start failures, the This Machine section's offline, join, and layout states, the library cutover script, watched folders and the Local folders dialog, the `data-server-ctl` command, local storage on disk, running several instances on one computer, the loopback-only listener, the events stream, and clearing local data.
+This file specifies the local data server that runs on a member's computer. The local operator drives most scenarios from admin-web's local sections, from the computer's terminal, or in a folder the data server watches. Members appear where they act inside an app or on another device, or where they see the result in an app. The app developer appears where an app reads the data server's events stream or writes a file through it. The scope covers starting and stopping the data server from the Data Server card and from the `starkeep` command, start failures, the This Machine section's offline, join, and layout states, the library cutover script, watched folders and the Local folders dialog, the `data-server-ctl` command, local storage on disk, running several instances on one computer, the loopback-only listener, the events stream, and clearing local data, from admin-web, the reset script, or `starkeep reset-local`.
 
 Related files:
 
@@ -220,6 +220,132 @@ Scenario: [LDS-017] The local operator learns that the environment is at fault w
 ```
 
 - **Notes:** Implementation gap: the card ignores Start's answer, so the message never appears.
+
+### From the terminal
+
+The `starkeep` command and admin-web share one record of what runs, so a service that one starts, the other shows as running. The command's own conventions belong to [command-line.md](command-line.md). Starting and stopping one app belongs to [app-lifecycle.md](app-lifecycle.md).
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [LDS-105] A local operator who runs start with no names gets the data server, Drive, and every app marked to run
+  Given the local operator started "dice" earlier, which marked it to run
+  And nothing runs on the computer now
+  When the local operator runs "starkeep start"
+  Then the output says "Started data-server on http://localhost:<port>.", then the same for drive, then for dice
+  And the Data Server card in admin-web shows the data server running
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [LDS-106] A local operator who starts from the terminal a data server that admin-web started is told it already runs
+  Given the local operator started the data server from admin-web's Data Server card
+  When the local operator runs "starkeep start data-server"
+  Then the output says "data-server was already running on http://localhost:<port>."
+  And the Data Server card keeps showing the data server running, with no restart
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [LDS-107] A local operator who stops everything from the terminal gets the same set back at the next start
+  Given the data server, Drive, and "dice" run, and admin-web runs from "starkeep admin"
+  When the local operator runs "starkeep stop"
+  Then the output says admin-web, dice, drive, and data-server stopped, in that order
+  When the local operator runs "starkeep start"
+  Then the local operator finds the data server, Drive, and "dice" running again
+```
+
+- **Notes:** stopping everything keeps each app's mark to run. Stopping one named app clears its mark (APP-LIFE-227).
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [LDS-108] A local operator who stops a service that is not running is told so, and the command succeeds
+  Given Drive is not running
+  When the local operator runs "starkeep stop drive"
+  Then the output says "drive was not running."
+  And the command exits with status 0
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [LDS-109] A local operator restarts the data server from the terminal
+  Given the data server runs
+  When the local operator runs "starkeep restart data-server"
+  Then the output says "Stopped data-server." and then "Started data-server on http://localhost:<port>."
+  And the Data Server card in admin-web shows the data server running
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [LDS-110] A local operator whose service does not start sees why, how many failed, and a failing exit status
+  Given another program holds Drive's port
+  When the local operator runs "starkeep start"
+  Then the output says "Could not start drive:" with the reason
+  And the output ends with "1 of 2 services did not start."
+  And the command exits with status 1
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [LDS-111] A local operator sees what runs on the computer, at which address, and the computer's sync state
+  Given the data server and Drive run, "dice" is marked to run but stopped, and the computer is signed in to sync
+  When the local operator runs "starkeep status"
+  Then the SERVICES list shows data-server and drive as running with their addresses
+  And the list shows dice as "stopped  (marked to run)"
+  And the list shows whether admin-web runs
+  And the output shows the joined cloud's address after "CLOUD", and "SYNC      signed in as <email>"
+```
+
+- **Notes:** a computer that joined no cloud shows "CLOUD not joined" and "SYNC signed out".
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [LDS-112] A local operator whose data server is stopped sees the sync state as unknown
+  Given the data server is stopped
+  When the local operator runs "starkeep status"
+  Then the output shows data-server as stopped
+  And the output shows "SYNC      unknown (the data server is not answering)"
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [LDS-113] A local operator follows the data server's log from the terminal
+  Given the data server was started on this computer
+  When the local operator runs "starkeep logs data-server -f"
+  Then the output shows the log's last 50 lines and then each new line as the data server writes it
+  And "-n 200" shows the last 200 lines first
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [LDS-114] A local operator who asks for the log of something never started here is told there is none
+  Given "dice" was never started on this computer
+  When the local operator runs "starkeep logs dice"
+  Then the output says "No log for dice at <path>. It has not been started here."
+  And the command exits with status 1
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [LDS-115] A local operator opens admin-web from the terminal
+  Given admin-web is not running
+  When the local operator runs "starkeep admin"
+  Then the output says "Starting admin-web…" and "admin-web runs at http://localhost:3000"
+  And the browser opens admin-web's dashboard
+  And "--no-open" starts admin-web without opening a browser
+```
+
+- **Notes:** on a computer where no browser opens, such as one reached over SSH, the output adds "Open http://localhost:3000 in your browser."
 
 ### This machine's settings
 
@@ -1151,3 +1277,35 @@ Scenario: [LDS-096] A local operator cannot run the reset script while the data 
 ```
 
 - **Notes:** Implementation gap: the script does not check, and deletes the database and stored files from under the running data server.
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [LDS-116] A local operator previews from the terminal what a reset of local data deletes, and nothing changes
+  Given the computer holds a library and watched folders
+  When the local operator runs "starkeep reset-local"
+  Then the output says "Would delete:" and lists the object files folder, the database files, and the watched-folder list
+  And the output ends with "Run `starkeep reset-local --apply` to delete them."
+  And the local operator finds the library unchanged
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [LDS-117] A local operator who resets local data from the terminal while the data server runs finds it running again on an empty library
+  Given the data server runs
+  When the local operator runs "starkeep reset-local --apply"
+  Then the output says "Stopping the data server…", then "Deleted <count> item(s) in <folder>."
+  And the output says the data server started again
+  And the Data Server card says "No folders are watched yet."
+  And the local operator keeps the config, the credentials, the files in the watched folders, and the cloud's data
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [LDS-118] A local operator with no local data to reset is told there is nothing to delete
+  Given the computer holds no library, database, or watched-folder list
+  When the local operator runs "starkeep reset-local"
+  Then the output says "Nothing to delete in <folder>."
+```

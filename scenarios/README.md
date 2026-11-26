@@ -35,6 +35,7 @@ A behavior change starts here.
 | [cloud-runtime.md](cloud-runtime.md)                     | `CLOUD-RUN-`   | What a cloud operator sees of the running cloud: app hosting, load, errors, and cost                                      |
 | [drive.md](drive.md)                                     | `DRIVE-`       | The Drive app                                                                                                             |
 | [app-development.md](app-development.md)                 | `APP-DEV-`     | Building a Starkeep app: the app client, the SDK, the test kit, and the example app                                       |
+| [command-line.md](command-line.md)                       | `CLI-`         | Getting the `starkeep` command, setting up a computer with it, and the conventions every command shares                   |
 
 ## Scenario shape
 

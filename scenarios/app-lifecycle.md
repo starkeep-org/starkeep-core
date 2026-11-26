@@ -1,6 +1,6 @@
 # App lifecycle
 
-This file specifies how apps arrive on, run on, change on, and leave a Starkeep deployment. The local operator works in Admin's local sections and runs install and upgrade commands on this computer. The cloud operator works in Admin's cloud sections and runs install, uninstall, and teardown commands against the AWS account. Members appear where they see the result of an install or an uninstall, and app developers appear where an update or an uninstall changes what their app receives. The scope covers app discovery, the consent dialog, local and cloud installs, starting and stopping local apps, updates, uninstalls and the data they keep, the teardown of every cloud app, the dashboard's app cards, and the manifest errors that app developers and both operators see.
+This file specifies how apps arrive on, run on, change on, and leave a Starkeep deployment. The local operator works in Admin's local sections and runs install, update, and upgrade commands on this computer, including the `starkeep` command. The cloud operator works in Admin's cloud sections and runs install, uninstall, and teardown commands against the AWS account. Members appear where they see the result of an install or an uninstall, and app developers appear where an update or an uninstall changes what their app receives. The scope covers app discovery, the consent dialog, local and cloud installs, starting and stopping local apps, updates, uninstalls and the data they keep, the teardown of every cloud app, the dashboard's app cards, and the manifest errors that app developers and both operators see.
 
 Related files:
 
@@ -136,6 +136,54 @@ Scenario: [APP-LIFE-010] A local operator who empties the folder list sees no ap
   Then the dialog says "No directories — no apps will be discovered."
   And the dashboard shows no app cards from folders
   And Discover apps does not list the example-app folder again on the local operator's next visit
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-213] A local operator who adds a discovery folder from the terminal sees the apps it contributed and why any folder in it was skipped
+  Given "~/starkeep-apps" holds the apps "dice" and "notes" and a subfolder whose manifest fails validation
+  When the local operator runs "starkeep source add ~/starkeep-apps"
+  Then the output shows "~/starkeep-apps" and, under it, a line for "dice" and a line for "notes", each with the app's name
+  And the output shows a "skipped:" line with the reason for the subfolder
+  And admin-web's dashboard shows cards for "dice" and "notes"
+```
+
+- **Notes:** the skip reasons match the ones Discover apps shows (APP-LIFE-004).
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-214] A local operator lists and removes discovery folders from the terminal
+  Given "~/starkeep-apps" is a discovery folder
+  When the local operator runs "starkeep source list"
+  Then the output shows each discovery folder with the apps it contributed
+  When the local operator runs "starkeep source remove ~/starkeep-apps"
+  Then the output says "Removed ~/starkeep-apps from the discovery folders."
+  And Discover apps in admin-web no longer lists the folder
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario Outline: [APP-LIFE-215] A local operator who names a folder that discovery cannot use is told why
+  When the local operator runs "starkeep source <verb> <folder>"
+  Then the output says "<message>"
+  And the discovery folders stay as they were
+
+  Examples:
+    | verb   | folder                                      | message                                |
+    | add    | a path that is not a folder                 | <absolute path> is not a folder.       |
+    | remove | a folder that is not a discovery folder     | <folder> is not a discovery folder.    |
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-216] A local operator with no discovery folders is told how to add one
+  Given the configuration lists no discovery folders
+  When the local operator runs "starkeep source list"
+  Then the output says "No discovery folders. Add one with `starkeep source add <dir>`."
 ```
 
 ### The example app
@@ -686,16 +734,18 @@ Scenario: [APP-LIFE-040] A local operator sees an error when the local data serv
 
 ### Install from the terminal
 
+The `starkeep` command's conventions, such as `--json`, `--verbose`, and the exit codes, belong to [command-line.md](command-line.md). A cloud install from the terminal belongs to "Installing in the cloud" › "From the terminal".
+
 ```gherkin
 @local
 @intent:confirmed
 Scenario: [APP-LIFE-041] A local operator reads the consent words in the terminal install and installs only after a yes
   Given the local data server is running
-  When the local operator runs "cli:install-app-local <app folder>" in a terminal
-  Then the command prints "Install <app>?" and the same consent words as Admin's dialog
+  When the local operator runs "starkeep install dice --local" in a terminal
+  Then the command prints "Install Dice?" and the same consent words as Admin's dialog
   And the command asks "Approve and install? [y/N]"
   When the local operator answers anything other than yes
-  Then the command prints "Not installed." and installs nothing
+  Then the command prints "Not installed: Dice." and installs nothing
 ```
 
 ```gherkin
@@ -703,10 +753,10 @@ Scenario: [APP-LIFE-041] A local operator reads the consent words in the termina
 @intent:confirmed
 Scenario: [APP-LIFE-042] A local operator who passes `--yes` installs without being asked
   Given the local data server is running
-  When the local operator runs "cli:install-app-local <app folder> --yes"
+  When the local operator runs "starkeep install dice --local --yes"
   Then the command prints the consent words, installs the app's dependencies, and registers the app
-  And the command prints where the app's credentials file is
-  And the command says to start the app from Admin, and to restart it if it already ran
+  And the command prints "Installed Dice. Its credentials are in <path>."
+  And admin-web's dashboard shows "dice" installed on this computer
 ```
 
 ```gherkin
@@ -714,9 +764,9 @@ Scenario: [APP-LIFE-042] A local operator who passes `--yes` installs without be
 @intent:confirmed
 Scenario: [APP-LIFE-043] A local operator whose script runs the terminal install without `--yes` installs nothing
   Given the local operator runs commands from a script with no terminal attached
-  When the local operator runs "cli:install-app-local <app folder>" from that script without "--yes"
-  Then the command says there is no terminal to ask for approval and to pass "--yes"
-  And the command exits with an error and installs nothing
+  When the local operator runs "starkeep install dice --local" from that script without "--yes"
+  Then the command says "Approve and install? No terminal is attached to answer. Pass --yes to approve."
+  And the command exits with status 3 and installs nothing
 ```
 
 ```gherkin
@@ -724,8 +774,8 @@ Scenario: [APP-LIFE-043] A local operator whose script runs the terminal install
 @intent:confirmed
 Scenario: [APP-LIFE-044] A local operator gets an early refusal from the terminal install when the local data server does not answer
   Given the local data server is stopped
-  When the local operator runs "cli:install-app-local <app folder>"
-  Then the command says the local data server is not answering and to start it from Admin
+  When the local operator runs "starkeep install dice --local"
+  Then the command says "The local data server at <address> is not answering. Run `starkeep start data-server`, then try again."
   And the command prints no consent words and runs no dependency install
 ```
 
@@ -733,14 +783,98 @@ Scenario: [APP-LIFE-044] A local operator gets an early refusal from the termina
 @local
 @intent:confirmed
 Scenario Outline: [APP-LIFE-045] A local operator cannot install from the terminal a folder with no manifest or an invalid one
-  When the local operator runs "cli:install-app-local" on a folder with <problem>
-  Then the command prints "<message>" and exits with an error
+  When the local operator runs "starkeep install <folder> --local" on a folder with <problem>
+  Then the command prints "<message>" and exits with status 1
   And nothing installs
 
   Examples:
-    | problem                  | message                                                    |
-    | no starkeep.manifest.json | <folder> holds no starkeep.manifest.json.                 |
-    | an invalid manifest       | The app's manifest failed validation: <first error>       |
+    | problem                   | message                                                     |
+    | no starkeep.manifest.json | <folder> holds no starkeep.manifest.json.                   |
+    | an invalid manifest       | The manifest in <folder> failed validation: <first error>   |
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-217] A local operator who installs from the terminal is offered to start the app, or starts it with --start
+  Given the local data server is running and "dice" is not running
+  When the local operator runs "starkeep install dice --local" in a terminal and approves the consent
+  Then after the install the command asks "Start Dice now? [y/N]"
+  When the local operator answers yes
+  Then the output says "Started dice on http://localhost:<port>."
+  And "starkeep install dice --local --yes --start" installs and starts the app without asking
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-218] A local operator who installs an app folder by its path can name the app by its id afterward
+  Given "~/code/dice" holds an app that no discovery folder reaches
+  When the local operator runs "starkeep install ~/code/dice --local --yes"
+  Then the output says "Added <home>/code/dice to the discovery folders."
+  And "starkeep start dice" then starts the app
+  And admin-web's dashboard shows a card for "dice"
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-219] A local operator who names an app that discovery does not find is told how to make it findable
+  Given no discovery folder holds an app with the id "dice"
+  When the local operator runs "starkeep install dice --local"
+  Then the command says 'No app "dice" in the discovery folders. Add its folder with `starkeep source add <dir>`, or install it by path.'
+  And nothing installs
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-220] A local operator who installs a running app again from the terminal finds it running the new manifest
+  Given "dice" is installed and running on this computer
+  And the folder's manifest changed since the install
+  When the local operator runs "starkeep install dice --local --yes"
+  Then the output says the app installed and then "Started dice on http://localhost:<port>."
+  And "dice" runs with the new manifest's behavior
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-221] A local operator installs several apps with one command
+  Given the discovery folders hold "dice" and "notes"
+  When the local operator runs "starkeep install dice notes --local --yes"
+  Then the output shows the consent words for each app before its install
+  And admin-web's dashboard shows both apps installed on this computer
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-222] A local operator whose dependency install fails finds the app not installed and the log that says why
+  Given "dice" is not installed on this computer, and its dependency install exits with an error
+  When the local operator runs "starkeep install dice --local --yes"
+  Then the command says "The dependency install failed (<command> exited <code>). See <log path>."
+  And the log file under "~/.starkeep/logs/" holds the dependency install's whole output
+  And admin-web's dashboard shows "dice" not installed on this computer
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-223] A local operator who starts a second operation on an app while one runs is told to wait for it
+  Given the local operator's "starkeep install dice --local" is still running in one terminal
+  When the local operator runs "starkeep uninstall dice --local" in another terminal
+  Then the second command says "Another operation on dice is running (pid <pid>: starkeep install dice --local). Try again once it ends."
+  And the first install finishes as if the second command never ran
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-224] A local operator whose earlier command died mid-operation is not blocked by it
+  Given a "starkeep install dice --local" run ended without finishing, such as when its terminal was killed
+  When the local operator runs "starkeep install dice --local" again
+  Then the install runs, with no message about another operation
 ```
 
 ## Installed apps on this computer
@@ -838,6 +972,60 @@ Scenario: [APP-LIFE-053] A local operator sees an error when the app list fails 
   And the dashboard does not show an empty list of apps as if none existed
 ```
 
+### Listing apps from the terminal
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-225] A local operator lists from the terminal every app discovery finds and each app's state on this computer
+  Given discovery finds "dice", "notes", and "todo"
+  And "dice" runs, "notes" is installed and stopped, and "todo" is not installed
+  When the local operator runs "starkeep list"
+  Then the output shows a row per app with its id, its source folder, and "running", "installed", or "not installed"
+  And an app that was uninstalled with its data kept shows "kept data"
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-226] A local operator sees in the list which installed apps' folders changed since their install was approved
+  Given "dice" is installed on this computer
+  And the manifest in its folder changed since the install was approved
+  When the local operator runs "starkeep list"
+  Then the row for "dice" ends with "(folder changed)"
+```
+
+- **Notes:** a folder that lost its manifest shows "(folder missing)", and one whose manifest fails validation shows "(folder invalid)".
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-228] A local operator sees each app's local state as unknown in the list while the data server is stopped
+  Given the local data server is stopped
+  When the local operator runs "starkeep list"
+  Then each app's row shows "unknown" in the LOCAL column
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-229] A local operator with no apps is told how to add a discovery folder
+  Given discovery finds no apps and none is installed
+  When the local operator runs "starkeep list"
+  Then the output says "No apps. Add a folder with `starkeep source add <dir>`."
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-230] A local operator reads one app's description, source, state, and consent words from the terminal
+  Given "dice" is installed and running on this computer
+  When the local operator runs "starkeep info dice"
+  Then the output shows the app's name, id, version, and description
+  And the output shows "Source" with the app's folder and "Local" with "running on http://localhost:<port>"
+  And the output shows the consent words of the manifest the local operator approved
+```
+
 ## Starting and stopping apps on this computer
 
 ### Start and Stop
@@ -932,6 +1120,21 @@ Scenario: [APP-LIFE-061] A local operator sees Open disabled, with the reason, f
   Then the Open button is disabled
   And hovering it says "No port found. Stop and restart to fix"
 ```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-227] A local operator who starts an app from the terminal gets it back at the next start, until the local operator stops it by name
+  Given "dice" is installed on this computer
+  When the local operator runs "starkeep start dice"
+  Then the output says "Started dice on http://localhost:<port>."
+  And after "starkeep stop" and "starkeep start", "dice" runs again
+  When the local operator runs "starkeep stop dice"
+  Then the output says "Stopped dice."
+  And the next "starkeep start" leaves "dice" stopped
+```
+
+- **Notes:** starting several names starts the data server first, then Drive, then the apps by id.
 
 ### Ports
 
@@ -1375,6 +1578,116 @@ Scenario: [APP-LIFE-094] A local operator cannot upgrade an app that two folders
 ```
 
 - **Notes:** A pinned app whose folder now holds another app's id is refused the same way.
+
+### Updating from the terminal
+
+`starkeep update` gets new code for installed apps with `git pull --ff-only` and applies it. The rules keep the local operator's own work in an app's repository safe.
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-235] A local operator who updates from the terminal pulls each installed app's repository and applies the new code
+  Given "dice" is installed on this computer from a git repository whose branch is behind its upstream
+  When the local operator runs "starkeep update"
+  Then the output says "Fetching <repository>…" and then "Pulled <repository>: <old commit> → <new commit>."
+  And the output says "Run `starkeep update --undo` to return to the commits before this pull."
+  And the output ends with "Updated dice."
+  And "dice" then runs the new code on this computer
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-236] A local operator whose apps are current is told each is up to date
+  Given every installed app's repository matches its upstream and every manifest matches its install
+  When the local operator runs "starkeep update"
+  Then the output says "<repository> is up to date with <upstream>." for each repository
+  And the output says "<app> is up to date." for each app
+  And no app restarts
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-237] A local operator whose app repository holds uncommitted changes keeps them, and no repository changes
+  Given "dice" and "notes" are installed from two repositories, and the "notes" repository holds uncommitted changes to tracked files
+  When the local operator runs "starkeep update"
+  Then the output says "<notes repository> has uncommitted changes to tracked files:", lists the files, and says "Commit or stash them, then run the update again."
+  And the local operator finds both repositories at the commits they held before
+  And the command exits with status 1
+```
+
+- **Notes:** untracked files do not refuse the update. Git itself refuses a pull that would overwrite one.
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-238] A local operator whose branch has diverged from its upstream is told to rebase or merge by hand
+  Given the "dice" repository holds a local commit, and its upstream holds a new commit
+  When the local operator runs "starkeep update dice"
+  Then the output says "<repository> has diverged from <upstream>: 1 local commit(s) and 1 new upstream commit(s). Rebase or merge by hand, then run the update again."
+  And the local operator finds the local commit still on the branch, with no merge commit
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-239] A local operator whose app folder is outside git updates the app from the folder as it is
+  Given "dice" is installed from a folder outside any git repository
+  And the folder's manifest changed since the install, and asks for no different access
+  When the local operator runs "starkeep update dice"
+  Then the output says "dice: <folder> is not in a git repository, so there is nothing to fetch."
+  And the output says "Applied dice's new manifest." and "Updated dice."
+```
+
+- **Notes:** "--no-fetch" applies every folder as it is, without a pull.
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-240] A local operator is asked again when an update asks for different access, and a no leaves the app as it was
+  Given the pull brings a "dice" manifest that asks for different access
+  When the local operator runs "starkeep update dice" in a terminal
+  Then the output says "dice's new version asks for different access:" with the new consent words
+  And the command asks "Approve dice's new access and update? [y/N]"
+  When the local operator answers anything other than yes
+  Then the output says "Not updated: dice."
+  And "dice" keeps running the manifest the local operator approved before
+```
+
+- **Notes:** "--yes" approves the new access without asking. A run with no terminal and no "--yes" stops with status 3 (CLI-024).
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-241] A local operator whose app runs during an update finds it running again on the new code
+  Given "dice" runs on this computer, and its repository is behind its upstream
+  When the local operator runs "starkeep update dice"
+  Then the output says "Stopping dice…", then shows the approved dependency install, then says "Started dice on http://localhost:<port>."
+  And "dice" runs the new code
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-242] A local operator who undoes the last update returns each pulled repository to its commit before the pull
+  Given the last "starkeep update" pulled the "dice" repository from one commit to a newer one
+  When the local operator runs "starkeep update --undo"
+  Then the output says "Returned <repository> to <old commit>."
+  And "dice" then runs the code of the old commit on this computer
+  And a second "starkeep update --undo" undoes the update before that one, or says "No recorded update to undo."
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-243] A local operator whose repository moved since the update is told how to undo by hand
+  Given the last "starkeep update" pulled the "dice" repository
+  And the local operator committed in that repository afterward
+  When the local operator runs "starkeep update --undo"
+  Then the output says "<repository> moved since the update (it is no longer at <new commit>). Undo it by hand with `git reset --keep <old commit>`."
+  And the local operator finds the repository and the new commit unchanged
+```
 
 ## Installing in the cloud
 
@@ -1963,6 +2276,28 @@ Scenario: [APP-LIFE-145] A local operator keeps a card with Delete data for kept
   And the card offers Delete data
 ```
 
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-231] A local operator who uninstalls from the terminal keeps the app's data on this computer
+  Given "dice" is installed on this computer
+  When the local operator runs "starkeep uninstall dice --local"
+  Then the output says "Uninstalled dice. Its data stays on this computer."
+  And "starkeep list" shows "kept data" for "dice"
+```
+
+- **Notes:** a reinstall brings the kept rows back (APP-LIFE-142).
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-232] A local operator who uninstalls an app that is not installed here is told so
+  Given "dice" is not installed on this computer
+  When the local operator runs "starkeep uninstall dice --local"
+  Then the output says "dice is not installed on this computer."
+  And the command exits with status 1
+```
+
 ### Deleting kept data on this computer
 
 ```gherkin
@@ -2039,6 +2374,32 @@ Scenario: [APP-LIFE-152] A local operator whose deletion fails part-way keeps th
   And the card still shows "Data kept" with Delete data
   When the local operator runs Delete data again
   Then the card no longer shows "Data kept"
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-233] A local operator deletes an app's data from the terminal only after typing its id
+  Given "dice" is installed on this computer
+  When the local operator runs "starkeep uninstall dice --local --delete-data" in a terminal
+  Then the output says "Uninstalled dice. Its data stays on this computer."
+  And the command asks "Type dice to delete its data on this computer:"
+  When the local operator types "dice"
+  Then the output says "Deleted dice's data on this computer."
+  And "starkeep list" no longer shows "kept data" for "dice"
+```
+
+- **Notes:** "--yes" deletes without the question. The same flag deletes the data an earlier uninstall kept.
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [APP-LIFE-234] A local operator who types a different id keeps the app's data
+  Given "starkeep uninstall dice --local --delete-data" asks for the app id
+  When the local operator types anything other than "dice"
+  Then the output says "Kept dice's data: the typed id did not match."
+  And the command exits with status 1
+  And "starkeep list" still shows "kept data" for "dice"
 ```
 
 ### In the cloud
