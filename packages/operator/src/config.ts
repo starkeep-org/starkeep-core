@@ -42,6 +42,27 @@ export function readConfig(): Record<string, unknown> | null {
 }
 
 /**
+ * The parsed file, or null when it is missing. A file that exists and does not
+ * parse throws, so no writer replaces a file a person can still repair.
+ */
+function readConfigForWrite(): Record<string, unknown> | null {
+  const path = configFile();
+  if (!existsSync(path)) return null;
+  const text = readFileSync(path, "utf-8");
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    /* reported below */
+  }
+  throw new Error(
+    `${path} does not hold a JSON object, so Starkeep left it alone. Fix the file, or move it away to start over, then run the command again.`,
+  );
+}
+
+/**
  * Write the whole file. The write goes through a temporary file and a rename,
  * so admin-web and the CLI never read half a file.
  */
@@ -59,7 +80,7 @@ export function writeConfig(config: Record<string, unknown>): void {
  * purpose, and stays empty.
  */
 export function readConfigSeeded(): Record<string, unknown> {
-  const config = readConfig();
+  const config = readConfigForWrite();
   if (config && Array.isArray(config.appParentDirs)) return config;
   const seeded = { ...(config ?? {}), appParentDirs: [DEFAULT_APPS_DIR] };
   writeConfig(seeded);
@@ -72,7 +93,7 @@ export function readConfigSeeded(): Record<string, unknown> {
  * person goes back. Returns the merged config.
  */
 export function patchConfig(patch: Record<string, unknown>): Record<string, unknown> {
-  const merged: Record<string, unknown> = { ...(readConfig() ?? {}) };
+  const merged: Record<string, unknown> = { ...(readConfigForWrite() ?? {}) };
   for (const [key, value] of Object.entries(patch)) {
     if (value === null) delete merged[key];
     else merged[key] = value;
