@@ -394,6 +394,20 @@ Scenario: [LDS-115] A local operator opens admin-web from the terminal
 - **Coverage:** No test starts admin-web from the CLI.
 - **Notes:** on a computer where no browser opens, such as one reached over SSH, the output adds "Open http://localhost:3000 in your browser."
 
+```gherkin
+@local
+@intent:confirmed @coverage:full
+Scenario: [LDS-122] A local operator whose platform update pulled new code finds the data server and Drive running again on it
+  Given the data server and Drive run, and the platform checkout's upstream holds new commits
+  When the local operator runs "starkeep update --platform --local"
+  Then the output says "Stopping drive…" and "Stopping data-server…", then that each started again
+  And the local operator finds the data server and Drive running the new code
+  And a platform update that pulled nothing restarts neither
+```
+
+- **Coverage:** `packages/cli/__tests__/update-platform.test.ts` › "applyPlatform restarts the data server and Drive that were running, once the checkout moved", "restarts nothing when the checkout did not move", and "leaves the cloud alone under --local" (unit).
+- **Notes:** admin-web may run under the local operator's own watcher, so the update leaves it running and says "admin-web keeps the old code until it restarts."
+
 ### This machine's settings
 
 ```gherkin
