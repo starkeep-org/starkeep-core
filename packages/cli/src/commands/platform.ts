@@ -29,7 +29,7 @@ import { cloudInstalled, runCloud } from "../cloud";
 import { CliError } from "../errors";
 import type { Io } from "../io";
 import { displayName } from "../names";
-import { readCloudState, runBootstrapUpdate, updateTarget } from "./cloud";
+import { readCloudState, ReplacementRefused, runBootstrapUpdate, updateTarget } from "./cloud";
 import { startOne } from "./services";
 import type { RepoUpdate } from "../git";
 
@@ -142,6 +142,14 @@ export async function applyPlatform(io: Io, options: PlatformOptions): Promise<P
       );
     }
   } catch (err) {
+    // `update` has no --allow-replacement, so name the command that does.
+    if (err instanceof ReplacementRefused) {
+      throw new CliError(
+        `Error: the change set removes or replaces ${err.risky} resource(s). Nothing was applied.\n` +
+          "Review it with `starkeep cloud bootstrap-update`. If the change is intended, apply it with\n" +
+          "`starkeep cloud bootstrap-update --apply --allow-replacement`, then run the update again.",
+      );
+    }
     const message = err instanceof Error ? err.message : String(err);
     if (!/no working AWS credentials/.test(message)) throw err;
     io.warn(

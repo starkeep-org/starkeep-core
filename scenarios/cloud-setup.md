@@ -1132,6 +1132,20 @@ Scenario: [CLOUD-SETUP-163] A cloud operator who declines the bootstrap update s
 
 ```gherkin
 @cloud
+@intent:confirmed @coverage:full
+Scenario: [CLOUD-SETUP-169] A cloud operator whose bootstrap update would replace a resource stops the platform update and is told the command that applies it
+  Given the checkout's template replaces or removes a resource of the live bootstrap stack
+  When the cloud operator runs "starkeep update --platform"
+  Then the output says "Error: the change set removes or replaces <count> resource(s). Nothing was applied."
+  And the output names "starkeep cloud bootstrap-update --apply --allow-replacement", then running the update again
+  And the cloud operator finds the bootstrap stack, the cloud data server and Drive as they were
+  And the command exits with status 1
+```
+
+- **Coverage:** `packages/cli/__tests__/update-platform.test.ts` › "applyPlatform names a command that exists when the bootstrap update would replace a resource" (unit).
+
+```gherkin
+@cloud
 @intent:confirmed @coverage:partial
 Scenario: [CLOUD-SETUP-164] A cloud operator cannot redeploy a cloud data server that runs commits the checkout lacks, and nothing changes
   Given the cloud data server was last deployed from a feature branch

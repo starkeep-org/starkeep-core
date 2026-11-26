@@ -135,6 +135,21 @@ function changeTable(rows: ResourceChangeRow[]): string[] {
   );
 }
 
+/**
+ * The change set removes or replaces a resource, and the caller did not
+ * allow it. A caller without `--allow-replacement`, such as `starkeep update
+ * --platform`, names its own remedy with {@link ReplacementRefused.risky}.
+ */
+export class ReplacementRefused extends CliError {
+  constructor(readonly risky: number) {
+    super(
+      `Error: the change set removes or replaces ${risky} resource(s). Nothing was applied.\n` +
+        "Review the table above, then rerun with --allow-replacement if the change is intended.",
+    );
+    this.name = "ReplacementRefused";
+  }
+}
+
 export type BootstrapUpdateOutcome = "no-changes" | "previewed" | "declined" | "applied";
 
 export interface BootstrapUpdateOptions {
@@ -186,10 +201,7 @@ export async function runBootstrapUpdate(
   const discard = () => deleteChangeSet(target, preview.changeSetName, clients);
   if (preview.risky > 0 && !options.allowReplacement) {
     await discard();
-    throw new CliError(
-      `Error: the change set removes or replaces ${preview.risky} resource(s). Nothing was applied.\n` +
-        "Review the table above, then rerun with --allow-replacement if the change is intended.",
-    );
+    throw new ReplacementRefused(preview.risky);
   }
   if (!options.apply) {
     await discard();
