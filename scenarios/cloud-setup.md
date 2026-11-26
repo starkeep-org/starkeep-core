@@ -1172,6 +1172,18 @@ Scenario: [CLOUD-SETUP-169] A cloud operator whose bootstrap update would replac
 - **Coverage:** `packages/cli/__tests__/update-platform.test.ts` › "applyPlatform names a command that exists when the bootstrap update would replace a resource" (unit).
 
 ```gherkin
+@local @cloud
+@intent:unclear
+Scenario: [CLOUD-SETUP-170] A cloud operator's unattended update of everything previews a bootstrap stack change and leaves it for the owner to apply
+  Given the bootstrap stack differs from the checkout's template
+  And the cloud operator's script runs "starkeep update --yes" with no app names and no terminal attached
+  When the update reaches the bootstrap stack
+  Then the output shows the change set's table and says to apply it with "starkeep cloud bootstrap-update --apply"
+  And the cloud operator finds the bootstrap stack as it was
+  And the update goes on to the cloud data server, Drive, and the apps
+```
+
+```gherkin
 @cloud
 @intent:confirmed @coverage:partial
 Scenario: [CLOUD-SETUP-164] A cloud operator cannot redeploy a cloud data server that runs commits the checkout lacks, and nothing changes
