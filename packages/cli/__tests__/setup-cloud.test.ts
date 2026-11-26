@@ -52,6 +52,8 @@ interface World {
   signedIn: boolean;
   syncing: boolean;
   cloudApps: string[];
+  /** The cloud address the running data server read at its start; undefined when it is down. */
+  dataServerCloud: string | null | undefined;
   failAt?: string;
 }
 
@@ -113,8 +115,14 @@ function depsFor(world: World): Deps {
     },
     cloudAppIds: async () => world.cloudApps,
     syncState: async () => (world.syncing ? "signed-in" : "signed-out"),
-    startLocalServices: async (_io, restart) =>
-      step(restart ? "restart-services" : "start-services"),
+    dataServerCloudUrl: async () => world.dataServerCloud,
+    startLocalServices: async (_io, restart) => {
+      step(restart ? "restart-services" : "start-services");
+      if (restart || world.dataServerCloud === undefined) {
+        const config = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+        world.dataServerCloud = (config.apiGatewayUrl as string | undefined) ?? null;
+      }
+    },
     installApps: async (_io, apps) => step(`install-apps ${apps.join(",")}`),
   };
 }
@@ -127,6 +135,7 @@ function freshWorld(): World {
     signedIn: false,
     syncing: false,
     cloudApps: [],
+    dataServerCloud: null,
   };
 }
 
@@ -198,6 +207,23 @@ describe("setup --cloud", () => {
     delete world.failAt;
     await setupCloud(io(), OPTIONS, depsFor(world));
     expect(world.calls).toEqual(rerun);
+  });
+
+  it("restarts a data server that started before the cloud existed, though this run installed nothing", async () => {
+    // The terminal closed while the Drive run finished on its own, before
+    // setup restarted the data server.
+    const world = freshWorld();
+    const first = depsFor(world);
+    await setupCloud(io(), OPTIONS, {
+      ...first,
+      startLocalServices: async () => {
+        throw new Error("the terminal closed");
+      },
+    }).catch(() => undefined);
+    expect(world.dataServerCloud).toBeNull();
+    world.calls = [];
+    await setupCloud(io(), OPTIONS, depsFor(world));
+    expect(world.calls).toEqual(["restart-services", "login-sync"]);
   });
 
   it("does nothing again on a finished setup but check the local services", async () => {
