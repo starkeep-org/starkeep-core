@@ -113,6 +113,29 @@ describe("starkeep login --admin", () => {
     expect(pool.revoked.size).toBe(1);
   });
 
+  it("says the session ended here when the pool cannot confirm the revocation", async () => {
+    const signedIn = await runWithBrowser(["login", "--admin", "--no-browser"], ADMIN);
+    expect(signedIn.code, signedIn.err).toBe(0);
+    const reachable = process.env.STARKEEP_COGNITO_ENDPOINT;
+    // Nothing listens on port 1, so the revocation cannot reach the pool.
+    process.env.STARKEEP_COGNITO_ENDPOINT = "http://127.0.0.1:1/cognito/";
+    let out = "";
+    try {
+      const code = await main(["logout", "--admin"], {
+        cwd: dir,
+        interactive: false,
+        stdout: (t) => (out += t),
+        stderr: () => {},
+      });
+      expect(code).toBe(0);
+    } finally {
+      process.env.STARKEEP_COGNITO_ENDPOINT = reachable;
+    }
+    expect(out).not.toContain("No admin session was open here.");
+    expect(out).toContain("Signed out as the admin on this computer.");
+    expect(session.adminSessionStatus().signedIn).toBe(false);
+  });
+
   it("needs one of --admin and --sync", async () => {
     const code = await main(["login"], { cwd: dir, interactive: false, stdout: () => {}, stderr: () => {} });
     expect(code).toBe(2);
