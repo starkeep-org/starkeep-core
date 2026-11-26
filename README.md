@@ -305,6 +305,8 @@ The new user will be emailed a temporary password, and they choose a permanent p
 
 Upgrading Starkeep will not affect your data.
 
+From a terminal, `starkeep update` does every step below: it pulls this checkout and each app's repository, restarts the data server and Drive, previews and applies the bootstrap update with your terminal's AWS credentials after you confirm, redeploys the cloud data server and Drive when they differ from the checkout, and then updates the apps, the cloud first. `starkeep update --platform` does the platform steps alone. A redeploy refuses when the cloud runs commits this checkout lacks, such as a feature branch, and names them; `--force` deploys anyway. `starkeep cloud status` shows what the cloud runs against this checkout.
+
 ### 1. Upgrade the local data server
 
 1. Pull the latest from `starkeep-core` and install it with `pnpm install`.
@@ -313,7 +315,7 @@ Upgrading Starkeep will not affect your data.
 
 ### 2. Upgrade the cloud data server and cloud Drive
 
-1. Rarely, an upgrade requires a bootstrap update, which should be run on the terminal with `scripts/update-bootstrap.sh --apply`. This command requires the AWS CLI and sufficient permissions in the environment. This command runs outside Starkeep for security reasons. Most upgrades skip this step.
+1. Rarely, an upgrade requires a bootstrap update, which should be run on the terminal with `starkeep cloud bootstrap-update --apply` (or `scripts/update-bootstrap.sh --apply`, which runs it). This command requires your terminal's AWS credentials with sufficient permissions. This command runs outside Admin for security reasons. Most upgrades skip this step.
 2. On the **Data Server** card in the **Cloud** section, choose **Manage deployment…** from the menu.
 3. On the **Deploy Starkeep cloud** step, click **Redeploy**. The redeploy updates the cloud data server first and then cloud Drive.
 
@@ -339,8 +341,11 @@ starkeep install photos --cloud                  # install in the cloud: the dat
 starkeep install photos --web                    # install only the cloud web app
 starkeep uninstall photos --local                # uninstall; the app's data stays
 starkeep uninstall photos --cloud --delete-data  # uninstall from the cloud and delete the data it kept
-starkeep update                                  # pull each app's repository and apply it, cloud first
+starkeep update                                  # update the platform, then pull each app's repository and apply it, cloud first
+starkeep update --platform                       # update this checkout, the bootstrap stack, the cloud data server and Drive
 starkeep update --undo                           # return to the commits before the last update
+starkeep cloud status                            # what the cloud runs, against this checkout
+starkeep cloud bootstrap-update                  # preview the bootstrap stack's update; --apply applies it
 starkeep reset-local                             # list the local data reset-local --apply deletes
 starkeep login --admin                           # sign in as the cloud's admin, in the browser
 starkeep login --sync                            # sign this computer in to sync, in the browser
