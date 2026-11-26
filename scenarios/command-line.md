@@ -420,7 +420,7 @@ Scenario: [CLI-028] A local operator with an old Node or no pnpm is told what to
 
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:unclear
 Scenario: [CLI-029] A cloud operator sees the cloud's drift among the doctor's checks, and no browser opens
   Given this computer deployed the cloud, and the cloud operator is signed in as the admin
   And the bootstrap stack differs from this checkout's template, and the cloud data server is behind this checkout

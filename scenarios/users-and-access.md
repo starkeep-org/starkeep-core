@@ -548,7 +548,7 @@ Scenario: [ACCESS-225] A cloud operator resets a password from the terminal and 
 
 ```gherkin
 @local @cloud
-@intent:confirmed @coverage:full
+@intent:unclear @coverage:full
 Scenario: [ACCESS-226] A cloud operator who names an email no account has is told so
   When the cloud operator runs "starkeep user disable nobody@example.com"
   Then the output says "No account has the email or username \"nobody@example.com\"."
