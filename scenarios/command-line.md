@@ -4,6 +4,9 @@ This file covers the `starkeep` command itself: getting it onto a computer, the 
 
 - [local-data-server.md](local-data-server.md): starting, stopping, and inspecting the data server and Drive, `starkeep logs`, `starkeep admin`, and `starkeep reset-local`.
 - [app-lifecycle.md](app-lifecycle.md): `starkeep source`, `list`, `info`, `install`, `uninstall`, `update`, and starting and stopping apps.
+- [cloud-setup.md](cloud-setup.md): `starkeep setup --cloud`, `starkeep update --platform`, and `starkeep cloud bootstrap-update`.
+- [cloud-runtime.md](cloud-runtime.md): `starkeep cloud status` and `starkeep cloud cost`.
+- [users-and-access.md](users-and-access.md): `starkeep login`, `logout`, and the `starkeep user` commands.
 
 ## Getting the command
 
@@ -370,3 +373,59 @@ Scenario: [CLI-030] A local operator's script that asks for a log as JSON is tol
 ```
 
 - **Coverage:** `packages/cli/__tests__/main.test.ts` › "refuses --json and names the log file (CLI-030)" (unit, local).
+
+## Checking a computer's setup
+
+`starkeep doctor` checks the tools, the install, the ports, and `config.json`, and on a computer with a cloud, the admin session, the terminal's AWS credentials, the bootstrap stack, and the cloud data server. Each line starts "ok", "warn", or "FAIL".
+
+```gherkin
+@local
+@intent:confirmed @coverage:full
+Scenario: [CLI-026] A local operator sees each check's outcome and the fix for every problem, and a failure exits with status 1
+  Given this computer's config.json does not parse
+  When the local operator runs "starkeep doctor"
+  Then the output lists Node, pnpm, git, the install, each service's port, and config.json, each with its outcome
+  And the config.json line says "FAIL" with a "Fix:" line beneath it
+  And the output ends with the count of failed checks and warnings
+  And the command exits with status 1
+```
+
+- **Coverage:** `packages/cli/__tests__/cost-and-doctor.test.ts` › "doctor exits 1 when a check fails, with every check in the --json result" and "fails a config.json that does not parse, or whose cloud fields disagree" (unit).
+- **Notes:** a warning alone exits with status 0. Under "--json", the result lists every check.
+
+```gherkin
+@local
+@intent:confirmed @coverage:full
+Scenario: [CLI-027] A local operator whose service port another program holds is told how to free it
+  Given another program holds the data server's port, and the data server is not running
+  When the local operator runs "starkeep doctor"
+  Then the port's line says "FAIL" and "another program holds data-server's port"
+  And the fix names "lsof -i :<port>" and the STARKEEP_PORT setting
+  And a port a running Starkeep service holds passes
+```
+
+- **Coverage:** `packages/cli/__tests__/cost-and-doctor.test.ts` › "doctor fails a port another program holds, and passes one a Starkeep service holds" and "sees a port held by another program" (unit).
+
+```gherkin
+@local
+@intent:confirmed @coverage:full
+Scenario: [CLI-028] A local operator with an old Node or no pnpm is told what to install
+  Given this computer runs Node 22 and has no pnpm on PATH
+  When the local operator runs "starkeep doctor"
+  Then the Node line says "FAIL" with the fix "nvm install 24"
+  And the pnpm line says "no `pnpm` on PATH" with the fix "npm install -g pnpm@10"
+```
+
+- **Coverage:** `packages/cli/__tests__/cost-and-doctor.test.ts` › "doctor fails a Node older than 24 and names the fix" and "fails a missing tool and names the fix" (unit).
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [CLI-029] A cloud operator sees the cloud's drift among the doctor's checks, and no browser opens
+  Given this computer deployed the cloud, and the cloud operator is signed in as the admin
+  And the bootstrap stack differs from this checkout's template, and the cloud data server is behind this checkout
+  When the cloud operator runs "starkeep doctor"
+  Then the bootstrap stack's line says "warn" with the fix "starkeep cloud bootstrap-update"
+  And the cloud data server's line says "warn" with the fix "starkeep update --platform"
+  And without an admin session, the admin session's line says "warn" with the fix "starkeep login --admin", and no browser opens
+```
