@@ -2338,3 +2338,5 @@ Scenario: [ACCESS-216] A cloud operator who opens another site's page while sign
   Then the page receives "This request must come from admin-web's own page."
   And nothing changes in the deployment
 ```
+
+- **Notes:** a page from another site that sends the browser to admin-web's sign-in start gets "Start the sign-in from admin-web's own page.", so it cannot sign the computer's sync or the admin session in through the sign-in page's remembered session.
