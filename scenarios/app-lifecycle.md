@@ -140,7 +140,7 @@ Scenario: [APP-LIFE-010] A local operator who empties the folder list sees no ap
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-213] A local operator who adds a discovery folder from the terminal sees the apps it contributed and why any folder in it was skipped
   Given "~/starkeep-apps" holds the apps "dice" and "notes" and a subfolder whose manifest fails validation
   When the local operator runs "starkeep source add ~/starkeep-apps"
@@ -149,11 +149,12 @@ Scenario: [APP-LIFE-213] A local operator who adds a discovery folder from the t
   And admin-web's dashboard shows cards for "dice" and "notes"
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "adds a folder and shows its apps and the skipped subfolder (APP-LIFE-213)" (integration, local). No test checks admin-web's cards.
 - **Notes:** the skip reasons match the ones Discover apps shows (APP-LIFE-004).
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-214] A local operator lists and removes discovery folders from the terminal
   Given "~/starkeep-apps" is a discovery folder
   When the local operator runs "starkeep source list"
@@ -163,9 +164,11 @@ Scenario: [APP-LIFE-214] A local operator lists and removes discovery folders fr
   And Discover apps in admin-web no longer lists the folder
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "lists the folders with their apps (APP-LIFE-214)" and "removes a discovery folder (APP-LIFE-214)" (integration, local). No test checks Discover apps in admin-web.
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario Outline: [APP-LIFE-215] A local operator who names a folder that discovery cannot use is told why
   When the local operator runs "starkeep source <verb> <folder>"
   Then the output says "<message>"
@@ -177,14 +180,18 @@ Scenario Outline: [APP-LIFE-215] A local operator who names a folder that discov
     | remove | a folder that is not a discovery folder     | <folder> is not a discovery folder.    |
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "refuses a path that is not a folder, or a folder it does not list (APP-LIFE-215)" (integration, local).
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-216] A local operator with no discovery folders is told how to add one
   Given the configuration lists no discovery folders
   When the local operator runs "starkeep source list"
   Then the output says "No discovery folders. Add one with `starkeep source add <dir>`."
 ```
+
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "says how to add a folder when there is none, and the list says there are no apps (APP-LIFE-216, APP-LIFE-229)" (integration, local).
 
 ### The example app
 
@@ -795,7 +802,7 @@ Scenario Outline: [APP-LIFE-045] A local operator cannot install from the termin
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-217] A local operator who installs from the terminal is offered to start the app, or starts it with --start
   Given the local data server is running and "dice" is not running
   When the local operator runs "starkeep install dice --local" in a terminal and approves the consent
@@ -805,9 +812,11 @@ Scenario: [APP-LIFE-217] A local operator who installs from the terminal is offe
   And "starkeep install dice --local --yes --start" installs and starts the app without asking
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "shows the consent words, asks to start the app, and starts it (APP-LIFE-217)" (integration, local). No test runs "--start".
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-218] A local operator who installs an app folder by its path can name the app by its id afterward
   Given "~/code/dice" holds an app that no discovery folder reaches
   When the local operator runs "starkeep install ~/code/dice --local --yes"
@@ -816,9 +825,11 @@ Scenario: [APP-LIFE-218] A local operator who installs an app folder by its path
   And admin-web's dashboard shows a card for "dice"
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "installs by path, adds the folder to discovery, and starts by id afterward (APP-LIFE-218)" (integration, local). No test checks admin-web's card.
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-219] A local operator who names an app that discovery does not find is told how to make it findable
   Given no discovery folder holds an app with the id "dice"
   When the local operator runs "starkeep install dice --local"
@@ -826,9 +837,11 @@ Scenario: [APP-LIFE-219] A local operator who names an app that discovery does n
   And nothing installs
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "names how to make an unknown app findable (APP-LIFE-219)" (integration, local).
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-220] A local operator who installs a running app again from the terminal finds it running the new manifest
   Given "dice" is installed and running on this computer
   And the folder's manifest changed since the install
@@ -837,9 +850,11 @@ Scenario: [APP-LIFE-220] A local operator who installs a running app again from 
   And "dice" runs with the new manifest's behavior
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "reinstalls a running app and starts it on the new folder (APP-LIFE-220)" (integration, local).
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-221] A local operator installs several apps with one command
   Given the discovery folders hold "dice" and "notes"
   When the local operator runs "starkeep install dice notes --local --yes"
@@ -847,9 +862,25 @@ Scenario: [APP-LIFE-221] A local operator installs several apps with one command
   And admin-web's dashboard shows both apps installed on this computer
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "installs several apps, each after its consent words (APP-LIFE-221)" (integration, local). No test checks admin-web's dashboard.
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
+Scenario: [APP-LIFE-268] A local operator whose install of several apps stops at one learns which apps installed
+  Given the discovery folders hold "dice", and "notes" cannot install
+  When the local operator runs "starkeep install dice notes --local --yes"
+  Then the output says why "notes" did not install
+  And the output says "Installed: dice." and "Not installed: notes."
+  And the command exits with status 1
+  And a "--json" run ends with a result that names "dice" as installed and "notes" as not installed
+```
+
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "names what installed and what did not when a later app fails" (integration, local).
+
+```gherkin
+@local
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-222] A local operator whose dependency install fails finds the app not installed and the log that says why
   Given "dice" is not installed on this computer, and its dependency install exits with an error
   When the local operator runs "starkeep install dice --local --yes"
@@ -858,9 +889,11 @@ Scenario: [APP-LIFE-222] A local operator whose dependency install fails finds t
   And admin-web's dashboard shows "dice" not installed on this computer
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "leaves an app whose dependency install fails uninstalled, and names the log (APP-LIFE-222)" (integration, local). The test reads the CLI's list, not admin-web's dashboard.
+
 ```gherkin
 @local
-@intent:unclear
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-223] A local operator who starts a second operation on an app while one runs is told to wait for it
   Given the local operator's "starkeep install dice --local" is still running in one terminal
   When the local operator runs "starkeep uninstall dice --local" in another terminal
@@ -868,14 +901,32 @@ Scenario: [APP-LIFE-223] A local operator who starts a second operation on an ap
   And the first install finishes as if the second command never ran
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "refuses a second operation while a live process holds the app (APP-LIFE-223)" (integration, local). The holder is a stand-in process, not a running install.
+- **Notes:** admin-web's local install and uninstall take the same lock (APP-LIFE-267).
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
+Scenario: [APP-LIFE-267] A local operator who installs or uninstalls in admin-web while a terminal operation runs on the app is told to wait for it
+  Given the local operator's "starkeep update dice" is still running in a terminal
+  When the local operator uninstalls "dice" from its card in admin-web
+  Then the dashboard says "Another operation on dice is running (pid <pid>: starkeep update dice). Try again once it ends."
+  And "dice" stays installed
+  And a terminal command on "dice" during an admin-web install or uninstall gets the same message, naming the admin-web operation
+```
+
+- **Coverage:** `apps/admin-web/__tests__/app-lock.test.ts` › "answers 409 and names the terminal command that holds the app, on uninstall" (unit, local). No test checks the dashboard's message.
+
+```gherkin
+@local
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-224] A local operator whose earlier command died mid-operation is not blocked by it
   Given a "starkeep install dice --local" run ended without finishing, such as when its terminal was killed
   When the local operator runs "starkeep install dice --local" again
   Then the install runs, with no message about another operation
 ```
+
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "takes over a lock whose holder died (APP-LIFE-224)" (integration, local).
 
 ## Installed apps on this computer
 
@@ -976,7 +1027,7 @@ Scenario: [APP-LIFE-053] A local operator sees an error when the app list fails 
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-225] A local operator lists from the terminal every app discovery finds and each app's state on this computer
   Given discovery finds "dice", "notes", and "todo"
   And "dice" runs, "notes" is installed and stopped, and "todo" is not installed
@@ -985,9 +1036,11 @@ Scenario: [APP-LIFE-225] A local operator lists from the terminal every app disc
   And an app that was uninstalled with its data kept shows "kept data"
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "shows each app's id, folder and local state (APP-LIFE-225)" (integration, local). The stand-in apps keep no data, so no test shows "kept data".
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-226] A local operator sees in the list which installed apps' folders changed since their install was approved
   Given "dice" is installed on this computer
   And the manifest in its folder changed since the install was approved
@@ -995,29 +1048,34 @@ Scenario: [APP-LIFE-226] A local operator sees in the list which installed apps'
   Then the row for "dice" ends with "(folder changed)"
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "marks an installed app whose folder changed since the install (APP-LIFE-226)" (integration, local). The "(folder missing)" and "(folder invalid)" notes have no test.
 - **Notes:** a folder that lost its manifest shows "(folder missing)", and one whose manifest fails validation shows "(folder invalid)".
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-228] A local operator sees each app's local state as unknown in the list while the data server is stopped
   Given the local data server is stopped
   When the local operator runs "starkeep list"
   Then each app's row shows "unknown" in the LOCAL column
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "shows each app's local state as unknown (APP-LIFE-228)" (integration, local).
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-229] A local operator with no apps is told how to add a discovery folder
   Given discovery finds no apps and none is installed
   When the local operator runs "starkeep list"
   Then the output says "No apps. Add a folder with `starkeep source add <dir>`."
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "says how to add a folder when there is none, and the list says there are no apps (APP-LIFE-216, APP-LIFE-229)" (integration, local).
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-230] A local operator reads one app's description, source, state, and consent words from the terminal
   Given "dice" is installed and running on this computer
   When the local operator runs "starkeep info dice"
@@ -1025,6 +1083,8 @@ Scenario: [APP-LIFE-230] A local operator reads one app's description, source, s
   And the output shows "Source" with the app's folder and "Local" with "running on http://localhost:<port>"
   And the output shows the consent words of the manifest the local operator approved
 ```
+
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "shows one app's description, source, state and consent words (APP-LIFE-230)" (integration, local).
 
 ## Starting and stopping apps on this computer
 
@@ -1123,7 +1183,7 @@ Scenario: [APP-LIFE-061] A local operator sees Open disabled, with the reason, f
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-227] A local operator who starts an app from the terminal gets it back at the next start, until the local operator stops it by name
   Given "dice" is installed on this computer
   When the local operator runs "starkeep start dice"
@@ -1134,11 +1194,12 @@ Scenario: [APP-LIFE-227] A local operator who starts an app from the terminal ge
   And the next "starkeep start" leaves "dice" stopped
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "stops everything in reverse order and brings the same set back (LDS-107, LDS-105, APP-LIFE-227)" and "clears the mark when an app stops by name (APP-LIFE-227)" (integration, local).
 - **Notes:** starting several names starts the data server first, then Drive, then the apps by id.
 
 ```gherkin
 @local
-@intent:unclear
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-265] A local operator who starts an app that is not installed on this computer is told to install it first
   Given discovery finds "dice", and "dice" is not installed on this computer
   When the local operator runs "starkeep start dice"
@@ -1146,6 +1207,8 @@ Scenario: [APP-LIFE-265] A local operator who starts an app that is not installe
   And "dice" does not start
   And the command exits with status 1
 ```
+
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "refuses to start an app this computer has not installed (APP-LIFE-265)" (integration, local).
 
 ### Ports
 
@@ -1596,7 +1659,7 @@ Scenario: [APP-LIFE-094] A local operator cannot upgrade an app that two folders
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-235] A local operator who updates from the terminal pulls each installed app's repository and applies the new code
   Given "dice" is installed on this computer from a git repository whose branch is behind its upstream
   When the local operator runs "starkeep update"
@@ -1606,9 +1669,11 @@ Scenario: [APP-LIFE-235] A local operator who updates from the terminal pulls ea
   And "dice" then runs the new code on this computer
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "pulls, applies, and restarts a running app on the new code (APP-LIFE-235, APP-LIFE-241)" (integration, local).
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-236] A local operator whose apps are current is told each is up to date
   Given every installed app's repository matches its upstream and every manifest matches its install
   When the local operator runs "starkeep update"
@@ -1617,9 +1682,11 @@ Scenario: [APP-LIFE-236] A local operator whose apps are current is told each is
   And no app restarts
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "says each repository and app is up to date, and restarts nothing (APP-LIFE-236)" (integration, local).
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-237] A local operator whose app repository holds uncommitted changes keeps them, and no repository changes
   Given "dice" and "notes" are installed from two repositories, and the "notes" repository holds uncommitted changes to tracked files
   When the local operator runs "starkeep update"
@@ -1628,11 +1695,12 @@ Scenario: [APP-LIFE-237] A local operator whose app repository holds uncommitted
   And the command exits with status 1
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "keeps a repository with uncommitted changes, and moves no repository (APP-LIFE-237)" (integration, local).
 - **Notes:** untracked files do not refuse the update. Git itself refuses a pull that would overwrite one.
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-238] A local operator whose branch has diverged from its upstream is told to rebase or merge by hand
   Given the "dice" repository holds a local commit, and its upstream holds a new commit
   When the local operator runs "starkeep update dice"
@@ -1640,9 +1708,11 @@ Scenario: [APP-LIFE-238] A local operator whose branch has diverged from its ups
   And the local operator finds the local commit still on the branch, with no merge commit
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "refuses a branch that diverged from its upstream (APP-LIFE-238)" (integration, local).
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-239] A local operator whose app folder is outside git updates the app from the folder as it is
   Given "dice" is installed from a folder outside any git repository
   And the folder's manifest changed since the install, and asks for no different access
@@ -1651,26 +1721,78 @@ Scenario: [APP-LIFE-239] A local operator whose app folder is outside git update
   And the output says "Applied dice's new manifest." and "Updated dice."
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "updates an app outside git from its folder as it is (APP-LIFE-239)" (integration, local).
 - **Notes:** "--no-fetch" applies every folder as it is, without a pull.
 
 ```gherkin
 @local
-@intent:unclear
-Scenario: [APP-LIFE-240] A local operator is asked again when an update asks for different access, and a no leaves the app as it was
-  Given the pull brings a "dice" manifest that asks for different access
-  When the local operator runs "starkeep update dice" in a terminal
-  Then the output says "dice's new version asks for different access:" with the new consent words
-  And the command asks "Approve dice's new access and update? [y/N]"
-  When the local operator answers anything other than yes
-  Then the output says "Not updated: dice."
-  And "dice" keeps running the manifest the local operator approved before
+@intent:confirmed @coverage:full
+Scenario: [APP-LIFE-269] A local operator whose app repository has no upstream updates the app from the folder as it is
+  Given "dice" is installed from a git repository whose branch tracks no upstream
+  When the local operator runs "starkeep update dice"
+  Then the output says "<repository>: the branch has no upstream, so there is nothing to fetch."
+  And the command applies the folder as it is, as for a folder outside git
 ```
 
-- **Notes:** "--yes" approves the new access without asking. A run with no terminal and no "--yes" stops with status 3 (CLI-024).
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "applies a repository with no upstream from the folder as it is (APP-LIFE-269)" (integration, local).
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
+Scenario: [APP-LIFE-270] A local operator whose installed app's folder lost its manifest or holds another app is told the update skipped it
+  Given "dice" is installed, and its folder now holds no manifest, or holds the manifest of the app "notes"
+  When the local operator runs "starkeep update"
+  Then the output warns "dice: <folder> no longer holds a manifest. Skipped." or 'dice: <folder> now holds the app "notes". Skipped.'
+  And "dice" keeps running the manifest the local operator approved
+  And the other apps update as usual
+```
+
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "skips an app whose folder lost its manifest, and updates the rest (APP-LIFE-270)" (integration, local). A folder that holds another app has no test.
+
+```gherkin
+@local
+@intent:confirmed @coverage:full
+Scenario: [APP-LIFE-271] A local operator who names a built-in service in an update is told it updates with the platform
+  When the local operator runs "starkeep update drive"
+  Then the output says "drive is built in and updates with the platform."
+  And the command exits with status 1
+```
+
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "says a built-in service updates with the platform" (integration, local).
+
+```gherkin
+@local
+@intent:confirmed @coverage:full
+Scenario: [APP-LIFE-272] A local operator who declines one app's new access keeps every app that shares its repository on the old version
+  Given "dice" and "notes" are installed from one repository, and its upstream gives "dice" a manifest that asks for different access
+  When the local operator runs "starkeep update" and answers no for "dice"
+  Then the output says "Not updated: dice." and "Not updated: notes, which shares a repository with an app you declined."
+  And the repository stays at the commit it held before
+```
+
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "keeps every app in a repository on the old version when one declines (APP-LIFE-272)" (integration, local).
+- **Notes:** a pull moves the whole repository, so a declined app holds back every app beside it.
+
+```gherkin
+@local
+@intent:confirmed @coverage:full
+Scenario: [APP-LIFE-240] A local operator is asked before an update pulls different access, and a no leaves the app as it was
+  Given the "dice" repository's upstream holds a manifest that asks for different access
+  When the local operator runs "starkeep update dice" in a terminal
+  Then the output says "dice's new version asks for different access:" with the new consent words
+  And the command asks "Approve dice's new access and update? [y/N]" before it pulls
+  When the local operator answers anything other than yes
+  Then the output says "Not updated: dice."
+  And the local operator finds the repository at the commit it held before, and "dice" running the manifest the local operator approved before
+  And a later restart of "dice" still runs the old code
+```
+
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "asks before it pulls new access, and a no leaves the folder, the grant and the app (APP-LIFE-240)" (integration, local).
+- **Notes:** "--yes" approves the new access without asking. A run with no terminal and no "--yes" stops with status 3 before any pull (CLI-024). The command reads the new manifest from the fetched upstream, so the question comes before any change. `starkeep update --undo` asks the same question when the older version asks for different access.
+
+```gherkin
+@local
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-241] A local operator whose app runs during an update finds it running again on the new code
   Given "dice" runs on this computer, and its repository is behind its upstream
   When the local operator runs "starkeep update dice"
@@ -1678,9 +1800,11 @@ Scenario: [APP-LIFE-241] A local operator whose app runs during an update finds 
   And "dice" runs the new code
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "pulls, applies, and restarts a running app on the new code (APP-LIFE-235, APP-LIFE-241)" (integration, local).
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-242] A local operator who undoes the last update returns each pulled repository to its commit before the pull
   Given the last "starkeep update" pulled the "dice" repository from one commit to a newer one
   When the local operator runs "starkeep update --undo"
@@ -1689,11 +1813,12 @@ Scenario: [APP-LIFE-242] A local operator who undoes the last update returns eac
   And a second "starkeep update --undo" undoes the update before that one, or says "No recorded update to undo."
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "undoes the last update, asking again for the old version's access (APP-LIFE-242)" (integration, local). No test runs a second undo.
 - **Notes:** an update that stops partway, because git refused a later repository's pull, still records the repositories it pulled, and its error names `starkeep update --undo`.
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-243] A local operator whose repository moved since the update is told how to undo by hand
   Given the last "starkeep update" pulled the "dice" repository
   And the local operator committed in that repository afterward
@@ -1701,6 +1826,8 @@ Scenario: [APP-LIFE-243] A local operator whose repository moved since the updat
   Then the output says "<repository> moved since the update (it is no longer at <new commit>). Undo it by hand with `git reset --keep <old commit>`."
   And the local operator finds the repository and the new commit unchanged
 ```
+
+- **Coverage:** `packages/cli/__tests__/update-fetch.test.ts` › "refuses a repository that moved since the update, and leaves it as it is" (unit, local).
 
 ## Installing in the cloud
 
@@ -2291,7 +2418,7 @@ Scenario: [APP-LIFE-145] A local operator keeps a card with Delete data for kept
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-231] A local operator who uninstalls from the terminal keeps the app's data on this computer
   Given "dice" is installed on this computer
   When the local operator runs "starkeep uninstall dice --local"
@@ -2300,17 +2427,20 @@ Scenario: [APP-LIFE-231] A local operator who uninstalls from the terminal keeps
   And a later "starkeep start" with no names leaves "dice" stopped, even when it was marked to run
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "keeps the data, shows it as kept, and drops the mark to run (APP-LIFE-231)" (integration, local). The stand-in keeps no data, so no test shows "kept data".
 - **Notes:** a reinstall brings the kept rows back (APP-LIFE-142).
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-232] A local operator who uninstalls an app that is not installed here is told so
   Given "dice" is not installed on this computer
   When the local operator runs "starkeep uninstall dice --local"
   Then the output says "dice is not installed on this computer."
   And the command exits with status 1
 ```
+
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "says an app is not installed here (APP-LIFE-232)" (integration, local).
 
 ### Deleting kept data on this computer
 
@@ -2392,29 +2522,31 @@ Scenario: [APP-LIFE-152] A local operator whose deletion fails part-way keeps th
 
 ```gherkin
 @local
-@intent:unclear
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-233] A local operator deletes an app's data from the terminal only after typing its id
   Given "dice" is installed on this computer
   When the local operator runs "starkeep uninstall dice --local --delete-data" in a terminal
-  Then the output says "Uninstalled dice. Its data stays on this computer."
-  And the command asks "Type dice to delete its data on this computer:"
+  Then the command asks "Type dice to delete its data on this computer:" before it changes anything
   When the local operator types "dice"
-  Then the output says "Deleted dice's data on this computer."
-  And "starkeep list" no longer shows "kept data" for "dice"
+  Then the output says "Uninstalled dice." and then "Deleted dice's data on this computer."
+  And "starkeep list" shows "dice" as "not installed", with no kept data
 ```
 
-- **Notes:** "--yes" deletes without the question. The same flag deletes the data an earlier uninstall kept.
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "asks for the id before it changes anything, then uninstalls and deletes the data (APP-LIFE-233)" (integration, local). The stand-in keeps no data, so the test sees the "kept no data" line.
+- **Notes:** "--yes" deletes without the question. The same flag deletes the data an earlier uninstall kept. An app that kept no data gets "dice kept no data on this computer." instead of the deletion line.
 
 ```gherkin
 @local
-@intent:unclear
-Scenario: [APP-LIFE-234] A local operator who types a different id keeps the app's data
+@intent:confirmed @coverage:full
+Scenario: [APP-LIFE-234] A local operator who types a different id changes nothing
   Given "starkeep uninstall dice --local --delete-data" asks for the app id
   When the local operator types anything other than "dice"
-  Then the output says "Kept dice's data: the typed id did not match."
+  Then the output says "Nothing changed: the typed id did not match, so dice stays installed with its data."
   And the command exits with status 1
-  And "starkeep list" still shows "kept data" for "dice"
+  And "starkeep list" still shows "dice" installed
 ```
+
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "changes nothing when the typed id does not match (APP-LIFE-234)" (integration, local).
 
 ### In the cloud
 

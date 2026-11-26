@@ -227,7 +227,7 @@ The `starkeep` command and admin-web share one record of what runs, so a service
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [LDS-105] A local operator who runs start with no names gets the data server, Drive, and every app marked to run
   Given the local operator started "dice" earlier, which marked it to run
   And nothing runs on the computer now
@@ -236,9 +236,11 @@ Scenario: [LDS-105] A local operator who runs start with no names gets the data 
   And the Data Server card in admin-web shows the data server running
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "stops everything in reverse order and brings the same set back (LDS-107, LDS-105, APP-LIFE-227)" (integration, local). No test checks admin-web's Data Server card.
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [LDS-106] A local operator who starts from the terminal a data server that admin-web started is told it already runs
   Given the local operator started the data server from admin-web's Data Server card
   When the local operator runs "starkeep start data-server"
@@ -246,9 +248,11 @@ Scenario: [LDS-106] A local operator who starts from the terminal a data server 
   And the Data Server card keeps showing the data server running, with no restart
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "says an app already runs when it does (LDS-106)" (integration, local). The data server in the test started from the terminal, not from admin-web.
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [LDS-107] A local operator who stops everything from the terminal gets the same set back at the next start
   Given the data server, Drive, and "dice" run, and admin-web runs from "starkeep admin"
   When the local operator runs "starkeep stop"
@@ -257,11 +261,12 @@ Scenario: [LDS-107] A local operator who stops everything from the terminal gets
   Then the local operator finds the data server, Drive, and "dice" running again
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "stops everything in reverse order and brings the same set back (LDS-107, LDS-105, APP-LIFE-227)" (integration, local). admin-web does not run in the test.
 - **Notes:** stopping everything keeps each app's mark to run. Stopping one named app clears its mark (APP-LIFE-227).
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [LDS-108] A local operator who stops a service that is not running is told so, and the command succeeds
   Given Drive is not running
   When the local operator runs "starkeep stop drive"
@@ -269,9 +274,11 @@ Scenario: [LDS-108] A local operator who stops a service that is not running is 
   And the command exits with status 0
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "says a stopped service was not running, and succeeds (LDS-108)" (integration, local).
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [LDS-109] A local operator restarts the data server from the terminal
   Given the data server runs
   When the local operator runs "starkeep restart data-server"
@@ -279,9 +286,23 @@ Scenario: [LDS-109] A local operator restarts the data server from the terminal
   And the Data Server card in admin-web shows the data server running
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "restarts the data server (LDS-109)" (integration, local). No test checks admin-web's Data Server card.
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
+Scenario: [LDS-124] A local operator who restarts with no names restarts the data server, Drive, and every app marked to run
+  Given the data server, Drive, and "dice" run, "dice" is marked to run, and admin-web runs
+  When the local operator runs "starkeep restart"
+  Then the output says each of data-server, drive, and dice stopped and started again
+  And admin-web keeps running, untouched
+```
+
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "restarts the platform and the marked apps with no names, and leaves admin-web alone" (integration, local). admin-web does not run in the test.
+
+```gherkin
+@local
+@intent:confirmed @coverage:full
 Scenario: [LDS-110] A local operator whose service does not start sees why, how many failed, and a failing exit status
   Given another program holds Drive's port
   When the local operator runs "starkeep start"
@@ -290,9 +311,11 @@ Scenario: [LDS-110] A local operator whose service does not start sees why, how 
   And the command exits with status 1
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "says which service did not start, how many failed, and fails (LDS-110)" (integration, local).
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [LDS-111] A local operator sees what runs on the computer, at which address, and the computer's sync state
   Given the data server and Drive run, "dice" is marked to run but stopped, and the computer is signed in to sync
   When the local operator runs "starkeep status"
@@ -302,11 +325,28 @@ Scenario: [LDS-111] A local operator sees what runs on the computer, at which ad
   And the output shows the joined cloud's address after "CLOUD", and "SYNC      signed in as <email>"
 ```
 
-- **Notes:** a computer that joined no cloud shows "CLOUD not joined" and "SYNC signed out".
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "shows the services, a marked app that is stopped, the cloud and sync (LDS-111)" (integration, local). The test computer is signed out and joined to no cloud.
+- **Notes:** a computer that does not sync shows "SYNC signed out".
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:none
+Scenario Outline: [LDS-125] A local operator sees from the terminal when sync is still connecting or the library belongs to another account
+  Given the computer's sync state is <state>
+  When the local operator runs "starkeep status"
+  Then the output shows "<line>"
+
+  Examples:
+    | state                                       | line                                                          |
+    | connecting for "ana@example.com"            | SYNC      connecting as ana@example.com                       |
+    | bound to the library of "ana@example.com"   | SYNC      this library belongs to another account (ana@example.com) |
+```
+
+- **Coverage:** No test puts the sync state into "connecting" or "bound elsewhere".
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [LDS-112] A local operator whose data server is stopped sees the sync state as unknown
   Given the data server is stopped
   When the local operator runs "starkeep status"
@@ -314,9 +354,11 @@ Scenario: [LDS-112] A local operator whose data server is stopped sees the sync 
   And the output shows "SYNC      unknown (the data server is not answering)"
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "shows the data server stopped and the sync state unknown (LDS-112)" (integration, local).
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [LDS-113] A local operator follows the data server's log from the terminal
   Given the data server was started on this computer
   When the local operator runs "starkeep logs data-server -f"
@@ -324,9 +366,11 @@ Scenario: [LDS-113] A local operator follows the data server's log from the term
   And "-n 200" shows the last 200 lines first
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "prints the last lines of a log, as many as -n asks (LDS-113)" (integration, local). No test follows the log with -f.
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [LDS-114] A local operator who asks for the log of something never started here is told there is none
   Given "dice" was never started on this computer
   When the local operator runs "starkeep logs dice"
@@ -334,9 +378,11 @@ Scenario: [LDS-114] A local operator who asks for the log of something never sta
   And the command exits with status 1
 ```
 
+- **Coverage:** `packages/cli/__tests__/main.test.ts` › "says when a name has no log here (LDS-114)" (unit, local).
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:none
 Scenario: [LDS-115] A local operator opens admin-web from the terminal
   Given admin-web is not running
   When the local operator runs "starkeep admin"
@@ -345,6 +391,7 @@ Scenario: [LDS-115] A local operator opens admin-web from the terminal
   And "--no-open" starts admin-web without opening a browser
 ```
 
+- **Coverage:** No test starts admin-web from the CLI.
 - **Notes:** on a computer where no browser opens, such as one reached over SSH, the output adds "Open http://localhost:3000 in your browser."
 
 ### This machine's settings
@@ -1280,7 +1327,7 @@ Scenario: [LDS-096] A local operator cannot run the reset script while the data 
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [LDS-116] A local operator previews from the terminal what a reset of local data deletes, and nothing changes
   Given the computer holds a library and watched folders
   When the local operator runs "starkeep reset-local"
@@ -1289,9 +1336,11 @@ Scenario: [LDS-116] A local operator previews from the terminal what a reset of 
   And the local operator finds the library unchanged
 ```
 
+- **Coverage:** `packages/cli/__tests__/main.test.ts` › "lists what it would delete without --apply, and deletes nothing (LDS-116)" (unit, local).
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [LDS-117] A local operator who resets local data from the terminal while the data server runs finds it running again on an empty library
   Given the data server runs
   When the local operator runs "starkeep reset-local --apply"
@@ -1301,11 +1350,28 @@ Scenario: [LDS-117] A local operator who resets local data from the terminal whi
   And the local operator keeps the config, the credentials, the files in the watched folders, and the cloud's data
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "stops the data server, deletes the library, and starts it again (LDS-117)" (integration, local). No test checks the Data Server card or the watched folders' files.
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [LDS-118] A local operator with no local data to reset is told there is nothing to delete
   Given the computer holds no library, database, or watched-folder list
   When the local operator runs "starkeep reset-local"
   Then the output says "Nothing to delete in <folder>."
 ```
+
+- **Coverage:** `packages/cli/__tests__/main.test.ts` › "says there is nothing to delete in an empty folder (LDS-118)" (unit, local).
+
+```gherkin
+@local
+@intent:confirmed @coverage:full
+Scenario: [LDS-126] A local operator whose config.json does not parse is told which file, and nothing overwrites it
+  Given "~/.starkeep/config.json" holds text that is not a JSON object
+  When the local operator runs a starkeep command that changes the configuration, such as "starkeep source add ~/starkeep-apps"
+  Then the output says "<home>/.starkeep/config.json does not hold a JSON object, so Starkeep left it alone. Fix the file, or move it away to start over, then run the command again."
+  And the command exits with status 1
+  And the file keeps its text, with the cloud fields in it
+```
+
+- **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "names a file that does not parse, and leaves it alone" (integration, local).
