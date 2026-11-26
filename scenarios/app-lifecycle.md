@@ -1595,7 +1595,7 @@ Scenario: [APP-LIFE-088] A cloud operator who unchecks every install in the Rede
 
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:unclear
 Scenario: [APP-LIFE-089] A cloud operator sees a pending cloud update only when the deployed manifest or code differs from the folder
   Given "dice" is installed in the cloud
   When the cloud operator opens the dashboard
@@ -1865,7 +1865,7 @@ Scenario: [APP-LIFE-257] A cloud operator whose cloud install already runs the f
 
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:unclear
 Scenario: [APP-LIFE-258] A cloud operator who declines an update's new cloud access leaves both places on the old version
   Given the pull brings a "dice" manifest that asks the cloud for different access
   When the cloud operator runs "starkeep update dice" in a terminal
@@ -2247,7 +2247,7 @@ Scenario: [APP-LIFE-124] A member keeps using a cloud app at the same address, w
 
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:unclear
 Scenario: [APP-LIFE-245] A cloud operator installs an app on this computer and in the cloud with one command and one consent
   Given the local data server is running and the cloud is set up
   When the cloud operator runs "starkeep install dice --local --cloud" in a terminal
@@ -2300,6 +2300,17 @@ Scenario: [APP-LIFE-249] A cloud operator who starts a second cloud app operatio
   When the cloud operator runs "starkeep install dice --cloud" and approves the consent
   Then the command says "Another cloud operation is running (notes (every surface)). Wait for it to end, or follow it in admin-web."
   And the install of "notes" finishes as if the second command never ran
+```
+
+```gherkin
+@cloud
+@intent:unclear
+Scenario: [APP-LIFE-266] A cloud operator who starts the same cloud install in a second open terminal follows the first one's progress
+  Given "starkeep install dice --cloud" is deploying in one terminal, and that terminal stays open
+  When the cloud operator runs "starkeep install dice --cloud" in a second terminal
+  Then the second terminal shows the deploy's progress from its start, with no second deploy
+  And the output says "Followed a dice (every surface) run that was already going."
+  And both terminals end with the deploy's outcome
 ```
 
 ```gherkin

@@ -548,6 +548,17 @@ Scenario: [LDS-121] A local operator whose data server does not come back after 
   And the command exits with status 1
 ```
 
+```gherkin
+@local
+@intent:unclear
+Scenario: [LDS-123] A local operator whose computer already belongs to a cloud cannot join another one from the terminal
+  Given the computer already syncs with the cloud at https://d123.cloudfront.net
+  When the local operator runs "starkeep setup --join https://d456.cloudfront.net"
+  Then the output says "This computer already belongs to https://d123.cloudfront.net."
+  And the This Machine section still shows the computer syncing with https://d123.cloudfront.net
+  And the command exits with status 1
+```
+
 ## Library ownership
 
 - [LDS-029] The first sign-in binds this machine's library to the signed-in member: see ACCESS-077 in [users-and-access.md](users-and-access.md).
