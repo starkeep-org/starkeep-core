@@ -1678,6 +1678,8 @@ Scenario: [APP-LIFE-242] A local operator who undoes the last update returns eac
   And a second "starkeep update --undo" undoes the update before that one, or says "No recorded update to undo."
 ```
 
+- **Notes:** an update that stops partway, because git refused a later repository's pull, still records the repositories it pulled, and its error names `starkeep update --undo`.
+
 ```gherkin
 @local
 @intent:confirmed

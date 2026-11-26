@@ -14,9 +14,11 @@ process.env.STARKEEP_DIR = join(scratch, "dot-starkeep");
 
 let fetchAll: typeof import("../src/commands/update").fetchAll;
 let createIo: typeof import("../src/io").createIo;
+let readUpdates: typeof import("../src/git").readUpdates;
 beforeAll(async () => {
   ({ fetchAll } = await import("../src/commands/update"));
   ({ createIo } = await import("../src/io"));
+  ({ readUpdates } = await import("../src/git"));
 });
 afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
@@ -129,5 +131,28 @@ describe("fetchAll", () => {
     writeFileSync(join(b.clone, "app.txt"), "dirty\n");
     expect(() => fetchAll(quietIo().io, [target(a.clone), target(b.clone)])).toThrow(/uncommitted/);
     expect(git(a.clone, "rev-parse", "HEAD")).toBe(aBefore);
+  });
+
+  it("records a pull that went through when a later pull fails, so --undo can return it", () => {
+    const a = repoPair();
+    const b = repoPair();
+    pushUpstream(a.work, "two\n");
+    // The upstream adds a file the clone holds untracked, so git refuses the pull.
+    writeFileSync(join(b.work, "new.txt"), "upstream\n");
+    git(b.work, "add", "new.txt");
+    git(b.work, "commit", "-q", "-m", "add new.txt");
+    git(b.work, "push", "-q", "origin", "main");
+    writeFileSync(join(b.clone, "new.txt"), "mine\n");
+    const aBefore = git(a.clone, "rev-parse", "HEAD");
+
+    expect(() => fetchAll(quietIo().io, [target(a.clone), target(b.clone)])).toThrow(
+      /starkeep update --undo/,
+    );
+    const aAfter = git(a.clone, "rev-parse", "HEAD");
+    expect(aAfter).not.toBe(aBefore);
+    expect(readUpdates().at(-1)?.repos).toEqual([
+      { root: a.clone, before: aBefore, after: aAfter },
+    ]);
+    expect(readFileSync(join(b.clone, "new.txt"), "utf8")).toBe("mine\n");
   });
 });
