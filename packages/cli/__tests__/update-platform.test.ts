@@ -175,6 +175,23 @@ describe("applyPlatform", () => {
     expect(state.runs).toEqual([]);
   });
 
+  it("names a command that exists when the bootstrap update would replace a resource", async () => {
+    const { ReplacementRefused } = await import("../src/commands/cloud");
+    state.bootstrap = new ReplacementRefused(2);
+    const failure = applyPlatform(io().handle, {
+      scope: both,
+      yes: true,
+      force: false,
+      pulled: false,
+    });
+    await expect(failure).rejects.toThrow(
+      "Error: the change set removes or replaces 2 resource(s). Nothing was applied.\n" +
+        "Review it with `starkeep cloud bootstrap-update`. If the change is intended, apply it with\n" +
+        "`starkeep cloud bootstrap-update --apply --allow-replacement`, then run the update again.",
+    );
+    expect(state.runs).toEqual([]);
+  });
+
   it("leaves the cloud alone under --local", async () => {
     await applyPlatform(io().handle, {
       scope: { local: true, cloud: false },
