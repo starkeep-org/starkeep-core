@@ -87,7 +87,12 @@ export const cloudCostCommand: Command = {
     io.print("Includes both Starkeep and non-Starkeep service costs.");
     io.print();
     if (costs === null) {
-      io.print("Cost report configured — data arrives within 24 hours.");
+      // Only this month's report is still on its way; a past month's never comes.
+      io.print(
+        current
+          ? "Cost report configured — data arrives within 24 hours."
+          : `No cost report covers ${monthFlag}.`,
+      );
       return;
     }
     for (const text of costLines(costs, projection)) io.print(text);
