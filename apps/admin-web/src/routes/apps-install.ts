@@ -5,6 +5,7 @@ import { approvesManifest } from "@starkeep/admin-installer/manifest-approval";
 import { appSource, idMismatch } from "@starkeep/operator/apps";
 import { MANIFEST_NOT_APPROVED } from "../lib/app-types";
 import { localDataServerUrlFromEnv } from "@starkeep/operator/urls";
+import { withAppLock } from "../lib/app-lock";
 
 /**
  * Install an app locally. Body: `{ appId, approvedManifest }`.
@@ -28,6 +29,12 @@ export async function POST(req: Request) {
     );
   }
 
+  return withAppLock(appId, `admin-web install ${appId}`, () =>
+    installUnderLock(appId, approvedManifest),
+  );
+}
+
+async function installUnderLock(appId: string, approvedManifest: object): Promise<Response> {
   // A first install reads the manifest the scan found, which is the one the
   // user saw on the card. A reinstall (the update dialog) reads the installed
   // app's pinned folder again, so the app never switches source.
