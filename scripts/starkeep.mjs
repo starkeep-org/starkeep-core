@@ -9,8 +9,8 @@
  * built-ins only, so it runs before any install. It:
  *
  * 1. Checks for Node 24 or later and a `pnpm` command on PATH.
- * 2. Runs `pnpm install` from the checkout root for `setup`, and for any
- *    command when the install has never run. The root `postinstall` builds the
+ * 2. Runs `pnpm install` from the checkout root for `setup`, for any
+ *    command when the install has never run, and under `--install-first`. The root `postinstall` builds the
  *    workspace.
  * 3. Warns when the checkout's commit or lockfile changed since the last
  *    install, because the built packages may then be stale.
@@ -168,7 +168,11 @@ function main() {
   // `--no-install` is the wrapper's own flag: skip the install `setup` runs,
   // for a checkout the caller knows is installed, such as in tests.
   const skipInstall = process.argv.includes("--no-install");
-  const args = process.argv.slice(2).filter((a) => a !== "--no-install");
+  // `--install-first` is the wrapper's own flag too: always install first.
+  // `starkeep update --platform` passes it when it reruns itself after
+  // pulling the checkout, so the rest of the update runs on the new code.
+  const installFirst = process.argv.includes("--install-first");
+  const args = process.argv.slice(2).filter((a) => a !== "--no-install" && a !== "--install-first");
   // `--help` and `help` work before anything is installed.
   const command = args.find((a) => !a.startsWith("-"));
   checkNode();
@@ -176,7 +180,11 @@ function main() {
 
   const wantsJson = args.includes("--json");
   // The install's output goes to stderr, so `--json` output stays clean.
-  if ((command && INSTALLING_COMMANDS.has(command) && !skipInstall) || !installed()) {
+  if (
+    installFirst ||
+    (command && INSTALLING_COMMANDS.has(command) && !skipInstall) ||
+    !installed()
+  ) {
     install();
   } else if (!wantsJson) {
     warnWhenStale();

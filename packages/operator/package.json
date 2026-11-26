@@ -15,6 +15,7 @@
     "./costs": "./src/costs.ts",
     "./credentials": "./src/credentials.ts",
     "./daemons": "./src/daemons.ts",
+    "./deployment-state": "./src/deployment-state.ts",
     "./events": "./src/events.ts",
     "./local-apps": "./src/local-apps.ts",
     "./locks": "./src/locks.ts",
@@ -41,6 +42,7 @@
     "@starkeep/app-client": "workspace:*",
     "@starkeep/aws-bootstrap": "workspace:*",
     "@starkeep/protocol-primitives": "workspace:*",
+    "diff": "^8.0.4",
     "kysely": "^0.28.17",
     "pg": "^8.0.0"
   },
