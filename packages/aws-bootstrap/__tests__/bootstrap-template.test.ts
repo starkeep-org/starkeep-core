@@ -209,6 +209,15 @@ describe("the admin and device clients' browser sign-in", () => {
   });
 });
 
+describe("the admin client's tokens", () => {
+  it("issues one-day refresh tokens, revocable one at a time", () => {
+    const props = resources.UserPoolClient!.Properties as Record<string, unknown>;
+    expect(props.TokenValidityUnits).toEqual({ RefreshToken: "days" });
+    expect(props.RefreshTokenValidity).toBe(1);
+    expect(props.EnableTokenRevocation).toBe(true);
+  });
+});
+
 describe("trust policies (who can assume which role)", () => {
   function trustStatements(roleName: string): Array<Record<string, unknown>> {
     const role = resources[roleName].Properties as unknown as {

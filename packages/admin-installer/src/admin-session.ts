@@ -18,14 +18,7 @@
  * storage before. Browser pages from other sites stay out through admin-web's
  * same-origin and `Host` checks.
  */
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   CognitoIdentityClient,
@@ -57,13 +50,22 @@ function readConfig(): Record<string, unknown> | null {
 /** Twelve hours without a privileged action ends the session. */
 export const ADMIN_IDLE_EXPIRY_MS = 12 * 60 * 60 * 1000;
 
+/**
+ * The admin client's refresh tokens last one day at the pool
+ * (`RefreshTokenValidity` in the bootstrap template), so no session outlives
+ * its sign-in by more than this.
+ */
+export const ADMIN_MAX_LIFETIME_MS = 24 * 60 * 60 * 1000;
+
 /** The group whose members administer the deployment. */
 export const ADMINS_GROUP = "starkeep-admins";
 
 /** The session ended, or never began: the person must sign in as the admin. */
 export class SignInRequired extends Error {
   readonly code = "NOT_SIGNED_IN";
-  constructor(message = "Sign in as the Starkeep admin first: run `starkeep login --admin`, or sign in in admin-web.") {
+  constructor(
+    message = "Sign in as the Starkeep admin first: run `starkeep login --admin`, or sign in in admin-web.",
+  ) {
     super(message);
     this.name = "SignInRequired";
   }
@@ -100,7 +102,11 @@ export function adminPool(): AdminPool | null {
   const userPoolId = config?.userPoolId;
   const clientId = config?.userPoolClientId;
   const identityPoolId = config?.identityPoolId;
-  if (typeof userPoolId !== "string" || typeof clientId !== "string" || typeof identityPoolId !== "string") {
+  if (
+    typeof userPoolId !== "string" ||
+    typeof clientId !== "string" ||
+    typeof identityPoolId !== "string"
+  ) {
     return null;
   }
   return {
@@ -149,11 +155,24 @@ function idle(session: SessionFile, now: number): boolean {
   return !Number.isFinite(last) || now - last > ADMIN_IDLE_EXPIRY_MS;
 }
 
+function tooOld(session: SessionFile, now: number): boolean {
+  const start = Date.parse(session.signedInAt);
+  return !Number.isFinite(start) || now - start > ADMIN_MAX_LIFETIME_MS;
+}
+
+/** When the session ends: twelve hours after its last use, and never later than a day after its sign-in. */
+function endsAt(session: SessionFile): number {
+  return Math.min(
+    Date.parse(session.lastUsedAt) + ADMIN_IDLE_EXPIRY_MS,
+    Date.parse(session.signedInAt) + ADMIN_MAX_LIFETIME_MS,
+  );
+}
+
 export interface AdminSessionStatus {
   signedIn: boolean;
   email: string | null;
   sub: string | null;
-  /** When the session ends without another privileged action. */
+  /** When the session ends: after twelve hours without use, or a day after its sign-in. */
   expiresAt: string | null;
 }
 
@@ -164,6 +183,7 @@ export function adminSessionStatus(now = Date.now()): AdminSessionStatus {
   if (
     !session ||
     idle(session, now) ||
+    tooOld(session, now) ||
     !pool ||
     session.userPoolId !== pool.userPoolId ||
     session.clientId !== pool.clientId
@@ -174,7 +194,7 @@ export function adminSessionStatus(now = Date.now()): AdminSessionStatus {
     signedIn: true,
     email: session.email,
     sub: session.sub,
-    expiresAt: new Date(Date.parse(session.lastUsedAt) + ADMIN_IDLE_EXPIRY_MS).toISOString(),
+    expiresAt: new Date(endsAt(session)).toISOString(),
   };
 }
 
@@ -182,20 +202,29 @@ export function adminSessionStatus(now = Date.now()): AdminSessionStatus {
  * Keep the tokens of a sign-in that just happened on the managed login page.
  * Refuses an account outside the admin group, after revoking its token.
  */
-export async function saveAdminSignIn(tokens: AuthTokens, now = Date.now()): Promise<AdminSessionStatus> {
+export async function saveAdminSignIn(
+  tokens: AuthTokens,
+  now = Date.now(),
+): Promise<AdminSessionStatus> {
   const pool = adminPool();
   if (!pool) throw new Error("This computer has no cloud setup yet (~/.starkeep/config.json).");
   const claims = idTokenClaims(tokens.idToken);
   if (!claims.sub) throw new Error("The sign-in token names no user.");
   if (!claims.groups.includes(ADMINS_GROUP)) {
-    await cognitoClient(pool).revoke(tokens.refreshToken).catch(() => undefined);
-    throw new Error("This account has no admin rights on this cloud. Ask an admin to make you one.");
+    await cognitoClient(pool)
+      .revoke(tokens.refreshToken)
+      .catch(() => undefined);
+    throw new Error(
+      "This account has no admin rights on this cloud. Ask an admin to make you one.",
+    );
   }
   const stamp = new Date(now).toISOString();
   // A previous session on this computer ends at the pool too.
   const previous = readFile();
   if (previous && previous.refreshToken !== tokens.refreshToken) {
-    await cognitoClient(pool).revoke(previous.refreshToken).catch(() => undefined);
+    await cognitoClient(pool)
+      .revoke(previous.refreshToken)
+      .catch(() => undefined);
   }
   writeFile({
     refreshToken: tokens.refreshToken,
@@ -244,7 +273,9 @@ export const exchangeAtIdentityPool: IdentityPoolExchange = async (pool, idToken
   // the credential. No ambient AWS credential is read.
   const client = new CognitoIdentityClient({ region: pool.region });
   const logins = { [`cognito-idp.${pool.region}.amazonaws.com/${pool.userPoolId}`]: idToken };
-  const id = await client.send(new GetIdCommand({ IdentityPoolId: pool.identityPoolId, Logins: logins }));
+  const id = await client.send(
+    new GetIdCommand({ IdentityPoolId: pool.identityPoolId, Logins: logins }),
+  );
   if (!id.IdentityId) throw new Error("The identity pool returned no identity.");
   const out = await client.send(
     new GetCredentialsForIdentityCommand({ IdentityId: id.IdentityId, Logins: logins }),
@@ -271,7 +302,8 @@ export async function adminCredentials(
 ): Promise<AdminCredentials> {
   const now = options.now ?? Date.now();
   const pool = adminPool();
-  if (!pool) throw new SignInRequired("This computer has no cloud setup yet, so no admin can sign in.");
+  if (!pool)
+    throw new SignInRequired("This computer has no cloud setup yet, so no admin can sign in.");
   const session = readFile();
   if (!session) throw new SignInRequired();
   if (session.userPoolId !== pool.userPoolId || session.clientId !== pool.clientId) {
@@ -280,9 +312,18 @@ export async function adminCredentials(
     throw new SignInRequired();
   }
   if (idle(session, now)) {
-    await cognitoClient(pool).revoke(session.refreshToken).catch(() => undefined);
+    await cognitoClient(pool)
+      .revoke(session.refreshToken)
+      .catch(() => undefined);
     removeFile();
     throw new SignInRequired("The admin session ended after 12 hours without use. Sign in again.");
+  }
+  if (tooOld(session, now)) {
+    await cognitoClient(pool)
+      .revoke(session.refreshToken)
+      .catch(() => undefined);
+    removeFile();
+    throw new SignInRequired("The admin session ended a day after its sign-in. Sign in again.");
   }
   let tokens: AuthTokens;
   try {

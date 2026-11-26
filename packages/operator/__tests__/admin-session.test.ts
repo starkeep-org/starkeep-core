@@ -7,7 +7,7 @@ import { createServer, type Server } from "node:http";
 import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createFakePool,
   FAKE_DEVICE_CLIENT_ID,
@@ -157,6 +157,35 @@ describe("the admin session", () => {
     await expect(
       session.adminCredentials({ now: t0 + 22 * 3600_000, exchange }),
     ).resolves.toMatchObject({ email: ADMIN });
+  });
+
+  it("ends a day after its sign-in however often it is used, as the pool's one-day refresh token does", async () => {
+    const t0 = Date.parse("2026-11-19T08:00:00Z");
+    await signIn(ADMIN, t0);
+    await session.adminCredentials({ now: t0 + 11 * 3600_000, exchange });
+    await session.adminCredentials({ now: t0 + 22 * 3600_000, exchange });
+    // The idle rule alone would end it at 34 hours; the day ends it first.
+    expect(session.adminSessionStatus(t0 + 22 * 3600_000).expiresAt).toBe(
+      new Date(t0 + session.ADMIN_MAX_LIFETIME_MS).toISOString(),
+    );
+    const later = t0 + session.ADMIN_MAX_LIFETIME_MS + 1;
+    expect(session.adminSessionStatus(later).signedIn).toBe(false);
+    await expect(session.adminCredentials({ now: later, exchange })).rejects.toThrow(
+      "The admin session ended a day after its sign-in. Sign in again.",
+    );
+    expect(existsSync(session.adminSessionFile())).toBe(false);
+  });
+
+  it("ends the session when the account lost its admin rights, and mints nothing (ACCESS-201)", async () => {
+    pool.addUser("demoted@example.com", "Password-1", { groups: ["starkeep-admins"] });
+    await signIn("demoted@example.com");
+    pool.addUser("demoted@example.com", "Password-1", { groups: ["starkeep-users"] });
+    const minted = vi.fn(exchange);
+    await expect(session.adminCredentials({ exchange: minted })).rejects.toThrow(
+      "This account is no longer an admin of this cloud.",
+    );
+    expect(minted).not.toHaveBeenCalled();
+    expect(existsSync(session.adminSessionFile())).toBe(false);
   });
 
   it("asks for a sign-in when the pool ended the session", async () => {

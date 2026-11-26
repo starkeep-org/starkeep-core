@@ -195,7 +195,9 @@ Resources:
   # The admin client. People sign in on the managed login page, through the
   # code flow with PKCE, and the page returns to admin-web or the CLI on this
   # computer. Password sign-in needs AWS credentials (ADMIN_USER_PASSWORD_AUTH),
-  # which only the e2e harness uses.
+  # which only the e2e harness uses. Refresh tokens last one day, so a copy of
+  # the admin session dies within a day even when no tool on this computer
+  # notices the twelve hours without use.
   UserPoolClient:
     Type: AWS::Cognito::UserPoolClient
     Properties:
@@ -208,7 +210,7 @@ Resources:
 ${oauthYaml}
       TokenValidityUnits:
         RefreshToken: days
-      RefreshTokenValidity: 30
+      RefreshTokenValidity: 1
       EnableTokenRevocation: true
       PreventUserExistenceErrors: ENABLED
 
