@@ -852,7 +852,7 @@ Scenario: [ACCESS-197] A cloud operator sees in the status who is signed in as t
 
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:unclear
 Scenario: [ACCESS-198] A cloud operator who leaves the computer's admin session unused for twelve hours must sign in again
   Given the cloud operator signed in as the admin on this computer
   And twelve hours passed with no cloud action in admin-web or the terminal
@@ -863,7 +863,7 @@ Scenario: [ACCESS-198] A cloud operator who leaves the computer's admin session 
 
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:unclear
 Scenario: [ACCESS-199] A cloud operator who signs out in the terminal is signed out of admin-web too
   Given the cloud operator is signed in as the admin on this computer
   When the cloud operator runs "starkeep logout --admin"
