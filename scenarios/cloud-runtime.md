@@ -316,9 +316,10 @@ Scenario: [CLOUD-RUN-076] A cloud operator reads a past month's cost from the te
   Then the table shows October 2026's cost by service and the total
   And the table has no PROJECTED column
   And "--month 2026-13" says "--month takes a month as YYYY-MM" and exits with status 2
+  And a past month that no cost report covers says "No cost report covers <month>."
 ```
 
-- **Coverage:** `packages/cli/__tests__/cost-and-doctor.test.ts` › "cloud cost reads the month --month names, and refuses a malformed one with exit status 2" and "leaves the projection out for a past month" (unit).
+- **Coverage:** `packages/cli/__tests__/cost-and-doctor.test.ts` › "cloud cost reads the month --month names, and refuses a malformed one with exit status 2", "leaves the projection out for a past month" and "says a past month has no report, rather than that one is on its way" (unit).
 
 ```gherkin
 @local @cloud

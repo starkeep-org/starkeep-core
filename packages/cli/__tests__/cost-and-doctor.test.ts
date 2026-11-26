@@ -95,6 +95,15 @@ describe("cloud cost", () => {
     costs.answer = Object.assign(new Error("no bucket"), { name: "NoSuchBucket" });
     expect((await run("cloud", "cost")).out).toContain("data arrives within 24 hours");
   });
+
+  it("says a past month has no report, rather than that one is on its way", async () => {
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ stackPrefix: "sk" }));
+    costs.answer = null;
+    const { code, out } = await run("cloud", "cost", "--month", "2025-01");
+    expect(code).toBe(0);
+    expect(out).toContain("No cost report covers 2025-01.");
+    expect(out).not.toContain("data arrives within 24 hours");
+  });
 });
 
 describe("doctor", () => {
