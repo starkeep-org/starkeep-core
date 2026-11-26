@@ -255,6 +255,8 @@ Scenario: [CLI-022] A local operator's script reads one JSON object per line and
   And the last line is a result object with "ok": true and the started names
 ```
 
+- **Notes:** an output holds exactly one result object, even when a command continues in a new process, as `starkeep update --platform` does after it pulls the checkout.
+
 ```gherkin
 @local
 @intent:confirmed
