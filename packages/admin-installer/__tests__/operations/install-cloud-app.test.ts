@@ -11,6 +11,8 @@ import { installCloudAppOp } from "../../src/operations/install-cloud-app.js";
 import { manifestDigest } from "../../src/manifest-approval.js";
 import type { InstallInput } from "../../src/orchestrator.js";
 import type { ProbeReport } from "../../src/post-install-probe.js";
+import type { SourceCommit } from "../../src/deployed-source.js";
+import { execFileSync } from "node:child_process";
 import {
   CREDS,
   INSTALLED_CONFIG,
@@ -46,6 +48,7 @@ function setup(
     bundleExit?: number;
     probe?: ProbeReport;
     version?: string | null;
+    deployed?: SourceCommit | null;
   } = {},
 ) {
   const appDir = exampleApp({ bundle: APPROVED_BUNDLE, ...options.manifest });
@@ -64,6 +67,7 @@ function setup(
       return { appRoleArn: "arn:role", receipt: null };
     },
     probeAnonymousSurface: async () => options.probe ?? QUIET_PROBE,
+    deployedAppSource: async () => options.deployed ?? null,
   });
   return { appDir, installs, commands, t };
 }
@@ -204,5 +208,73 @@ describe("installCloudAppOp", () => {
     await expect(
       installCloudAppOp(t.ctx, { appId: "example-app", appDir }, t.emit),
     ).rejects.toEqual(withCode("NOT_SIGNED_IN"));
+  });
+
+  describe("the backward-deploy guard", () => {
+    /** Make the app folder a repository with a commit on `main` and one on `feature`. */
+    function branches(appDir: string): { feature: string } {
+      const git = (...args: string[]) =>
+        execFileSync("git", ["-C", appDir, "-c", "user.name=t", "-c", "user.email=t@t", ...args], {
+          encoding: "utf8",
+        }).trim();
+      git("init", "-q", "-b", "main");
+      git("add", ".");
+      git("commit", "-q", "-m", "app");
+      git("checkout", "-q", "-b", "feature");
+      writeFileSync(join(appDir, "feature.ts"), "new route");
+      git("add", "feature.ts");
+      git("commit", "-q", "-m", "add the new route");
+      const feature = git("rev-parse", "HEAD");
+      git("checkout", "-q", "main");
+      return { feature };
+    }
+
+    it("reports DEPLOY_BACKWARD before it builds when the cloud runs a commit the folder lacks", async () => {
+      const first = setup();
+      const { feature } = branches(first.appDir);
+      const { installs, commands, t } = setup({
+        deployed: { commit: feature, dirty: false, branch: null },
+      });
+      const failure = installCloudAppOp(
+        t.ctx,
+        { appId: "example-app", appDir: first.appDir, surfaces: ["web"] },
+        t.emit,
+      );
+      await expect(failure).rejects.toEqual(withCode("DEPLOY_BACKWARD"));
+      await expect(failure).rejects.toThrow(
+        /example-app in the cloud runs 1 commit\(s\)[\s\S]*add the new route[\s\S]*--force/,
+      );
+      expect(commands).toEqual([]);
+      expect(installs).toEqual([]);
+    });
+
+    it("deploys anyway with allowBackward, and says so", async () => {
+      const first = setup();
+      const { feature } = branches(first.appDir);
+      const { installs, t } = setup({ deployed: { commit: feature, dirty: false, branch: null } });
+      await installCloudAppOp(
+        t.ctx,
+        { appId: "example-app", appDir: first.appDir, surfaces: [], allowBackward: true },
+        t.emit,
+      );
+      expect(installs).toHaveLength(1);
+      expect(installs[0]!.sourceDir).toBe(first.appDir);
+      expect(t.progress()).toContain("this deploy removes them (forced)");
+    });
+
+    it("deploys a folder that holds the recorded commit", async () => {
+      const first = setup();
+      branches(first.appDir);
+      const head = execFileSync("git", ["-C", first.appDir, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+      }).trim();
+      const { installs, t } = setup({ deployed: { commit: head, dirty: false, branch: null } });
+      await installCloudAppOp(
+        t.ctx,
+        { appId: "example-app", appDir: first.appDir, surfaces: [] },
+        t.emit,
+      );
+      expect(installs).toHaveLength(1);
+    });
   });
 });

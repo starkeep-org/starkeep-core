@@ -308,6 +308,7 @@ export function cloudInstallInput(opts: {
     manifest: opts.manifest,
     surfaces: opts.surfaces,
     webSourceDir: opts.appDir,
+    sourceDir: opts.appDir,
     ...(opts.zipBuffer ? { zipBuffer: opts.zipBuffer } : {}),
     version: opts.manifest.version,
     registryCredentials: opts.registryCredentials,

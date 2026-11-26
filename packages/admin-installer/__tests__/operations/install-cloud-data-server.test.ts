@@ -5,8 +5,10 @@
 import { describe, expect, it } from "vitest";
 import { installCloudDataServerOp } from "../../src/operations/install-cloud-data-server.js";
 import type { CloudDataServerInstallOutputs } from "../../src/builtin-installs.js";
+import { platformFingerprint, type PlatformDeployRecord } from "../../src/deployed-source.js";
 import {
   INSTALLED_CONFIG,
+  platformRepo,
   readConfigIn,
   starkeepDirWith,
   testContext,
@@ -158,5 +160,122 @@ describe("installCloudDataServerOp", () => {
     } as never);
     await expect(installCloudDataServerOp(t.ctx, {}, t.emit)).rejects.toThrow("pulumi up failed");
     expect(readConfigIn(dir).customDomainAttempted).toBe("a.example.com");
+  });
+});
+
+describe("installCloudDataServerOp's deployed record and backward-deploy guard", () => {
+  function recordStore(initial: PlatformDeployRecord | null = null) {
+    const store = { record: initial, writes: [] as PlatformDeployRecord[] };
+    return {
+      store,
+      platformRecord: {
+        read: async () => store.record,
+        write: async (r: PlatformDeployRecord) => {
+          store.writes.push(r);
+          store.record = r;
+        },
+      },
+    };
+  }
+
+  it("records the checkout's commit and platform fingerprint after a successful install", async () => {
+    const repo = platformRepo();
+    const head = repo.git("rev-parse", "HEAD");
+    const { store, platformRecord } = recordStore();
+    const t = testContext(starkeepDirWith(INSTALLED_CONFIG), {
+      ...stubs([]),
+      platformRecord,
+      platformCheckout: repo.dir,
+    } as never);
+    await installCloudDataServerOp(t.ctx, {}, t.emit);
+    expect(store.writes).toHaveLength(1);
+    expect(store.writes[0]).toMatchObject({
+      commit: head,
+      dirty: false,
+      branch: "main",
+      fingerprint: platformFingerprint(repo.dir),
+    });
+    expect(store.writes[0]!.fingerprint).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("writes no record when the install fails", async () => {
+    const repo = platformRepo();
+    const { store, platformRecord } = recordStore();
+    const t = testContext(starkeepDirWith(INSTALLED_CONFIG), {
+      ...stubs([]),
+      installCloudDataServer: async () => {
+        throw new Error("pulumi up failed");
+      },
+      platformRecord,
+      platformCheckout: repo.dir,
+    } as never);
+    await expect(installCloudDataServerOp(t.ctx, {}, t.emit)).rejects.toThrow("pulumi up failed");
+    expect(store.writes).toEqual([]);
+  });
+
+  it("reports DEPLOY_BACKWARD before it builds when the cloud runs a commit the checkout lacks", async () => {
+    const repo = platformRepo();
+    repo.git("checkout", "-q", "-b", "feature");
+    const feature = repo.commit("packages/admin-installer/jobs.ts", "jobs");
+    repo.git("checkout", "-q", "main");
+    const deployed = {
+      commit: feature,
+      dirty: false,
+      branch: "feature",
+      fingerprint: "f",
+      deployedAt: "",
+    };
+    const { store, platformRecord } = recordStore(deployed);
+    const calls: string[] = [];
+    const t = testContext(starkeepDirWith(INSTALLED_CONFIG), {
+      ...stubs(calls),
+      platformRecord,
+      platformCheckout: repo.dir,
+    } as never);
+    const failure = installCloudDataServerOp(t.ctx, {}, t.emit);
+    await expect(failure).rejects.toEqual(withCode("DEPLOY_BACKWARD"));
+    await expect(failure).rejects.toThrow(/edit packages\/admin-installer\/jobs\.ts/);
+    expect(calls).toEqual([]);
+    expect(store.writes).toEqual([]);
+  });
+
+  it("deploys anyway with allowBackward, says so, and records the new commit", async () => {
+    const repo = platformRepo();
+    repo.git("checkout", "-q", "-b", "feature");
+    const feature = repo.commit("packages/admin-installer/jobs.ts", "jobs");
+    repo.git("checkout", "-q", "main");
+    const { store, platformRecord } = recordStore({
+      commit: feature,
+      dirty: false,
+      branch: "feature",
+      fingerprint: "f",
+      deployedAt: "",
+    });
+    const calls: string[] = [];
+    const t = testContext(starkeepDirWith(INSTALLED_CONFIG), {
+      ...stubs(calls),
+      platformRecord,
+      platformCheckout: repo.dir,
+    } as never);
+    await installCloudDataServerOp(t.ctx, { allowBackward: true }, t.emit);
+    expect(calls.some((c) => c.startsWith("install"))).toBe(true);
+    expect(t.progress()).toContain("this deploy removes them (forced)");
+    expect(store.record?.commit).toBe(repo.git("rev-parse", "HEAD"));
+  });
+
+  it("still succeeds when the record cannot be written, and warns", async () => {
+    const repo = platformRepo();
+    const t = testContext(starkeepDirWith(INSTALLED_CONFIG), {
+      ...stubs([]),
+      platformRecord: {
+        read: async () => null,
+        write: async () => {
+          throw new Error("AccessDenied");
+        },
+      },
+      platformCheckout: repo.dir,
+    } as never);
+    await installCloudDataServerOp(t.ctx, {}, t.emit);
+    expect(t.progress()).toContain("Warning: could not record the deployed commit: AccessDenied");
   });
 });

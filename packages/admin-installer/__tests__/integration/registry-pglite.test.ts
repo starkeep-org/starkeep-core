@@ -447,3 +447,74 @@ describe("schema init on a fresh cluster", () => {
     ]);
   });
 });
+
+describe("the recorded source commit", () => {
+  let registry: Registry;
+  beforeEach(async () => {
+    await initSchema();
+    registry = createDsqlRegistry(connection);
+  });
+  afterEach(async () => {
+    await registry.close();
+  });
+
+  // The deploy guard reads what the last install recorded, whatever its surfaces.
+  it("records each install's commit and whether it had changes, and reads it back", async () => {
+    expect(await registry.deployedSource("photos")).toBeNull();
+    await registry.registerApp(photos, "photos", [], null, {
+      commit: "aaa",
+      dirty: false,
+      branch: "main",
+    });
+    expect(await registry.deployedSource("photos")).toEqual({
+      commit: "aaa",
+      dirty: false,
+      branch: null,
+    });
+    await registry.registerApp(photos, "photos", ["mobile"], null, {
+      commit: "bbb",
+      dirty: true,
+      branch: null,
+    });
+    expect(await registry.deployedSource("photos")).toMatchObject({ commit: "bbb", dirty: true });
+    // An install from a folder outside git records no commit.
+    await registry.registerApp(photos, "photos", ["web"], null, null);
+    expect(await registry.deployedSource("photos")).toBeNull();
+  });
+
+  it("schema init adds the source columns to a registry that predates them, and keeps the rows", async () => {
+    await registry.close();
+    await state.pg.exec(`DROP SCHEMA shared CASCADE`);
+    await state.pg.exec(`
+      CREATE SCHEMA shared;
+      CREATE TABLE shared.app_registry (
+        app_id text PRIMARY KEY,
+        version text NOT NULL,
+        name text,
+        installed_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        web_app boolean NOT NULL DEFAULT false,
+        mobile_app boolean NOT NULL DEFAULT false,
+        manifest text,
+        web_source_hash text
+      );
+      INSERT INTO shared.app_registry (app_id, version) VALUES ('photos', '1');
+    `);
+    registry = createDsqlRegistry(connection);
+    // Before the cloud data server's redeploy, the read finds no record and
+    // the install names the redeploy.
+    expect(await registry.deployedSource("photos")).toBeNull();
+    await expect(
+      registry.registerApp(photos, "photos", [], null, { commit: "a", dirty: false, branch: null }),
+    ).rejects.toThrow(/no source_commit column[\s\S]*starkeep update --platform/);
+    await initSchema();
+    await initSchema();
+    expect(await registry.deployedSource("photos")).toBeNull();
+    await registry.registerApp(photos, "photos", [], null, {
+      commit: "a",
+      dirty: false,
+      branch: null,
+    });
+    expect(await registry.deployedSource("photos")).toMatchObject({ commit: "a" });
+  });
+});
