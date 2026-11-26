@@ -376,7 +376,7 @@ Scenario: [CLOUD-SETUP-024] A cloud operator deploys the bootstrap stack with th
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [CLOUD-SETUP-025] A cloud operator on the stack outputs step gets a link to the Outputs tab and enters four values
   Given the cloud operator completed step 1 with the region "us-west-2" and the stack prefix "starkeep"
   When the cloud operator opens the stack outputs step
@@ -384,6 +384,7 @@ Scenario: [CLOUD-SETUP-025] A cloud operator on the stack outputs step gets a li
   And the step asks for CognitoDomain, IdentityPoolId, UserPoolClientId, and UserPoolId, and no other value
 ```
 
+- **Coverage:** `apps/admin-web/__tests__/cloud-setup-navigation.test.tsx` › "asks for the four outputs sign-in uses" (unit, local). No test checks the Outputs tab link.
 - **Notes:** the sign-in step needs CognitoDomain, because the sign-in happens on the managed login page at that domain.
 
 ```gherkin
@@ -459,7 +460,7 @@ Refusing an account without cloud operator rights at this step belongs to [users
 
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:none
 Scenario: [CLOUD-SETUP-031] The cloud operator signs in on the sign-in page with the emailed temporary password and sets a permanent one
   Given the cloud operator received a temporary password in the invitation email
   And the cloud setup wizard's stack outputs step is done
@@ -472,6 +473,7 @@ Scenario: [CLOUD-SETUP-031] The cloud operator signs in on the sign-in page with
   And no page of admin-web ever asked for the password
 ```
 
+- **Coverage:** The temporary password and the new-password page belong to the managed login page, which no test drives.
 - **Notes:** the sign-in page is Cognito's managed login page in Starkeep's style. Its own checks, such as a new password that does not match its confirmation, belong to that page.
 
 ```gherkin
@@ -502,16 +504,20 @@ Scenario: [CLOUD-SETUP-036] A cloud operator who entered only the four stack out
 
 ```gherkin
 @cloud
-@intent:confirmed @coverage:full
+@intent:confirmed @coverage:partial
 Scenario: [CLOUD-SETUP-037] A cloud operator whose bootstrap stack predates the device client or the sign-in domain is told to update the stack
-  Given the bootstrap stack predates the device client or the managed sign-in domain
-  When the cloud operator signs in on the wizard with an account that has cloud operator rights
+  Given the bootstrap stack predates the managed sign-in domain, so the stack has no CognitoDomain output
+  When the cloud operator opens the sign-in step, or runs "starkeep login --admin"
+  Then the cloud operator is told that the admin sign-in needs the CognitoDomain output, and that a bootstrap stack from before the managed sign-in page must be updated first with "scripts/update-bootstrap.sh --apply"
+  And no sign-in starts
+  Given the stack has the sign-in domain but predates the device client
+  When the cloud operator signs in and reaches the deploy step
   Then the deploy step says to update the bootstrap stack with a newly downloaded template and sign in again
   And "Deploy Starkeep cloud" stays disabled
   And the step offers "Look up again"
 ```
 
-- **Coverage:** `apps/admin-web/__tests__/cognito-outputs.test.ts` › "POST /api/cognito-outputs says to update the stack when the pool has no device client" and "says to update the stack when the pool has no managed login domain" (unit); `apps/admin-web/__tests__/cloud-setup-navigation.test.tsx` › "the outputs the wizard looks up blocks the deploy and says why when the lookup fails, then retries" and "signing in on the wizard completes the sign-in when the lookup fails, and says why on the deploy step" (unit, local).
+- **Coverage:** `packages/cli/__tests__/login.test.ts` › "asks for the stack outputs when the configuration names no sign-in page (ACCESS-210)" (unit, local); `apps/admin-web/__tests__/cognito-outputs.test.ts` › "says to update the stack when the pool has no device client" (unit). No test drives the sign-in step's message in the wizard.
 
 ```gherkin
 @local
@@ -608,7 +614,7 @@ Scenario: [CLOUD-SETUP-044] A cloud operator whose deploy fails sees the error a
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:none
 Scenario: [CLOUD-SETUP-045] A cloud operator whose sign-in expires mid-deploy signs in again and keeps the progress
   Given the cloud operator is signed in on the deploy step
   And the cloud operator's sign-in will expire before the deploy finishes
@@ -618,6 +624,8 @@ Scenario: [CLOUD-SETUP-045] A cloud operator whose sign-in expires mid-deploy si
   Then the wizard opens the sign-in step
   And after the sign-in the deploy step offers the deploy again
 ```
+
+- **Coverage:** No test runs a deploy whose sign-in expires.
 
 ```gherkin
 @local
@@ -742,7 +750,7 @@ Scenario: [CLOUD-SETUP-054] A cloud operator who reaches the deploy step without
 
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:none
 Scenario: [CLOUD-SETUP-055] A cloud operator who runs the install command without a sign-in is told to sign in first, and the command asks for no password
   Given this computer's cloud setup is done through the stack outputs step
   And no admin session is open on this computer, from admin-web or from "starkeep login --admin"
@@ -752,6 +760,7 @@ Scenario: [CLOUD-SETUP-055] A cloud operator who runs the install command withou
   And after "starkeep login --admin" the same command runs as the signed-in cloud operator
 ```
 
+- **Coverage:** No test runs an installer script without a session.
 - **Notes:** Implementation gap: the message repeats its instruction as "… or sign in in admin-web. Run `starkeep login --admin` first." (`packages/admin-installer/scripts/admin-credentials.ts`).
 
 ```gherkin
