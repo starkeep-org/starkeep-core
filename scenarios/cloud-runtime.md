@@ -292,6 +292,45 @@ Scenario: [CLOUD-RUN-016] A cloud operator jumps from the Data Server card to th
   Then the dashboard scrolls to the Costs section
 ```
 
+### Costs from the terminal
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:partial
+Scenario: [CLOUD-RUN-075] A cloud operator reads this month's cost by service from the terminal, with the projection and the totals
+  Given this month's cost report holds $1.20 for Lambda and $0.30 for S3
+  When the cloud operator runs "starkeep cloud cost"
+  Then the output says "Includes both Starkeep and non-Starkeep service costs."
+  And a table lists "Lambda" with $1.20 and then "S3" with $0.30 under "MONTH-TO-DATE", each with an amount under "PROJECTED"
+  And a "Total" row shows $1.50 month-to-date
+```
+
+- **Coverage:** `packages/cli/__tests__/cost-and-doctor.test.ts` › "cloud cost lists each service from the largest cost down, with the projection and the totals" (unit) checks the table. No test runs the command against a delivered report.
+- **Notes:** the terminal and the Costs section show the same projection, which `@starkeep/operator/costs` computes.
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:full
+Scenario: [CLOUD-RUN-076] A cloud operator reads a past month's cost from the terminal, without a projection
+  When the cloud operator runs "starkeep cloud cost --month 2026-10"
+  Then the table shows October 2026's cost by service and the total
+  And the table has no PROJECTED column
+  And "--month 2026-13" says "--month takes a month as YYYY-MM" and exits with status 2
+```
+
+- **Coverage:** `packages/cli/__tests__/cost-and-doctor.test.ts` › "cloud cost reads the month --month names, and refuses a malformed one with exit status 2" and "leaves the projection out for a past month" (unit).
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:full
+Scenario: [CLOUD-RUN-077] A cloud operator whose cost report has not arrived yet is told when it will
+  Given AWS has delivered no cost report for the month yet
+  When the cloud operator runs "starkeep cloud cost"
+  Then the output says "Cost report configured — data arrives within 24 hours."
+```
+
+- **Coverage:** `packages/cli/__tests__/cost-and-doctor.test.ts` › "cloud cost says the report has not arrived yet when there is none, or no billing bucket" (unit).
+
 ## Cost ceilings
 
 The cloud's data plane is pay-per-use, so a flood of requests turns into a larger AWS bill rather than an outage. The deployment's gateway caps the request rate to bound that cost.

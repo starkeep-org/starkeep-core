@@ -431,6 +431,133 @@ Scenario: [ACCESS-176] A cloud operator cannot delete an account that is still e
   And the row offers "Disable"
 ```
 
+### Managing accounts from the terminal
+
+The `starkeep user` commands do what the Cloud Users section does, as the cloud operator's admin session. Each command names an account by its email address.
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:full
+Scenario: [ACCESS-217] A cloud operator lists the deployment's accounts from the terminal, with each one's groups and state
+  Given the deployment has an account with cloud operator rights, a member, and an account whose invitation is still unused
+  When the cloud operator runs "starkeep user list"
+  Then the output lists each account's email under EMAIL, with "yes" under ADMIN and DATA for its groups
+  And the STATE column shows "invited" for the unused invitation, "disabled" for a disabled account, and "active" for the rest
+```
+
+- **Coverage:** `packages/cli/__tests__/user-commands.test.ts` › "starkeep user lists every account with its groups and state" (unit, Cognito stubbed).
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:full
+Scenario: [ACCESS-218] A cloud operator invites a person from the terminal into the groups named
+  When the cloud operator runs "starkeep user add lee@example.com --data"
+  Then the output says "Created lee@example.com. Cognito has emailed a temporary password."
+  And "starkeep user list" shows lee@example.com in the data group only, as invited
+```
+
+- **Coverage:** `packages/cli/__tests__/user-commands.test.ts` › "starkeep user invites a person into the groups named, and says Cognito emailed the password" (unit, Cognito stubbed).
+- **Notes:** "--admin" adds cloud operator rights. ACCESS-180 states what the invited person receives.
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:full
+Scenario: [ACCESS-219] A cloud operator who invites an address that is not an email is told to enter one
+  When the cloud operator runs "starkeep user add lee"
+  Then the output says "Enter the person's email address."
+  And the command exits with status 2
+```
+
+- **Coverage:** `packages/cli/__tests__/user-commands.test.ts` › "starkeep user refuses an address that is not an email with exit status 2" (unit, Cognito stubbed).
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:full
+Scenario: [ACCESS-220] A cloud operator gives an account cloud operator rights or a synced library from the terminal, and takes them away
+  When the cloud operator runs "starkeep user grant sam@example.com --admin"
+  Then the output says "Updated sam@example.com."
+  And "starkeep user list" shows sam@example.com with cloud operator rights
+  When the cloud operator runs "starkeep user revoke sam@example.com --data"
+  Then "starkeep user list" shows sam@example.com outside the data group
+```
+
+- **Coverage:** `packages/cli/__tests__/user-commands.test.ts` › "starkeep user grants and revokes a group by email" (unit, Cognito stubbed).
+- **Notes:** a grant or revoke without "--admin" or "--data" names both flags and exits with status 2.
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:full
+Scenario: [ACCESS-221] The last enabled cloud operator cannot take away their own cloud operator rights from the terminal
+  Given the cloud operator holds the only enabled account with cloud operator rights
+  When the cloud operator runs "starkeep user revoke <own email> --admin"
+  Then the output says "This is the last admin. Make someone else an admin first."
+  And the account keeps its cloud operator rights
+  And the command exits with status 1
+```
+
+- **Coverage:** `packages/cli/__tests__/user-commands.test.ts` › "starkeep user refuses to take the last enabled admin's rights away, and changes nothing" (unit, Cognito stubbed).
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:full
+Scenario: [ACCESS-222] A cloud operator cannot disable their own account from the terminal
+  When the cloud operator runs "starkeep user disable <own email>"
+  Then the output says "You cannot disable your own account."
+  And the account stays enabled
+  And the command exits with status 1
+```
+
+- **Coverage:** `packages/cli/__tests__/user-commands.test.ts` › "starkeep user refuses to disable the signed-in admin's own account" (unit, Cognito stubbed).
+- **Notes:** disabling the last enabled account with cloud operator rights is refused with the last-admin message, as in ACCESS-020.
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:full
+Scenario: [ACCESS-223] A cloud operator disables a member from the terminal, which signs the member out of every device
+  When the cloud operator runs "starkeep user disable sam@example.com"
+  Then the output says "Disabled sam@example.com and signed them out of every device."
+  And "starkeep user list" shows the account as disabled
+```
+
+- **Coverage:** `packages/cli/__tests__/user-commands.test.ts` › "starkeep user disables a member and signs them out of every device" (unit, Cognito stubbed).
+- **Notes:** ACCESS-017 states what the member sees. "starkeep user enable" lets the account sign in again and says "Enabled <email>. They sign in again on each device."
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:full
+Scenario: [ACCESS-224] A cloud operator signs a member out of every device from the terminal, and the account stays
+  When the cloud operator runs "starkeep user sign-out sam@example.com"
+  Then the output says "Signed sam@example.com out of every device. Each one stops syncing within 15 minutes and asks them to sign in again."
+  And "starkeep user list" still shows the account as active
+```
+
+- **Coverage:** `packages/cli/__tests__/user-commands.test.ts` › "starkeep user signs a member out of every device and keeps the account" (unit, Cognito stubbed).
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:full
+Scenario: [ACCESS-225] A cloud operator resets a password from the terminal and sees the temporary password once
+  When the cloud operator runs "starkeep user reset-password sam@example.com"
+  Then the output says "New temporary password for sam@example.com: <password>. Send it to them; they choose their own at their next sign-in. It is not shown again."
+  And the password has sixteen letters and digits with no 0, O, 1, l, or I
+  And no later command shows the password again
+```
+
+- **Coverage:** `packages/cli/__tests__/user-commands.test.ts` › "starkeep user shows a reset's temporary password once, and sets it as temporary" (unit, Cognito stubbed).
+- **Notes:** ACCESS-024 and ACCESS-025 state what the member sees after a reset.
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:full
+Scenario: [ACCESS-226] A cloud operator who names an email no account has is told so
+  When the cloud operator runs "starkeep user disable nobody@example.com"
+  Then the output says "No account has the email or username \"nobody@example.com\"."
+  And the command exits with status 2
+```
+
+- **Coverage:** `packages/cli/__tests__/user-commands.test.ts` › "starkeep user says no account has an email it does not know, with exit status 2" (unit, Cognito stubbed).
+- **Notes:** the terminal has no command that deletes an account. ACCESS-027's deletion also deletes the member's cloud library, which the terminal cannot do yet.
+
 ## Signing in to cloud apps
 
 A member signs in to a cloud app on the deployment's managed login page. The platform's sign-in routes start and finish the sign-in, and each app keeps its session in cookies scoped to the app.
