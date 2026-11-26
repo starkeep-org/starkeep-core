@@ -833,9 +833,9 @@ Scenario: [ACCESS-195] A cloud operator who signs in from the terminal is signed
 ```gherkin
 @local @cloud
 @intent:confirmed @coverage:none
-Scenario: [ACCESS-196] A cloud operator who signs in in admin-web can run the installer scripts in the terminal without signing in again
+Scenario: [ACCESS-196] A cloud operator who signs in in admin-web can run cloud commands in the terminal without signing in again
   Given the cloud operator signed in on admin-web's sign-in page
-  When the cloud operator runs an installer script on the same computer, such as the cloud data server install
+  When the cloud operator runs "starkeep install dice --cloud" or an installer script on the same computer
   Then the command acts as the signed-in cloud operator
   And the command asks for no sign-in
 ```

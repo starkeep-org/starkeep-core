@@ -4,7 +4,7 @@ This file specifies an app's own data on Starkeep: the tables an app declares, t
 
 Related files:
 
-- [app-lifecycle.md](app-lifecycle.md): declaring tables and jobs in the manifest, the install consent dialog's jobs panel, tables added at update, and app data kept across uninstall and reinstall, including Delete data and `cli:delete-app-data`.
+- [app-lifecycle.md](app-lifecycle.md): declaring tables and jobs in the manifest, the install consent dialog's jobs panel, tables added at update, and app data kept across uninstall and reinstall, including Delete data and `starkeep uninstall --cloud --delete-data`.
 - [users-and-access.md](users-and-access.md): which member's rows an app session reaches, outside-client tokens and their modes, and the consent and connections pages' host.
 - [shared-data.md](shared-data.md): shared records, labels, and how the records, metadata, and label routes apply the query grammar.
 - [sync.md](sync.md): how an app's rows reach the member's other devices and the cloud.
@@ -1926,4 +1926,4 @@ Scenario: [APP-DATA-155] After a cloud uninstall and reinstall, the app finds no
 
 ## Kept app data
 
-An app's rows and private files outlive an uninstall, on a computer and in the cloud. These behaviors belong to [app-lifecycle.md](app-lifecycle.md): a reinstall bringing kept rows back (APP-LIFE-142 on a computer, APP-LIFE-155 in the cloud), Delete data and whether the cloud holds a copy (APP-LIFE-146), `cli:delete-app-data` (APP-LIFE-160), and an update that adds tables and indexes (APP-LIFE-076). How rows reach the member's other devices belongs to [sync.md](sync.md).
+An app's rows and private files outlive an uninstall, on a computer and in the cloud. These behaviors belong to [app-lifecycle.md](app-lifecycle.md): a reinstall bringing kept rows back (APP-LIFE-142 on a computer, APP-LIFE-155 in the cloud), Delete data and whether the cloud holds a copy (APP-LIFE-146), `starkeep uninstall --cloud --delete-data` (APP-LIFE-160), and an update that adds tables and indexes (APP-LIFE-076). How rows reach the member's other devices belongs to [sync.md](sync.md).

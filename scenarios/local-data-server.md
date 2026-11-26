@@ -512,6 +512,42 @@ Scenario: [LDS-028] A local operator who presses Join Existing Cloud sees the jo
   And after the local operator joins and reloads the page, the Cloud section shows the section under a "This machine" heading
 ```
 
+### Joining a cloud from the terminal
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [LDS-119] A local operator joins an existing cloud from the terminal and signs the computer in to sync
+  Given the computer has neither deployed nor joined a cloud
+  When the local operator runs "starkeep setup --join https://d123.cloudfront.net"
+  Then the output says "This computer joins https://d123.cloudfront.net. Restarting the data server…"
+  And the sign-in page opens for the computer's sync sign-in
+  When the local operator signs in there
+  Then the output ends with "This computer syncs with https://d123.cloudfront.net."
+  And the This Machine section shows the joined cloud and the computer signed in
+```
+
+- **Notes:** a data server that is not running starts first. The sync sign-in itself belongs to [users-and-access.md](users-and-access.md) (ACCESS-211).
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [LDS-120] A local operator who gives a join address that is not https is told the form it takes
+  When the local operator runs "starkeep setup --join http://d123.cloudfront.net"
+  Then the output says "--join takes the cloud's https address, such as https://d123.cloudfront.net."
+  And the command exits with status 2, and the computer joins no cloud
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [LDS-121] A local operator whose data server does not come back after the join is told where to look
+  Given the data server fails to start again after it records the cloud's address
+  When the local operator runs "starkeep setup --join https://d123.cloudfront.net"
+  Then the output says "The data server did not come back after the restart. Run `starkeep logs data-server`."
+  And the command exits with status 1
+```
+
 ## Library ownership
 
 - [LDS-029] The first sign-in binds this machine's library to the signed-in member: see ACCESS-077 in [users-and-access.md](users-and-access.md).
