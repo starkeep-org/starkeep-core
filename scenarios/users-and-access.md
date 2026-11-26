@@ -1,6 +1,6 @@
 # Users and access
 
-This file specifies who may do what on a Starkeep deployment, for members, cloud operators, local operators, and app developers. A cloud operator manages accounts and roles in admin-web's cloud sections. A member signs in to cloud apps in a browser and signs in to phone apps. A local operator signs a computer in through admin-web. An app developer guards an app's own routes, signs the app's requests to the data servers, and relies on the type grants an install gives the app. The scope covers cloud operator rights and the data group, account management, every sign-in surface, the cut that keeps members' data apart, app credentials and type grants, outside-client tokens and OAuth for MCP clients, and the rule that local surfaces stay on this machine.
+This file specifies who may do what on a Starkeep deployment, for members, cloud operators, local operators, and app developers. A cloud operator manages accounts and roles in admin-web's cloud sections, and signs in once on a computer for admin-web, the `starkeep` command, and the installer scripts. A member signs in to cloud apps in a browser and signs in to phone apps. A local operator signs a computer in through admin-web. An app developer guards an app's own routes, signs the app's requests to the data servers, and relies on the type grants an install gives the app. The scope covers cloud operator rights and the data group, account management, every sign-in surface, the cut that keeps members' data apart, app credentials and type grants, outside-client tokens and OAuth for MCP clients, and the rule that local surfaces stay on this machine.
 
 Related files:
 
@@ -33,12 +33,12 @@ Scenario: [ACCESS-001] A member uses every cloud app installed on the deployment
 @intent:confirmed
 Scenario: [ACCESS-002] A local operator whose account lacks cloud operator rights cannot sign in to admin-web
   Given the local operator holds an account that can use apps but has no cloud operator rights
-  When the local operator signs in to admin-web's dashboard with the account's email and password
-  Then admin-web refuses the sign-in with "This account has no admin rights on this cloud. Ask an admin to make you one."
+  When the local operator signs in from admin-web's dashboard on the sign-in page with the account's email and password
+  Then the browser returns to admin-web, which shows "Sign-in did not finish: This account has no admin rights on this cloud. Ask an admin to make you one."
   And admin-web shows none of its cloud sections to the local operator
 ```
 
-- **Notes:** an account in no group at all meets the same refusal. ACCESS-194 states the same refusal at the cloud setup wizard's sign-in step.
+- **Notes:** an account in no group at all meets the same refusal. ACCESS-194 states the same refusal at the cloud setup wizard's sign-in step, and ACCESS-200 in the terminal.
 
 ```gherkin
 @local
@@ -46,8 +46,8 @@ Scenario: [ACCESS-002] A local operator whose account lacks cloud operator right
 Scenario: [ACCESS-194] A cloud operator who signs in at the setup wizard with an account that lacks cloud operator rights cannot start the deploy
   Given the cloud operator holds an account that can use apps but has no cloud operator rights
   And the cloud setup wizard's stack outputs step is done
-  When the cloud operator signs in at the wizard's sign-in step with that account's email and password
-  Then the wizard refuses the sign-in with "This account has no admin rights on this cloud. Ask an admin to make you one."
+  When the cloud operator clicks "Open the sign-in page" on the wizard's sign-in step and signs in there with that account
+  Then the browser returns to the wizard, which shows "Sign-in did not finish: This account has no admin rights on this cloud. Ask an admin to make you one."
   And the cloud operator cannot start the deploy
 ```
 
@@ -391,7 +391,7 @@ Scenario: [ACCESS-185] A cloud operator resets a member's password and the accou
 Scenario: [ACCESS-025] A local operator who signs a computer in after a password reset chooses a new password
   Given a cloud operator reset the password of the local operator's account and sent the local operator the temporary password
   When the local operator signs a computer in with the temporary password
-  Then admin-web asks the local operator to choose a new password
+  Then the sign-in page asks the local operator to choose a new password
   And the local operator signs in with the new password
 ```
 
@@ -808,20 +808,202 @@ Scenario: [ACCESS-061] An app developer finds the session routes refusing a fore
   And a refresh or sign-out from either of the deployment's own hosts succeeds
 ```
 
-## Signing in a computer
+## The cloud operator's sign-in on a computer
 
-A local operator signs a computer in through admin-web's This Machine section. The computer's local data server keeps the sign-in and presents it on every call to the cloud. Joining a cloud by address belongs to [local-data-server.md](local-data-server.md).
+A cloud operator signs in once on a computer, on the managed login page in the browser. admin-web, the `starkeep` command, and the installer scripts on that computer share the one sign-in. No Starkeep page or command ever asks for the password.
 
 ### Signing in and out
 
 ```gherkin
 @local @cloud
 @intent:confirmed
-Scenario: [ACCESS-062] A local operator signs a joined computer in with an email and password
+Scenario: [ACCESS-195] A cloud operator who signs in from the terminal is signed in to admin-web too, without typing a password into Starkeep
+  Given this computer's cloud setup is done through the stack outputs step
+  When the cloud operator runs "starkeep login --admin"
+  Then the browser opens the sign-in page, and the terminal says "Sign in on this page; it returns here when you finish:" with the page's address
+  When the cloud operator signs in on the page with an account that has cloud operator rights
+  Then the browser tab says "You can close this tab and return to the terminal."
+  And the terminal says "Signed in as the admin (<email>). admin-web uses the same sign-in."
+  And admin-web's cloud sections then open without a sign-in
+```
+
+- **Notes:** the terminal never reads a password. The sign-in page asks for a new password at an account's first sign-in.
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [ACCESS-196] A cloud operator who signs in in admin-web can run the installer scripts in the terminal without signing in again
+  Given the cloud operator signed in on admin-web's sign-in page
+  When the cloud operator runs an installer script on the same computer, such as the cloud data server install
+  Then the command acts as the signed-in cloud operator
+  And the command asks for no sign-in
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [ACCESS-197] A cloud operator sees in the status who is signed in as the admin and until when
+  Given the cloud operator signed in as the admin on this computer
+  When the cloud operator runs "starkeep status"
+  Then the output shows "ADMIN     signed in as <email> until <time> unless used"
+```
+
+- **Notes:** a computer whose admin session ended shows "ADMIN signed out". A computer that joined no cloud shows no ADMIN line.
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [ACCESS-198] A cloud operator who leaves the computer's admin session unused for twelve hours must sign in again
+  Given the cloud operator signed in as the admin on this computer
+  And twelve hours passed with no cloud action in admin-web or the terminal
+  When the cloud operator starts a cloud action
+  Then the cloud operator is told "The admin session ended after 12 hours without use. Sign in again."
+  And each cloud action within twelve hours of the last one keeps the session going
+```
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [ACCESS-199] A cloud operator who signs out in the terminal is signed out of admin-web too
+  Given the cloud operator is signed in as the admin on this computer
+  When the cloud operator runs "starkeep logout --admin"
+  Then the output says "Signed out as the admin."
+  And admin-web's cloud sections then ask the cloud operator to sign in
+  And the old sign-in no longer works anywhere
+```
+
+- **Notes:** when no admin session is open, the output says "No admin session was open here."
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [ACCESS-200] A local operator whose account lacks cloud operator rights cannot sign in as the admin from the terminal
+  Given the local operator holds an account that can use apps but has no cloud operator rights
+  When the local operator runs "starkeep login --admin" and signs in on the page with that account
+  Then the terminal says "This account has no admin rights on this cloud. Ask an admin to make you one."
+  And the command exits with status 1, and no admin session opens on the computer
+```
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [ACCESS-201] A cloud operator whose admin rights were removed must sign in with an account that still has them
+  Given the cloud operator signed in as the admin on this computer
+  And another cloud operator then removed the account's cloud operator rights
+  When the cloud operator starts a cloud action on this computer
+  Then the cloud operator is told "This account is no longer an admin of this cloud."
+  And the action does not run
+```
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [ACCESS-202] A cloud operator whose account was signed out of all devices must sign in again on the computer
+  Given the cloud operator signed in as the admin on this computer
+  And another cloud operator signed the account out of all devices
+  When the cloud operator starts a cloud action on this computer
+  Then the cloud operator is told "The admin session was ended at the pool. Sign in again."
+  And the action does not run
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [ACCESS-203] A cloud operator keeps the computer's admin session out of reach of the computer's other accounts
+  Given the cloud operator signed in as the admin on a computer
+  When the cloud operator looks for the admin session from another account on the same computer
+  Then the other account cannot read the admin session file
+```
+
+### Sign-in problems
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [ACCESS-204] A cloud operator on a computer with no browser signs in through a forwarded port
+  Given the cloud operator reaches the computer over SSH
+  When the cloud operator runs "starkeep login --admin --no-browser"
+  Then the terminal prints the sign-in page's address and opens no browser
+  When the cloud operator forwards the computer's port 47615 to a machine with a browser, opens the address there, and signs in
+  Then the terminal says "Signed in as the admin (<email>). admin-web uses the same sign-in."
+```
+
+- **Notes:** the sign-in page returns to a fixed loopback address, so the browser must reach port 47615 of the computer that ran the command.
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [ACCESS-205] A cloud operator who does not finish the sign-in within five minutes is told the time ran out
+  When the cloud operator runs "starkeep login --admin" and does not finish the sign-in within five minutes
+  Then the terminal says "No sign-in arrived before the time ran out."
+  And the command exits with status 1, and no admin session opens
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [ACCESS-206] A cloud operator whose sign-in port is taken is told to stop the program that holds it
+  Given another program on the computer listens on port 47615
+  When the cloud operator runs "starkeep login --admin"
+  Then the terminal says "Port 47615 is in use, so the sign-in cannot return here. Stop the program that holds it and try again."
+  And no browser opens
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [ACCESS-207] A cloud operator whose sign-in page reports an error sees it in the terminal
+  When the cloud operator runs "starkeep login --admin" and the sign-in page returns an error, such as a cancelled sign-in
+  Then the terminal says "The sign-in page answered: <error>"
+  And no admin session opens
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [ACCESS-208] A cloud operator whose admin-web runs on another port is told to sign in from the terminal
+  Given admin-web runs on a port other than 3000
+  When the cloud operator opens a sign-in in admin-web
+  Then admin-web says "Browser sign-in returns to admin-web on port 3000, and this admin-web runs on port <port>. Sign in with `starkeep login` in a terminal instead."
+  And admin-web offers no sign-in button
+```
+
+- **Notes:** the sign-in page returns only to addresses the bootstrap stack lists, which name port 3000.
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [ACCESS-209] A cloud operator whose sign-in in admin-web fails sees why after the browser returns
+  When the cloud operator signs in from admin-web and the sign-in fails, such as with an account that lacks cloud operator rights
+  Then the browser returns to admin-web, which shows "Sign-in did not finish: <reason>" with a "Dismiss" button
+  And a reload of the page does not show the notice again
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [ACCESS-210] A cloud operator who signs in from the terminal before the stack outputs are recorded is told to finish that step
+  Given this computer's configuration holds no stack outputs
+  When the cloud operator runs "starkeep login --admin"
+  Then the terminal says "This computer has no cloud setup with a sign-in page yet. Finish the Stack outputs step in admin-web first."
+```
+
+## Signing in a computer
+
+A local operator signs a computer in through admin-web's This Machine section or with `starkeep login --sync`, on the sign-in page in the browser. The computer's local data server keeps the sign-in and presents it on every call to the cloud. Joining a cloud by address belongs to [local-data-server.md](local-data-server.md).
+
+### Signing in and out
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [ACCESS-062] A local operator signs a joined computer in on the sign-in page
   Given the local operator's computer has joined the deployment by its address
-  When the local operator enters an account's email and password in admin-web's This Machine section
-  Then the This Machine section shows the computer signed in as the account's email
+  When the local operator clicks "Sign in to sync" in admin-web's This Machine section
+  And the local operator signs in on the sign-in page that opens with an account's email and password
+  Then the browser returns to admin-web, and the This Machine section shows the computer signed in as the account's email
   And the computer starts syncing the account's library
+  And no page of admin-web asked for the password
 ```
 
 ```gherkin
@@ -838,23 +1020,22 @@ Scenario: [ACCESS-063] A local operator must join a cloud before signing a compu
 ```gherkin
 @local
 @intent:confirmed
-Scenario: [ACCESS-064] A local operator who enters a wrong password sees that it is wrong
+Scenario: [ACCESS-064] A local operator who enters a wrong password stays on the sign-in page, and the computer stays signed out
   Given the local operator's computer has joined a cloud
-  When the local operator signs the computer in with a wrong password
-  Then the This Machine section shows "Incorrect username or password."
-  And the computer stays signed out
+  When the local operator clicks "Sign in to sync" and enters a wrong password on the sign-in page
+  Then the sign-in page says the password is wrong and asks again
+  And the This Machine section still shows the computer signed out
 ```
 
 ```gherkin
 @local
 @intent:confirmed
-Scenario: [ACCESS-065] A local operator who signs in with a temporary password chooses a new password
+Scenario: [ACCESS-065] A local operator who signs in with a temporary password chooses a new password on the sign-in page
   Given a cloud operator created an account, and the local operator holds the emailed temporary password
-  When the local operator signs the computer in with the temporary password
-  Then the This Machine section asks the local operator to choose a new password
+  When the local operator clicks "Sign in to sync" and signs in on the sign-in page with the temporary password
+  Then the sign-in page asks the local operator to choose a new password
   When the local operator enters a new password that the pool's policy accepts
-  Then the computer signs in
-  And a password that breaks the policy shows the pool's explanation instead
+  Then the browser returns to admin-web, and the computer signs in
 ```
 
 ```gherkin
@@ -923,8 +1104,58 @@ Scenario: [ACCESS-071] A local operator signs a computer in to the cloud it join
 Scenario: [ACCESS-072] A local operator signs a computer in given only the cloud's address
   Given the local operator knows the cloud's gateway address or its CloudFront address
   When the local operator joins the computer to the cloud by that address, holding no credential
-  Then the local operator can sign the computer in with an email and password and no further settings
+  Then the local operator can sign the computer in on the sign-in page with no further settings
   And on a cloud with no device sign-in set up, the local operator sees that device sign-in is not set up
+```
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [ACCESS-211] A local operator signs a joined computer in to sync from the terminal
+  Given the local operator's computer has joined the deployment by its address
+  When the local operator runs "starkeep login --sync" and signs in on the sign-in page that opens
+  Then the terminal says "This computer syncs as <email>."
+  And admin-web's This Machine section shows the computer signed in as that email
+```
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [ACCESS-212] A local operator signs a computer out of sync from the terminal
+  Given the local operator's computer is signed in and syncing
+  When the local operator runs "starkeep logout --sync"
+  Then the terminal says "This computer no longer syncs."
+  And admin-web's This Machine section shows the computer signed out
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [ACCESS-213] A local operator whose computer joined no cloud is told to join one before a terminal sign-in
+  Given the local operator's computer has not joined any cloud
+  When the local operator runs "starkeep login --sync"
+  Then the terminal says "This computer has joined no cloud. Join one in admin-web first."
+  And no browser opens
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [ACCESS-214] A local operator who names neither sign-in is told to pick one
+  When the local operator runs "starkeep login" without "--admin" or "--sync"
+  Then the terminal says "Name what to sign in to: --admin or --sync."
+  And the command exits with status 2
+```
+
+```gherkin
+@local
+@intent:confirmed
+Scenario: [ACCESS-215] A local operator finds that a program holding an account's password cannot sign the computer in with it
+  Given the local operator's computer has joined a cloud
+  And a program on the computer holds an account's email and password
+  When the program sends them to the computer's local data server to sign it in
+  Then the program receives "Send either { code, codeVerifier, redirectUri } from the sign-in page or { refreshToken }"
+  And the This Machine section still shows the computer signed out
 ```
 
 ### When the pool is out of reach
@@ -2096,4 +2327,14 @@ Scenario: [ACCESS-173] A local operator who opens another site's page keeps the 
   When the local operator opens a web page that posts to, or reads, the local data server's watched-folder routes
   Then the page's request fails as forbidden
   And the local operator's watched folders stay as they were
+```
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [ACCESS-216] A cloud operator who opens another site's page while signed in finds admin-web refusing to act as the cloud operator for it
+  Given the cloud operator is signed in as the admin on this computer
+  When the cloud operator opens a page from another site that sends admin-web a cloud request, such as one that invites a user
+  Then the page receives "This request must come from admin-web's own page."
+  And nothing changes in the deployment
 ```
