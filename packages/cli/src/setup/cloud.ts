@@ -63,6 +63,11 @@ export interface CloudSetupDeps {
   cloudAppIds(io: Io): Promise<string[] | null>;
   /** This computer's sync state, as the data server reports it, or null when it is down. */
   syncState(): Promise<string | null>;
+  /**
+   * The cloud address the running data server read when it started: null for
+   * none, undefined when the data server is down.
+   */
+  dataServerCloudUrl(): Promise<string | null | undefined>;
   /** Restart the data server, or start it, and start Drive. */
   startLocalServices(io: Io, restartDataServer: boolean): Promise<void>;
   installApps(io: Io, apps: string[], yes: boolean): Promise<void>;
@@ -276,8 +281,15 @@ export async function setupCloud(
     done.push("drive");
   }
 
-  // Phase 7. The data server reads the cloud's address only at start.
-  await deps.startLocalServices(io, done.includes("cloud-data-server") || done.includes("drive"));
+  // Phase 7. The data server reads the cloud's address only at start. A run
+  // that installed nothing still restarts a data server that started before
+  // the cloud existed, such as when the terminal closed before this phase.
+  const running = await deps.dataServerCloudUrl();
+  const stale = running !== undefined && running !== readConfigSeeded().apiGatewayUrl;
+  await deps.startLocalServices(
+    io,
+    done.includes("cloud-data-server") || done.includes("drive") || stale,
+  );
   done.push("local-services");
 
   // Phase 8.
