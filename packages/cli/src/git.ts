@@ -64,6 +64,15 @@ export function aheadBehind(root: string): { ahead: number; behind: number } {
   return { ahead: ahead ?? 0, behind: behind ?? 0 };
 }
 
+/**
+ * A file's text at `rev`, such as the fetched upstream `@{u}`, or null when the
+ * commit does not hold it. `path` is relative to the repository's root.
+ */
+export function fileAt(root: string, rev: string, path: string): string | null {
+  const r = spawnSync("git", ["show", `${rev}:${path}`], { cwd: root, encoding: "utf8" });
+  return r.status === 0 ? (r.stdout ?? "") : null;
+}
+
 export function pullFastForward(root: string): void {
   const r = git(root, ["pull", "--ff-only", "--quiet"]);
   if (!r.ok) throw new Error(`git pull --ff-only failed in ${root}: ${r.err}`);

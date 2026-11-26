@@ -129,9 +129,17 @@ export type FolderManifest =
 export function readFolderManifest(dir: string): FolderManifest {
   const manifestPath = join(dir, MANIFEST_FILE);
   if (!existsSync(manifestPath)) return { kind: "missing" };
+  return parseManifestText(readFileSync(manifestPath, "utf-8"));
+}
+
+/**
+ * Parse and validate a manifest's text, such as one read from a git commit
+ * before the folder holds it.
+ */
+export function parseManifestText(text: string): Exclude<FolderManifest, { kind: "missing" }> {
   let raw: unknown;
   try {
-    raw = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    raw = JSON.parse(text);
   } catch (err) {
     return { kind: "invalid", error: err instanceof Error ? err.message : String(err) };
   }
