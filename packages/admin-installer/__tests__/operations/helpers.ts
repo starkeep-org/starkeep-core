@@ -2,9 +2,10 @@
  * A throwaway Starkeep folder and an operation context whose AWS calls are
  * stand-ins, for the operation tests.
  */
-import { cpSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { rmSync } from "node:fs";
 import { afterEach, expect } from "vitest";
 import { DEFAULT_APPS_DIR } from "../../src/app-discovery.js";
@@ -98,6 +99,8 @@ export function testContext(
       },
       overrides: {
         sts: { send: async () => ({ Account: "999999999999" }) } as never,
+        platformRecord: { read: async () => null, write: async () => {} },
+        deployedAppSource: async () => null,
         ...overrides,
       },
     },
@@ -107,4 +110,33 @@ export function testContext(
 /** An `expect(...).rejects` matcher input for an OperationError with `code`. */
 export function withCode(code: string) {
   return expect.objectContaining({ name: "OperationError", code });
+}
+
+/**
+ * A git repository shaped like a platform checkout, with `commit` to add a
+ * commit and `branch` to work on another branch.
+ */
+export function platformRepo(): {
+  dir: string;
+  git: (...args: string[]) => string;
+  commit: (file: string, text: string) => string;
+} {
+  const dir = mkdtempSync(join(tmpdir(), "op-test-repo-"));
+  dirs.push(dir);
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  git("init", "-q", "-b", "main");
+  const commit = (file: string, text: string) => {
+    mkdirSync(dirname(join(dir, file)), { recursive: true });
+    writeFileSync(join(dir, file), text);
+    git("add", file);
+    git("commit", "-q", "-m", `edit ${file}`);
+    return git("rev-parse", "HEAD");
+  };
+  commit("pnpm-lock.yaml", "lock");
+  commit("packages/admin-installer/index.ts", "one");
+  return { dir, git, commit };
 }

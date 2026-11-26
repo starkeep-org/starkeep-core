@@ -22,7 +22,10 @@
     "./operations/delete-app-data": "./src/operations/delete-app-data.ts",
     "./operations/install-local-app": "./src/operations/install-local-app.ts",
     "./operations/errors": "./src/operations/errors.ts",
-    "./platform-env": "./src/platform-env.ts"
+    "./platform-env": "./src/platform-env.ts",
+    "./deployed-source": "./src/deployed-source.ts",
+    "./operations/deploy-guard": "./src/operations/deploy-guard.ts",
+    "./drive-manifest": "./src/drive-manifest.ts"
   },
   "scripts": {
     "cli:install-cloud-data-server": "tsx scripts/cli-install-cloud-data-server.ts",

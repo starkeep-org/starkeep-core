@@ -28,7 +28,9 @@ export type OperationErrorCode =
   /** The operation deletes or changes something that needs a confirmation it did not get. */
   | "NOT_CONFIRMED"
   /** The deployment's state forbids the operation, such as deleting an installed app's data. */
-  | "REFUSED";
+  | "REFUSED"
+  /** The cloud runs patches the checkout lacks, so the deploy would remove them. */
+  | "DEPLOY_BACKWARD";
 
 export class OperationError extends Error {
   constructor(

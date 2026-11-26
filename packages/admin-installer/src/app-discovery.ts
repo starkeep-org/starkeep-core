@@ -378,21 +378,40 @@ export function sourcePaths(appDir: string): string[] {
  * folder's repository, or a workspace dependency cannot be found.
  */
 export function sourceFingerprint(appDir: string): string | null {
-  const run = (cwd: string, args: string[], env?: NodeJS.ProcessEnv) =>
-    execFileSync("git", ["-C", cwd, ...args], {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "ignore"],
-      ...(env ? { env } : {}),
-    }).trim();
-  let scratch: string | null = null;
   try {
-    const top = realpathSync(run(appDir, ["rev-parse", "--show-toplevel"]));
+    const top = realpathSync(git(appDir, ["rev-parse", "--show-toplevel"]));
     const paths = sourcePaths(appDir);
     if (paths.length === 0) return null;
     const rels = paths.map((p) => relative(top, p).split(sep).join("/"));
     if (rels.some((r) => r.startsWith("..") || isAbsolute(r))) return null;
+    return treeFingerprint(top, rels);
+  } catch {
+    return null;
+  }
+}
 
-    const gitPath = (name: string) => resolve(top, run(top, ["rev-parse", "--git-path", name]));
+function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
+  return execFileSync("git", ["-C", cwd, ...args], {
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "ignore"],
+    ...(env ? { env } : {}),
+  }).trim();
+}
+
+/**
+ * A fingerprint of the files under `rels`, paths relative to the working tree
+ * `top`, as the working tree holds them: every file git tracks or would
+ * track, committed or not. {@link sourceFingerprint} computes it for an app's
+ * source paths, and the platform's deployed record for the platform's.
+ *
+ * git hashes the working tree into a throwaway index and object store, so
+ * the repository's own index and objects stay untouched. Throws when git
+ * fails.
+ */
+export function treeFingerprint(top: string, rels: string[]): string {
+  let scratch: string | null = null;
+  try {
+    const gitPath = (name: string) => resolve(top, git(top, ["rev-parse", "--git-path", name]));
     scratch = mkdtempSync(join(tmpdir(), "starkeep-source-"));
     const index = join(scratch, "index");
     // A copy of the real index, so git rehashes only files that changed. git
@@ -414,20 +433,18 @@ export function sourceFingerprint(appDir: string): string | null {
       GIT_OBJECT_DIRECTORY: objects,
       GIT_ALTERNATE_OBJECT_DIRECTORIES: gitPath("objects"),
     };
-    run(top, ["add", "--all", "--", ...rels.map((r) => (r === "" ? "." : r))], env);
-    const tree = run(top, ["write-tree"], env);
+    git(top, ["add", "--all", "--", ...rels.map((r) => (r === "" ? "." : r))], env);
+    const tree = git(top, ["write-tree"], env);
     const lines = rels.map((r) => {
       let id: string;
       try {
-        id = run(top, ["rev-parse", `${tree}:${r}`], env);
+        id = git(top, ["rev-parse", `${tree}:${r}`], env);
       } catch {
         id = "-";
       }
       return `${id} ${r}`;
     });
     return createHash("sha256").update(lines.join("\n")).digest("hex");
-  } catch {
-    return null;
   } finally {
     if (scratch !== null) rmSync(scratch, { recursive: true, force: true });
   }

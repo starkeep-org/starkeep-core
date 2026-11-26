@@ -21,6 +21,16 @@ import {
 } from "./config";
 import { OperationError } from "./errors";
 import { runCommand, workspaceRoot } from "./steps";
+import {
+  platformFingerprint,
+  readPlatformDeployRecord,
+  sourceCommitOf,
+  writePlatformDeployRecord,
+  type PlatformDeployRecord,
+} from "../deployed-source";
+import { roleChain } from "../session";
+import { assertNotBackward, comparisonNote, compareWithDeployed } from "./deploy-guard";
+import type { OperationContext } from "./context";
 
 export interface InstallCloudDataServerInput {
   /**
@@ -30,6 +40,11 @@ export interface InstallCloudDataServerInput {
    * a real install cannot pick it up by accident.
    */
   ephemeral?: boolean;
+  /**
+   * Deploy even when the cloud runs patches this checkout lacks
+   * (`deploy-guard.ts`). The CLI's `--force` sets it.
+   */
+  allowBackward?: boolean;
 }
 
 export interface InstallCloudDataServerResult {
@@ -39,6 +54,26 @@ export interface InstallCloudDataServerResult {
   s3Bucket: string;
   auroraEndpoint: string;
   customDomain?: CloudDataServerInstallOutputs["customDomain"];
+}
+
+/** The record's store: SSM through Manager, unless a test passes its own. */
+function platformRecordStore(
+  ctx: OperationContext,
+  opts: { stackPrefix: string; region: string; managerRoleArn: string },
+): NonNullable<NonNullable<OperationContext["overrides"]>["platformRecord"]> {
+  if (ctx.overrides?.platformRecord) return ctx.overrides.platformRecord;
+  // The admin lane already holds this process's credentials, so the default
+  // chain starts from the admin's role.
+  const manager = () =>
+    roleChain([opts.managerRoleArn], {
+      region: opts.region,
+      sessionPrefix: "starkeep-deploy-record",
+    });
+  return {
+    read: async () => readPlatformDeployRecord({ ...opts, awsCreds: await manager() }),
+    write: async (record) =>
+      writePlatformDeployRecord({ ...opts, awsCreds: await manager(), record }),
+  };
 }
 
 const SIGN_IN_REMEDY =
@@ -71,6 +106,29 @@ export const installCloudDataServerOp: Operation<
       accountId,
     }),
   });
+
+  // Before anything changes: does the cloud run patches this checkout lacks?
+  const checkout = ctx.overrides?.platformCheckout ?? workspaceRoot();
+  const records = platformRecordStore(ctx, {
+    stackPrefix: config.stackPrefix,
+    region,
+    managerRoleArn: arns.managerRoleArn,
+  });
+  const deployed = await records.read();
+  const comparison = compareWithDeployed(checkout, deployed);
+  const note = comparisonNote(comparison, "The cloud data server");
+  if (note) emit({ type: "progress", message: note });
+  if (input.allowBackward) {
+    if (comparison.kind === "backward" || comparison.kind === "unknown-commit") {
+      emit({
+        type: "progress",
+        message:
+          "Warning: the cloud runs changes this checkout lacks, and this deploy removes them (forced).",
+      });
+    }
+  } else {
+    assertNotBackward(comparison, "The cloud data server", "`starkeep update --platform --force`");
+  }
 
   // Rebuild dist.zip first. Otherwise the install uploads whatever zip was
   // built last, and when its hash matches what Lambda holds, Pulumi skips the
@@ -168,6 +226,23 @@ export const installCloudDataServerOp: Operation<
     mobileAppsUserPoolClientId: outputs.mobileAppsUserPoolClientId,
   };
   writeInstallerConfig(dir, updated);
+
+  // What this deploy ran, for the next deploy's guard and `cloud status`.
+  const record: PlatformDeployRecord = {
+    ...sourceCommitOf(checkout),
+    fingerprint: platformFingerprint(checkout),
+    deployedAt: new Date().toISOString(),
+  };
+  try {
+    await records.write(record);
+  } catch (err) {
+    // The cloud already runs the new code, so the install succeeded. The
+    // next deploy's guard then compares against the older record.
+    emit({
+      type: "progress",
+      message: `Warning: could not record the deployed commit: ${err instanceof Error ? err.message : String(err)}`,
+    });
+  }
 
   const lines = [
     `Install complete. Updated ${installerConfigPath(dir)}:`,
