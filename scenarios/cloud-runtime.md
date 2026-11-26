@@ -88,6 +88,60 @@ Behaviors owned elsewhere:
 - A computer that joined someone else's cloud, which shows no cloud card: CLOUD-SETUP-004 in [cloud-setup.md](cloud-setup.md).
 - A local operator refused at admin-web's sign-in for lacking cloud operator rights: ACCESS-002 in [users-and-access.md](users-and-access.md).
 
+## What the cloud runs, from the terminal
+
+`starkeep cloud status` compares what the cloud runs with this checkout and its app folders. It reads the cloud as the cloud operator's admin session, and reads the bootstrap stack with the terminal's AWS credentials when the terminal holds them for the deployment's account.
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [CLOUD-RUN-071] A cloud operator sees the bootstrap stack, the cloud data server, Drive, and each cloud app against this checkout
+  Given the cloud operator is signed in as the admin on the computer that deployed the cloud
+  And the terminal holds AWS credentials for the deployment's account
+  When the cloud operator runs "starkeep cloud status"
+  Then the output shows "BOOTSTRAP" with the stack's status and whether it matches this checkout's template
+  And the output shows "CLOUD DATA SERVER" with the commit and branch it was deployed from, and whether it is current, behind, or runs commits this checkout lacks
+  And the output shows "DRIVE" as current or behind this checkout
+  And the output lists each cloud app under "APPS" with the commit its last install built from, and whether it is current or behind its folder
+```
+
+- **Notes:** the bootstrap check makes a change set and deletes it, so the stack itself never changes.
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [CLOUD-RUN-072] A cloud operator whose terminal holds no AWS credentials for the account still sees what the cloud runs
+  Given the cloud operator is signed in as the admin
+  And the terminal holds no AWS credentials, or credentials for another account
+  When the cloud operator runs "starkeep cloud status"
+  Then the BOOTSTRAP line says "unknown:" with the reason and that the bootstrap stack needs the account's AWS credentials
+  And the output still shows the cloud data server, Drive, and the cloud apps
+```
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:partial
+Scenario: [CLOUD-RUN-073] A cloud operator is told what to do about a cloud that is behind, or one that runs commits this checkout lacks
+  Given the cloud operator is signed in as the admin
+  When the cloud data server is behind this checkout and the cloud operator runs "starkeep cloud status"
+  Then the output ends with "Run `starkeep update --platform` to redeploy the cloud data server and Drive."
+  When the cloud data server instead runs commits this checkout lacks
+  Then the output ends with "The cloud runs commits this checkout lacks. Check out the branch the cloud runs before you redeploy."
+```
+
+- **Coverage:** `packages/operator/__tests__/deployment-state.test.ts` › "comparePlatform is behind when the checkout has platform commits the cloud lacks", "is ahead when the cloud runs a branch's commits, and diverged when both sides moved", "names uncommitted changes when the commits match but the code differs", and "says to fetch a recorded commit the repository lacks" (unit) cover the comparison. No test runs the command.
+
+```gherkin
+@local @cloud
+@intent:confirmed
+Scenario: [CLOUD-RUN-074] A cloud operator sees one line of the cloud's skew in "starkeep status", and only with an admin session
+  Given the cloud operator is signed in as the admin on this computer
+  And the cloud data server is behind this checkout, and "dice" in the cloud is behind its folder
+  When the cloud operator runs "starkeep status"
+  Then the output ends with a "SKEW" line that says the cloud data server is behind this checkout and that 1 cloud app is behind its folder, naming "dice"
+  And without an admin session, the output shows no SKEW line and no browser opens
+```
+
 ## Costs
 
 The dashboard's Costs section reads the AWS cost and usage report that the deploy sets up. AWS delivers the report to the deployment's billing bucket about once a day, and the report bills the whole AWS account, not only the deployment. The section appears on the computer that deployed the cloud, under the cloud apps.
