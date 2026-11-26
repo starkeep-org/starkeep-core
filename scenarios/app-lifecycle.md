@@ -1924,7 +1924,7 @@ Scenario: [APP-LIFE-261] A cloud operator updates only the cloud, or only this c
 
 ```gherkin
 @local @cloud
-@intent:confirmed @coverage:partial
+@intent:unclear @coverage:partial
 Scenario: [APP-LIFE-262] A cloud operator cannot deploy an app folder that lacks commits the cloud install runs, and nothing deploys
   Given "dice" was last installed in the cloud from a feature branch
   And the "dice" folder on this computer is on a branch that lacks the feature branch's commits

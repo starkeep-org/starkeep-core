@@ -133,7 +133,7 @@ Scenario: [CLOUD-RUN-073] A cloud operator is told what to do about a cloud that
 
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:unclear
 Scenario: [CLOUD-RUN-074] A cloud operator sees one line of the cloud's skew in "starkeep status", and only with an admin session
   Given the cloud operator is signed in as the admin on this computer
   And the cloud data server is behind this checkout, and "dice" in the cloud is behind its folder
