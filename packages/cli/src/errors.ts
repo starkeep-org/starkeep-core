@@ -26,6 +26,18 @@ export class CliError extends Error {
   }
 }
 
+/**
+ * A failure another process already reported, such as the process that
+ * continues `update --platform` after the pull. The CLI exits with its code
+ * and prints nothing more, so `--json` output keeps exactly one result.
+ */
+export class ReportedFailure extends CliError {
+  constructor(exitCode: number) {
+    super("", exitCode);
+    this.name = "ReportedFailure";
+  }
+}
+
 export function usageError(message: string): CliError {
   return new CliError(message, EXIT_USAGE, "USAGE");
 }

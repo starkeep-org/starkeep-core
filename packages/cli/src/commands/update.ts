@@ -38,7 +38,7 @@ import { manifestDigest } from "@starkeep/admin-installer/manifest-approval";
 import type { AppSurface } from "@starkeep/admin-installer/operations";
 import { cloudInstalled, readCloudApps, runCloud } from "../cloud";
 import { flag, type Command, type ParsedArgs } from "../command";
-import { CliError, usageError } from "../errors";
+import { CliError, ReportedFailure, usageError } from "../errors";
 import { requireTerminal, type Io } from "../io";
 import {
   installCommandFor,
@@ -663,7 +663,8 @@ export const updateCommand: Command = {
           const at = readUpdates().at(-1)!.at;
           // The new process prints the rest, and the result.
           const code = continueAfterPull(io, argvOf(args), at);
-          if (code !== 0) throw new CliError(`The update stopped (exit code ${code}).`, code);
+          // The new process already printed why it stopped, and its result.
+          if (code !== 0) throw new ReportedFailure(code);
           return;
         }
       }
