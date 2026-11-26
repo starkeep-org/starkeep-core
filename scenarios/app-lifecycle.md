@@ -860,7 +860,7 @@ Scenario: [APP-LIFE-222] A local operator whose dependency install fails finds t
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:unclear
 Scenario: [APP-LIFE-223] A local operator who starts a second operation on an app while one runs is told to wait for it
   Given the local operator's "starkeep install dice --local" is still running in one terminal
   When the local operator runs "starkeep uninstall dice --local" in another terminal
@@ -1135,6 +1135,17 @@ Scenario: [APP-LIFE-227] A local operator who starts an app from the terminal ge
 ```
 
 - **Notes:** starting several names starts the data server first, then Drive, then the apps by id.
+
+```gherkin
+@local
+@intent:unclear
+Scenario: [APP-LIFE-265] A local operator who starts an app that is not installed on this computer is told to install it first
+  Given discovery finds "dice", and "dice" is not installed on this computer
+  When the local operator runs "starkeep start dice"
+  Then the output says "dice is not installed on this computer. Run `starkeep install dice --local`."
+  And "dice" does not start
+  And the command exits with status 1
+```
 
 ### Ports
 
@@ -1644,7 +1655,7 @@ Scenario: [APP-LIFE-239] A local operator whose app folder is outside git update
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:unclear
 Scenario: [APP-LIFE-240] A local operator is asked again when an update asks for different access, and a no leaves the app as it was
   Given the pull brings a "dice" manifest that asks for different access
   When the local operator runs "starkeep update dice" in a terminal
@@ -2381,7 +2392,7 @@ Scenario: [APP-LIFE-152] A local operator whose deletion fails part-way keeps th
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:unclear
 Scenario: [APP-LIFE-233] A local operator deletes an app's data from the terminal only after typing its id
   Given "dice" is installed on this computer
   When the local operator runs "starkeep uninstall dice --local --delete-data" in a terminal
@@ -2396,7 +2407,7 @@ Scenario: [APP-LIFE-233] A local operator deletes an app's data from the termina
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:unclear
 Scenario: [APP-LIFE-234] A local operator who types a different id keeps the app's data
   Given "starkeep uninstall dice --local --delete-data" asks for the app id
   When the local operator types anything other than "dice"
