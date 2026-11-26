@@ -198,6 +198,29 @@ describe("installCloudDataServerOp's deployed record and backward-deploy guard",
     expect(store.writes[0]!.fingerprint).toMatch(/^[0-9a-f]{64}$/);
   });
 
+  it("records the commit it deployed, not one made while the deploy ran", async () => {
+    const repo = platformRepo();
+    const deployedHead = repo.git("rev-parse", "HEAD");
+    const deployedFingerprint = platformFingerprint(repo.dir);
+    const { store, platformRecord } = recordStore();
+    const t = testContext(starkeepDirWith(INSTALLED_CONFIG), {
+      ...stubs([]),
+      installCloudDataServer: async () => {
+        // The person commits during the ten-minute deploy.
+        repo.commit("packages/admin-installer/later.ts", "later");
+        return OUTPUTS;
+      },
+      platformRecord,
+      platformCheckout: repo.dir,
+    } as never);
+    await installCloudDataServerOp(t.ctx, {}, t.emit);
+    expect(repo.git("rev-parse", "HEAD")).not.toBe(deployedHead);
+    expect(store.writes[0]).toMatchObject({
+      commit: deployedHead,
+      fingerprint: deployedFingerprint,
+    });
+  });
+
   it("writes no record when the install fails", async () => {
     const repo = platformRepo();
     const { store, platformRecord } = recordStore();

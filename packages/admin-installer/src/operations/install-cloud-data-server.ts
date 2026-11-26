@@ -149,6 +149,9 @@ export const installCloudDataServerOp: Operation<
       `The cloud data server's build failed (exit ${built ?? "without a code"}).`,
     );
   }
+  // What this deploy runs, taken once the bundle is built and before the
+  // deploy's long wait, so a commit made meanwhile is not recorded as deployed.
+  const deploying = { ...sourceCommitOf(checkout), fingerprint: platformFingerprint(checkout) };
 
   // CloudFormation cannot create a SecureString, so the installer creates the
   // Pulumi state passphrase once and never changes it.
@@ -228,11 +231,7 @@ export const installCloudDataServerOp: Operation<
   writeInstallerConfig(dir, updated);
 
   // What this deploy ran, for the next deploy's guard and `cloud status`.
-  const record: PlatformDeployRecord = {
-    ...sourceCommitOf(checkout),
-    fingerprint: platformFingerprint(checkout),
-    deployedAt: new Date().toISOString(),
-  };
+  const record: PlatformDeployRecord = { ...deploying, deployedAt: new Date().toISOString() };
   try {
     await records.write(record);
   } catch (err) {
