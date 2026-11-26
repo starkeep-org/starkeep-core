@@ -289,3 +289,12 @@ Scenario: [CLI-025] A local operator sees a step's own output only with --verbos
 ```
 
 - **Notes:** a step that fails names the log file under `~/.starkeep/logs/` that holds its whole output (APP-LIFE-222).
+
+```gherkin
+@local
+@intent:unclear
+Scenario: [CLI-030] A local operator's script that asks for a log as JSON is told to read the log file instead
+  When the local operator's script runs "starkeep logs data-server --json"
+  Then the output says that "starkeep logs" prints text only, and names the log file's path
+  And the command exits with status 2
+```
