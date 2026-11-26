@@ -18,6 +18,8 @@ export class CliError extends Error {
     readonly exitCode: number = EXIT_FAILED,
     readonly code?: string,
     readonly logPath?: string,
+    /** Extra fields for the `--json` result, such as what a run finished before it failed. */
+    readonly data?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "CliError";

@@ -62,23 +62,27 @@ export async function main(argv: string[], options: MainOptions): Promise<number
   const stderr = options.stderr ?? ((t: string) => void process.stderr.write(t));
   const name = argv.find((a) => !a.startsWith("-"));
   const json = argv.includes("--json");
+  /** Bad usage before a command runs: text on stderr, and under --json a result too. */
+  const usage = (message: string, help: string): number => {
+    stderr(`${message}\n\n${help}\n`);
+    if (json) {
+      stdout(
+        `${JSON.stringify({ type: "result", ok: false, error: { message, code: "USAGE" } })}\n`,
+      );
+    }
+    return EXIT_USAGE;
+  };
 
   if (!name || name === "help") {
     const topic = name === "help" ? argv[argv.indexOf("help") + 1] : undefined;
     const command = topic ? COMMANDS.find((c) => c.name === topic) : undefined;
-    if (topic && !command) {
-      stderr(`Unknown command "${topic}".\n\n${generalHelp()}\n`);
-      return EXIT_USAGE;
-    }
+    if (topic && !command) return usage(`Unknown command "${topic}".`, generalHelp());
     stdout(`${command ? commandHelp(command) : generalHelp()}\n`);
     return name || argv.includes("--help") || argv.includes("-h") ? 0 : EXIT_USAGE;
   }
 
   const command = COMMANDS.find((c) => c.name === name);
-  if (!command) {
-    stderr(`Unknown command "${name}".\n\n${generalHelp()}\n`);
-    return EXIT_USAGE;
-  }
+  if (!command) return usage(`Unknown command "${name}".`, generalHelp());
 
   let parsed: ReturnType<typeof parseArgs>;
   try {
@@ -89,8 +93,7 @@ export async function main(argv: string[], options: MainOptions): Promise<number
       strict: true,
     });
   } catch (err) {
-    stderr(`${(err as Error).message}\n\n${commandHelp(command)}\n`);
-    return EXIT_USAGE;
+    return usage((err as Error).message, commandHelp(command));
   }
   if (parsed.values.help) {
     stdout(`${commandHelp(command)}\n`);
@@ -111,6 +114,7 @@ export async function main(argv: string[], options: MainOptions): Promise<number
       io.event({
         type: "result",
         ok: false,
+        ...(cli?.data ? { data: cli.data } : {}),
         error: {
           message,
           ...(cli?.code ? { code: cli.code } : {}),
