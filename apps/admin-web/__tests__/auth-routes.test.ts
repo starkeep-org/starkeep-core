@@ -128,6 +128,30 @@ describe("GET /auth/start", () => {
     expect(location(res).searchParams.get("signInError")).toMatch(/port 3999.*starkeep login/);
   });
 
+  it("refuses a sign-in that another site started, so a page elsewhere cannot sign this computer in", async () => {
+    for (const site of ["cross-site", "same-site"]) {
+      const res = await route.START(
+        new Request("http://localhost:3000/auth/start?client=device&returnTo=/", {
+          headers: { "sec-fetch-site": site },
+        }),
+      );
+      expect(res.status).toBe(302);
+      expect(location(res).host).toBe("localhost:3000");
+      expect(location(res).searchParams.get("signInError")).toMatch(/admin-web's own page/);
+    }
+  });
+
+  it("starts a sign-in from admin-web's own page, or from an address typed in the browser", async () => {
+    for (const site of ["same-origin", "none"]) {
+      const res = await route.START(
+        new Request("http://localhost:3000/auth/start?client=admin", {
+          headers: { "sec-fetch-site": site },
+        }),
+      );
+      expect(location(res).origin).toBe(`https://${DOMAIN}`);
+    }
+  });
+
   it("never returns to another site", async () => {
     const res = await start(`client=nope&returnTo=${encodeURIComponent("//evil.example/x")}`);
     expect(location(res).pathname).toBe("/");

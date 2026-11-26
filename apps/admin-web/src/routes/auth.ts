@@ -94,10 +94,28 @@ async function signInTarget(client: Client): Promise<{ domain: string; clientId:
   }
 }
 
+/**
+ * Whether another site sent the browser here. The start is a top-level GET,
+ * which the `Origin` checks let through. Without this check, a page on any
+ * site could navigate to it while the managed login page's session cookie
+ * lives, and the page would return a code with no question asked: admin-web
+ * would then sign this computer's sync, or the admin session, in without the
+ * person. Browsers name the initiator in `Sec-Fetch-Site`. `none` is an
+ * address typed or opened from outside a page, such as by the CLI. A browser
+ * that sends no such header passes, as it did before.
+ */
+function startedElsewhere(req: Request): boolean {
+  const site = req.headers.get("sec-fetch-site");
+  return site === "cross-site" || site === "same-site";
+}
+
 export async function START(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const client = url.searchParams.get("client");
   const returnTo = safeReturnTo(url.searchParams.get("returnTo"));
+  if (startedElsewhere(req)) {
+    return back("/", { signInError: "Start the sign-in from admin-web's own page." });
+  }
   if (client !== "admin" && client !== "device") {
     return back(returnTo, { signInError: "Unknown sign-in kind." });
   }
