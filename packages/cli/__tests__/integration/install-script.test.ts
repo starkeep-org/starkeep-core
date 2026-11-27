@@ -31,6 +31,17 @@ const handoff = join(scratch, "handoff.txt");
 const source = join(scratch, "source");
 execFileSync("git", ["clone", "-q", CHECKOUT, source]);
 execFileSync("git", ["-C", source, "checkout", "-q", "-B", "main"]);
+// CI's checkout is shallow, so the copy gets a commit of its own: CLI-003's
+// test resets its clone one commit back.
+execFileSync("git", ["-C", source, "commit", "-q", "--allow-empty", "-m", "Upstream"], {
+  env: {
+    ...process.env,
+    GIT_AUTHOR_NAME: "T",
+    GIT_AUTHOR_EMAIL: "t@example.com",
+    GIT_COMMITTER_NAME: "T",
+    GIT_COMMITTER_EMAIL: "t@example.com",
+  },
+});
 
 mkdirSync(fakeBin);
 writeFileSync(join(fakeBin, "node"), `#!/bin/sh\nprintf '%s\\n' "$PWD" "$@" > "${handoff}"\n`);

@@ -19,8 +19,11 @@ export const root = realpathSync(mkdtempSync(join(tmpdir(), "cli-scenarios-")));
 export const dataDir = join(root, "dot-starkeep");
 mkdirSync(dataDir);
 
-/** A port in a band of its own per run, so parallel suites rarely collide. */
-const base = 21_000 + Math.floor(Math.random() * 400) * 50;
+/**
+ * A port in a band of its own per run, so parallel suites rarely collide. The
+ * bands end below 32768, where Linux starts handing out ephemeral ports.
+ */
+const base = 21_000 + Math.floor(Math.random() * 230) * 50;
 process.env.STARKEEP_DIR = dataDir;
 process.env.STARKEEP_PORT = String(base);
 process.env.STARKEEP_DRIVE_PORT = String(base + 1);
