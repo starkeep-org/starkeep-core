@@ -36,6 +36,7 @@ import {
   dependencyConsent,
   grantPermissions,
   publicSharingConsent,
+  publicSiteConsent,
   jobsConsent,
 } from "../src/consent-text";
 import { installLocalApp } from "../src/local-app-install";
@@ -89,6 +90,8 @@ if (!manifest.infraRequirements?.fileAccessAll) {
 }
 const publicLinks = publicSharingConsent(manifest);
 if (publicLinks) console.log(`\nPublic links: ${publicLinks}`);
+const publicSite = publicSiteConsent(manifest);
+if (publicSite) console.log(`\nPublic website: ${publicSite}`);
 const jobLines = jobsConsent(manifest);
 if (jobLines.length > 0) {
   console.log("\nBackground jobs:");

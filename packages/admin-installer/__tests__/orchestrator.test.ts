@@ -642,6 +642,69 @@ describe("install", () => {
       expect.objectContaining({ accessKeyId: expect.any(String) }),
     );
   });
+
+  // SITES-014
+  it("installs a site-only app with no exec role, bundle or compute stack", async () => {
+    const manifest: AppManifest = {
+      ...photosManifest,
+      infraRequirements: {
+        ...photosManifest.infraRequirements,
+        compute: { enabled: false, handlers: [] },
+        publicSite: { bundleDir: "site" },
+      },
+    };
+    await installApp({
+      appId: "photos",
+      manifest,
+      zipBuffer: Buffer.from(zipSync({ "site/index.html": new Uint8Array([1]) })),
+      version: "0.1.0",
+      config,
+      registryCredentials,
+    });
+    expect(doneSteps("install")).toEqual([
+      "put_app_creds_parameter",
+      "create_iam_role",
+      "attach_temp_install_ddl_policy",
+      "run_dsql_ddl",
+      "detach_temp_install_ddl_policy",
+      "put_s3_keep_file",
+      "attach_temp_install_infra_policy",
+      "upload_static_assets",
+      "detach_temp_install_infra_policy",
+      "register_app",
+    ]);
+    expect(uploadAppBundle).not.toHaveBeenCalled();
+    expect(installComputeStack).not.toHaveBeenCalled();
+    expect(uploadStaticAssets).toHaveBeenCalledWith(
+      "photos",
+      "starkeep-app-assets-111122223333-us-east-1",
+      [expect.objectContaining({ key: "_site/index.html" })],
+      "us-east-1",
+      expect.anything(),
+    );
+    expect(fakeRegistry.registerApp).toHaveBeenCalledWith(manifest, "photos", ["web"], null);
+  });
+
+  // SITES-013
+  it("deletes the site's files when a reinstall's manifest drops the site", async () => {
+    const withSite: AppManifest = {
+      ...photosManifest,
+      infraRequirements: {
+        ...photosManifest.infraRequirements,
+        publicSite: { bundleDir: "site" },
+      },
+    };
+    fakeRegistry.storedManifest.mockResolvedValueOnce(withSite);
+    await installApp({
+      appId: "photos",
+      manifest: photosManifest,
+      zipBuffer: Buffer.from(zipSync({ "index.mjs": new Uint8Array([1]) })),
+      version: "0.1.0",
+      config,
+      registryCredentials,
+    });
+    expect(deleteStaticAssets).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("uninstall", () => {
@@ -671,6 +734,25 @@ describe("uninstall", () => {
     expect(deleteAppVault).toHaveBeenCalledWith(
       expect.objectContaining({ stackPrefix: config.stackPrefix, appId: "photos" }),
     );
+  });
+
+  // SITES-012
+  it("empties the site's files on uninstalling a site-only app", async () => {
+    await uninstallApp({
+      appId: "photos",
+      manifest: {
+        ...photosManifest,
+        infraRequirements: {
+          ...photosManifest.infraRequirements,
+          compute: { enabled: false, handlers: [] },
+          publicSite: { bundleDir: "site" },
+        },
+      },
+      config,
+      registryCredentials,
+    });
+    expect(doneSteps("uninstall")).toContain("delete_static_assets");
+    expect(deleteStaticAssets).toHaveBeenCalledTimes(1);
   });
 
   it("install steps don't shadow uninstall steps (separate ledgers per operation)", async () => {

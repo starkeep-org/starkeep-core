@@ -203,6 +203,33 @@ describe("app build output — served from the app assets bucket", () => {
   });
 });
 
+describe("/sites/* — public sites", () => {
+  // SITES-006
+  it("serves public sites from the app assets bucket, so no visit reaches Lambda", () => {
+    const behavior = behaviorFor("/sites/*") as CacheBehavior & {
+      functionAssociations?: Array<{ eventType: string; functionArn: string }>;
+    };
+    expect(behavior).toBeDefined();
+    expect(behavior.targetOriginId).toBe("app-assets-s3");
+    expect(behavior.allowedMethods).toEqual(["GET", "HEAD"]);
+    expect(behavior.cachePolicyId).toBe("cache:Managed-CachingOptimized");
+    expect(behavior.trustedKeyGroups ?? []).toEqual([]);
+  });
+
+  it("runs the site-paths function, not the signed-out redirect", () => {
+    const behavior = behaviorFor("/sites/*") as CacheBehavior & {
+      functionAssociations?: Array<{ eventType: string; functionArn: string }>;
+    };
+    const fn = created.find(
+      (r) => r.type.endsWith("cloudfront/function:Function") && r.name === "site-paths",
+    );
+    expect(fn).toBeDefined();
+    expect(behavior.functionAssociations).toEqual([
+      { eventType: "viewer-request", functionArn: expect.stringContaining("site-paths") },
+    ]);
+  });
+});
+
 describe("/public-shares/* — anonymous public-share items pages", () => {
   it("caches for a minute, keyed by path and query string", () => {
     // The token is in the path and the cursor in the query, so both must

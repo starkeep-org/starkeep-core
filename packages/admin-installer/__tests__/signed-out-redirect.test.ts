@@ -239,13 +239,15 @@ describe("wiring", () => {
       resolve(PKG_DIR, "src", "builtin-programs", "cloud-data-server-program.ts"),
       "utf-8",
     );
-    const associations = program.match(/functionAssociations/g) ?? [];
+    // The /sites/* behavior carries its own function (site-paths), so count
+    // the redirect's association rather than every association.
+    const associations = program.match(/functionArn: signedOutRedirect\.arn/g) ?? [];
     expect(
       associations,
       "the static-asset behavior forwards no cookies and must keep its cache",
     ).toHaveLength(1);
     const defaultBlock = program.slice(program.indexOf("defaultCacheBehavior:"));
-    expect(defaultBlock).toContain("functionAssociations");
+    expect(defaultBlock).toContain("functionArn: signedOutRedirect.arn");
   });
 });
 

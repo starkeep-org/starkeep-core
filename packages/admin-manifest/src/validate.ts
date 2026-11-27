@@ -291,6 +291,15 @@ export function validateManifest(raw: unknown): ValidationResult {
     }
   }
 
+  // A public site lives in the cloud's app assets bucket, behind the cloud's
+  // CloudFront. A computer has no address on the internet to publish it at.
+  if (manifest.infraRequirements.publicSite && !manifest.targets.includes("cloud")) {
+    errors.push(
+      'infraRequirements.publicSite is declared but targets omits "cloud" — a public site is ' +
+        "published only from the cloud",
+    );
+  }
+
   // Label keys are the app's published schema, so a duplicate is a manifest
   // authoring mistake rather than something to silently dedup: the registry's
   // primary key is (app_id, key), so a second row would be dropped and the

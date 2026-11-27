@@ -26,6 +26,7 @@ import {
   grantPermissions,
   jobsConsent,
   publicSharingConsent,
+  publicSiteConsent,
   type AppSurface,
   type DependencyPlan,
   type LocalAppEntry,
@@ -144,6 +145,15 @@ export function ConsentDialog({
           <div className="border rounded-md p-3 text-sm flex flex-col gap-1">
             <span className="font-medium">Public links</span>
             <span className="text-muted-foreground">{publicSharingConsent(entry.manifest)}</span>
+          </div>
+        )}
+
+        {showAccess && publicSiteConsent({ ...entry.manifest, id: entry.appId }) && (
+          <div className="border rounded-md p-3 text-sm flex flex-col gap-1">
+            <span className="font-medium">Public website</span>
+            <span className="text-muted-foreground">
+              {publicSiteConsent({ ...entry.manifest, id: entry.appId })}
+            </span>
           </div>
         )}
 

@@ -121,20 +121,25 @@ export function publicPathCovers(entry: string, path: string): boolean {
   return path === entry;
 }
 
-const bundleAssetsDirSchema = z
-  .string()
-  .min(1)
-  .refine(
-    (dir) =>
-      !dir.startsWith("/") &&
-      !dir.includes("\\") &&
-      dir.split("/").every((segment) => segment !== ".." && segment !== ""),
-    {
-      message:
-        "bundleAssetsDir must be a relative directory inside dist.zip, with / separators, " +
-        'no empty segment and no ".." segment',
-    },
-  );
+/** A relative directory inside `dist.zip`, named in errors as `field`. */
+function bundleDirSchema(field: string) {
+  return z
+    .string()
+    .min(1)
+    .refine(
+      (dir) =>
+        !dir.startsWith("/") &&
+        !dir.includes("\\") &&
+        dir.split("/").every((segment) => segment !== ".." && segment !== ""),
+      {
+        message:
+          `${field} must be a relative directory inside dist.zip, with / separators, ` +
+          'no empty segment and no ".." segment',
+      },
+    );
+}
+
+const bundleAssetsDirSchema = bundleDirSchema("bundleAssetsDir");
 
 // `handler` is the Lambda entry point inside the app's `dist.zip` (e.g.
 // `index.handler` or `infra/src/resize-handler.handler`). The app's
@@ -506,6 +511,35 @@ export const appJobSchema = z.strictObject({
   description: z.string().min(1).max(200),
 });
 
+/**
+ * A public site: a folder of static files inside `dist.zip`, which the
+ * installer copies to the app assets bucket and CloudFront serves at
+ * `/sites/<appId>/` from S3. No Lambda runs for a visitor, and the signed-out
+ * redirect does not apply, because it covers only `/apps/`.
+ *
+ * The site is built before install, so it holds no member's data. Its script
+ * runs on the deployment's shared origin, as every app's does, so installing a
+ * site trusts its author as much as installing an app.
+ */
+export const publicSiteSchema = z.strictObject({
+  /**
+   * The folder inside `dist.zip` that holds the site, with `index.html` at its
+   * root. Relative to the zip's root, with `/` separators and no `..` segment.
+   */
+  bundleDir: bundleDirSchema("publicSite.bundleDir"),
+});
+
+/** The path a public site lives under, relative to the deployment's origin. */
+export function publicSitePath(appId: string): string {
+  return `/sites/${appId}/`;
+}
+
+/**
+ * The folder under `apps/<appId>/` in the app assets bucket that holds the
+ * site's files. The `/sites/*` CloudFront function maps each request to it.
+ */
+export const PUBLIC_SITE_ASSET_PREFIX = "_site";
+
 export const infraRequirementsSchema = z.strictObject({
   fileAccess: z.array(fileAccessSchema).default([]),
   // All-access over every type + the `other` catch-all. Only the
@@ -546,6 +580,12 @@ export const infraRequirementsSchema = z.strictObject({
    * {@link appJobSchema}. Cloud only, and each job names a compute handler.
    */
   jobs: z.array(appJobSchema).max(8).default([]),
+  /**
+   * A public website the app ships in its bundle. Anyone on the internet reads
+   * it at `/sites/<appId>/`, with no sign-in. See {@link publicSiteSchema}.
+   * Cloud only.
+   */
+  publicSite: publicSiteSchema.optional(),
 });
 
 export const permissionEntrySchema = z.strictObject({
@@ -657,6 +697,7 @@ export type SharedResourceRequirement = z.infer<typeof sharedResourceRequirement
 export type AppComputeRoute = z.infer<typeof appComputeRouteSchema>;
 export type AppComputeHandler = z.infer<typeof appComputeHandlerSchema>;
 export type AppJob = z.infer<typeof appJobSchema>;
+export type PublicSite = z.infer<typeof publicSiteSchema>;
 export type SyncableTableColumn = z.infer<typeof syncableTableColumnSchema>;
 export type SyncableTable = z.infer<typeof syncableTableSchema>;
 export type AppSpecificSyncable = z.infer<typeof appSpecificSyncableSchema>;

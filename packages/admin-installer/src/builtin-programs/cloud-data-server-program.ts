@@ -25,6 +25,7 @@
 import { createHmac } from "node:crypto";
 import * as aws from "@pulumi/aws";
 import { appAssetsBucketName } from "../static-assets";
+import { SITE_PATHS_FUNCTION_CODE } from "./site-paths-function";
 import * as pulumi from "@pulumi/pulumi";
 import * as tls from "@pulumi/tls";
 import {
@@ -1413,6 +1414,16 @@ export function buildCloudDataServerProgram(
 }`,
     });
 
+    // Public sites: maps /sites/<appId>/<path> to the site's object in the
+    // app assets bucket. See site-paths-function.ts.
+    const sitePaths = new aws.cloudfront.Function("site-paths", {
+      name: `${ctx.stackPrefix}-site-paths`,
+      runtime: "cloudfront-js-2.0",
+      comment: "Maps a public site's addresses to its files in the app assets bucket.",
+      publish: true,
+      code: SITE_PATHS_FUNCTION_CODE,
+    });
+
     // API Gateway execute-api origin domain (apiEndpoint minus the scheme).
     const gatewayOriginDomain = api.apiEndpoint.apply((ep) => ep.replace(/^https?:\/\//, ""));
     const gatewayOriginId = "api-gateway";
@@ -1663,6 +1674,22 @@ export function buildCloudDataServerProgram(
           cachedMethods: ["GET", "HEAD"],
           cachePolicyId: cachingOptimizedId,
           compress: true,
+        },
+        {
+          // Public sites. Anonymous by design, like the two build-output
+          // prefixes, and served from the app assets bucket, so a visitor
+          // spends no Lambda and a burst of visitors cannot throttle a
+          // member's app. No signed-out redirect: it covers /apps/ only, and
+          // a visitor has no account to sign in with. The objects say
+          // `max-age=0, must-revalidate`, so a reinstall shows within seconds.
+          pathPattern: "/sites/*",
+          targetOriginId: appAssetsOriginId,
+          viewerProtocolPolicy: "redirect-to-https",
+          allowedMethods: ["GET", "HEAD"],
+          cachedMethods: ["GET", "HEAD"],
+          cachePolicyId: cachingOptimizedId,
+          compress: true,
+          functionAssociations: [{ eventType: "viewer-request", functionArn: sitePaths.arn }],
         },
         {
           // Part B: content-addressed shared file bytes. Served from S3,

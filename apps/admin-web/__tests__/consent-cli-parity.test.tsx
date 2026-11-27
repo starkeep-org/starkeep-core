@@ -15,6 +15,7 @@ import {
   dependencyConsent,
   jobsConsent,
   publicSharingConsent,
+  publicSiteConsent,
   type DependencyPlan,
   type LocalAppEntry,
 } from "../src/lib/app-types";
@@ -73,6 +74,7 @@ describe("the consent dialog and the terminal install say the same words", () =>
       },
       { kind: "skip", reason: "none" },
     ],
+    ["a public website", { publicSite: { bundleDir: "site" } }, { kind: "skip", reason: "none" }],
     [
       "the User-Data-Owner and a refused dependency install",
       { fileAccessAll: true },
@@ -90,6 +92,8 @@ describe("the consent dialog and the terminal install say the same words", () =>
     const links = publicSharingConsent(app.manifest);
     if (links) expect(text).toContain(links);
     for (const line of jobsConsent(app.manifest)) expect(text).toContain(line);
+    const site = publicSiteConsent(app.manifest);
+    if (site) expect(text).toContain(site);
     const dependencies = dependencyConsent(plan);
     if (dependencies) expect(text).toContain(dependencies);
   });

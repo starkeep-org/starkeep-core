@@ -64,6 +64,7 @@ import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { validateManifest } from "@starkeep/admin-manifest";
 import { installApp, manifestSurfaces, type AppSurface } from "../src/orchestrator";
 import { formatAnonymousRouteReport } from "../src/anonymous-route-report";
+import { probePublicSite } from "../src/public-site-probe";
 import { formatProbeReport, probeAnonymousSurface } from "../src/post-install-probe";
 import { exitOnInstallFailure } from "../src/cli-exit";
 import {
@@ -462,6 +463,31 @@ if (!installsWeb) {
 
 const browserBaseForProbe = config.publicBaseUrl ?? config.apiGatewayUrl;
 
+// The public site answers from S3 through CloudFront, so it needs no route
+// probe, only a check that the address answers.
+if (manifest.infraRequirements.publicSite && browserBaseForProbe) {
+  const site = await probePublicSite(browserBaseForProbe, appId);
+  console.log("");
+  if (site.ok) {
+    console.log(`Public site: ${site.url} answered ${site.status}.`);
+  } else {
+    console.warn(
+      `  WARNING: the public site ${site.url} answered ${site.status ?? "nothing"}. ${site.advice}`,
+    );
+  }
+}
+
+// A site-only app has no Lambda and no routes, so nothing to probe below.
+if (!manifest.infraRequirements.compute.enabled) {
+  if (browserBaseForProbe && manifest.infraRequirements.publicSite) {
+    console.log(`\nInstall complete. ${appId}'s public site is at:`);
+    console.log(`  ${browserBaseForProbe.replace(/\/+$/, "")}/sites/${appId}/`);
+  } else {
+    console.log(`\nInstall complete.`);
+  }
+  process.exit(0);
+}
+
 // Ask the deployment what is actually anonymous, rather than trusting what the
 // manifest declares. The two can disagree, and the August exposure is what that
 // disagreement looks like — it would have been caught here on the day it was
@@ -533,3 +559,7 @@ console.log(`\nInstall complete. ${appId} app available at:`);
 console.log(
   `  ${browserBaseForProbe ?? ""}${browserBaseForProbe ? `/apps/${appId}` : "(publicBaseUrl/apiGatewayUrl not in config)"}`,
 );
+if (manifest.infraRequirements.publicSite && browserBaseForProbe) {
+  console.log(`Its public site is at:`);
+  console.log(`  ${browserBaseForProbe.replace(/\/+$/, "")}/sites/${appId}/`);
+}

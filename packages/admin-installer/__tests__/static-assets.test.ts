@@ -271,6 +271,83 @@ describe("collectStaticAssets", () => {
   });
 });
 
+describe("collectStaticAssets: public site", () => {
+  function siteManifest(over: Record<string, unknown> = {}): AppManifest {
+    const result = validateManifest({
+      id: "blog",
+      name: "Blog",
+      version: "0.1.0",
+      tier: "community",
+      targets: ["cloud"],
+      infraRequirements: { publicSite: { bundleDir: "site" }, ...over },
+    });
+    if (!result.manifest) throw new Error(result.errors.join("\n"));
+    return result.manifest;
+  }
+
+  it("copies every file in the site's folder under _site/, revalidated on each load", () => {
+    const assets = collectStaticAssets(
+      siteManifest(),
+      zip({
+        "site/index.html": "<html>",
+        "site/about/index.html": "<html>",
+        "site/img/cat.png": "png",
+        "README.md": "not served",
+      }),
+    );
+    expect(assets.map((a) => [a.key, a.contentType, a.cacheControl])).toEqual([
+      ["_site/about/index.html", "text/html; charset=utf-8", "public, max-age=0, must-revalidate"],
+      ["_site/img/cat.png", "image/png", "public, max-age=0, must-revalidate"],
+      ["_site/index.html", "text/html; charset=utf-8", "public, max-age=0, must-revalidate"],
+    ]);
+  });
+
+  it("serves a large site file from S3, with no Lambda size limit", () => {
+    const big = new Uint8Array(MAX_LAMBDA_SERVED_FILE_BYTES + 1);
+    const assets = collectStaticAssets(
+      siteManifest(),
+      zip({ "site/index.html": "<html>", "site/video.mp4": big }),
+    );
+    expect(assets.map((a) => a.key)).toEqual(["_site/index.html", "_site/video.mp4"]);
+  });
+
+  it("collects a site beside a handler's build output", () => {
+    const m = manifest();
+    m.infraRequirements.publicSite = { bundleDir: "site" };
+    const assets = collectStaticAssets(
+      m,
+      zip({
+        "assets/_immutable/app.js": "js",
+        "site/index.html": "<html>",
+      }),
+    );
+    expect(assets.map((a) => a.key)).toEqual(["_immutable/app.js", "_site/index.html"]);
+  });
+
+  // SITES-017
+  it("refuses a bundle without the site's folder", () => {
+    expect(() => collectStaticAssets(siteManifest(), zip({ "other/index.html": "x" }))).toThrow(
+      /declares a public site in "site", but dist.zip has no files under site\//,
+    );
+  });
+
+  // SITES-017
+  it("refuses a site without index.html", () => {
+    expect(() =>
+      collectStaticAssets(siteManifest(), zip({ "site/about/index.html": "x" })),
+    ).toThrow(StaticAssetsError);
+    expect(() =>
+      collectStaticAssets(siteManifest(), zip({ "site/about/index.html": "x" })),
+    ).toThrow(/has no index.html/);
+  });
+
+  it("refuses a site file that is not a plain relative path", () => {
+    expect(() =>
+      collectStaticAssets(siteManifest(), zip({ "site/index.html": "x", "site/a//b.html": "x" })),
+    ).toThrow(/not a plain relative path/);
+  });
+});
+
 describe("uploadStaticAssets", () => {
   const asset = (key: string, body = key) => ({
     key,
@@ -304,6 +381,30 @@ describe("uploadStaticAssets", () => {
       current: ["_static/b.js"],
       previous: ["_static/a.js"],
     });
+  });
+
+  // SITES-011
+  it("drops a site page the new deployment removed at once, unlike build files", async () => {
+    await uploadStaticAssets(
+      "dice",
+      BUCKET,
+      [asset("_immutable/v1.js"), asset("_site/index.html"), asset("_site/old.html")],
+      "us-east-1",
+      creds,
+    );
+    await uploadStaticAssets(
+      "dice",
+      BUCKET,
+      [asset("_immutable/v2.js"), asset("_site/index.html")],
+      "us-east-1",
+      creds,
+    );
+    expect(keys()).toEqual([
+      "apps/dice/.deployments.json",
+      "apps/dice/_immutable/v1.js",
+      "apps/dice/_immutable/v2.js",
+      "apps/dice/_site/index.html",
+    ]);
   });
 
   it("keeps the previous deployment's files and prunes the one before", async () => {

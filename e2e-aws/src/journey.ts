@@ -2081,6 +2081,43 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         expect(revalidated.status).toBe(304);
       });
 
+      if (app.publicSite) {
+        // SITES-001 to SITES-004 and SITES-006, live. No cookie on any request:
+        // a visitor holds no account.
+        it(`a visitor reads ${app.appId}'s public site signed out, served from S3`, async () => {
+          const base = config.publicBaseUrl!;
+          const site = `${base}/sites/${app.appId}/`;
+          const home = await fetchWhenReady(site, { redirect: "manual" });
+          expect(home.status).toBe(200);
+          expect(home.headers.get("content-type") ?? "").toMatch(/^text\/html/);
+          // From the app assets bucket: no Lambda ran for the visit.
+          expect(home.headers.get("server")).toBe("AmazonS3");
+          expect(home.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
+          expect(await home.text()).toContain('href="about/"');
+
+          const about = await fetch(`${site}about/`, { redirect: "manual" });
+          expect(about.status).toBe(200);
+          expect(await about.text()).toContain('src="star.svg"');
+          const star = await fetch(`${site}about/star.svg`);
+          expect(star.status).toBe(200);
+          expect(star.headers.get("content-type") ?? "").toMatch(/^image\/svg\+xml/);
+
+          // A folder named without its slash moves to the slashed spelling, so
+          // the page's relative image resolves inside the folder.
+          for (const [from, to] of [
+            [`${base}/sites/${app.appId}`, `${base}/sites/${app.appId}/`],
+            [`${site}about`, `${site}about/`],
+          ] as const) {
+            const moved = await fetch(from, { redirect: "manual" });
+            expect(moved.status, from).toBe(301);
+            expect(new URL(moved.headers.get("location")!, from).href).toBe(to);
+          }
+
+          const missing = await fetch(`${site}missing.html`, { redirect: "manual" });
+          expect(missing.status).toBe(404);
+        });
+      }
+
       it("Part B: shared bytes via CloudFront signed URL — edge hit, tamper rejected, apps/* isolated", async () => {
         const base = config.publicBaseUrl!;
 
@@ -2447,6 +2484,19 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // App-plane access is gone (HMAC secret deleted → 401, or routes 404).
         const appGone = await cloudApp(appUnderTest).fetch("/health");
         expect([401, 403, 404]).toContain(appGone.status);
+
+        // SITES-012: the public site goes with the web app. The edge may hold
+        // the home page for its one-second minimum, so poll briefly.
+        if (app.publicSite) {
+          const site = `${config.publicBaseUrl!}/sites/${app.appId}/`;
+          let status = 0;
+          for (let i = 0; i < 10; i++) {
+            status = (await fetch(site, { redirect: "manual" })).status;
+            if (status === 404) break;
+            await new Promise((r) => setTimeout(r, 3000));
+          }
+          expect(status, `${site} after uninstall`).toBe(404);
+        }
 
         // Shared records survive under Drive.
         const listRes = await cloudApp(drive).fetch("/data/records");

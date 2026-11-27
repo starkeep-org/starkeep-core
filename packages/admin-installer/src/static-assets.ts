@@ -1,6 +1,8 @@
 /**
  * A web app's served build output: the files CloudFront answers from the app
- * assets bucket rather than from the app's Lambda.
+ * assets bucket rather than from the app's Lambda. A public site's files are
+ * part of it, under `apps/<appId>/_site/`, which CloudFront serves at
+ * `/sites/<appId>/`.
  *
  * Every request that reaches a Lambda counts against the account's small
  * concurrency pool and must fit in a 6 MB response. A browser app loads tens
@@ -27,6 +29,7 @@ import { createHash } from "node:crypto";
 import { unzipSync } from "fflate";
 import {
   publicPathCovers,
+  PUBLIC_SITE_ASSET_PREFIX,
   SERVED_ASSET_PREFIXES,
   type AppManifest,
 } from "@starkeep/admin-manifest";
@@ -80,12 +83,18 @@ export class StaticAssetsError extends Error {
  * Only handlers that declare `bundleAssetsDir` contribute. The manifest schema
  * already refuses a handler whose `staticAssetPaths` reach a served prefix
  * without one.
+ *
+ * A public site contributes every file in its folder, under `_site/`, and must
+ * hold an `index.html`.
  */
 export function collectStaticAssets(manifest: AppManifest, zip: Uint8Array): StaticAsset[] {
   const handlers = manifest.infraRequirements.compute.handlers.filter(
     (h): h is typeof h & { bundleAssetsDir: string } => h.bundleAssetsDir !== undefined,
   );
-  if (handlers.length === 0) return [];
+  const site = manifest.infraRequirements.publicSite;
+  if (handlers.length === 0 && !site) return [];
+  const siteDir = site ? `${site.bundleDir}/` : null;
+  const siteFiles: string[] = [];
 
   const oversize: string[] = [];
   const seenDirs = new Set<string>();
@@ -101,6 +110,12 @@ export function collectStaticAssets(manifest: AppManifest, zip: Uint8Array): Sta
     // every `staticAssetPaths` entry.
     filter: (file) => {
       if (file.name.endsWith("/")) return false;
+      // Every file in a public site's folder is public by declaration: the
+      // manifest names the folder, and the consent dialog names the site.
+      if (siteDir && file.name.startsWith(siteDir)) {
+        siteFiles.push(file.name.slice(siteDir.length));
+        return true;
+      }
       for (const handler of handlers) {
         const dir = `${handler.bundleAssetsDir}/`;
         if (!file.name.startsWith(dir)) continue;
@@ -126,6 +141,20 @@ export function collectStaticAssets(manifest: AppManifest, zip: Uint8Array): Sta
       );
     }
   }
+  if (site) {
+    if (siteFiles.length === 0) {
+      throw new StaticAssetsError(
+        `The manifest declares a public site in "${site.bundleDir}", but dist.zip has no files ` +
+          `under ${site.bundleDir}/. Check the bundle script's zip command.`,
+      );
+    }
+    if (!siteFiles.includes("index.html")) {
+      throw new StaticAssetsError(
+        `The public site in "${site.bundleDir}" has no index.html, so its address would answer ` +
+          `404. Put the site's home page at ${site.bundleDir}/index.html.`,
+      );
+    }
+  }
   if (oversize.length > 0) {
     throw new StaticAssetsError(
       `The app's Lambda would serve files larger than a Lambda response can carry: ` +
@@ -137,8 +166,13 @@ export function collectStaticAssets(manifest: AppManifest, zip: Uint8Array): Sta
 
   const assets = new Map<string, StaticAsset>();
   for (const [name, body] of Object.entries(files)) {
-    const handler = handlers.find((h) => name.startsWith(`${h.bundleAssetsDir}/`))!;
-    const key = name.slice(handler.bundleAssetsDir.length + 1);
+    const inSite = siteDir !== null && name.startsWith(siteDir);
+    const key = inSite
+      ? `${PUBLIC_SITE_ASSET_PREFIX}/${name.slice(siteDir.length)}`
+      : name.slice(
+          handlers.find((h) => name.startsWith(`${h.bundleAssetsDir}/`))!.bundleAssetsDir.length +
+            1,
+        );
     // A zip entry name is author-controlled. CloudFront normalizes `..` and
     // empty segments out of a request path, so such a key could never be
     // served, and refusing it keeps every key a plain path under the prefix.
@@ -363,7 +397,15 @@ export async function uploadStaticAssets(
     ),
   );
 
-  const keep = new Set([...next.current, ...next.previous].map((k) => `${prefix}${k}`));
+  // A tab opened before the update may still ask for the last deployment's
+  // build files, so those stay one more round. A site's pages do not: a page
+  // the author removed must stop loading as soon as the new version is up.
+  const keep = new Set(
+    [
+      ...next.current,
+      ...next.previous.filter((k) => !k.startsWith(`${PUBLIC_SITE_ASSET_PREFIX}/`)),
+    ].map((k) => `${prefix}${k}`),
+  );
   keep.add(recordKey);
   // The listing predates this upload, which is safe: every key just put is in
   // `keep`, so only an older key can be stale.

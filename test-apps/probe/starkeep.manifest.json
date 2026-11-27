@@ -21,6 +21,7 @@
       }
     ],
     "publicSharing": true,
+    "publicSite": { "bundleDir": "site" },
     "jobs": [
       {
         "name": "probe-tick",

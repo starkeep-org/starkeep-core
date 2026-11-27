@@ -115,6 +115,12 @@ export interface JourneyApp {
    */
   readonly publicSharing?: boolean;
   /**
+   * Whether the manifest declares a public site (`publicSite`) whose home page
+   * links to `about/`, which shows an image by a relative link, as Probe's
+   * does. The journey reads it signed out and checks that uninstall removes it.
+   */
+  readonly publicSite?: boolean;
+  /**
    * A scheduled job the manifest declares, with a route that writes one row of
    * `appTable` per run and answers `{ message: "Wrote tick-<runId>" }`, as
    * Probe's `probe-tick` does. The route sweep checks the job routes, and the
