@@ -33,6 +33,7 @@ A behavior change starts here.
 | [sync.md](sync.md)                                       | `SYNC-`        | Keeping records and rows the same across a member's devices and the cloud                                                 |
 | [uploads-and-file-bytes.md](uploads-and-file-bytes.md)   | `BYTES-`       | Moving file bytes between devices and the cloud: upload order, large files, and files awaiting upload                     |
 | [cloud-runtime.md](cloud-runtime.md)                     | `CLOUD-RUN-`   | What a cloud operator sees of the running cloud: app hosting, load, errors, and cost                                      |
+| [public-sites.md](public-sites.md)                       | `SITES-`       | Public websites that cloud apps publish for anyone to read without signing in                                             |
 | [drive.md](drive.md)                                     | `DRIVE-`       | The Drive app                                                                                                             |
 | [app-development.md](app-development.md)                 | `APP-DEV-`     | Building a Starkeep app: the app client, the SDK, the test kit, and the example app                                       |
 

@@ -153,6 +153,13 @@ describe("teardown-cloud-data-server.sh", () => {
     expect(after.buckets).not.toContain(`sktest-files-123456789012-${REGION}`);
   });
 
+  it("deletes the site-paths function too, whose name would block the next install", () => {
+    const { status, output } = run(["--force"], mergeAccounts(live, target));
+    expect(status, output).toBe(0);
+    expect(output).toContain("Function: sktest-signed-out-redirect not found, skipping.");
+    expect(output).toContain("Function: sktest-site-paths not found, skipping.");
+  });
+
   it("reports a failed lookup of the redirect function rather than skipping it", () => {
     const account = mergeAccounts(live, target);
     account.errors.push({

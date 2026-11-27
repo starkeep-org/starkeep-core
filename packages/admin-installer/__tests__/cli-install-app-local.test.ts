@@ -13,7 +13,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { cpSync, existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -119,6 +119,28 @@ describe("cli:install-app-local", () => {
       dataServerUrl,
     });
     expect(statSync(creds).mode & 0o777).toBe(0o600);
+  });
+
+  // SITES-023, SITES-018
+  it("shows the public website line for an app with a site", async () => {
+    const appDir = exampleApp();
+    const path = join(appDir, "starkeep.manifest.json");
+    const raw = JSON.parse(readFileSync(path, "utf-8")) as {
+      targets?: string[];
+      infraRequirements: Record<string, unknown>;
+    };
+    raw.targets = ["local", "cloud"];
+    raw.infraRequirements.publicSite = { bundleDir: "site" };
+    writeFileSync(path, JSON.stringify(raw));
+    const result = await runCli(appDir, ["--yes"]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain(
+      "Public website: Example App publishes a website at /sites/example-app/ that anyone on " +
+        "the internet can read without signing in.",
+    );
+    // The local install registers the app with the computer's data server
+    // and publishes nothing.
+    expect(installs.map((i) => i.manifest.id)).toEqual(["example-app"]);
   });
 
   it("refuses without --yes when no terminal can ask, and installs nothing", async () => {

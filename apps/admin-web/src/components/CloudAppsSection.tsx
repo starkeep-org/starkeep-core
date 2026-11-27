@@ -7,7 +7,13 @@ import { useAppUpdate, type CloudInstallRequest } from "@/components/AppUpdate";
 import { readCloudConfig } from "@/lib/cloud-config";
 import { AppCard, AppCardGrid, type AppCardAction } from "@/components/AppCard";
 import { ACTION_OCCASIONAL, ACTION_OPEN } from "@/lib/action-colors";
-import { consentDiffers, surfacesOf, type AppSurface, type LocalAppEntry } from "@/lib/app-types";
+import {
+  cloudWebLinks,
+  consentDiffers,
+  surfacesOf,
+  type AppSurface,
+  type LocalAppEntry,
+} from "@/lib/app-types";
 
 /** Why a tile from the registry alone cannot redeploy or re-register. */
 function noFolder(surface: AppSurface): string {
@@ -103,7 +109,6 @@ export function CloudAppsSection({
         {leading}
         {apps?.flatMap((entry) => {
           const name = entry.manifest.name ?? entry.appId;
-          const url = browserBaseUrl ? `${browserBaseUrl}/apps/${entry.appId}/` : null;
           // One run at a time across every tile, and none before cloud is set up.
           // A locally installed app deploys only the manifest the user
           // approved, so a first cloud install waits until the local install
@@ -199,13 +204,13 @@ export function CloudAppsSection({
                   </Button>
                 </span>
               );
-            } else if (surface === "web" && url) {
+            } else if (surface === "web") {
+              // What the cloud runs decides the links, not the folder.
               primary = (
-                <Button asChild size="sm" className={ACTION_OPEN}>
-                  <a href={url} target="_blank" rel="noopener noreferrer" title={url}>
-                    Open {name} ↗
-                  </a>
-                </Button>
+                <WebLinks
+                  name={name}
+                  links={cloudWebLinks(entry.appId, deployed ?? entry.manifest, browserBaseUrl)}
+                />
               );
             }
 
@@ -236,7 +241,6 @@ export function CloudAppsSection({
         })}
         {unlisted.flatMap((row) => {
           const name = row.name ?? row.appId;
-          const url = browserBaseUrl ? `${browserBaseUrl}/apps/${row.appId}/` : null;
           const surfaces: AppSurface[] = [
             ...(row.webApp ? (["web"] as const) : []),
             ...(row.mobileApp ? (["mobile"] as const) : []),
@@ -260,12 +264,11 @@ export function CloudAppsSection({
                 ]}
                 badges={<InstalledBadge verb={surface === "web" ? "Installed" : "Registered"} />}
                 primary={
-                  surface === "web" && url ? (
-                    <Button asChild size="sm" className={ACTION_OPEN}>
-                      <a href={url} target="_blank" rel="noopener noreferrer" title={url}>
-                        Open {name} ↗
-                      </a>
-                    </Button>
+                  surface === "web" ? (
+                    <WebLinks
+                      name={name}
+                      links={cloudWebLinks(row.appId, row.manifest, browserBaseUrl)}
+                    />
                   ) : null
                 }
               />
@@ -286,6 +289,38 @@ export function CloudAppsSection({
           }}
           onCancel={() => setPendingConsent(null)}
         />
+      )}
+    </div>
+  );
+}
+
+/**
+ * An installed cloud web app's links: the app itself, and its public site
+ * when the deployed manifest declares one.
+ */
+function WebLinks({
+  name,
+  links,
+}: {
+  name: string;
+  links: { app: string | null; site: string | null };
+}): ReactNode {
+  if (!links.app && !links.site) return null;
+  return (
+    <div className="flex flex-wrap gap-2">
+      {links.app && (
+        <Button asChild size="sm" className={ACTION_OPEN}>
+          <a href={links.app} target="_blank" rel="noopener noreferrer" title={links.app}>
+            Open {name} ↗
+          </a>
+        </Button>
+      )}
+      {links.site && (
+        <Button asChild size="sm" variant="outline">
+          <a href={links.site} target="_blank" rel="noopener noreferrer" title={links.site}>
+            Public site ↗
+          </a>
+        </Button>
       )}
     </div>
   );

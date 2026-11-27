@@ -78,6 +78,7 @@ vi.mock("@aws-sdk/client-s3", () => {
 import {
   collectStaticAssets,
   deleteStaticAssets,
+  folderRedirectPage,
   MAX_LAMBDA_SERVED_FILE_BYTES,
   MissingAppAssetsBucketError,
   StaticAssetsError,
@@ -271,6 +272,134 @@ describe("collectStaticAssets", () => {
   });
 });
 
+describe("collectStaticAssets: public site", () => {
+  function siteManifest(over: Record<string, unknown> = {}): AppManifest {
+    const result = validateManifest({
+      id: "blog",
+      name: "Blog",
+      version: "0.1.0",
+      tier: "community",
+      targets: ["cloud"],
+      infraRequirements: { publicSite: { bundleDir: "site" }, ...over },
+    });
+    if (!result.manifest) throw new Error(result.errors.join("\n"));
+    return result.manifest;
+  }
+
+  it("copies every file in the site's folder under _site/, revalidated on each load", () => {
+    const assets = collectStaticAssets(
+      siteManifest(),
+      zip({
+        "site/index.html": "<html>",
+        "site/about/index.html": "<html>",
+        "site/img/cat.png": "png",
+        "README.md": "not served",
+      }),
+    );
+    expect(assets.map((a) => [a.key, a.contentType, a.cacheControl])).toEqual([
+      // The page at the folder's bare name, which moves the browser to about/.
+      ["_site/about", "text/html; charset=utf-8", "public, max-age=0, must-revalidate"],
+      ["_site/about/index.html", "text/html; charset=utf-8", "public, max-age=0, must-revalidate"],
+      ["_site/img/cat.png", "image/png", "public, max-age=0, must-revalidate"],
+      ["_site/index.html", "text/html; charset=utf-8", "public, max-age=0, must-revalidate"],
+    ]);
+  });
+
+  // SITES-003
+  it("writes a page at each folder's bare name that moves the browser inside the folder", () => {
+    const assets = collectStaticAssets(
+      siteManifest(),
+      zip({
+        "site/index.html": "<html>",
+        "site/docs/v1.2/index.html": "<html>",
+        "site/img/cat.png": "png",
+      }),
+    );
+    // A folder with an index.html gets a page; one without (img/) does not,
+    // because its slashed spelling would answer 404 anyway.
+    expect(assets.map((a) => a.key)).toEqual([
+      "_site/docs/v1.2",
+      "_site/docs/v1.2/index.html",
+      "_site/img/cat.png",
+      "_site/index.html",
+    ]);
+    const page = new TextDecoder().decode(assets[0]!.body);
+    expect(page).toBe(folderRedirectPage("v1.2"));
+    // Relative to /sites/<appId>/docs/v1.2, "v1.2/" is the folder itself.
+    expect(page).toContain('location.replace("v1.2/" + location.search + location.hash)');
+    expect(page).toContain('<meta http-equiv="refresh" content="0; url=v1.2/">');
+  });
+
+  it("escapes a folder name before it reaches the page", () => {
+    expect(folderRedirectPage('a"<b')).toContain('"a%22%3Cb/"');
+    expect(folderRedirectPage('a"<b')).not.toContain('a"<b');
+  });
+
+  it("keeps a file that shares its name with a folder, rather than the folder's page", () => {
+    // A zip's entry names are free text, so it can hold both.
+    const assets = collectStaticAssets(
+      siteManifest(),
+      zip({ "site/index.html": "<html>", "site/about": "file", "site/about/index.html": "<html>" }),
+    );
+    const about = assets.find((a) => a.key === "_site/about")!;
+    expect(new TextDecoder().decode(about.body)).toBe("file");
+  });
+
+  // SITES-020
+  it("serves a file whose name has no extension as itself", () => {
+    const assets = collectStaticAssets(
+      siteManifest(),
+      zip({ "site/index.html": "<html>", "site/assets/NOTICES": "licenses" }),
+    );
+    expect(assets.map((a) => a.key)).toEqual(["_site/assets/NOTICES", "_site/index.html"]);
+  });
+
+  it("serves a large site file from S3, with no Lambda size limit", () => {
+    const big = new Uint8Array(MAX_LAMBDA_SERVED_FILE_BYTES + 1);
+    const assets = collectStaticAssets(
+      siteManifest(),
+      zip({ "site/index.html": "<html>", "site/video.mp4": big }),
+    );
+    expect(assets.map((a) => a.key)).toEqual(["_site/index.html", "_site/video.mp4"]);
+  });
+
+  it("collects a site beside a handler's build output", () => {
+    const m = manifest();
+    m.infraRequirements.publicSite = { bundleDir: "site" };
+    const assets = collectStaticAssets(
+      m,
+      zip({
+        "assets/_immutable/app.js": "js",
+        "site/index.html": "<html>",
+      }),
+    );
+    expect(assets.map((a) => a.key)).toEqual(["_immutable/app.js", "_site/index.html"]);
+  });
+
+  // SITES-017
+  it("refuses a bundle without the site's folder", () => {
+    expect(() => collectStaticAssets(siteManifest(), zip({ "other/index.html": "x" }))).toThrow(
+      /declares a public site in "site", but dist.zip has no files under site\//,
+    );
+  });
+
+  // SITES-017
+  it("refuses a site without index.html", () => {
+    expect(() =>
+      collectStaticAssets(siteManifest(), zip({ "site/about/index.html": "x" })),
+    ).toThrow(StaticAssetsError);
+    expect(() =>
+      collectStaticAssets(siteManifest(), zip({ "site/about/index.html": "x" })),
+    ).toThrow(/has no index.html/);
+  });
+
+  it("refuses a site file that is not a plain relative path", () => {
+    expect(() =>
+      collectStaticAssets(siteManifest(), zip({ "site/index.html": "x", "site/a//b.html": "x" })),
+    ).toThrow(/not a plain relative path/);
+  });
+});
+
 describe("uploadStaticAssets", () => {
   const asset = (key: string, body = key) => ({
     key,
@@ -304,6 +433,30 @@ describe("uploadStaticAssets", () => {
       current: ["_static/b.js"],
       previous: ["_static/a.js"],
     });
+  });
+
+  // SITES-011
+  it("drops a site page the new deployment removed at once, unlike build files", async () => {
+    await uploadStaticAssets(
+      "dice",
+      BUCKET,
+      [asset("_immutable/v1.js"), asset("_site/index.html"), asset("_site/old.html")],
+      "us-east-1",
+      creds,
+    );
+    await uploadStaticAssets(
+      "dice",
+      BUCKET,
+      [asset("_immutable/v2.js"), asset("_site/index.html")],
+      "us-east-1",
+      creds,
+    );
+    expect(keys()).toEqual([
+      "apps/dice/.deployments.json",
+      "apps/dice/_immutable/v1.js",
+      "apps/dice/_immutable/v2.js",
+      "apps/dice/_site/index.html",
+    ]);
   });
 
   it("keeps the previous deployment's files and prunes the one before", async () => {

@@ -119,10 +119,15 @@ describe("bootstrap template structure", () => {
         Sid: "CloudFrontReadsServedPrefixes",
         Effect: "Allow",
         Principal: { Service: "cloudfront.amazonaws.com" },
-        Action: "s3:GetObject",
+        // ListBucket makes a missing public-site page answer 404, not 403. On
+        // the bucket's own ARN it reads no object, so the deployment record
+        // stays out of reach.
+        Action: ["s3:GetObject", "s3:ListBucket"],
         Resource: [
+          { "Fn::Sub": "arn:aws:s3:::${AppAssetsBucket}" },
           { "Fn::Sub": "arn:aws:s3:::${AppAssetsBucket}/apps/*/_immutable/*" },
           { "Fn::Sub": "arn:aws:s3:::${AppAssetsBucket}/apps/*/_static/*" },
+          { "Fn::Sub": "arn:aws:s3:::${AppAssetsBucket}/apps/*/_site/*" },
         ],
         Condition: {
           StringLike: {

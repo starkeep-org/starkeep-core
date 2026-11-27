@@ -531,8 +531,8 @@ ${installInfraBoundaryPolicyYaml}
         - Key: StackPrefix
           Value: !Ref StackPrefix
 
-  # App assets bucket: web apps' /_immutable/ and /_static/ build output, which
-  # CloudFront serves without Lambda. install-infra writes it. Public by
+  # App assets bucket: web apps' /_immutable/ and /_static/ build output and
+  # public sites, which CloudFront serves without Lambda. install-infra writes it. Public by
   # design, never user data, rebuilt from each bundle, so unversioned.
   AppAssetsBucket:
     Type: AWS::S3::Bucket
@@ -552,8 +552,9 @@ ${installInfraBoundaryPolicyYaml}
         - Key: StackPrefix
           Value: !Ref StackPrefix
 
-  # CloudFront reads the two served prefixes only. The distribution does not
-  # exist yet, so any distribution in this account qualifies.
+  # CloudFront reads the served prefixes only: build output and public sites.
+  # ListBucket makes a missing key 404, not 403; no request names the root.
+  # Any distribution in this account qualifies.
   AppAssetsBucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
@@ -565,10 +566,12 @@ ${installInfraBoundaryPolicyYaml}
             Effect: Allow
             Principal:
               Service: cloudfront.amazonaws.com
-            Action: s3:GetObject
+            Action: [s3:GetObject, s3:ListBucket]
             Resource:
+              - !Sub 'arn:aws:s3:::\${AppAssetsBucket}'
               - !Sub 'arn:aws:s3:::\${AppAssetsBucket}/apps/*/_immutable/*'
               - !Sub 'arn:aws:s3:::\${AppAssetsBucket}/apps/*/_static/*'
+              - !Sub 'arn:aws:s3:::\${AppAssetsBucket}/apps/*/_site/*'
             Condition:
               StringLike:
                 'AWS:SourceArn': !Sub 'arn:aws:cloudfront::\${AWS::AccountId}:distribution/*'

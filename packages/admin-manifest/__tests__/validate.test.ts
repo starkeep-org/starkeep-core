@@ -138,6 +138,7 @@ describe("unknown keys (#137)", () => {
           ],
         },
         labelKeys: [{ key: "mood", description: "How the photo feels." }],
+        publicSite: { bundleDir: "site" },
       },
       localRun: { command: "pnpm", args: ["start"] },
       installDependencies: { command: "pnpm", args: ["install"] },
@@ -170,6 +171,7 @@ describe("unknown keys (#137)", () => {
     "infraRequirements.appSpecificSyncable.tables.0.columns.0",
     "infraRequirements.appSpecificSyncable.tables.0.indexes.0",
     "infraRequirements.labelKeys.0",
+    "infraRequirements.publicSite",
     "localRun",
     "installDependencies",
     "bundle",
@@ -1281,4 +1283,36 @@ describe("infraRequirements.jobs", () => {
     const result = validateManifest(withJobs([job], { protocolMinVersion: "1.0.0" }));
     expect(result.errors.some((e) => e.includes('protocolMinVersion "1.1.0"'))).toBe(true);
   });
+});
+
+describe("public site", () => {
+  it("accepts a site on a cloud app, with no compute", () => {
+    const result = validateManifest(
+      minimal({ targets: ["cloud"], infraRequirements: { publicSite: { bundleDir: "site" } } }),
+    );
+    expect(result.errors).toEqual([]);
+    expect(result.manifest?.infraRequirements.publicSite).toEqual({ bundleDir: "site" });
+  });
+
+  // SITES-016
+  it("refuses a site on an app with no cloud install", () => {
+    const result = validateManifest(
+      minimal({ targets: ["local"], infraRequirements: { publicSite: { bundleDir: "site" } } }),
+    );
+    expect(result.errors).toEqual([
+      'infraRequirements.publicSite is declared but targets omits "cloud" — a public site is ' +
+        "published only from the cloud",
+    ]);
+  });
+
+  it.each(["/site", "../site", "site/../x", "site//x", "site\\x", ""])(
+    "refuses the folder %j",
+    (bundleDir) => {
+      const result = validateManifest(
+        minimal({ targets: ["cloud"], infraRequirements: { publicSite: { bundleDir } } }),
+      );
+      expect(result.errors.join("\n")).toMatch(/publicSite\.bundleDir|bundleDir/);
+      expect(result.valid).toBe(false);
+    },
+  );
 });

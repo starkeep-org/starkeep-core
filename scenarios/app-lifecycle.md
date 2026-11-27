@@ -1662,9 +1662,9 @@ Scenario: [APP-LIFE-119] A cloud operator cannot install an app with a built-in 
 @cloud @mobile
 @intent:confirmed
 Scenario: [APP-LIFE-120] A cloud operator cannot install a surface the manifest does not offer
-  Given an app's manifest declares no compute
+  Given an app's manifest declares no compute and no public site
   When the cloud operator runs "cli:install-app notes --web"
-  Then the command says "notes's manifest declares no compute, so it has no web app." and exits with an error
+  Then the command says "notes's manifest declares no compute and no public site, so it has no web app." and exits with an error
   And "--mobile" on an app with no mobile build says the manifest declares no mobile build
 ```
 

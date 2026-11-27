@@ -119,6 +119,7 @@ function app(appId: string, name: string, offers: { web: boolean; mobile: boolea
 
 const PHOTOS = app("photos", "Photos", { web: true, mobile: true });
 const MEMO = app("memo", "Memo", { web: true, mobile: false });
+const NOTES = app("notes", "Notes", { web: true, mobile: false });
 
 /** The tile named `name`. */
 async function tile(name: string): Promise<HTMLElement> {
@@ -633,5 +634,65 @@ describe("a cloud install the route refuses", () => {
     const refreshApps = await installRefused({ message: "pulumi up failed" });
     expect(refreshApps).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+  });
+});
+
+describe("an app with a public site", () => {
+  const withSite = (compute: boolean): LocalAppEntry =>
+    ({
+      ...PHOTOS,
+      manifest: {
+        ...PHOTOS.manifest,
+        mobile: undefined,
+        infraRequirements: { compute: { enabled: compute }, publicSite: { bundleDir: "site" } },
+      },
+    }) as LocalAppEntry;
+
+  // SITES-009
+  it("links the installed app's public site, and no other app's tile shows one", async () => {
+    const site = withSite(true);
+    await renderWith(
+      [
+        { appId: "photos", webApp: true, mobileApp: false, manifest: site.manifest },
+        { appId: "notes", webApp: true, mobileApp: false, manifest: NOTES.manifest },
+      ],
+      [site, NOTES],
+    );
+    const photos = await tile("Photos");
+    const link = await within(photos).findByRole("link", { name: "Public site ↗" });
+    expect(link.getAttribute("href")).toBe("https://d1.cloudfront.net/sites/photos/");
+    expect(within(photos).getByRole("link", { name: "Open Photos ↗" })).toBeTruthy();
+    await within(await tile("Notes")).findByRole("link", { name: "Open Notes ↗" });
+    expect(within(await tile("Notes")).queryByRole("link", { name: "Public site ↗" })).toBeNull();
+  });
+
+  it("gives a site-only app a web tile that links only the site", async () => {
+    const site = withSite(false);
+    await renderWith(
+      [{ appId: "photos", webApp: true, mobileApp: false, manifest: site.manifest }],
+      [site],
+    );
+    expect(tileNames()).toEqual(["Photos"]);
+    const photos = await tile("Photos");
+    await within(photos).findByRole("link", { name: "Public site ↗" });
+    expect(within(photos).queryByRole("link", { name: "Open Photos ↗" })).toBeNull();
+  });
+
+  // SITES-007
+  it("asks before a redeploy whose manifest adds a public site", async () => {
+    const site = withSite(true);
+    await renderWith(
+      [{ appId: "photos", webApp: true, mobileApp: false, manifest: NOTES.manifest }],
+      [site],
+    );
+    await vi.waitFor(async () =>
+      expect(within(await tile("Photos")).getByText("Installed")).toBeTruthy(),
+    );
+    await chooseFromMenu("Photos", "Redeploy Photos");
+    expect(
+      await screen.findByRole("heading", { name: "Install Photos in the cloud?" }),
+    ).toBeTruthy();
+    expect(await screen.findByText("Public website")).toBeTruthy();
+    expect(installs).toHaveLength(0);
   });
 });

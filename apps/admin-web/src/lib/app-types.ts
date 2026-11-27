@@ -8,6 +8,7 @@ export {
   dependencyConsent,
   grantPermissions,
   publicSharingConsent,
+  publicSiteConsent,
   jobsConsent,
 } from "@starkeep/admin-installer/consent-text";
 
@@ -99,6 +100,8 @@ export interface ManifestSummary {
     publicSharing?: boolean;
     /** The app's scheduled jobs. */
     jobs?: { name: string; mode: "read" | "readwrite"; description: string }[];
+    /** The app publishes a public website at `/sites/<appId>/`. */
+    publicSite?: { bundleDir: string };
   };
   /** The mobile builds the app ships; see the manifest's `mobile` field. */
   mobile?: {
@@ -166,6 +169,7 @@ export function consentDiffers(current: ManifestSummary, next: ManifestSummary):
   const grants = (m: ManifestSummary) => ({
     all: m.infraRequirements?.fileAccessAll === true,
     publicSharing: m.infraRequirements?.publicSharing === true,
+    publicSite: m.infraRequirements?.publicSite !== undefined,
     fileAccess: (m.infraRequirements?.fileAccess ?? [])
       .map((f) => ({
         types: [...f.types].sort(),
@@ -183,6 +187,25 @@ export type DependencyPlan =
   | { kind: "skip"; reason: string }
   | { kind: "refused"; display: string; cwd: string; reason: string };
 
+/**
+ * Where a cloud web app's card links. An app with a public site and no
+ * compute has no page under `/apps/`, so its card opens the site instead.
+ */
+export function cloudWebLinks(
+  appId: string,
+  manifest: ManifestSummary | null | undefined,
+  browserBaseUrl: string | null,
+): { app: string | null; site: string | null } {
+  if (!browserBaseUrl) return { app: null, site: null };
+  const ir = manifest?.infraRequirements;
+  // A registry row predating the manifest column reads as an app.
+  const hasApp = !manifest || ir?.compute?.enabled === true;
+  return {
+    app: hasApp ? `${browserBaseUrl}/apps/${appId}/` : null,
+    site: ir?.publicSite ? `${browserBaseUrl}/sites/${appId}/` : null,
+  };
+}
+
 /** Membership comes from each app's manifest `targets` (default ["local"]). */
 export function targetsOf(a: LocalAppEntry): AppTarget[] {
   return a.manifest.targets ?? ["local"];
@@ -190,12 +213,13 @@ export function targetsOf(a: LocalAppEntry): AppTarget[] {
 
 /**
  * The cloud surfaces an app's manifest offers, by the rule admin-installer's
- * `manifestSurfaces()` applies: compute makes a web app, an Android build a
- * mobile app.
+ * `manifestSurfaces()` applies: compute or a public site makes a web app, an
+ * Android build a mobile app.
  */
 export function surfacesOf(a: LocalAppEntry): AppSurface[] {
   const out: AppSurface[] = [];
-  if (a.manifest.infraRequirements?.compute?.enabled) out.push("web");
+  const ir = a.manifest.infraRequirements;
+  if (ir?.compute?.enabled || ir?.publicSite) out.push("web");
   if (a.manifest.mobile?.android) out.push("mobile");
   return out;
 }

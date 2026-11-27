@@ -16,6 +16,7 @@ export interface ConsentManifest {
     fileAccessAll?: boolean;
     publicSharing?: boolean;
     jobs?: ReadonlyArray<ConsentJob>;
+    publicSite?: { bundleDir: string };
   };
 }
 
@@ -89,6 +90,18 @@ export function publicSharingConsent(manifest: ConsentManifest): string | null {
   if (manifest.infraRequirements?.publicSharing !== true) return null;
   const name = manifest.name ?? manifest.id ?? "This app";
   return `${name} can create web links to your ${sharedContentOf(manifest)}. Anyone who has a valid link can view the content you share without signing in.`;
+}
+
+/**
+ * What the install dialogs say about the app's public site, or null when it
+ * has none. The site's address is relative, because the dialog does not know
+ * which deployment's domain will serve it.
+ */
+export function publicSiteConsent(manifest: ConsentManifest): string | null {
+  if (!manifest.infraRequirements?.publicSite) return null;
+  const name = manifest.name ?? manifest.id ?? "This app";
+  const path = manifest.id ? `/sites/${manifest.id}/` : "/sites/<app id>/";
+  return `${name} publishes a website at ${path} that anyone on the internet can read without signing in.`;
 }
 
 /**

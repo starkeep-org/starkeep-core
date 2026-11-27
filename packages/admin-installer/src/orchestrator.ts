@@ -186,12 +186,14 @@ export interface UninstallInput {
 export type { AppSurface };
 
 /**
- * The surfaces a manifest offers: the web app when it declares compute, the
- * mobile app when it declares an Android build. Drive offers neither.
+ * The surfaces a manifest offers: the web app when it declares compute or a
+ * public site, the mobile app when it declares an Android build. Drive offers
+ * neither.
  */
 export function manifestSurfaces(manifest: AppManifest): AppSurface[] {
   const out: AppSurface[] = [];
-  if (manifest.infraRequirements.compute.enabled) out.push("web");
+  const ir = manifest.infraRequirements;
+  if (ir.compute.enabled || ir.publicSite) out.push("web");
   if (manifest.mobile?.android) out.push("mobile");
   return out;
 }
@@ -208,7 +210,7 @@ function resolveSurfaces(
     if (!offered.includes(surface)) {
       throw new Error(
         surface === "web"
-          ? `${appId}'s manifest declares no compute, so it has no web app to install`
+          ? `${appId}'s manifest declares no compute and no public site, so it has no web app to install`
           : `${appId}'s manifest declares no mobile build`,
       );
     }
@@ -274,6 +276,9 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
   // identity and the callback.
   const surfaces = resolveSurfaces(appId, manifest, input.surfaces);
   const web = surfaces.includes("web");
+  // A web app with a public site and no compute has no Lambda: no exec role,
+  // no bundle in the artifacts bucket and no compute stack.
+  const compute = web && ir.compute.enabled;
   // Taken after the CLI's dependency install and bundle build, so the
   // fingerprint covers a lockfile the install rewrote.
   const webSourceHash = web && input.webSourceDir ? sourceFingerprint(input.webSourceDir) : null;
@@ -365,7 +370,7 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
   // Only for the web app. Without it (and Starkeep Drive has none) there is
   // no Lambda to run, and a role that can read the HMAC credential existing
   // for nothing to use is surface with no purpose.
-  if (web) {
+  if (compute) {
     await runStep(registry, appId, "install", "create_iam_exec_role", done, async () => {
       await createAppExecRole({
         stackPrefix: config.stackPrefix,
@@ -448,9 +453,9 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
   if (web) {
     // install-infra owns the install-time AWS-provisioning grants (bundle
     // upload + Pulumi up). Attach the per-app temp policy on install-infra,
-    // run upload + compute stack as install-infra, then detach. A bundle
-    // without compute would have nothing to upload it for, so the gate is
-    // strictly on `compute.enabled`.
+    // run upload + compute stack as install-infra, then detach. The web app
+    // is compute, a public site, or both; a site-only app uploads its site's
+    // files and skips the Lambda's bundle and stack.
     // alwaysRun: the temp policy is detached at the end of every run (see the
     // matching detach step below), so on a resume/redeploy — where the ledger
     // already has this step "done" from the first install — a skipped attach
@@ -484,23 +489,26 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
       // though the step is already "done" from the first install — otherwise
       // the Lambda keeps serving the original code and Redeploy is a no-op.
       // Idempotent: it overwrites the same apps/<appId>/latest/dist.zip key.
-      await runStep(
-        registry,
-        appId,
-        "install",
-        "upload_bundle",
-        done,
-        () =>
-          uploadAppBundle(
-            config.stackPrefix,
-            appId,
-            config.artifactsBucket,
-            zipBuffer,
-            config.region,
-            infraCreds,
-          ),
-        { alwaysRun: true },
-      );
+      // Only the Lambda reads the bundle, so a site-only app skips it.
+      if (compute) {
+        await runStep(
+          registry,
+          appId,
+          "install",
+          "upload_bundle",
+          done,
+          () =>
+            uploadAppBundle(
+              config.stackPrefix,
+              appId,
+              config.artifactsBucket,
+              zipBuffer,
+              config.region,
+              infraCreds,
+            ),
+          { alwaysRun: true },
+        );
+      }
 
       // Before the compute stack, so the new Lambda never serves a shell that
       // names a file CloudFront cannot find yet. alwaysRun for the same reason
@@ -530,46 +538,49 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
     // routes. Skipping it on a redeploy (because the first install recorded
     // it "done") is why Redeploy never updated the app. Idempotent: a
     // no-change up is a cheap no-op; a changed bundleHash/manifest updates the
-    // Lambda code and API Gateway routes.
-    await runStep(
-      registry,
-      appId,
-      "install",
-      "install_compute_stack",
-      done,
-      async () => {
-        const bundleHash = zipBuffer
-          ? createHash("sha256").update(zipBuffer).digest("base64")
-          : undefined;
-        const computeCtx: ComputeContext = {
-          stackPrefix: config.stackPrefix,
-          appId,
-          appRoleArn,
-          appExecRoleArn,
-          apiGatewayId: config.apiGatewayId,
-          apiGatewayExecutionArn: config.apiGatewayExecutionArn,
-          apiGatewayUrl: config.apiGatewayUrl,
-          authorizerId: config.authorizerId,
-          ...(config.sessionAuthorizerId
-            ? { sessionAuthorizerId: config.sessionAuthorizerId }
-            : {}),
-          ...(config.originAuthorizerId ? { originAuthorizerId: config.originAuthorizerId } : {}),
-          ...(config.delegatedAuthorizerId
-            ? { delegatedAuthorizerId: config.delegatedAuthorizerId }
-            : {}),
-          region: config.region,
-          accountId: config.accountId,
-          pulumiStateBucket: config.pulumiStateBucket,
-          artifactsBucket: config.artifactsBucket,
-          dsqlHostname: config.dsqlHostname,
-          filesBucket: config.filesBucket,
-          infraCreds,
-          bundleHash,
-        };
-        receipt = await installComputeStack(manifest, computeCtx);
-      },
-      { alwaysRun: true },
-    );
+    // Lambda code and API Gateway routes. A site-only app has no compute to
+    // reconcile.
+    if (compute) {
+      await runStep(
+        registry,
+        appId,
+        "install",
+        "install_compute_stack",
+        done,
+        async () => {
+          const bundleHash = zipBuffer
+            ? createHash("sha256").update(zipBuffer).digest("base64")
+            : undefined;
+          const computeCtx: ComputeContext = {
+            stackPrefix: config.stackPrefix,
+            appId,
+            appRoleArn,
+            appExecRoleArn,
+            apiGatewayId: config.apiGatewayId,
+            apiGatewayExecutionArn: config.apiGatewayExecutionArn,
+            apiGatewayUrl: config.apiGatewayUrl,
+            authorizerId: config.authorizerId,
+            ...(config.sessionAuthorizerId
+              ? { sessionAuthorizerId: config.sessionAuthorizerId }
+              : {}),
+            ...(config.originAuthorizerId ? { originAuthorizerId: config.originAuthorizerId } : {}),
+            ...(config.delegatedAuthorizerId
+              ? { delegatedAuthorizerId: config.delegatedAuthorizerId }
+              : {}),
+            region: config.region,
+            accountId: config.accountId,
+            pulumiStateBucket: config.pulumiStateBucket,
+            artifactsBucket: config.artifactsBucket,
+            dsqlHostname: config.dsqlHostname,
+            filesBucket: config.filesBucket,
+            infraCreds,
+            bundleHash,
+          };
+          receipt = await installComputeStack(manifest, computeCtx);
+        },
+        { alwaysRun: true },
+      );
+    }
 
     // The app stopped using the bucket, so its files there are public paths
     // no manifest names any more. After the compute stack, because the old
@@ -672,7 +683,12 @@ async function uninstallAppInner(input: UninstallInput, registry: Registry): Pro
   // it. Skipping the record would leave kept data that nothing lists.
   await registry.listRetainedAppData();
 
-  if (ir.compute.enabled) await removeComputeSteps(appId, config, registry, done, managerCreds);
+  // A site-only app has no compute stack, but its site's files sit in the app
+  // assets bucket, which removeComputeSteps empties. The stack's teardown
+  // tolerates a stack that never existed.
+  if (ir.compute.enabled || ir.publicSite) {
+    await removeComputeSteps(appId, config, registry, done, managerCreds);
+  }
 
   // The app's files under apps/<appId>/ in the files bucket stay, as its
   // schema does. `cli:delete-app-data` deletes both.
@@ -869,7 +885,11 @@ async function removeComputeSteps(
 // without reaching into ./app-creds directly.
 export { appCredsParameterName };
 
-/** Does any handler in this manifest serve files from the app assets bucket? */
+/**
+ * Does this manifest serve files from the app assets bucket: a handler's
+ * build output, or a public site?
+ */
 function manifestUsesAppAssetsBucket(manifest: AppManifest | null): boolean {
+  if (manifest?.infraRequirements?.publicSite) return true;
   return (manifest?.infraRequirements?.compute?.handlers ?? []).some(handlerUsesAppAssetsBucket);
 }

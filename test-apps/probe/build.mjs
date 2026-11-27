@@ -12,7 +12,7 @@
  */
 
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -105,11 +105,15 @@ if (!cloud) {
   execSync(`node "${writeAssets}" "${join(staging, "assets")}"`, { stdio: "inherit" });
   rmSync(writeAssets);
 
+  // The public site the manifest's `publicSite` names. The installer copies
+  // it to the app assets bucket, and CloudFront serves it at /sites/probe/.
+  cpSync(join(pkgDir, "site"), join(staging, "site"), { recursive: true });
+
   mkdirSync(dirname(out), { recursive: true });
   if (existsSync(out)) rmSync(out);
   // -r, not -j: the assets directory has to keep its shape inside the zip,
   // because the adapter resolves paths under it.
-  execSync(`zip -rq "${out}" static-handler.mjs api-handler.mjs assets`, {
+  execSync(`zip -rq "${out}" static-handler.mjs api-handler.mjs assets site`, {
     cwd: staging,
     stdio: "inherit",
   });

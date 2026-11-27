@@ -2081,6 +2081,57 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         expect(revalidated.status).toBe(304);
       });
 
+      if (app.publicSite) {
+        // SITES-001 to SITES-006 and SITES-020, live. No cookie on any request
+        // but the member's: a visitor holds no account.
+        it(`a visitor reads ${app.appId}'s public site signed out, served from S3`, async () => {
+          const base = config.publicBaseUrl!;
+          const site = `${base}/sites/${app.appId}/`;
+          const home = await fetchWhenReady(site, { redirect: "manual" });
+          expect(home.status).toBe(200);
+          expect(home.headers.get("content-type") ?? "").toMatch(/^text\/html/);
+          // From the app assets bucket: no Lambda ran for the visit.
+          expect(home.headers.get("server")).toBe("AmazonS3");
+          expect(home.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
+          const homePage = await home.text();
+          expect(homePage).toContain('href="about/"');
+
+          // SITES-005: a signed-in member's browser gets the same page.
+          const asMember = await fetch(site, {
+            headers: { cookie: await signInToApp(app.appId) },
+            redirect: "manual",
+          });
+          expect(asMember.status).toBe(200);
+          expect(await asMember.text()).toBe(homePage);
+
+          const about = await fetch(`${site}about/`, { redirect: "manual" });
+          expect(about.status).toBe(200);
+          expect(await about.text()).toContain('src="star.svg"');
+          const star = await fetch(`${site}about/star.svg`);
+          expect(star.status).toBe(200);
+          expect(star.headers.get("content-type") ?? "").toMatch(/^image\/svg\+xml/);
+
+          // The bare root moves to the slashed spelling, so the home page's
+          // relative links resolve inside the site.
+          const root = await fetch(`${base}/sites/${app.appId}`, { redirect: "manual" });
+          expect(root.status).toBe(301);
+          expect(new URL(root.headers.get("location")!, base).href).toBe(site);
+          // A folder named without its slash answers the page the installer
+          // wrote there, which moves the browser to the slashed spelling.
+          const bare = await fetch(`${site}about`, { redirect: "manual" });
+          expect(bare.status).toBe(200);
+          expect(bare.headers.get("content-type") ?? "").toMatch(/^text\/html/);
+          expect(await bare.text()).toContain('location.replace("about/"');
+          // SITES-020: a file whose name has no extension loads as itself.
+          const notices = await fetch(`${site}NOTICES`, { redirect: "manual" });
+          expect(notices.status).toBe(200);
+          expect(await notices.text()).toContain("no extension");
+
+          const missing = await fetch(`${site}missing.html`, { redirect: "manual" });
+          expect(missing.status).toBe(404);
+        });
+      }
+
       it("Part B: shared bytes via CloudFront signed URL — edge hit, tamper rejected, apps/* isolated", async () => {
         const base = config.publicBaseUrl!;
 
@@ -2447,6 +2498,19 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
         // App-plane access is gone (HMAC secret deleted → 401, or routes 404).
         const appGone = await cloudApp(appUnderTest).fetch("/health");
         expect([401, 403, 404]).toContain(appGone.status);
+
+        // SITES-012: the public site goes with the web app. The edge may hold
+        // the home page for its one-second minimum, so poll briefly.
+        if (app.publicSite) {
+          const site = `${config.publicBaseUrl!}/sites/${app.appId}/`;
+          let status = 0;
+          for (let i = 0; i < 10; i++) {
+            status = (await fetch(site, { redirect: "manual" })).status;
+            if (status === 404) break;
+            await new Promise((r) => setTimeout(r, 3000));
+          }
+          expect(status, `${site} after uninstall`).toBe(404);
+        }
 
         // Shared records survive under Drive.
         const listRes = await cloudApp(drive).fetch("/data/records");

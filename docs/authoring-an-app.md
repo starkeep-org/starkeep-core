@@ -1359,6 +1359,50 @@ secrets for it. On the local surface every call answers `cloudRequired: true`.
 The example app's `digest` job stores, rotates and deletes a provider token
 this way.
 
+### 7e. Public sites (cloud target only)
+
+A public site is a folder of static files that anyone on the internet can
+read without signing in, such as a project page or a documentation site. Your
+app ships the folder in its bundle and names it in the manifest:
+
+```json
+"infraRequirements": {
+  "publicSite": { "bundleDir": "site" }
+}
+```
+
+The cloud install copies every file under `site/` in `dist.zip` to the app
+assets bucket, and CloudFront serves the folder at
+`https://<deployment>/sites/<appId>/`. The folder must hold an `index.html`
+at its root, or the install stops before it changes anything.
+
+- **No Lambda.** S3 answers every visit, so visitors never spend the
+  deployment's Lambda concurrency, and a site-only app may declare no compute
+  at all. Such an app still needs a `bundle` command that writes `dist.zip`.
+- **Addresses.** A path ending in `/` serves that folder's `index.html`.
+  `/sites/<appId>` redirects to `/sites/<appId>/`. A folder named without its
+  slash, such as `/sites/<appId>/about`, answers a small page that the
+  installer writes, which moves the browser to `about/`, so relative links in
+  the folder's page resolve inside it. Any other path serves the file of that
+  name, with or without an extension, and a missing file answers 404 with
+  S3's plain page.
+- **Caching.** Every site file revalidates on each load, so a reinstall shows
+  the new version within seconds. A page that the new version no longer holds
+  stops loading at once.
+- **No member data.** The site is built before install, so it can never show a
+  member's data. Keep it that way: never write a member's data into the
+  folder, and never ship a secret in it.
+- **Same origin.** The site's script runs on the deployment's origin, beside
+  every member's cloud apps. A script injection bug in the site, such as one
+  that writes a URL parameter into the page, would let a crafted link act as a
+  signed-in member who opens it. Treat the site's script with the care you give
+  your app's own pages.
+- **Consent.** The install dialog tells the operator that the app publishes a
+  website, and admin-web's cloud card links the site. A local install publishes
+  nothing.
+
+Probe's `site/` folder is the smallest example.
+
 ### 8. Sign-in (cloud target only)
 
 A person signs in to a cloud app on the platform's managed login page, never on

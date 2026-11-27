@@ -631,8 +631,8 @@ fi
 # ── Step 4b: CloudFront (Part B: shared-file signed URLs) ─────────────────────
 # The platform CloudFront distribution and its URL-signing material: the
 # distribution itself, the S3-origin OAC, the shared-files and public-shares
-# cache policies, the RSA public key + key group, the signed-out-redirect
-# viewer-request function, and a custom domain the stack owned. Deleting a
+# cache policies, the RSA public key + key group, the signed-out-redirect and
+# site-paths viewer-request functions, and a custom domain the stack owned. Deleting a
 # distribution requires disable → wait-until-Deployed → delete, which is slow
 # (~5–15 min). A failure here does not abort the wider teardown: it is
 # recorded, the later steps still run, and the script fails at the end. Done
@@ -676,6 +676,8 @@ OAC_NAME = f"{prefix}-files-oac"
 # policy left behind makes the next install of the prefix fail.
 CACHE_NAMES = [f"{prefix}-shared-files-cache", f"{prefix}-public-shares-cache"]
 REDIRECT_FN_NAME = f"{prefix}-signed-out-redirect"
+# The viewer-request function on the /sites/* behavior.
+SITE_FN_NAME = f"{prefix}-site-paths"
 
 
 def cf(*args):
@@ -823,33 +825,34 @@ for cache_name in CACHE_NAMES:
         "get-cache-policy", "delete-cache-policy",
     )
 
-# ---- The signed-out-redirect viewer-request function -------------------------
-# Addressed by name rather than id, so it needs its own block rather than
-# delete_with_etag. Leaving it behind is not a harmless leak: CloudFront
+# ---- The viewer-request functions -------------------------------------------
+# Addressed by name rather than id, so they need their own block rather than
+# delete_with_etag. Leaving one behind is not a harmless leak: CloudFront
 # function names are account-global and CreateFunction refuses a duplicate, so
 # an orphan here breaks the NEXT install of this same prefix. Deletable only
 # once the distribution above no longer references it.
-for attempt in range(6):
-    try:
-        got = cf("describe-function", "--name", REDIRECT_FN_NAME)
-    except Exception as e:  # noqa: BLE001 — absent is success; anything else fails
-        if "NoSuchFunctionExists" in str(e):
-            print(f"  Function: {REDIRECT_FN_NAME} not found, skipping.")
-        else:
-            record_failure(f"function lookup ({REDIRECT_FN_NAME}): {e}")
-        break
-    try:
-        cf("delete-function", "--name", REDIRECT_FN_NAME, "--if-match", got["ETag"])
-        print(f"  Function: deleted {REDIRECT_FN_NAME}.")
-        break
-    except Exception as e:  # noqa: BLE001 — best-effort teardown
-        # FunctionInUse until the distribution that references it is really
-        # gone. Names are account-global and CreateFunction refuses a
-        # duplicate, so an orphan here breaks the next install of this prefix.
-        if attempt == 5:
-            record_failure(f"function cleanup ({REDIRECT_FN_NAME}) after 6 tries: {e}")
+for fn_name in (REDIRECT_FN_NAME, SITE_FN_NAME):
+    for attempt in range(6):
+        try:
+            got = cf("describe-function", "--name", fn_name)
+        except Exception as e:  # noqa: BLE001 — absent is success; anything else fails
+            if "NoSuchFunctionExists" in str(e):
+                print(f"  Function: {fn_name} not found, skipping.")
+            else:
+                record_failure(f"function lookup ({fn_name}): {e}")
             break
-        time.sleep(20)
+        try:
+            cf("delete-function", "--name", fn_name, "--if-match", got["ETag"])
+            print(f"  Function: deleted {fn_name}.")
+            break
+        except Exception as e:  # noqa: BLE001 — best-effort teardown
+            # FunctionInUse until the distribution that references it is really
+            # gone. Names are account-global and CreateFunction refuses a
+            # duplicate, so an orphan here breaks the next install of this prefix.
+            if attempt == 5:
+                record_failure(f"function cleanup ({fn_name}) after 6 tries: {e}")
+                break
+            time.sleep(20)
 
 # ---- The custom domain's certificates and records ----------------------------
 # Every certificate tagged with the prefix goes: the stack's (Route53 mode, no
