@@ -94,7 +94,7 @@ Behaviors owned elsewhere:
 
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:none
 Scenario: [CLOUD-RUN-071] A cloud operator sees the bootstrap stack, the cloud data server, Drive, and each cloud app against this checkout
   Given the cloud operator is signed in as the admin on the computer that deployed the cloud
   And the terminal holds AWS credentials for the deployment's account
@@ -105,11 +105,12 @@ Scenario: [CLOUD-RUN-071] A cloud operator sees the bootstrap stack, the cloud d
   And the output lists each cloud app under "APPS" with the commit its last install built from, and whether it is current or behind its folder
 ```
 
+- **Coverage:** No test runs "starkeep cloud status".
 - **Notes:** the bootstrap check makes a change set and deletes it, so the stack itself never changes.
 
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:none
 Scenario: [CLOUD-RUN-072] A cloud operator whose terminal holds no AWS credentials for the account still sees what the cloud runs
   Given the cloud operator is signed in as the admin
   And the terminal holds no AWS credentials, or credentials for another account
@@ -117,6 +118,8 @@ Scenario: [CLOUD-RUN-072] A cloud operator whose terminal holds no AWS credentia
   Then the BOOTSTRAP line says "unknown:" with the reason and that the bootstrap stack needs the account's AWS credentials
   And the output still shows the cloud data server, Drive, and the cloud apps
 ```
+
+- **Coverage:** No test runs "starkeep cloud status" without the account's AWS credentials.
 
 ```gherkin
 @local @cloud
@@ -133,14 +136,18 @@ Scenario: [CLOUD-RUN-073] A cloud operator is told what to do about a cloud that
 
 ```gherkin
 @local @cloud
-@intent:unclear
-Scenario: [CLOUD-RUN-074] A cloud operator sees one line of the cloud's skew in "starkeep status", and only with an admin session
+@intent:confirmed @coverage:none
+Scenario: [CLOUD-RUN-074] A cloud operator's "starkeep status" reads only this computer, so it never keeps the admin session going
   Given the cloud operator is signed in as the admin on this computer
-  And the cloud data server is behind this checkout, and "dice" in the cloud is behind its folder
+  And the cloud data server is behind this checkout
   When the cloud operator runs "starkeep status"
-  Then the output ends with a "SKEW" line that says the cloud data server is behind this checkout and that 1 cloud app is behind its folder, naming "dice"
-  And without an admin session, the output shows no SKEW line and no browser opens
+  Then the output shows this computer's services, its cloud address, its sync sign-in, and the admin session
+  And the output says nothing about what the cloud runs
+  And the admin session's idle time is unchanged
 ```
+
+- **Coverage:** No test checks that `starkeep status` leaves the admin session's last use alone.
+- **Notes:** "starkeep cloud status" shows the cloud's drift (CLOUD-RUN-071). A status bar that polls "starkeep status" would otherwise keep the admin session alive past the twelve idle hours of ACCESS-198.
 
 ## Costs
 

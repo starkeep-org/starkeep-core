@@ -1678,7 +1678,7 @@ Scenario: [APP-LIFE-094] A local operator cannot upgrade an app that two folders
 @intent:confirmed @coverage:full
 Scenario: [APP-LIFE-235] A local operator who updates from the terminal pulls each installed app's repository and applies the new code
   Given "dice" is installed on this computer from a git repository whose branch is behind its upstream
-  When the local operator runs "starkeep update"
+  When the local operator runs "starkeep update dice"
   Then the output says "Fetching <repository>…" and then "Pulled <repository>: <old commit> → <new commit>."
   And the output says "Run `starkeep update --undo` to return to the commits before this pull."
   And the output ends with "Updated dice."
@@ -1686,13 +1686,14 @@ Scenario: [APP-LIFE-235] A local operator who updates from the terminal pulls ea
 ```
 
 - **Coverage:** `packages/cli/__tests__/integration/local-scenarios.test.ts` › "pulls, applies, and restarts a running app on the new code (APP-LIFE-235, APP-LIFE-241)" (integration, local).
+- **Notes:** with no app names, the update starts with the platform (LDS-127), then updates every installed app the same way.
 
 ```gherkin
 @local
 @intent:confirmed @coverage:full
 Scenario: [APP-LIFE-236] A local operator whose apps are current is told each is up to date
-  Given every installed app's repository matches its upstream and every manifest matches its install
-  When the local operator runs "starkeep update"
+  Given "dice" and "notes" are installed, each repository matches its upstream, and each manifest matches its install
+  When the local operator runs "starkeep update dice notes"
   Then the output says "<repository> is up to date with <upstream>." for each repository
   And the output says "<app> is up to date." for each app
   And no app restarts
@@ -1924,18 +1925,19 @@ Scenario: [APP-LIFE-261] A cloud operator updates only the cloud, or only this c
 
 ```gherkin
 @local @cloud
-@intent:unclear @coverage:partial
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-262] A cloud operator cannot deploy an app folder that lacks commits the cloud install runs, and nothing deploys
   Given "dice" was last installed in the cloud from a feature branch
   And the "dice" folder on this computer is on a branch that lacks the feature branch's commits
   When the cloud operator runs "starkeep install dice --cloud" or "starkeep update dice"
   Then the install stops before it builds anything, with "dice in the cloud runs <count> commit(s) that this checkout lacks:" and each commit's short id and subject
+  And each listed commit that changes "dice"'s folder ends with "(changes dice)", and a line says how many of them do
   And the message names "starkeep install dice --cloud --force"
   And the cloud operator finds the cloud's "dice" still running the feature branch's code
 ```
 
 - **Coverage:** `packages/admin-installer/__tests__/operations/install-cloud-app.test.ts` › "the backward-deploy guard reports DEPLOY_BACKWARD before it builds when the cloud runs a commit the folder lacks" and "deploys a folder that holds the recorded commit" (unit). No test runs the command against a live cloud.
-- **Notes:** the check compares patches, so a folder whose branch holds the commits under new ids after a rebase-merge passes. CLOUD-SETUP-164 states the same check for the cloud data server.
+- **Notes:** the check compares patches, so a folder whose branch holds the commits under new ids after a rebase-merge passes. A rebase that resolved a conflict inside a commit changed that commit's patch, so the check counts the commit as missing, and the deploy needs "--force". CLOUD-SETUP-164 states the same check for the cloud data server.
 
 ```gherkin
 @local @cloud
@@ -1963,6 +1965,21 @@ Scenario: [APP-LIFE-264] A cloud operator reads from the terminal which commit a
 
 - **Coverage:** `packages/admin-installer/__tests__/orchestrator.test.ts` › "records the commit of the folder the install builds from, and whether it had changes" (unit) and `packages/admin-installer/__tests__/integration/registry-pglite.test.ts` › "the recorded source commit records each install's commit and whether it had changes, and reads it back" (integration) cover the record. No test runs "starkeep info" against a cloud.
 - **Notes:** every cloud install records its folder's commit, whatever its surfaces. A folder outside git records none, and the line says "no recorded commit".
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:partial
+Scenario: [APP-LIFE-276] A cloud operator whose repository holds several apps learns which of the cloud's missing commits change the app being deployed
+  Given one repository holds the platform and the app "example-app"
+  And "example-app" was last installed in the cloud from a feature branch whose commits change only the platform
+  When the cloud operator runs "starkeep install example-app --cloud" from the repository's main branch
+  Then the install stops with "example-app in the cloud runs <count> commit(s) that this checkout lacks:" and lists the feature branch's commits
+  And the output says "None of them change example-app's folder. They change other parts of this repository."
+  And the message names "--force", so the cloud operator can deploy anyway
+```
+
+- **Coverage:** `packages/admin-installer/__tests__/operations/deploy-guard.test.ts` › "compareWithDeployed marks the missing commits that change the app's folder, in a repository that holds several apps (APP-LIFE-276)" and "says when none of the missing commits change the app's folder" (unit). No test runs the command against a live cloud.
+- **Notes:** the check still counts every commit of the repository, because nothing maps an app to the packages its build uses, and a check that missed a shared package would remove deployed work silently. The marks let the cloud operator judge "--force" quickly.
 
 ```gherkin
 @local @cloud

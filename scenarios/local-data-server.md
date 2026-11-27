@@ -396,7 +396,7 @@ Scenario: [LDS-115] A local operator opens admin-web from the terminal
 
 ```gherkin
 @local
-@intent:confirmed @coverage:full
+@intent:confirmed @coverage:partial
 Scenario: [LDS-122] A local operator whose platform update pulled new code finds the data server and Drive running again on it
   Given the data server and Drive run, and the platform checkout's upstream holds new commits
   When the local operator runs "starkeep update --platform --local"
@@ -405,8 +405,49 @@ Scenario: [LDS-122] A local operator whose platform update pulled new code finds
   And a platform update that pulled nothing restarts neither
 ```
 
-- **Coverage:** `packages/cli/__tests__/update-platform.test.ts` › "applyPlatform restarts the data server and Drive that were running, once the checkout moved", "restarts nothing when the checkout did not move", and "leaves the cloud alone under --local" (unit).
+- **Coverage:** `packages/cli/__tests__/update-platform.test.ts` › "applyPlatform restarts the data server and Drive that were running, once the checkout moved", "restarts nothing when the checkout did not move", and "leaves the cloud alone under --local" (unit). The services are stand-ins, so no test checks the output or the code the services run.
 - **Notes:** admin-web may run under the local operator's own watcher, so the update leaves it running and says "admin-web keeps the old code until it restarts."
+
+```gherkin
+@local
+@intent:confirmed @coverage:none
+Scenario: [LDS-127] A local operator who updates everything gets the platform first, then every app
+  Given the platform checkout's upstream and "dice"'s repository both hold new commits
+  When the local operator runs "starkeep update"
+  Then the output says "Pulled <checkout>: <old commit> → <new commit>." and "Installing the new platform code, then continuing the update with it…"
+  And the data server and Drive restart on the new code
+  And the output then pulls "dice"'s repository and ends with "Updated dice."
+```
+
+- **Coverage:** No test pulls the platform checkout, which in a test run is the checkout the test runs from.
+- **Notes:** the platform goes first, because an app may need a newer platform, but a platform never needs a newer app.
+
+```gherkin
+@local
+@intent:confirmed @coverage:none
+Scenario: [LDS-128] A local operator whose platform checkout holds uncommitted changes updates nothing, and is told how to update only the apps
+  Given the platform checkout holds uncommitted changes to tracked files
+  When the local operator runs "starkeep update"
+  Then the output says "<checkout> has uncommitted changes to tracked files:", lists the files, and says "Commit or stash them, then run the update again."
+  And the output says "To update only the apps, name them: `starkeep update <app>...`."
+  And no repository moves, and no app updates
+  And the command exits with status 1
+```
+
+- **Coverage:** No test runs the update against a platform checkout with changes.
+- **Notes:** a developer's checkout often holds changes. "starkeep update dice" updates the app and leaves the platform alone.
+
+```gherkin
+@local
+@intent:confirmed @coverage:partial
+Scenario: [LDS-129] A local operator whose platform update stopped before the restart finds the services restarted by the next update
+  Given "starkeep update --platform" pulled the platform checkout, and the continued update stopped before it restarted the data server and Drive
+  When the local operator runs "starkeep update --platform" again
+  Then the output says "Stopping drive…" and "Stopping data-server…", then that each started again
+  And the data server and Drive run the new code
+```
+
+- **Coverage:** `packages/cli/__tests__/update-platform.test.ts` › "restarts the services after a pull whose continued process stopped before the restart" (unit). No test stops a continued update.
 
 ### This machine's settings
 

@@ -1173,15 +1173,18 @@ Scenario: [CLOUD-SETUP-169] A cloud operator whose bootstrap update would replac
 
 ```gherkin
 @local @cloud
-@intent:unclear
-Scenario: [CLOUD-SETUP-170] A cloud operator's unattended update of everything previews a bootstrap stack change and leaves it for the owner to apply
+@intent:confirmed @coverage:partial
+Scenario: [CLOUD-SETUP-170] A cloud operator's update of everything previews a bootstrap stack change and leaves it, and the cloud redeploys, for the owner
   Given the bootstrap stack differs from the checkout's template
-  And the cloud operator's script runs "starkeep update --yes" with no app names and no terminal attached
-  When the update reaches the bootstrap stack
-  Then the output shows the change set's table and says to apply it with "starkeep cloud bootstrap-update --apply"
-  And the cloud operator finds the bootstrap stack as it was
-  And the update goes on to the cloud data server, Drive, and the apps
+  When the cloud operator runs "starkeep update --yes" with no app names
+  Then the output shows the change set's table, and the bootstrap stack stays as it was
+  And the output warns that the cloud data server and Drive wait for the change, and names "starkeep update --platform" and "starkeep cloud bootstrap-update --apply"
+  And the cloud data server and Drive keep running what they ran
+  And the update goes on to the apps
 ```
+
+- **Coverage:** `packages/cli/__tests__/update-platform.test.ts` › "only previews the bootstrap change in an update of everything, and leaves the cloud redeploys for the owner (CLOUD-SETUP-170)" and "goes on to the cloud in an update of everything when the bootstrap stack has no change" (unit). The bootstrap step is a stand-in, and no test runs the whole command.
+- **Notes:** a change to the bootstrap stack can change IAM, so only `starkeep update --platform`, after its question, applies one. The stack's change may grant what the new cloud data server needs, so the redeploys wait. A stack with no change lets the update go on to the cloud data server and Drive.
 
 ```gherkin
 @cloud
@@ -1195,12 +1198,12 @@ Scenario: [CLOUD-SETUP-164] A cloud operator cannot redeploy a cloud data server
   And the cloud operator finds the cloud unchanged, still running the feature branch's code
 ```
 
-- **Coverage:** `packages/admin-installer/__tests__/operations/install-cloud-data-server.test.ts` › "installCloudDataServerOp's deployed record and backward-deploy guard reports DEPLOY_BACKWARD before it builds when the cloud runs a commit the checkout lacks" (unit); `packages/admin-installer/__tests__/operations/deploy-guard.test.ts` › "compareWithDeployed refuses a checkout that lacks a commit the cloud runs, and names it" (unit). No test redeploys from admin-web's wizard, which shows the install's error message.
-- **Notes:** the check compares patches, so a checkout whose branch holds the feature's commits under new ids, as a rebase-merge leaves them, passes. A cloud last deployed from uncommitted changes gets a warning that no check can compare them.
+- **Coverage:** `packages/admin-installer/__tests__/operations/install-cloud-data-server.test.ts` › "installCloudDataServerOp's deployed record and backward-deploy guard reports DEPLOY_BACKWARD before it builds when the cloud runs a commit the checkout lacks" (unit); `packages/admin-installer/__tests__/operations/deploy-guard.test.ts` › "compareWithDeployed refuses a checkout that lacks a commit the cloud runs, and names it" (unit); `packages/cli/__tests__/update-platform.test.ts` › "refuses a cloud data server that runs commits this checkout lacks before announcing the redeploy" (unit). No test redeploys from admin-web's wizard, which shows the install's error message.
+- **Notes:** the check compares patches, so a checkout whose branch holds the feature's commits under new ids, as a rebase-merge leaves them, passes. A rebase that resolved a conflict inside a commit changed that commit's patch, so the check counts the commit as missing, and the redeploy needs "--force". A cloud last deployed from uncommitted changes gets a warning that no check can compare them.
 
 ```gherkin
 @cloud
-@intent:confirmed @coverage:full
+@intent:confirmed @coverage:partial
 Scenario: [CLOUD-SETUP-165] A cloud operator who passes --force redeploys anyway and is warned that the cloud's commits go
   Given the cloud data server runs commits this checkout lacks
   When the cloud operator runs "starkeep update --platform --force"
@@ -1208,7 +1211,7 @@ Scenario: [CLOUD-SETUP-165] A cloud operator who passes --force redeploys anyway
   And "starkeep cloud status" then shows the cloud data server as current
 ```
 
-- **Coverage:** `packages/admin-installer/__tests__/operations/install-cloud-data-server.test.ts` › "installCloudDataServerOp's deployed record and backward-deploy guard deploys anyway with allowBackward, says so, and records the new commit" (unit); `packages/cli/__tests__/update-platform.test.ts` › "applyPlatform passes --force on as allowBackward" (unit).
+- **Coverage:** `packages/admin-installer/__tests__/operations/install-cloud-data-server.test.ts` › "installCloudDataServerOp's deployed record and backward-deploy guard deploys anyway with allowBackward, says so, and records the new commit" (unit); `packages/cli/__tests__/update-platform.test.ts` › "applyPlatform passes --force on as allowBackward" (unit). No test runs "starkeep cloud status" afterward.
 
 ```gherkin
 @cloud
@@ -1237,7 +1240,7 @@ Scenario: [CLOUD-SETUP-167] A cloud operator finds each cloud data server deploy
 
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:none
 Scenario: [CLOUD-SETUP-168] A cloud operator who undoes a platform update is told the cloud keeps the newer platform
   Given the last "starkeep update" pulled the platform checkout and redeployed the cloud data server
   When the cloud operator runs "starkeep update --undo"
@@ -1245,6 +1248,8 @@ Scenario: [CLOUD-SETUP-168] A cloud operator who undoes a platform update is tol
   And the output says the bootstrap stack and the cloud data server keep running the newer platform
   And the output names "starkeep update --platform --no-fetch --force" to redeploy the older one
 ```
+
+- **Coverage:** No test undoes a platform update.
 
 ## Updating the bootstrap stack
 
