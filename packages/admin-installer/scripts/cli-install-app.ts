@@ -388,7 +388,7 @@ for (const surface of surfaces) {
   if (!offered.includes(surface)) {
     console.error(
       surface === "web"
-        ? `Error: ${appId}'s manifest declares no compute, so it has no web app.`
+        ? `Error: ${appId}'s manifest declares no compute and no public site, so it has no web app.`
         : `Error: ${appId}'s manifest declares no mobile build (mobile.android).`,
     );
     process.exit(1);

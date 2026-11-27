@@ -114,6 +114,46 @@ describe("cli:install-app and the bundle command", () => {
   });
 });
 
+// A public site makes a web app even with no compute, so `--web` refuses only
+// a manifest that declares neither.
+describe("cli:install-app --web and the surfaces a manifest offers", () => {
+  function appWith(infraRequirements: Record<string, unknown>): string {
+    const dir = mkdtempSync(join(tmpdir(), "cli-surface-app-"));
+    writeFileSync(
+      join(dir, "starkeep.manifest.json"),
+      JSON.stringify({
+        id: "example-app",
+        name: "Example",
+        version: "0.1.0",
+        tier: "community",
+        targets: ["cloud"],
+        infraRequirements,
+        bundle: { command: "node", args: ["scripts/bundle.mjs"] },
+      }),
+    );
+    cpSync(join(DEFAULT_APPS_DIR, "package.json"), join(dir, "package.json"));
+    return dir;
+  }
+
+  it("refuses --web for a manifest with no compute and no public site", async () => {
+    const result = await runCli(appWith({}));
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "example-app's manifest declares no compute and no public site, so it has no web app.",
+    );
+    expect(result.stdout).not.toContain("cloud install");
+  });
+
+  it("accepts --web for a site-only manifest", async () => {
+    const result = await runCli(appWith({ publicSite: { bundleDir: "site" } }));
+    expect(result.stderr).not.toContain("so it has no web app");
+    // The next check, on the bundle command, is the one that stops it.
+    expect(result.stderr).toContain(
+      "The manifest's bundle command `node scripts/bundle.mjs` is not approved",
+    );
+  });
+});
+
 // Admin's cloud-install route checks the folder against the manifest the
 // person approved and passes its digest. The CLI reads the manifest again
 // later, so it refuses a folder that changed between the two reads.
