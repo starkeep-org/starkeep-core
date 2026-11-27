@@ -145,7 +145,7 @@ export async function readCloudApps(
     credentials: admin.stsCredentials,
   });
   try {
-    return await listCloudApps(pool);
+    return await listCloudApps(pool, config);
   } finally {
     await pool.end().catch(() => {});
   }

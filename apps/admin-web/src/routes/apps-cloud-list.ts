@@ -12,6 +12,7 @@
  */
 
 import { listCloudApps } from "@starkeep/operator/cloud-registry";
+import { readConfig } from "@starkeep/operator/config";
 import { openInstallerPool } from "../lib/installer-dsql";
 
 // The row shapes and the comparison with the folder live in
@@ -24,7 +25,7 @@ export async function POST(req: Request) {
   const { pool } = opened;
 
   try {
-    const apps = await listCloudApps(pool);
+    const apps = await listCloudApps(pool, readConfig() ?? {});
     return Response.json({ apps: apps.map(({ folder: _folder, ...app }) => app) });
   } catch (err) {
     return Response.json(

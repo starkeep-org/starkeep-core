@@ -162,12 +162,19 @@ describe("whether a row is behind its app's folder", () => {
     web_source_hash: string | null;
   } = { manifest: JSON.stringify(deployed), web_app: true, web_source_hash: "abc" };
 
+  // The deployment's values now, as config.json holds them.
+  const deployment = {
+    userPoolId: "us-west-2_abc",
+    publicBaseUrl: "https://d1.cloudfront.net",
+  };
+
   async function behind(
     r: Partial<typeof row>,
     folder?: { manifest: Record<string, unknown>; source: string | null },
+    now: Record<string, unknown> = deployment,
   ) {
     const { behindFolder } = await import("../src/routes/apps-cloud-list");
-    return behindFolder({ ...row, ...r }, folder);
+    return behindFolder({ ...row, ...r }, folder, now);
   }
 
   it("is current when the folder holds the deployed manifest and code, whatever the key order", async () => {
@@ -216,6 +223,16 @@ describe("whether a row is behind its app's folder", () => {
           { manifest: folderManifest, source: "abc" },
         ),
       ).toEqual({ behind: false, codeBehind: false });
+    });
+
+    it("is behind when the deployment's value changed since the deploy, such as a new public address", async () => {
+      expect(
+        await behind(
+          { manifest: JSON.stringify(filled) },
+          { manifest: folderManifest, source: "abc" },
+          { ...deployment, publicBaseUrl: "https://photos.example.com" },
+        ),
+      ).toMatchObject({ behind: true });
     });
 
     it("is behind when the folder sets a platform variable itself", async () => {

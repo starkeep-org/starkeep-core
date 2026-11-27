@@ -10,7 +10,11 @@
  */
 import { DsqlSigner } from "@aws-sdk/dsql-signer";
 import { sourceFingerprint } from "@starkeep/admin-installer/app-discovery";
-import { withoutFilledPlatformEnv } from "@starkeep/admin-installer/platform-env";
+import {
+  platformEnvValues,
+  withoutFilledPlatformEnv,
+  type PlatformEnvSource,
+} from "@starkeep/admin-installer/platform-env";
 import {
   DummyDriver,
   Kysely,
@@ -133,6 +137,7 @@ export interface FolderNow {
 export function behindFolder(
   r: Pick<RegistryDbRow, "manifest" | "web_app" | "web_source_hash">,
   folder: FolderNow | undefined,
+  deployment: PlatformEnvSource,
 ): { behind: boolean | null; codeBehind: boolean | null } {
   if (!folder) return { behind: null, codeBehind: null };
   const deployed = parseManifest(r.manifest);
@@ -140,7 +145,10 @@ export function behindFolder(
   // manifest, so those filled values are not a change.
   const behind =
     deployed === null ||
-    !sameManifest(withoutFilledPlatformEnv(deployed, folder.manifest), folder.manifest);
+    !sameManifest(
+      withoutFilledPlatformEnv(deployed, folder.manifest, platformEnvValues(deployment)),
+      folder.manifest,
+    );
   const codeBehind =
     r.web_app !== true
       ? false
@@ -157,8 +165,14 @@ export type CloudApp = ReturnType<typeof registryApp> & {
   folder: string | null;
 };
 
-/** Every app installed in the cloud, each compared with its folder on this computer. */
-export async function listCloudApps(pool: pg.Pool): Promise<CloudApp[]> {
+/**
+ * Every app the cloud registry holds, compared with its folder here.
+ * `deployment` is `config.json`, whose values a deploy would write now.
+ */
+export async function listCloudApps(
+  pool: pg.Pool,
+  deployment: PlatformEnvSource,
+): Promise<CloudApp[]> {
   const query = compiler
     .selectFrom("shared.app_registry")
     .select([
@@ -183,6 +197,6 @@ export async function listCloudApps(pool: pg.Pool): Promise<CloudApp[]> {
       // Only a web app runs the folder's code in the cloud.
       source: r.web_app === true ? sourceFingerprint(folder.dir) : null,
     };
-    return { ...registryApp(r), ...behindFolder(r, now), folder: folder?.dir ?? null };
+    return { ...registryApp(r), ...behindFolder(r, now, deployment), folder: folder?.dir ?? null };
   });
 }
