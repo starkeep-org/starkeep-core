@@ -35,9 +35,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { CommandOutput } from "@/components/CommandOutput";
 import { ConsentDialog } from "@/components/ConsentDialog";
-import {
-  readCloudConfig,
-} from "@/lib/cloud-config";
+import { readCloudConfig } from "@/lib/cloud-config";
 import { readAdminSession, throwIfNotSignedIn, NotSignedInError } from "@/lib/admin-session-client";
 import {
   consentDiffers,
@@ -230,9 +228,7 @@ export function AppUpdateProvider({
   const [registry, setRegistry] = useState<CloudRegistry>(
     cloudAdministered ? { kind: "loading" } : { kind: "none" },
   );
-  const [installing, setInstalling] = useState<
-    CloudInstallRequest | null
-  >(null);
+  const [installing, setInstalling] = useState<CloudInstallRequest | null>(null);
   const [cloudRunning, setCloudRunning] = useState(false);
   const installDone = useRef<((result: CloudInstallResult) => void) | null>(null);
   const local = useRef<LocalHandlers | null>(null);
@@ -298,7 +294,10 @@ export function AppUpdateProvider({
       if (!cfg)
         return { ok: false, error: "Cloud is not configured. Complete the cloud setup first." };
       if (!(await readAdminSession()).signedIn) {
-        return { ok: false, error: "Not signed in. Sign in as the admin from the dashboard first." };
+        return {
+          ok: false,
+          error: "Not signed in. Sign in as the admin from the dashboard first.",
+        };
       }
       return new Promise<CloudInstallResult>((resolve) => {
         installDone.current = resolve;

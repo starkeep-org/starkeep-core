@@ -24,7 +24,12 @@ export async function operatorSession(): Promise<OperatorSession> {
   if (!cfg) throw new Error("Cloud is not configured. Complete the cloud setup first.");
   const session = await readAdminSession();
   if (!session.signedIn || !session.sub) throw new NotSignedInError();
-  return { stackPrefix: cfg.stackPrefix, region: cfg.region, userSub: session.sub, email: session.email };
+  return {
+    stackPrefix: cfg.stackPrefix,
+    region: cfg.region,
+    userSub: session.sub,
+    email: session.email,
+  };
 }
 
 /**
@@ -38,5 +43,10 @@ export async function operatorSessionIfSignedIn(): Promise<OperatorSession | nul
   if (!cfg) return null;
   const session = await readAdminSession();
   if (!session.signedIn || !session.sub) return null;
-  return { stackPrefix: cfg.stackPrefix, region: cfg.region, userSub: session.sub, email: session.email };
+  return {
+    stackPrefix: cfg.stackPrefix,
+    region: cfg.region,
+    userSub: session.sub,
+    email: session.email,
+  };
 }

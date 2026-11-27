@@ -42,7 +42,13 @@ beforeEach(() => {
       };
       calls.push(call);
       if (url === "/api/admin-session") {
-        return Response.json({ signedIn: false, email: null, sub: null, expiresAt: null, browserSignIn });
+        return Response.json({
+          signedIn: false,
+          email: null,
+          sub: null,
+          expiresAt: null,
+          browserSignIn,
+        });
       }
       if (url === "/api/this-machine/sign-out") {
         machine = SIGNED_OUT;
@@ -63,7 +69,9 @@ afterEach(() => {
 describe("a signed-out machine", () => {
   it("sends the person to the managed login page to sign in, and asks for no password", async () => {
     render(<ThisMachineSection />);
-    const link = (await screen.findByRole("link", { name: "Sign in to sync" })) as HTMLAnchorElement;
+    const link = (await screen.findByRole("link", {
+      name: "Sign in to sync",
+    })) as HTMLAnchorElement;
     expect(link.getAttribute("href")).toMatch(/^\/auth\/start\?client=device&returnTo=/);
     expect(document.querySelector('input[type="password"]')).toBeNull();
     expect(calls.some((c) => c.url.includes("sign-in"))).toBe(false);

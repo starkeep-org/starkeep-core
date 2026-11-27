@@ -51,7 +51,9 @@ export async function adminScriptCredentials(
 export const adminBaseCredentials = (): Promise<BaseCredentials> => adminScriptCredentials();
 
 /** Exit with the reason when no credentials can be had. */
-export async function adminScriptCredentialsOrExit(nonInteractive: boolean): Promise<BaseCredentials> {
+export async function adminScriptCredentialsOrExit(
+  nonInteractive: boolean,
+): Promise<BaseCredentials> {
   try {
     return await adminScriptCredentials({ nonInteractive });
   } catch (err) {

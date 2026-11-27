@@ -11,13 +11,7 @@ interface Props {
   onSuccess?: () => void;
 }
 
-export function CommandOutputModal({
-  opened,
-  onClose,
-  commandId,
-  title,
-  onSuccess,
-}: Props) {
+export function CommandOutputModal({ opened, onClose, commandId, title, onSuccess }: Props) {
   const [lines, setLines] = useState<string[]>([]);
   const [status, setStatus] = useState<"idle" | "running" | "success" | "failure">("idle");
 

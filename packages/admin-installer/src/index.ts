@@ -24,10 +24,7 @@ export { formatAnonymousRouteReport } from "./anonymous-route-report";
 export { roleChain } from "./session";
 export type { AwsCredentials } from "./session";
 
-export {
-  regionFromUserPoolId,
-  getIdentityPoolCredentials,
-} from "./cognito-auth";
+export { regionFromUserPoolId, getIdentityPoolCredentials } from "./cognito-auth";
 export type {
   CognitoUserPoolRef,
   CognitoIdentityPoolRef,

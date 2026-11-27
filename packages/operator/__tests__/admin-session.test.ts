@@ -102,14 +102,20 @@ beforeEach(async () => {
 
 describe("startAuthorization", () => {
   it("sends the hash of a fresh secret to the page, never the secret", () => {
-    const start = oauth.startAuthorization({ domain: "d.example.com", clientId: "c", redirectUri: REDIRECT });
+    const start = oauth.startAuthorization({
+      domain: "d.example.com",
+      clientId: "c",
+      redirectUri: REDIRECT,
+    });
     const url = new URL(start.url);
     expect(url.origin + url.pathname).toBe("https://d.example.com/oauth2/authorize");
     expect(url.searchParams.get("code_challenge")).toBe(oauth.pkceChallenge(start.codeVerifier));
     expect(url.searchParams.get("code_challenge_method")).toBe("S256");
     expect(url.searchParams.get("state")).toBe(start.state);
     expect(start.url).not.toContain(start.codeVerifier);
-    expect(oauth.startAuthorization({ domain: "d", clientId: "c", redirectUri: REDIRECT }).state).not.toBe(start.state);
+    expect(
+      oauth.startAuthorization({ domain: "d", clientId: "c", redirectUri: REDIRECT }).state,
+    ).not.toBe(start.state);
   });
 });
 
@@ -133,14 +139,18 @@ describe("the admin session", () => {
     const minted = await session.adminCredentials({ now: t0 + 60 * 60_000, exchange });
     expect(minted).toMatchObject({ email: ADMIN, stackPrefix: "sk", region: "us-east-1" });
     expect(minted.stsCredentials.expiration).toBe("2030-01-01T00:00:00.000Z");
-    const file = JSON.parse(readFileSync(session.adminSessionFile(), "utf8")) as { lastUsedAt: string };
+    const file = JSON.parse(readFileSync(session.adminSessionFile(), "utf8")) as {
+      lastUsedAt: string;
+    };
     expect(file.lastUsedAt).toBe(new Date(t0 + 60 * 60_000).toISOString());
   });
 
   it("ends after twelve idle hours, revoking the token", async () => {
     const t0 = Date.parse("2026-11-19T08:00:00Z");
     await signIn(ADMIN, t0);
-    const token = (JSON.parse(readFileSync(session.adminSessionFile(), "utf8")) as { refreshToken: string }).refreshToken;
+    const token = (
+      JSON.parse(readFileSync(session.adminSessionFile(), "utf8")) as { refreshToken: string }
+    ).refreshToken;
     const later = t0 + session.ADMIN_IDLE_EXPIRY_MS + 1;
     expect(session.adminSessionStatus(later).signedIn).toBe(false);
     await expect(session.adminCredentials({ now: later, exchange })).rejects.toBeInstanceOf(
@@ -191,13 +201,17 @@ describe("the admin session", () => {
   it("asks for a sign-in when the pool ended the session", async () => {
     await signIn(ADMIN);
     pool.signOutEverywhere(ADMIN);
-    await expect(session.adminCredentials({ exchange })).rejects.toBeInstanceOf(session.SignInRequired);
+    await expect(session.adminCredentials({ exchange })).rejects.toBeInstanceOf(
+      session.SignInRequired,
+    );
     expect(existsSync(session.adminSessionFile())).toBe(false);
   });
 
   it("signs out at the pool and on disk", async () => {
     await signIn(ADMIN);
-    const token = (JSON.parse(readFileSync(session.adminSessionFile(), "utf8")) as { refreshToken: string }).refreshToken;
+    const token = (
+      JSON.parse(readFileSync(session.adminSessionFile(), "utf8")) as { refreshToken: string }
+    ).refreshToken;
     expect(await session.signOutAdmin()).toEqual({ revoked: true });
     expect(pool.revoked.has(token)).toBe(true);
     expect(session.adminSessionStatus().signedIn).toBe(false);
@@ -216,10 +230,18 @@ describe("the admin session", () => {
 
   it("ignores a session from another cloud than config.json names", async () => {
     await signIn(ADMIN);
-    const file = JSON.parse(readFileSync(session.adminSessionFile(), "utf8")) as Record<string, unknown>;
-    writeFileSync(session.adminSessionFile(), JSON.stringify({ ...file, userPoolId: "us-east-1_Other" }));
+    const file = JSON.parse(readFileSync(session.adminSessionFile(), "utf8")) as Record<
+      string,
+      unknown
+    >;
+    writeFileSync(
+      session.adminSessionFile(),
+      JSON.stringify({ ...file, userPoolId: "us-east-1_Other" }),
+    );
     expect(session.adminSessionStatus().signedIn).toBe(false);
-    await expect(session.adminCredentials({ exchange })).rejects.toBeInstanceOf(session.SignInRequired);
+    await expect(session.adminCredentials({ exchange })).rejects.toBeInstanceOf(
+      session.SignInRequired,
+    );
   });
 });
 

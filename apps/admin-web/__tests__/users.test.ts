@@ -27,7 +27,6 @@ vi.mock("@starkeep/operator/admin-session", async (original) =>
   (await import("./fake-admin-session")).fakeAdminSessionModule(await original()),
 );
 
-
 const roleChain = vi.fn();
 
 vi.mock("@starkeep/admin-installer/session", () => ({

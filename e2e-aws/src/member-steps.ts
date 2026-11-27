@@ -241,7 +241,10 @@ export function defineMemberSteps(m: MemberStepsContext): void {
     // the session, as it takes a code from the managed login page.
     const deviceClientId = m.config().deviceUserPoolClientId;
     await expect(
-      passwordSignIn(m.config(), deviceClientId, { email: MEMBER_EMAIL, password: temporaryPassword }),
+      passwordSignIn(m.config(), deviceClientId, {
+        email: MEMBER_EMAIL,
+        password: temporaryPassword,
+      }),
     ).rejects.toBeInstanceOf(NewPasswordRequired);
 
     chosenPassword = `Member-${randomBytes(9).toString("base64url")}`;

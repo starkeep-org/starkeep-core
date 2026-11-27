@@ -500,10 +500,7 @@ export function DashboardPage() {
                     ) : undefined
                   }
                 />
-                <LocalDriveSection
-                  cloudDeployed={cloudDeployed}
-                  signedIn={signedInAsAdmin}
-                />
+                <LocalDriveSection cloudDeployed={cloudDeployed} signedIn={signedInAsAdmin} />
               </>
             }
           />

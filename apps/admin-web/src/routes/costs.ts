@@ -8,7 +8,11 @@ export async function POST(_req: Request) {
       return Response.json({ error: "~/.starkeep/config.json names no stack" }, { status: 409 });
     }
     try {
-      const costs = await fetchMtdCostsByService(admin.stsCredentials, admin.stackPrefix, admin.region);
+      const costs = await fetchMtdCostsByService(
+        admin.stsCredentials,
+        admin.stackPrefix,
+        admin.region,
+      );
       return Response.json({ costs });
     } catch (err) {
       const name = err instanceof Error ? err.name : "unknown";
