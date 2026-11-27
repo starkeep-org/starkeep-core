@@ -752,7 +752,7 @@ Scenario: [CLOUD-SETUP-054] A cloud operator who reaches the deploy step without
 
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [CLOUD-SETUP-146] A cloud operator deploys a new cloud and syncs this computer with it in one command
   Given the cloud operator's terminal holds AWS credentials for an account with no Starkeep deployment
   When the cloud operator runs 'starkeep setup --cloud --region us-east-2 --name "Home" --admin-email <email>' and answers yes
@@ -765,11 +765,12 @@ Scenario: [CLOUD-SETUP-146] A cloud operator deploys a new cloud and syncs this 
   And admin-web's dashboard shows the deployed cloud, and the This Machine section shows the computer signed in
 ```
 
+- **Coverage:** `packages/cli/__tests__/setup-cloud.test.ts` › "runs every phase in order on a bare account" (unit, local). The test checks the phases with stand-ins for AWS, and no test checks the output or runs the setup against AWS.
 - **Notes:** the second sign-in, for sync, usually needs no password, because the sign-in page remembers the first one.
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [CLOUD-SETUP-147] A cloud operator sees the AWS account and is asked before the bootstrap stack is created
   Given the cloud operator's terminal holds AWS credentials
   When the cloud operator runs "starkeep setup --cloud" with a region, a name, and an email
@@ -780,11 +781,12 @@ Scenario: [CLOUD-SETUP-147] A cloud operator sees the AWS account and is asked b
   And the cloud operator finds no new stack in the AWS account
 ```
 
+- **Coverage:** `packages/cli/__tests__/setup-cloud.test.ts` › "stops at the stack's creation without a terminal or --yes" (unit, local). No test checks the question's words or a declined answer.
 - **Notes:** "--yes" answers the question. A run with no terminal and no "--yes" stops with status 3 (CLI-024).
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [CLOUD-SETUP-148] A cloud operator who uses the account's root user is warned to use a safer identity
   Given the cloud operator's terminal holds the AWS account's root user credentials
   When the cloud operator runs "starkeep setup --cloud" with a region, a name, and an email
@@ -792,9 +794,11 @@ Scenario: [CLOUD-SETUP-148] A cloud operator who uses the account's root user is
   And setup still asks before creating the stack
 ```
 
+- **Coverage:** `packages/operator/__tests__/bootstrap.test.ts` › "names the account and the caller, and spots the root user" (unit, local). No test checks the warning's words in the setup's output.
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [CLOUD-SETUP-149] A cloud operator whose terminal credentials belong to another account than this computer's cloud is refused
   Given this computer's configuration names one AWS account
   And the cloud operator's terminal holds credentials for another account
@@ -803,9 +807,11 @@ Scenario: [CLOUD-SETUP-149] A cloud operator whose terminal credentials belong t
   And the cloud operator finds nothing created in either account
 ```
 
+- **Coverage:** `packages/cli/__tests__/setup-cloud.test.ts` › "refuses credentials for another account than config.json names" (unit, local).
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario Outline: [CLOUD-SETUP-150] A cloud operator who leaves out a value a new cloud needs is told which flag gives it
   Given this computer has no cloud setup
   When the cloud operator runs "starkeep setup --cloud <flags>"
@@ -822,9 +828,11 @@ Scenario Outline: [CLOUD-SETUP-150] A cloud operator who leaves out a value a ne
     | --join https://d123.cloudfront.net                       | Choose --cloud or --join, not both.                                                                                       |
 ```
 
+- **Coverage:** `packages/cli/__tests__/setup-cloud.test.ts` › "asks for the region, the name and the admin's email before touching AWS" and "refuses a prefix the template would refuse" (unit, local). No test checks the messages, the name's rule, or "--cloud" with "--join".
+
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [CLOUD-SETUP-151] A cloud operator whose account already holds the bootstrap stack sets up on it without creating another
   Given the AWS account holds a usable "starkeep-bootstrap" stack
   And this computer's configuration holds none of its outputs
@@ -833,9 +841,11 @@ Scenario: [CLOUD-SETUP-151] A cloud operator whose account already holds the boo
   And setup goes on to the sign-in and the installs
 ```
 
+- **Coverage:** `packages/cli/__tests__/setup-cloud.test.ts` › "uses an existing stack with the prefix instead of creating one" (unit, local). No test checks the message.
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:none
 Scenario: [CLOUD-SETUP-152] A cloud operator whose bootstrap stack is in a failed state is told to tear it down first
   Given the AWS account holds a "starkeep-bootstrap" stack that failed to create
   When the cloud operator runs "starkeep setup --cloud --region us-east-2"
@@ -843,9 +853,11 @@ Scenario: [CLOUD-SETUP-152] A cloud operator whose bootstrap stack is in a faile
   And setup changes nothing in AWS
 ```
 
+- **Coverage:** No test runs the setup against a failed stack.
+
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [CLOUD-SETUP-153] A cloud operator who runs setup again after a failure resumes after the steps that finished
   Given a "starkeep setup --cloud" run created the stack, signed the cloud operator in, and installed the cloud data server, and then the Drive install failed
   When the cloud operator runs "starkeep setup --cloud" again
@@ -854,11 +866,12 @@ Scenario: [CLOUD-SETUP-153] A cloud operator who runs setup again after a failur
   And the run ends with "The cloud is set up, and this computer syncs with it."
 ```
 
+- **Coverage:** `packages/cli/__tests__/setup-cloud.test.ts` › "resumes at %s after it failed" (unit, local). No test checks the messages.
 - **Notes:** a run whose admin session is still open skips the sign-in. A computer that already syncs says "This computer already syncs." A data server that started before the cloud existed restarts, even when the run installs nothing, such as after a terminal that closed once the Drive install had finished on its own.
 
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [CLOUD-SETUP-154] A cloud operator whose terminal closes during the cloud data server install finds the install going on, and the next run follows it
   Given a "starkeep setup --cloud" run is installing the cloud data server
   When the cloud operator closes the terminal and runs "starkeep setup --cloud" again before the install ends
@@ -866,25 +879,30 @@ Scenario: [CLOUD-SETUP-154] A cloud operator whose terminal closes during the cl
   And the output says "Followed a cloud data server install run that was already going."
 ```
 
+- **Coverage:** `packages/cli/__tests__/cloud-run.test.ts` › "says it followed a run that was already going (APP-LIFE-248)" (unit, local) covers the follow that the setup shares. No test follows the cloud data server install through the setup.
+
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:none
 Scenario: [CLOUD-SETUP-155] A cloud operator sets up the cloud with a custom domain
   When the cloud operator runs "starkeep setup --cloud" with a region, a name, an email, and "--domain photos.example.com"
   Then the install's summary names "photos.example.com" after "customDomain"
   And the summary says which step the domain still awaits, such as the record to add, and to install again
 ```
 
+- **Coverage:** No test runs the setup with "--domain".
 - **Notes:** a later run with "--domain" installs the cloud data server again with the new domain, and an empty "--domain" removes it. The domain's own steps belong to "Custom domain".
 
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [CLOUD-SETUP-156] A cloud operator installs apps in the new cloud as part of the setup
   When the cloud operator runs "starkeep setup --cloud" with a region, a name, an email, and "--apps dice,notes"
   Then after Drive, the output shows the consent words for "dice" and asks "Approve and install? [y/N]", then the same for "notes"
   And each approved app answers at its address under "/apps/" in the new cloud
 ```
+
+- **Coverage:** `packages/cli/__tests__/setup-cloud.test.ts` › "runs every phase in order on a bare account" (unit, local) checks that the apps install after Drive. No test checks the consent questions or the apps' addresses.
 
 ## Installing the cloud data server from the terminal
 

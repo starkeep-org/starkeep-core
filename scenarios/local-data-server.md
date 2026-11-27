@@ -516,7 +516,7 @@ Scenario: [LDS-028] A local operator who presses Join Existing Cloud sees the jo
 
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [LDS-119] A local operator joins an existing cloud from the terminal and signs the computer in to sync
   Given the computer has neither deployed nor joined a cloud
   When the local operator runs "starkeep setup --join https://d123.cloudfront.net"
@@ -527,20 +527,23 @@ Scenario: [LDS-119] A local operator joins an existing cloud from the terminal a
   And the This Machine section shows the joined cloud and the computer signed in
 ```
 
+- **Coverage:** `packages/cli/__tests__/setup-join.test.ts` › "records the address, waits for the restart, then signs in to sync (LDS-119)" (unit, local). The sync sign-in is a stand-in, so no test checks the closing line or the This Machine section.
 - **Notes:** a data server that is not running starts first. The sync sign-in itself belongs to [users-and-access.md](users-and-access.md) (ACCESS-211).
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [LDS-120] A local operator who gives a join address that is not https is told the form it takes
   When the local operator runs "starkeep setup --join http://d123.cloudfront.net"
   Then the output says "--join takes the cloud's https address, such as https://d123.cloudfront.net."
   And the command exits with status 2, and the computer joins no cloud
 ```
 
+- **Coverage:** `packages/cli/__tests__/setup-join.test.ts` › "refuses an address that is not https with status 2, and joins nothing (LDS-120)" (unit, local).
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [LDS-121] A local operator whose data server does not come back after the join is told where to look
   Given the data server fails to start again after it records the cloud's address
   When the local operator runs "starkeep setup --join https://d123.cloudfront.net"
@@ -548,16 +551,21 @@ Scenario: [LDS-121] A local operator whose data server does not come back after 
   And the command exits with status 1
 ```
 
+- **Coverage:** `packages/cli/__tests__/setup-join.test.ts` › "says where to look when the data server does not come back (LDS-121)" (unit, local).
+
 ```gherkin
 @local
-@intent:unclear
+@intent:confirmed @coverage:partial
 Scenario: [LDS-123] A local operator whose computer already belongs to a cloud cannot join another one from the terminal
   Given the computer already syncs with the cloud at https://d123.cloudfront.net
   When the local operator runs "starkeep setup --join https://d456.cloudfront.net"
-  Then the output says "This computer already belongs to https://d123.cloudfront.net."
+  Then the output says "This computer already belongs to https://d123.cloudfront.net. Moving a computer to another cloud is not supported."
   And the This Machine section still shows the computer syncing with https://d123.cloudfront.net
   And the command exits with status 1
 ```
+
+- **Coverage:** `packages/cli/__tests__/setup-join.test.ts` › "refuses another cloud on a computer that already has one, and changes nothing (LDS-123)" (unit, local). No test opens the This Machine section.
+- **Notes:** admin-web offers Join only to a computer with no cloud (LDS-022). A rerun with the same address resumes the join. A computer whose own deploy has started belongs to that cloud already.
 
 ## Library ownership
 
