@@ -76,6 +76,31 @@ export class UserInputError extends Error {
   }
 }
 
+/** No account has the email or username named. admin-web answers it with 400. */
+export class UserNotFound extends UserInputError {
+  constructor(ref: string) {
+    super(`No account has the email or username "${ref}".`);
+    this.name = "UserNotFound";
+  }
+}
+
+/**
+ * The account exists, but a group step after its creation failed, so it
+ * lacks a group the caller asked for.
+ */
+export class GroupStepFailed extends Error {
+  constructor(
+    readonly email: string,
+    readonly group: Group,
+    cause: unknown,
+  ) {
+    super(
+      `Created ${email}, but could not add it to the ${group} group: ${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+    this.name = "GroupStepFailed";
+  }
+}
+
 export const LAST_ADMIN_ERROR = "This is the last admin. Make someone else an admin first.";
 export const DISABLE_SELF_ERROR = "You cannot disable your own account.";
 
@@ -171,30 +196,42 @@ export async function createUser(
   if (!/^[^\s@]+@[^\s@]+$/.test(email)) {
     throw new UserInputError("Enter the person's email address.");
   }
-  const created = await pool.client.send(
-    new AdminCreateUserCommand({
-      UserPoolId: pool.poolId,
-      Username: email,
-      UserAttributes: [
-        { Name: "email", Value: email },
-        { Name: "email_verified", Value: "true" },
-      ],
-      DesiredDeliveryMediums: ["EMAIL"],
-    }),
-  );
+  let created;
+  try {
+    created = await pool.client.send(
+      new AdminCreateUserCommand({
+        UserPoolId: pool.poolId,
+        Username: email,
+        UserAttributes: [
+          { Name: "email", Value: email },
+          { Name: "email_verified", Value: "true" },
+        ],
+        DesiredDeliveryMediums: ["EMAIL"],
+      }),
+    );
+  } catch (err) {
+    if ((err as { name?: string }).name === "UsernameExistsException") {
+      throw new UserRefusal(`An account with the email ${email} already exists.`);
+    }
+    throw err;
+  }
   const username = created.User?.Username ?? email;
   for (const [group, wanted] of [
     [ADMINS_GROUP, input.admin],
     [DATA_GROUP, input.data],
   ] as const) {
     if (wanted) {
-      await pool.client.send(
-        new AdminAddUserToGroupCommand({
-          UserPoolId: pool.poolId,
-          Username: username,
-          GroupName: group,
-        }),
-      );
+      try {
+        await pool.client.send(
+          new AdminAddUserToGroupCommand({
+            UserPoolId: pool.poolId,
+            Username: username,
+            GroupName: group,
+          }),
+        );
+      } catch (err) {
+        throw new GroupStepFailed(email, group, err);
+      }
     }
   }
 }
@@ -317,6 +354,6 @@ export async function findUser(pool: UserPool, ref: string): Promise<UserView> {
   const wanted = ref.trim().toLowerCase();
   const user =
     users.find((u) => u.username === ref) ?? users.find((u) => u.email?.toLowerCase() === wanted);
-  if (!user) throw new UserInputError(`No account has the email or username "${ref}".`);
+  if (!user) throw new UserNotFound(ref);
   return user;
 }

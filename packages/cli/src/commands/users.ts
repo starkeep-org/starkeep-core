@@ -10,6 +10,7 @@ import {
   createUser,
   DATA_GROUP,
   findUser,
+  GroupStepFailed,
   listUsers,
   resetPassword,
   setEnabled,
@@ -17,6 +18,7 @@ import {
   signOutEverywhere,
   userPool,
   UserInputError,
+  UserNotFound,
   UserRefusal,
   type Group,
   type UserPool,
@@ -35,12 +37,24 @@ async function pool(io: Io): Promise<UserPool> {
   return userPool(await adminCredentialsOrSignIn(io), poolId);
 }
 
-/** Run `act`, turning a refusal into exit 1 and bad input into exit 2. */
+/**
+ * Run `act`, turning a refusal or an unknown account into exit 1 and bad
+ * input into exit 2.
+ */
 async function acting<T>(act: () => Promise<T>): Promise<T> {
   try {
     return await act();
   } catch (err) {
     if (err instanceof UserRefusal) throw new CliError(err.message, 1, "REFUSED");
+    if (err instanceof UserNotFound) throw new CliError(err.message, 1, "NOT_FOUND");
+    if (err instanceof GroupStepFailed) {
+      const flagName = err.group === ADMINS_GROUP ? "--admin" : "--data";
+      throw new CliError(
+        `${err.message}\nThe account exists. Add the group with \`starkeep user grant ${err.email} ${flagName}\`.`,
+        1,
+        "PARTIAL",
+      );
+    }
     if (err instanceof UserInputError) throw new CliError(err.message, EXIT_USAGE, "INVALID_INPUT");
     throw err;
   }
@@ -112,15 +126,17 @@ export const userListCommand: Command = {
 export const userAddCommand: Command = {
   name: "user add",
   summary: "Invite a person, in the groups you name",
-  usage: "<email> [--admin] [--data]",
+  usage: "<email> (--admin | --data)...",
   lane: "admin",
   flags: GROUP_FLAGS,
   details:
     "Cognito emails the person a temporary password, which they replace at their first\n" +
     "sign-in. --data gives the account a library that syncs; --admin gives it cloud\n" +
-    "operator rights. An account may have both.",
+    "operator rights. An account needs one of them, and may have both.",
   async run(io, args) {
     const email = oneAccount(args, "add").trim();
+    // An account in no group can neither sync nor manage the cloud.
+    groupsOf(args, "add");
     await acting(async () =>
       createUser(await pool(io), { email, admin: flag(args, "admin"), data: flag(args, "data") }),
     );

@@ -116,7 +116,7 @@ describe("starkeep user", () => {
   });
 
   it("refuses an address that is not an email with exit status 2", async () => {
-    const { code, err } = await run("user", "add", "lee");
+    const { code, err } = await run("user", "add", "lee", "--data");
     expect(code).toBe(2);
     expect(err).toContain("Enter the person's email address.");
   });
@@ -188,10 +188,46 @@ describe("starkeep user", () => {
     });
   });
 
-  it("says no account has an email it does not know, with exit status 2", async () => {
+  it("says no account has an email it does not know, with exit status 1 and no usage text (ACCESS-226)", async () => {
     const { code, err } = await run("user", "disable", "nobody@example.com");
-    expect(code).toBe(2);
+    expect(code).toBe(1);
     expect(err).toContain('No account has the email or username "nobody@example.com".');
+    expect(err).not.toContain("Usage:");
+  });
+
+  it("refuses an email that already has an account, and changes nothing", async () => {
+    cognito
+      .on(AdminCreateUserCommand)
+      .rejects(
+        Object.assign(new Error("User account already exists"), {
+          name: "UsernameExistsException",
+        }),
+      );
+    const { code, err } = await run("user", "add", "sam@example.com", "--data");
+    expect(code).toBe(1);
+    expect(err).toContain("An account with the email sam@example.com already exists.");
+    expect(cognito.commandCalls(AdminAddUserToGroupCommand)).toHaveLength(0);
+  });
+
+  it("refuses an account in no group, before it creates anything", async () => {
+    const { code, err } = await run("user", "add", "lee@example.com");
+    expect(code).toBe(2);
+    expect(err).toContain(
+      "Name the group: starkeep user add <email> --admin (cloud operator rights) or --data (a synced library).",
+    );
+    expect(cognito.commandCalls(AdminCreateUserCommand)).toHaveLength(0);
+  });
+
+  it("says the account exists when its group step fails, and names the grant", async () => {
+    cognito.on(AdminAddUserToGroupCommand).rejects(new Error("Rate exceeded"));
+    const { code, err } = await run("user", "add", "lee@example.com", "--admin");
+    expect(code).toBe(1);
+    expect(err).toContain(
+      "Created lee@example.com, but could not add it to the starkeep-admins group: Rate exceeded",
+    );
+    expect(err).toContain(
+      "The account exists. Add the group with `starkeep user grant lee@example.com --admin`.",
+    );
   });
 
   it("lists the user commands for `starkeep user`", async () => {
