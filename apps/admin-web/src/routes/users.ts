@@ -24,7 +24,12 @@ import {
 } from "@starkeep/operator/users";
 import { requireAdmin } from "../lib/admin-auth";
 
-export { ADMINS_GROUP, DATA_GROUP, temporaryPassword, type UserView } from "@starkeep/operator/users";
+export {
+  ADMINS_GROUP,
+  DATA_GROUP,
+  temporaryPassword,
+  type UserView,
+} from "@starkeep/operator/users";
 
 function userPoolId(): string {
   const config = readStarkeepConfig() as { userPoolId?: string };
