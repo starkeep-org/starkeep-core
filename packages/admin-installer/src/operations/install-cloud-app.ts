@@ -362,6 +362,7 @@ export const installCloudAppOp: Operation<InstallCloudAppInput, InstallCloudAppR
       comparison,
       `${appId} in the cloud`,
       `\`starkeep install ${appId} --cloud --force\``,
+      { dir: appDir, name: appId },
     );
   } else if (comparison.kind === "backward" || comparison.kind === "unknown-commit") {
     emit({
