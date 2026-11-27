@@ -33,6 +33,20 @@ delete process.env.STARKEEP_LOCAL_DATA_SERVER_URL;
 delete process.env.STARKEEP_DRIVE_URL;
 delete process.env.INIT_CWD;
 
+// The suites fetch from this worker, both directly and through the CLI that
+// `answering` runs in-process. Every `starkeep` call blocks the worker in
+// spawnSync, so fetch's pool cannot see that a server closed or restarted
+// behind a kept-alive connection, and the next fetch fails on that dead socket.
+// A real CLI run is a fresh process. Closing each connection matches that.
+const pooledFetch = globalThis.fetch;
+globalThis.fetch = ((input: Parameters<typeof fetch>[0], init: RequestInit = {}) => {
+  const headers = new Headers(
+    init.headers ?? (input instanceof Request ? input.headers : undefined),
+  );
+  headers.set("connection", "close");
+  return pooledFetch(input, { ...init, headers });
+}) as typeof fetch;
+
 export interface Run {
   code: number;
   out: string;
