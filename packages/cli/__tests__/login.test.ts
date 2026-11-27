@@ -299,7 +299,9 @@ describe("starkeep login --sync", () => {
   it("says to join a cloud first, and opens no browser (ACCESS-213)", async () => {
     const r = await run(["login", "--sync", "--no-browser"]);
     expect(r.code).toBe(1);
-    expect(r.err).toContain("This computer has joined no cloud.");
+    expect(r.err).toContain(
+      "This computer has joined no cloud. Join one with `starkeep setup --join <address>` or in admin-web.",
+    );
     expect(r.out + r.err).not.toContain("oauth2/authorize");
   });
 

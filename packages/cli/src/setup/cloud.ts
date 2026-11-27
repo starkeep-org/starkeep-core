@@ -34,7 +34,12 @@ import {
   isUsableStack,
   type OwnerClients,
 } from "@starkeep/operator/bootstrap";
-import { patchConfig, readConfigSeeded, regionFromUserPoolId } from "@starkeep/operator/config";
+import {
+  patchConfig,
+  readConfig,
+  readConfigSeeded,
+  regionFromUserPoolId,
+} from "@starkeep/operator/config";
 import { PLATFORM_RUN_OWNERS } from "@starkeep/operator/operation-runs";
 import { localDataServerUrlFromEnv } from "@starkeep/operator/urls";
 import { CliError, usageError } from "../errors";
@@ -340,6 +345,22 @@ export async function setupJoin(
   if (!/^https:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/\S*)?$/.test(url)) {
     throw usageError(
       "--join takes the cloud's https address, such as https://d123.cloudfront.net.",
+    );
+  }
+  // A computer that deployed or joined a cloud keeps it: its library is
+  // bound to that cloud's account. Joining the same address again resumes.
+  const config = readConfig() ?? {};
+  const current = [config.apiGatewayUrl, config.publicBaseUrl, config.cloudUrl]
+    .filter((v): v is string => typeof v === "string" && v.length > 0)
+    .map((v) => v.replace(/\/+$/, ""));
+  const belongs =
+    current[0] ??
+    (typeof config.userPoolId === "string"
+      ? `the cloud whose sign-in pool is ${config.userPoolId}`
+      : null);
+  if (belongs && !current.includes(url)) {
+    throw new CliError(
+      `This computer already belongs to ${belongs}. Moving a computer to another cloud is not supported.`,
     );
   }
   await deps.startLocalServices(io, false);

@@ -125,7 +125,9 @@ export async function loginSync(io: Io, noBrowser: boolean): Promise<{ email: st
   const config = readConfig() ?? {};
   const cloudUrl = typeof config.apiGatewayUrl === "string" ? config.apiGatewayUrl : null;
   if (!cloudUrl)
-    throw new CliError("This computer has joined no cloud. Join one in admin-web first.");
+    throw new CliError(
+      "This computer has joined no cloud. Join one with `starkeep setup --join <address>` or in admin-web.",
+    );
   // The data server keeps the sync session, so check it before the browser opens.
   await syncState();
   let auth;
