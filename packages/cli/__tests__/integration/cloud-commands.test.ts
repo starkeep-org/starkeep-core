@@ -330,12 +330,29 @@ describe("update with a cloud install", () => {
     expect(cloud.runs).toHaveLength(0);
   });
 
-  it("keeps this computer on the old version when the cloud deploy fails", async () => {
+  it("keeps this computer on the old version when the cloud deploy fails, and says so (APP-LIFE-274)", async () => {
     cloud.apps = [cloudRow("dice", { behind: true })];
+    cloud.fail = "install-cloud-app";
+    const run = await quietly(["update", "dice", "--yes", "--no-fetch"]);
+    expect(run.code).toBe(1);
+    expect(run.err).toContain("The cloud refused the deploy.");
+    expect(run.err).toContain(
+      "dice stays on the old version on this computer, because its cloud update failed.",
+    );
+    expect(run.err).not.toContain("update --undo");
+    expect(run.out).not.toContain("Updated dice.");
+  });
+
+  it("names the undo when the failed cloud update follows a pull (APP-LIFE-274)", async () => {
+    dice.publish({ version: "v4" });
+    cloud.apps = [cloudRow("dice")];
     cloud.fail = "install-cloud-app";
     const run = await quietly(["update", "dice", "--yes"]);
     expect(run.code).toBe(1);
-    expect(run.err).toContain("The cloud refused the deploy.");
+    expect(run.err).toContain(
+      "The folder holds the pulled code. `starkeep update --undo` returns it.",
+    );
     expect(run.out).not.toContain("Updated dice.");
+    expect(starkeep(["update", "--undo"]).code).toBe(0);
   });
 });

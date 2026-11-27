@@ -430,6 +430,22 @@ async function applyLocally(
 
 type Outcome = { cloud?: string; local?: string };
 
+/**
+ * A failed cloud update, with what it means for this computer: the install
+ * here stays on the old version, though a pull may have moved the folder.
+ */
+function stayedLocally(err: unknown, appId: string, moved: boolean): CliError {
+  const message = err instanceof Error ? err.message : String(err);
+  const lines = [
+    message,
+    `${appId} stays on the old version on this computer, because its cloud update failed.`,
+    ...(moved ? ["The folder holds the pulled code. `starkeep update --undo` returns it."] : []),
+  ];
+  return err instanceof CliError
+    ? new CliError(lines.join("\n"), err.exitCode, err.code, err.logPath)
+    : new CliError(lines.join("\n"));
+}
+
 async function applyAll(
   io: Io,
   targets: Target[],
@@ -449,7 +465,14 @@ async function applyAll(
       const result: Outcome = {};
       const ok = approved.get(t.appId);
       const moved = t.repo !== null && movedRoots.has(t.repo);
-      if (t.cloud) result.cloud = await applyToCloud(io, { ...t, cloud: t.cloud }, yes, ok, moved);
+      if (t.cloud) {
+        try {
+          result.cloud = await applyToCloud(io, { ...t, cloud: t.cloud }, yes, ok, moved);
+        } catch (err) {
+          if (!t.local) throw err;
+          throw stayedLocally(err, t.appId, moved);
+        }
+      }
       // A cloud update the person declined leaves this computer alone too, so
       // the device never runs ahead of the cloud.
       if (t.local && result.cloud !== "declined") {
