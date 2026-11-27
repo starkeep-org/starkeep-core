@@ -704,6 +704,12 @@ describe("install", () => {
       registryCredentials,
     });
     expect(deleteStaticAssets).toHaveBeenCalledTimes(1);
+    expect(deleteStaticAssets).toHaveBeenCalledWith(
+      "photos",
+      "starkeep-app-assets-111122223333-us-east-1",
+      "us-east-1",
+      expect.objectContaining({ accessKeyId: expect.any(String) }),
+    );
   });
 });
 
@@ -753,6 +759,12 @@ describe("uninstall", () => {
     });
     expect(doneSteps("uninstall")).toContain("delete_static_assets");
     expect(deleteStaticAssets).toHaveBeenCalledTimes(1);
+    expect(deleteStaticAssets).toHaveBeenCalledWith(
+      "photos",
+      "starkeep-app-assets-111122223333-us-east-1",
+      "us-east-1",
+      expect.objectContaining({ accessKeyId: expect.any(String) }),
+    );
   });
 
   it("install steps don't shadow uninstall steps (separate ledgers per operation)", async () => {
