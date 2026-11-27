@@ -35,7 +35,12 @@ import {
 import { repoRoot } from "@starkeep/operator/repo-root";
 import { compareWithDeployed } from "@starkeep/admin-installer/operations/deploy-guard";
 import type { CloudApp } from "@starkeep/operator/cloud-registry";
-import { adminCredentialsOrSignIn, cloudInstalled, readCloudAppsAs } from "../cloud";
+import {
+  adminCredentialsOrSignIn,
+  cloudInstalled,
+  readCloudAppsAs,
+  type CloudReadOptions,
+} from "../cloud";
 import { flag, stringFlag, type Command } from "../command";
 import { CliError, usageError } from "../errors";
 import type { Io } from "../io";
@@ -353,7 +358,7 @@ export interface CloudState {
 /** The cloud data server, Drive and the cloud apps, compared with this computer. */
 export async function readCloudState(
   io: Io,
-  options: { signIn: boolean },
+  options: CloudReadOptions,
 ): Promise<CloudState | null> {
   const config = readConfig() ?? {};
   const read = await readCloudAppsAs(io, options);

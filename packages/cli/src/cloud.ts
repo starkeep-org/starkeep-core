@@ -157,17 +157,22 @@ export function cloudInstalled(): boolean {
  * the cloud is not set up. With `signIn: false`, also null when no admin
  * session is open, so a read-only command never opens a browser.
  */
-export async function readCloudApps(
-  io: Io,
-  options: { signIn: boolean },
-): Promise<CloudApp[] | null> {
+/** How a cloud read gets the admin's credentials. */
+export interface CloudReadOptions {
+  /** Sign in at a terminal when no session is open. */
+  signIn: boolean;
+  /** Count the read as a use of the session. Defaults to true. */
+  markUsed?: boolean;
+}
+
+export async function readCloudApps(io: Io, options: CloudReadOptions): Promise<CloudApp[] | null> {
   return (await readCloudAppsAs(io, options))?.apps ?? null;
 }
 
 /** {@link readCloudApps}, with the admin credentials that read them. */
 export async function readCloudAppsAs(
   io: Io,
-  options: { signIn: boolean },
+  options: CloudReadOptions,
 ): Promise<{ apps: CloudApp[]; admin: AdminCredentials } | null> {
   const config = readConfig() ?? {};
   const hostname = config.auroraEndpoint;
@@ -175,7 +180,9 @@ export async function readCloudAppsAs(
   if (typeof hostname !== "string" || typeof stackPrefix !== "string") return null;
   let admin: AdminCredentials;
   try {
-    admin = options.signIn ? await adminCredentialsOrSignIn(io) : await adminCredentials();
+    admin = options.signIn
+      ? await adminCredentialsOrSignIn(io)
+      : await adminCredentials({ markUsed: options.markUsed });
   } catch (err) {
     if (err instanceof SignInRequired) return null;
     throw err;
