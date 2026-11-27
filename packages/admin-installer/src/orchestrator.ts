@@ -535,11 +535,12 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
     }
 
     // alwaysRun: Pulumi up is the reconcile that actually pushes new code and
-    // routes. A site-only app has no compute to reconcile. Skipping it on a redeploy (because the first install recorded
+    // routes. Skipping it on a redeploy (because the first install recorded
     // it "done") is why Redeploy never updated the app. Idempotent: a
     // no-change up is a cheap no-op; a changed bundleHash/manifest updates the
-    // Lambda code and API Gateway routes.
-    if (compute)
+    // Lambda code and API Gateway routes. A site-only app has no compute to
+    // reconcile.
+    if (compute) {
       await runStep(
         registry,
         appId,
@@ -579,6 +580,7 @@ async function installAppInner(input: InstallInput, registry: Registry): Promise
         },
         { alwaysRun: true },
       );
+    }
 
     // The app stopped using the bucket, so its files there are public paths
     // no manifest names any more. After the compute stack, because the old
