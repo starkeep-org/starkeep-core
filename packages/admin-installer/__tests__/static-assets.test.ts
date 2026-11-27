@@ -335,6 +335,16 @@ describe("collectStaticAssets: public site", () => {
     expect(folderRedirectPage('a"<b')).not.toContain('a"<b');
   });
 
+  it("keeps a file that shares its name with a folder, rather than the folder's page", () => {
+    // A zip's entry names are free text, so it can hold both.
+    const assets = collectStaticAssets(
+      siteManifest(),
+      zip({ "site/index.html": "<html>", "site/about": "file", "site/about/index.html": "<html>" }),
+    );
+    const about = assets.find((a) => a.key === "_site/about")!;
+    expect(new TextDecoder().decode(about.body)).toBe("file");
+  });
+
   // SITES-020
   it("serves a file whose name has no extension as itself", () => {
     const assets = collectStaticAssets(

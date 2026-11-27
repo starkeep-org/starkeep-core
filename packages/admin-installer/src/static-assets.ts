@@ -196,8 +196,8 @@ export function collectStaticAssets(manifest: AppManifest, zip: Uint8Array): Sta
   // A folder named without its trailing slash. The `/sites/*` function cannot
   // see which names are folders, so the installer, which can, puts a small
   // page at the folder's bare name that moves the browser to the slashed
-  // spelling. A name that is a file is served as that file, so the two never
-  // collide: a zip cannot hold a file and a folder of one name.
+  // spelling. A zip's entry names are free text, so it can hold a file and a
+  // folder of one name; the file wins, because the author put it there.
   if (site) {
     for (const file of siteFiles) {
       if (!file.endsWith("/index.html")) continue;
