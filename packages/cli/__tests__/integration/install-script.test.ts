@@ -25,6 +25,13 @@ const scratch = mkdtempSync(join(tmpdir(), "cli-install-sh-"));
 const fakeBin = join(scratch, "bin");
 const handoff = join(scratch, "handoff.txt");
 
+// install.sh clones a branch and pulls it on a second run. CI checks the
+// checkout out at a detached HEAD, so the script clones from a copy whose
+// HEAD is a branch.
+const source = join(scratch, "source");
+execFileSync("git", ["clone", "-q", CHECKOUT, source]);
+execFileSync("git", ["-C", source, "checkout", "-q", "-B", "main"]);
+
 mkdirSync(fakeBin);
 writeFileSync(join(fakeBin, "node"), `#!/bin/sh\nprintf '%s\\n' "$PWD" "$@" > "${handoff}"\n`);
 chmodSync(join(fakeBin, "node"), 0o755);
@@ -36,7 +43,7 @@ function install(...args: string[]) {
 }
 
 function installWithPath(path: string, ...args: string[]) {
-  return spawnSync("/bin/sh", [SCRIPT, "--repo", pathToFileURL(CHECKOUT).href, ...args], {
+  return spawnSync("/bin/sh", [SCRIPT, "--repo", pathToFileURL(source).href, ...args], {
     env: { ...process.env, PATH: path, HOME: scratch },
     encoding: "utf8",
     timeout: 120_000,
