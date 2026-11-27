@@ -2082,8 +2082,8 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
       });
 
       if (app.publicSite) {
-        // SITES-001 to SITES-004, SITES-006 and SITES-020, live. No cookie on any request:
-        // a visitor holds no account.
+        // SITES-001 to SITES-006 and SITES-020, live. No cookie on any request
+        // but the member's: a visitor holds no account.
         it(`a visitor reads ${app.appId}'s public site signed out, served from S3`, async () => {
           const base = config.publicBaseUrl!;
           const site = `${base}/sites/${app.appId}/`;
@@ -2093,7 +2093,16 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
           // From the app assets bucket: no Lambda ran for the visit.
           expect(home.headers.get("server")).toBe("AmazonS3");
           expect(home.headers.get("cache-control")).toBe("public, max-age=0, must-revalidate");
-          expect(await home.text()).toContain('href="about/"');
+          const homePage = await home.text();
+          expect(homePage).toContain('href="about/"');
+
+          // SITES-005: a signed-in member's browser gets the same page.
+          const asMember = await fetch(site, {
+            headers: { cookie: await signInToApp(app.appId) },
+            redirect: "manual",
+          });
+          expect(asMember.status).toBe(200);
+          expect(await asMember.text()).toBe(homePage);
 
           const about = await fetch(`${site}about/`, { redirect: "manual" });
           expect(about.status).toBe(200);

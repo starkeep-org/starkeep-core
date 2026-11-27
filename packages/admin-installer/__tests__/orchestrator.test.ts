@@ -685,6 +685,29 @@ describe("install", () => {
     expect(fakeRegistry.registerApp).toHaveBeenCalledWith(manifest, "photos", ["web"], null);
   });
 
+  // SITES-017
+  it("refuses a site bundle without index.html before any step", async () => {
+    await expect(
+      installApp({
+        appId: "photos",
+        manifest: {
+          ...photosManifest,
+          infraRequirements: {
+            ...photosManifest.infraRequirements,
+            compute: { enabled: false, handlers: [] },
+            publicSite: { bundleDir: "site" },
+          },
+        },
+        zipBuffer: Buffer.from(zipSync({ "site/about/index.html": new Uint8Array([1]) })),
+        version: "0.1.0",
+        config,
+        registryCredentials,
+      }),
+    ).rejects.toThrow(/has no index.html/);
+    expect(ledger).toEqual([]);
+    expect(uploadStaticAssets).not.toHaveBeenCalled();
+  });
+
   // SITES-013
   it("deletes the site's files when a reinstall's manifest drops the site", async () => {
     const withSite: AppManifest = {
@@ -765,6 +788,32 @@ describe("uninstall", () => {
       "us-east-1",
       expect.objectContaining({ accessKeyId: expect.any(String) }),
     );
+  });
+
+  // SITES-012
+  it("empties the site's files on removing a site-only app's web app alone", async () => {
+    await uninstallApp({
+      appId: "photos",
+      manifest: {
+        ...photosManifest,
+        infraRequirements: {
+          ...photosManifest.infraRequirements,
+          compute: { enabled: false, handlers: [] },
+          publicSite: { bundleDir: "site" },
+        },
+      },
+      config,
+      registryCredentials,
+      surfaces: ["web"],
+    });
+    expect(deleteStaticAssets).toHaveBeenCalledWith(
+      "photos",
+      "starkeep-app-assets-111122223333-us-east-1",
+      "us-east-1",
+      expect.objectContaining({ accessKeyId: expect.any(String) }),
+    );
+    expect(fakeRegistry.removeSurfaces).toHaveBeenCalledWith("photos", ["web"]);
+    expect(runAppUninstallDdl).not.toHaveBeenCalled();
   });
 
   it("install steps don't shadow uninstall steps (separate ledgers per operation)", async () => {
