@@ -196,13 +196,11 @@ describe("starkeep user", () => {
   });
 
   it("refuses an email that already has an account, and changes nothing", async () => {
-    cognito
-      .on(AdminCreateUserCommand)
-      .rejects(
-        Object.assign(new Error("User account already exists"), {
-          name: "UsernameExistsException",
-        }),
-      );
+    cognito.on(AdminCreateUserCommand).rejects(
+      Object.assign(new Error("User account already exists"), {
+        name: "UsernameExistsException",
+      }),
+    );
     const { code, err } = await run("user", "add", "sam@example.com", "--data");
     expect(code).toBe(1);
     expect(err).toContain("An account with the email sam@example.com already exists.");
