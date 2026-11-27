@@ -205,7 +205,7 @@ export function checkConfig(
 }
 
 /** The checks that need a cloud: the admin session, the owner lane, skew and drift. */
-async function cloudChecks(io: Io): Promise<CheckResult[]> {
+export async function cloudChecks(io: Io): Promise<CheckResult[]> {
   const config = readConfig() ?? {};
   const results: CheckResult[] = [];
   const session = adminSessionStatus();
@@ -214,7 +214,7 @@ async function cloudChecks(io: Io): Promise<CheckResult[]> {
       ? ok("Admin session", `signed in as ${session.email ?? session.sub}`)
       : warn(
           "Admin session",
-          "not signed in, so the cloud checks below are skipped",
+          "not signed in, so the cloud data server and Drive checks are skipped",
           "starkeep login --admin",
         ),
   );
@@ -258,7 +258,8 @@ async function cloudChecks(io: Io): Promise<CheckResult[]> {
   }
   if (!session.signedIn || !cloudInstalled()) return results;
   try {
-    const state = await readCloudState(io, { signIn: false });
+    // A doctor run is no cloud action: it leaves the session's idle time alone.
+    const state = await readCloudState(io, { signIn: false, markUsed: false });
     if (!state) return results;
     const kind = state.platform.kind;
     const line = platformLine(state.platform);
@@ -288,13 +289,14 @@ export const doctorCommand: Command = {
   name: "doctor",
   summary: "Check this computer's Starkeep setup and say how to fix each problem",
   usage: "",
-  lane: "none",
+  lane: "check",
   flags: {},
   details:
     "Checks Node, pnpm and git, the checkout's install, the services' ports and config.json.\n" +
     "On a computer with a cloud, also checks the admin session, this terminal's AWS\n" +
     "credentials, the bootstrap stack's drift and the cloud data server's skew. A failed\n" +
-    "check makes the command exit 1; a warning does not. The cloud checks never open a browser.",
+    "check makes the command exit 1; a warning does not. The cloud checks never open a browser,\n" +
+    "and they leave the admin session's idle time alone.",
   async run(io) {
     const results: CheckResult[] = [
       checkNode(),

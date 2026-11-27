@@ -12,7 +12,7 @@ import type { Io } from "./io";
  * depends on the target flags: none for `--local`, the admin for the cloud.
  * `setup` names both lanes its cloud phases use.
  */
-export type Lane = "none" | "admin" | "owner" | "target" | "setup";
+export type Lane = "none" | "check" | "admin" | "owner" | "target" | "setup";
 
 export interface FlagSpec {
   type: "boolean" | "string";
@@ -53,6 +53,9 @@ export const GLOBAL_FLAGS: Record<string, FlagSpec> = {
 
 export const LANE_TEXT: Record<Lane, string> = {
   none: "This computer only. Needs no cloud credentials.",
+  check:
+    "Reads this computer. With a cloud, also reads it with an open admin session, and the\n" +
+    "bootstrap stack with this terminal's AWS credentials. Never signs in or changes anything.",
   admin: "Signs in as the Starkeep admin (starkeep login --admin).",
   owner: "Uses this terminal's AWS credentials, for the bootstrap stack only.",
   target:

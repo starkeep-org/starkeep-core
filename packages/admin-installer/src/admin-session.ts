@@ -296,9 +296,13 @@ export const exchangeAtIdentityPool: IdentityPoolExchange = async (pool, idToken
  * Credentials for one privileged action, as the signed-in admin. Refreshes the
  * tokens, exchanges the ID token at the identity pool, and marks the session
  * used. Throws {@link SignInRequired} when no live session exists.
+ *
+ * `markUsed: false` leaves the session's last use as it was, for a read that
+ * a person did not ask for as a cloud action, such as the doctor's checks. A
+ * tool that polls must not keep the session from going idle.
  */
 export async function adminCredentials(
-  options: { now?: number; exchange?: IdentityPoolExchange } = {},
+  options: { now?: number; exchange?: IdentityPoolExchange; markUsed?: boolean } = {},
 ): Promise<AdminCredentials> {
   const now = options.now ?? Date.now();
   const pool = adminPool();
@@ -345,7 +349,7 @@ export async function adminCredentials(
   // Re-read before writing: a sign-out or a new sign-in in the other tool may
   // have landed during the refresh, and must not be undone.
   const current = readFile();
-  if (current && current.refreshToken === session.refreshToken) {
+  if (options.markUsed !== false && current && current.refreshToken === session.refreshToken) {
     writeFile({ ...current, lastUsedAt: new Date(now).toISOString() });
   }
   return {

@@ -145,6 +145,14 @@ describe("the admin session", () => {
     expect(file.lastUsedAt).toBe(new Date(t0 + 60 * 60_000).toISOString());
   });
 
+  it("leaves the session's last use alone for a read that is no cloud action (CLI-029)", async () => {
+    const t0 = Date.parse("2026-11-19T08:00:00Z");
+    await signIn(ADMIN, t0);
+    const before = readFileSync(session.adminSessionFile(), "utf8");
+    await session.adminCredentials({ now: t0 + 60 * 60_000, exchange, markUsed: false });
+    expect(readFileSync(session.adminSessionFile(), "utf8")).toBe(before);
+  });
+
   it("ends after twelve idle hours, revoking the token", async () => {
     const t0 = Date.parse("2026-11-19T08:00:00Z");
     await signIn(ADMIN, t0);
