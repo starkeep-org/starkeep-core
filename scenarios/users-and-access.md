@@ -473,6 +473,44 @@ Scenario: [ACCESS-219] A cloud operator who invites an address that is not an em
 ```gherkin
 @local @cloud
 @intent:confirmed @coverage:full
+Scenario: [ACCESS-232] A cloud operator who invites an email that already has an account is told so, and nothing changes
+  Given the deployment has an account for sam@example.com
+  When the cloud operator runs "starkeep user add sam@example.com --data"
+  Then the output says "An account with the email sam@example.com already exists."
+  And the command exits with status 1, and the account's groups stay as they were
+```
+
+- **Coverage:** `packages/cli/__tests__/user-commands.test.ts` › "starkeep user refuses an email that already has an account, and changes nothing" (unit, Cognito stubbed).
+- **Notes:** "starkeep user grant" adds a group to an account that exists.
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:full
+Scenario: [ACCESS-233] A cloud operator who invites a person into no group is told to name one, and no account is made
+  When the cloud operator runs "starkeep user add lee@example.com" with neither "--admin" nor "--data"
+  Then the output says "Name the group: starkeep user add <email> --admin (cloud operator rights) or --data (a synced library)."
+  And the command exits with status 2, and no account exists for lee@example.com
+```
+
+- **Coverage:** `packages/cli/__tests__/user-commands.test.ts` › "starkeep user refuses an account in no group, before it creates anything" (unit, Cognito stubbed).
+- **Notes:** an account in no group can neither sync a library (ACCESS-006) nor manage the cloud (ACCESS-007).
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:full
+Scenario: [ACCESS-234] A cloud operator whose invitation's group step fails learns that the account exists without the group
+  Given Cognito refuses to add a new account to the admins group
+  When the cloud operator runs "starkeep user add lee@example.com --admin"
+  Then the output says "Created lee@example.com, but could not add it to the starkeep-admins group:" with Cognito's reason
+  And the output says "The account exists. Add the group with `starkeep user grant lee@example.com --admin`."
+  And the command exits with status 1
+```
+
+- **Coverage:** `packages/cli/__tests__/user-commands.test.ts` › "starkeep user says the account exists when its group step fails, and names the grant" (unit, Cognito stubbed).
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:full
 Scenario: [ACCESS-220] A cloud operator gives an account cloud operator rights or a synced library from the terminal, and takes them away
   When the cloud operator runs "starkeep user grant sam@example.com --admin"
   Then the output says "Updated sam@example.com."
@@ -548,14 +586,14 @@ Scenario: [ACCESS-225] A cloud operator resets a password from the terminal and 
 
 ```gherkin
 @local @cloud
-@intent:unclear @coverage:full
+@intent:confirmed @coverage:full
 Scenario: [ACCESS-226] A cloud operator who names an email no account has is told so
   When the cloud operator runs "starkeep user disable nobody@example.com"
   Then the output says "No account has the email or username \"nobody@example.com\"."
-  And the command exits with status 2
+  And the command exits with status 1, with no usage text
 ```
 
-- **Coverage:** `packages/cli/__tests__/user-commands.test.ts` › "starkeep user says no account has an email it does not know, with exit status 2" (unit, Cognito stubbed).
+- **Coverage:** `packages/cli/__tests__/user-commands.test.ts` › "starkeep user says no account has an email it does not know, with exit status 1 and no usage text (ACCESS-226)" (unit, Cognito stubbed).
 - **Notes:** the terminal has no command that deletes an account. ACCESS-027's deletion also deletes the member's cloud library, which the terminal cannot do yet.
 
 ## Signing in to cloud apps

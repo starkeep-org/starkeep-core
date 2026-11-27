@@ -420,12 +420,17 @@ Scenario: [CLI-028] A local operator with an old Node or no pnpm is told what to
 
 ```gherkin
 @local @cloud
-@intent:unclear
-Scenario: [CLI-029] A cloud operator sees the cloud's drift among the doctor's checks, and no browser opens
+@intent:confirmed @coverage:full
+Scenario: [CLI-029] A cloud operator sees the cloud's drift among the doctor's checks, and the check neither signs in nor keeps the admin session going
   Given this computer deployed the cloud, and the cloud operator is signed in as the admin
   And the bootstrap stack differs from this checkout's template, and the cloud data server is behind this checkout
   When the cloud operator runs "starkeep doctor"
   Then the bootstrap stack's line says "warn" with the fix "starkeep cloud bootstrap-update"
   And the cloud data server's line says "warn" with the fix "starkeep update --platform"
-  And without an admin session, the admin session's line says "warn" with the fix "starkeep login --admin", and no browser opens
+  And the admin session's idle time is unchanged
+  And without an admin session, the admin session's line says "not signed in, so the cloud data server and Drive checks are skipped" with the fix "starkeep login --admin"
+  And without an admin session, the AWS credentials and bootstrap stack lines still appear, and no browser opens
 ```
+
+- **Coverage:** `packages/cli/__tests__/doctor-cloud.test.ts` › "warns about the bootstrap stack and a cloud data server behind the checkout, with each fix (CLI-029)", "reads the cloud without a sign-in and without counting as a use of the session (CLI-029)" and "without an admin session, says which checks it skips and still checks the AWS credentials and the bootstrap stack (CLI-029)" (unit); `packages/operator/__tests__/admin-session.test.ts` › "leaves the session's last use alone for a read that is no cloud action (CLI-029)" (unit).
+- **Notes:** the doctor's help names its lane: it reads this computer, the cloud with an open admin session, and the bootstrap stack with the terminal's AWS credentials, and it changes nothing. A status bar that polls the doctor leaves the session to end after its twelve idle hours (ACCESS-198).
