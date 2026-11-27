@@ -465,8 +465,11 @@ const browserBaseForProbe = config.publicBaseUrl ?? config.apiGatewayUrl;
 
 // The public site answers from S3 through CloudFront, so it needs no route
 // probe, only a check that the address answers.
-if (manifest.infraRequirements.publicSite && browserBaseForProbe) {
-  const site = await probePublicSite(browserBaseForProbe, appId);
+const site =
+  manifest.infraRequirements.publicSite && browserBaseForProbe
+    ? await probePublicSite(browserBaseForProbe, appId)
+    : null;
+if (site) {
   console.log("");
   if (site.ok) {
     console.log(`Public site: ${site.url} answered ${site.status}.`);
@@ -479,9 +482,9 @@ if (manifest.infraRequirements.publicSite && browserBaseForProbe) {
 
 // A site-only app has no Lambda and no routes, so nothing to probe below.
 if (!manifest.infraRequirements.compute.enabled) {
-  if (browserBaseForProbe && manifest.infraRequirements.publicSite) {
+  if (site) {
     console.log(`\nInstall complete. ${appId}'s public site is at:`);
-    console.log(`  ${browserBaseForProbe.replace(/\/+$/, "")}/sites/${appId}/`);
+    console.log(`  ${site.url}`);
   } else {
     console.log(`\nInstall complete.`);
   }
@@ -559,7 +562,7 @@ console.log(`\nInstall complete. ${appId} app available at:`);
 console.log(
   `  ${browserBaseForProbe ?? ""}${browserBaseForProbe ? `/apps/${appId}` : "(publicBaseUrl/apiGatewayUrl not in config)"}`,
 );
-if (manifest.infraRequirements.publicSite && browserBaseForProbe) {
+if (site) {
   console.log(`Its public site is at:`);
-  console.log(`  ${browserBaseForProbe.replace(/\/+$/, "")}/sites/${appId}/`);
+  console.log(`  ${site.url}`);
 }

@@ -7,6 +7,8 @@
  * update answers in its own way, so the probe can name the fix.
  */
 
+import { publicSitePath } from "@starkeep/admin-manifest";
+
 export interface PublicSiteProbe {
   url: string;
   /** The last status the address answered, or null when it never answered. */
@@ -27,7 +29,7 @@ export async function probePublicSite(
   fetchImpl: typeof fetch = fetch,
   opts: { attempts?: number; delayMs?: number } = {},
 ): Promise<PublicSiteProbe> {
-  const url = `${baseUrl.replace(/\/+$/, "")}/sites/${appId}/`;
+  const url = `${baseUrl.replace(/\/+$/, "")}${publicSitePath(appId)}`;
   const attempts = opts.attempts ?? 3;
   const delayMs = opts.delayMs ?? 2000;
   let status: number | null = null;
