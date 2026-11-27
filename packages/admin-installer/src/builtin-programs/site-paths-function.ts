@@ -7,13 +7,17 @@
  * put the site's files. The installer's grants and the uninstall's delete
  * already cover `apps/<appId>/`, so a site needs no S3 prefix of its own.
  *
- * Three address rules, the ones static hosts use:
+ * Three address rules:
  *
+ * - `/sites/<appId>` redirects to `/sites/<appId>/`, so relative links in the
+ *   home page resolve inside the site.
  * - A path that ends in `/` serves that folder's `index.html`.
- * - A path whose last segment has no dot names a folder, so it redirects to
- *   the same path plus `/`. Relative links in the page then resolve against
- *   the folder rather than its parent.
- * - Any other path serves the file of that name.
+ * - Any other path serves the object of that name. For a file, that is the
+ *   file, whatever its name: Flutter's `assets/NOTICES` has no extension. For
+ *   a folder named without its slash, such as `about`, that is the page the
+ *   installer wrote there, which moves the browser to `about/`. The function
+ *   cannot tell a file from a folder, because it cannot see the bucket, so the
+ *   installer, which knows the site's files, decides.
  *
  * Kept in its own module, free of Pulumi, so a unit test can run the code.
  * The code stays ES5, which is what the existing functions use.
@@ -34,7 +38,7 @@ export const SITE_PATHS_FUNCTION_CODE = `function handler(event) {
   var appId = m[1];
   var rest = m[2];
 
-  if (!rest || (rest.charAt(rest.length - 1) !== "/" && rest.slice(rest.lastIndexOf("/") + 1).indexOf(".") === -1)) {
+  if (!rest) {
     return {
       statusCode: 301,
       statusDescription: "Moved Permanently",

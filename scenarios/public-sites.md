@@ -38,7 +38,7 @@ Scenario: [SITES-002] A visitor follows a link to a page in a site's subfolder
 
 ```gherkin
 @cloud
-@intent:confirmed @coverage:full
+@intent:confirmed @coverage:partial
 Scenario Outline: [SITES-003] A visitor who leaves off the trailing slash still lands on the page, with its images
   Given a cloud operator installed an app whose public site holds an "about/" folder with a page that shows an image by a relative link
   When the visitor types "<address>" into the browser
@@ -51,9 +51,21 @@ Scenario Outline: [SITES-003] A visitor who leaves off the trailing slash still 
     | https://<deployment>/sites/<appId>/about  | https://<deployment>/sites/<appId>/about/    |
 ```
 
-- **Coverage:** `e2e-aws/src/journey.ts` "a visitor reads probe's public site signed out, served from S3", tier-3 AWS, cloud follows both redirects and loads the about page's image.
+- **Coverage:** `e2e-aws/src/journey.ts` "a visitor reads probe's public site signed out, served from S3", tier-3 AWS, cloud checks the root's redirect, the page at `about`, and the about page's image, and `packages/admin-installer/__tests__/static-assets.test.ts` checks the page's script and meta refresh, unit. No test drives a browser through the move.
 
-- **Notes:** An address whose last segment has a dot, such as `/sites/<appId>/about.html`, names a file and loads that file. An address whose last segment has no dot names a folder.
+- **Notes:** The site's root answers a redirect. A folder deeper in the site answers a small page at its bare name that moves the browser, so the move needs script or a meta refresh. A name the site holds as a file loads that file, whatever its name (SITES-020).
+
+```gherkin
+@cloud
+@intent:confirmed @coverage:full
+Scenario: [SITES-020] A visitor opens a file whose name has no extension
+  Given a cloud operator installed an app whose public site holds a file named "NOTICES"
+  When the visitor opens "https://<deployment>/sites/<appId>/NOTICES"
+  Then the visitor sees the file's contents
+```
+
+- **Coverage:** `e2e-aws/src/journey.ts` "a visitor reads probe's public site signed out, served from S3", tier-3 AWS, cloud; `packages/admin-installer/__tests__/static-assets.test.ts` "serves a file whose name has no extension as itself", unit.
+- **Notes:** Flutter's web build loads `assets/NOTICES` for its licenses page.
 
 ```gherkin
 @cloud

@@ -2082,7 +2082,7 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
       });
 
       if (app.publicSite) {
-        // SITES-001 to SITES-004 and SITES-006, live. No cookie on any request:
+        // SITES-001 to SITES-004, SITES-006 and SITES-020, live. No cookie on any request:
         // a visitor holds no account.
         it(`a visitor reads ${app.appId}'s public site signed out, served from S3`, async () => {
           const base = config.publicBaseUrl!;
@@ -2102,16 +2102,21 @@ export function defineCloudJourney(app: JourneyApp, options: CloudJourneyOptions
           expect(star.status).toBe(200);
           expect(star.headers.get("content-type") ?? "").toMatch(/^image\/svg\+xml/);
 
-          // A folder named without its slash moves to the slashed spelling, so
-          // the page's relative image resolves inside the folder.
-          for (const [from, to] of [
-            [`${base}/sites/${app.appId}`, `${base}/sites/${app.appId}/`],
-            [`${site}about`, `${site}about/`],
-          ] as const) {
-            const moved = await fetch(from, { redirect: "manual" });
-            expect(moved.status, from).toBe(301);
-            expect(new URL(moved.headers.get("location")!, from).href).toBe(to);
-          }
+          // The bare root moves to the slashed spelling, so the home page's
+          // relative links resolve inside the site.
+          const root = await fetch(`${base}/sites/${app.appId}`, { redirect: "manual" });
+          expect(root.status).toBe(301);
+          expect(new URL(root.headers.get("location")!, base).href).toBe(site);
+          // A folder named without its slash answers the page the installer
+          // wrote there, which moves the browser to the slashed spelling.
+          const bare = await fetch(`${site}about`, { redirect: "manual" });
+          expect(bare.status).toBe(200);
+          expect(bare.headers.get("content-type") ?? "").toMatch(/^text\/html/);
+          expect(await bare.text()).toContain('location.replace("about/"');
+          // SITES-020: a file whose name has no extension loads as itself.
+          const notices = await fetch(`${site}NOTICES`, { redirect: "manual" });
+          expect(notices.status).toBe(200);
+          expect(await notices.text()).toContain("no extension");
 
           const missing = await fetch(`${site}missing.html`, { redirect: "manual" });
           expect(missing.status).toBe(404);

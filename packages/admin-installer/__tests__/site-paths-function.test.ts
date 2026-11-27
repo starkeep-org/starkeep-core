@@ -41,22 +41,30 @@ describe("site-paths function", () => {
   });
 
   // SITES-003
-  it.each([
-    ["/sites/blog", "/sites/blog/"],
-    ["/sites/blog/about", "/sites/blog/about/"],
-  ])("redirects %s to %s, so relative links resolve in the folder", (from, to) => {
-    const answer = run(from) as Answered;
+  it("redirects the site's bare root to its slashed spelling", () => {
+    const answer = run("/sites/blog") as Answered;
     expect(answer.statusCode).toBe(301);
-    expect(answer.headers.location!.value).toBe(to);
+    expect(answer.headers.location!.value).toBe("/sites/blog/");
+  });
+
+  // SITES-003, SITES-020
+  it("serves a name without an extension as the object of that name", () => {
+    // A file such as Flutter's NOTICES, or the page the installer writes at a
+    // folder's bare name. The function cannot tell which; the bucket holds
+    // the answer.
+    expect(run("/sites/blog/assets/NOTICES")).toMatchObject({
+      uri: "/apps/blog/_site/assets/NOTICES",
+    });
+    expect(run("/sites/blog/about")).toMatchObject({ uri: "/apps/blog/_site/about" });
   });
 
   it("keeps the query string across the redirect", () => {
-    const answer = run("/sites/blog/about", {
+    const answer = run("/sites/blog", {
       q: { value: "cats" },
       tag: { value: "a", multiValue: [{ value: "a" }, { value: "b" }] },
       flag: { value: "" },
     }) as Answered;
-    expect(answer.headers.location!.value).toBe("/sites/blog/about/?q=cats&tag=a&tag=b&flag");
+    expect(answer.headers.location!.value).toBe("/sites/blog/?q=cats&tag=a&tag=b&flag");
   });
 
   it("answers 404 for an address that names no site", () => {

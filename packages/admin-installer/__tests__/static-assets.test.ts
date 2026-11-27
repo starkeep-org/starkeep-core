@@ -78,6 +78,7 @@ vi.mock("@aws-sdk/client-s3", () => {
 import {
   collectStaticAssets,
   deleteStaticAssets,
+  folderRedirectPage,
   MAX_LAMBDA_SERVED_FILE_BYTES,
   MissingAppAssetsBucketError,
   StaticAssetsError,
@@ -296,10 +297,51 @@ describe("collectStaticAssets: public site", () => {
       }),
     );
     expect(assets.map((a) => [a.key, a.contentType, a.cacheControl])).toEqual([
+      // The page at the folder's bare name, which moves the browser to about/.
+      ["_site/about", "text/html; charset=utf-8", "public, max-age=0, must-revalidate"],
       ["_site/about/index.html", "text/html; charset=utf-8", "public, max-age=0, must-revalidate"],
       ["_site/img/cat.png", "image/png", "public, max-age=0, must-revalidate"],
       ["_site/index.html", "text/html; charset=utf-8", "public, max-age=0, must-revalidate"],
     ]);
+  });
+
+  // SITES-003
+  it("writes a page at each folder's bare name that moves the browser inside the folder", () => {
+    const assets = collectStaticAssets(
+      siteManifest(),
+      zip({
+        "site/index.html": "<html>",
+        "site/docs/v1.2/index.html": "<html>",
+        "site/img/cat.png": "png",
+      }),
+    );
+    // A folder with an index.html gets a page; one without (img/) does not,
+    // because its slashed spelling would answer 404 anyway.
+    expect(assets.map((a) => a.key)).toEqual([
+      "_site/docs/v1.2",
+      "_site/docs/v1.2/index.html",
+      "_site/img/cat.png",
+      "_site/index.html",
+    ]);
+    const page = new TextDecoder().decode(assets[0]!.body);
+    expect(page).toBe(folderRedirectPage("v1.2"));
+    // Relative to /sites/<appId>/docs/v1.2, "v1.2/" is the folder itself.
+    expect(page).toContain('location.replace("v1.2/" + location.search + location.hash)');
+    expect(page).toContain('<meta http-equiv="refresh" content="0; url=v1.2/">');
+  });
+
+  it("escapes a folder name before it reaches the page", () => {
+    expect(folderRedirectPage('a"<b')).toContain('"a%22%3Cb/"');
+    expect(folderRedirectPage('a"<b')).not.toContain('a"<b');
+  });
+
+  // SITES-020
+  it("serves a file whose name has no extension as itself", () => {
+    const assets = collectStaticAssets(
+      siteManifest(),
+      zip({ "site/index.html": "<html>", "site/assets/NOTICES": "licenses" }),
+    );
+    expect(assets.map((a) => a.key)).toEqual(["_site/assets/NOTICES", "_site/index.html"]);
   });
 
   it("serves a large site file from S3, with no Lambda size limit", () => {

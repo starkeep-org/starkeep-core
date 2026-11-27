@@ -1379,11 +1379,13 @@ at its root, or the install stops before it changes anything.
 - **No Lambda.** S3 answers every visit, so visitors never spend the
   deployment's Lambda concurrency, and a site-only app may declare no compute
   at all. Such an app still needs a `bundle` command that writes `dist.zip`.
-- **Addresses.** A path ending in `/` serves that folder's `index.html`. A path
-  whose last segment has no dot, such as `/sites/<appId>/about`, redirects to
-  the same path plus `/`, so relative links in the page resolve inside the
-  folder. Any other path serves the file of that name, and a missing file
-  answers 404 with S3's plain page.
+- **Addresses.** A path ending in `/` serves that folder's `index.html`.
+  `/sites/<appId>` redirects to `/sites/<appId>/`. A folder named without its
+  slash, such as `/sites/<appId>/about`, answers a small page that the
+  installer writes, which moves the browser to `about/`, so relative links in
+  the folder's page resolve inside it. Any other path serves the file of that
+  name, with or without an extension, and a missing file answers 404 with
+  S3's plain page.
 - **Caching.** Every site file revalidates on each load, so a reinstall shows
   the new version within seconds. A page that the new version no longer holds
   stops loading at once.

@@ -193,7 +193,43 @@ export function collectStaticAssets(manifest: AppManifest, zip: Uint8Array): Sta
         : REVALIDATE_CACHE_CONTROL,
     });
   }
+  // A folder named without its trailing slash. The `/sites/*` function cannot
+  // see which names are folders, so the installer, which can, puts a small
+  // page at the folder's bare name that moves the browser to the slashed
+  // spelling. A name that is a file is served as that file, so the two never
+  // collide: a zip cannot hold a file and a folder of one name.
+  if (site) {
+    for (const file of siteFiles) {
+      if (!file.endsWith("/index.html")) continue;
+      const folder = file.slice(0, -"/index.html".length);
+      const key = `${PUBLIC_SITE_ASSET_PREFIX}/${folder}`;
+      if (assets.has(key)) continue;
+      assets.set(key, {
+        key,
+        body: new TextEncoder().encode(folderRedirectPage(folder.split("/").pop()!)),
+        contentType: "text/html; charset=utf-8",
+        cacheControl: REVALIDATE_CACHE_CONTROL,
+      });
+    }
+  }
   return [...assets.values()].sort((a, b) => a.key.localeCompare(b.key));
+}
+
+/**
+ * The page a public site serves at a folder's bare name, such as `about`. It
+ * moves the browser to `about/`, keeping the query and the fragment, so the
+ * folder's relative links resolve inside it. The meta refresh covers a
+ * browser with script turned off.
+ */
+export function folderRedirectPage(folderName: string): string {
+  const target = encodeURIComponent(folderName) + "/";
+  return (
+    `<!doctype html><html><head><meta charset="utf-8">` +
+    `<link rel="canonical" href="${target}">` +
+    `<script>location.replace(${JSON.stringify(target)} + location.search + location.hash)</script>` +
+    `<noscript><meta http-equiv="refresh" content="0; url=${target}"></noscript>` +
+    `<title>Moved</title></head><body><a href="${target}">${target}</a></body></html>`
+  );
 }
 
 interface DeploymentsRecord {

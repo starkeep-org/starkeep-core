@@ -117,7 +117,8 @@ export interface JourneyApp {
   /**
    * Whether the manifest declares a public site (`publicSite`) whose home page
    * links to `about/`, which shows an image by a relative link, as Probe's
-   * does. The journey reads it signed out and checks that uninstall removes it.
+   * does, and a `NOTICES` file at its root, whose name has no extension. The
+   * journey reads it signed out and checks that uninstall removes it.
    */
   readonly publicSite?: boolean;
   /**
