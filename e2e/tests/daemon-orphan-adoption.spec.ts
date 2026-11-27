@@ -14,7 +14,8 @@
 import { expect, test } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { eventually } from "@starkeep/e2e";
 
 test.describe.configure({ mode: "serial" });
@@ -22,15 +23,19 @@ test.describe.configure({ mode: "serial" });
 const adminUrl = () => process.env.E2E_ADMIN_URL!;
 const adminDataDir = () => process.env.E2E_ADMIN_DATA_DIR!;
 const drivePort = () => parseInt(process.env.E2E_DRIVE_DAEMON_PORT!, 10);
+const DRIVE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "../../apps/drive");
 
 const strays: ChildProcess[] = [];
 
-/** Bind `port` with a process whose command line passes admin's daemon guard (node …). */
+/**
+ * Bind `port` with a process admin takes for an orphaned Drive: a node
+ * program that runs in Drive's package folder.
+ */
 async function spawnNodeServer(port: number): Promise<ChildProcess> {
   const child = spawn(
     process.execPath,
     ["-e", `require("http").createServer((q,s)=>s.end("ok")).listen(${port},"127.0.0.1")`],
-    { detached: true, stdio: "ignore" },
+    { cwd: DRIVE_DIR, detached: true, stdio: "ignore" },
   );
   child.unref();
   strays.push(child);
