@@ -1200,7 +1200,7 @@ Scenario: [ACCESS-212] A local operator signs a computer out of sync from the te
 Scenario: [ACCESS-213] A local operator whose computer joined no cloud is told to join one before a terminal sign-in
   Given the local operator's computer has not joined any cloud
   When the local operator runs "starkeep login --sync"
-  Then the terminal says "This computer has joined no cloud. Join one in admin-web first."
+  Then the terminal says "This computer has joined no cloud. Join one with `starkeep setup --join <address>` or in admin-web."
   And no browser opens
 ```
 

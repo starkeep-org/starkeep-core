@@ -930,13 +930,14 @@ Scenario: [APP-LIFE-224] A local operator whose earlier command died mid-operati
 
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-244] A local operator who names no target for an install or an uninstall is told the target flags
   When the local operator runs "starkeep install dice" with no target flag
   Then the command says "Name where to install: --local (this computer), --cloud (the cloud, every surface), --web or --mobile. Flags combine."
   And the command exits with status 2 and installs nothing
 ```
 
+- **Coverage:** `packages/cli/__tests__/main.test.ts` › "install without a target flag (APP-LIFE-244)" and "uninstall without a target flag (APP-LIFE-244)" (unit, local).
 - **Notes:** "starkeep uninstall dice" says the same with "uninstall".
 
 ## Installed apps on this computer
@@ -1595,16 +1596,19 @@ Scenario: [APP-LIFE-088] A cloud operator who unchecks every install in the Rede
 
 ```gherkin
 @cloud
-@intent:unclear
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-089] A cloud operator sees a pending cloud update only when the deployed manifest or code differs from the folder
   Given "dice" is installed in the cloud
   When the cloud operator opens the dashboard
   Then the cloud tile shows no pending update when the folder holds the deployed manifest in another key order
   And the cloud tile shows no pending update when the folder's uncommitted changes are the ones deployed, or were committed after the deploy
   And the cloud tile shows no pending update right after a web app's own deploy, although the deploy filled in platform values that the folder's manifest leaves empty
+  And the cloud tile shows a pending update when a platform value the deploy filled in has changed since, such as the public address after a custom domain
   And the cloud tile shows a pending update when the folder holds another manifest
   And the cloud tile shows a pending update when the cloud install predates the recorded manifest
 ```
+
+- **Coverage:** `apps/admin-web/__tests__/cloud-apps-list.test.ts` › "whether a row is behind its app's folder" (unit, local). The tests check the comparison, and no test opens the dashboard's cloud tile.
 
 ```gherkin
 @cloud @mobile
@@ -1843,7 +1847,7 @@ Scenario: [APP-LIFE-243] A local operator whose repository moved since the updat
 
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-256] A cloud operator whose app runs in both places updates the cloud first, then this computer
   Given "dice" is installed on this computer and in the cloud, and its repository is behind its upstream
   When the cloud operator runs "starkeep update dice"
@@ -1851,11 +1855,12 @@ Scenario: [APP-LIFE-256] A cloud operator whose app runs in both places updates 
   And only after the cloud deploy ends does the output show this computer's update, ending with "Updated dice."
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/cloud-commands.test.ts` › "updates the cloud first, then this computer (APP-LIFE-256)" (integration, local, with a stand-in for the cloud run).
 - **Notes:** a member's device that runs a newer version than the cloud can stall its uploads until the cloud catches up, so the cloud goes first.
 
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-257] A cloud operator whose cloud install already runs the folder's code is spared a redeploy
   Given the cloud's install of "dice" holds the folder's manifest and web code
   When the cloud operator runs "starkeep update dice --no-fetch"
@@ -1863,22 +1868,27 @@ Scenario: [APP-LIFE-257] A cloud operator whose cloud install already runs the f
   And no cloud deploy starts
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/cloud-commands.test.ts` › "spares a cloud install that already runs the folder (APP-LIFE-257)" (integration, local, with a stand-in for the cloud run).
+
 ```gherkin
 @local @cloud
-@intent:unclear
-Scenario: [APP-LIFE-258] A cloud operator who declines an update's new cloud access leaves both places on the old version
-  Given the pull brings a "dice" manifest that asks the cloud for different access
+@intent:confirmed @coverage:full
+Scenario: [APP-LIFE-258] A cloud operator who declines an update's new access leaves the folder and both places on the old version
+  Given "dice" is installed on this computer and in the cloud
+  And the upstream of its repository holds a "dice" manifest that asks for different access
   When the cloud operator runs "starkeep update dice" in a terminal
-  Then the output says "dice's new version asks the cloud for different access:" with the new consent words
-  And the command asks "Approve dice's new access and update the cloud? [y/N]"
+  Then before any pull, the output says "dice's new version asks for different access here and in the cloud:" with the new consent words
+  And the command asks "Approve dice's new access and update? [y/N]"
   When the cloud operator answers anything other than yes
-  Then the output says "Not updated in the cloud: dice."
-  And "dice" keeps running the old version on this computer too
+  Then the output says "Not updated: dice."
+  And the folder, this computer and the cloud all keep the old version
 ```
+
+- **Coverage:** `packages/cli/__tests__/integration/cloud-commands.test.ts` › "asks before the pull when the cloud gets new access, and a no leaves both places and the folder (APP-LIFE-258)" (integration, local, with a stand-in for the cloud run).
 
 ```gherkin
 @cloud @mobile
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-259] A cloud operator's update redeploys only the surfaces an app already has in the cloud
   Given "dice" has a web app in the cloud and no mobile app, and its manifest offers both
   When the cloud operator runs "starkeep update dice"
@@ -1886,9 +1896,11 @@ Scenario: [APP-LIFE-259] A cloud operator's update redeploys only the surfaces a
   And the dashboard's Dice Mobile tile still reads Not registered
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/cloud-commands.test.ts` › "redeploys only the surfaces the app has in the cloud (APP-LIFE-259)" (integration, local, with a stand-in for the cloud run). No test checks the dashboard's mobile tile.
+
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-260] A cloud operator who updates a cloud app that no discovery folder holds is told to add its folder
   Given "dice" is installed in the cloud, and no discovery folder on this computer holds it
   When the cloud operator runs "starkeep update dice --cloud"
@@ -1896,15 +1908,34 @@ Scenario: [APP-LIFE-260] A cloud operator who updates a cloud app that no discov
   And no cloud deploy starts
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/cloud-commands.test.ts` › "names the folder a cloud-only app needs (APP-LIFE-260)" (integration, local, with a stand-in for the cloud run).
+
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-261] A cloud operator updates only the cloud, or only this computer
   Given "dice" is installed on this computer and in the cloud, and its folder holds new code
   When the cloud operator runs "starkeep update dice --cloud"
   Then the cloud runs the new code, and this computer's install stays as it was
   And "starkeep update dice --local" updates this computer and leaves the cloud alone
 ```
+
+- **Coverage:** `packages/cli/__tests__/integration/cloud-commands.test.ts` › "updates only the cloud with --cloud, and only this computer with --local (APP-LIFE-261)" (integration, local, with a stand-in for the cloud run). The test checks which runs start, and no test checks the code the cloud then runs.
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:full
+Scenario: [APP-LIFE-274] A cloud operator whose cloud update fails learns that this computer stays on the old version
+  Given "dice" is installed on this computer and in the cloud, and its repository is behind its upstream
+  When the cloud operator runs "starkeep update dice --yes"
+  And the cloud deploy of "dice" fails
+  Then the output shows the cloud's refusal and says "dice stays on the old version on this computer, because its cloud update failed."
+  And the output says "The folder holds the pulled code. `starkeep update --undo` returns it."
+  And the command exits with status 1, and this computer's install of "dice" is unchanged
+```
+
+- **Coverage:** `packages/cli/__tests__/integration/cloud-commands.test.ts` › "keeps this computer on the old version when the cloud deploy fails, and says so (APP-LIFE-274)" and "names the undo when the failed cloud update follows a pull (APP-LIFE-274)" (integration, local, with a stand-in for the cloud run).
+- **Notes:** a run with "--no-fetch" pulls nothing, so its output leaves out the undo line.
 
 ## Installing in the cloud
 
@@ -2105,7 +2136,7 @@ Scenario: [APP-LIFE-111] A cloud operator cannot register a mobile build on a de
 
 ```gherkin
 @cloud @mobile
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario Outline: [APP-LIFE-112] A cloud operator who installs from the terminal gets the data side and the surfaces asked for
   Given an app's manifest offers a web app and an Android build
   When the cloud operator runs "starkeep install dice <flags>"
@@ -2118,9 +2149,11 @@ Scenario Outline: [APP-LIFE-112] A cloud operator who installs from the terminal
     | --mobile   | the mobile registration only, with no compute |
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/cloud-commands.test.ts` › "asks once and installs the surfaces %s names (APP-LIFE-112)" (integration, local, with a stand-in for the cloud run). The test checks the surfaces the run receives. No test runs `starkeep install --cloud` against AWS, and tier 3 still drives the operation through the `cli-*` scripts.
+
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:none
 Scenario: [APP-LIFE-113] A cloud operator sees the deployment and folder before a terminal cloud install acts, and the app's address when done
   When the cloud operator runs "starkeep install dice --cloud"
   Then before any step the output shows the region, the stack prefix, the account, the app folder, and the surfaces it adds
@@ -2128,9 +2161,11 @@ Scenario: [APP-LIFE-113] A cloud operator sees the deployment and folder before 
   And after a mobile-only registration the output names the Android package and its sign-in callback
 ```
 
+- **Coverage:** No test checks the cloud install's summary or its closing address through `starkeep install`.
+
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:none
 Scenario: [APP-LIFE-114] A cloud operator sees every manifest error and warning, and the terminal cloud install refuses
   Given the app's manifest holds several errors and one warning
   When the cloud operator runs "starkeep install dice --cloud"
@@ -2139,6 +2174,7 @@ Scenario: [APP-LIFE-114] A cloud operator sees every manifest error and warning,
   And the command exits with an error before deploying anything
 ```
 
+- **Coverage:** No test checks the list of errors and warnings, which the command does not print yet (see Notes).
 - **Notes:** Implementation gap: `starkeep install` checks the folder before the consent words and stops at the first error, as "The manifest in <folder> failed validation: <first error>", without the other errors or the warnings (`packages/cli/src/app-steps.ts` › `validFolder`).
 
 ```gherkin
@@ -2202,13 +2238,15 @@ Scenario: [APP-LIFE-120] A cloud operator cannot install a surface the manifest 
 
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-121] A cloud operator without the cloud data server's settings is told to set up the cloud first
   Given this computer's configuration lacks the cloud data server's settings
   When the cloud operator runs "starkeep install dice --cloud"
   Then the command says "This computer has no cloud with a data server yet. Run `starkeep setup --cloud` first."
   And the command shows no consent words and deploys nothing
 ```
+
+- **Coverage:** `packages/cli/__tests__/main.test.ts` › "fails and names the setup command, before any consent or sign-in (APP-LIFE-121)" (unit, local).
 
 ```gherkin
 @cloud
@@ -2247,19 +2285,35 @@ Scenario: [APP-LIFE-124] A member keeps using a cloud app at the same address, w
 
 ```gherkin
 @local @cloud
-@intent:unclear
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-245] A cloud operator installs an app on this computer and in the cloud with one command and one consent
   Given the local data server is running and the cloud is set up
   When the cloud operator runs "starkeep install dice --local --cloud" in a terminal
   Then the command shows the consent words once and asks "Approve and install? [y/N]"
   When the cloud operator answers yes
-  Then the app installs on this computer, then in the cloud
+  Then the app installs in the cloud, then on this computer
   And admin-web's dashboard shows "dice" installed on this computer and in the cloud
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/cloud-commands.test.ts` › "installs in the cloud first, then on this computer, with one consent (APP-LIFE-245)" (integration, local, with a stand-in for the cloud run). No test checks admin-web's dashboard.
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:full
+Scenario: [APP-LIFE-273] A cloud operator whose combined install fails in the cloud finds this computer unchanged
+  Given the local data server is running and the cloud is set up
+  When the cloud operator runs "starkeep install dice --local --cloud --yes"
+  And the cloud deploy of "dice" fails
+  Then the output shows the cloud's refusal and the command exits with status 1
+  And "dice" is not installed on this computer
+```
+
+- **Coverage:** `packages/cli/__tests__/integration/cloud-commands.test.ts` › "leaves this computer as it was when the cloud step fails" (integration, local, with a stand-in for the cloud run).
+- **Notes:** the cloud goes first for the reason APP-LIFE-256 gives.
+
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-246] A cloud operator without an admin session who installs in the cloud from a terminal signs in on the way
   Given no admin session is open on this computer
   When the cloud operator runs "starkeep install dice --cloud" in a terminal and approves the consent
@@ -2268,9 +2322,11 @@ Scenario: [APP-LIFE-246] A cloud operator without an admin session who installs 
   Then the install goes on, with no second command
 ```
 
+- **Coverage:** `packages/cli/__tests__/cloud-sign-in.test.ts` › "signs in on the way, saying only that it does (APP-LIFE-246)" (unit, local). No test runs the install on through a sign-in.
+
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-247] A cloud operator's script without an admin session is told to sign in first, with exit status 3
   Given no admin session is open on this computer
   And the cloud operator's script runs with no terminal attached
@@ -2279,11 +2335,11 @@ Scenario: [APP-LIFE-247] A cloud operator's script without an admin session is t
   And the command exits with status 3 and deploys nothing
 ```
 
-- **Notes:** Implementation gap: the message repeats its instruction as "… or sign in in admin-web. Run `starkeep login --admin` first." (`packages/cli/src/cloud.ts` › `adminCredentialsOrSignIn`).
+- **Coverage:** `packages/cli/__tests__/cloud-sign-in.test.ts` › "names the sign-in once when no session exists (APP-LIFE-247)" (unit, local). No test runs the install command without a session.
 
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-248] A cloud operator whose terminal closes during a cloud install finds the install going on, and the next run follows it
   Given "starkeep install dice --cloud" is deploying
   When the cloud operator closes the terminal and runs "starkeep install dice --cloud" again before the deploy ends
@@ -2292,9 +2348,11 @@ Scenario: [APP-LIFE-248] A cloud operator whose terminal closes during a cloud i
   And the app answers at its address when the deploy ends
 ```
 
+- **Coverage:** `packages/cli/__tests__/cloud-run.test.ts` › "says it followed a run that was already going (APP-LIFE-248)" (unit, local). No test closes a terminal mid-run.
+
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-249] A cloud operator who starts a second cloud app operation while one runs is told to wait or follow the first in admin-web
   Given a cloud install of "notes" is running, started from admin-web or another terminal
   When the cloud operator runs "starkeep install dice --cloud" and approves the consent
@@ -2302,20 +2360,24 @@ Scenario: [APP-LIFE-249] A cloud operator who starts a second cloud app operatio
   And the install of "notes" finishes as if the second command never ran
 ```
 
+- **Coverage:** `packages/cli/__tests__/cloud-run.test.ts` › "refuses while another cloud operation runs, and names it (APP-LIFE-249)" (unit, local). No test checks that the first install finishes.
+
 ```gherkin
 @cloud
-@intent:unclear
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-266] A cloud operator who starts the same cloud install in a second open terminal follows the first one's progress
   Given "starkeep install dice --cloud" is deploying in one terminal, and that terminal stays open
   When the cloud operator runs "starkeep install dice --cloud" in a second terminal
   Then the second terminal shows the deploy's progress from its start, with no second deploy
-  And the output says "Followed a dice (every surface) run that was already going."
+  And the output says "Following the dice (every surface) run that another command started (pid <pid>: starkeep install dice --cloud)."
   And both terminals end with the deploy's outcome
 ```
 
+- **Coverage:** `packages/cli/__tests__/cloud-run.test.ts` › "follows another terminal's run of the same operation to its end (APP-LIFE-266)" (unit, local). The test stands in for the run's log, so no test watches two processes.
+
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-250] A cloud operator whose terminal cloud install fails sees the reason and the log that holds the whole run
   Given AWS refuses a step of a cloud install of "dice"
   When the cloud operator runs "starkeep install dice --cloud --yes"
@@ -2324,9 +2386,11 @@ Scenario: [APP-LIFE-250] A cloud operator whose terminal cloud install fails see
   And "--verbose" shows the deploy's own output lines as the run goes
 ```
 
+- **Coverage:** `packages/cli/__tests__/cloud-run.test.ts` › "shows the refusal and the whole log, with status 1 (APP-LIFE-250)" (unit, local). No test checks "--verbose" for a cloud run.
+
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-251] A cloud operator whose sign-in expires during a terminal cloud install is told to sign in and run the command again
   Given the cloud operator's sign-in expires during "starkeep install dice --cloud"
   When the cloud operator waits for the install to end
@@ -2334,11 +2398,12 @@ Scenario: [APP-LIFE-251] A cloud operator whose sign-in expires during a termina
   And the output names the log file
 ```
 
+- **Coverage:** `packages/cli/__tests__/cloud-run.test.ts` › "says to sign in and run the command again when the sign-in expired (APP-LIFE-251)" (unit, local).
 - **Notes:** admin-web shows the same failure as APP-LIFE-104.
 
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-252] A cloud operator sees each app's cloud surfaces in the list, and which cloud installs are behind the folder
   Given the cloud operator is signed in as the admin on this computer
   And "dice" runs in the cloud with a web app and a mobile app, and its folder holds newer web code
@@ -2348,9 +2413,11 @@ Scenario: [APP-LIFE-252] A cloud operator sees each app's cloud surfaces in the 
   And an app installed only in the cloud gets a row of its own
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/cloud-commands.test.ts` › "shows each app's surfaces and which are behind, with a row for a cloud-only app (APP-LIFE-252)" (integration, local, with a stand-in for the cloud run). `apps/admin-web/__tests__/cloud-apps-list.test.ts` covers the comparison behind "(behind)".
+
 ```gherkin
 @local @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-253] A local operator without an admin session sees the cloud column as unknown, and no sign-in starts
   Given the computer's cloud is set up, and no admin session is open on this computer
   When the local operator runs "starkeep list"
@@ -2359,9 +2426,11 @@ Scenario: [APP-LIFE-253] A local operator without an admin session sees the clou
   And no browser opens
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/cloud-commands.test.ts` › "shows ? in the cloud column and warns, with no sign-in (APP-LIFE-253)" (integration, local, with a stand-in for the cloud run). The stand-in replaces the cloud read, so no test checks that no browser opens.
+
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-254] A cloud operator who uninstalls an app the cloud does not hold is told so
   Given "dice" is not installed in the cloud
   When the cloud operator runs "starkeep uninstall dice --cloud"
@@ -2369,14 +2438,32 @@ Scenario: [APP-LIFE-254] A cloud operator who uninstalls an app the cloud does n
   And the command exits with status 1
 ```
 
+- **Coverage:** `packages/cli/__tests__/integration/cloud-commands.test.ts` › "says an app the cloud does not hold is not installed there (APP-LIFE-254)" (integration, local, with a stand-in for the cloud run).
+
 ```gherkin
 @cloud @mobile
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-255] A cloud operator cannot delete a cloud app's data while removing only one surface
   When the cloud operator runs "starkeep uninstall dice --web --delete-data"
   Then the command says "--delete-data in the cloud needs --cloud: --web and --mobile keep the data side."
   And the command exits with status 2, and "dice" keeps working in the cloud
 ```
+
+- **Coverage:** `packages/cli/__tests__/main.test.ts` › "--delete-data with a single cloud surface, which keeps the data side (APP-LIFE-255)" (unit, local).
+
+```gherkin
+@local @cloud
+@intent:confirmed @coverage:full
+Scenario: [APP-LIFE-275] A cloud operator who deletes an app's data in both places types its id once, and a mismatch removes nothing
+  Given "dice" is installed on this computer and in the cloud
+  When the cloud operator runs "starkeep uninstall dice --local --cloud --delete-data" in a terminal
+  Then the command asks "Type dice to delete its data on this computer and in the cloud:" before any change
+  When the cloud operator types another id
+  Then the output says "Nothing changed: the typed id did not match, so dice stays installed with its data."
+  And the command exits with status 1, and "dice" stays installed in both places
+```
+
+- **Coverage:** `packages/cli/__tests__/integration/cloud-commands.test.ts` › "asks for the id before any change, and a mismatch removes nothing" (integration, local, with a stand-in for the cloud run).
 
 ### A web app's served files
 
@@ -2765,13 +2852,15 @@ Scenario: [APP-LIFE-234] A local operator who types a different id changes nothi
 
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [APP-LIFE-153] A cloud operator who uninstalls from the terminal removes the app, keeps its data, and learns how to delete it
   Given "dice" is installed in the cloud
   When the cloud operator runs "starkeep uninstall dice --cloud"
   Then the output names the region, the stack prefix and the account before it acts
   And the output ends with "dice cloud uninstall complete. Its data stays in the cloud, and reinstalling dice gets it back. To delete it: starkeep uninstall dice --cloud --delete-data."
 ```
+
+- **Coverage:** `packages/cli/__tests__/integration/cloud-commands.test.ts` › "removes the app from the cloud and keeps its data (APP-LIFE-153)" (integration, local, with a stand-in for the cloud run). The test checks the run, and no test checks the operation's closing line through the command.
 
 ```gherkin
 @cloud
@@ -2878,16 +2967,18 @@ Scenario: [APP-LIFE-161] A cloud operator who types a non-matching answer cancel
 
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [APP-LIFE-162] A cloud operator can delete without a question only with --yes
   Given an admin session is open on this computer
   And the cloud operator's script runs with no terminal attached
   When the script runs "starkeep uninstall dice --cloud --delete-data" without "--yes"
-  Then the command says "Type dice to delete its cloud data: No terminal is attached to answer. Pass --yes to delete without typing the app id."
-  And the command exits with status 3, and the cloud still keeps the data
+  Then the command says "Type the app id to delete its data. No terminal is attached to answer. Pass --yes to delete without typing the app id."
+  And the command exits with status 3 before any change, and the cloud still runs the app and keeps its data
   When the script adds "--yes"
   Then the data is deleted without a question
 ```
+
+- **Coverage:** `packages/cli/__tests__/integration/cloud-commands.test.ts` › "deletes cloud data without a terminal only with --yes (APP-LIFE-162)" (integration, local, with a stand-in for the cloud run).
 
 ```gherkin
 @cloud
