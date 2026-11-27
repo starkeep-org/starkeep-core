@@ -13,7 +13,7 @@ Related files:
 
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [SITES-001] A visitor reads a public site's home page without signing in
   Given a cloud operator installed an app whose manifest declares a public site
   And the visitor holds no account on the deployment
@@ -22,9 +22,11 @@ Scenario: [SITES-001] A visitor reads a public site's home page without signing 
   And no sign-in page appears
 ```
 
+- **Coverage:** `e2e-aws/src/journey.ts` "a visitor reads probe's public site signed out, served from S3", tier-3 AWS, cloud; `packages/admin-installer/__tests__/site-paths-function.test.ts`, unit.
+
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [SITES-002] A visitor follows a link to a page in a site's subfolder
   Given a cloud operator installed an app whose public site holds an "about/" folder with its own home page
   When the visitor opens the site's home page
@@ -32,9 +34,11 @@ Scenario: [SITES-002] A visitor follows a link to a page in a site's subfolder
   Then the visitor sees the about page
 ```
 
+- **Coverage:** `e2e-aws/src/journey.ts` "a visitor reads probe's public site signed out, served from S3", tier-3 AWS, cloud.
+
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario Outline: [SITES-003] A visitor who leaves off the trailing slash still lands on the page, with its images
   Given a cloud operator installed an app whose public site holds an "about/" folder with a page that shows an image by a relative link
   When the visitor types "<address>" into the browser
@@ -47,16 +51,20 @@ Scenario Outline: [SITES-003] A visitor who leaves off the trailing slash still 
     | https://<deployment>/sites/<appId>/about  | https://<deployment>/sites/<appId>/about/    |
 ```
 
+- **Coverage:** `e2e-aws/src/journey.ts` "a visitor reads probe's public site signed out, served from S3", tier-3 AWS, cloud follows both redirects and loads the about page's image.
+
 - **Notes:** An address whose last segment has a dot, such as `/sites/<appId>/about.html`, names a file and loads that file. An address whose last segment has no dot names a folder.
 
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [SITES-004] A visitor who opens a page the site does not have sees a not-found answer
   Given a cloud operator installed an app whose public site has no "missing.html"
   When the visitor opens "https://<deployment>/sites/<appId>/missing.html"
   Then the browser shows a "404 Not Found" answer
 ```
+
+- **Coverage:** `e2e-aws/src/journey.ts` "a visitor reads probe's public site signed out, served from S3", tier-3 AWS, cloud asks for `missing.html`.
 
 ```gherkin
 @cloud
@@ -73,7 +81,7 @@ Scenario: [SITES-019] A visitor sees the platform's plain not-found answer, not 
 
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:none
 Scenario: [SITES-005] A signed-in member sees the same public site as a visitor
   Given a member is signed in to the deployment's cloud apps in a browser
   And a cloud operator installed an app whose manifest declares a public site
@@ -84,7 +92,7 @@ Scenario: [SITES-005] A signed-in member sees the same public site as a visitor
 
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [SITES-006] Visits to a public site run none of the deployment's app code
   Given a cloud operator installed an app whose manifest declares a public site
   When many visitors read the site at the same moment
@@ -92,11 +100,13 @@ Scenario: [SITES-006] Visits to a public site run none of the deployment's app c
   And members' cloud apps answer as quickly as before the visits
 ```
 
+- **Coverage:** the tier-3 public-site step asserts that S3 answered each visit, and `packages/admin-installer/__tests__/cloudfront-distribution.test.ts` "/sites/\* — public sites", unit, checks the behavior targets the bucket. No test measures members' apps under a burst of visitors.
+
 ## Installing an app with a public site
 
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [SITES-007] A cloud operator sees before installing that the app publishes a public website
   Given an app's manifest declares a public site
   When the cloud operator opens the app's install dialog in admin-web
@@ -104,11 +114,13 @@ Scenario: [SITES-007] A cloud operator sees before installing that the app publi
   And the section says the app publishes a website at "/sites/<appId>/" that anyone on the internet can read without signing in
 ```
 
+- **Coverage:** `apps/admin-web/__tests__/cloud-apps-section.test.tsx` "asks before a redeploy whose manifest adds a public site" and `apps/admin-web/__tests__/consent-cli-parity.test.tsx` "for a public website", unit; `packages/admin-installer/__tests__/public-site-consent.test.ts`, unit.
+
 - **Notes:** A local install of the same app shows the same section, because a cloud install skips the dialog for a manifest the local operator already approved.
 
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [SITES-008] The cloud install prints the site's address and checks that it answers
   Given an app's manifest declares a public site
   When the cloud operator runs the app's cloud install
@@ -116,9 +128,11 @@ Scenario: [SITES-008] The cloud install prints the site's address and checks tha
   And the install output reports that the address answered
 ```
 
+- **Coverage:** `packages/admin-installer/__tests__/public-site-probe.test.ts` "reports the site's address and that it answered", unit. The tier-3 installs print the line, but no test asserts the output.
+
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [SITES-009] A cloud operator sees which installed cloud apps publish a public site
   Given a cloud operator installed an app whose manifest declares a public site
   And the cloud operator installed another app without one
@@ -127,9 +141,11 @@ Scenario: [SITES-009] A cloud operator sees which installed cloud apps publish a
   And the other app's card shows no such link
 ```
 
+- **Coverage:** `apps/admin-web/__tests__/cloud-apps-section.test.tsx` "links the installed app's public site, and no other app's tile shows one", unit.
+
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [SITES-014] A site-only app installs without any Lambda
   Given an app's manifest declares a public site and no compute
   When the cloud operator runs the app's cloud install
@@ -138,9 +154,11 @@ Scenario: [SITES-014] A site-only app installs without any Lambda
   And the AWS console shows no Lambda function for the app
 ```
 
+- **Coverage:** `packages/admin-installer/__tests__/orchestrator.test.ts` "installs a site-only app with no exec role, bundle or compute stack", unit, with the steps faked. No tier-3 run installs a site-only app.
+
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [SITES-015] An install on a deployment that predates public sites warns and names the update
   Given the cloud operator has not updated the bootstrap stack or reinstalled the cloud data server since public sites arrived
   And an app's manifest declares a public site
@@ -149,11 +167,13 @@ Scenario: [SITES-015] An install on a deployment that predates public sites warn
   And the warning tells the cloud operator to update the bootstrap stack and then reinstall the cloud data server
 ```
 
+- **Coverage:** `packages/admin-installer/__tests__/public-site-probe.test.ts` "names the bootstrap update and the cloud data server reinstall", unit. No test runs the install against an outdated deployment.
+
 ## Updating and removing a public site
 
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:none
 Scenario: [SITES-010] A visitor sees an updated site soon after the cloud operator reinstalls the app
   Given a cloud operator installed an app whose public site's home page reads "Version one"
   And the app developer changed the home page to read "Version two"
@@ -164,7 +184,7 @@ Scenario: [SITES-010] A visitor sees an updated site soon after the cloud operat
 
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [SITES-011] A page the new version removed no longer loads
   Given a cloud operator installed an app whose public site holds "old.html"
   And the app developer removed "old.html" from the site
@@ -173,9 +193,11 @@ Scenario: [SITES-011] A page the new version removed no longer loads
   Then the browser shows a "404 Not Found" answer
 ```
 
+- **Coverage:** `packages/admin-installer/__tests__/static-assets.test.ts` "drops a site page the new deployment removed at once, unlike build files", unit, with S3 faked.
+
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [SITES-012] A site disappears when the cloud operator uninstalls its app
   Given a cloud operator installed an app whose manifest declares a public site
   When the cloud operator uninstalls the app's web app
@@ -183,9 +205,11 @@ Scenario: [SITES-012] A site disappears when the cloud operator uninstalls its a
   Then the browser shows a "404 Not Found" answer
 ```
 
+- **Coverage:** `e2e-aws/src/journey.ts` "uninstalls probe: app plane gone, shared records persist", tier-3 AWS, cloud; `packages/admin-installer/__tests__/orchestrator.test.ts` "empties the site's files on uninstalling a site-only app", unit.
+
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario: [SITES-013] A site disappears when a reinstall's manifest no longer declares it
   Given a cloud operator installed an app whose manifest declares a public site
   And the app developer removed the public site from the manifest
@@ -194,11 +218,13 @@ Scenario: [SITES-013] A site disappears when a reinstall's manifest no longer de
   Then the browser shows a "404 Not Found" answer
 ```
 
+- **Coverage:** `packages/admin-installer/__tests__/orchestrator.test.ts` "deletes the site's files when a reinstall's manifest drops the site", unit, with the steps faked.
+
 ## Declaring a public site
 
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:full
 Scenario: [SITES-016] A manifest that declares a site but no cloud target is refused
   Given an app developer's manifest declares a public site
   And the manifest's targets omit "cloud"
@@ -206,9 +232,11 @@ Scenario: [SITES-016] A manifest that declares a site but no cloud target is ref
   Then validation fails with an error that says a public site is published only from the cloud
 ```
 
+- **Coverage:** `packages/admin-manifest/__tests__/validate.test.ts` "refuses a site on an app with no cloud install", unit.
+
 ```gherkin
 @cloud
-@intent:confirmed
+@intent:confirmed @coverage:partial
 Scenario Outline: [SITES-017] A bundle without a usable site folder is refused before the install changes anything
   Given an app developer's manifest declares a public site in the folder "site"
   And the app's bundle <problem>
@@ -222,9 +250,11 @@ Scenario Outline: [SITES-017] A bundle without a usable site folder is refused b
     | has a "site" folder without "index.html"   | the missing home page        |
 ```
 
+- **Coverage:** `packages/admin-installer/__tests__/static-assets.test.ts` "refuses a bundle without the site's folder" and "refuses a site without index.html", unit. The orchestrator reads the bundle before any step, but no test drives a site bundle through it.
+
 ```gherkin
 @local
-@intent:confirmed
+@intent:confirmed @coverage:none
 Scenario: [SITES-018] A local install of an app with a site publishes nothing
   Given an app's manifest declares a public site
   When the local operator installs the app on a computer
