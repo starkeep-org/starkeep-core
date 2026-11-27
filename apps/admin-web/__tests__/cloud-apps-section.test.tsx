@@ -119,6 +119,7 @@ function app(appId: string, name: string, offers: { web: boolean; mobile: boolea
 
 const PHOTOS = app("photos", "Photos", { web: true, mobile: true });
 const MEMO = app("memo", "Memo", { web: true, mobile: false });
+const NOTES = app("notes", "Notes", { web: true, mobile: false });
 
 /** The tile named `name`. */
 async function tile(name: string): Promise<HTMLElement> {
@@ -653,16 +654,16 @@ describe("an app with a public site", () => {
     await renderWith(
       [
         { appId: "photos", webApp: true, mobileApp: false, manifest: site.manifest },
-        { appId: "memo", webApp: true, mobileApp: false, manifest: MEMO.manifest },
+        { appId: "notes", webApp: true, mobileApp: false, manifest: NOTES.manifest },
       ],
-      [site, MEMO],
+      [site, NOTES],
     );
     const photos = await tile("Photos");
     const link = await within(photos).findByRole("link", { name: "Public site ↗" });
     expect(link.getAttribute("href")).toBe("https://d1.cloudfront.net/sites/photos/");
     expect(within(photos).getByRole("link", { name: "Open Photos ↗" })).toBeTruthy();
-    await within(await tile("Memo")).findByRole("link", { name: "Open Memo ↗" });
-    expect(within(await tile("Memo")).queryByRole("link", { name: "Public site ↗" })).toBeNull();
+    await within(await tile("Notes")).findByRole("link", { name: "Open Notes ↗" });
+    expect(within(await tile("Notes")).queryByRole("link", { name: "Public site ↗" })).toBeNull();
   });
 
   it("gives a site-only app a web tile that links only the site", async () => {
@@ -681,7 +682,7 @@ describe("an app with a public site", () => {
   it("asks before a redeploy whose manifest adds a public site", async () => {
     const site = withSite(true);
     await renderWith(
-      [{ appId: "photos", webApp: true, mobileApp: false, manifest: MEMO.manifest }],
+      [{ appId: "photos", webApp: true, mobileApp: false, manifest: NOTES.manifest }],
       [site],
     );
     await vi.waitFor(async () =>
