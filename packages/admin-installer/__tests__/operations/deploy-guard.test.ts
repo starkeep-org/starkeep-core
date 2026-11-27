@@ -77,6 +77,43 @@ describe("compareWithDeployed", () => {
   });
 
   // SHA ancestry fails here: main holds the feature's patch under a new SHA.
+  it("marks the missing commits that change the app's folder, in a repository that holds several apps (APP-LIFE-276)", () => {
+    const { dir, git, commit } = repo();
+    execFileSync("mkdir", [join(dir, "dice"), join(dir, "platform")]);
+    commit("dice/app.ts", "v1");
+    git("checkout", "-q", "-b", "feature");
+    commit("platform/core.ts", "new core");
+    const own = commit("dice/app.ts", "v2");
+    git("checkout", "-q", "main");
+    const refusal = () =>
+      assertNotBackward(
+        compareWithDeployed(dir, at(own)),
+        "dice in the cloud",
+        "`starkeep install dice --cloud --force`",
+        { dir: join(dir, "dice"), name: "dice" },
+      );
+    expect(refusal).toThrow(/edit platform\/core\.ts\n/);
+    expect(refusal).toThrow(/edit dice\/app\.ts {2}\(changes dice\)/);
+    expect(refusal).toThrow("1 of them change dice's folder.");
+  });
+
+  it("says when none of the missing commits change the app's folder", () => {
+    const { dir, git, commit } = repo();
+    execFileSync("mkdir", [join(dir, "dice"), join(dir, "platform")]);
+    commit("dice/app.ts", "v1");
+    git("checkout", "-q", "-b", "feature");
+    const platformOnly = commit("platform/core.ts", "new core");
+    git("checkout", "-q", "main");
+    expect(() =>
+      assertNotBackward(
+        compareWithDeployed(dir, at(platformOnly)),
+        "dice in the cloud",
+        "`starkeep install dice --cloud --force`",
+        { dir: join(dir, "dice"), name: "dice" },
+      ),
+    ).toThrow("None of them change dice's folder. They change other parts of this repository.");
+  });
+
   it("passes a checkout whose branch holds the deployed patch rebased", () => {
     const { dir, git, commit } = repo();
     git("checkout", "-q", "-b", "feature");

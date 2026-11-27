@@ -116,25 +116,63 @@ export function patchDifference(
   };
 }
 
+/** Whether `commit` changes a file under `dir`, the folder an app deploys from. */
+function changesFolder(dir: string, commit: string): boolean {
+  try {
+    return (
+      git(dir, [
+        "diff-tree",
+        "--root",
+        "--no-commit-id",
+        "--name-only",
+        "-r",
+        commit,
+        "--",
+        ".",
+      ]) !== ""
+    );
+  } catch {
+    return true;
+  }
+}
+
 /**
  * Refuse a deploy that would remove patches the cloud runs. `what` names the
  * deployed thing, such as "The cloud data server" or "photos in the cloud".
  * `forceHint` names the flag that deploys anyway.
+ *
+ * The check counts every commit of the repository, because nothing maps an
+ * app to the packages its build uses. With `folder`, the refusal marks the
+ * commits that change the app's own folder, so the person can judge the
+ * forced deploy: a repository can hold several apps and the platform.
  */
 export function assertNotBackward(
   comparison: DeployComparison,
   what: string,
   forceHint: string,
+  folder?: { dir: string; name: string },
 ): void {
   if (comparison.kind === "backward") {
     const shown = comparison.missing.slice(0, 10);
     const more = comparison.missing.length - shown.length;
+    const own = folder
+      ? comparison.missing.filter((m) => changesFolder(folder.dir, m.commit)).length
+      : 0;
+    const mark = (commit: string) =>
+      folder && changesFolder(folder.dir, commit) ? `  (changes ${folder.name})` : "";
     throw new OperationError(
       "DEPLOY_BACKWARD",
       [
         `${what} runs ${comparison.missing.length} commit(s) that this checkout lacks:`,
-        ...shown.map((m) => `  ${m.commit.slice(0, 8)} ${m.subject}`),
+        ...shown.map((m) => `  ${m.commit.slice(0, 8)} ${m.subject}${mark(m.commit)}`),
         ...(more > 0 ? [`  …and ${more} more`] : []),
+        ...(folder
+          ? [
+              own === 0
+                ? `None of them change ${folder.name}'s folder. They change other parts of this repository.`
+                : `${own} of them change ${folder.name}'s folder.`,
+            ]
+          : []),
         "Deploying this checkout would remove them. Check out or rebase onto the branch the cloud runs,",
         `or deploy anyway with ${forceHint}.`,
       ].join("\n"),
