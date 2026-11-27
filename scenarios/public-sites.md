@@ -95,7 +95,7 @@ Scenario: [SITES-019] A visitor sees the platform's plain not-found answer, not 
 
 ```gherkin
 @cloud
-@intent:confirmed @coverage:none
+@intent:confirmed @coverage:full
 Scenario: [SITES-005] A signed-in member sees the same public site as a visitor
   Given a member is signed in to the deployment's cloud apps in a browser
   And a cloud operator installed an app whose manifest declares a public site
@@ -103,6 +103,8 @@ Scenario: [SITES-005] A signed-in member sees the same public site as a visitor
   Then the member sees the same home page a visitor sees
   And the page shows none of the member's data
 ```
+
+- **Coverage:** `e2e-aws/src/journey.ts` "a visitor reads probe's public site signed out, served from S3", tier-3 AWS, cloud, fetches the home page with a member's session cookie and expects the visitor's exact page.
 
 ```gherkin
 @cloud
