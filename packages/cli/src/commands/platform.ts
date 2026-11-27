@@ -7,9 +7,13 @@
  * 2. Install the new dependencies and rebuild, then rerun the update in a new
  *    process, so the new code runs the remaining steps. The running CLI's
  *    files changed under it.
- * 3. Restart the local services that were running.
- * 4. Preview the bootstrap stack's update, and apply it after confirmation,
- *    with this terminal's AWS credentials. Without them, say so and go on.
+ * 3. Restart the local services that were running. A pull whose restart
+ *    never happened, because the continued process stopped first, leaves a
+ *    marker, so the next update restarts them.
+ * 4. Preview the bootstrap stack's update, and under `--platform` apply it
+ *    after confirmation, with this terminal's AWS credentials. Without them,
+ *    say so and go on. An update of everything only previews: a change to
+ *    the stack's IAM waits for the owner, and so do the cloud redeploys.
  * 5. Redeploy the cloud data server when its deployed record differs from
  *    this checkout, and Drive when its manifest differs. The deploy refuses
  *    to remove commits the cloud runs, unless `--force`.
@@ -18,10 +22,17 @@
  * platform but a platform never needs a newer app.
  */
 import { spawnSync } from "node:child_process";
+import { mkdirSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { starkeepDir } from "@starkeep/app-client";
+import { assertNotBackward } from "@starkeep/admin-installer/operations/deploy-guard";
 import { readConfig } from "@starkeep/operator/config";
 import { PLATFORM_RUN_OWNERS } from "@starkeep/operator/operation-runs";
-import { platformLine, platformNeedsDeploy } from "@starkeep/operator/deployment-state";
+import {
+  platformLine,
+  platformNeedsDeploy,
+  type PlatformComparison,
+} from "@starkeep/operator/deployment-state";
 import { repoRoot } from "@starkeep/operator/repo-root";
 import { serviceStatus } from "@starkeep/operator/service-control";
 import { stopById } from "@starkeep/operator/daemons";
@@ -47,6 +58,8 @@ export interface PlatformOptions {
   force: boolean;
   /** The checkout moved in an earlier process of this update. */
   pulled: boolean;
+  /** Apply the bootstrap stack's update, as `--platform` does, or only preview it. */
+  applyBootstrap: boolean;
 }
 
 export interface PlatformOutcome {
@@ -83,6 +96,16 @@ export function continueAfterPull(io: Io, argv: string[], recordAt: string): num
   return result.status ?? 1;
 }
 
+function restartMarker(): string {
+  return join(starkeepDir(), "platform-restart-pending");
+}
+
+/** Note that the platform checkout moved, so the local services need a restart. */
+export function markRestartPending(): void {
+  mkdirSync(starkeepDir(), { recursive: true });
+  writeFileSync(restartMarker(), `${new Date().toISOString()}\n`, { mode: 0o600 });
+}
+
 /** Whether the checkout the CLI runs from is one of `moved`. */
 export function platformMoved(moved: RepoUpdate[]): boolean {
   const root = repoRoot();
@@ -98,7 +121,7 @@ export async function applyPlatform(io: Io, options: PlatformOptions): Promise<P
     drive: "skipped",
   };
 
-  if (options.scope.local && options.pulled) {
+  if (options.scope.local && (options.pulled || existsSync(restartMarker()))) {
     const running: string[] = [];
     for (const id of PLATFORM_DAEMONS) if ((await serviceStatus(id)).running) running.push(id);
     for (const id of [...running].reverse()) {
@@ -113,6 +136,7 @@ export async function applyPlatform(io: Io, options: PlatformOptions): Promise<P
       }
       outcome.restarted.push(id);
     }
+    rmSync(restartMarker(), { force: true });
     // admin-web may run under the person's own watcher, so the update leaves
     // it alone and says so.
     if ((await serviceStatus("admin-web")).running) {
@@ -130,12 +154,22 @@ export async function applyPlatform(io: Io, options: PlatformOptions): Promise<P
   try {
     const result = await runBootstrapUpdate(io, {
       target: updateTarget({}),
-      apply: true,
+      apply: options.applyBootstrap,
       yes: options.yes,
       allowReplacement: false,
       verbose: false,
     });
     outcome.bootstrap = result;
+    if (result === "previewed") {
+      // The stack's change may grant what the new cloud data server needs,
+      // so the cloud redeploys wait for it too.
+      io.warn(
+        "The update leaves the bootstrap stack's change for the owner, and the cloud data server and\n" +
+          "Drive wait for it. Apply it with `starkeep update --platform`, or with\n" +
+          "`starkeep cloud bootstrap-update --apply`, then run the update again.",
+      );
+      return outcome;
+    }
     if (result === "declined") {
       throw new CliError(
         "The bootstrap update was declined, so the update stopped before the cloud data server.",
@@ -163,6 +197,8 @@ export async function applyPlatform(io: Io, options: PlatformOptions): Promise<P
   if (!state) throw new CliError("Could not read the cloud. Run `starkeep login --admin`.");
   io.event({ type: "progress", message: `Cloud data server: ${platformLine(state.platform)}.` });
   if (platformNeedsDeploy(state.platform)) {
+    // Refuse before the long redeploy is announced; the deploy checks again.
+    if (!options.force) refuseBackward(state.platform);
     io.event({
       type: "progress",
       message: "Redeploying the cloud data server. This takes 10 to 20 minutes.",
@@ -192,4 +228,23 @@ export async function applyPlatform(io: Io, options: PlatformOptions): Promise<P
     outcome.drive = "up to date";
   }
   return outcome;
+}
+
+/** The deploy guard's refusal, for a cloud data server that runs commits this checkout lacks. */
+function refuseBackward(platform: PlatformComparison): void {
+  if (platform.kind !== "ahead" && platform.kind !== "diverged") return;
+  try {
+    assertNotBackward(
+      {
+        kind: "backward",
+        recorded: platform.record.commit ?? "",
+        dirty: platform.record.dirty,
+        missing: platform.checkoutLacks,
+      },
+      "The cloud data server",
+      "`starkeep update --platform --force`",
+    );
+  } catch (err) {
+    throw new CliError(err instanceof Error ? err.message : String(err));
+  }
 }
