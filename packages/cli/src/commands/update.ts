@@ -63,7 +63,12 @@ import {
 } from "../git";
 import { startOne } from "./services";
 import { repoRoot } from "@starkeep/operator/repo-root";
-import { applyPlatform, continueAfterPull, type PlatformOutcome } from "./platform";
+import {
+  applyPlatform,
+  continueAfterPull,
+  markRestartPending,
+  type PlatformOutcome,
+} from "./platform";
 import { PLATFORM_SERVICES, serviceId } from "../names";
 
 type AppManifest = Extract<FolderManifest, { kind: "valid" }>["manifest"];
@@ -657,8 +662,19 @@ export const updateCommand: Command = {
     if (platformOnly || args.positionals.length === 0) {
       const afterPull = flag(args, "after-platform-pull");
       if (!afterPull && !noFetch) {
-        const moved = fetchRepos(io, [repoRoot()]);
+        let moved: RepoUpdate[];
+        try {
+          moved = fetchRepos(io, [repoRoot()]);
+        } catch (err) {
+          if (platformOnly || !(err instanceof CliError)) throw err;
+          throw new CliError(
+            `${err.message}\nTo update only the apps, name them: \`starkeep update <app>...\`.`,
+            err.exitCode,
+            err.code,
+          );
+        }
         if (moved.length > 0) {
+          markRestartPending();
           // fetchRepos recorded the pull. The continued process joins that record.
           const at = readUpdates().at(-1)!.at;
           // The new process prints the rest, and the result.
@@ -668,7 +684,13 @@ export const updateCommand: Command = {
           return;
         }
       }
-      platform = await applyPlatform(io, { scope, yes, force, pulled: afterPull });
+      platform = await applyPlatform(io, {
+        scope,
+        yes,
+        force,
+        pulled: afterPull,
+        applyBootstrap: platformOnly,
+      });
       if (platformOnly) {
         io.event({ type: "result", ok: true, data: { platform } });
         return;
