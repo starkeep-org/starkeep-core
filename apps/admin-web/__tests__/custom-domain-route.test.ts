@@ -18,7 +18,6 @@ vi.mock("@starkeep/operator/admin-session", async (original) =>
   (await import("./fake-admin-session")).fakeAdminSessionModule(await original()),
 );
 
-
 const dnsMock = {
   resolveCname: vi.fn<(name: string) => Promise<string[]>>(),
   resolve4: vi.fn<(name: string) => Promise<string[]>>(),
@@ -183,9 +182,7 @@ describe("POST /check", () => {
     dnsMock.resolveCname.mockRejectedValue(new Error("ENODATA"));
     dnsMock.resolve4.mockRejectedValue(new Error("ENOTFOUND"));
 
-    const res = await route.CHECK(
-      jsonRequest("/api/custom-domain/check", {}),
-    );
+    const res = await route.CHECK(jsonRequest("/api/custom-domain/check", {}));
 
     expect(await res.json()).toEqual({ certificateStatus: "ISSUED", pointsAtDistribution: false });
     const call = acm.commandCalls(DescribeCertificateCommand)[0]!;
@@ -201,9 +198,7 @@ describe("POST /check", () => {
     acm.on(DescribeCertificateCommand).resolves({ Certificate: { Status: "ISSUED" } });
     dnsMock.resolveCname.mockResolvedValue(["D1.cloudfront.net."]);
 
-    const res = await route.CHECK(
-      jsonRequest("/api/custom-domain/check", {}),
-    );
+    const res = await route.CHECK(jsonRequest("/api/custom-domain/check", {}));
     expect(((await res.json()) as { pointsAtDistribution: boolean }).pointsAtDistribution).toBe(
       true,
     );
@@ -219,9 +214,7 @@ describe("POST /check", () => {
     dnsMock.resolve4.mockResolvedValue(["13.32.164.46"]);
     dnsMock.reverse.mockResolvedValue(["server-13-32-164-46.ord58.r.cloudfront.net."]);
 
-    const res = await route.CHECK(
-      jsonRequest("/api/custom-domain/check", {}),
-    );
+    const res = await route.CHECK(jsonRequest("/api/custom-domain/check", {}));
     expect(((await res.json()) as { pointsAtDistribution: boolean }).pointsAtDistribution).toBe(
       true,
     );
@@ -229,29 +222,19 @@ describe("POST /check", () => {
 
   it("refuses another site's page", async () => {
     const crossSite = await route.CHECK(
-      jsonRequest(
-        "/api/custom-domain/check",
-        {},
-        "POST",
-        "https://evil.example",
-      ),
+      jsonRequest("/api/custom-domain/check", {}, "POST", "https://evil.example"),
     );
     expect(crossSite.status).toBe(403);
   });
 
   it("says so when no install has acted on a domain", async () => {
-    const res = await route.CHECK(
-      jsonRequest("/api/custom-domain/check", {}),
-    );
+    const res = await route.CHECK(jsonRequest("/api/custom-domain/check", {}));
     expect(res.status).toBe(400);
   });
 });
 
 describe("POST /zone", () => {
-  const zone = (domain: unknown) =>
-    route.ZONE(
-      jsonRequest("/api/custom-domain/zone", { domain }),
-    );
+  const zone = (domain: unknown) => route.ZONE(jsonRequest("/api/custom-domain/zone", { domain }));
 
   it("names the account's zone for the domain, found with the operator's credentials", async () => {
     findHostedZone.mockResolvedValue({ id: "Z1", name: "example.com" });

@@ -17,7 +17,6 @@ vi.mock("@starkeep/operator/admin-session", async (original) =>
   (await import("./fake-admin-session")).fakeAdminSessionModule(await original()),
 );
 
-
 vi.mock("node:child_process", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:child_process")>()),
   spawn: (await import("./fake-spawn")).fakeSpawn,

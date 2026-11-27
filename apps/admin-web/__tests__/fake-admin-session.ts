@@ -22,7 +22,10 @@ export const FAKE_ADMIN_CREDENTIALS = {
 };
 
 export const FAKE_ADMIN = {
-  credentials: { ...FAKE_ADMIN_CREDENTIALS, expiration: new Date(FAKE_ADMIN_CREDENTIALS.expiration) },
+  credentials: {
+    ...FAKE_ADMIN_CREDENTIALS,
+    expiration: new Date(FAKE_ADMIN_CREDENTIALS.expiration),
+  },
   stsCredentials: FAKE_ADMIN_CREDENTIALS,
   idToken: "fake.id.token",
   email: "admin@example.com",
@@ -51,7 +54,12 @@ export function fakeAdminSessionModule(original: Record<string, unknown>) {
     }),
     adminSessionStatus: vi.fn(() =>
       signedIn
-        ? { signedIn: true, email: FAKE_ADMIN.email, sub: FAKE_ADMIN.sub, expiresAt: "2030-01-01T00:00:00.000Z" }
+        ? {
+            signedIn: true,
+            email: FAKE_ADMIN.email,
+            sub: FAKE_ADMIN.sub,
+            expiresAt: "2030-01-01T00:00:00.000Z",
+          }
         : { signedIn: false, email: null, sub: null, expiresAt: null },
     ),
     saveAdminSignIn: vi.fn(async () => {

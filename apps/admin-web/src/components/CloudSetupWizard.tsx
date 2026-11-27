@@ -652,7 +652,8 @@ function Step3SignIn({
   onBack: () => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const unavailable = session && !session.browserSignIn.available ? session.browserSignIn.reason : null;
+  const unavailable =
+    session && !session.browserSignIn.available ? session.browserSignIn.reason : null;
 
   if (session?.signedIn) {
     return (
@@ -695,8 +696,8 @@ function Step3SignIn({
       <p className="text-sm text-muted-foreground">
         Sign in with your Starkeep admin account. The sign-in page opens in this browser.
         <br />
-        <strong>Check your email for your temporary password.</strong> The page asks you to choose
-        a permanent one the first time.
+        <strong>Check your email for your temporary password.</strong> The page asks you to choose a
+        permanent one the first time.
       </p>
       {unavailable && (
         <Alert>
@@ -827,11 +828,10 @@ function Step4Deploy({
       // admin-web restart, which the cloud-data-server pass itself causes in
       // development) reconnects to the run instead of failing the pass. The
       // server mints fresh credentials for each pass from the admin session.
-      return runInstallStream(
-        url,
-        reattach ? { reattach: true } : {},
-        { onLine: (line) => setLines((l) => [...l, line]), isAborted: () => aborted },
-      );
+      return runInstallStream(url, reattach ? { reattach: true } : {}, {
+        onLine: (line) => setLines((l) => [...l, line]),
+        isAborted: () => aborted,
+      });
     }
 
     function failPass(r: { message: string; tokenExpired: boolean }): void {

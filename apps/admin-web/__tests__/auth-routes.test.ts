@@ -48,13 +48,19 @@ beforeAll(async () => {
       if (req.url === "/oauth2/token") {
         tokenRequests.push(new URLSearchParams(body));
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ access_token: "a", id_token: "i", refresh_token: "r", expires_in: 900 }));
+        res.end(
+          JSON.stringify({ access_token: "a", id_token: "i", refresh_token: "r", expires_in: 900 }),
+        );
         return;
       }
       if (req.url === "/auth/login") {
         loginBodies.push(JSON.parse(body));
         res.writeHead(loginStatus, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(loginStatus === 200 ? { ok: true } : { error: "library belongs to another account" }));
+        res.end(
+          JSON.stringify(
+            loginStatus === 200 ? { ok: true } : { error: "library belongs to another account" },
+          ),
+        );
         return;
       }
       if (req.url === "/auth/config") {
@@ -219,7 +225,10 @@ describe("GET /auth/callback", () => {
     const res = await callback(`code=dev-code&state=${state}`);
     expect(location(res).searchParams.get("signedIn")).toBe("device");
     expect(loginBodies).toEqual([
-      expect.objectContaining({ code: "dev-code", redirectUri: "http://localhost:3000/auth/callback" }),
+      expect.objectContaining({
+        code: "dev-code",
+        redirectUri: "http://localhost:3000/auth/callback",
+      }),
     ]);
     expect(tokenRequests).toHaveLength(0);
   });
@@ -240,7 +249,9 @@ describe("GET /auth/callback", () => {
 
 describe("GET /api/admin-session", () => {
   it("says whether an admin is signed in and whether a browser sign-in can return here", async () => {
-    const here = await (await route.SESSION(new Request("http://localhost:3000/api/admin-session"))).json();
+    const here = await (
+      await route.SESSION(new Request("http://localhost:3000/api/admin-session"))
+    ).json();
     expect(here).toMatchObject({ signedIn: true, browserSignIn: { available: true } });
     signOutFake();
     const elsewhere = await (

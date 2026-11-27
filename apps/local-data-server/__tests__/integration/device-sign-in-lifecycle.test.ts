@@ -363,9 +363,7 @@ describe("a sign-out the pool did not hear", () => {
   }
 
   it("is finished by the next sign-in, so a second offline sign-out cannot overwrite it", async () => {
-    expect((await login(server, cloud)).status).toBe(
-      200,
-    );
+    expect((await login(server, cloud)).status).toBe(200);
     const first = await storedRefreshToken(server);
 
     cloud.pool.reachable = false;
@@ -382,9 +380,7 @@ describe("a sign-out the pool did not hear", () => {
     });
 
     cloud.pool.reachable = true;
-    expect((await login(server, cloud)).status).toBe(
-      200,
-    );
+    expect((await login(server, cloud)).status).toBe(200);
     expect(cloud.pool.revoked.has(first!)).toBe(true);
     expect(await pendingOnDisk()).toBeNull();
 

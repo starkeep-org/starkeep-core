@@ -49,7 +49,6 @@ export const DATA_GROUP = "starkeep-users";
 const GROUPS = [ADMINS_GROUP, DATA_GROUP] as const;
 type Group = (typeof GROUPS)[number];
 
-
 export interface UserView {
   /** The Cognito username, which is the user's `sub` in a pool keyed by email. */
   readonly username: string;

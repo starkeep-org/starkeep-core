@@ -22,7 +22,6 @@ vi.mock("@starkeep/operator/admin-session", async (original) =>
   (await import("./fake-admin-session")).fakeAdminSessionModule(await original()),
 );
 
-
 const cognito = mockClient(CognitoIdentityProviderClient);
 let route: typeof import("../src/routes/cognito-outputs");
 

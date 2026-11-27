@@ -79,7 +79,10 @@ export async function signOutAdmin(): Promise<void> {
 /** Throw {@link NotSignedInError} for a route's 401 `NOT_SIGNED_IN` answer. */
 export async function throwIfNotSignedIn(res: Response): Promise<void> {
   if (res.status !== 401) return;
-  const body = (await res.clone().json().catch(() => ({}))) as { code?: string; error?: string };
+  const body = (await res
+    .clone()
+    .json()
+    .catch(() => ({}))) as { code?: string; error?: string };
   if (body.code === NOT_SIGNED_IN) throw new NotSignedInError(body.error);
 }
 

@@ -22,16 +22,10 @@ import { lastChild, resetSpawns, spawnedChildren, type FakeChild } from "./fake-
 import { lines, readSse } from "./sse";
 import { readFolderManifest } from "@starkeep/admin-installer/app-discovery";
 import { manifestDigest } from "@starkeep/admin-installer/manifest-approval";
-import {
-  FAKE_ADMIN,
-  FAKE_ADMIN_CREDENTIALS,
-  signInFake,
-  signOutFake,
-} from "./fake-admin-session";
+import { FAKE_ADMIN, FAKE_ADMIN_CREDENTIALS, signInFake, signOutFake } from "./fake-admin-session";
 vi.mock("@starkeep/operator/admin-session", async (original) =>
   (await import("./fake-admin-session")).fakeAdminSessionModule(await original()),
 );
-
 
 vi.mock("node:child_process", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:child_process")>()),
