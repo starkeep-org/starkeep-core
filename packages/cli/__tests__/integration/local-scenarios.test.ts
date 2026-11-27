@@ -618,7 +618,7 @@ describe("update", () => {
       expect(run.code, run.err).toBe(0);
       expect(run.err).toContain(`here: ${here} no longer holds a manifest. Skipped.`);
       expect(result(starkeep(["update", "here", "solo", "--json"]).out).data).toMatchObject({
-        apps: { here: "skipped" },
+        apps: { here: { local: "skipped" } },
       });
     } finally {
       writeFileSync(path, text);

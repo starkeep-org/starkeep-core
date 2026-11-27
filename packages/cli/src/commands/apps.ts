@@ -445,15 +445,15 @@ export const installCommand: Command = {
   details:
     "An app is an id from the discovery folders or a path to an app folder. Installing by path\n" +
     "adds the folder to discovery. A target flag is required, and flags combine: --local --cloud\n" +
-    "installs on this computer, then in the cloud. A cloud install builds the bundle from the\n" +
+    "installs in the cloud, then on this computer. A cloud install builds the bundle from the\n" +
     "folder here and needs no local install. Only cloud targets sign in as the admin.\n" +
     "A run without a terminal needs --yes.",
   async run(io, args) {
     const targets = targetsOf(args, "install");
     if (args.positionals.length === 0) throw usageError("Name at least one app to install.");
+    if (targets.cloud) requireCloud();
     if (!flag(args, "yes")) requireTerminal(io, "Approve and install?", "--yes to approve");
     if (targets.local) await requireDataServer();
-    if (targets.cloud) requireCloud();
     const installed: string[] = [];
     const declined: string[] = [];
     const at = { ref: "", appId: "" };
@@ -652,8 +652,8 @@ export const uninstallCommand: Command = {
     }
     // The typed id guards the whole command, so a run that cannot ask stops
     // before the first change.
-    if (typeBack) requireTerminal(io, "Type the app id to delete its data.", TYPE_BACK_HINT);
     if (targets.cloud) requireCloud();
+    if (typeBack) requireTerminal(io, "Type the app id to delete its data.", TYPE_BACK_HINT);
     if (targets.local) await requireDataServer();
     const registry = targets.local ? await readRegistry() : null;
     for (const appId of args.positionals) {

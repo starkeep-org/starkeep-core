@@ -120,28 +120,37 @@ describe("bad usage exits 2", () => {
     expect((await run([])).code).toBe(2);
   });
 
-  it("install without a target flag", async () => {
+  it("install without a target flag (APP-LIFE-244)", async () => {
     const { code, err } = await run(["install", "example-app"]);
     expect(code).toBe(2);
-    expect(err).toContain("--local");
+    expect(err).toContain(
+      "Name where to install: --local (this computer), --cloud (the cloud, every surface), --web or --mobile. Flags combine.",
+    );
   });
 
-  it("uninstall without a target flag", async () => {
-    expect((await run(["uninstall", "example-app"])).code).toBe(2);
+  it("uninstall without a target flag (APP-LIFE-244)", async () => {
+    const { code, err } = await run(["uninstall", "example-app"]);
+    expect(code).toBe(2);
+    expect(err).toContain("Name where to uninstall: --local (this computer)");
   });
 
-  it("--delete-data with a single cloud surface, which keeps the data side", async () => {
+  it("--delete-data with a single cloud surface, which keeps the data side (APP-LIFE-255)", async () => {
     const { code, err } = await run(["uninstall", "example-app", "--web", "--delete-data"]);
     expect(code).toBe(2);
-    expect(err).toContain("--delete-data in the cloud needs --cloud");
+    expect(err).toContain(
+      "--delete-data in the cloud needs --cloud: --web and --mobile keep the data side.",
+    );
   });
 });
 
 describe("a cloud target before cloud setup", () => {
-  it("fails and names the setup command, before any sign-in", async () => {
-    const { code, err } = await run(["install", "example-app", "--cloud"]);
+  it("fails and names the setup command, before any consent or sign-in (APP-LIFE-121)", async () => {
+    const { code, out, err } = await run(["install", "example-app", "--cloud"]);
     expect(code).toBe(1);
-    expect(err).toContain("starkeep setup --cloud");
+    expect(err).toContain(
+      "This computer has no cloud with a data server yet. Run `starkeep setup --cloud` first.",
+    );
+    expect(out).not.toContain("Install ");
   });
 
   it("--json reports the failure as a result event", async () => {
